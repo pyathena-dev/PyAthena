@@ -24,3 +24,4 @@ docs/_build
 .mcp.json
 .serena
 _version.py
+.env

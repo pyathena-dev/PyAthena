@@ -1,9 +1,17 @@
 # -*- coding: utf-8 -*-
 import pytest
-from sqlalchemy import Integer, String
+from sqlalchemy import Integer, String, types
 from sqlalchemy.sql import sqltypes
 
-from pyathena.sqlalchemy.types import ARRAY, MAP, STRUCT, AthenaArray, AthenaMap, AthenaStruct
+from pyathena.sqlalchemy.types import (
+    ARRAY,
+    MAP,
+    STRUCT,
+    AthenaArray,
+    AthenaMap,
+    AthenaStruct,
+    get_double_type,
+)
 
 
 class TestAthenaStruct:
@@ -145,3 +153,14 @@ class TestAthenaArray:
         assert isinstance(array_type.item_type, AthenaMap)
         assert isinstance(array_type.item_type.key_type, sqltypes.String)
         assert isinstance(array_type.item_type.value_type, sqltypes.Integer)
+
+
+def test_get_double_type():
+    from pyathena.sqlalchemy.base import ischema_names
+
+    result = get_double_type()
+    if hasattr(types, "DOUBLE"):
+        assert result is types.DOUBLE
+    else:
+        assert result is types.FLOAT
+    assert ischema_names["double"] is result

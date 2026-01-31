@@ -2,14 +2,30 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
 
+from sqlalchemy import types
 from sqlalchemy.sql import sqltypes
 from sqlalchemy.sql.type_api import TypeEngine
 
 if TYPE_CHECKING:
     from sqlalchemy import Dialect
     from sqlalchemy.sql.type_api import _LiteralProcessorType
+
+
+def get_double_type() -> Type[Any]:
+    """Get the appropriate type for DOUBLE based on SQLAlchemy version.
+
+    SQLAlchemy 2.0+ provides a native DOUBLE type, while earlier versions
+    only have FLOAT. This function returns the appropriate type based on
+    what's available.
+
+    Returns:
+        types.DOUBLE for SQLAlchemy 2.0+, types.FLOAT for earlier versions.
+    """
+    if hasattr(types, "DOUBLE"):
+        return types.DOUBLE
+    return types.FLOAT
 
 
 class AthenaTimestamp(TypeEngine[datetime]):

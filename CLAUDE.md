@@ -134,10 +134,18 @@ def method_name(self, param1: str, param2: Optional[int] = None) -> List[str]:
 To run tests locally, you need to set the following environment variables:
 
 ```bash
-export AWS_DEFAULT_REGION=us-west-2
-export AWS_ATHENA_S3_STAGING_DIR=s3://your-staging-bucket/path/
-export AWS_ATHENA_WORKGROUP=primary
-export AWS_ATHENA_SPARK_WORKGROUP=spark-primary
+export AWS_DEFAULT_REGION=<your-region>
+export AWS_ATHENA_S3_STAGING_DIR=s3://<your-bucket>/<path>/
+export AWS_ATHENA_WORKGROUP=<your-workgroup>
+export AWS_ATHENA_SPARK_WORKGROUP=<your-spark-workgroup>
+```
+
+**Using .env file (Recommended)**:
+Create a `.env` file in the project root (already in `.gitignore`) with your AWS settings, then load it before running tests:
+
+```bash
+# Load .env and run tests
+export $(cat .env | xargs) && uv run pytest tests/pyathena/test_file.py -v
 ```
 
 **CRITICAL: Pre-test Requirements**
@@ -147,7 +155,7 @@ make chk
 
 # Only after lint passes, install dependencies and run tests
 uv sync
-uv run pytest tests/pyathena/test_file.py -v
+export $(cat .env | xargs) && uv run pytest tests/pyathena/test_file.py -v
 ```
 
 #### Writing Tests
