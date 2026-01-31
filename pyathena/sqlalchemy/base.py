@@ -37,7 +37,13 @@ from pyathena.sqlalchemy.compiler import (
     AthenaTypeCompiler,
 )
 from pyathena.sqlalchemy.preparer import AthenaDMLIdentifierPreparer
-from pyathena.sqlalchemy.types import TINYINT, AthenaDate, AthenaStruct, AthenaTimestamp
+from pyathena.sqlalchemy.types import (
+    TINYINT,
+    AthenaDate,
+    AthenaStruct,
+    AthenaTimestamp,
+    get_double_type,
+)
 from pyathena.sqlalchemy.util import _HashableDict
 from pyathena.util import strtobool
 
@@ -61,8 +67,7 @@ if TYPE_CHECKING:
 ischema_names: Dict[str, Type[Any]] = {
     "boolean": types.BOOLEAN,
     "float": types.FLOAT,
-    # TODO: types.DOUBLE is not defined in SQLAlchemy 1.4.
-    "double": types.FLOAT,
+    "double": get_double_type(),
     "real": types.FLOAT,
     "tinyint": TINYINT,
     "smallint": types.SMALLINT,

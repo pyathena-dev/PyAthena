@@ -1,16 +1,16 @@
-RUFF_VERSION := 0.9.1
-TOX_VERSION := 4.23.2
+RUFF_VERSION := 0.14.14
+TOX_VERSION := 4.34.1
 
 .PHONY: fmt
 fmt:
 	# TODO: https://github.com/astral-sh/uv/issues/5903
-	uvx ruff check --select I --fix .
-	uvx ruff format .
+	uvx ruff@$(RUFF_VERSION) check --select I --fix .
+	uvx ruff@$(RUFF_VERSION) format .
 
 .PHONY: chk
 chk:
-	uvx ruff check .
-	uvx ruff format --check .
+	uvx ruff@$(RUFF_VERSION) check .
+	uvx ruff@$(RUFF_VERSION) format --check .
 	uv run mypy .
 
 .PHONY: test
@@ -23,7 +23,7 @@ test-sqla:
 
 .PHONY: tox
 tox:
-	uvx tox run
+	uvx tox@$(TOX_VERSION) -c pyproject.toml run
 
 .PHONY: docs
 docs:
