@@ -1,29 +1,24 @@
-(api_converters)=
+.. _api_converters:
 
-# Data Conversion
+Data Conversion
+===============
 
 This section covers data type converters and parameter formatters.
 
-## Type Converters
+Type Converters
+---------------
 
-```{eval-rst}
 .. autoclass:: pyathena.converter.Converter
    :members:
-```
 
-```{eval-rst}
 .. autoclass:: pyathena.converter.DefaultTypeConverter
    :members:
-```
 
-## Parameter Formatters
+Parameter Formatters
+--------------------
 
-```{eval-rst}
 .. autoclass:: pyathena.formatter.Formatter
    :members:
-```
 
-```{eval-rst}
 .. autoclass:: pyathena.formatter.DefaultParameterFormatter
    :members:
-```
