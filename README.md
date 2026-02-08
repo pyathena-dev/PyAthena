@@ -2,7 +2,7 @@
 
 <div align="center">
 
-<img src="docs/_static/icon.png" alt="PyAthena logo" width="250">
+<img src="https://raw.githubusercontent.com/laughingman7743/PyAthena/master/docs/_static/icon.png" alt="PyAthena logo" width="250">
 
 [![PyPI - Version](https://badge.fury.io/py/pyathena.svg)](https://badge.fury.io/py/pyathena)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/PyAthena.svg)](https://pypi.org/project/PyAthena/)
