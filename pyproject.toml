@@ -73,6 +73,7 @@ dev = [
     "pytest-dependency",
     "sphinx",
     "sphinx-multiversion",
+    "sphinxext-opengraph",
     "furo",
     "types-python-dateutil",
 ]

@@ -116,6 +116,7 @@ extensions = [
     "sphinx.ext.intersphinx",
     "sphinx.ext.githubpages",
     "sphinx_multiversion",
+    "sphinxext.opengraph",
 ]
 
 # Napoleon settings for Google-style docstrings
@@ -186,6 +187,13 @@ html_sidebars = {
         "sidebar/scroll-end.html",
     ]
 }
+
+# -- Open Graph protocol settings ----------------------------------------------
+
+ogp_site_url = "https://laughingman7743.github.io/PyAthena/"
+ogp_image = "https://laughingman7743.github.io/PyAthena/_static/logo_square.png"
+ogp_description_length = 200
+ogp_type = "website"
 
 # -- Sphinx-multiversion configuration ----------------------------------------
 
