@@ -117,6 +117,7 @@ extensions = [
     "sphinx.ext.githubpages",
     "sphinx_multiversion",
     "sphinxext.opengraph",
+    "sphinx_design",
 ]
 
 try:
