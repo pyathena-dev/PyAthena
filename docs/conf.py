@@ -119,6 +119,22 @@ extensions = [
     "sphinxext.opengraph",
 ]
 
+try:
+    import myst_parser  # noqa: F401
+
+    extensions.append("myst_parser")
+    source_suffix = {
+        ".rst": "restructuredtext",
+        ".md": "myst",
+    }
+    myst_enable_extensions = [
+        "colon_fence",
+        "fieldlist",
+        "deflist",
+    ]
+except ImportError:
+    pass
+
 # Napoleon settings for Google-style docstrings
 napoleon_google_docstring = True
 napoleon_numpy_docstring = False

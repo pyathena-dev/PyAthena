@@ -75,6 +75,7 @@ dev = [
     "sphinx-multiversion",
     "sphinxext-opengraph",
     "furo",
+    "myst-parser",
     "types-python-dateutil",
 ]
 
