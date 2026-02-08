@@ -16,11 +16,14 @@ PyAthena is a Python DB API 2.0 (PEP 249) compliant client library for Amazon At
 
 ### 2. Multiple Cursor Types
 The project supports different cursor implementations for various use cases:
-- **Standard Cursor** (`pyathena.cursor.Cursor`): Basic DB API cursor
-- **Async Cursor** (`pyathena.async_cursor.AsyncCursor`): For asynchronous operations
-- **Pandas Cursor** (`pyathena.pandas.cursor.PandasCursor`): Returns results as DataFrames
+- **Standard Cursor** (`pyathena.cursor.Cursor`): Basic DB API cursor returning tuples
+- **Pandas Cursor** (`pyathena.pandas.cursor.PandasCursor`): Returns results as pandas DataFrames
 - **Arrow Cursor** (`pyathena.arrow.cursor.ArrowCursor`): Returns results in Apache Arrow format
-- **Spark Cursor** (`pyathena.spark.cursor.SparkCursor`): For PySpark integration
+- **Polars Cursor** (`pyathena.polars.cursor.PolarsCursor`): Returns results as Polars DataFrames
+- **S3FS Cursor** (`pyathena.s3fs.cursor.S3FSCursor`): Lightweight CSV-based cursor using S3 filesystem (no pandas/arrow dependency)
+- **Spark Cursor** (`pyathena.spark.cursor.SparkCursor`): For PySpark integration with Athena Spark workgroups
+
+Each cursor type (except Spark) has a corresponding async variant (e.g., `AsyncCursor`, `AsyncPandasCursor`, `AsyncArrowCursor`, `AsyncPolarsCursor`, `AsyncS3FSCursor`).
 
 ### 3. Type System and Conversion
 - Data type conversion is handled in `pyathena/converter.py`
@@ -193,7 +196,7 @@ def test_find_maxdepth(self, fs):
 
 #### Adding a New Feature
 1. Check if it aligns with DB API 2.0 specifications
-2. Consider impact on all cursor types (standard, pandas, arrow, spark)
+2. Consider impact on all cursor types (standard, pandas, arrow, polars, s3fs, spark)
 3. Update type hints and ensure mypy passes
 4. Add comprehensive tests
 5. Update documentation if adding public APIs
@@ -214,30 +217,76 @@ def test_find_maxdepth(self, fs):
 
 ```
 pyathena/
-├── {cursor_type}/         # Cursor-specific implementations
-│   ├── __init__.py
-│   ├── cursor.py          # Cursor implementation
-│   ├── converter.py       # Type converters
-│   └── result_set.py      # Result handling
+├── __init__.py            # DB API 2.0 globals, connect() entry point
+├── connection.py          # Connection class
+├── cursor.py              # Standard Cursor
+├── async_cursor.py        # Standard AsyncCursor
+├── common.py              # Base cursor classes (BaseCursor, CursorIterator)
+├── converter.py           # Type conversion utilities
+├── formatter.py           # SQL parameter formatting, UNLOAD wrapping
+├── result_set.py          # Base result set handling
+├── model.py               # Data models and enums
+├── error.py               # Exception hierarchy
+├── util.py                # Utility functions
+│
+├── pandas/                # Pandas cursor implementation
+│   ├── cursor.py          # PandasCursor
+│   ├── async_cursor.py    # AsyncPandasCursor
+│   ├── converter.py       # Pandas type converters
+│   └── result_set.py      # Pandas result set handling
+│
+├── arrow/                 # Arrow cursor implementation
+│   ├── cursor.py          # ArrowCursor
+│   ├── async_cursor.py    # AsyncArrowCursor
+│   ├── converter.py       # Arrow type converters
+│   └── result_set.py      # Arrow result set handling
+│
+├── polars/                # Polars cursor implementation
+│   ├── cursor.py          # PolarsCursor
+│   ├── async_cursor.py    # AsyncPolarsCursor
+│   ├── converter.py       # Polars type converters
+│   └── result_set.py      # Polars result set handling
+│
+├── s3fs/                  # S3FS cursor implementation (lightweight CSV reader)
+│   ├── cursor.py          # S3FSCursor
+│   ├── async_cursor.py    # AsyncS3FSCursor
+│   ├── reader.py          # CSV reader implementation
+│   ├── converter.py       # S3FS type converters
+│   └── result_set.py      # S3FS result set handling
+│
+├── spark/                 # Spark cursor implementation
+│   ├── cursor.py          # SparkCursor
+│   ├── async_cursor.py    # AsyncSparkCursor
+│   └── common.py          # Spark utilities
 │
 ├── sqlalchemy/            # SQLAlchemy dialect implementations
-│   ├── base.py           # Base dialect
-│   ├── {dialect}.py      # Specific dialects (rest, pandas, arrow)
-│   └── requirements.py   # SQLAlchemy requirements
+│   ├── base.py            # Base AthenaDialect
+│   ├── rest.py            # AthenaRestDialect (standard cursor)
+│   ├── pandas.py          # AthenaPandasDialect
+│   ├── arrow.py           # AthenaArrowDialect
+│   ├── polars.py          # AthenaPolarsDialect
+│   ├── s3fs.py            # AthenaS3FSDialect
+│   ├── compiler.py        # SQL compiler for Athena
+│   ├── types.py           # SQLAlchemy type mappings
+│   ├── preparer.py        # SQL identifier preparer
+│   ├── constants.py       # Dialect constants
+│   ├── util.py            # Dialect utilities
+│   └── requirements.py    # SQLAlchemy compatibility requirements
 │
-└── filesystem/           # S3 filesystem abstractions
-    ├── s3.py             # S3FileSystem implementation (fsspec compatible)
-    └── s3_object.py      # S3 object representations
+└── filesystem/            # S3 filesystem abstractions
+    ├── s3.py              # S3FileSystem implementation (fsspec compatible)
+    └── s3_object.py       # S3 object representations
 ```
 
 ### Important Implementation Details
 
 #### Parameter Formatting
-- Two parameter styles supported: `pyformat` (default) and `qmark`
-- Parameter formatting logic in `formatter.py`
-- PyFormat: `%(name)s` style
-- Qmark: `?` style
+- Parameter style: `pyformat` (`%(name)s` style) as declared in DB API 2.0 globals
+- Parameter formatting logic in `formatter.py` (`DefaultParameterFormatter`)
+- Uses Presto-style escaping (single quote doubling) for SELECT/WITH/INSERT/UPDATE/MERGE statements
+- Uses Hive-style escaping (backslash-based) for DDL statements (CREATE, DROP, etc.)
 - Always escape special characters in parameter values
+- `Formatter.wrap_unload()` wraps SELECT/WITH queries with UNLOAD for high-performance Parquet/ORC result retrieval
 
 #### Result Set Handling
 - Results are typically staged in S3 (configured via `s3_staging_dir`)
@@ -289,11 +338,16 @@ When implementing filesystem methods:
 4. Don't forget to close cursors and connections to clean up resources
 5. Be aware of Athena service quotas and rate limits
 
-### Release Process
-1. Update version in `pyathena/__init__.py`
-2. Ensure all tests pass
-3. Create a git tag for the release
-4. Build and publish to PyPI
+### Build System and Release Process
+
+**Build System**: Hatchling with hatch-vcs for version control system integration.
+
+**Version Management**: Versions are automatically derived from git tags via `hatch-vcs`. The generated version file is `pyathena/_version.py` (auto-generated, do not edit manually).
+
+**Release Process**:
+1. Ensure all tests pass
+2. Create a git tag for the release (version is derived from the tag)
+3. Build and publish to PyPI
 
 ## Contact and Resources
 - **Repository**: https://github.com/laughingman7743/PyAthena
