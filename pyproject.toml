@@ -12,7 +12,7 @@ dependencies = [
     "python-dateutil",
 ]
 requires-python = ">=3.10"
-readme = "README.rst"
+readme = "README.md"
 license = {file = "LICENSE"}
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -73,6 +73,7 @@ dev = [
     "pytest-dependency",
     "sphinx",
     "sphinx-multiversion",
+    "sphinxext-opengraph",
     "furo",
     "types-python-dateutil",
 ]
@@ -90,7 +91,7 @@ only-include = [
     "pyathena/",
     "LICENSE",
     "pyproject.toml",
-    "README.rst"
+    "README.md"
 ]
 
 [tool.hatch.build.targets.wheel]
