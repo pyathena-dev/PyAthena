@@ -4,6 +4,12 @@ table.docutils td {
     text-align: left !important;
 }
 
+/* Limit sidebar logo size */
+img.sidebar-logo {
+    max-width: 60% !important;
+    margin: 0 auto !important;
+}
+
 /* Align table itself to the left */
 table.docutils {
     margin-left: 0;
