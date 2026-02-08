@@ -6,37 +6,44 @@ This section covers Apache Arrow-specific cursors, result sets, and data convert
 
 ## Arrow Cursors
 
-```{autoclass} pyathena.arrow.cursor.ArrowCursor
-:members:
-:inherited-members:
+```{eval-rst}
+.. autoclass:: pyathena.arrow.cursor.ArrowCursor
+   :members:
+   :inherited-members:
 ```
 
-```{autoclass} pyathena.arrow.async_cursor.AsyncArrowCursor
-:members:
-:inherited-members:
+```{eval-rst}
+.. autoclass:: pyathena.arrow.async_cursor.AsyncArrowCursor
+   :members:
+   :inherited-members:
 ```
 
 ## Arrow Result Set
 
-```{autoclass} pyathena.arrow.result_set.AthenaArrowResultSet
-:members:
-:inherited-members:
+```{eval-rst}
+.. autoclass:: pyathena.arrow.result_set.AthenaArrowResultSet
+   :members:
+   :inherited-members:
 ```
 
 ## Arrow Data Converters
 
-```{autoclass} pyathena.arrow.converter.DefaultArrowTypeConverter
-:members:
+```{eval-rst}
+.. autoclass:: pyathena.arrow.converter.DefaultArrowTypeConverter
+   :members:
 ```
 
-```{autoclass} pyathena.arrow.converter.DefaultArrowUnloadTypeConverter
-:members:
+```{eval-rst}
+.. autoclass:: pyathena.arrow.converter.DefaultArrowUnloadTypeConverter
+   :members:
 ```
 
 ## Arrow Utilities
 
-```{autofunction} pyathena.arrow.util.to_column_info
+```{eval-rst}
+.. autofunction:: pyathena.arrow.util.to_column_info
 ```
 
-```{autofunction} pyathena.arrow.util.get_athena_type
+```{eval-rst}
+.. autofunction:: pyathena.arrow.util.get_athena_type
 ```
