@@ -191,7 +191,7 @@ html_sidebars = {
 # -- Open Graph protocol settings ----------------------------------------------
 
 ogp_site_url = "https://laughingman7743.github.io/PyAthena/"
-ogp_image = "https://laughingman7743.github.io/PyAthena/_static/logo_square.png"
+ogp_image = "https://laughingman7743.github.io/PyAthena/_static/ogp_white.png"
 ogp_description_length = 200
 ogp_type = "website"
 
