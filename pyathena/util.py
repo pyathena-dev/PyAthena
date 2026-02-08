@@ -190,7 +190,7 @@ def retry_api_call(
             max=config.max_delay,
             exp_base=config.exponential_base,
         ),
-        after=after_log(logger, logger.level) if logger else None,  # type: ignore
+        after=after_log(logger, logger.getEffectiveLevel()) if logger else None,  # type: ignore
         reraise=True,
     )
     return retry(func, *args, **kwargs)
