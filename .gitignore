@@ -23,5 +23,6 @@ cover/
 docs/_build
 .mcp.json
 .serena
+.playwright-mcp
 _version.py
 .env

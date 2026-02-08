@@ -15,3 +15,9 @@ table.docutils {
     margin-left: 0;
     margin-right: auto;
 }
+
+/* Header banner image */
+img[alt="PyAthena"] {
+    border-radius: 16px;
+    margin-bottom: 1rem;
+}
