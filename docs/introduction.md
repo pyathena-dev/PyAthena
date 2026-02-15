@@ -56,6 +56,6 @@ PyAthena provides comprehensive support for Amazon Athena's data types and featu
 
 ## License
 
-[MIT license](https://github.com/laughingman7743/PyAthena/blob/master/LICENSE)
+[MIT license](https://github.com/pyathena-dev/PyAthena/blob/master/LICENSE)
 
 Many of the implementations in this library are based on [PyHive](https://github.com/dropbox/PyHive), thanks for [PyHive](https://github.com/dropbox/PyHive).

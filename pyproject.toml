@@ -30,8 +30,8 @@ classifiers = [
 dynamic = ["version"]
 
 [project.urls]
-homepage = "https://github.com/laughingman7743/PyAthena/"
-repository = "https://github.com/laughingman7743/PyAthena/"
+homepage = "https://github.com/pyathena-dev/PyAthena/"
+repository = "https://github.com/pyathena-dev/PyAthena/"
 
 [project.entry-points."sqlalchemy.dialects"]
 awsathena = "pyathena.sqlalchemy.base:AthenaDialect"

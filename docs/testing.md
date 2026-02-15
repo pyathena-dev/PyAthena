@@ -57,7 +57,7 @@ GitHub Actions uses OpenID Connect (OIDC) to access AWS resources. You will need
 
 The CloudFormation templates for creating GitHub OIDC Provider and IAM Role can be found in the [aws-actions/configure-aws-credentials repository](https://github.com/aws-actions/configure-aws-credentials#sample-iam-role-cloudformation-template).
 
-Under [scripts/cloudformation](https://github.com/laughingman7743/PyAthena/tree/master/scripts/cloudformation) you will also find a CloudFormation template with additional permissions and workgroup settings needed for testing.
+Under [scripts/cloudformation](https://github.com/pyathena-dev/PyAthena/tree/master/scripts/cloudformation) you will also find a CloudFormation template with additional permissions and workgroup settings needed for testing.
 
 The example of the CloudFormation execution command is the following:
 
@@ -67,7 +67,7 @@ $ aws --region us-west-2 \
     --stack-name github-actions-oidc-pyathena \
     --capabilities CAPABILITY_NAMED_IAM \
     --template-body file://./scripts/cloudformation/github_actions_oidc.yaml \
-    --parameters ParameterKey=GitHubOrg,ParameterValue=laughingman7743 \
+    --parameters ParameterKey=GitHubOrg,ParameterValue=pyathena-dev \
       ParameterKey=RepositoryName,ParameterValue=PyAthena \
       ParameterKey=BucketName,ParameterValue=laughingman7743-athena \
       ParameterKey=RoleName,ParameterValue=github-actions-oidc-pyathena-test \
