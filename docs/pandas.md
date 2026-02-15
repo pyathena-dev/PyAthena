@@ -18,7 +18,7 @@ df = pd.read_sql_query("SELECT * FROM many_rows", conn)
 print(df.head())
 ```
 
-NOTE: [Poor performance when using pandas.read_sql #222](https://github.com/laughingman7743/PyAthena/issues/222)
+NOTE: [Poor performance when using pandas.read_sql #222](https://github.com/pyathena-dev/PyAthena/issues/222)
 
 The `pyathena.pandas.util` package also has helper methods.
 
@@ -34,7 +34,7 @@ print(df.describe())
 ```
 
 If you want to use the query results output to S3 directly, you can use [PandasCursor](#pandas-cursor).
-This cursor fetches query results faster than the default cursor. (See [benchmark results](https://github.com/laughingman7743/PyAthena/tree/master/benchmarks).)
+This cursor fetches query results faster than the default cursor. (See [benchmark results](https://github.com/pyathena-dev/PyAthena/tree/master/benchmarks).)
 
 (to-sql)=
 

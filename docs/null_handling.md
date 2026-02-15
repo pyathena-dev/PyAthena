@@ -398,6 +398,6 @@ See the {ref}`arrow-cursor` documentation for more details on unload limitations
 
 This behavior is documented in response to the following GitHub issues:
 
-- [#118](https://github.com/laughingman7743/PyAthena/issues/118): PandasCursor converting strings to NaN
-- [#148](https://github.com/laughingman7743/PyAthena/issues/148): String NULL handling in pandas conversion
-- [#168](https://github.com/laughingman7743/PyAthena/issues/168): Inconsistent NULL handling across data types
+- [#118](https://github.com/pyathena-dev/PyAthena/issues/118): PandasCursor converting strings to NaN
+- [#148](https://github.com/pyathena-dev/PyAthena/issues/148): String NULL handling in pandas conversion
+- [#168](https://github.com/pyathena-dev/PyAthena/issues/168): Inconsistent NULL handling across data types

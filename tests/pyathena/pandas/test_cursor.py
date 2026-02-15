@@ -1029,7 +1029,7 @@ class TestPandasCursor:
         indirect=["pandas_cursor"],
     )
     def test_null_vs_empty_string(self, pandas_cursor, parquet_engine):
-        # TODO https://github.com/laughingman7743/PyAthena/issues/118
+        # TODO https://github.com/pyathena-dev/PyAthena/issues/118
         query = """
         SELECT * FROM (VALUES ('', 'a'), ('N/A', 'a'), ('NULL', 'a'), (NULL, 'a'))
         AS t (col1, col2)

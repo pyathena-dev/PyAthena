@@ -188,7 +188,7 @@ html_css_files = [
 
 # Furo theme options
 html_theme_options = {
-    "source_repository": "https://github.com/laughingman7743/PyAthena/",
+    "source_repository": "https://github.com/pyathena-dev/PyAthena/",
     "source_branch": "master",
     "source_directory": "docs/",
 }
@@ -207,8 +207,8 @@ html_sidebars = {
 
 # -- Open Graph protocol settings ----------------------------------------------
 
-ogp_site_url = "https://laughingman7743.github.io/PyAthena/"
-ogp_image = "https://laughingman7743.github.io/PyAthena/_static/ogp_white.png"
+ogp_site_url = "https://pyathena-dev.github.io/PyAthena/"
+ogp_image = "https://pyathena-dev.github.io/PyAthena/_static/ogp_white.png"
 ogp_description_length = 200
 ogp_type = "website"
 
