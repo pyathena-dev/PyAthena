@@ -207,8 +207,8 @@ html_sidebars = {
 
 # -- Open Graph protocol settings ----------------------------------------------
 
-ogp_site_url = "https://pyathena-dev.github.io/PyAthena/"
-ogp_image = "https://pyathena-dev.github.io/PyAthena/_static/ogp_white.png"
+ogp_site_url = "https://pyathena.dev/"
+ogp_image = "https://pyathena.dev/_static/ogp_white.png"
 ogp_description_length = 200
 ogp_type = "website"
 
