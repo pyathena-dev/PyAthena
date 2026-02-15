@@ -60,7 +60,7 @@ Many of the implementations in this library are based on [PyHive](https://github
 
 ## Links
 
-- Documentation: https://pyathena-dev.github.io/PyAthena/
+- Documentation: https://pyathena.dev/
 - PyPI Releases: https://pypi.org/project/PyAthena/
 - Source Code: https://github.com/pyathena-dev/PyAthena/
 - Issue Tracker: https://github.com/pyathena-dev/PyAthena/issues

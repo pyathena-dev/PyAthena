@@ -32,7 +32,7 @@ dynamic = ["version"]
 [project.urls]
 homepage = "https://github.com/pyathena-dev/PyAthena/"
 repository = "https://github.com/pyathena-dev/PyAthena/"
-documentation = "https://pyathena-dev.github.io/PyAthena/"
+documentation = "https://pyathena.dev/"
 issues = "https://github.com/pyathena-dev/PyAthena/issues"
 
 [project.entry-points."sqlalchemy.dialects"]
