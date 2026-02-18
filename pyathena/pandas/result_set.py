@@ -296,6 +296,9 @@ class AthenaPandasResultSet(AthenaResultSet):
             df = self._as_pandas()
             trunc_date = _no_trunc_date if self.is_unload else self._trunc_date
             self._df_iter = PandasDataFrameIterator(df, trunc_date)
+        elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
+            df = self._as_pandas_from_api()
+            self._df_iter = PandasDataFrameIterator(df, self._trunc_date)
         else:
             import pandas as pd
 
@@ -677,6 +680,21 @@ class AthenaPandasResultSet(AthenaResultSet):
         else:
             df = self._read_csv()
         return df
+
+    def _as_pandas_from_api(self) -> "DataFrame":
+        """Build a DataFrame from GetQueryResults API.
+
+        Used as a fallback when ``output_location`` is not available
+        (e.g. managed query result storage).
+        """
+        import pandas as pd
+
+        rows = self._fetch_all_rows()
+        if not rows:
+            return pd.DataFrame()
+        description = self.description if self.description else []
+        columns = [d[0] for d in description]
+        return pd.DataFrame(self._rows_to_columnar(rows, columns))
 
     def as_pandas(self) -> Union[PandasDataFrameIterator, "DataFrame"]:
         if self._chunksize is None:

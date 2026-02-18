@@ -251,6 +251,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
         # _metadata for unload queries, so we must cache column names AFTER this.
         if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
             self._df_iter = self._create_dataframe_iterator()
+        elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
+            df = self._as_polars_from_api()
+            self._df_iter = PolarsDataFrameIterator(df, self.converters, self._get_column_names())
         else:
             import polars as pl
 
@@ -538,6 +541,21 @@ class AthenaPolarsResultSet(AthenaResultSet):
         else:
             df = self._read_csv()
         return df
+
+    def _as_polars_from_api(self) -> "pl.DataFrame":
+        """Build a Polars DataFrame from GetQueryResults API.
+
+        Used as a fallback when ``output_location`` is not available
+        (e.g. managed query result storage).
+        """
+        import polars as pl
+
+        rows = self._fetch_all_rows()
+        if not rows:
+            return pl.DataFrame()
+        description = self.description if self.description else []
+        columns = [d[0] for d in description]
+        return pl.DataFrame(self._rows_to_columnar(rows, columns))
 
     def as_polars(self) -> "pl.DataFrame":
         """Return query results as a Polars DataFrame.

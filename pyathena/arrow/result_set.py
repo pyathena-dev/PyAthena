@@ -117,6 +117,8 @@ class AthenaArrowResultSet(AthenaResultSet):
         self._fs = self.__s3_file_system()
         if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
             self._table = self._as_arrow()
+        elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
+            self._table = self._as_arrow_from_api()
         else:
             import pyarrow as pa
 
@@ -345,6 +347,21 @@ class AthenaArrowResultSet(AthenaResultSet):
         else:
             table = self._read_csv()
         return table
+
+    def _as_arrow_from_api(self) -> "Table":
+        """Build an Arrow Table from GetQueryResults API.
+
+        Used as a fallback when ``output_location`` is not available
+        (e.g. managed query result storage).
+        """
+        import pyarrow as pa
+
+        rows = self._fetch_all_rows()
+        if not rows:
+            return pa.Table.from_pydict({})
+        description = self.description if self.description else []
+        columns = [d[0] for d in description]
+        return pa.table(self._rows_to_columnar(rows, columns))
 
     def as_arrow(self) -> "Table":
         return self._table
