@@ -457,8 +457,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
         if not self._is_csv_readable():
             return pl.DataFrame()
 
-        # After validation, output_location is guaranteed to be set
-        assert self.output_location is not None
+        if self.output_location is None:
+            raise ProgrammingError("output_location is not available.")
 
         separator, has_header, new_columns = self._get_csv_params()
 
@@ -492,8 +492,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
         if not self._prepare_parquet_location():
             return pl.DataFrame()
 
-        # After preparation, unload_location is guaranteed to be set
-        assert self._unload_location is not None
+        if self._unload_location is None:
+            raise ProgrammingError("unload_location is not available.")
 
         try:
             return pl.read_parquet(
@@ -636,8 +636,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
         if not self._is_csv_readable():
             return
 
-        # After validation, output_location is guaranteed to be set
-        assert self.output_location is not None
+        if self.output_location is None:
+            raise ProgrammingError("output_location is not available.")
 
         separator, has_header, new_columns = self._get_csv_params()
 
@@ -674,8 +674,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
         if not self._prepare_parquet_location():
             return
 
-        # After preparation, unload_location is guaranteed to be set
-        assert self._unload_location is not None
+        if self._unload_location is None:
+            raise ProgrammingError("unload_location is not available.")
 
         try:
             lazy_df = pl.scan_parquet(

@@ -27,6 +27,7 @@ class Env:
             "Required environment variable `AWS_ATHENA_SPARK_WORKGROUP` not found."
         )
         self.default_work_group = os.getenv("AWS_ATHENA_DEFAULT_WORKGROUP", "primary")
+        self.managed_work_group = os.getenv("AWS_ATHENA_MANAGED_WORKGROUP")
         self.schema = "pyathena_test_" + "".join(
             random.choices(string.ascii_lowercase + string.digits, k=10)
         )

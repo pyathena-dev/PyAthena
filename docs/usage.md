@@ -14,6 +14,36 @@ print(cursor.description)
 print(cursor.fetchall())
 ```
 
+## Managed query result storage
+
+When using a workgroup with [managed query result storage](https://docs.aws.amazon.com/athena/latest/ug/managed-results.html) enabled,
+you don't need to specify an S3 staging directory.
+
+```python
+from pyathena import connect
+
+cursor = connect(work_group="YOUR_MANAGED_WORK_GROUP",
+                 region_name="us-west-2").cursor()
+cursor.execute("SELECT * FROM one_row")
+print(cursor.fetchall())
+```
+
+If the ``AWS_ATHENA_S3_STAGING_DIR`` environment variable is set, pass ``s3_staging_dir=""``
+to explicitly disable the fallback. Otherwise the API will reject the request because
+``ResultConfiguration`` and ``ManagedQueryResultsConfiguration`` cannot be set together.
+
+```python
+cursor = connect(work_group="YOUR_MANAGED_WORK_GROUP",
+                 s3_staging_dir="",
+                 region_name="us-west-2").cursor()
+```
+
+```{note}
+With managed query result storage, query results are retrieved via the `GetQueryResults` API
+(1000 rows per request) instead of reading S3 files directly. This may be slower for large
+result sets. For large datasets, consider using customer-managed storage or the `UNLOAD` statement.
+```
+
 ## Cursor iteration
 
 ```python
@@ -366,7 +396,7 @@ Support [Boto3 environment variables](https://boto3.amazonaws.com/v1/documentati
 ### Additional environment variables
 
 AWS_ATHENA_S3_STAGING_DIR
-: The S3 location where Athena automatically stores the query results and metadata information. Required if you have not set up workgroups. Not required if a workgroup has been set up.
+: The S3 location where Athena automatically stores the query results and metadata information. Required if you have not set up workgroups. Not required if a workgroup has been set up. When connecting to a workgroup with [managed query result storage](https://docs.aws.amazon.com/athena/latest/ug/managed-results.html), pass ``s3_staging_dir=""`` to explicitly disable this environment variable fallback (see [Managed query result storage](#managed-query-result-storage)).
 
 AWS_ATHENA_WORK_GROUP
 : The setting of the workgroup to execute the query.

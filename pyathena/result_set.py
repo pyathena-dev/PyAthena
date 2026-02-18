@@ -73,7 +73,8 @@ class AthenaResultSet(CursorIterator):
         self._connection: Optional["Connection[Any]"] = connection
         self._converter = converter
         self._query_execution: Optional[AthenaQueryExecution] = query_execution
-        assert self._query_execution, "Required argument `query_execution` not found."
+        if not self._query_execution:
+            raise ProgrammingError("Required argument `query_execution` not found.")
         self._retry_config = retry_config
         self._client = connection.session.client(
             "s3",

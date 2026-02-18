@@ -18,6 +18,7 @@ jobs:
       AWS_ATHENA_S3_STAGING_DIR: s3://laughingman7743-pyathena/github/
       AWS_ATHENA_WORKGROUP: pyathena
       AWS_ATHENA_SPARK_WORKGROUP: pyathena-spark
+      AWS_ATHENA_MANAGED_WORKGROUP: pyathena-managed
 
     strategy:
       fail-fast: false

@@ -669,3 +669,22 @@ class TestPolarsCursor:
         assert values[2] == "hello"
         assert values[3] == "N/A"
         assert values[4] == "NULL"
+
+    @pytest.mark.parametrize(
+        "polars_cursor",
+        [
+            pytest.param({}, id="default"),
+            pytest.param(
+                {"work_group": ENV.managed_work_group, "s3_staging_dir": ""},
+                id="managed",
+                marks=pytest.mark.skipif(
+                    not ENV.managed_work_group,
+                    reason="AWS_ATHENA_MANAGED_WORKGROUP not set",
+                ),
+            ),
+        ],
+        indirect=["polars_cursor"],
+    )
+    def test_fetch_all_rows(self, polars_cursor):
+        polars_cursor.execute("SELECT 1 AS col")
+        assert polars_cursor.fetchall() == [(1,)]

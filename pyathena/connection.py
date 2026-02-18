@@ -26,7 +26,7 @@ import pyathena
 from pyathena.common import BaseCursor, CursorIterator
 from pyathena.converter import Converter
 from pyathena.cursor import Cursor
-from pyathena.error import NotSupportedError
+from pyathena.error import NotSupportedError, ProgrammingError
 from pyathena.formatter import DefaultParameterFormatter, Formatter
 from pyathena.util import RetryConfig
 
@@ -77,7 +77,9 @@ class Connection(Generic[ConnectionCursor]):
     Note:
         Either s3_staging_dir or work_group must be specified. If using a
         workgroup, it must have a result location configured unless
-        s3_staging_dir is also provided.
+        s3_staging_dir is also provided. For workgroups with managed query
+        result storage, pass ``s3_staging_dir=""`` to skip the environment
+        variable fallback.
     """
 
     _ENV_S3_STAGING_DIR: str = "AWS_ATHENA_S3_STAGING_DIR"
@@ -198,6 +200,10 @@ class Connection(Generic[ConnectionCursor]):
         Args:
             s3_staging_dir: S3 location to store query results. Required if not
                 using workgroups or if workgroup doesn't have result location.
+                Pass an empty string to explicitly disable S3 staging and skip
+                the ``AWS_ATHENA_S3_STAGING_DIR`` environment variable fallback.
+                This is required when connecting to a workgroup with managed
+                query result storage enabled.
             region_name: AWS region name. Uses default region if not specified.
             schema_name: Default database/schema name. Defaults to "default".
             catalog_name: Data catalog name. Defaults to "awsdatacatalog".
@@ -226,12 +232,17 @@ class Connection(Generic[ConnectionCursor]):
             **kwargs: Additional arguments passed to boto3 Session and client.
 
         Raises:
-            AssertionError: If neither s3_staging_dir nor work_group is provided.
+            ProgrammingError: If neither s3_staging_dir nor work_group is provided.
 
         Note:
             Either s3_staging_dir or work_group must be specified. Environment
             variables AWS_ATHENA_S3_STAGING_DIR and AWS_ATHENA_WORK_GROUP are
             checked if parameters are not provided.
+
+            When using a workgroup with managed query result storage, pass
+            ``s3_staging_dir=""`` to prevent the environment variable fallback
+            from sending a ``ResultConfiguration`` that conflicts with
+            ``ManagedQueryResultsConfiguration``.
         """
         self._kwargs = {
             **kwargs,
@@ -241,8 +252,8 @@ class Connection(Generic[ConnectionCursor]):
             "serial_number": serial_number,
             "duration_seconds": duration_seconds,
         }
-        if s3_staging_dir:
-            self.s3_staging_dir: Optional[str] = s3_staging_dir
+        if s3_staging_dir is not None:
+            self.s3_staging_dir: Optional[str] = s3_staging_dir or None
         else:
             self.s3_staging_dir = os.getenv(self._ENV_S3_STAGING_DIR)
         self.region_name = region_name
@@ -258,9 +269,8 @@ class Connection(Generic[ConnectionCursor]):
         self.profile_name = profile_name
         self.config: Optional[Config] = config if config else Config()
 
-        assert self.s3_staging_dir or self.work_group, (
-            "Required argument `s3_staging_dir` or `work_group` not found."
-        )
+        if not self.s3_staging_dir and not self.work_group:
+            raise ProgrammingError("Required argument `s3_staging_dir` or `work_group` not found.")
 
         if self.s3_staging_dir and not self.s3_staging_dir.endswith("/"):
             self.s3_staging_dir = f"{self.s3_staging_dir}/"

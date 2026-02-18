@@ -898,6 +898,25 @@ class TestCursor:
         # Row 5: "NULL" string literal should be preserved as-is
         assert rows[4][1] == "NULL"
 
+    @pytest.mark.parametrize(
+        "cursor",
+        [
+            pytest.param({}, id="default"),
+            pytest.param(
+                {"work_group": ENV.managed_work_group, "s3_staging_dir": ""},
+                id="managed",
+                marks=pytest.mark.skipif(
+                    not ENV.managed_work_group,
+                    reason="AWS_ATHENA_MANAGED_WORKGROUP not set",
+                ),
+            ),
+        ],
+        indirect=["cursor"],
+    )
+    def test_fetch_all_rows(self, cursor):
+        cursor.execute("SELECT 1 AS col")
+        assert cursor.fetchall() == [(1,)]
+
 
 class TestDictCursor:
     def test_fetchone(self, dict_cursor):

@@ -17,6 +17,9 @@ Parameters:
   SparkWorkGroupName:
     Type: String
     Default: "pyathena-spark"
+  ManagedWorkGroupName:
+    Type: String
+    Default: "pyathena-managed"
   OIDCProviderArn:
     Type: String
     Default: ""
@@ -251,6 +254,20 @@ Resources:
         ResultConfiguration:
           OutputLocation: !Sub "s3://${BucketName}/workgroup=${SparkWorkGroupName}/"
         ExecutionRole: !GetAtt SparkRole.Arn
+
+  ManagedWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub "${ManagedWorkGroupName}"
+      State: ENABLED
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: false
+        PublishCloudWatchMetricsEnabled: false
+        RequesterPaysEnabled: false
+        EngineVersion:
+          SelectedEngineVersion: "Athena engine version 3"
+        ManagedQueryResultsConfiguration:
+          Enabled: true
 
   GithubOidc:
     Type: AWS::IAM::OIDCProvider

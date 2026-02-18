@@ -1328,3 +1328,22 @@ class TestPandasCursor:
         # Each corresponding chunk should be identical
         for chunk1, chunk2 in zip(chunks_via_method, chunks_via_direct, strict=False):
             pd.testing.assert_frame_equal(chunk1, chunk2)
+
+    @pytest.mark.parametrize(
+        "pandas_cursor",
+        [
+            pytest.param({}, id="default"),
+            pytest.param(
+                {"work_group": ENV.managed_work_group, "s3_staging_dir": ""},
+                id="managed",
+                marks=pytest.mark.skipif(
+                    not ENV.managed_work_group,
+                    reason="AWS_ATHENA_MANAGED_WORKGROUP not set",
+                ),
+            ),
+        ],
+        indirect=["pandas_cursor"],
+    )
+    def test_fetch_all_rows(self, pandas_cursor):
+        pandas_cursor.execute("SELECT 1 AS col")
+        assert pandas_cursor.fetchall() == [(1,)]
