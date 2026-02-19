@@ -681,15 +681,19 @@ class AthenaPandasResultSet(AthenaResultSet):
             df = self._read_csv()
         return df
 
-    def _as_pandas_from_api(self) -> "DataFrame":
+    def _as_pandas_from_api(self, converter: Optional[Converter] = None) -> "DataFrame":
         """Build a DataFrame from GetQueryResults API.
 
         Used as a fallback when ``output_location`` is not available
         (e.g. managed query result storage).
+
+        Args:
+            converter: Type converter for result values. Defaults to
+                ``DefaultTypeConverter`` if not specified.
         """
         import pandas as pd
 
-        rows = self._fetch_all_rows()
+        rows = self._fetch_all_rows(converter)
         if not rows:
             return pd.DataFrame()
         description = self.description if self.description else []

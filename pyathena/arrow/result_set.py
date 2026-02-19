@@ -348,15 +348,19 @@ class AthenaArrowResultSet(AthenaResultSet):
             table = self._read_csv()
         return table
 
-    def _as_arrow_from_api(self) -> "Table":
+    def _as_arrow_from_api(self, converter: Optional[Converter] = None) -> "Table":
         """Build an Arrow Table from GetQueryResults API.
 
         Used as a fallback when ``output_location`` is not available
         (e.g. managed query result storage).
+
+        Args:
+            converter: Type converter for result values. Defaults to
+                ``DefaultTypeConverter`` if not specified.
         """
         import pyarrow as pa
 
-        rows = self._fetch_all_rows()
+        rows = self._fetch_all_rows(converter)
         if not rows:
             return pa.Table.from_pydict({})
         description = self.description if self.description else []

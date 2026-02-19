@@ -542,15 +542,19 @@ class AthenaPolarsResultSet(AthenaResultSet):
             df = self._read_csv()
         return df
 
-    def _as_polars_from_api(self) -> "pl.DataFrame":
+    def _as_polars_from_api(self, converter: Optional[Converter] = None) -> "pl.DataFrame":
         """Build a Polars DataFrame from GetQueryResults API.
 
         Used as a fallback when ``output_location`` is not available
         (e.g. managed query result storage).
+
+        Args:
+            converter: Type converter for result values. Defaults to
+                ``DefaultTypeConverter`` if not specified.
         """
         import polars as pl
 
-        rows = self._fetch_all_rows()
+        rows = self._fetch_all_rows(converter)
         if not rows:
             return pl.DataFrame()
         description = self.description if self.description else []

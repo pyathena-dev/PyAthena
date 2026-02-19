@@ -497,17 +497,22 @@ class AthenaResultSet(CursorIterator):
 
     def _fetch_all_rows(
         self,
+        converter: Optional[Converter] = None,
     ) -> List[Tuple[Optional[Any], ...]]:
         """Fetch all rows via GetQueryResults API with type conversion.
 
         Paginates through all results from the beginning using MaxResults=1000.
-        Uses ``DefaultTypeConverter`` for string-to-Python type conversion,
-        ensuring consistent behavior regardless of subclass converter
-        (e.g. Pandas/Arrow converters only handle a subset of types).
+        Defaults to ``DefaultTypeConverter`` for string-to-Python type conversion,
+        because subclass converters (e.g. Pandas/Arrow) are designed for S3 file
+        reading and may not handle API result strings.
 
         This method is intended for use by subclass result sets that need to
         fall back to the API when S3 output is not available (e.g., managed
         query result storage).
+
+        Args:
+            converter: Type converter for result values. Defaults to
+                ``DefaultTypeConverter`` if not specified.
 
         Returns:
             List of converted row tuples.
@@ -521,7 +526,7 @@ class AthenaResultSet(CursorIterator):
             "This may be slow for large result sets."
         )
 
-        converter = DefaultTypeConverter()
+        converter = converter or DefaultTypeConverter()
         all_rows: List[Tuple[Optional[Any], ...]] = []
         next_token: Optional[str] = None
 
