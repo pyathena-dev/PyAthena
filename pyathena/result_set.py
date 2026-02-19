@@ -19,7 +19,7 @@ from typing import (
 )
 
 from pyathena.common import CursorIterator
-from pyathena.converter import Converter
+from pyathena.converter import Converter, DefaultTypeConverter
 from pyathena.error import DataError, OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig, parse_output_location, retry_api_call
@@ -73,7 +73,8 @@ class AthenaResultSet(CursorIterator):
         self._connection: Optional["Connection[Any]"] = connection
         self._converter = converter
         self._query_execution: Optional[AthenaQueryExecution] = query_execution
-        assert self._query_execution, "Required argument `query_execution` not found."
+        if not self._query_execution:
+            raise ProgrammingError("Required argument `query_execution` not found.")
         self._retry_config = retry_config
         self._client = connection.session.client(
             "s3",
@@ -328,19 +329,21 @@ class AthenaResultSet(CursorIterator):
             raise ProgrammingError("AthenaResultSet is closed.")
         return cast("Connection[Any]", self._connection)
 
-    def __fetch(self, next_token: Optional[str] = None) -> Dict[str, Any]:
+    def __get_query_results(
+        self, max_results: int, next_token: Optional[str] = None
+    ) -> Dict[str, Any]:
         if not self.query_id:
             raise ProgrammingError("QueryExecutionId is none or empty.")
         if self.state != AthenaQueryExecution.STATE_SUCCEEDED:
             raise ProgrammingError("QueryExecutionState is not SUCCEEDED.")
         if self.is_closed:
             raise ProgrammingError("AthenaResultSet is closed.")
-        request = {
+        request: Dict[str, Any] = {
             "QueryExecutionId": self.query_id,
-            "MaxResults": self._arraysize,
+            "MaxResults": max_results,
         }
         if next_token:
-            request.update({"NextToken": next_token})
+            request["NextToken"] = next_token
         try:
             response = retry_api_call(
                 self.connection.client.get_query_results,
@@ -354,17 +357,23 @@ class AthenaResultSet(CursorIterator):
         else:
             return cast(Dict[str, Any], response)
 
+    def __fetch(self, next_token: Optional[str] = None) -> Dict[str, Any]:
+        return self.__get_query_results(self._arraysize, next_token)
+
     def _fetch(self) -> None:
         if not self._next_token:
             raise ProgrammingError("NextToken is none or empty.")
         response = self.__fetch(self._next_token)
-        self._process_rows(response)
+        rows, self._next_token = self._parse_result_rows(response)
+        self._process_rows(rows)
 
     def _pre_fetch(self) -> None:
         response = self.__fetch()
         self._process_metadata(response)
         self._process_update_count(response)
-        self._process_rows(response)
+        rows, self._next_token = self._parse_result_rows(response)
+        offset = 1 if rows and self._is_first_row_column_labels(rows) else 0
+        self._process_rows(rows, offset)
 
     def fetchone(
         self,
@@ -433,40 +442,130 @@ class AthenaResultSet(CursorIterator):
             self._rowcount = update_count
 
     def _get_rows(
-        self, offset: int, metadata: Tuple[Any, ...], rows: List[Dict[str, Any]]
+        self,
+        offset: int,
+        metadata: Tuple[Any, ...],
+        rows: List[Dict[str, Any]],
+        converter: Optional[Converter] = None,
     ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        conv = converter or self._converter
         return [
             tuple(
                 [
-                    self._converter.convert(meta.get("Type"), row.get("VarCharValue"))
+                    conv.convert(meta.get("Type"), row.get("VarCharValue"))
                     for meta, row in zip(metadata, rows[i].get("Data", []), strict=False)
                 ]
             )
             for i in range(offset, len(rows))
         ]
 
-    def _process_rows(self, response: Dict[str, Any]) -> None:
+    def _parse_result_rows(
+        self, response: Dict[str, Any]
+    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """Parse a GetQueryResults response into raw rows and next token.
+
+        Handles response validation and pagination token extraction.
+        This is the shared parsing logic used by both ``_pre_fetch``
+        (normal path) and ``_fetch_all_rows`` (API fallback).
+
+        Args:
+            response: Raw response dict from ``GetQueryResults`` API.
+
+        Returns:
+            Tuple of (rows, next_token).
+        """
         result_set = response.get("ResultSet")
         if not result_set:
             raise DataError("KeyError `ResultSet`")
         rows = result_set.get("Rows")
         if rows is None:
             raise DataError("KeyError `Rows`")
-        processed_rows = []
-        if len(rows) > 0:
-            offset = 1 if not self._next_token and self._is_first_row_column_labels(rows) else 0
-            metadata = cast(Tuple[Any, ...], self._metadata)
-            processed_rows = self._get_rows(offset, metadata, rows)
-        self._rows.extend(processed_rows)
-        self._next_token = response.get("NextToken")
+        next_token = response.get("NextToken")
+        return rows, next_token
+
+    def _process_rows(self, rows: List[Dict[str, Any]], offset: int = 0) -> None:
+        if rows and self._metadata:
+            processed_rows = self._get_rows(offset, self._metadata, rows)
+            self._rows.extend(processed_rows)
 
     def _is_first_row_column_labels(self, rows: List[Dict[str, Any]]) -> bool:
         first_row_data = rows[0].get("Data", [])
-        metadata = cast(Tuple[Any, Any], self._metadata)
-        for meta, data in zip(metadata, first_row_data, strict=False):
+        for meta, data in zip(self._metadata or (), first_row_data, strict=False):
             if meta.get("Name") != data.get("VarCharValue"):
                 return False
         return True
+
+    def _fetch_all_rows(
+        self,
+        converter: Optional[Converter] = None,
+    ) -> List[Tuple[Optional[Any], ...]]:
+        """Fetch all rows via GetQueryResults API with type conversion.
+
+        Paginates through all results from the beginning using MaxResults=1000.
+        Defaults to ``DefaultTypeConverter`` for string-to-Python type conversion,
+        because subclass converters (e.g. Pandas/Arrow) are designed for S3 file
+        reading and may not handle API result strings.
+
+        This method is intended for use by subclass result sets that need to
+        fall back to the API when S3 output is not available (e.g., managed
+        query result storage).
+
+        Args:
+            converter: Type converter for result values. Defaults to
+                ``DefaultTypeConverter`` if not specified.
+
+        Returns:
+            List of converted row tuples.
+        """
+        if self._metadata is None:
+            raise ProgrammingError("Metadata is not available.")
+
+        _logger.warning(
+            "output_location is not available (e.g. managed query result storage). "
+            "Falling back to GetQueryResults API. "
+            "This may be slow for large result sets."
+        )
+
+        converter = converter or DefaultTypeConverter()
+        all_rows: List[Tuple[Optional[Any], ...]] = []
+        next_token: Optional[str] = None
+
+        while True:
+            response = self.__get_query_results(self.DEFAULT_FETCH_SIZE, next_token)
+            rows, next_token = self._parse_result_rows(response)
+
+            offset = 1 if rows and self._is_first_row_column_labels(rows) else 0
+            all_rows.extend(
+                cast(
+                    List[Tuple[Optional[Any], ...]],
+                    self._get_rows(offset, self._metadata, rows, converter),
+                )
+            )
+
+            if not next_token:
+                break
+
+        return all_rows
+
+    @staticmethod
+    def _rows_to_columnar(
+        rows: List[Tuple[Optional[Any], ...]],
+        columns: List[str],
+    ) -> Dict[str, List[Any]]:
+        """Convert row-oriented data to columnar format.
+
+        Args:
+            rows: List of row tuples from ``_fetch_all_rows()``.
+            columns: Column names in order.
+
+        Returns:
+            Dictionary mapping column names to lists of values.
+        """
+        columnar: Dict[str, List[Any]] = {col: [] for col in columns}
+        for row in rows:
+            for col, val in zip(columns, row, strict=False):
+                columnar[col].append(val)
+        return columnar
 
     def _get_content_length(self) -> int:
         if not self.output_location:
@@ -530,14 +629,19 @@ class AthenaDictResultSet(AthenaResultSet):
     dict_type: Type[Any] = dict
 
     def _get_rows(
-        self, offset: int, metadata: Tuple[Any, ...], rows: List[Dict[str, Any]]
+        self,
+        offset: int,
+        metadata: Tuple[Any, ...],
+        rows: List[Dict[str, Any]],
+        converter: Optional[Converter] = None,
     ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        conv = converter or self._converter
         return [
             self.dict_type(
                 [
                     (
                         meta.get("Name"),
-                        self._converter.convert(meta.get("Type"), row.get("VarCharValue")),
+                        conv.convert(meta.get("Type"), row.get("VarCharValue")),
                     )
                     for meta, row in zip(metadata, rows[i].get("Data", []), strict=False)
                 ]

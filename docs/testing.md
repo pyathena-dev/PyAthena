@@ -20,6 +20,15 @@ If primary is not available as the default workgroup, specify an alternative wor
 $ export AWS_ATHENA_DEFAULT_WORKGROUP=DEFAULT_WORKGROUP
 ```
 
+### Managed query result storage (optional)
+
+To test the managed query result storage feature, create a workgroup with managed storage enabled and set the `AWS_ATHENA_MANAGED_WORKGROUP` environment variable.
+If not set, managed storage tests will be skipped.
+
+```bash
+$ export AWS_ATHENA_MANAGED_WORKGROUP=pyathena-managed
+```
+
 ## Run test
 
 ```bash

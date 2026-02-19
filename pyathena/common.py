@@ -210,15 +210,15 @@ class BaseCursor(metaclass=ABCMeta):
         request: Dict[str, Any] = {
             "QueryString": query,
             "QueryExecutionContext": {},
-            "ResultConfiguration": {},
         }
         if self._schema_name:
             request["QueryExecutionContext"].update({"Database": self._schema_name})
         if self._catalog_name:
             request["QueryExecutionContext"].update({"Catalog": self._catalog_name})
+        result_configuration: Dict[str, Any] = {}
         if self._s3_staging_dir or s3_staging_dir:
-            request["ResultConfiguration"].update(
-                {"OutputLocation": s3_staging_dir if s3_staging_dir else self._s3_staging_dir}
+            result_configuration["OutputLocation"] = (
+                s3_staging_dir if s3_staging_dir else self._s3_staging_dir
             )
         if self._work_group or work_group:
             request.update({"WorkGroup": work_group if work_group else self._work_group})
@@ -228,7 +228,9 @@ class BaseCursor(metaclass=ABCMeta):
             }
             if self._kms_key:
                 enc_conf.update({"KmsKey": self._kms_key})
-            request["ResultConfiguration"].update({"EncryptionConfiguration": enc_conf})
+            result_configuration["EncryptionConfiguration"] = enc_conf
+        if result_configuration:
+            request["ResultConfiguration"] = result_configuration
         if self._result_reuse_enable or result_reuse_enable:
             reuse_conf = {
                 "Enabled": result_reuse_enable

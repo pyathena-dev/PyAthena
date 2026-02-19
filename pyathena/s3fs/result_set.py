@@ -82,10 +82,14 @@ class AthenaS3FSResultSet(AthenaResultSet):
 
         if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
             self._init_csv_reader()
+        elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
+            # Managed query result storage: no output_location, use API
+            rows = self._fetch_all_rows()
+            self._rows.extend(rows)
 
         # If CSV reader was not initialized (e.g., CTAS, DDL),
         # fall back to pre-fetched data from Athena API
-        if not self._csv_reader and pre_fetched_rows:
+        if not self._csv_reader and not self._rows and pre_fetched_rows:
             self._rows.extend(pre_fetched_rows)
 
     def _create_s3_file_system(self) -> S3FileSystem:

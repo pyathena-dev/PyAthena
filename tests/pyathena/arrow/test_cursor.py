@@ -927,3 +927,22 @@ class TestArrowCursor:
         assert values[2] == "hello"
         assert values[3] == "N/A"
         assert values[4] == "NULL"
+
+    @pytest.mark.parametrize(
+        "arrow_cursor",
+        [
+            pytest.param({}, id="default"),
+            pytest.param(
+                {"work_group": ENV.managed_work_group, "s3_staging_dir": ""},
+                id="managed",
+                marks=pytest.mark.skipif(
+                    not ENV.managed_work_group,
+                    reason="AWS_ATHENA_MANAGED_WORKGROUP not set",
+                ),
+            ),
+        ],
+        indirect=["arrow_cursor"],
+    )
+    def test_fetch_all_rows(self, arrow_cursor):
+        arrow_cursor.execute("SELECT 1 AS col")
+        assert arrow_cursor.fetchall() == [(1,)]

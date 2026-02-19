@@ -502,3 +502,22 @@ class TestS3FSCursor:
             cursor.execute("SELECT 'a,b,c' AS col_with_commas")
             result = cursor.fetchone()
             assert result == ("a,b,c",)
+
+    @pytest.mark.parametrize(
+        "s3fs_cursor",
+        [
+            pytest.param({}, id="default"),
+            pytest.param(
+                {"work_group": ENV.managed_work_group, "s3_staging_dir": ""},
+                id="managed",
+                marks=pytest.mark.skipif(
+                    not ENV.managed_work_group,
+                    reason="AWS_ATHENA_MANAGED_WORKGROUP not set",
+                ),
+            ),
+        ],
+        indirect=["s3fs_cursor"],
+    )
+    def test_fetch_all_rows(self, s3fs_cursor):
+        s3fs_cursor.execute("SELECT 1 AS col")
+        assert s3fs_cursor.fetchall() == [(1,)]

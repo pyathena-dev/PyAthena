@@ -223,7 +223,8 @@ class AsyncPolarsCursor(AsyncCursor):
         """
         if self._unload:
             s3_staging_dir = s3_staging_dir if s3_staging_dir else self._s3_staging_dir
-            assert s3_staging_dir, "If the unload option is used, s3_staging_dir is required."
+            if not s3_staging_dir:
+                raise ProgrammingError("If the unload option is used, s3_staging_dir is required.")
             operation, unload_location = self._formatter.wrap_unload(
                 operation,
                 s3_staging_dir=s3_staging_dir,
