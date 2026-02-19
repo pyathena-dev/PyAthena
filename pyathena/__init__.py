@@ -85,6 +85,9 @@ def connect(*args, **kwargs) -> "Connection[Any]":
     Args:
         s3_staging_dir: S3 location to store query results. Required if not
             using workgroups or if the workgroup doesn't have a result location.
+            Pass an empty string to explicitly disable S3 staging and skip
+            the ``AWS_ATHENA_S3_STAGING_DIR`` environment variable fallback
+            (required for workgroups with managed query result storage).
         region_name: AWS region name. If not specified, uses the default region
             from your AWS configuration.
         schema_name: Athena database/schema name. Defaults to "default".
@@ -109,7 +112,7 @@ def connect(*args, **kwargs) -> "Connection[Any]":
         A Connection object that can be used to create cursors and execute queries.
 
     Raises:
-        AssertionError: If neither s3_staging_dir nor work_group is provided.
+        ProgrammingError: If neither s3_staging_dir nor work_group is provided.
 
     Example:
         >>> import pyathena
