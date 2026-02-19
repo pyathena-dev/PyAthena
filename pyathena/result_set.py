@@ -364,13 +364,16 @@ class AthenaResultSet(CursorIterator):
         if not self._next_token:
             raise ProgrammingError("NextToken is none or empty.")
         response = self.__fetch(self._next_token)
-        self._process_rows(response)
+        rows, self._next_token = self._parse_result_rows(response)
+        self._process_rows(rows)
 
     def _pre_fetch(self) -> None:
         response = self.__fetch()
         self._process_metadata(response)
         self._process_update_count(response)
-        self._process_rows(response)
+        rows, self._next_token = self._parse_result_rows(response)
+        offset = 1 if rows and self._is_first_row_column_labels(rows) else 0
+        self._process_rows(rows, offset)
 
     def fetchone(
         self,
@@ -439,12 +442,17 @@ class AthenaResultSet(CursorIterator):
             self._rowcount = update_count
 
     def _get_rows(
-        self, offset: int, metadata: Tuple[Any, ...], rows: List[Dict[str, Any]]
+        self,
+        offset: int,
+        metadata: Tuple[Any, ...],
+        rows: List[Dict[str, Any]],
+        converter: Optional[Converter] = None,
     ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        conv = converter or self._converter
         return [
             tuple(
                 [
-                    self._converter.convert(meta.get("Type"), row.get("VarCharValue"))
+                    conv.convert(meta.get("Type"), row.get("VarCharValue"))
                     for meta, row in zip(metadata, rows[i].get("Data", []), strict=False)
                 ]
             )
@@ -452,22 +460,19 @@ class AthenaResultSet(CursorIterator):
         ]
 
     def _parse_result_rows(
-        self, response: Dict[str, Any], is_first_page: bool
-    ) -> Tuple[List[Dict[str, Any]], int, Optional[str]]:
-        """Parse a GetQueryResults response into raw rows, offset, and next token.
+        self, response: Dict[str, Any]
+    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """Parse a GetQueryResults response into raw rows and next token.
 
-        Handles response validation, column-header detection, and pagination
-        token extraction. This is the shared parsing logic used by both
-        ``_process_rows`` (normal path) and ``_fetch_all_rows`` (API fallback).
+        Handles response validation and pagination token extraction.
+        This is the shared parsing logic used by both ``_pre_fetch``
+        (normal path) and ``_fetch_all_rows`` (API fallback).
 
         Args:
             response: Raw response dict from ``GetQueryResults`` API.
-            is_first_page: Whether this is the first page of results. Used to
-                detect the column-label header row.
 
         Returns:
-            Tuple of (rows, offset, next_token) where *offset* is 1 when
-            the first row is a column-label header, 0 otherwise.
+            Tuple of (rows, next_token).
         """
         result_set = response.get("ResultSet")
         if not result_set:
@@ -476,22 +481,16 @@ class AthenaResultSet(CursorIterator):
         if rows is None:
             raise DataError("KeyError `Rows`")
         next_token = response.get("NextToken")
-        if not rows:
-            return rows, 0, next_token
-        offset = 1 if is_first_page and self._is_first_row_column_labels(rows) else 0
-        return rows, offset, next_token
+        return rows, next_token
 
-    def _process_rows(self, response: Dict[str, Any]) -> None:
-        rows, offset, self._next_token = self._parse_result_rows(response, not self._next_token)
-        if rows:
-            metadata = cast(Tuple[Any, ...], self._metadata)
-            processed_rows = self._get_rows(offset, metadata, rows)
+    def _process_rows(self, rows: List[Dict[str, Any]], offset: int = 0) -> None:
+        if rows and self._metadata:
+            processed_rows = self._get_rows(offset, self._metadata, rows)
             self._rows.extend(processed_rows)
 
     def _is_first_row_column_labels(self, rows: List[Dict[str, Any]]) -> bool:
         first_row_data = rows[0].get("Data", [])
-        metadata = cast(Tuple[Any, Any], self._metadata)
-        for meta, data in zip(metadata, first_row_data, strict=False):
+        for meta, data in zip(self._metadata or (), first_row_data, strict=False):
             if meta.get("Name") != data.get("VarCharValue"):
                 return False
         return True
@@ -524,23 +523,20 @@ class AthenaResultSet(CursorIterator):
 
         converter = DefaultTypeConverter()
         all_rows: List[Tuple[Optional[Any], ...]] = []
-        metadata = cast(Tuple[Any, ...], self._metadata)
         next_token: Optional[str] = None
-        is_first_page = True
 
         while True:
             response = self.__get_query_results(self.DEFAULT_FETCH_SIZE, next_token)
-            rows, offset, next_token = self._parse_result_rows(response, is_first_page)
+            rows, next_token = self._parse_result_rows(response)
 
-            for i in range(offset, len(rows)):
-                all_rows.append(
-                    tuple(
-                        converter.convert(meta.get("Type"), row.get("VarCharValue"))
-                        for meta, row in zip(metadata, rows[i].get("Data", []), strict=False)
-                    )
+            offset = 1 if rows and self._is_first_row_column_labels(rows) else 0
+            all_rows.extend(
+                cast(
+                    List[Tuple[Optional[Any], ...]],
+                    self._get_rows(offset, self._metadata, rows, converter),
                 )
+            )
 
-            is_first_page = False
             if not next_token:
                 break
 
@@ -628,14 +624,19 @@ class AthenaDictResultSet(AthenaResultSet):
     dict_type: Type[Any] = dict
 
     def _get_rows(
-        self, offset: int, metadata: Tuple[Any, ...], rows: List[Dict[str, Any]]
+        self,
+        offset: int,
+        metadata: Tuple[Any, ...],
+        rows: List[Dict[str, Any]],
+        converter: Optional[Converter] = None,
     ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        conv = converter or self._converter
         return [
             self.dict_type(
                 [
                     (
                         meta.get("Name"),
-                        self._converter.convert(meta.get("Type"), row.get("VarCharValue")),
+                        conv.convert(meta.get("Type"), row.get("VarCharValue")),
                     )
                     for meta, row in zip(metadata, rows[i].get("Data", []), strict=False)
                 ]
