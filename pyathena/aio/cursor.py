@@ -5,7 +5,7 @@ import logging
 from typing import Any, Callable, Dict, List, Optional, Union, cast
 
 from pyathena.aio.common import AioBaseCursor
-from pyathena.aio.result_set import AioDictResultSet, AioResultSet
+from pyathena.aio.result_set import AthenaAioDictResultSet, AthenaAioResultSet
 from pyathena.common import CursorIterator
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
@@ -57,8 +57,8 @@ class AioCursor(AioBaseCursor, CursorIterator, WithResultSet):
             **kwargs,
         )
         self._query_id: Optional[str] = None
-        self._result_set: Optional[AioResultSet] = None
-        self._result_set_class = AioResultSet
+        self._result_set: Optional[AthenaAioResultSet] = None
+        self._result_set_class = AthenaAioResultSet
         self._on_start_query_execution = on_start_query_execution
 
     @property
@@ -172,7 +172,7 @@ class AioCursor(AioBaseCursor, CursorIterator, WithResultSet):
     ) -> Optional[Union[Any, Dict[Any, Optional[Any]]]]:
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
-        result_set = cast(AioResultSet, self.result_set)
+        result_set = cast(AthenaAioResultSet, self.result_set)
         return await result_set.fetchone()
 
     async def fetchmany(  # type: ignore[override]
@@ -180,7 +180,7 @@ class AioCursor(AioBaseCursor, CursorIterator, WithResultSet):
     ) -> List[Union[Any, Dict[Any, Optional[Any]]]]:
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
-        result_set = cast(AioResultSet, self.result_set)
+        result_set = cast(AthenaAioResultSet, self.result_set)
         return await result_set.fetchmany(size)
 
     async def fetchall(  # type: ignore[override]
@@ -188,7 +188,7 @@ class AioCursor(AioBaseCursor, CursorIterator, WithResultSet):
     ) -> List[Union[Any, Dict[Any, Optional[Any]]]]:
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
-        result_set = cast(AioResultSet, self.result_set)
+        result_set = cast(AthenaAioResultSet, self.result_set)
         return await result_set.fetchall()
 
     def __aiter__(self):
@@ -220,6 +220,6 @@ class AioDictCursor(AioCursor):
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        self._result_set_class = AioDictResultSet
+        self._result_set_class = AthenaAioDictResultSet
         if "dict_type" in kwargs:
-            AioDictResultSet.dict_type = kwargs["dict_type"]
+            AthenaAioDictResultSet.dict_type = kwargs["dict_type"]

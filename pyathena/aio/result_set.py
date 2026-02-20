@@ -11,7 +11,6 @@ from typing import (
     List,
     Optional,
     Tuple,
-    Type,
     Union,
     cast,
 )
@@ -21,7 +20,7 @@ from pyathena.common import CursorIterator
 from pyathena.converter import Converter
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
-from pyathena.result_set import AthenaResultSet
+from pyathena.result_set import AthenaDictResultSet, AthenaResultSet
 from pyathena.util import RetryConfig
 
 if TYPE_CHECKING:
@@ -30,7 +29,7 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)  # type: ignore
 
 
-class AioResultSet(AthenaResultSet):
+class AthenaAioResultSet(AthenaResultSet):
     """Async result set that provides async fetch methods.
 
     Because ``AthenaResultSet.__init__`` calls ``_pre_fetch`` (a blocking API
@@ -79,10 +78,10 @@ class AioResultSet(AthenaResultSet):
         query_execution: AthenaQueryExecution,
         arraysize: int,
         retry_config: RetryConfig,
-    ) -> "AioResultSet":
+    ) -> "AthenaAioResultSet":
         """Async factory method.
 
-        Creates an ``AioResultSet`` and awaits the initial data fetch.
+        Creates an ``AthenaAioResultSet`` and awaits the initial data fetch.
 
         Args:
             connection: The database connection.
@@ -92,7 +91,7 @@ class AioResultSet(AthenaResultSet):
             retry_config: Retry configuration for API calls.
 
         Returns:
-            A fully initialized ``AioResultSet``.
+            A fully initialized ``AthenaAioResultSet``.
         """
         result_set = cls(connection, converter, query_execution, arraysize, retry_config)
         if result_set.state == AthenaQueryExecution.STATE_SUCCEEDED:
@@ -107,7 +106,7 @@ class AioResultSet(AthenaResultSet):
         if self.state != AthenaQueryExecution.STATE_SUCCEEDED:
             raise ProgrammingError("QueryExecutionState is not SUCCEEDED.")
         if self.is_closed:
-            raise ProgrammingError("AioResultSet is closed.")
+            raise ProgrammingError("AthenaAioResultSet is closed.")
         request: Dict[str, Any] = {
             "QueryExecutionId": self.query_id,
             "MaxResults": max_results,
@@ -193,28 +192,9 @@ class AioResultSet(AthenaResultSet):
         return row
 
 
-class AioDictResultSet(AioResultSet):
-    """Async result set that returns rows as dictionaries."""
+class AthenaAioDictResultSet(AthenaDictResultSet, AthenaAioResultSet):
+    """Async result set that returns rows as dictionaries.
 
-    dict_type: Type[Any] = dict
-
-    def _get_rows(
-        self,
-        offset: int,
-        metadata: Tuple[Any, ...],
-        rows: List[Dict[str, Any]],
-        converter: Optional[Converter] = None,
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
-        conv = converter or self._converter
-        return [
-            self.dict_type(
-                [
-                    (
-                        meta.get("Name"),
-                        conv.convert(meta.get("Type"), row.get("VarCharValue")),
-                    )
-                    for meta, row in zip(metadata, rows[i].get("Data", []), strict=False)
-                ]
-            )
-            for i in range(offset, len(rows))
-        ]
+    Inherits ``_get_rows`` from ``AthenaDictResultSet`` and async fetch
+    methods from ``AthenaAioResultSet`` via multiple inheritance.
+    """
