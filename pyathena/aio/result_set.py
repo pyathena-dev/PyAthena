@@ -1,0 +1,220 @@
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+import collections
+import logging
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Deque,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Type,
+    Union,
+    cast,
+)
+
+from pyathena.aio.util import async_retry_api_call
+from pyathena.common import CursorIterator
+from pyathena.converter import Converter
+from pyathena.error import OperationalError, ProgrammingError
+from pyathena.model import AthenaQueryExecution
+from pyathena.result_set import AthenaResultSet
+from pyathena.util import RetryConfig
+
+if TYPE_CHECKING:
+    from pyathena.connection import Connection
+
+_logger = logging.getLogger(__name__)  # type: ignore
+
+
+class AioResultSet(AthenaResultSet):
+    """Async result set that provides async fetch methods.
+
+    Because ``AthenaResultSet.__init__`` calls ``_pre_fetch`` (a blocking API
+    call), this class overrides ``__init__`` to skip it and provides an
+    ``async create()`` classmethod factory instead.
+    """
+
+    def __init__(
+        self,
+        connection: "Connection[Any]",
+        converter: Converter,
+        query_execution: AthenaQueryExecution,
+        arraysize: int,
+        retry_config: RetryConfig,
+    ) -> None:
+        # Replicate parent field initialization without calling _pre_fetch.
+        CursorIterator.__init__(self, arraysize=arraysize)
+        self._connection: Optional["Connection[Any]"] = connection
+        self._converter = converter
+        self._query_execution: Optional[AthenaQueryExecution] = query_execution
+        if not self._query_execution:
+            raise ProgrammingError("Required argument `query_execution` not found.")
+        self._retry_config = retry_config
+        self._client = connection.session.client(
+            "s3",
+            region_name=connection.region_name,
+            config=connection.config,
+            **connection._client_kwargs,
+        )
+
+        self._metadata: Optional[Tuple[Dict[str, Any], ...]] = None
+        self._rows: Deque[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]] = (
+            collections.deque()
+        )
+        self._next_token: Optional[str] = None
+
+        if self.state == AthenaQueryExecution.STATE_SUCCEEDED:
+            self._rownumber = 0
+            # NOTE: _pre_fetch is NOT called here; use create() instead.
+
+    @classmethod
+    async def create(
+        cls,
+        connection: "Connection[Any]",
+        converter: Converter,
+        query_execution: AthenaQueryExecution,
+        arraysize: int,
+        retry_config: RetryConfig,
+    ) -> "AioResultSet":
+        """Async factory method.
+
+        Creates an ``AioResultSet`` and awaits the initial data fetch.
+
+        Args:
+            connection: The database connection.
+            converter: Type converter for result values.
+            query_execution: Query execution metadata.
+            arraysize: Number of rows to fetch per request.
+            retry_config: Retry configuration for API calls.
+
+        Returns:
+            A fully initialized ``AioResultSet``.
+        """
+        result_set = cls(connection, converter, query_execution, arraysize, retry_config)
+        if result_set.state == AthenaQueryExecution.STATE_SUCCEEDED:
+            await result_set._async_pre_fetch()
+        return result_set
+
+    async def __async_get_query_results(
+        self, max_results: int, next_token: Optional[str] = None
+    ) -> Dict[str, Any]:
+        if not self.query_id:
+            raise ProgrammingError("QueryExecutionId is none or empty.")
+        if self.state != AthenaQueryExecution.STATE_SUCCEEDED:
+            raise ProgrammingError("QueryExecutionState is not SUCCEEDED.")
+        if self.is_closed:
+            raise ProgrammingError("AioResultSet is closed.")
+        request: Dict[str, Any] = {
+            "QueryExecutionId": self.query_id,
+            "MaxResults": max_results,
+        }
+        if next_token:
+            request["NextToken"] = next_token
+        try:
+            response = await async_retry_api_call(
+                self.connection.client.get_query_results,
+                config=self._retry_config,
+                logger=_logger,
+                **request,
+            )
+        except Exception as e:
+            _logger.exception("Failed to fetch result set.")
+            raise OperationalError(*e.args) from e
+        else:
+            return cast(Dict[str, Any], response)
+
+    async def __async_fetch(self, next_token: Optional[str] = None) -> Dict[str, Any]:
+        return await self.__async_get_query_results(self._arraysize, next_token)
+
+    async def _async_fetch(self) -> None:
+        if not self._next_token:
+            raise ProgrammingError("NextToken is none or empty.")
+        response = await self.__async_fetch(self._next_token)
+        rows, self._next_token = self._parse_result_rows(response)
+        self._process_rows(rows)
+
+    async def _async_pre_fetch(self) -> None:
+        response = await self.__async_fetch()
+        self._process_metadata(response)
+        self._process_update_count(response)
+        rows, self._next_token = self._parse_result_rows(response)
+        offset = 1 if rows and self._is_first_row_column_labels(rows) else 0
+        self._process_rows(rows, offset)
+
+    async def fetchone(  # type: ignore[override]
+        self,
+    ) -> Optional[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        if not self._rows and self._next_token:
+            await self._async_fetch()
+        if not self._rows:
+            return None
+        if self._rownumber is None:
+            self._rownumber = 0
+        self._rownumber += 1
+        return self._rows.popleft()
+
+    async def fetchmany(  # type: ignore[override]
+        self, size: Optional[int] = None
+    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        if not size or size <= 0:
+            size = self._arraysize
+        rows = []
+        for _ in range(size):
+            row = await self.fetchone()
+            if row:
+                rows.append(row)
+            else:
+                break
+        return rows
+
+    async def fetchall(  # type: ignore[override]
+        self,
+    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        rows = []
+        while True:
+            row = await self.fetchone()
+            if row:
+                rows.append(row)
+            else:
+                break
+        return rows
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        row = await self.fetchone()
+        if row is None:
+            raise StopAsyncIteration
+        return row
+
+
+class AioDictResultSet(AioResultSet):
+    """Async result set that returns rows as dictionaries."""
+
+    dict_type: Type[Any] = dict
+
+    def _get_rows(
+        self,
+        offset: int,
+        metadata: Tuple[Any, ...],
+        rows: List[Dict[str, Any]],
+        converter: Optional[Converter] = None,
+    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        conv = converter or self._converter
+        return [
+            self.dict_type(
+                [
+                    (
+                        meta.get("Name"),
+                        conv.convert(meta.get("Type"), row.get("VarCharValue")),
+                    )
+                    for meta, row in zip(metadata, rows[i].get("Data", []), strict=False)
+                ]
+            )
+            for i in range(offset, len(rows))
+        ]

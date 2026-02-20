@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, FrozenSet, Type, overload
 from pyathena.error import *  # noqa
 
 if TYPE_CHECKING:
+    from pyathena.aio.connection import AioConnection
     from pyathena.connection import Connection, ConnectionCursor
     from pyathena.cursor import Cursor
 
@@ -128,3 +129,32 @@ def connect(*args, **kwargs) -> "Connection[Any]":
     from pyathena.connection import Connection
 
     return Connection(*args, **kwargs)
+
+
+async def aconnect(*args, **kwargs) -> "AioConnection":
+    """Create a new async database connection to Amazon Athena.
+
+    This is the async counterpart of :func:`connect`. It returns an
+    ``AioConnection`` whose cursors use native ``asyncio`` for polling
+    and API calls, keeping the event loop free.
+
+    Args:
+        **kwargs: Arguments forwarded to ``AioConnection.create()``.
+            See :func:`connect` for the full list of supported arguments.
+
+    Returns:
+        An ``AioConnection`` that produces ``AioCursor`` instances by default.
+
+    Example:
+        >>> import pyathena
+        >>> conn = await pyathena.aconnect(
+        ...     s3_staging_dir='s3://my-bucket/staging/',
+        ...     region_name='us-east-1',
+        ... )
+        >>> async with conn.cursor() as cursor:
+        ...     await cursor.execute("SELECT 1")
+        ...     print(await cursor.fetchone())
+    """
+    from pyathena.aio.connection import AioConnection
+
+    return await AioConnection.create(*args, **kwargs)

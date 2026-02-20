@@ -71,6 +71,7 @@ dev = [
     "mypy>=0.900",
     "pytest>=3.5",
     "pytest-cov",
+    "pytest-asyncio",
     "pytest-xdist",
     "pytest-dependency",
     "sphinx",
@@ -108,6 +109,7 @@ source = "vcs"
 version-file = "pyathena/_version.py"
 
 [tool.pytest.ini_options]
+asyncio_mode = "auto"
 norecursedirs = [
     "benchmarks",
     ".venv",
