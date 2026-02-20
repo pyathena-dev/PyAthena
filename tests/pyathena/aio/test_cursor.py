@@ -198,6 +198,23 @@ class TestAioCursor:
         with pytest.raises(ProgrammingError):
             aio_cursor.arraysize = -1
 
+    async def test_list_databases(self, aio_cursor):
+        databases = await aio_cursor.list_databases(catalog_name="AwsDataCatalog")
+        assert len(databases) > 0
+        database_names = [db.name for db in databases]
+        assert "default" in database_names
+
+    async def test_get_table_metadata(self, aio_cursor):
+        metadata = await aio_cursor.get_table_metadata(table_name="one_row")
+        assert metadata.name == "one_row"
+        assert metadata.table_type
+
+    async def test_list_table_metadata(self, aio_cursor):
+        metadata_list = await aio_cursor.list_table_metadata()
+        assert len(metadata_list) > 0
+        table_names = [m.name for m in metadata_list]
+        assert "one_row" in table_names
+
 
 class TestAioDictCursor:
     async def test_fetchone(self, aio_dict_cursor):

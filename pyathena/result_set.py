@@ -68,6 +68,7 @@ class AthenaResultSet(CursorIterator):
         query_execution: AthenaQueryExecution,
         arraysize: int,
         retry_config: RetryConfig,
+        _pre_fetch: bool = True,
     ) -> None:
         super().__init__(arraysize=arraysize)
         self._connection: Optional["Connection[Any]"] = connection
@@ -91,7 +92,8 @@ class AthenaResultSet(CursorIterator):
 
         if self.state == AthenaQueryExecution.STATE_SUCCEEDED:
             self._rownumber = 0
-            self._pre_fetch()
+            if _pre_fetch:
+                self._pre_fetch()
 
     @property
     def database(self) -> Optional[str]:

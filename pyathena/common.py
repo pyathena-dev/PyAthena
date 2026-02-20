@@ -614,6 +614,31 @@ class BaseCursor(metaclass=ABCMeta):
             _logger.warning("Failed to check the cache. Moving on without cache.", exc_info=True)
         return query_id
 
+    def _prepare_query(
+        self,
+        operation: str,
+        parameters: Optional[Union[Dict[str, Any], List[str]]] = None,
+        paramstyle: Optional[str] = None,
+    ) -> Tuple[str, Optional[List[str]]]:
+        """Format query and build execution parameters. No I/O.
+
+        Args:
+            operation: SQL query string.
+            parameters: Query parameters.
+            paramstyle: Parameter style override.
+
+        Returns:
+            Tuple of (formatted_query, execution_parameters).
+        """
+        if pyathena.paramstyle == "qmark" or paramstyle == "qmark":
+            query = operation
+            execution_parameters = cast(Optional[List[str]], parameters)
+        else:
+            query = self._formatter.format(operation, cast(Optional[Dict[str, Any]], parameters))
+            execution_parameters = None
+        _logger.debug(query)
+        return query, execution_parameters
+
     def _execute(
         self,
         operation: str,
@@ -626,13 +651,7 @@ class BaseCursor(metaclass=ABCMeta):
         result_reuse_minutes: Optional[int] = None,
         paramstyle: Optional[str] = None,
     ) -> str:
-        if pyathena.paramstyle == "qmark" or paramstyle == "qmark":
-            query = operation
-            execution_parameters = cast(Optional[List[str]], parameters)
-        else:
-            query = self._formatter.format(operation, cast(Optional[Dict[str, Any]], parameters))
-            execution_parameters = None
-        _logger.debug(query)
+        query, execution_parameters = self._prepare_query(operation, parameters, paramstyle)
 
         request = self._build_start_query_execution_request(
             query=query,
