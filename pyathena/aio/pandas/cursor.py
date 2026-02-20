@@ -16,7 +16,7 @@ from typing import (
     cast,
 )
 
-from pyathena.aio.base import AioCursorBase
+from pyathena.aio.common import WithAsyncFetch
 from pyathena.common import CursorIterator
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaCompression, AthenaFileFormat, AthenaQueryExecution
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)  # type: ignore
 
 
-class AioPandasCursor(AioCursorBase):
+class AioPandasCursor(WithAsyncFetch):
     """Native asyncio cursor that returns results as pandas DataFrames.
 
     Uses ``asyncio.to_thread()`` to create the result set off the event loop.

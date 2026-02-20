@@ -5,7 +5,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union, cast
 
-from pyathena.aio.base import AioCursorBase
+from pyathena.aio.common import WithAsyncFetch
 from pyathena.arrow.converter import (
     DefaultArrowTypeConverter,
     DefaultArrowUnloadTypeConverter,
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)  # type: ignore
 
 
-class AioArrowCursor(AioCursorBase):
+class AioArrowCursor(WithAsyncFetch):
     """Native asyncio cursor that returns results as Apache Arrow Tables.
 
     Uses ``asyncio.to_thread()`` to create the result set off the event loop.

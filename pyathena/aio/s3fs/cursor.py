@@ -5,7 +5,7 @@ import asyncio
 import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
 
-from pyathena.aio.base import AioCursorBase
+from pyathena.aio.common import WithAsyncFetch
 from pyathena.common import CursorIterator
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
@@ -15,7 +15,7 @@ from pyathena.s3fs.result_set import AthenaS3FSResultSet, CSVReaderType
 _logger = logging.getLogger(__name__)  # type: ignore
 
 
-class AioS3FSCursor(AioCursorBase):
+class AioS3FSCursor(WithAsyncFetch):
     """Native asyncio cursor that reads CSV results via S3FileSystem.
 
     Uses ``asyncio.to_thread()`` for result set creation and fetch operations

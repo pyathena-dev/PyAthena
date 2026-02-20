@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Dict, List, Optional, Union, cast
 
-from pyathena.aio.base import AioCursorBase
+from pyathena.aio.common import WithAsyncFetch
 from pyathena.aio.result_set import AthenaAioDictResultSet, AthenaAioResultSet
 from pyathena.common import CursorIterator
 from pyathena.error import OperationalError, ProgrammingError
@@ -13,7 +13,7 @@ from pyathena.model import AthenaQueryExecution
 _logger = logging.getLogger(__name__)  # type: ignore
 
 
-class AioCursor(AioCursorBase):
+class AioCursor(WithAsyncFetch):
     """Native asyncio cursor for Amazon Athena.
 
     Unlike ``AsyncCursor`` (which uses ``ThreadPoolExecutor``), this cursor
