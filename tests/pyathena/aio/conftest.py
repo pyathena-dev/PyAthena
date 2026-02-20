@@ -38,3 +38,45 @@ async def aio_dict_cursor(request):
             yield cursor
     finally:
         conn.close()
+
+
+@pytest.fixture
+async def aio_pandas_cursor(request):
+    from pyathena.pandas.aio_cursor import AioPandasCursor
+
+    if not hasattr(request, "param"):
+        setattr(request, "param", {})  # noqa: B010
+    conn = await _aio_connect(schema_name=ENV.schema, cursor_class=AioPandasCursor, **request.param)
+    try:
+        async with conn.cursor() as cursor:
+            yield cursor
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+async def aio_arrow_cursor(request):
+    from pyathena.arrow.aio_cursor import AioArrowCursor
+
+    if not hasattr(request, "param"):
+        setattr(request, "param", {})  # noqa: B010
+    conn = await _aio_connect(schema_name=ENV.schema, cursor_class=AioArrowCursor, **request.param)
+    try:
+        async with conn.cursor() as cursor:
+            yield cursor
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+async def aio_polars_cursor(request):
+    from pyathena.polars.aio_cursor import AioPolarsCursor
+
+    if not hasattr(request, "param"):
+        setattr(request, "param", {})  # noqa: B010
+    conn = await _aio_connect(schema_name=ENV.schema, cursor_class=AioPolarsCursor, **request.param)
+    try:
+        async with conn.cursor() as cursor:
+            yield cursor
+    finally:
+        conn.close()

@@ -7,20 +7,6 @@ from tests import ENV
 from tests.pyathena.aio.conftest import _aio_connect
 
 
-@pytest.fixture
-async def aio_polars_cursor(request):
-    from pyathena.polars.aio_cursor import AioPolarsCursor
-
-    if not hasattr(request, "param"):
-        setattr(request, "param", {})  # noqa: B010
-    conn = await _aio_connect(schema_name=ENV.schema, cursor_class=AioPolarsCursor, **request.param)
-    try:
-        async with conn.cursor() as cursor:
-            yield cursor
-    finally:
-        conn.close()
-
-
 class TestAioPolarsCursor:
     async def test_fetchone(self, aio_polars_cursor):
         await aio_polars_cursor.execute("SELECT * FROM one_row")

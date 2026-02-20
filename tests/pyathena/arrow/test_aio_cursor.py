@@ -7,20 +7,6 @@ from tests import ENV
 from tests.pyathena.aio.conftest import _aio_connect
 
 
-@pytest.fixture
-async def aio_arrow_cursor(request):
-    from pyathena.arrow.aio_cursor import AioArrowCursor
-
-    if not hasattr(request, "param"):
-        setattr(request, "param", {})  # noqa: B010
-    conn = await _aio_connect(schema_name=ENV.schema, cursor_class=AioArrowCursor, **request.param)
-    try:
-        async with conn.cursor() as cursor:
-            yield cursor
-    finally:
-        conn.close()
-
-
 class TestAioArrowCursor:
     async def test_fetchone(self, aio_arrow_cursor):
         await aio_arrow_cursor.execute("SELECT * FROM one_row")
