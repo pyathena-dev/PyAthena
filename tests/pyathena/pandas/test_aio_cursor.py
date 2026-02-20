@@ -48,7 +48,7 @@ class TestAioPandasCursor:
             aio_pandas_cursor.as_pandas()
 
     async def test_context_manager(self):
-        from pyathena.pandas.aio_cursor import AioPandasCursor
+        from pyathena.aio.pandas.cursor import AioPandasCursor
 
         conn = await _aio_connect(schema_name=ENV.schema, cursor_class=AioPandasCursor)
         try:

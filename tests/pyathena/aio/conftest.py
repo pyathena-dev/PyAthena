@@ -42,7 +42,7 @@ async def aio_dict_cursor(request):
 
 @pytest.fixture
 async def aio_pandas_cursor(request):
-    from pyathena.pandas.aio_cursor import AioPandasCursor
+    from pyathena.aio.pandas.cursor import AioPandasCursor
 
     if not hasattr(request, "param"):
         setattr(request, "param", {})  # noqa: B010
@@ -56,7 +56,7 @@ async def aio_pandas_cursor(request):
 
 @pytest.fixture
 async def aio_arrow_cursor(request):
-    from pyathena.arrow.aio_cursor import AioArrowCursor
+    from pyathena.aio.arrow.cursor import AioArrowCursor
 
     if not hasattr(request, "param"):
         setattr(request, "param", {})  # noqa: B010
@@ -70,7 +70,7 @@ async def aio_arrow_cursor(request):
 
 @pytest.fixture
 async def aio_polars_cursor(request):
-    from pyathena.polars.aio_cursor import AioPolarsCursor
+    from pyathena.aio.polars.cursor import AioPolarsCursor
 
     if not hasattr(request, "param"):
         setattr(request, "param", {})  # noqa: B010

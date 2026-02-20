@@ -55,7 +55,7 @@ class TestAioPolarsCursor:
             aio_polars_cursor.as_arrow()
 
     async def test_context_manager(self):
-        from pyathena.polars.aio_cursor import AioPolarsCursor
+        from pyathena.aio.polars.cursor import AioPolarsCursor
 
         conn = await _aio_connect(schema_name=ENV.schema, cursor_class=AioPolarsCursor)
         try:
