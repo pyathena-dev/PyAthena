@@ -358,13 +358,12 @@ class BaseCursor(metaclass=ABCMeta):
                 break
         return databases
 
-    def _get_table_metadata(
+    def _build_get_table_metadata_request(
         self,
         table_name: str,
         catalog_name: Optional[str] = None,
         schema_name: Optional[str] = None,
-        logging_: bool = True,
-    ) -> AthenaTableMetadata:
+    ) -> Dict[str, Any]:
         request: Dict[str, Any] = {
             "CatalogName": catalog_name if catalog_name else self._catalog_name,
             "DatabaseName": schema_name if schema_name else self._schema_name,
@@ -372,6 +371,20 @@ class BaseCursor(metaclass=ABCMeta):
         }
         if self._work_group:
             request.update({"WorkGroup": self._work_group})
+        return request
+
+    def _get_table_metadata(
+        self,
+        table_name: str,
+        catalog_name: Optional[str] = None,
+        schema_name: Optional[str] = None,
+        logging_: bool = True,
+    ) -> AthenaTableMetadata:
+        request = self._build_get_table_metadata_request(
+            table_name=table_name,
+            catalog_name=catalog_name,
+            schema_name=schema_name,
+        )
         try:
             response = retry_api_call(
                 self._connection.client.get_table_metadata,
@@ -614,6 +627,31 @@ class BaseCursor(metaclass=ABCMeta):
             _logger.warning("Failed to check the cache. Moving on without cache.", exc_info=True)
         return query_id
 
+    def _prepare_query(
+        self,
+        operation: str,
+        parameters: Optional[Union[Dict[str, Any], List[str]]] = None,
+        paramstyle: Optional[str] = None,
+    ) -> Tuple[str, Optional[List[str]]]:
+        """Format query and build execution parameters. No I/O.
+
+        Args:
+            operation: SQL query string.
+            parameters: Query parameters.
+            paramstyle: Parameter style override.
+
+        Returns:
+            Tuple of (formatted_query, execution_parameters).
+        """
+        if pyathena.paramstyle == "qmark" or paramstyle == "qmark":
+            query = operation
+            execution_parameters = cast(Optional[List[str]], parameters)
+        else:
+            query = self._formatter.format(operation, cast(Optional[Dict[str, Any]], parameters))
+            execution_parameters = None
+        _logger.debug(query)
+        return query, execution_parameters
+
     def _execute(
         self,
         operation: str,
@@ -626,13 +664,7 @@ class BaseCursor(metaclass=ABCMeta):
         result_reuse_minutes: Optional[int] = None,
         paramstyle: Optional[str] = None,
     ) -> str:
-        if pyathena.paramstyle == "qmark" or paramstyle == "qmark":
-            query = operation
-            execution_parameters = cast(Optional[List[str]], parameters)
-        else:
-            query = self._formatter.format(operation, cast(Optional[Dict[str, Any]], parameters))
-            execution_parameters = None
-        _logger.debug(query)
+        query, execution_parameters = self._prepare_query(operation, parameters, paramstyle)
 
         request = self._build_start_query_execution_request(
             query=query,

@@ -1,12 +1,10 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-import collections
 import logging
 from typing import (
     TYPE_CHECKING,
     Any,
-    Deque,
     Dict,
     List,
     Optional,
@@ -16,7 +14,6 @@ from typing import (
 )
 
 from pyathena.aio.util import async_retry_api_call
-from pyathena.common import CursorIterator
 from pyathena.converter import Converter
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
@@ -32,9 +29,9 @@ _logger = logging.getLogger(__name__)  # type: ignore
 class AthenaAioResultSet(AthenaResultSet):
     """Async result set that provides async fetch methods.
 
-    Because ``AthenaResultSet.__init__`` calls ``_pre_fetch`` (a blocking API
-    call), this class overrides ``__init__`` to skip it and provides an
-    ``async create()`` classmethod factory instead.
+    Skips the synchronous ``_pre_fetch`` by passing ``_pre_fetch=False`` to
+    the parent ``__init__`` and provides an ``async create()`` classmethod
+    factory instead.
     """
 
     def __init__(
@@ -45,30 +42,14 @@ class AthenaAioResultSet(AthenaResultSet):
         arraysize: int,
         retry_config: RetryConfig,
     ) -> None:
-        # Replicate parent field initialization without calling _pre_fetch.
-        CursorIterator.__init__(self, arraysize=arraysize)
-        self._connection: Optional["Connection[Any]"] = connection
-        self._converter = converter
-        self._query_execution: Optional[AthenaQueryExecution] = query_execution
-        if not self._query_execution:
-            raise ProgrammingError("Required argument `query_execution` not found.")
-        self._retry_config = retry_config
-        self._client = connection.session.client(
-            "s3",
-            region_name=connection.region_name,
-            config=connection.config,
-            **connection._client_kwargs,
+        super().__init__(
+            connection=connection,
+            converter=converter,
+            query_execution=query_execution,
+            arraysize=arraysize,
+            retry_config=retry_config,
+            _pre_fetch=False,
         )
-
-        self._metadata: Optional[Tuple[Dict[str, Any], ...]] = None
-        self._rows: Deque[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]] = (
-            collections.deque()
-        )
-        self._next_token: Optional[str] = None
-
-        if self.state == AthenaQueryExecution.STATE_SUCCEEDED:
-            self._rownumber = 0
-            # NOTE: _pre_fetch is NOT called here; use create() instead.
 
     @classmethod
     async def create(
