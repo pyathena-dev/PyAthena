@@ -123,6 +123,7 @@ class AioPolarsCursor(AioBaseCursor, CursorIterator, WithResultSet):
         return self.result_set.rowcount if self.result_set else -1
 
     def close(self) -> None:
+        """Close the cursor and release associated resources."""
         if self.result_set and not self.result_set.is_closed:
             self.result_set.close()
 
@@ -214,11 +215,23 @@ class AioPolarsCursor(AioBaseCursor, CursorIterator, WithResultSet):
         seq_of_parameters: List[Optional[Union[Dict[str, Any], List[str]]]],
         **kwargs,
     ) -> None:
+        """Execute a SQL query multiple times with different parameters.
+
+        Args:
+            operation: SQL query string to execute.
+            seq_of_parameters: Sequence of parameter sets, one per execution.
+            **kwargs: Additional keyword arguments passed to each ``execute()``.
+        """
         for parameters in seq_of_parameters:
             await self.execute(operation, parameters, **kwargs)
         self._reset_state()
 
     async def cancel(self) -> None:
+        """Cancel the currently executing query.
+
+        Raises:
+            ProgrammingError: If no query is currently executing.
+        """
         if not self.query_id:
             raise ProgrammingError("QueryExecutionId is none or empty.")
         await self._cancel(self.query_id)
@@ -226,6 +239,14 @@ class AioPolarsCursor(AioBaseCursor, CursorIterator, WithResultSet):
     def fetchone(
         self,
     ) -> Optional[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        """Fetch the next row of the result set.
+
+        Returns:
+            A tuple representing the next row, or None if no more rows.
+
+        Raises:
+            ProgrammingError: If no result set is available.
+        """
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaPolarsResultSet, self.result_set)
@@ -234,6 +255,17 @@ class AioPolarsCursor(AioBaseCursor, CursorIterator, WithResultSet):
     def fetchmany(
         self, size: Optional[int] = None
     ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        """Fetch multiple rows from the result set.
+
+        Args:
+            size: Maximum number of rows to fetch. Defaults to arraysize.
+
+        Returns:
+            List of tuples representing the fetched rows.
+
+        Raises:
+            ProgrammingError: If no result set is available.
+        """
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaPolarsResultSet, self.result_set)
@@ -242,6 +274,14 @@ class AioPolarsCursor(AioBaseCursor, CursorIterator, WithResultSet):
     def fetchall(
         self,
     ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        """Fetch all remaining rows from the result set.
+
+        Returns:
+            List of tuples representing all remaining rows.
+
+        Raises:
+            ProgrammingError: If no result set is available.
+        """
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaPolarsResultSet, self.result_set)
