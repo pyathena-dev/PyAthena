@@ -67,6 +67,14 @@ CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.execute_many (
 ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
 LOCATION '{{ s3_staging_dir }}{{ schema }}/execute_many/';
 
+DROP TABLE IF EXISTS {{ schema }}.execute_many_aio;
+CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.execute_many_aio (
+    a INT,
+    b STRING
+)
+ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
+LOCATION '{{ s3_staging_dir }}{{ schema }}/execute_many_aio/';
+
 DROP TABLE IF EXISTS {{ schema }}.execute_many_pandas;
 CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.execute_many_pandas (
     a INT,

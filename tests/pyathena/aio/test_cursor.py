@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
+import re
 from datetime import datetime
 
 import pytest
 
-from pyathena.error import ProgrammingError
+from pyathena.error import DatabaseError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet
 from tests import ENV
@@ -79,6 +80,86 @@ class TestAioCursor:
         await aio_cursor.execute("SELECT 1 AS foobar FROM one_row")
         assert await aio_cursor.fetchall() == [(1,)]
         assert aio_cursor.description == [("foobar", "integer", None, None, 10, 0, "UNKNOWN")]
+
+    async def test_description_initial(self, aio_cursor):
+        assert aio_cursor.description is None
+
+    async def test_bad_query(self, aio_cursor):
+        with pytest.raises(DatabaseError):
+            await aio_cursor.execute("SELECT does_not_exist FROM this_really_does_not_exist")
+
+    async def test_query_id(self, aio_cursor):
+        assert aio_cursor.query_id is None
+        await aio_cursor.execute("SELECT * FROM one_row")
+        expected_pattern = (
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-[4][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        )
+        assert re.match(expected_pattern, aio_cursor.query_id)
+
+    async def test_query_execution_initial(self, aio_cursor):
+        assert not aio_cursor.has_result_set
+        assert aio_cursor.rownumber is None
+        assert aio_cursor.rowcount == -1
+        assert aio_cursor.database is None
+        assert aio_cursor.catalog is None
+        assert aio_cursor.query_id is None
+        assert aio_cursor.query is None
+        assert aio_cursor.statement_type is None
+        assert aio_cursor.work_group is None
+        assert aio_cursor.state is None
+        assert aio_cursor.state_change_reason is None
+        assert aio_cursor.submission_date_time is None
+        assert aio_cursor.completion_date_time is None
+        assert aio_cursor.data_scanned_in_bytes is None
+        assert aio_cursor.engine_execution_time_in_millis is None
+        assert aio_cursor.query_queue_time_in_millis is None
+        assert aio_cursor.total_execution_time_in_millis is None
+        assert aio_cursor.query_planning_time_in_millis is None
+        assert aio_cursor.service_processing_time_in_millis is None
+        assert aio_cursor.output_location is None
+        assert aio_cursor.data_manifest_location is None
+        assert aio_cursor.encryption_option is None
+        assert aio_cursor.kms_key is None
+        assert aio_cursor.selected_engine_version is None
+        assert aio_cursor.effective_engine_version is None
+
+    async def test_cancel_initial(self, aio_cursor):
+        with pytest.raises(ProgrammingError):
+            await aio_cursor.cancel()
+
+    async def test_executemany(self, aio_cursor):
+        rows = [(1, "foo"), (2, "bar"), (3, "jim o'rourke")]
+        await aio_cursor.executemany(
+            "INSERT INTO execute_many_aio (a, b) VALUES (%(a)d, %(b)s)",
+            [{"a": a, "b": b} for a, b in rows],
+        )
+        assert aio_cursor.rowcount == -1
+        await aio_cursor.execute("SELECT * FROM execute_many_aio")
+        assert sorted(await aio_cursor.fetchall()) == list(rows)
+
+    async def test_executemany_fetch(self, aio_cursor):
+        await aio_cursor.executemany("SELECT %(x)d FROM one_row", [{"x": i} for i in range(1, 2)])
+        with pytest.raises(ProgrammingError):
+            await aio_cursor.fetchall()
+        with pytest.raises(ProgrammingError):
+            await aio_cursor.fetchmany()
+        with pytest.raises(ProgrammingError):
+            await aio_cursor.fetchone()
+
+    async def test_execute_with_callback(self, aio_cursor):
+        callback_results = []
+
+        def on_start(query_id):
+            assert query_id is not None
+            assert len(query_id) > 0
+            callback_results.append(query_id)
+
+        result = await aio_cursor.execute("SELECT 1", on_start_query_execution=on_start)
+
+        assert len(callback_results) == 1
+        assert callback_results[0] == aio_cursor.query_id
+        assert result is aio_cursor
+        assert await aio_cursor.fetchone() == (1,)
 
     async def test_context_manager(self):
         conn = await _aio_connect(schema_name=ENV.schema)
