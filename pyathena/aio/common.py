@@ -103,7 +103,7 @@ class AioBaseCursor(BaseCursor):
             query_execution = await self.__poll(query_id)
         except asyncio.CancelledError:
             if self._kill_on_interrupt:
-                _logger.warning("Query canceled.")
+                _logger.warning("Query canceled by user.")
                 await self._cancel(query_id)
                 query_execution = await self.__poll(query_id)
             else:

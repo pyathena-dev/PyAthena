@@ -63,6 +63,12 @@ class AioCursor(AioBaseCursor, CursorIterator, WithResultSet):
 
     @property
     def result_set(self) -> Optional[AthenaResultSet]:
+        """Get the result set from the last executed query.
+
+        Returns:
+            The result set object containing query results, or None if no
+            query has been executed or the query didn't return results.
+        """
         return self._result_set
 
     @result_set.setter
@@ -71,6 +77,12 @@ class AioCursor(AioBaseCursor, CursorIterator, WithResultSet):
 
     @property
     def query_id(self) -> Optional[str]:
+        """Get the Athena query execution ID of the last executed query.
+
+        Returns:
+            The query execution ID assigned by Athena, or None if no query
+            has been executed.
+        """
         return self._query_id
 
     @query_id.setter
@@ -79,13 +91,32 @@ class AioCursor(AioBaseCursor, CursorIterator, WithResultSet):
 
     @property
     def rownumber(self) -> Optional[int]:
+        """Get the current row number within the result set.
+
+        Returns:
+            The zero-based index of the current row, or None if no result set
+            is available or no rows have been fetched.
+        """
         return self.result_set.rownumber if self.result_set else None
 
     @property
     def rowcount(self) -> int:
+        """Get the number of rows affected by the last operation.
+
+        For SELECT statements, this returns the total number of rows in the
+        result set. For other operations, behavior follows DB API 2.0 specification.
+
+        Returns:
+            The number of rows, or -1 if not applicable or unknown.
+        """
         return self.result_set.rowcount if self.result_set else -1
 
     def close(self) -> None:
+        """Close the cursor and free any associated resources.
+
+        Closes the cursor and any associated result sets. This method is
+        synchronous (no I/O needed, just clears references).
+        """
         if self.result_set and not self.result_set.is_closed:
             self.result_set.close()
 
@@ -158,11 +189,31 @@ class AioCursor(AioBaseCursor, CursorIterator, WithResultSet):
         seq_of_parameters: List[Optional[Union[Dict[str, Any], List[str]]]],
         **kwargs,
     ) -> None:
+        """Execute a SQL query multiple times with different parameters.
+
+        Args:
+            operation: SQL query string to execute.
+            seq_of_parameters: Sequence of parameter dictionaries or lists,
+                one for each execution.
+            **kwargs: Additional keyword arguments passed to each
+                ``execute()`` call.
+
+        Note:
+            Operations that return result sets are not allowed with
+            ``executemany``.
+        """
         for parameters in seq_of_parameters:
             await self.execute(operation, parameters, **kwargs)
+        # Operations that have result sets are not allowed with executemany.
         self._reset_state()
 
     async def cancel(self) -> None:
+        """Cancel the currently executing query.
+
+        Raises:
+            ProgrammingError: If no query is currently executing
+                (query_id is None).
+        """
         if not self.query_id:
             raise ProgrammingError("QueryExecutionId is none or empty.")
         await self._cancel(self.query_id)
@@ -170,6 +221,15 @@ class AioCursor(AioBaseCursor, CursorIterator, WithResultSet):
     async def fetchone(  # type: ignore[override]
         self,
     ) -> Optional[Union[Any, Dict[Any, Optional[Any]]]]:
+        """Fetch the next row of a query result set.
+
+        Returns:
+            A tuple representing the next row, or None if no more rows.
+
+        Raises:
+            ProgrammingError: If called before executing a query that
+                returns results.
+        """
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaAioResultSet, self.result_set)
@@ -178,6 +238,18 @@ class AioCursor(AioBaseCursor, CursorIterator, WithResultSet):
     async def fetchmany(  # type: ignore[override]
         self, size: Optional[int] = None
     ) -> List[Union[Any, Dict[Any, Optional[Any]]]]:
+        """Fetch multiple rows from a query result set.
+
+        Args:
+            size: Maximum number of rows to fetch. If None, uses arraysize.
+
+        Returns:
+            List of tuples representing the fetched rows.
+
+        Raises:
+            ProgrammingError: If called before executing a query that
+                returns results.
+        """
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaAioResultSet, self.result_set)
@@ -186,6 +258,15 @@ class AioCursor(AioBaseCursor, CursorIterator, WithResultSet):
     async def fetchall(  # type: ignore[override]
         self,
     ) -> List[Union[Any, Dict[Any, Optional[Any]]]]:
+        """Fetch all remaining rows from a query result set.
+
+        Returns:
+            List of tuples representing all remaining rows in the result set.
+
+        Raises:
+            ProgrammingError: If called before executing a query that
+                returns results.
+        """
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaAioResultSet, self.result_set)

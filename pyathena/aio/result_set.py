@@ -147,6 +147,14 @@ class AthenaAioResultSet(AthenaResultSet):
     async def fetchone(  # type: ignore[override]
         self,
     ) -> Optional[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        """Fetch the next row of the result set.
+
+        Automatically fetches the next page from Athena when the current
+        page is exhausted and more pages are available.
+
+        Returns:
+            A tuple representing the next row, or None if no more rows.
+        """
         if not self._rows and self._next_token:
             await self._async_fetch()
         if not self._rows:
@@ -159,6 +167,15 @@ class AthenaAioResultSet(AthenaResultSet):
     async def fetchmany(  # type: ignore[override]
         self, size: Optional[int] = None
     ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        """Fetch multiple rows from the result set.
+
+        Args:
+            size: Maximum number of rows to fetch. If None, uses arraysize.
+
+        Returns:
+            List of row tuples. May contain fewer rows than requested if
+            fewer are available.
+        """
         if not size or size <= 0:
             size = self._arraysize
         rows = []
@@ -173,6 +190,11 @@ class AthenaAioResultSet(AthenaResultSet):
     async def fetchall(  # type: ignore[override]
         self,
     ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        """Fetch all remaining rows from the result set.
+
+        Returns:
+            List of all remaining row tuples.
+        """
         rows = []
         while True:
             row = await self.fetchone()
