@@ -67,6 +67,33 @@ class TestAioPandasCursor:
         with pytest.raises(ProgrammingError):
             aio_pandas_cursor.arraysize = -1
 
+    async def test_description(self, aio_pandas_cursor):
+        await aio_pandas_cursor.execute("SELECT CAST(1 AS INT) AS foobar FROM one_row")
+        assert aio_pandas_cursor.fetchall() == [(1,)]
+        assert aio_pandas_cursor.description == [
+            ("foobar", "integer", None, None, 10, 0, "UNKNOWN")
+        ]
+
+    async def test_description_initial(self, aio_pandas_cursor):
+        assert aio_pandas_cursor.description is None
+
+    async def test_cancel_initial(self, aio_pandas_cursor):
+        with pytest.raises(ProgrammingError):
+            await aio_pandas_cursor.cancel()
+
+    async def test_executemany_fetch(self, aio_pandas_cursor):
+        await aio_pandas_cursor.executemany(
+            "SELECT %(x)d FROM one_row", [{"x": i} for i in range(1, 2)]
+        )
+        with pytest.raises(ProgrammingError):
+            aio_pandas_cursor.fetchall()
+        with pytest.raises(ProgrammingError):
+            aio_pandas_cursor.fetchmany()
+        with pytest.raises(ProgrammingError):
+            aio_pandas_cursor.fetchone()
+        with pytest.raises(ProgrammingError):
+            aio_pandas_cursor.as_pandas()
+
     @pytest.mark.parametrize(
         "aio_pandas_cursor",
         [{"cursor_kwargs": {"unload": True}}],

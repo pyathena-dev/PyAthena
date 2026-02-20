@@ -358,13 +358,12 @@ class BaseCursor(metaclass=ABCMeta):
                 break
         return databases
 
-    def _get_table_metadata(
+    def _build_get_table_metadata_request(
         self,
         table_name: str,
         catalog_name: Optional[str] = None,
         schema_name: Optional[str] = None,
-        logging_: bool = True,
-    ) -> AthenaTableMetadata:
+    ) -> Dict[str, Any]:
         request: Dict[str, Any] = {
             "CatalogName": catalog_name if catalog_name else self._catalog_name,
             "DatabaseName": schema_name if schema_name else self._schema_name,
@@ -372,6 +371,20 @@ class BaseCursor(metaclass=ABCMeta):
         }
         if self._work_group:
             request.update({"WorkGroup": self._work_group})
+        return request
+
+    def _get_table_metadata(
+        self,
+        table_name: str,
+        catalog_name: Optional[str] = None,
+        schema_name: Optional[str] = None,
+        logging_: bool = True,
+    ) -> AthenaTableMetadata:
+        request = self._build_get_table_metadata_request(
+            table_name=table_name,
+            catalog_name=catalog_name,
+            schema_name=schema_name,
+        )
         try:
             response = retry_api_call(
                 self._connection.client.get_table_metadata,

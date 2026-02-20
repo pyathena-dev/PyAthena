@@ -74,6 +74,35 @@ class TestAioPolarsCursor:
         with pytest.raises(ProgrammingError):
             aio_polars_cursor.arraysize = -1
 
+    async def test_description(self, aio_polars_cursor):
+        await aio_polars_cursor.execute("SELECT CAST(1 AS INT) AS foobar FROM one_row")
+        assert aio_polars_cursor.fetchall() == [(1,)]
+        assert aio_polars_cursor.description == [
+            ("foobar", "integer", None, None, 10, 0, "UNKNOWN")
+        ]
+
+    async def test_description_initial(self, aio_polars_cursor):
+        assert aio_polars_cursor.description is None
+
+    async def test_cancel_initial(self, aio_polars_cursor):
+        with pytest.raises(ProgrammingError):
+            await aio_polars_cursor.cancel()
+
+    async def test_executemany_fetch(self, aio_polars_cursor):
+        await aio_polars_cursor.executemany(
+            "SELECT %(x)d FROM one_row", [{"x": i} for i in range(1, 2)]
+        )
+        with pytest.raises(ProgrammingError):
+            aio_polars_cursor.fetchall()
+        with pytest.raises(ProgrammingError):
+            aio_polars_cursor.fetchmany()
+        with pytest.raises(ProgrammingError):
+            aio_polars_cursor.fetchone()
+        with pytest.raises(ProgrammingError):
+            aio_polars_cursor.as_polars()
+        with pytest.raises(ProgrammingError):
+            aio_polars_cursor.as_arrow()
+
     @pytest.mark.parametrize(
         "aio_polars_cursor",
         [{"cursor_kwargs": {"unload": True}}],
