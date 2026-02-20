@@ -4,17 +4,16 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Dict, List, Optional, Union, cast
 
-from pyathena.aio.common import AioBaseCursor
+from pyathena.aio.base import AioCursorBase
 from pyathena.aio.result_set import AthenaAioDictResultSet, AthenaAioResultSet
 from pyathena.common import CursorIterator
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
-from pyathena.result_set import AthenaResultSet, WithResultSet
 
 _logger = logging.getLogger(__name__)  # type: ignore
 
 
-class AioCursor(AioBaseCursor, CursorIterator, WithResultSet):
+class AioCursor(AioCursorBase):
     """Native asyncio cursor for Amazon Athena.
 
     Unlike ``AsyncCursor`` (which uses ``ThreadPoolExecutor``), this cursor
@@ -54,71 +53,23 @@ class AioCursor(AioBaseCursor, CursorIterator, WithResultSet):
             kill_on_interrupt=kill_on_interrupt,
             result_reuse_enable=result_reuse_enable,
             result_reuse_minutes=result_reuse_minutes,
+            on_start_query_execution=on_start_query_execution,
             **kwargs,
         )
-        self._query_id: Optional[str] = None
         self._result_set: Optional[AthenaAioResultSet] = None
         self._result_set_class = AthenaAioResultSet
-        self._on_start_query_execution = on_start_query_execution
 
     @property
-    def result_set(self) -> Optional[AthenaResultSet]:
-        """Get the result set from the last executed query.
+    def arraysize(self) -> int:
+        return self._arraysize
 
-        Returns:
-            The result set object containing query results, or None if no
-            query has been executed or the query didn't return results.
-        """
-        return self._result_set
-
-    @result_set.setter
-    def result_set(self, val) -> None:
-        self._result_set = val
-
-    @property
-    def query_id(self) -> Optional[str]:
-        """Get the Athena query execution ID of the last executed query.
-
-        Returns:
-            The query execution ID assigned by Athena, or None if no query
-            has been executed.
-        """
-        return self._query_id
-
-    @query_id.setter
-    def query_id(self, val) -> None:
-        self._query_id = val
-
-    @property
-    def rownumber(self) -> Optional[int]:
-        """Get the current row number within the result set.
-
-        Returns:
-            The zero-based index of the current row, or None if no result set
-            is available or no rows have been fetched.
-        """
-        return self.result_set.rownumber if self.result_set else None
-
-    @property
-    def rowcount(self) -> int:
-        """Get the number of rows affected by the last operation.
-
-        For SELECT statements, this returns the total number of rows in the
-        result set. For other operations, behavior follows DB API 2.0 specification.
-
-        Returns:
-            The number of rows, or -1 if not applicable or unknown.
-        """
-        return self.result_set.rowcount if self.result_set else -1
-
-    def close(self) -> None:
-        """Close the cursor and free any associated resources.
-
-        Closes the cursor and any associated result sets. This method is
-        synchronous (no I/O needed, just clears references).
-        """
-        if self.result_set and not self.result_set.is_closed:
-            self.result_set.close()
+    @arraysize.setter
+    def arraysize(self, value: int) -> None:
+        if value <= 0 or value > self.DEFAULT_FETCH_SIZE:
+            raise ProgrammingError(
+                f"MaxResults is more than maximum allowed length {self.DEFAULT_FETCH_SIZE}."
+            )
+        self._arraysize = value
 
     async def execute(  # type: ignore[override]
         self,
@@ -183,41 +134,6 @@ class AioCursor(AioBaseCursor, CursorIterator, WithResultSet):
             raise OperationalError(query_execution.state_change_reason)
         return self
 
-    async def executemany(  # type: ignore[override]
-        self,
-        operation: str,
-        seq_of_parameters: List[Optional[Union[Dict[str, Any], List[str]]]],
-        **kwargs,
-    ) -> None:
-        """Execute a SQL query multiple times with different parameters.
-
-        Args:
-            operation: SQL query string to execute.
-            seq_of_parameters: Sequence of parameter dictionaries or lists,
-                one for each execution.
-            **kwargs: Additional keyword arguments passed to each
-                ``execute()`` call.
-
-        Note:
-            Operations that return result sets are not allowed with
-            ``executemany``.
-        """
-        for parameters in seq_of_parameters:
-            await self.execute(operation, parameters, **kwargs)
-        # Operations that have result sets are not allowed with executemany.
-        self._reset_state()
-
-    async def cancel(self) -> None:
-        """Cancel the currently executing query.
-
-        Raises:
-            ProgrammingError: If no query is currently executing
-                (query_id is None).
-        """
-        if not self.query_id:
-            raise ProgrammingError("QueryExecutionId is none or empty.")
-        await self._cancel(self.query_id)
-
     async def fetchone(  # type: ignore[override]
         self,
     ) -> Optional[Union[Any, Dict[Any, Optional[Any]]]]:
@@ -272,20 +188,11 @@ class AioCursor(AioBaseCursor, CursorIterator, WithResultSet):
         result_set = cast(AthenaAioResultSet, self.result_set)
         return await result_set.fetchall()
 
-    def __aiter__(self):
-        return self
-
     async def __anext__(self):
         row = await self.fetchone()
         if row is None:
             raise StopAsyncIteration
         return row
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        self.close()
 
 
 class AioDictCursor(AioCursor):
