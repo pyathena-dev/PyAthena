@@ -1036,7 +1036,7 @@ dev = [
     { name = "sphinx-design", version = "0.7.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "sphinx-multiversion" },
     { name = "sphinxext-opengraph" },
-    { name = "sqlalchemy" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "types-python-dateutil" },
 ]
 
@@ -1079,7 +1079,7 @@ dev = [
     { name = "sphinx-design" },
     { name = "sphinx-multiversion" },
     { name = "sphinxext-opengraph" },
-    { name = "sqlalchemy", specifier = ">=1.0.0" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=1.0.0" },
     { name = "types-python-dateutil" },
 ]
 
