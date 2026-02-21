@@ -21,6 +21,10 @@ test: chk
 test-sqla:
 	uv run pytest -n 8 --cov pyathena --cov-report html --cov-report term tests/sqlalchemy/
 
+.PHONY: test-sqla-async
+test-sqla-async:
+	uv run pytest -n 8 --cov pyathena --cov-report html --cov-report term tests/sqlalchemy/ --dburi async
+
 .PHONY: tox
 tox:
 	uvx tox@$(TOX_VERSION) -c pyproject.toml run

@@ -13,13 +13,15 @@ from sqlalchemy.testing.provision import (
     temp_table_keyword_args,
 )
 
-from tests import ENV, SQLALCHEMY_CONNECTION_STRING
+from tests import ASYNC_SQLALCHEMY_CONNECTION_STRING, ENV, SQLALCHEMY_CONNECTION_STRING
 
 
 def pytest_sessionstart(session):
-    conn_str = (
-        SQLALCHEMY_CONNECTION_STRING + "&tblproperties=" + quote_plus("'table_type'='ICEBERG'")
+    use_async = session.config.getoption("--dburi", None) == ["async"]
+    base_conn_str = (
+        ASYNC_SQLALCHEMY_CONNECTION_STRING if use_async else SQLALCHEMY_CONNECTION_STRING
     )
+    conn_str = base_conn_str + "&tblproperties=" + quote_plus("'table_type'='ICEBERG'")
     session.config.option.dburi = [
         conn_str.format(
             region_name=ENV.region_name,
