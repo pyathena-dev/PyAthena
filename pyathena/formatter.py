@@ -8,7 +8,7 @@ from abc import ABCMeta, abstractmethod
 from copy import deepcopy
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Any, Callable, Dict, Optional, Type
+from typing import Any, Callable, Dict, Optional, Tuple, Type
 
 from pyathena.error import ProgrammingError
 from pyathena.model import AthenaCompression, AthenaFileFormat
@@ -86,7 +86,7 @@ class Formatter(metaclass=ABCMeta):
         s3_staging_dir: str,
         format_: str = AthenaFileFormat.FILE_FORMAT_PARQUET,
         compression: str = AthenaCompression.COMPRESSION_SNAPPY,
-    ):
+    ) -> Tuple[str, Optional[str]]:
         """Wrap a SELECT query with UNLOAD statement for high-performance result retrieval.
 
         Transforms SELECT or WITH queries into UNLOAD statements that export results

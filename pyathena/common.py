@@ -15,7 +15,9 @@ from pyathena.formatter import Formatter
 from pyathena.model import (
     AthenaCalculationExecution,
     AthenaCalculationExecutionStatus,
+    AthenaCompression,
     AthenaDatabase,
+    AthenaFileFormat,
     AthenaQueryExecution,
     AthenaTableMetadata,
 )
@@ -651,6 +653,32 @@ class BaseCursor(metaclass=ABCMeta):
             execution_parameters = None
         _logger.debug(query)
         return query, execution_parameters
+
+    def _prepare_unload(
+        self,
+        operation: str,
+        s3_staging_dir: Optional[str],
+    ) -> Tuple[str, Optional[str]]:
+        """Wrap operation with UNLOAD if enabled.
+
+        Args:
+            operation: SQL query string.
+            s3_staging_dir: S3 location for query results.
+
+        Returns:
+            Tuple of (possibly-wrapped operation, unload_location or None).
+        """
+        if not getattr(self, "_unload", False):
+            return operation, None
+        s3_staging_dir = s3_staging_dir if s3_staging_dir else self._s3_staging_dir
+        if not s3_staging_dir:
+            raise ProgrammingError("If the unload option is used, s3_staging_dir is required.")
+        return self._formatter.wrap_unload(
+            operation,
+            s3_staging_dir=s3_staging_dir,
+            format_=AthenaFileFormat.FILE_FORMAT_PARQUET,
+            compression=AthenaCompression.COMPRESSION_SNAPPY,
+        )
 
     def _execute(
         self,
