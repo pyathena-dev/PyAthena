@@ -93,6 +93,9 @@ class AsyncAdapt_pyathena_cursor:  # noqa: N801 - follows SQLAlchemy's internal 
     def setinputsizes(self, sizes: Any) -> None:
         self._cursor.setinputsizes(sizes)
 
+    async def _async_soft_close(self) -> None:
+        return
+
     # PyAthena-specific methods used by AthenaDialect reflection
     def list_databases(self, *args: Any, **kwargs: Any) -> Any:
         return await_only(self._cursor.list_databases(*args, **kwargs))
