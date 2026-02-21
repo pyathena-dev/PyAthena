@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 from pyathena.aio.common import WithAsyncFetch
 from pyathena.common import CursorIterator
@@ -41,7 +41,6 @@ class AioS3FSCursor(WithAsyncFetch):
         kill_on_interrupt: bool = True,
         result_reuse_enable: bool = False,
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
-        on_start_query_execution: Optional[Callable[[str], None]] = None,
         csv_reader: Optional[CSVReaderType] = None,
         **kwargs,
     ) -> None:
@@ -56,7 +55,6 @@ class AioS3FSCursor(WithAsyncFetch):
             kill_on_interrupt=kill_on_interrupt,
             result_reuse_enable=result_reuse_enable,
             result_reuse_minutes=result_reuse_minutes,
-            on_start_query_execution=on_start_query_execution,
             **kwargs,
         )
         self._csv_reader = csv_reader
@@ -87,7 +85,6 @@ class AioS3FSCursor(WithAsyncFetch):
         result_reuse_enable: Optional[bool] = None,
         result_reuse_minutes: Optional[int] = None,
         paramstyle: Optional[str] = None,
-        on_start_query_execution: Optional[Callable[[str], None]] = None,
         **kwargs,
     ) -> "AioS3FSCursor":
         """Execute a SQL query asynchronously via S3FileSystem CSV reader.
@@ -102,7 +99,6 @@ class AioS3FSCursor(WithAsyncFetch):
             result_reuse_enable: Enable Athena result reuse for this query.
             result_reuse_minutes: Minutes to reuse cached results.
             paramstyle: Parameter style ('qmark' or 'pyformat').
-            on_start_query_execution: Callback called when query starts.
             **kwargs: Additional execution parameters.
 
         Returns:
@@ -120,11 +116,6 @@ class AioS3FSCursor(WithAsyncFetch):
             result_reuse_minutes=result_reuse_minutes,
             paramstyle=paramstyle,
         )
-
-        if self._on_start_query_execution:
-            self._on_start_query_execution(self.query_id)
-        if on_start_query_execution:
-            on_start_query_execution(self.query_id)
 
         query_execution = await self._poll(self.query_id)
         if query_execution.state == AthenaQueryExecution.STATE_SUCCEEDED:

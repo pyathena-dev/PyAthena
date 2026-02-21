@@ -146,21 +146,6 @@ class TestAioCursor:
         with pytest.raises(ProgrammingError):
             await aio_cursor.fetchone()
 
-    async def test_execute_with_callback(self, aio_cursor):
-        callback_results = []
-
-        def on_start(query_id):
-            assert query_id is not None
-            assert len(query_id) > 0
-            callback_results.append(query_id)
-
-        result = await aio_cursor.execute("SELECT 1", on_start_query_execution=on_start)
-
-        assert len(callback_results) == 1
-        assert callback_results[0] == aio_cursor.query_id
-        assert result is aio_cursor
-        assert await aio_cursor.fetchone() == (1,)
-
     async def test_context_manager(self):
         conn = await _aio_connect(schema_name=ENV.schema)
         try:

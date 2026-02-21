@@ -365,7 +365,6 @@ class WithAsyncFetch(AioBaseCursor, CursorIterator, WithResultSet):
         super().__init__(**kwargs)
         self._query_id: Optional[str] = None
         self._result_set: Optional[AthenaResultSet] = None
-        self._on_start_query_execution = kwargs.get("on_start_query_execution")
 
     @property
     def arraysize(self) -> int:

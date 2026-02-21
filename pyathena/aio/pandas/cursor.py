@@ -7,7 +7,6 @@ from multiprocessing import cpu_count
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
     Dict,
     Iterable,
     List,
@@ -65,7 +64,6 @@ class AioPandasCursor(WithAsyncFetch):
         result_reuse_enable: bool = False,
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
         auto_optimize_chunksize: bool = False,
-        on_start_query_execution: Optional[Callable[[str], None]] = None,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -79,7 +77,6 @@ class AioPandasCursor(WithAsyncFetch):
             kill_on_interrupt=kill_on_interrupt,
             result_reuse_enable=result_reuse_enable,
             result_reuse_minutes=result_reuse_minutes,
-            on_start_query_execution=on_start_query_execution,
             **kwargs,
         )
         self._unload = unload
@@ -113,7 +110,6 @@ class AioPandasCursor(WithAsyncFetch):
         keep_default_na: bool = False,
         na_values: Optional[Iterable[str]] = ("",),
         quoting: int = 1,
-        on_start_query_execution: Optional[Callable[[str], None]] = None,
         **kwargs,
     ) -> "AioPandasCursor":
         """Execute a SQL query asynchronously and return results as pandas DataFrames.
@@ -131,7 +127,6 @@ class AioPandasCursor(WithAsyncFetch):
             keep_default_na: Whether to keep default pandas NA values.
             na_values: Additional values to treat as NA.
             quoting: CSV quoting behavior (pandas csv.QUOTE_* constants).
-            on_start_query_execution: Callback called when query starts.
             **kwargs: Additional pandas read_csv/read_parquet parameters.
 
         Returns:
@@ -162,10 +157,6 @@ class AioPandasCursor(WithAsyncFetch):
             paramstyle=paramstyle,
         )
 
-        if self._on_start_query_execution:
-            self._on_start_query_execution(self.query_id)
-        if on_start_query_execution:
-            on_start_query_execution(self.query_id)
         query_execution = await self._poll(self.query_id)
         if query_execution.state == AthenaQueryExecution.STATE_SUCCEEDED:
             self.result_set = await asyncio.to_thread(

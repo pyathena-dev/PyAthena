@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List, Optional, Union, cast
+from typing import Any, Dict, List, Optional, Union, cast
 
 from pyathena.aio.common import WithAsyncFetch
 from pyathena.aio.result_set import AthenaAioDictResultSet, AthenaAioResultSet
@@ -39,7 +39,6 @@ class AioCursor(WithAsyncFetch):
         kill_on_interrupt: bool = True,
         result_reuse_enable: bool = False,
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
-        on_start_query_execution: Optional[Callable[[str], None]] = None,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -53,7 +52,6 @@ class AioCursor(WithAsyncFetch):
             kill_on_interrupt=kill_on_interrupt,
             result_reuse_enable=result_reuse_enable,
             result_reuse_minutes=result_reuse_minutes,
-            on_start_query_execution=on_start_query_execution,
             **kwargs,
         )
         self._result_set: Optional[AthenaAioResultSet] = None
@@ -82,7 +80,6 @@ class AioCursor(WithAsyncFetch):
         result_reuse_enable: Optional[bool] = None,
         result_reuse_minutes: Optional[int] = None,
         paramstyle: Optional[str] = None,
-        on_start_query_execution: Optional[Callable[[str], None]] = None,
         **kwargs,
     ) -> "AioCursor":
         """Execute a SQL query asynchronously.
@@ -97,7 +94,6 @@ class AioCursor(WithAsyncFetch):
             result_reuse_enable: Enable result reuse (optional).
             result_reuse_minutes: Result reuse duration in minutes (optional).
             paramstyle: Parameter style to use (optional).
-            on_start_query_execution: Callback invoked with query_id after submission.
             **kwargs: Additional execution parameters.
 
         Returns:
@@ -115,11 +111,6 @@ class AioCursor(WithAsyncFetch):
             result_reuse_minutes=result_reuse_minutes,
             paramstyle=paramstyle,
         )
-
-        if self._on_start_query_execution:
-            self._on_start_query_execution(self.query_id)
-        if on_start_query_execution:
-            on_start_query_execution(self.query_id)
 
         query_execution = await self._poll(self.query_id)
         if query_execution.state == AthenaQueryExecution.STATE_SUCCEEDED:

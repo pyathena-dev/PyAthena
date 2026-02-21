@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from multiprocessing import cpu_count
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
 
 from pyathena.aio.common import WithAsyncFetch
 from pyathena.common import CursorIterator
@@ -50,7 +50,6 @@ class AioPolarsCursor(WithAsyncFetch):
         unload: bool = False,
         result_reuse_enable: bool = False,
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
-        on_start_query_execution: Optional[Callable[[str], None]] = None,
         block_size: Optional[int] = None,
         cache_type: Optional[str] = None,
         max_workers: int = (cpu_count() or 1) * 5,
@@ -68,7 +67,6 @@ class AioPolarsCursor(WithAsyncFetch):
             kill_on_interrupt=kill_on_interrupt,
             result_reuse_enable=result_reuse_enable,
             result_reuse_minutes=result_reuse_minutes,
-            on_start_query_execution=on_start_query_execution,
             **kwargs,
         )
         self._unload = unload
@@ -97,7 +95,6 @@ class AioPolarsCursor(WithAsyncFetch):
         result_reuse_enable: Optional[bool] = None,
         result_reuse_minutes: Optional[int] = None,
         paramstyle: Optional[str] = None,
-        on_start_query_execution: Optional[Callable[[str], None]] = None,
         **kwargs,
     ) -> "AioPolarsCursor":
         """Execute a SQL query asynchronously and return results as Polars DataFrames.
@@ -112,7 +109,6 @@ class AioPolarsCursor(WithAsyncFetch):
             result_reuse_enable: Enable Athena result reuse for this query.
             result_reuse_minutes: Minutes to reuse cached results.
             paramstyle: Parameter style ('qmark' or 'pyformat').
-            on_start_query_execution: Callback called when query starts.
             **kwargs: Additional execution parameters passed to Polars read functions.
 
         Returns:
@@ -143,10 +139,6 @@ class AioPolarsCursor(WithAsyncFetch):
             paramstyle=paramstyle,
         )
 
-        if self._on_start_query_execution:
-            self._on_start_query_execution(self.query_id)
-        if on_start_query_execution:
-            on_start_query_execution(self.query_id)
         query_execution = await self._poll(self.query_id)
         if query_execution.state == AthenaQueryExecution.STATE_SUCCEEDED:
             self.result_set = await asyncio.to_thread(
