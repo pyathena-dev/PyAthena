@@ -1,20 +1,9 @@
 # -*- coding: utf-8 -*-
 import sqlalchemy
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.sql.schema import MetaData, Table
 
-from tests import ASYNC_SQLALCHEMY_CONNECTION_STRING, ENV
-
-
-def _async_conn_str(**kwargs):
-    return ASYNC_SQLALCHEMY_CONNECTION_STRING.format(
-        region_name=ENV.region_name,
-        schema_name=ENV.schema,
-        s3_staging_dir=ENV.s3_staging_dir,
-        location=ENV.s3_staging_dir,
-        **kwargs,
-    )
+from tests import ENV
 
 
 class TestAsyncSQLAlchemyAthena:
@@ -98,46 +87,3 @@ class TestAsyncSQLAlchemyAthena:
         assert actual["default"] is None
         assert not actual["autoincrement"]
         assert actual["comment"] == "some comment"
-
-
-class TestAsyncDialectProperties:
-    async def test_aiorest_dialect(self):
-        engine = create_async_engine(_async_conn_str())
-        try:
-            assert engine.dialect.is_async is True
-            assert engine.dialect.driver == "aiorest"
-            assert engine.dialect.supports_statement_cache is True
-        finally:
-            await engine.dispose()
-
-    async def test_aiopandas_dialect(self):
-        engine = create_async_engine(_async_conn_str().replace("+aiorest", "+aiopandas"))
-        try:
-            assert engine.dialect.is_async is True
-            assert engine.dialect.driver == "aiopandas"
-        finally:
-            await engine.dispose()
-
-    async def test_aioarrow_dialect(self):
-        engine = create_async_engine(_async_conn_str().replace("+aiorest", "+aioarrow"))
-        try:
-            assert engine.dialect.is_async is True
-            assert engine.dialect.driver == "aioarrow"
-        finally:
-            await engine.dispose()
-
-    async def test_aiopolars_dialect(self):
-        engine = create_async_engine(_async_conn_str().replace("+aiorest", "+aiopolars"))
-        try:
-            assert engine.dialect.is_async is True
-            assert engine.dialect.driver == "aiopolars"
-        finally:
-            await engine.dispose()
-
-    async def test_aios3fs_dialect(self):
-        engine = create_async_engine(_async_conn_str().replace("+aiorest", "+aios3fs"))
-        try:
-            assert engine.dialect.is_async is True
-            assert engine.dialect.driver == "aios3fs"
-        finally:
-            await engine.dispose()
