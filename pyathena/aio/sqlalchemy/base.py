@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from sqlalchemy import URL
 
 
-class AsyncAdaptPyathenaCursor:
+class AsyncAdapt_pyathena_cursor:  # noqa: N801 - follows SQLAlchemy's internal async adapter naming convention (e.g. AsyncAdapt_asyncpg_dbapi)
     """Wraps any async PyAthena cursor with a sync DBAPI interface.
 
     SQLAlchemy's async engine uses greenlet-based ``await_only()`` to call
@@ -87,26 +87,26 @@ class AsyncAdaptPyathenaCursor:
     def list_table_metadata(self, *args: Any, **kwargs: Any) -> Any:
         return await_only(self._cursor.list_table_metadata(*args, **kwargs))
 
-    def __enter__(self) -> "AsyncAdaptPyathenaCursor":
+    def __enter__(self) -> "AsyncAdapt_pyathena_cursor":
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         self.close()
 
 
-class AsyncAdaptPyathenaConnection(AdaptedConnection):
+class AsyncAdapt_pyathena_connection(AdaptedConnection):  # noqa: N801 - follows SQLAlchemy's internal async adapter naming convention (e.g. AsyncAdapt_asyncpg_dbapi)
     """Wraps ``AioConnection`` with a sync DBAPI interface.
 
     This adapted connection delegates ``cursor()`` to the underlying
     ``AioConnection`` and wraps each returned async cursor with
-    ``AsyncAdaptPyathenaCursor``.
+    ``AsyncAdapt_pyathena_cursor``.
     """
 
     await_only_ = staticmethod(await_only)
 
     __slots__ = ("dbapi", "_connection")
 
-    def __init__(self, dbapi: "AsyncAdaptPyathenaDbapi", connection: AioConnection) -> None:
+    def __init__(self, dbapi: "AsyncAdapt_pyathena_dbapi", connection: AioConnection) -> None:
         self.dbapi = dbapi
         self._connection = connection
 
@@ -122,9 +122,9 @@ class AsyncAdaptPyathenaConnection(AdaptedConnection):
     def schema_name(self) -> Optional[str]:
         return self._connection.schema_name  # type: ignore[no-any-return]
 
-    def cursor(self) -> AsyncAdaptPyathenaCursor:
+    def cursor(self) -> AsyncAdapt_pyathena_cursor:
         raw_cursor = self._connection.cursor()
-        return AsyncAdaptPyathenaCursor(raw_cursor)
+        return AsyncAdapt_pyathena_cursor(raw_cursor)
 
     def close(self) -> None:
         self._connection.close()
@@ -136,7 +136,7 @@ class AsyncAdaptPyathenaConnection(AdaptedConnection):
         pass
 
 
-class AsyncAdaptPyathenaDbapi:
+class AsyncAdapt_pyathena_dbapi:  # noqa: N801 - follows SQLAlchemy's internal async adapter naming convention (e.g. AsyncAdapt_asyncpg_dbapi)
     """Fake DBAPI module for the async SQLAlchemy engine.
 
     SQLAlchemy expects ``import_dbapi()`` to return a module-like object
@@ -159,9 +159,9 @@ class AsyncAdaptPyathenaDbapi:
     DataError = DataError
     NotSupportedError = NotSupportedError
 
-    def connect(self, **kwargs: Any) -> AsyncAdaptPyathenaConnection:
+    def connect(self, **kwargs: Any) -> AsyncAdapt_pyathena_connection:
         connection = await_only(AioConnection.create(**kwargs))
-        return AsyncAdaptPyathenaConnection(self, connection)
+        return AsyncAdapt_pyathena_connection(self, connection)
 
 
 class AthenaAioDialect(AthenaDialect):
@@ -191,11 +191,11 @@ class AthenaAioDialect(AthenaDialect):
 
     @classmethod
     def import_dbapi(cls) -> "ModuleType":
-        return AsyncAdaptPyathenaDbapi()  # type: ignore[return-value]
+        return AsyncAdapt_pyathena_dbapi()  # type: ignore[return-value]
 
     @classmethod
     def dbapi(cls) -> "ModuleType":  # type: ignore[override]
-        return AsyncAdaptPyathenaDbapi()  # type: ignore[return-value]
+        return AsyncAdapt_pyathena_dbapi()  # type: ignore[return-value]
 
     def create_connect_args(self, url: "URL") -> Tuple[Tuple[str], MutableMapping[str, Any]]:
         opts = self._create_connect_args(url)
