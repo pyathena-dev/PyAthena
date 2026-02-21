@@ -2,19 +2,19 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Callable, Dict, List, Optional, Union, cast
 
-from pyathena.common import BaseCursor, CursorIterator
-from pyathena.error import OperationalError, ProgrammingError
+from pyathena.common import CursorIterator
+from pyathena.error import OperationalError
 from pyathena.model import AthenaQueryExecution
-from pyathena.result_set import WithResultSet
+from pyathena.result_set import WithFetch
 from pyathena.s3fs.converter import DefaultS3FSTypeConverter
 from pyathena.s3fs.result_set import AthenaS3FSResultSet, CSVReaderType
 
 _logger = logging.getLogger(__name__)
 
 
-class S3FSCursor(BaseCursor, CursorIterator, WithResultSet):
+class S3FSCursor(WithFetch):
     """Cursor for reading CSV results via S3FileSystem without pandas/pyarrow.
 
     This cursor uses Python's standard csv module and PyAthena's S3FileSystem
@@ -106,8 +106,6 @@ class S3FSCursor(BaseCursor, CursorIterator, WithResultSet):
         )
         self._on_start_query_execution = on_start_query_execution
         self._csv_reader = csv_reader
-        self._query_id: Optional[str] = None
-        self._result_set: Optional[AthenaS3FSResultSet] = None
 
     @staticmethod
     def get_default_converter(
@@ -122,60 +120,6 @@ class S3FSCursor(BaseCursor, CursorIterator, WithResultSet):
             DefaultS3FSTypeConverter instance.
         """
         return DefaultS3FSTypeConverter()
-
-    @property
-    def arraysize(self) -> int:
-        """Get the number of rows to fetch at a time with fetchmany()."""
-        return self._arraysize
-
-    @arraysize.setter
-    def arraysize(self, value: int) -> None:
-        """Set the number of rows to fetch at a time with fetchmany().
-
-        Args:
-            value: Number of rows (must be positive).
-
-        Raises:
-            ProgrammingError: If value is not positive.
-        """
-        if value <= 0:
-            raise ProgrammingError("arraysize must be a positive integer value.")
-        self._arraysize = value
-
-    @property  # type: ignore
-    def result_set(self) -> Optional[AthenaS3FSResultSet]:
-        """Get the current result set."""
-        return self._result_set
-
-    @result_set.setter
-    def result_set(self, val) -> None:
-        """Set the current result set."""
-        self._result_set = val
-
-    @property
-    def query_id(self) -> Optional[str]:
-        """Get the ID of the last executed query."""
-        return self._query_id
-
-    @query_id.setter
-    def query_id(self, val) -> None:
-        """Set the query ID."""
-        self._query_id = val
-
-    @property
-    def rownumber(self) -> Optional[int]:
-        """Get the current row number (0-indexed)."""
-        return self.result_set.rownumber if self.result_set else None
-
-    @property
-    def rowcount(self) -> int:
-        """Get the number of rows affected by the last operation."""
-        return self.result_set.rowcount if self.result_set else -1
-
-    def close(self) -> None:
-        """Close the cursor and release resources."""
-        if self.result_set and not self.result_set.is_closed:
-            self.result_set.close()
 
     def execute(
         self,
@@ -249,82 +193,3 @@ class S3FSCursor(BaseCursor, CursorIterator, WithResultSet):
         else:
             raise OperationalError(query_execution.state_change_reason)
         return self
-
-    def executemany(
-        self,
-        operation: str,
-        seq_of_parameters: List[Optional[Union[Dict[str, Any], List[str]]]],
-        **kwargs,
-    ) -> None:
-        """Execute a SQL query with multiple parameter sets.
-
-        Args:
-            operation: SQL query string to execute.
-            seq_of_parameters: Sequence of parameter sets.
-            **kwargs: Additional execution parameters.
-        """
-        for parameters in seq_of_parameters:
-            self.execute(operation, parameters, **kwargs)
-        # Operations that have result sets are not allowed with executemany.
-        self._reset_state()
-
-    def cancel(self) -> None:
-        """Cancel the currently running query.
-
-        Raises:
-            ProgrammingError: If no query is running.
-        """
-        if not self.query_id:
-            raise ProgrammingError("QueryExecutionId is none or empty.")
-        self._cancel(self.query_id)
-
-    def fetchone(
-        self,
-    ) -> Optional[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
-        """Fetch the next row of the result set.
-
-        Returns:
-            A tuple representing the next row, or None if no more rows.
-
-        Raises:
-            ProgrammingError: If no query has been executed.
-        """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaS3FSResultSet, self.result_set)
-        return result_set.fetchone()
-
-    def fetchmany(
-        self, size: Optional[int] = None
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
-        """Fetch the next set of rows of the result set.
-
-        Args:
-            size: Maximum number of rows to fetch. Defaults to arraysize.
-
-        Returns:
-            A list of tuples representing the rows.
-
-        Raises:
-            ProgrammingError: If no query has been executed.
-        """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaS3FSResultSet, self.result_set)
-        return result_set.fetchmany(size)
-
-    def fetchall(
-        self,
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
-        """Fetch all remaining rows of the result set.
-
-        Returns:
-            A list of tuples representing all remaining rows.
-
-        Raises:
-            ProgrammingError: If no query has been executed.
-        """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaS3FSResultSet, self.result_set)
-        return result_set.fetchall()
