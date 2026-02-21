@@ -14,7 +14,7 @@ PyAthena has two families of async cursors:
 |---|---|---|
 | **Concurrency model** | `concurrent.futures.ThreadPoolExecutor` | Native `asyncio` (`await` / `async for`) |
 | **Event loop** | Blocks a thread per query | Non-blocking |
-| **Connection** | `connect()` (sync) | `aconnect()` (async) |
+| **Connection** | `connect()` (sync) | `aio_connect()` (async) |
 | **execute()** returns | `(query_id, Future)` | Awaitable cursor (self) |
 | **Fetch methods** | Sync (via `Future.result()`) | `await cursor.fetchone()` for streaming cursors |
 | **Iteration** | `for row in result_set` | `async for row in cursor` |
@@ -29,22 +29,22 @@ from synchronous code.
 
 ## Connection
 
-Use the `aconnect()` function to create an async connection.
+Use the `aio_connect()` function to create an async connection.
 It returns an `AioConnection` that produces `AioCursor` instances by default.
 
 ```python
-from pyathena import aconnect
+from pyathena import aio_connect
 
-conn = await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+conn = await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                       region_name="us-west-2")
 ```
 
 The connection supports the async context manager protocol:
 
 ```python
-from pyathena import aconnect
+from pyathena import aio_connect
 
-async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor()
     await cursor.execute("SELECT 1")
@@ -59,10 +59,10 @@ AioCursor is a native asyncio cursor that uses `await` for query execution and r
 It follows the DB API 2.0 interface adapted for async usage.
 
 ```python
-from pyathena import aconnect
+from pyathena import aio_connect
 from pyathena.aio.cursor import AioCursor
 
-async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor()
     await cursor.execute("SELECT * FROM many_rows")
@@ -74,9 +74,9 @@ async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 The cursor supports the `async with` context manager:
 
 ```python
-from pyathena import aconnect
+from pyathena import aio_connect
 
-async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     async with conn.cursor() as cursor:
         await cursor.execute("SELECT * FROM many_rows")
@@ -86,9 +86,9 @@ async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 You can iterate over results with `async for`:
 
 ```python
-from pyathena import aconnect
+from pyathena import aio_connect
 
-async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     async with conn.cursor() as cursor:
         await cursor.execute("SELECT * FROM many_rows")
@@ -99,9 +99,9 @@ async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 Execution information of the query can also be retrieved:
 
 ```python
-from pyathena import aconnect
+from pyathena import aio_connect
 
-async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     async with conn.cursor() as cursor:
         await cursor.execute("SELECT * FROM many_rows")
@@ -121,9 +121,9 @@ async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 To cancel a running query:
 
 ```python
-from pyathena import aconnect
+from pyathena import aio_connect
 
-async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     async with conn.cursor() as cursor:
         await cursor.execute("SELECT * FROM many_rows")
@@ -137,10 +137,10 @@ async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 AioDictCursor is an AioCursor that returns rows as dictionaries with column names as keys.
 
 ```python
-from pyathena import aconnect
+from pyathena import aio_connect
 from pyathena.aio.cursor import AioDictCursor
 
-async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor(AioDictCursor)
     await cursor.execute("SELECT * FROM many_rows LIMIT 10")
@@ -152,10 +152,10 @@ If you want to change the dictionary type (e.g., use OrderedDict):
 
 ```python
 from collections import OrderedDict
-from pyathena import aconnect
+from pyathena import aio_connect
 from pyathena.aio.cursor import AioDictCursor
 
-async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor(AioDictCursor, dict_type=OrderedDict)
     await cursor.execute("SELECT * FROM many_rows LIMIT 10")
