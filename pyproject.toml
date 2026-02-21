@@ -42,9 +42,17 @@ awsathena = "pyathena.sqlalchemy.base:AthenaDialect"
 "awsathena.arrow" = "pyathena.sqlalchemy.arrow:AthenaArrowDialect"
 "awsathena.polars" = "pyathena.sqlalchemy.polars:AthenaPolarsDialect"
 "awsathena.s3fs" = "pyathena.sqlalchemy.s3fs:AthenaS3FSDialect"
+"awsathena.aiorest" = "pyathena.aio.sqlalchemy.rest:AthenaAioRestDialect"
+"awsathena.aiopandas" = "pyathena.aio.sqlalchemy.pandas:AthenaAioPandasDialect"
+"awsathena.aioarrow" = "pyathena.aio.sqlalchemy.arrow:AthenaAioArrowDialect"
+"awsathena.aiopolars" = "pyathena.aio.sqlalchemy.polars:AthenaAioPolarsDialect"
+"awsathena.aios3fs" = "pyathena.aio.sqlalchemy.s3fs:AthenaAioS3FSDialect"
 
 [project.optional-dependencies]
 sqlalchemy = ["sqlalchemy>=1.0.0"]
+aiosqlalchemy = [
+    "sqlalchemy[asyncio]>=2.0.0",
+]
 pandas = [
     "pandas>=1.3.0; python_version<'3.13'",
     "pandas>=2.3.0; python_version>='3.13'",
@@ -59,7 +67,7 @@ polars = [
 
 [dependency-groups]
 dev = [
-    "sqlalchemy>=1.0.0",
+    "sqlalchemy[asyncio]>=1.0.0",
     "pandas>=1.3.0; python_version<'3.13'",
     "pandas>=2.3.0; python_version>='3.13'",
     "numpy>=1.26.0; python_version<'3.13'",
@@ -189,6 +197,7 @@ commands =
     uv sync --group dev
     make test
     make test-sqla
+    make test-sqla-async
 passenv =
     TOXENV
     AWS_*

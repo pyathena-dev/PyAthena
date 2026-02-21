@@ -6,8 +6,9 @@ from pathlib import Path
 import boto3
 import pytest
 import sqlalchemy
+from sqlalchemy.ext.asyncio import create_async_engine as _create_async_engine
 
-from tests import ENV, SQLALCHEMY_CONNECTION_STRING
+from tests import ASYNC_SQLALCHEMY_CONNECTION_STRING, ENV, SQLALCHEMY_CONNECTION_STRING
 from tests.pyathena.util import read_query
 
 
@@ -72,7 +73,8 @@ def connect(schema_name="default", **kwargs):
 
 
 def create_engine(**kwargs):
-    conn_str = SQLALCHEMY_CONNECTION_STRING
+    driver = kwargs.pop("driver", "rest")
+    conn_str = SQLALCHEMY_CONNECTION_STRING.replace("+rest", f"+{driver}")
     for arg in [
         "bucket_count",
         "cluster",
@@ -92,6 +94,20 @@ def create_engine(**kwargs):
         if arg in kwargs:
             conn_str += f"&{arg}={{{arg}}}"
     return sqlalchemy.engine.create_engine(
+        conn_str.format(
+            region_name=ENV.region_name,
+            schema_name=ENV.schema,
+            s3_staging_dir=ENV.s3_staging_dir,
+            location=ENV.s3_staging_dir,
+            **kwargs,
+        )
+    )
+
+
+def create_async_engine(**kwargs):
+    driver = kwargs.pop("driver", "aiorest")
+    conn_str = ASYNC_SQLALCHEMY_CONNECTION_STRING.replace("+aiorest", f"+{driver}")
+    return _create_async_engine(
         conn_str.format(
             region_name=ENV.region_name,
             schema_name=ENV.schema,
@@ -228,6 +244,18 @@ def engine(request):
             yield engine_, conn
     finally:
         engine_.dispose()
+
+
+@pytest.fixture
+async def async_engine(request):
+    if not hasattr(request, "param"):
+        setattr(request, "param", {})  # noqa: B010
+    engine_ = create_async_engine(**request.param)
+    try:
+        async with engine_.connect() as conn:
+            yield engine_, conn
+    finally:
+        await engine_.dispose()
 
 
 @pytest.fixture

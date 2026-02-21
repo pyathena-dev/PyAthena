@@ -7,6 +7,10 @@ SQLALCHEMY_CONNECTION_STRING = (
     "awsathena+rest://athena.{region_name}.amazonaws.com:443/"
     "{schema_name}?s3_staging_dir={s3_staging_dir}&location={location}"
 )
+ASYNC_SQLALCHEMY_CONNECTION_STRING = (
+    "awsathena+aiorest://athena.{region_name}.amazonaws.com:443/"
+    "{schema_name}?s3_staging_dir={s3_staging_dir}&location={location}"
+)
 
 
 class Env:
