@@ -177,24 +177,27 @@ Native asyncio versions are available for all cursor types:
 
 ### Fetch behavior
 
-Most aio cursors load all result data eagerly during `execute()` (via `asyncio.to_thread`),
-so `fetchone()`, `fetchmany()`, and `fetchall()` are synchronous (in-memory only):
+For **AioPandasCursor**, **AioArrowCursor**, and **AioPolarsCursor**, the S3 download
+(CSV or Parquet) happens inside `execute()`, wrapped in `asyncio.to_thread()`.
+By the time `execute()` returns, all data is already loaded into memory.
+Therefore `fetchone()`, `fetchall()`, `as_pandas()`, `as_arrow()`, and `as_polars()`
+are synchronous (in-memory only) and do not need `await`:
 
 ```python
-# Pandas, Arrow, Polars — fetch is sync (data already loaded)
-await cursor.execute("SELECT * FROM many_rows")
-row = cursor.fetchone()        # No await needed
-rows = cursor.fetchall()       # No await needed
-df = cursor.as_pandas()        # No await needed
+# Pandas, Arrow, Polars — S3 download completes during execute()
+await cursor.execute("SELECT * FROM many_rows")  # Downloads data here
+row = cursor.fetchone()        # No await — data already in memory
+rows = cursor.fetchall()       # No await
+df = cursor.as_pandas()        # No await
 ```
 
 The exceptions are **AioCursor** and **AioS3FSCursor**, which stream rows lazily from S3.
-Their fetch methods require `await`:
+Their fetch methods perform I/O and require `await`:
 
 ```python
-# AioCursor, AioS3FSCursor — fetch is async (reads from S3)
+# AioCursor, AioS3FSCursor — fetch reads from S3 lazily
 await cursor.execute("SELECT * FROM many_rows")
-row = await cursor.fetchone()    # Await required
+row = await cursor.fetchone()    # Await required — reads from S3
 rows = await cursor.fetchall()   # Await required
 ```
 

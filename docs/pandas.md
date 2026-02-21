@@ -776,8 +776,9 @@ AioPandasCursor is a native asyncio cursor that returns results as pandas DataFr
 Unlike AsyncPandasCursor which uses `concurrent.futures`, this cursor uses
 `asyncio.to_thread()` for result set creation, keeping the event loop free.
 
-Since the result set is loaded eagerly during `execute()`, fetch methods and `as_pandas()`
-are synchronous (in-memory only) and do not need `await`.
+The S3 download (CSV or Parquet) happens inside `execute()`, wrapped in `asyncio.to_thread()`.
+By the time `execute()` returns, all data is already loaded into memory.
+Therefore fetch methods and `as_pandas()` are synchronous and do not need `await`.
 
 ```python
 from pyathena import aconnect
