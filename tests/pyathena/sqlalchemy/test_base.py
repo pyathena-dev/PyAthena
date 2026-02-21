@@ -30,6 +30,17 @@ from tests.pyathena.conftest import ENV
 
 
 class TestSQLAlchemyAthena:
+    @pytest.mark.parametrize(
+        "engine",
+        [
+            {"driver": "rest"},
+            {"driver": "pandas"},
+            {"driver": "arrow"},
+            {"driver": "polars"},
+            {"driver": "s3fs"},
+        ],
+        indirect=True,
+    )
     def test_basic_query(self, engine):
         engine, conn = engine
         rows = conn.execute(sqlalchemy.text("SELECT * FROM one_row")).fetchall()

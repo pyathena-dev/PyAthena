@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import pytest
 import sqlalchemy
 from sqlalchemy import text
 from sqlalchemy.sql.schema import MetaData, Table
@@ -7,6 +8,17 @@ from tests import ENV
 
 
 class TestAsyncSQLAlchemyAthena:
+    @pytest.mark.parametrize(
+        "async_engine",
+        [
+            {"driver": "aiorest"},
+            {"driver": "aiopandas"},
+            {"driver": "aioarrow"},
+            {"driver": "aiopolars"},
+            {"driver": "aios3fs"},
+        ],
+        indirect=True,
+    )
     async def test_basic_query(self, async_engine):
         engine, conn = async_engine
         rows = (await conn.execute(text("SELECT * FROM one_row"))).fetchall()

@@ -6,6 +6,7 @@ from pathlib import Path
 import boto3
 import pytest
 import sqlalchemy
+from sqlalchemy.ext.asyncio import create_async_engine as _create_async_engine
 
 from tests import ASYNC_SQLALCHEMY_CONNECTION_STRING, ENV, SQLALCHEMY_CONNECTION_STRING
 from tests.pyathena.util import read_query
@@ -72,7 +73,8 @@ def connect(schema_name="default", **kwargs):
 
 
 def create_engine(**kwargs):
-    conn_str = SQLALCHEMY_CONNECTION_STRING
+    driver = kwargs.pop("driver", "rest")
+    conn_str = SQLALCHEMY_CONNECTION_STRING.replace("+rest", f"+{driver}")
     for arg in [
         "bucket_count",
         "cluster",
@@ -103,8 +105,9 @@ def create_engine(**kwargs):
 
 
 def create_async_engine(**kwargs):
-    conn_str = ASYNC_SQLALCHEMY_CONNECTION_STRING
-    return sqlalchemy.ext.asyncio.create_async_engine(
+    driver = kwargs.pop("driver", "aiorest")
+    conn_str = ASYNC_SQLALCHEMY_CONNECTION_STRING.replace("+aiorest", f"+{driver}")
+    return _create_async_engine(
         conn_str.format(
             region_name=ENV.region_name,
             schema_name=ENV.schema,
