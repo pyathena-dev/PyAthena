@@ -5,11 +5,11 @@ from tests import ENV
 
 
 async def _aio_connect(schema_name="default", **kwargs):
-    from pyathena import aconnect
+    from pyathena import aio_connect
 
     if "work_group" not in kwargs:
         kwargs["work_group"] = ENV.default_work_group
-    return await aconnect(schema_name=schema_name, **kwargs)
+    return await aio_connect(schema_name=schema_name, **kwargs)
 
 
 @pytest.fixture

@@ -9,7 +9,7 @@ Connection
 ----------
 
 .. automodule:: pyathena
-   :members: aconnect
+   :members: aio_connect
 
 .. autoclass:: pyathena.aio.connection.AioConnection
    :members:

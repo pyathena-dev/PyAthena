@@ -23,7 +23,7 @@ class AioS3FSCursor(WithAsyncFetch):
     reader, making fetch calls blocking I/O.
 
     Example:
-        >>> async with await pyathena.aconnect(...) as conn:
+        >>> async with await pyathena.aio_connect(...) as conn:
         ...     cursor = conn.cursor(AioS3FSCursor)
         ...     await cursor.execute("SELECT * FROM my_table")
         ...     row = await cursor.fetchone()

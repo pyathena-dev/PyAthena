@@ -33,7 +33,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
 
     Example:
         >>> import asyncio
-        >>> async with await pyathena.aconnect(
+        >>> async with await pyathena.aio_connect(
         ...     work_group="spark-workgroup",
         ...     cursor_class=AioSparkCursor,
         ... ) as conn:
