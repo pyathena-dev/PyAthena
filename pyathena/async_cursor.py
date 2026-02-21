@@ -7,8 +7,7 @@ from concurrent.futures.thread import ThreadPoolExecutor
 from multiprocessing import cpu_count
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
-from pyathena.common import CursorIterator
-from pyathena.cursor import BaseCursor
+from pyathena.common import BaseCursor, CursorIterator
 from pyathena.error import NotSupportedError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaDictResultSet, AthenaResultSet

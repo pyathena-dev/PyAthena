@@ -12,13 +12,11 @@ from typing import (
     Iterable,
     List,
     Optional,
-    Tuple,
     Union,
     cast,
 )
 
 from pyathena.common import CursorIterator
-from pyathena.cursor import BaseCursor
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaCompression, AthenaFileFormat, AthenaQueryExecution
 from pyathena.pandas.converter import (
@@ -26,7 +24,7 @@ from pyathena.pandas.converter import (
     DefaultPandasUnloadTypeConverter,
 )
 from pyathena.pandas.result_set import AthenaPandasResultSet, PandasDataFrameIterator
-from pyathena.result_set import WithResultSet
+from pyathena.result_set import WithFetch
 
 if TYPE_CHECKING:
     from pandas import DataFrame
@@ -34,7 +32,7 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)  # type: ignore
 
 
-class PandasCursor(BaseCursor, CursorIterator, WithResultSet):
+class PandasCursor(WithFetch):
     """Cursor for handling pandas DataFrame results from Athena queries.
 
     This cursor returns query results as pandas DataFrames with memory-efficient
@@ -138,8 +136,6 @@ class PandasCursor(BaseCursor, CursorIterator, WithResultSet):
         self._max_workers = max_workers
         self._auto_optimize_chunksize = auto_optimize_chunksize
         self._on_start_query_execution = on_start_query_execution
-        self._query_id: Optional[str] = None
-        self._result_set: Optional[AthenaPandasResultSet] = None
 
     @staticmethod
     def get_default_converter(
@@ -148,45 +144,6 @@ class PandasCursor(BaseCursor, CursorIterator, WithResultSet):
         if unload:
             return DefaultPandasUnloadTypeConverter()
         return DefaultPandasTypeConverter()
-
-    @property
-    def arraysize(self) -> int:
-        return self._arraysize
-
-    @arraysize.setter
-    def arraysize(self, value: int) -> None:
-        if value <= 0:
-            raise ProgrammingError("arraysize must be a positive integer value.")
-        self._arraysize = value
-
-    @property  # type: ignore
-    def result_set(self) -> Optional[AthenaPandasResultSet]:
-        return self._result_set
-
-    @result_set.setter
-    def result_set(self, val) -> None:
-        self._result_set = val
-
-    @property
-    def query_id(self) -> Optional[str]:
-        return self._query_id
-
-    @query_id.setter
-    def query_id(self, val) -> None:
-        self._query_id = val
-
-    @property
-    def rownumber(self) -> Optional[int]:
-        return self.result_set.rownumber if self.result_set else None
-
-    @property
-    def rowcount(self) -> int:
-        """Get the number of rows affected by the last operation."""
-        return self.result_set.rowcount if self.result_set else -1
-
-    def close(self) -> None:
-        if self.result_set and not self.result_set.is_closed:
-            self.result_set.close()
 
     def execute(
         self,
@@ -291,46 +248,6 @@ class PandasCursor(BaseCursor, CursorIterator, WithResultSet):
             raise OperationalError(query_execution.state_change_reason)
 
         return self
-
-    def executemany(
-        self,
-        operation: str,
-        seq_of_parameters: List[Optional[Union[Dict[str, Any], List[str]]]],
-        **kwargs,
-    ) -> None:
-        for parameters in seq_of_parameters:
-            self.execute(operation, parameters, **kwargs)
-        # Operations that have result sets are not allowed with executemany.
-        self._reset_state()
-
-    def cancel(self) -> None:
-        if not self.query_id:
-            raise ProgrammingError("QueryExecutionId is none or empty.")
-        self._cancel(self.query_id)
-
-    def fetchone(
-        self,
-    ) -> Optional[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaPandasResultSet, self.result_set)
-        return result_set.fetchone()
-
-    def fetchmany(
-        self, size: Optional[int] = None
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaPandasResultSet, self.result_set)
-        return result_set.fetchmany(size)
-
-    def fetchall(
-        self,
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaPandasResultSet, self.result_set)
-        return result_set.fetchall()
 
     def as_pandas(self) -> Union["DataFrame", PandasDataFrameIterator]:
         """Return DataFrame or PandasDataFrameIterator based on chunksize setting.

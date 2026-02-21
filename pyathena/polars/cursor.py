@@ -11,12 +11,11 @@ from typing import (
     Iterator,
     List,
     Optional,
-    Tuple,
     Union,
     cast,
 )
 
-from pyathena.common import BaseCursor, CursorIterator
+from pyathena.common import CursorIterator
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaCompression, AthenaFileFormat, AthenaQueryExecution
 from pyathena.polars.converter import (
@@ -24,7 +23,7 @@ from pyathena.polars.converter import (
     DefaultPolarsUnloadTypeConverter,
 )
 from pyathena.polars.result_set import AthenaPolarsResultSet
-from pyathena.result_set import WithResultSet
+from pyathena.result_set import WithFetch
 
 if TYPE_CHECKING:
     import polars as pl
@@ -33,7 +32,7 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 
-class PolarsCursor(BaseCursor, CursorIterator, WithResultSet):
+class PolarsCursor(WithFetch):
     """Cursor for handling Polars DataFrame results from Athena queries.
 
     This cursor returns query results as Polars DataFrames using Polars' native
@@ -135,8 +134,6 @@ class PolarsCursor(BaseCursor, CursorIterator, WithResultSet):
         self._cache_type = cache_type
         self._max_workers = max_workers
         self._chunksize = chunksize
-        self._query_id: Optional[str] = None
-        self._result_set: Optional[AthenaPolarsResultSet] = None
 
     @staticmethod
     def get_default_converter(
@@ -153,60 +150,6 @@ class PolarsCursor(BaseCursor, CursorIterator, WithResultSet):
         if unload:
             return DefaultPolarsUnloadTypeConverter()
         return DefaultPolarsTypeConverter()
-
-    @property
-    def arraysize(self) -> int:
-        """Get the number of rows to fetch per batch."""
-        return self._arraysize
-
-    @arraysize.setter
-    def arraysize(self, value: int) -> None:
-        """Set the number of rows to fetch per batch.
-
-        Args:
-            value: Number of rows to fetch. Must be positive.
-
-        Raises:
-            ProgrammingError: If value is not positive.
-        """
-        if value <= 0:
-            raise ProgrammingError("arraysize must be a positive integer value.")
-        self._arraysize = value
-
-    @property  # type: ignore
-    def result_set(self) -> Optional[AthenaPolarsResultSet]:
-        """Get the current result set."""
-        return self._result_set
-
-    @result_set.setter
-    def result_set(self, val) -> None:
-        """Set the current result set."""
-        self._result_set = val
-
-    @property
-    def query_id(self) -> Optional[str]:
-        """Get the current query execution ID."""
-        return self._query_id
-
-    @query_id.setter
-    def query_id(self, val) -> None:
-        """Set the current query execution ID."""
-        self._query_id = val
-
-    @property
-    def rownumber(self) -> Optional[int]:
-        """Get the current row number in the result set."""
-        return self.result_set.rownumber if self.result_set else None
-
-    @property
-    def rowcount(self) -> int:
-        """Get the number of rows affected by the last operation."""
-        return self.result_set.rowcount if self.result_set else -1
-
-    def close(self) -> None:
-        """Close the cursor and release resources."""
-        if self.result_set and not self.result_set.is_closed:
-            self.result_set.close()
 
     def execute(
         self,
@@ -297,85 +240,6 @@ class PolarsCursor(BaseCursor, CursorIterator, WithResultSet):
         else:
             raise OperationalError(query_execution.state_change_reason)
         return self
-
-    def executemany(
-        self,
-        operation: str,
-        seq_of_parameters: List[Optional[Union[Dict[str, Any], List[str]]]],
-        **kwargs,
-    ) -> None:
-        """Execute a SQL query multiple times with different parameters.
-
-        Args:
-            operation: SQL query string to execute.
-            seq_of_parameters: Sequence of parameter sets.
-            **kwargs: Additional execution parameters.
-        """
-        for parameters in seq_of_parameters:
-            self.execute(operation, parameters, **kwargs)
-        # Operations that have result sets are not allowed with executemany.
-        self._reset_state()
-
-    def cancel(self) -> None:
-        """Cancel the currently running query.
-
-        Raises:
-            ProgrammingError: If no query is currently running.
-        """
-        if not self.query_id:
-            raise ProgrammingError("QueryExecutionId is none or empty.")
-        self._cancel(self.query_id)
-
-    def fetchone(
-        self,
-    ) -> Optional[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
-        """Fetch the next row of the query result.
-
-        Returns:
-            A single row as a tuple, or None if no more rows are available.
-
-        Raises:
-            ProgrammingError: If no result set is available.
-        """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaPolarsResultSet, self.result_set)
-        return result_set.fetchone()
-
-    def fetchmany(
-        self, size: Optional[int] = None
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
-        """Fetch the next set of rows of the query result.
-
-        Args:
-            size: Number of rows to fetch. Defaults to arraysize.
-
-        Returns:
-            A list of rows as tuples.
-
-        Raises:
-            ProgrammingError: If no result set is available.
-        """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaPolarsResultSet, self.result_set)
-        return result_set.fetchmany(size)
-
-    def fetchall(
-        self,
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
-        """Fetch all remaining rows of the query result.
-
-        Returns:
-            A list of all remaining rows as tuples.
-
-        Raises:
-            ProgrammingError: If no result set is available.
-        """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaPolarsResultSet, self.result_set)
-        return result_set.fetchall()
 
     def as_polars(self) -> "pl.DataFrame":
         """Return query results as a Polars DataFrame.

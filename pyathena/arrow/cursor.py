@@ -2,17 +2,17 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union, cast
 
 from pyathena.arrow.converter import (
     DefaultArrowTypeConverter,
     DefaultArrowUnloadTypeConverter,
 )
 from pyathena.arrow.result_set import AthenaArrowResultSet
-from pyathena.common import BaseCursor, CursorIterator
+from pyathena.common import CursorIterator
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaCompression, AthenaFileFormat, AthenaQueryExecution
-from pyathena.result_set import WithResultSet
+from pyathena.result_set import WithFetch
 
 if TYPE_CHECKING:
     import polars as pl
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)  # type: ignore
 
 
-class ArrowCursor(BaseCursor, CursorIterator, WithResultSet):
+class ArrowCursor(WithFetch):
     """Cursor for handling Apache Arrow Table results from Athena queries.
 
     This cursor returns query results as Apache Arrow Tables, which provide
@@ -116,8 +116,6 @@ class ArrowCursor(BaseCursor, CursorIterator, WithResultSet):
         self._on_start_query_execution = on_start_query_execution
         self._connect_timeout = connect_timeout
         self._request_timeout = request_timeout
-        self._query_id: Optional[str] = None
-        self._result_set: Optional[AthenaArrowResultSet] = None
 
     @staticmethod
     def get_default_converter(
@@ -126,45 +124,6 @@ class ArrowCursor(BaseCursor, CursorIterator, WithResultSet):
         if unload:
             return DefaultArrowUnloadTypeConverter()
         return DefaultArrowTypeConverter()
-
-    @property
-    def arraysize(self) -> int:
-        return self._arraysize
-
-    @arraysize.setter
-    def arraysize(self, value: int) -> None:
-        if value <= 0:
-            raise ProgrammingError("arraysize must be a positive integer value.")
-        self._arraysize = value
-
-    @property  # type: ignore
-    def result_set(self) -> Optional[AthenaArrowResultSet]:
-        return self._result_set
-
-    @result_set.setter
-    def result_set(self, val) -> None:
-        self._result_set = val
-
-    @property
-    def query_id(self) -> Optional[str]:
-        return self._query_id
-
-    @query_id.setter
-    def query_id(self, val) -> None:
-        self._query_id = val
-
-    @property
-    def rownumber(self) -> Optional[int]:
-        return self.result_set.rownumber if self.result_set else None
-
-    @property
-    def rowcount(self) -> int:
-        """Get the number of rows affected by the last operation."""
-        return self.result_set.rowcount if self.result_set else -1
-
-    def close(self) -> None:
-        if self.result_set and not self.result_set.is_closed:
-            self.result_set.close()
 
     def execute(
         self,
@@ -254,46 +213,6 @@ class ArrowCursor(BaseCursor, CursorIterator, WithResultSet):
         else:
             raise OperationalError(query_execution.state_change_reason)
         return self
-
-    def executemany(
-        self,
-        operation: str,
-        seq_of_parameters: List[Optional[Union[Dict[str, Any], List[str]]]],
-        **kwargs,
-    ) -> None:
-        for parameters in seq_of_parameters:
-            self.execute(operation, parameters, **kwargs)
-        # Operations that have result sets are not allowed with executemany.
-        self._reset_state()
-
-    def cancel(self) -> None:
-        if not self.query_id:
-            raise ProgrammingError("QueryExecutionId is none or empty.")
-        self._cancel(self.query_id)
-
-    def fetchone(
-        self,
-    ) -> Optional[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaArrowResultSet, self.result_set)
-        return result_set.fetchone()
-
-    def fetchmany(
-        self, size: Optional[int] = None
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaArrowResultSet, self.result_set)
-        return result_set.fetchmany(size)
-
-    def fetchall(
-        self,
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaArrowResultSet, self.result_set)
-        return result_set.fetchall()
 
     def as_arrow(self) -> "Table":
         """Return query results as an Apache Arrow Table.
