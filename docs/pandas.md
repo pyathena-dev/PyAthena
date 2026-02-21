@@ -774,11 +774,8 @@ cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 
 AioPandasCursor is a native asyncio cursor that returns results as pandas DataFrames.
 Unlike AsyncPandasCursor which uses `concurrent.futures`, this cursor uses
-`asyncio.to_thread()` for result set creation, keeping the event loop free.
-
-The S3 download (CSV or Parquet) happens inside `execute()`, wrapped in `asyncio.to_thread()`.
-By the time `execute()` returns, all data is already loaded into memory.
-Therefore fetch methods and `as_pandas()` are synchronous and do not need `await`.
+`asyncio.to_thread()` for both result set creation and fetch operations,
+keeping the event loop free.
 
 ```python
 from pyathena import aconnect
@@ -803,9 +800,9 @@ async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor(AioPandasCursor)
     await cursor.execute("SELECT * FROM many_rows")
-    print(cursor.fetchone())
-    print(cursor.fetchmany())
-    print(cursor.fetchall())
+    print(await cursor.fetchone())
+    print(await cursor.fetchmany())
+    print(await cursor.fetchall())
 ```
 
 ```python
@@ -833,9 +830,3 @@ async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
     df = cursor.as_pandas()
 ```
 
-```{note}
-When using AioPandasCursor with the `chunksize` option, `execute()` creates a lazy
-`TextFileReader` instead of loading all data at once. Subsequent iteration via
-`as_pandas()`, `fetchone()`, or `async for` triggers chunk-by-chunk S3 reads that
-are not wrapped in `asyncio.to_thread()` and will block the event loop.
-```

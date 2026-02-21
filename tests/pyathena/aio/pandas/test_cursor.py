@@ -11,20 +11,20 @@ class TestAioPandasCursor:
     async def test_fetchone(self, aio_pandas_cursor):
         await aio_pandas_cursor.execute("SELECT * FROM one_row")
         assert aio_pandas_cursor.rownumber == 0
-        assert aio_pandas_cursor.fetchone() == (1,)
+        assert await aio_pandas_cursor.fetchone() == (1,)
         assert aio_pandas_cursor.rownumber == 1
-        assert aio_pandas_cursor.fetchone() is None
+        assert await aio_pandas_cursor.fetchone() is None
 
     async def test_fetchmany(self, aio_pandas_cursor):
         await aio_pandas_cursor.execute("SELECT * FROM many_rows LIMIT 15")
-        assert len(aio_pandas_cursor.fetchmany(10)) == 10
-        assert len(aio_pandas_cursor.fetchmany(10)) == 5
+        assert len(await aio_pandas_cursor.fetchmany(10)) == 10
+        assert len(await aio_pandas_cursor.fetchmany(10)) == 5
 
     async def test_fetchall(self, aio_pandas_cursor):
         await aio_pandas_cursor.execute("SELECT * FROM one_row")
-        assert aio_pandas_cursor.fetchall() == [(1,)]
+        assert await aio_pandas_cursor.fetchall() == [(1,)]
         await aio_pandas_cursor.execute("SELECT a FROM many_rows ORDER BY a")
-        assert aio_pandas_cursor.fetchall() == [(i,) for i in range(10000)]
+        assert await aio_pandas_cursor.fetchall() == [(i,) for i in range(10000)]
 
     async def test_as_pandas(self, aio_pandas_cursor):
         await aio_pandas_cursor.execute("SELECT * FROM one_row")
@@ -39,11 +39,11 @@ class TestAioPandasCursor:
 
     async def test_no_result_set_raises(self, aio_pandas_cursor):
         with pytest.raises(ProgrammingError):
-            aio_pandas_cursor.fetchone()
+            await aio_pandas_cursor.fetchone()
         with pytest.raises(ProgrammingError):
-            aio_pandas_cursor.fetchmany()
+            await aio_pandas_cursor.fetchmany()
         with pytest.raises(ProgrammingError):
-            aio_pandas_cursor.fetchall()
+            await aio_pandas_cursor.fetchall()
         with pytest.raises(ProgrammingError):
             aio_pandas_cursor.as_pandas()
 
@@ -54,7 +54,7 @@ class TestAioPandasCursor:
         try:
             async with conn.cursor() as cursor:
                 await cursor.execute("SELECT * FROM one_row")
-                assert cursor.fetchone() == (1,)
+                assert await cursor.fetchone() == (1,)
         finally:
             conn.close()
 
@@ -69,7 +69,7 @@ class TestAioPandasCursor:
 
     async def test_description(self, aio_pandas_cursor):
         await aio_pandas_cursor.execute("SELECT CAST(1 AS INT) AS foobar FROM one_row")
-        assert aio_pandas_cursor.fetchall() == [(1,)]
+        assert await aio_pandas_cursor.fetchall() == [(1,)]
         assert aio_pandas_cursor.description == [
             ("foobar", "integer", None, None, 10, 0, "UNKNOWN")
         ]
@@ -86,11 +86,11 @@ class TestAioPandasCursor:
             "SELECT %(x)d FROM one_row", [{"x": i} for i in range(1, 2)]
         )
         with pytest.raises(ProgrammingError):
-            aio_pandas_cursor.fetchall()
+            await aio_pandas_cursor.fetchall()
         with pytest.raises(ProgrammingError):
-            aio_pandas_cursor.fetchmany()
+            await aio_pandas_cursor.fetchmany()
         with pytest.raises(ProgrammingError):
-            aio_pandas_cursor.fetchone()
+            await aio_pandas_cursor.fetchone()
         with pytest.raises(ProgrammingError):
             aio_pandas_cursor.as_pandas()
 
@@ -101,8 +101,8 @@ class TestAioPandasCursor:
     )
     async def test_fetchone_unload(self, aio_pandas_cursor):
         await aio_pandas_cursor.execute("SELECT * FROM one_row")
-        assert aio_pandas_cursor.fetchone() == (1,)
-        assert aio_pandas_cursor.fetchone() is None
+        assert await aio_pandas_cursor.fetchone() == (1,)
+        assert await aio_pandas_cursor.fetchone() is None
 
     @pytest.mark.parametrize(
         "aio_pandas_cursor",

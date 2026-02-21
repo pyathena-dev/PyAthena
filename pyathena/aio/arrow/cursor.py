@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union, cast
 
 from pyathena.aio.common import WithAsyncFetch
 from pyathena.arrow.converter import (
@@ -25,9 +25,8 @@ _logger = logging.getLogger(__name__)  # type: ignore
 class AioArrowCursor(WithAsyncFetch):
     """Native asyncio cursor that returns results as Apache Arrow Tables.
 
-    Uses ``asyncio.to_thread()`` to create the result set off the event loop.
-    Since ``AthenaArrowResultSet`` loads all data in ``__init__`` (via S3),
-    fetch methods are synchronous (in-memory only) and do not need to be async.
+    Uses ``asyncio.to_thread()`` for both result set creation and fetch
+    operations, keeping the event loop free.
 
     Example:
         >>> async with await pyathena.aconnect(...) as conn:
@@ -141,6 +140,72 @@ class AioArrowCursor(WithAsyncFetch):
         else:
             raise OperationalError(query_execution.state_change_reason)
         return self
+
+    async def fetchone(  # type: ignore[override]
+        self,
+    ) -> Optional[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        """Fetch the next row of the result set.
+
+        Wraps the synchronous fetch in ``asyncio.to_thread`` to avoid
+        blocking the event loop.
+
+        Returns:
+            A tuple representing the next row, or None if no more rows.
+
+        Raises:
+            ProgrammingError: If no result set is available.
+        """
+        if not self.has_result_set:
+            raise ProgrammingError("No result set.")
+        result_set = cast(AthenaArrowResultSet, self.result_set)
+        return await asyncio.to_thread(result_set.fetchone)
+
+    async def fetchmany(  # type: ignore[override]
+        self, size: Optional[int] = None
+    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        """Fetch multiple rows from the result set.
+
+        Wraps the synchronous fetch in ``asyncio.to_thread`` to avoid
+        blocking the event loop.
+
+        Args:
+            size: Maximum number of rows to fetch. Defaults to arraysize.
+
+        Returns:
+            List of tuples representing the fetched rows.
+
+        Raises:
+            ProgrammingError: If no result set is available.
+        """
+        if not self.has_result_set:
+            raise ProgrammingError("No result set.")
+        result_set = cast(AthenaArrowResultSet, self.result_set)
+        return await asyncio.to_thread(result_set.fetchmany, size)
+
+    async def fetchall(  # type: ignore[override]
+        self,
+    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        """Fetch all remaining rows from the result set.
+
+        Wraps the synchronous fetch in ``asyncio.to_thread`` to avoid
+        blocking the event loop.
+
+        Returns:
+            List of tuples representing all remaining rows.
+
+        Raises:
+            ProgrammingError: If no result set is available.
+        """
+        if not self.has_result_set:
+            raise ProgrammingError("No result set.")
+        result_set = cast(AthenaArrowResultSet, self.result_set)
+        return await asyncio.to_thread(result_set.fetchall)
+
+    async def __anext__(self):
+        row = await self.fetchone()
+        if row is None:
+            raise StopAsyncIteration
+        return row
 
     def as_arrow(self) -> "Table":
         """Return query results as an Apache Arrow Table.
