@@ -1,7 +1,7 @@
 name: Test
 
 on:
-  push:
+  pull_request:
   schedule:
     - cron:  '0 0 * * 0'
 
@@ -11,45 +11,18 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    uses: ./.github/workflows/test-suite.yaml
+    with:
+      test-type: pyathena
 
-    env:
-      AWS_DEFAULT_REGION: us-west-2
-      AWS_ATHENA_S3_STAGING_DIR: s3://laughingman7743-pyathena/github/
-      AWS_ATHENA_WORKGROUP: pyathena
-      AWS_ATHENA_SPARK_WORKGROUP: pyathena-spark
-      AWS_ATHENA_MANAGED_WORKGROUP: pyathena-managed
+  test-sqla:
+    needs: [test]
+    uses: ./.github/workflows/test-suite.yaml
+    with:
+      test-type: sqla
 
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - uses: astral-sh/setup-uv@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-          enable-cache: true
-      # TODO: In the case of Python 3.13+, the following error occurs, so install Python using setup-python.
-      #   ../meson.build:44:2: ERROR: Problem encountered: Cannot compile
-      #   `Python.h`. Perhaps you need to install python-dev|python-devel
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-        if: matrix.python-version == '3.13' || matrix.python-version == '3.14'
-      - run: |
-          make tool
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::676287850544:role/github-actions-oidc-pyathena
-          role-session-name: PyAthenaTestSession
-          aws-region: ${{ env.AWS_DEFAULT_REGION }}
-
-      - name: Test
-        run: |
-          make tox
+  test-sqla-async:
+    needs: [test-sqla]
+    uses: ./.github/workflows/test-suite.yaml
+    with:
+      test-type: sqla_async

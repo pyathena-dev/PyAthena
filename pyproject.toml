@@ -178,7 +178,7 @@ exclude = [
 legacy_tox_ini = """
 [tox]
 isolated_build = true
-envlist = py{310,311,312,313,314}
+envlist = py{310,311,312,313,314}-{pyathena,sqla,sqla_async}
 
 [gh-actions]
 python =
@@ -188,6 +188,12 @@ python =
     3.13: py313
     3.14: py314
 
+[gh-actions:env]
+TEST_TYPE =
+    pyathena: pyathena
+    sqla: sqla
+    sqla_async: sqla_async
+
 [testenv]
 allowlist_externals =
     uv
@@ -195,9 +201,9 @@ allowlist_externals =
     make
 commands =
     uv sync --group dev
-    make test
-    make test-sqla
-    make test-sqla-async
+    pyathena: make test
+    sqla: make test-sqla
+    sqla_async: make test-sqla-async
 passenv =
     TOXENV
     AWS_*
