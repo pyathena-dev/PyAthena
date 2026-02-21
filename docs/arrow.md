@@ -480,3 +480,93 @@ cursor = connect(
     region_name="us-west-2"
 ).cursor(AsyncArrowCursor, connect_timeout=10.0, request_timeout=30.0)
 ```
+
+(aio-arrow-cursor)=
+
+## AioArrowCursor
+
+AioArrowCursor is a native asyncio cursor that returns results as Apache Arrow Tables.
+Unlike AsyncArrowCursor which uses `concurrent.futures`, this cursor uses
+`asyncio.to_thread()` for result set creation, keeping the event loop free.
+
+Since the result set is loaded eagerly during `execute()`, fetch methods, `as_arrow()`,
+and `as_polars()` are synchronous (in-memory only) and do not need `await`.
+
+```python
+from pyathena import aconnect
+from pyathena.aio.arrow.cursor import AioArrowCursor
+
+async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                          region_name="us-west-2") as conn:
+    cursor = conn.cursor(AioArrowCursor)
+    table = (await cursor.execute("SELECT * FROM many_rows")).as_arrow()
+    print(table)
+    print(table.column_names)
+    print(table.num_rows)
+    print(table.schema)
+```
+
+Support fetch and iterate query results:
+
+```python
+from pyathena import aconnect
+from pyathena.aio.arrow.cursor import AioArrowCursor
+
+async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                          region_name="us-west-2") as conn:
+    cursor = conn.cursor(AioArrowCursor)
+    await cursor.execute("SELECT * FROM many_rows")
+    print(cursor.fetchone())
+    print(cursor.fetchmany())
+    print(cursor.fetchall())
+```
+
+```python
+from pyathena import aconnect
+from pyathena.aio.arrow.cursor import AioArrowCursor
+
+async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                          region_name="us-west-2") as conn:
+    cursor = conn.cursor(AioArrowCursor)
+    await cursor.execute("SELECT * FROM many_rows")
+    async for row in cursor:
+        print(row)
+```
+
+The `as_polars()` method converts the result to a Polars DataFrame:
+
+```python
+from pyathena import aconnect
+from pyathena.aio.arrow.cursor import AioArrowCursor
+
+async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                          region_name="us-west-2") as conn:
+    cursor = conn.cursor(AioArrowCursor)
+    await cursor.execute("SELECT * FROM many_rows")
+    df = cursor.as_polars()
+```
+
+The unload option is also available:
+
+```python
+from pyathena import aconnect
+from pyathena.aio.arrow.cursor import AioArrowCursor
+
+async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                          region_name="us-west-2") as conn:
+    cursor = conn.cursor(AioArrowCursor, unload=True)
+    await cursor.execute("SELECT * FROM many_rows")
+    table = cursor.as_arrow()
+```
+
+AioArrowCursor also supports S3 timeout configuration:
+
+```python
+from pyathena import aconnect
+from pyathena.aio.arrow.cursor import AioArrowCursor
+
+async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                          region_name="us-west-2") as conn:
+    cursor = conn.cursor(AioArrowCursor, connect_timeout=10.0, request_timeout=30.0)
+    await cursor.execute("SELECT * FROM many_rows")
+```

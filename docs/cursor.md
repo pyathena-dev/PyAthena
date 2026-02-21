@@ -294,6 +294,14 @@ cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 ```
 
 
+## AioCursor
+
+See {ref}`aio-cursor`.
+
+## AioDictCursor
+
+See {ref}`aio-dict-cursor`.
+
 ## PandasCursor
 
 See {ref}`pandas-cursor`.
@@ -301,6 +309,10 @@ See {ref}`pandas-cursor`.
 ## AsyncPandasCursor
 
 See {ref}`async-pandas-cursor`.
+
+## AioPandasCursor
+
+See {ref}`aio-pandas-cursor`.
 
 ## ArrowCursor
 
@@ -310,6 +322,10 @@ See {ref}`arrow-cursor`.
 
 See {ref}`async-arrow-cursor`.
 
+## AioArrowCursor
+
+See {ref}`aio-arrow-cursor`.
+
 ## PolarsCursor
 
 See {ref}`polars-cursor`.
@@ -317,6 +333,10 @@ See {ref}`polars-cursor`.
 ## AsyncPolarsCursor
 
 See {ref}`async-polars-cursor`.
+
+## AioPolarsCursor
+
+See {ref}`aio-polars-cursor`.
 
 ## S3FSCursor
 
@@ -326,6 +346,10 @@ See {ref}`s3fs-cursor`.
 
 See {ref}`async-s3fs-cursor`.
 
+## AioS3FSCursor
+
+See {ref}`aio-s3fs-cursor`.
+
 ## SparkCursor
 
 See {ref}`spark-cursor`.
@@ -333,6 +357,10 @@ See {ref}`spark-cursor`.
 ## AsyncSparkCursor
 
 See {ref}`async-spark-cursor`.
+
+## AioSparkCursor
+
+See {ref}`aio-spark-cursor`.
 
 For detailed API documentation of all cursor classes and their methods,
 see the {ref}`api` section.

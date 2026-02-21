@@ -767,3 +767,67 @@ cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                  region_name="us-west-2",
                  cursor_class=AsyncPandasCursor).cursor(unload=True)
 ```
+
+(aio-pandas-cursor)=
+
+## AioPandasCursor
+
+AioPandasCursor is a native asyncio cursor that returns results as pandas DataFrames.
+Unlike AsyncPandasCursor which uses `concurrent.futures`, this cursor uses
+`asyncio.to_thread()` for result set creation, keeping the event loop free.
+
+Since the result set is loaded eagerly during `execute()`, fetch methods and `as_pandas()`
+are synchronous (in-memory only) and do not need `await`.
+
+```python
+from pyathena import aconnect
+from pyathena.aio.pandas.cursor import AioPandasCursor
+
+async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                          region_name="us-west-2") as conn:
+    cursor = conn.cursor(AioPandasCursor)
+    await cursor.execute("SELECT * FROM many_rows")
+    df = cursor.as_pandas()
+    print(df.describe())
+    print(df.head())
+```
+
+Support fetch and iterate query results:
+
+```python
+from pyathena import aconnect
+from pyathena.aio.pandas.cursor import AioPandasCursor
+
+async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                          region_name="us-west-2") as conn:
+    cursor = conn.cursor(AioPandasCursor)
+    await cursor.execute("SELECT * FROM many_rows")
+    print(cursor.fetchone())
+    print(cursor.fetchmany())
+    print(cursor.fetchall())
+```
+
+```python
+from pyathena import aconnect
+from pyathena.aio.pandas.cursor import AioPandasCursor
+
+async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                          region_name="us-west-2") as conn:
+    cursor = conn.cursor(AioPandasCursor)
+    await cursor.execute("SELECT * FROM many_rows")
+    async for row in cursor:
+        print(row)
+```
+
+The unload option is also available:
+
+```python
+from pyathena import aconnect
+from pyathena.aio.pandas.cursor import AioPandasCursor
+
+async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                          region_name="us-west-2") as conn:
+    cursor = conn.cursor(AioPandasCursor, unload=True)
+    await cursor.execute("SELECT * FROM many_rows")
+    df = cursor.as_pandas()
+```
