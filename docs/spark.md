@@ -333,3 +333,69 @@ with conn.cursor() as cursor:
 ```
 
 NOTE: Currently it appears that the calculation is not canceled unless the session is terminated.
+
+(aio-spark-cursor)=
+
+## AioSparkCursor
+
+AioSparkCursor is a native asyncio cursor for executing PySpark code on Athena.
+Unlike AsyncSparkCursor which uses `concurrent.futures`, this cursor uses
+native `asyncio` for polling and API calls, keeping the event loop free.
+
+Since `SparkBaseCursor.__init__` performs I/O (session management), cursor creation
+must be wrapped in `asyncio.to_thread`:
+
+```python
+import asyncio
+from pyathena import aconnect
+from pyathena.aio.spark.cursor import AioSparkCursor
+
+async with await aconnect(work_group="YOUR_SPARK_WORKGROUP",
+                          cursor_class=AioSparkCursor) as conn:
+    cursor = await asyncio.to_thread(conn.cursor)
+    await cursor.execute("""spark.sql("SELECT 1").show()""")
+    print(await cursor.get_std_out())
+```
+
+The cursor supports the async context manager for automatic session termination:
+
+```python
+import asyncio
+import textwrap
+from pyathena import aconnect
+from pyathena.aio.spark.cursor import AioSparkCursor
+
+async with await aconnect(work_group="YOUR_SPARK_WORKGROUP",
+                          cursor_class=AioSparkCursor) as conn:
+    cursor = await asyncio.to_thread(conn.cursor)
+    async with cursor:
+        await cursor.execute(
+            textwrap.dedent(
+                """
+                file_name = "s3://athena-examples-us-east-1/notebooks/yellow_tripdata_2016-01.parquet"
+
+                taxi_df = (spark.read.format("parquet")
+                     .option("header", "true")
+                     .option("inferSchema", "true")
+                     .load(file_name))
+                taxi1_df=taxi_df.groupBy("VendorID", "passenger_count").count()
+                taxi1_df.show()
+                """
+            )
+        )
+        print(await cursor.get_std_out())
+        print(await cursor.get_std_error())
+```
+
+To cancel a running calculation:
+
+```python
+import asyncio
+from pyathena import aconnect
+from pyathena.aio.spark.cursor import AioSparkCursor
+
+async with await aconnect(work_group="YOUR_SPARK_WORKGROUP",
+                          cursor_class=AioSparkCursor) as conn:
+    cursor = await asyncio.to_thread(conn.cursor)
+    await cursor.cancel()
+```

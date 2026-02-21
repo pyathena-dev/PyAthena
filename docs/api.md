@@ -20,6 +20,7 @@ api/arrow
 api/polars
 api/s3fs
 api/spark
+api/aio
 ```
 
 ## Quick reference
@@ -44,3 +45,4 @@ api/spark
 - {ref}`api_polars` - Polars DataFrame integration (no pyarrow required)
 - {ref}`api_s3fs` - Lightweight S3FS-based cursor (no pandas/pyarrow required)
 - {ref}`api_spark` - Apache Spark integration for big data processing
+- {ref}`api_aio` - Native asyncio cursor implementations

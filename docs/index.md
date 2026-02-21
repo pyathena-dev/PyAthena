@@ -52,6 +52,7 @@ arrow
 polars
 s3fs
 spark
+aio
 ```
 
 :::

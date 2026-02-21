@@ -574,3 +574,88 @@ result_set = future.result()
 for chunk in result_set.iter_chunks():
     process_chunk(chunk)
 ```
+
+(aio-polars-cursor)=
+
+## AioPolarsCursor
+
+AioPolarsCursor is a native asyncio cursor that returns results as Polars DataFrames.
+Unlike AsyncPolarsCursor which uses `concurrent.futures`, this cursor uses
+`asyncio.to_thread()` for result set creation, keeping the event loop free.
+
+The S3 download (CSV or Parquet) happens inside `execute()`, wrapped in `asyncio.to_thread()`.
+By the time `execute()` returns, all data is already loaded into memory.
+Therefore fetch methods, `as_polars()`, and `as_arrow()` are synchronous and do not need `await`.
+
+```python
+from pyathena import aconnect
+from pyathena.aio.polars.cursor import AioPolarsCursor
+
+async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                          region_name="us-west-2") as conn:
+    cursor = conn.cursor(AioPolarsCursor)
+    await cursor.execute("SELECT * FROM many_rows")
+    df = cursor.as_polars()
+    print(df.describe())
+    print(df.head())
+```
+
+Support fetch and iterate query results:
+
+```python
+from pyathena import aconnect
+from pyathena.aio.polars.cursor import AioPolarsCursor
+
+async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                          region_name="us-west-2") as conn:
+    cursor = conn.cursor(AioPolarsCursor)
+    await cursor.execute("SELECT * FROM many_rows")
+    print(cursor.fetchone())
+    print(cursor.fetchmany())
+    print(cursor.fetchall())
+```
+
+```python
+from pyathena import aconnect
+from pyathena.aio.polars.cursor import AioPolarsCursor
+
+async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                          region_name="us-west-2") as conn:
+    cursor = conn.cursor(AioPolarsCursor)
+    await cursor.execute("SELECT * FROM many_rows")
+    async for row in cursor:
+        print(row)
+```
+
+The `as_arrow()` method converts the result to an Apache Arrow Table:
+
+```python
+from pyathena import aconnect
+from pyathena.aio.polars.cursor import AioPolarsCursor
+
+async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                          region_name="us-west-2") as conn:
+    cursor = conn.cursor(AioPolarsCursor)
+    await cursor.execute("SELECT * FROM many_rows")
+    table = cursor.as_arrow()
+```
+
+The unload option is also available:
+
+```python
+from pyathena import aconnect
+from pyathena.aio.polars.cursor import AioPolarsCursor
+
+async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                          region_name="us-west-2") as conn:
+    cursor = conn.cursor(AioPolarsCursor, unload=True)
+    await cursor.execute("SELECT * FROM many_rows")
+    df = cursor.as_polars()
+```
+
+```{note}
+When using AioPolarsCursor with the `chunksize` option, `execute()` creates a lazy
+reader instead of loading all data at once. Subsequent iteration via `as_polars()`,
+`fetchone()`, or `async for` triggers chunk-by-chunk S3 reads that are not wrapped
+in `asyncio.to_thread()` and will block the event loop.
+```

@@ -366,3 +366,57 @@ cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 query_id, future = cursor.execute("SELECT * FROM many_rows")
 cursor.cancel(query_id)
 ```
+
+(aio-s3fs-cursor)=
+
+## AioS3FSCursor
+
+AioS3FSCursor is a native asyncio cursor that uses the same lightweight CSV parsing as S3FSCursor.
+Unlike AsyncS3FSCursor which uses `concurrent.futures`, this cursor uses
+`asyncio.to_thread()` for both result set creation and fetch operations,
+keeping the event loop free.
+
+Since `AthenaS3FSResultSet` lazily streams rows from S3 via a CSV reader,
+fetch methods are async and require `await`.
+
+```python
+from pyathena import aconnect
+from pyathena.aio.s3fs.cursor import AioS3FSCursor
+
+async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                          region_name="us-west-2") as conn:
+    cursor = conn.cursor(AioS3FSCursor)
+    await cursor.execute("SELECT * FROM many_rows")
+    print(await cursor.fetchone())
+    print(await cursor.fetchmany(10))
+    print(await cursor.fetchall())
+```
+
+Async iteration is supported:
+
+```python
+from pyathena import aconnect
+from pyathena.aio.s3fs.cursor import AioS3FSCursor
+
+async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                          region_name="us-west-2") as conn:
+    cursor = conn.cursor(AioS3FSCursor)
+    await cursor.execute("SELECT * FROM many_rows")
+    async for row in cursor:
+        print(row)
+```
+
+Execution information of the query can also be retrieved:
+
+```python
+from pyathena import aconnect
+from pyathena.aio.s3fs.cursor import AioS3FSCursor
+
+async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                          region_name="us-west-2") as conn:
+    cursor = conn.cursor(AioS3FSCursor)
+    await cursor.execute("SELECT * FROM many_rows")
+    print(cursor.state)
+    print(cursor.data_scanned_in_bytes)
+    print(cursor.output_location)
+```

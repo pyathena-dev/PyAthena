@@ -52,6 +52,22 @@ print(cursor.description)
 print(cursor.fetchall())
 ```
 
+Native asyncio is also supported:
+
+```python
+import asyncio
+from pyathena import aconnect
+
+async def main():
+    async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                              region_name="us-west-2") as conn:
+        cursor = conn.cursor()
+        await cursor.execute("SELECT 1")
+        print(await cursor.fetchone())
+
+asyncio.run(main())
+```
+
 ## License
 
 [MIT license](LICENSE)
