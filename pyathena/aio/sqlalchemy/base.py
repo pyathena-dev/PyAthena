@@ -38,10 +38,11 @@ class AsyncAdapt_pyathena_cursor:  # noqa: N801 - follows SQLAlchemy's internal 
     """
 
     server_side = False
-    __slots__ = ("_cursor",)
+    __slots__ = ("_cursor", "_rows")
 
     def __init__(self, cursor: Any) -> None:
         self._cursor = cursor
+        self._rows: List[Any] = []
 
     @property
     def description(self) -> Any:
@@ -53,9 +54,15 @@ class AsyncAdapt_pyathena_cursor:  # noqa: N801 - follows SQLAlchemy's internal 
 
     def close(self) -> None:
         self._cursor.close()
+        self._rows.clear()
 
     def execute(self, operation: str, parameters: Any = None, **kwargs: Any) -> Any:
-        return await_only(self._cursor.execute(operation, parameters, **kwargs))
+        result = await_only(self._cursor.execute(operation, parameters, **kwargs))
+        if self._cursor.description:
+            self._rows = list(await_only(self._cursor.fetchall()))
+        else:
+            self._rows = []
+        return result
 
     def executemany(
         self,
@@ -65,15 +72,24 @@ class AsyncAdapt_pyathena_cursor:  # noqa: N801 - follows SQLAlchemy's internal 
     ) -> None:
         for parameters in seq_of_parameters:
             await_only(self._cursor.execute(operation, parameters, **kwargs))
+        self._rows = []
 
     def fetchone(self) -> Any:
-        return await_only(self._cursor.fetchone())
+        if self._rows:
+            return self._rows.pop(0)
+        return None
 
     def fetchmany(self, size: Optional[int] = None) -> Any:
-        return await_only(self._cursor.fetchmany(size))
+        if size is None:
+            size = self._cursor.arraysize if hasattr(self._cursor, "arraysize") else 1
+        items = self._rows[:size]
+        self._rows = self._rows[size:]
+        return items
 
     def fetchall(self) -> Any:
-        return await_only(self._cursor.fetchall())
+        items = self._rows
+        self._rows = []
+        return items
 
     def setinputsizes(self, sizes: Any) -> None:
         self._cursor.setinputsizes(sizes)
