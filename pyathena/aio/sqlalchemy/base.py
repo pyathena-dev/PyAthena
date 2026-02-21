@@ -93,6 +93,9 @@ class AsyncAdapt_pyathena_cursor:  # noqa: N801 - follows SQLAlchemy's internal 
     def setinputsizes(self, sizes: Any) -> None:
         self._cursor.setinputsizes(sizes)
 
+    async def _async_soft_close(self) -> None:
+        return
+
     # PyAthena-specific methods used by AthenaDialect reflection
     def list_databases(self, *args: Any, **kwargs: Any) -> Any:
         return await_only(self._cursor.list_databases(*args, **kwargs))
@@ -122,11 +125,11 @@ class AsyncAdapt_pyathena_connection(AdaptedConnection):  # noqa: N801 - follows
 
     def __init__(self, dbapi: "AsyncAdapt_pyathena_dbapi", connection: AioConnection) -> None:
         self.dbapi = dbapi
-        self._connection = connection
+        self._connection = connection  # type: ignore[assignment]
 
     @property
     def driver_connection(self) -> AioConnection:
-        return self._connection  # type: ignore[no-any-return]
+        return self._connection  # type: ignore[return-value]
 
     @property
     def catalog_name(self) -> Optional[str]:
@@ -144,7 +147,7 @@ class AsyncAdapt_pyathena_connection(AdaptedConnection):  # noqa: N801 - follows
         self._connection.close()
 
     def commit(self) -> None:
-        self._connection.commit()
+        self._connection.commit()  # type: ignore[unused-coroutine]
 
     def rollback(self) -> None:
         pass
