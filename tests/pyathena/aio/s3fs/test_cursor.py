@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import pytest
 
+from pyathena.aio.s3fs.cursor import AioS3FSCursor
 from pyathena.error import ProgrammingError
 from pyathena.s3fs.result_set import AthenaS3FSResultSet
 from tests import ENV
@@ -58,11 +59,16 @@ class TestAioS3FSCursor:
         with pytest.raises(ProgrammingError):
             aio_s3fs_cursor.arraysize = -1
 
+    async def test_async_iterator(self, aio_s3fs_cursor):
+        await aio_s3fs_cursor.execute("SELECT * FROM one_row")
+        rows = []
+        async for row in aio_s3fs_cursor:
+            rows.append(row)
+        assert rows == [(1,)]
+
     async def test_context_manager(self):
         conn = await _aio_connect(schema_name=ENV.schema)
         try:
-            from pyathena.aio.s3fs.cursor import AioS3FSCursor
-
             async with conn.cursor(AioS3FSCursor) as cursor:
                 await cursor.execute("SELECT * FROM one_row")
                 assert await cursor.fetchone() == (1,)

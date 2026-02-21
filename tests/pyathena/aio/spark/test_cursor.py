@@ -3,9 +3,10 @@ import textwrap
 
 import pytest
 
-from pyathena.error import DatabaseError, OperationalError
+from pyathena.error import DatabaseError, NotSupportedError, OperationalError
 from pyathena.model import AthenaCalculationExecutionStatus
 from tests import ENV
+from tests.pyathena.aio.conftest import _aio_connect
 
 
 class TestAioSparkCursor:
@@ -142,3 +143,22 @@ class TestAioSparkCursor:
             )
 
         await task
+
+    async def test_executemany(self, aio_spark_cursor):
+        with pytest.raises(NotSupportedError):
+            await aio_spark_cursor.executemany("SELECT 1", [])
+
+    async def test_context_manager(self):
+        import asyncio
+
+        from pyathena.aio.spark.cursor import AioSparkCursor
+
+        conn = await _aio_connect(
+            schema_name=ENV.schema,
+            cursor_class=AioSparkCursor,
+            work_group=ENV.spark_work_group,
+        )
+        cursor = await asyncio.to_thread(conn.cursor)
+        async with cursor:
+            await cursor.execute("print('hello')")
+            assert await cursor.get_std_out() == "hello"

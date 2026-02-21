@@ -6,7 +6,7 @@ import logging
 from typing import Any, Dict, List, Optional, Union, cast
 
 from pyathena.aio.util import async_retry_api_call
-from pyathena.error import NotSupportedError, OperationalError, ProgrammingError
+from pyathena.error import DatabaseError, NotSupportedError, OperationalError, ProgrammingError
 from pyathena.model import (
     AthenaCalculationExecution,
     AthenaCalculationExecutionStatus,
@@ -123,10 +123,10 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
             calculation_id = response.get("CalculationExecutionId")
         except Exception as e:
             _logger.exception("Failed to execute calculation.")
-            raise OperationalError(*e.args) from e
+            raise DatabaseError(*e.args) from e
         return cast(str, calculation_id)
 
-    async def __poll(  # type: ignore[override]
+    async def __poll(
         self, query_id: str
     ) -> Union[AthenaQueryExecution, AthenaCalculationExecution]:
         while True:
@@ -181,8 +181,10 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
 
     async def _read_s3_file_as_text(self, uri) -> str:  # type: ignore[override]
         bucket, key = parse_output_location(uri)
-        response = await asyncio.to_thread(
+        response = await async_retry_api_call(
             self._client.get_object,
+            config=self._retry_config,
+            logger=_logger,
             Bucket=bucket,
             Key=key,
         )
