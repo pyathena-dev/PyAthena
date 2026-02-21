@@ -11,20 +11,20 @@ class TestAioPolarsCursor:
     async def test_fetchone(self, aio_polars_cursor):
         await aio_polars_cursor.execute("SELECT * FROM one_row")
         assert aio_polars_cursor.rownumber == 0
-        assert aio_polars_cursor.fetchone() == (1,)
+        assert await aio_polars_cursor.fetchone() == (1,)
         assert aio_polars_cursor.rownumber == 1
-        assert aio_polars_cursor.fetchone() is None
+        assert await aio_polars_cursor.fetchone() is None
 
     async def test_fetchmany(self, aio_polars_cursor):
         await aio_polars_cursor.execute("SELECT * FROM many_rows LIMIT 15")
-        assert len(aio_polars_cursor.fetchmany(10)) == 10
-        assert len(aio_polars_cursor.fetchmany(10)) == 5
+        assert len(await aio_polars_cursor.fetchmany(10)) == 10
+        assert len(await aio_polars_cursor.fetchmany(10)) == 5
 
     async def test_fetchall(self, aio_polars_cursor):
         await aio_polars_cursor.execute("SELECT * FROM one_row")
-        assert aio_polars_cursor.fetchall() == [(1,)]
+        assert await aio_polars_cursor.fetchall() == [(1,)]
         await aio_polars_cursor.execute("SELECT a FROM many_rows ORDER BY a")
-        assert aio_polars_cursor.fetchall() == [(i,) for i in range(10000)]
+        assert await aio_polars_cursor.fetchall() == [(i,) for i in range(10000)]
 
     async def test_as_polars(self, aio_polars_cursor):
         await aio_polars_cursor.execute("SELECT * FROM one_row")
@@ -44,11 +44,11 @@ class TestAioPolarsCursor:
 
     async def test_no_result_set_raises(self, aio_polars_cursor):
         with pytest.raises(ProgrammingError):
-            aio_polars_cursor.fetchone()
+            await aio_polars_cursor.fetchone()
         with pytest.raises(ProgrammingError):
-            aio_polars_cursor.fetchmany()
+            await aio_polars_cursor.fetchmany()
         with pytest.raises(ProgrammingError):
-            aio_polars_cursor.fetchall()
+            await aio_polars_cursor.fetchall()
         with pytest.raises(ProgrammingError):
             aio_polars_cursor.as_polars()
         with pytest.raises(ProgrammingError):
@@ -61,7 +61,7 @@ class TestAioPolarsCursor:
         try:
             async with conn.cursor() as cursor:
                 await cursor.execute("SELECT * FROM one_row")
-                assert cursor.fetchone() == (1,)
+                assert await cursor.fetchone() == (1,)
         finally:
             conn.close()
 
@@ -76,7 +76,7 @@ class TestAioPolarsCursor:
 
     async def test_description(self, aio_polars_cursor):
         await aio_polars_cursor.execute("SELECT CAST(1 AS INT) AS foobar FROM one_row")
-        assert aio_polars_cursor.fetchall() == [(1,)]
+        assert await aio_polars_cursor.fetchall() == [(1,)]
         assert aio_polars_cursor.description == [
             ("foobar", "integer", None, None, 10, 0, "UNKNOWN")
         ]
@@ -93,11 +93,11 @@ class TestAioPolarsCursor:
             "SELECT %(x)d FROM one_row", [{"x": i} for i in range(1, 2)]
         )
         with pytest.raises(ProgrammingError):
-            aio_polars_cursor.fetchall()
+            await aio_polars_cursor.fetchall()
         with pytest.raises(ProgrammingError):
-            aio_polars_cursor.fetchmany()
+            await aio_polars_cursor.fetchmany()
         with pytest.raises(ProgrammingError):
-            aio_polars_cursor.fetchone()
+            await aio_polars_cursor.fetchone()
         with pytest.raises(ProgrammingError):
             aio_polars_cursor.as_polars()
         with pytest.raises(ProgrammingError):
@@ -110,8 +110,8 @@ class TestAioPolarsCursor:
     )
     async def test_fetchone_unload(self, aio_polars_cursor):
         await aio_polars_cursor.execute("SELECT * FROM one_row")
-        assert aio_polars_cursor.fetchone() == (1,)
-        assert aio_polars_cursor.fetchone() is None
+        assert await aio_polars_cursor.fetchone() == (1,)
+        assert await aio_polars_cursor.fetchone() is None
 
     @pytest.mark.parametrize(
         "aio_polars_cursor",
