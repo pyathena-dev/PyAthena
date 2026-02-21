@@ -42,6 +42,11 @@ awsathena = "pyathena.sqlalchemy.base:AthenaDialect"
 "awsathena.arrow" = "pyathena.sqlalchemy.arrow:AthenaArrowDialect"
 "awsathena.polars" = "pyathena.sqlalchemy.polars:AthenaPolarsDialect"
 "awsathena.s3fs" = "pyathena.sqlalchemy.s3fs:AthenaS3FSDialect"
+"awsathena.aiorest" = "pyathena.sqlalchemy.async_rest:AthenaAioRestDialect"
+"awsathena.aiopandas" = "pyathena.sqlalchemy.async_pandas:AthenaAioPandasDialect"
+"awsathena.aioarrow" = "pyathena.sqlalchemy.async_arrow:AthenaAioArrowDialect"
+"awsathena.aiopolars" = "pyathena.sqlalchemy.async_polars:AthenaAioPolarsDialect"
+"awsathena.aios3fs" = "pyathena.sqlalchemy.async_s3fs:AthenaAioS3FSDialect"
 
 [project.optional-dependencies]
 sqlalchemy = ["sqlalchemy>=1.0.0"]
