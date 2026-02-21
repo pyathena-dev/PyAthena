@@ -7,17 +7,15 @@ from multiprocessing import cpu_count
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
     Dict,
     Iterable,
     List,
     Optional,
-    Tuple,
     Union,
     cast,
 )
 
-from pyathena.aio.common import AioBaseCursor
+from pyathena.aio.common import WithAsyncFetch
 from pyathena.common import CursorIterator
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaCompression, AthenaFileFormat, AthenaQueryExecution
@@ -26,7 +24,6 @@ from pyathena.pandas.converter import (
     DefaultPandasUnloadTypeConverter,
 )
 from pyathena.pandas.result_set import AthenaPandasResultSet, PandasDataFrameIterator
-from pyathena.result_set import WithResultSet
 
 if TYPE_CHECKING:
     from pandas import DataFrame
@@ -34,7 +31,7 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)  # type: ignore
 
 
-class AioPandasCursor(AioBaseCursor, CursorIterator, WithResultSet):
+class AioPandasCursor(WithAsyncFetch):
     """Native asyncio cursor that returns results as pandas DataFrames.
 
     Uses ``asyncio.to_thread()`` to create the result set off the event loop.
@@ -67,7 +64,6 @@ class AioPandasCursor(AioBaseCursor, CursorIterator, WithResultSet):
         result_reuse_enable: bool = False,
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
         auto_optimize_chunksize: bool = False,
-        on_start_query_execution: Optional[Callable[[str], None]] = None,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -90,8 +86,6 @@ class AioPandasCursor(AioBaseCursor, CursorIterator, WithResultSet):
         self._cache_type = cache_type
         self._max_workers = max_workers
         self._auto_optimize_chunksize = auto_optimize_chunksize
-        self._on_start_query_execution = on_start_query_execution
-        self._query_id: Optional[str] = None
         self._result_set: Optional[AthenaPandasResultSet] = None
 
     @staticmethod
@@ -101,45 +95,6 @@ class AioPandasCursor(AioBaseCursor, CursorIterator, WithResultSet):
         if unload:
             return DefaultPandasUnloadTypeConverter()
         return DefaultPandasTypeConverter()
-
-    @property
-    def arraysize(self) -> int:
-        return self._arraysize
-
-    @arraysize.setter
-    def arraysize(self, value: int) -> None:
-        if value <= 0:
-            raise ProgrammingError("arraysize must be a positive integer value.")
-        self._arraysize = value
-
-    @property  # type: ignore
-    def result_set(self) -> Optional[AthenaPandasResultSet]:
-        return self._result_set
-
-    @result_set.setter
-    def result_set(self, val) -> None:
-        self._result_set = val
-
-    @property
-    def query_id(self) -> Optional[str]:
-        return self._query_id
-
-    @query_id.setter
-    def query_id(self, val) -> None:
-        self._query_id = val
-
-    @property
-    def rownumber(self) -> Optional[int]:
-        return self.result_set.rownumber if self.result_set else None
-
-    @property
-    def rowcount(self) -> int:
-        return self.result_set.rowcount if self.result_set else -1
-
-    def close(self) -> None:
-        """Close the cursor and release associated resources."""
-        if self.result_set and not self.result_set.is_closed:
-            self.result_set.close()
 
     async def execute(  # type: ignore[override]
         self,
@@ -155,7 +110,6 @@ class AioPandasCursor(AioBaseCursor, CursorIterator, WithResultSet):
         keep_default_na: bool = False,
         na_values: Optional[Iterable[str]] = ("",),
         quoting: int = 1,
-        on_start_query_execution: Optional[Callable[[str], None]] = None,
         **kwargs,
     ) -> "AioPandasCursor":
         """Execute a SQL query asynchronously and return results as pandas DataFrames.
@@ -173,7 +127,6 @@ class AioPandasCursor(AioBaseCursor, CursorIterator, WithResultSet):
             keep_default_na: Whether to keep default pandas NA values.
             na_values: Additional values to treat as NA.
             quoting: CSV quoting behavior (pandas csv.QUOTE_* constants).
-            on_start_query_execution: Callback called when query starts.
             **kwargs: Additional pandas read_csv/read_parquet parameters.
 
         Returns:
@@ -204,10 +157,6 @@ class AioPandasCursor(AioBaseCursor, CursorIterator, WithResultSet):
             paramstyle=paramstyle,
         )
 
-        if self._on_start_query_execution:
-            self._on_start_query_execution(self.query_id)
-        if on_start_query_execution:
-            on_start_query_execution(self.query_id)
         query_execution = await self._poll(self.query_id)
         if query_execution.state == AthenaQueryExecution.STATE_SUCCEEDED:
             self.result_set = await asyncio.to_thread(
@@ -234,84 +183,6 @@ class AioPandasCursor(AioBaseCursor, CursorIterator, WithResultSet):
             raise OperationalError(query_execution.state_change_reason)
         return self
 
-    async def executemany(  # type: ignore[override]
-        self,
-        operation: str,
-        seq_of_parameters: List[Optional[Union[Dict[str, Any], List[str]]]],
-        **kwargs,
-    ) -> None:
-        """Execute a SQL query multiple times with different parameters.
-
-        Args:
-            operation: SQL query string to execute.
-            seq_of_parameters: Sequence of parameter sets, one per execution.
-            **kwargs: Additional keyword arguments passed to each ``execute()``.
-        """
-        for parameters in seq_of_parameters:
-            await self.execute(operation, parameters, **kwargs)
-        self._reset_state()
-
-    async def cancel(self) -> None:
-        """Cancel the currently executing query.
-
-        Raises:
-            ProgrammingError: If no query is currently executing.
-        """
-        if not self.query_id:
-            raise ProgrammingError("QueryExecutionId is none or empty.")
-        await self._cancel(self.query_id)
-
-    def fetchone(
-        self,
-    ) -> Optional[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
-        """Fetch the next row of the result set.
-
-        Returns:
-            A tuple representing the next row, or None if no more rows.
-
-        Raises:
-            ProgrammingError: If no result set is available.
-        """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaPandasResultSet, self.result_set)
-        return result_set.fetchone()
-
-    def fetchmany(
-        self, size: Optional[int] = None
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
-        """Fetch multiple rows from the result set.
-
-        Args:
-            size: Maximum number of rows to fetch. Defaults to arraysize.
-
-        Returns:
-            List of tuples representing the fetched rows.
-
-        Raises:
-            ProgrammingError: If no result set is available.
-        """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaPandasResultSet, self.result_set)
-        return result_set.fetchmany(size)
-
-    def fetchall(
-        self,
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
-        """Fetch all remaining rows from the result set.
-
-        Returns:
-            List of tuples representing all remaining rows.
-
-        Raises:
-            ProgrammingError: If no result set is available.
-        """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaPandasResultSet, self.result_set)
-        return result_set.fetchall()
-
     def as_pandas(self) -> Union["DataFrame", PandasDataFrameIterator]:
         """Return DataFrame or PandasDataFrameIterator based on chunksize setting.
 
@@ -322,18 +193,3 @@ class AioPandasCursor(AioBaseCursor, CursorIterator, WithResultSet):
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaPandasResultSet, self.result_set)
         return result_set.as_pandas()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        row = self.fetchone()
-        if row is None:
-            raise StopAsyncIteration
-        return row
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        self.close()

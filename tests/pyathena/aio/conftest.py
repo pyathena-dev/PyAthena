@@ -80,3 +80,38 @@ async def aio_polars_cursor(request):
             yield cursor
     finally:
         conn.close()
+
+
+@pytest.fixture
+async def aio_s3fs_cursor(request):
+    from pyathena.aio.s3fs.cursor import AioS3FSCursor
+
+    if not hasattr(request, "param"):
+        setattr(request, "param", {})  # noqa: B010
+    conn = await _aio_connect(schema_name=ENV.schema, cursor_class=AioS3FSCursor, **request.param)
+    try:
+        async with conn.cursor() as cursor:
+            yield cursor
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+async def aio_spark_cursor(request):
+    import asyncio
+
+    from pyathena.aio.spark.cursor import AioSparkCursor
+
+    if not hasattr(request, "param"):
+        setattr(request, "param", {})  # noqa: B010
+    conn = await _aio_connect(
+        schema_name=ENV.schema,
+        cursor_class=AioSparkCursor,
+        work_group=ENV.spark_work_group,
+        **request.param,
+    )
+    cursor = await asyncio.to_thread(conn.cursor)
+    try:
+        yield cursor
+    finally:
+        await cursor.close()
