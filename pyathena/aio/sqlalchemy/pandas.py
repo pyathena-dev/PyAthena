@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from typing import TYPE_CHECKING
 
-from pyathena.sqlalchemy.async_base import AthenaAioDialect
+from pyathena.aio.sqlalchemy.base import AthenaAioDialect
 from pyathena.util import strtobool
 
 if TYPE_CHECKING:
@@ -33,7 +33,7 @@ class AthenaAioPandasDialect(AthenaAioDialect):
 
     See Also:
         :class:`~pyathena.aio.pandas.cursor.AioPandasCursor`: The underlying async cursor.
-        :class:`~pyathena.sqlalchemy.async_base.AthenaAioDialect`: Base async dialect.
+        :class:`~pyathena.aio.sqlalchemy.base.AthenaAioDialect`: Base async dialect.
     """
 
     driver = "aiopandas"

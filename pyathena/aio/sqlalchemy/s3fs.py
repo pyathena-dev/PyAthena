@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from typing import TYPE_CHECKING
 
-from pyathena.sqlalchemy.async_base import AthenaAioDialect
+from pyathena.aio.sqlalchemy.base import AthenaAioDialect
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -25,7 +25,7 @@ class AthenaAioS3FSDialect(AthenaAioDialect):
 
     See Also:
         :class:`~pyathena.aio.s3fs.cursor.AioS3FSCursor`: The underlying async cursor.
-        :class:`~pyathena.sqlalchemy.async_base.AthenaAioDialect`: Base async dialect.
+        :class:`~pyathena.aio.sqlalchemy.base.AthenaAioDialect`: Base async dialect.
     """
 
     driver = "aios3fs"
