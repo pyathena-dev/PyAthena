@@ -131,7 +131,7 @@ def connect(*args, **kwargs) -> "Connection[Any]":
     return Connection(*args, **kwargs)
 
 
-async def aconnect(*args, **kwargs) -> "AioConnection":
+async def aio_connect(*args, **kwargs) -> "AioConnection":
     """Create a new async database connection to Amazon Athena.
 
     This is the async counterpart of :func:`connect`. It returns an
@@ -147,7 +147,7 @@ async def aconnect(*args, **kwargs) -> "AioConnection":
 
     Example:
         >>> import pyathena
-        >>> conn = await pyathena.aconnect(
+        >>> conn = await pyathena.aio_connect(
         ...     s3_staging_dir='s3://my-bucket/staging/',
         ...     region_name='us-east-1',
         ... )

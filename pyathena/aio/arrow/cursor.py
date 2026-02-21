@@ -29,7 +29,7 @@ class AioArrowCursor(WithAsyncFetch):
     operations, keeping the event loop free.
 
     Example:
-        >>> async with await pyathena.aconnect(...) as conn:
+        >>> async with await pyathena.aio_connect(...) as conn:
         ...     cursor = conn.cursor(AioArrowCursor)
         ...     await cursor.execute("SELECT * FROM my_table")
         ...     table = cursor.as_arrow()

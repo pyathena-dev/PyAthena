@@ -40,7 +40,7 @@ class AioPandasCursor(WithAsyncFetch):
     when ``chunksize`` is set, as fetch calls trigger lazy S3 reads.
 
     Example:
-        >>> async with await pyathena.aconnect(...) as conn:
+        >>> async with await pyathena.aio_connect(...) as conn:
         ...     cursor = conn.cursor(AioPandasCursor)
         ...     await cursor.execute("SELECT * FROM my_table")
         ...     df = cursor.as_pandas()

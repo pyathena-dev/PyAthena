@@ -56,10 +56,10 @@ Native asyncio is also supported:
 
 ```python
 import asyncio
-from pyathena import aconnect
+from pyathena import aio_connect
 
 async def main():
-    async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+    async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                               region_name="us-west-2") as conn:
         cursor = conn.cursor()
         await cursor.execute("SELECT 1")

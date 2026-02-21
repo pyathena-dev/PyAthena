@@ -380,10 +380,10 @@ Since `AthenaS3FSResultSet` lazily streams rows from S3 via a CSV reader,
 fetch methods are async and require `await`.
 
 ```python
-from pyathena import aconnect
+from pyathena import aio_connect
 from pyathena.aio.s3fs.cursor import AioS3FSCursor
 
-async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor(AioS3FSCursor)
     await cursor.execute("SELECT * FROM many_rows")
@@ -395,10 +395,10 @@ async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 Async iteration is supported:
 
 ```python
-from pyathena import aconnect
+from pyathena import aio_connect
 from pyathena.aio.s3fs.cursor import AioS3FSCursor
 
-async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor(AioS3FSCursor)
     await cursor.execute("SELECT * FROM many_rows")
@@ -409,10 +409,10 @@ async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 Execution information of the query can also be retrieved:
 
 ```python
-from pyathena import aconnect
+from pyathena import aio_connect
 from pyathena.aio.s3fs.cursor import AioS3FSCursor
 
-async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor(AioS3FSCursor)
     await cursor.execute("SELECT * FROM many_rows")

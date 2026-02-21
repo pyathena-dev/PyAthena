@@ -159,10 +159,10 @@ class TestAioCursor:
         conn = await _aio_connect()
         conn.close()
 
-    async def test_aconnect(self):
-        from pyathena import aconnect
+    async def test_aio_connect(self):
+        from pyathena import aio_connect
 
-        conn = await aconnect(work_group=ENV.default_work_group)
+        conn = await aio_connect(work_group=ENV.default_work_group)
         async with conn.cursor() as cursor:
             await cursor.execute("SELECT 1")
             assert await cursor.fetchone() == (1,)

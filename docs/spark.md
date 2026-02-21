@@ -347,10 +347,10 @@ must be wrapped in `asyncio.to_thread`:
 
 ```python
 import asyncio
-from pyathena import aconnect
+from pyathena import aio_connect
 from pyathena.aio.spark.cursor import AioSparkCursor
 
-async with await aconnect(work_group="YOUR_SPARK_WORKGROUP",
+async with await aio_connect(work_group="YOUR_SPARK_WORKGROUP",
                           cursor_class=AioSparkCursor) as conn:
     cursor = await asyncio.to_thread(conn.cursor)
     await cursor.execute("""spark.sql("SELECT 1").show()""")
@@ -362,10 +362,10 @@ The cursor supports the async context manager for automatic session termination:
 ```python
 import asyncio
 import textwrap
-from pyathena import aconnect
+from pyathena import aio_connect
 from pyathena.aio.spark.cursor import AioSparkCursor
 
-async with await aconnect(work_group="YOUR_SPARK_WORKGROUP",
+async with await aio_connect(work_group="YOUR_SPARK_WORKGROUP",
                           cursor_class=AioSparkCursor) as conn:
     cursor = await asyncio.to_thread(conn.cursor)
     async with cursor:
@@ -391,10 +391,10 @@ To cancel a running calculation:
 
 ```python
 import asyncio
-from pyathena import aconnect
+from pyathena import aio_connect
 from pyathena.aio.spark.cursor import AioSparkCursor
 
-async with await aconnect(work_group="YOUR_SPARK_WORKGROUP",
+async with await aio_connect(work_group="YOUR_SPARK_WORKGROUP",
                           cursor_class=AioSparkCursor) as conn:
     cursor = await asyncio.to_thread(conn.cursor)
     await cursor.cancel()

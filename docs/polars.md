@@ -585,10 +585,10 @@ Unlike AsyncPolarsCursor which uses `concurrent.futures`, this cursor uses
 keeping the event loop free.
 
 ```python
-from pyathena import aconnect
+from pyathena import aio_connect
 from pyathena.aio.polars.cursor import AioPolarsCursor
 
-async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor(AioPolarsCursor)
     await cursor.execute("SELECT * FROM many_rows")
@@ -600,10 +600,10 @@ async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 Support fetch and iterate query results:
 
 ```python
-from pyathena import aconnect
+from pyathena import aio_connect
 from pyathena.aio.polars.cursor import AioPolarsCursor
 
-async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor(AioPolarsCursor)
     await cursor.execute("SELECT * FROM many_rows")
@@ -613,10 +613,10 @@ async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 ```
 
 ```python
-from pyathena import aconnect
+from pyathena import aio_connect
 from pyathena.aio.polars.cursor import AioPolarsCursor
 
-async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor(AioPolarsCursor)
     await cursor.execute("SELECT * FROM many_rows")
@@ -627,10 +627,10 @@ async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 The `as_arrow()` method converts the result to an Apache Arrow Table:
 
 ```python
-from pyathena import aconnect
+from pyathena import aio_connect
 from pyathena.aio.polars.cursor import AioPolarsCursor
 
-async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor(AioPolarsCursor)
     await cursor.execute("SELECT * FROM many_rows")
@@ -640,10 +640,10 @@ async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 The unload option is also available:
 
 ```python
-from pyathena import aconnect
+from pyathena import aio_connect
 from pyathena.aio.polars.cursor import AioPolarsCursor
 
-async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor(AioPolarsCursor, unload=True)
     await cursor.execute("SELECT * FROM many_rows")
