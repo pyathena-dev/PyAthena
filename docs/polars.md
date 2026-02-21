@@ -652,3 +652,10 @@ async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
     await cursor.execute("SELECT * FROM many_rows")
     df = cursor.as_polars()
 ```
+
+```{note}
+When using AioPolarsCursor with the `chunksize` option, `execute()` creates a lazy
+reader instead of loading all data at once. Subsequent iteration via `as_polars()`,
+`fetchone()`, or `async for` triggers chunk-by-chunk S3 reads that are not wrapped
+in `asyncio.to_thread()` and will block the event loop.
+```

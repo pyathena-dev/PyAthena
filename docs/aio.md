@@ -201,4 +201,14 @@ row = await cursor.fetchone()    # Await required — reads from S3
 rows = await cursor.fetchall()   # Await required
 ```
 
+```{note}
+When using AioPandasCursor or AioPolarsCursor with the `chunksize` option,
+`execute()` creates a lazy reader (e.g., pandas `TextFileReader`) instead of
+loading all data at once. Subsequent iteration via `as_pandas()`, `fetchone()`,
+or `async for` triggers chunk-by-chunk S3 reads that are **not** wrapped in
+`asyncio.to_thread()` and will block the event loop. If you need chunked
+processing in an async application, consider wrapping the iteration in
+`asyncio.to_thread()` yourself, or use the default non-chunked mode.
+```
+
 See each cursor's documentation page for detailed usage examples.
