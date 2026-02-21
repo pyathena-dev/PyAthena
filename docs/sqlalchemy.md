@@ -2,8 +2,13 @@
 
 # SQLAlchemy
 
-Install SQLAlchemy with `pip install "SQLAlchemy>=1.0.0"` or `pip install PyAthena[SQLAlchemy]`.
+Install SQLAlchemy with `pip install "SQLAlchemy>=1.0.0"` or `pip install PyAthena[sqlalchemy]`.
 Supported SQLAlchemy is 1.0.0 or higher.
+
+For async support (`create_async_engine`), install with `pip install PyAthena[aiosqlalchemy]`
+(requires SQLAlchemy 2.0+).
+
+### Sync
 
 ```python
 from sqlalchemy import func, select
@@ -24,6 +29,48 @@ with engine.connect() as connection:
     print(result.scalar())
 ```
 
+### Async
+
+```python
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
+
+conn_str = "awsathena+aiorest://{aws_access_key_id}:{aws_secret_access_key}@athena.{region_name}.amazonaws.com:443/"\
+           "{schema_name}?s3_staging_dir={s3_staging_dir}"
+engine = create_async_engine(conn_str.format(
+    aws_access_key_id="YOUR_ACCESS_KEY_ID",
+    aws_secret_access_key="YOUR_SECRET_ACCESS_KEY",
+    region_name="us-west-2",
+    schema_name="default",
+    s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/"))
+
+async def main():
+    async with engine.connect() as connection:
+        result = await connection.execute(text("SELECT * FROM many_rows"))
+        print(result.fetchall())
+    await engine.dispose()
+```
+
+SQLAlchemy's reflection API (`Table(..., autoload_with=)`, `inspect()`) is synchronous
+internally, so it cannot be called directly on an async connection. Use `run_sync()` to
+bridge the gap:
+
+```python
+from sqlalchemy.sql.schema import Table, MetaData
+
+async with engine.connect() as connection:
+    # Table reflection
+    table = await connection.run_sync(
+        lambda sync_conn: Table("my_table", MetaData(), autoload_with=sync_conn)
+    )
+
+    # Schema inspection
+    import sqlalchemy
+    schemas = await connection.run_sync(
+        lambda sync_conn: sqlalchemy.inspect(sync_conn).get_schema_names()
+    )
+```
+
 ## Connection string
 
 The connection string has the following format:
@@ -38,7 +85,15 @@ If you do not specify `aws_access_key_id` and `aws_secret_access_key` using inst
 awsathena+rest://:@athena.{region_name}.amazonaws.com:443/{schema_name}?s3_staging_dir={s3_staging_dir}&...
 ```
 
+For async, replace the driver portion (e.g. `+rest` with `+aiorest`):
+
+```text
+awsathena+aiorest://:@athena.{region_name}.amazonaws.com:443/{schema_name}?s3_staging_dir={s3_staging_dir}&...
+```
+
 ## Dialect & driver
+
+### Sync
 
 | Dialect   | Driver | Schema           | Cursor                 |
 |-----------|--------|------------------|------------------------|
@@ -48,6 +103,18 @@ awsathena+rest://:@athena.{region_name}.amazonaws.com:443/{schema_name}?s3_stagi
 | awsathena | arrow  | awsathena+arrow  | {ref}`arrow-cursor`    |
 | awsathena | polars | awsathena+polars | {ref}`polars-cursor`   |
 | awsathena | s3fs   | awsathena+s3fs   | {ref}`s3fs-cursor`     |
+
+### Async
+
+Requires `pip install PyAthena[aiosqlalchemy]` (SQLAlchemy 2.0+).
+
+| Dialect   | Driver    | Schema              | Cursor                       |
+|-----------|-----------|---------------------|------------------------------|
+| awsathena | aiorest   | awsathena+aiorest   | DefaultCursor (async)        |
+| awsathena | aiopandas | awsathena+aiopandas | {ref}`pandas-cursor` (async) |
+| awsathena | aioarrow  | awsathena+aioarrow  | {ref}`arrow-cursor` (async)  |
+| awsathena | aiopolars | awsathena+aiopolars | {ref}`polars-cursor` (async) |
+| awsathena | aios3fs   | awsathena+aios3fs   | {ref}`s3fs-cursor` (async)   |
 
 ## Dialect options
 

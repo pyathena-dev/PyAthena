@@ -27,7 +27,7 @@ class TestAsyncSQLAlchemyAthena:
         assert len(rows[0]) == 1
 
     async def test_unicode(self, async_engine):
-        engine, conn = async_engine
+        _, conn = async_engine
         unicode_str = "密林"
         returned_str = (
             await conn.execute(
@@ -41,7 +41,7 @@ class TestAsyncSQLAlchemyAthena:
         assert returned_str == unicode_str
 
     async def test_reflect_table(self, async_engine):
-        engine, conn = async_engine
+        _, conn = async_engine
         one_row = await conn.run_sync(
             lambda sync_conn: Table("one_row", MetaData(schema=ENV.schema), autoload_with=sync_conn)
         )
@@ -50,7 +50,7 @@ class TestAsyncSQLAlchemyAthena:
         assert one_row.comment == "table comment"
 
     async def test_reflect_schemas(self, async_engine):
-        engine, conn = async_engine
+        _, conn = async_engine
 
         def _inspect(sync_conn):
             insp = sqlalchemy.inspect(sync_conn)
@@ -61,7 +61,7 @@ class TestAsyncSQLAlchemyAthena:
         assert "default" in schemas
 
     async def test_get_table_names(self, async_engine):
-        engine, conn = async_engine
+        _, conn = async_engine
 
         def _inspect(sync_conn):
             insp = sqlalchemy.inspect(sync_conn)
@@ -71,7 +71,7 @@ class TestAsyncSQLAlchemyAthena:
         assert "many_rows" in table_names
 
     async def test_has_table(self, async_engine):
-        engine, conn = async_engine
+        _, conn = async_engine
 
         def _inspect(sync_conn):
             insp = sqlalchemy.inspect(sync_conn)
@@ -85,7 +85,7 @@ class TestAsyncSQLAlchemyAthena:
         assert not not_exists
 
     async def test_get_columns(self, async_engine):
-        engine, conn = async_engine
+        _, conn = async_engine
 
         def _inspect(sync_conn):
             insp = sqlalchemy.inspect(sync_conn)

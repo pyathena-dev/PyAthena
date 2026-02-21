@@ -118,8 +118,6 @@ class AsyncAdapt_pyathena_connection(AdaptedConnection):  # noqa: N801 - follows
     ``AsyncAdapt_pyathena_cursor``.
     """
 
-    await_only_ = staticmethod(await_only)
-
     __slots__ = ("dbapi", "_connection")
 
     def __init__(self, dbapi: "AsyncAdapt_pyathena_dbapi", connection: AioConnection) -> None:
@@ -185,17 +183,11 @@ class AthenaAioDialect(AthenaDialect):
 
     Extends the synchronous ``AthenaDialect`` with async capability
     by setting ``is_async = True`` and providing an adapted DBAPI module
-    that wraps ``AioConnection`` and async cursors.
+    that wraps ``AioConnection`` and async cursors via greenlet-based
+    ``await_only()``.
 
-    Connection URL Format:
-        ``awsathena+aiorest://{access_key}:{secret_key}@athena.{region}.amazonaws.com/{schema}``
-
-    Example:
-        >>> from sqlalchemy.ext.asyncio import create_async_engine
-        >>> engine = create_async_engine(
-        ...     "awsathena+aiorest://:@athena.us-west-2.amazonaws.com/default"
-        ...     "?s3_staging_dir=s3://my-bucket/athena-results/"
-        ... )
+    Subclasses (e.g. ``AthenaAioRestDialect``, ``AthenaAioPandasDialect``)
+    register concrete ``awsathena+aio*`` drivers.
 
     See Also:
         :class:`~pyathena.sqlalchemy.base.AthenaDialect`: Synchronous base dialect.
