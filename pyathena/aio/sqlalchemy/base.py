@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Dict, List, MutableMapping, Optional, Tuple, Union, cast
 
+from sqlalchemy import pool
 from sqlalchemy.engine import AdaptedConnection
 from sqlalchemy.util.concurrency import await_only
 
@@ -188,6 +189,10 @@ class AthenaAioDialect(AthenaDialect):
 
     is_async = True
     supports_statement_cache = True
+
+    @classmethod
+    def get_pool_class(cls, url: "URL") -> type:
+        return pool.AsyncAdaptedQueuePool
 
     @classmethod
     def import_dbapi(cls) -> "ModuleType":
