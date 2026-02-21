@@ -33,6 +33,10 @@ Aio Result Set
    :members:
    :inherited-members:
 
+.. autoclass:: pyathena.aio.result_set.AthenaAioDictResultSet
+   :members:
+   :inherited-members:
+
 Aio Base Classes
 ----------------
 
