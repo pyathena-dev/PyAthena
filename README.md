@@ -52,7 +52,7 @@ print(cursor.description)
 print(cursor.fetchall())
 ```
 
-### Async
+Native asyncio is also supported:
 
 ```python
 import asyncio
