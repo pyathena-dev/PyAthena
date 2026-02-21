@@ -177,38 +177,19 @@ Native asyncio versions are available for all cursor types:
 
 ### Fetch behavior
 
-For **AioPandasCursor**, **AioArrowCursor**, and **AioPolarsCursor**, the S3 download
-(CSV or Parquet) happens inside `execute()`, wrapped in `asyncio.to_thread()`.
-By the time `execute()` returns, all data is already loaded into memory.
-Therefore `fetchone()`, `fetchall()`, `as_pandas()`, `as_arrow()`, and `as_polars()`
-are synchronous (in-memory only) and do not need `await`:
+All aio cursors use `await` for fetch operations. The S3 download (CSV or Parquet)
+happens inside `execute()`, wrapped in `asyncio.to_thread()`. Fetch methods are also
+wrapped in `asyncio.to_thread()` to ensure the event loop is never blocked — this is
+especially important when `chunksize` is set, as fetch calls trigger lazy S3 reads.
 
 ```python
-# Pandas, Arrow, Polars — S3 download completes during execute()
-await cursor.execute("SELECT * FROM many_rows")  # Downloads data here
-row = cursor.fetchone()        # No await — data already in memory
-rows = cursor.fetchall()       # No await
-df = cursor.as_pandas()        # No await
-```
-
-The exceptions are **AioCursor** and **AioS3FSCursor**, which stream rows lazily from S3.
-Their fetch methods perform I/O and require `await`:
-
-```python
-# AioCursor, AioS3FSCursor — fetch reads from S3 lazily
 await cursor.execute("SELECT * FROM many_rows")
-row = await cursor.fetchone()    # Await required — reads from S3
-rows = await cursor.fetchall()   # Await required
+row = await cursor.fetchone()
+rows = await cursor.fetchall()
+df = cursor.as_pandas()  # In-memory conversion, no await needed
 ```
 
-```{note}
-When using AioPandasCursor or AioPolarsCursor with the `chunksize` option,
-`execute()` creates a lazy reader (e.g., pandas `TextFileReader`) instead of
-loading all data at once. Subsequent iteration via `as_pandas()`, `fetchone()`,
-or `async for` triggers chunk-by-chunk S3 reads that are **not** wrapped in
-`asyncio.to_thread()` and will block the event loop. If you need chunked
-processing in an async application, consider wrapping the iteration in
-`asyncio.to_thread()` yourself, or use the default non-chunked mode.
-```
+The `as_pandas()`, `as_arrow()`, and `as_polars()` convenience methods operate on
+already-loaded data and remain synchronous.
 
 See each cursor's documentation page for detailed usage examples.

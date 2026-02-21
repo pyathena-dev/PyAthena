@@ -487,11 +487,8 @@ cursor = connect(
 
 AioArrowCursor is a native asyncio cursor that returns results as Apache Arrow Tables.
 Unlike AsyncArrowCursor which uses `concurrent.futures`, this cursor uses
-`asyncio.to_thread()` for result set creation, keeping the event loop free.
-
-The S3 download (CSV or Parquet) happens inside `execute()`, wrapped in `asyncio.to_thread()`.
-By the time `execute()` returns, all data is already loaded into memory.
-Therefore fetch methods, `as_arrow()`, and `as_polars()` are synchronous and do not need `await`.
+`asyncio.to_thread()` for both result set creation and fetch operations,
+keeping the event loop free.
 
 ```python
 from pyathena import aconnect
@@ -517,9 +514,9 @@ async with await aconnect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor(AioArrowCursor)
     await cursor.execute("SELECT * FROM many_rows")
-    print(cursor.fetchone())
-    print(cursor.fetchmany())
-    print(cursor.fetchall())
+    print(await cursor.fetchone())
+    print(await cursor.fetchmany())
+    print(await cursor.fetchall())
 ```
 
 ```python
