@@ -14,7 +14,7 @@ from pyathena.arrow.converter import (
 from pyathena.arrow.result_set import AthenaArrowResultSet
 from pyathena.async_cursor import AsyncCursor
 from pyathena.common import CursorIterator
-from pyathena.model import AthenaCompression, AthenaFileFormat, AthenaQueryExecution
+from pyathena.model import AthenaQueryExecution
 
 _logger = logging.getLogger(__name__)  # type: ignore
 
@@ -182,18 +182,7 @@ class AsyncArrowCursor(AsyncCursor):
         paramstyle: Optional[str] = None,
         **kwargs,
     ) -> Tuple[str, "Future[Union[AthenaArrowResultSet, Any]]"]:
-        if self._unload:
-            s3_staging_dir = s3_staging_dir if s3_staging_dir else self._s3_staging_dir
-            if not s3_staging_dir:
-                raise ProgrammingError("If the unload option is used, s3_staging_dir is required.")
-            operation, unload_location = self._formatter.wrap_unload(
-                operation,
-                s3_staging_dir=s3_staging_dir,
-                format_=AthenaFileFormat.FILE_FORMAT_PARQUET,
-                compression=AthenaCompression.COMPRESSION_SNAPPY,
-            )
-        else:
-            unload_location = None
+        operation, unload_location = self._prepare_unload(operation, s3_staging_dir)
         query_id = self._execute(
             operation,
             parameters=parameters,

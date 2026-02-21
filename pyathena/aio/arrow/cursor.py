@@ -13,7 +13,7 @@ from pyathena.arrow.converter import (
 from pyathena.arrow.result_set import AthenaArrowResultSet
 from pyathena.common import CursorIterator
 from pyathena.error import OperationalError, ProgrammingError
-from pyathena.model import AthenaCompression, AthenaFileFormat, AthenaQueryExecution
+from pyathena.model import AthenaQueryExecution
 
 if TYPE_CHECKING:
     import polars as pl
@@ -109,18 +109,7 @@ class AioArrowCursor(WithAsyncFetch):
             Self reference for method chaining.
         """
         self._reset_state()
-        if self._unload:
-            s3_staging_dir = s3_staging_dir if s3_staging_dir else self._s3_staging_dir
-            if not s3_staging_dir:
-                raise ProgrammingError("If the unload option is used, s3_staging_dir is required.")
-            operation, unload_location = self._formatter.wrap_unload(
-                operation,
-                s3_staging_dir=s3_staging_dir,
-                format_=AthenaFileFormat.FILE_FORMAT_PARQUET,
-                compression=AthenaCompression.COMPRESSION_SNAPPY,
-            )
-        else:
-            unload_location = None
+        operation, unload_location = self._prepare_unload(operation, s3_staging_dir)
         self.query_id = await self._execute(
             operation,
             parameters=parameters,
