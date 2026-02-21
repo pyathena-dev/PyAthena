@@ -9,7 +9,6 @@ from sqlalchemy.testing.suite import StringTest as _StringTest
 from sqlalchemy.testing.suite import TrueDivTest as _TrueDivTest
 
 del BinaryTest  # noqa
-del BizarroCharacterFKResolutionTest  # noqa
 del ComponentReflectionTest  # noqa
 del ComponentReflectionTestExtra  # noqa
 del CompositeKeyReflectionTest  # noqa
