@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union, cast
 from pyathena.aio.common import WithAsyncFetch
 from pyathena.common import CursorIterator
 from pyathena.error import OperationalError, ProgrammingError
+from pyathena.filesystem.s3_async import AioS3FileSystem
 from pyathena.model import AthenaQueryExecution
 from pyathena.s3fs.converter import DefaultS3FSTypeConverter
 from pyathena.s3fs.result_set import AthenaS3FSResultSet, CSVReaderType
@@ -16,11 +17,12 @@ _logger = logging.getLogger(__name__)  # type: ignore
 
 
 class AioS3FSCursor(WithAsyncFetch):
-    """Native asyncio cursor that reads CSV results via S3FileSystem.
+    """Native asyncio cursor that reads CSV results via AioS3FileSystem.
 
-    Uses ``asyncio.to_thread()`` for result set creation and fetch operations
-    because ``AthenaS3FSResultSet`` lazily streams rows from S3 via a CSV
-    reader, making fetch calls blocking I/O.
+    Uses ``AioS3FileSystem`` for S3 operations, which replaces
+    ``ThreadPoolExecutor`` parallelism with ``asyncio.gather`` +
+    ``asyncio.to_thread``. Fetch operations are wrapped in
+    ``asyncio.to_thread()`` because CSV reading is blocking I/O.
 
     Example:
         >>> async with await pyathena.aio_connect(...) as conn:
@@ -127,6 +129,7 @@ class AioS3FSCursor(WithAsyncFetch):
                 arraysize=self.arraysize,
                 retry_config=self._retry_config,
                 csv_reader=self._csv_reader,
+                filesystem_class=AioS3FileSystem,
                 **kwargs,
             )
         else:
