@@ -1,9 +1,8 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from pyathena.aio.common import WithAsyncFetch
 from pyathena.arrow.converter import (
@@ -19,7 +18,7 @@ if TYPE_CHECKING:
     import polars as pl
     from pyarrow import Table
 
-_logger = logging.getLogger(__name__)  # type: ignore
+_logger = logging.getLogger(__name__)
 
 
 class AioArrowCursor(WithAsyncFetch):
@@ -37,19 +36,19 @@ class AioArrowCursor(WithAsyncFetch):
 
     def __init__(
         self,
-        s3_staging_dir: Optional[str] = None,
-        schema_name: Optional[str] = None,
-        catalog_name: Optional[str] = None,
-        work_group: Optional[str] = None,
+        s3_staging_dir: str | None = None,
+        schema_name: str | None = None,
+        catalog_name: str | None = None,
+        work_group: str | None = None,
         poll_interval: float = 1,
-        encryption_option: Optional[str] = None,
-        kms_key: Optional[str] = None,
+        encryption_option: str | None = None,
+        kms_key: str | None = None,
         kill_on_interrupt: bool = True,
         unload: bool = False,
         result_reuse_enable: bool = False,
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
-        connect_timeout: Optional[float] = None,
-        request_timeout: Optional[float] = None,
+        connect_timeout: float | None = None,
+        request_timeout: float | None = None,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -68,12 +67,12 @@ class AioArrowCursor(WithAsyncFetch):
         self._unload = unload
         self._connect_timeout = connect_timeout
         self._request_timeout = request_timeout
-        self._result_set: Optional[AthenaArrowResultSet] = None
+        self._result_set: AthenaArrowResultSet | None = None
 
     @staticmethod
     def get_default_converter(
         unload: bool = False,
-    ) -> Union[DefaultArrowTypeConverter, DefaultArrowUnloadTypeConverter, Any]:
+    ) -> DefaultArrowTypeConverter | DefaultArrowUnloadTypeConverter | Any:
         if unload:
             return DefaultArrowUnloadTypeConverter()
         return DefaultArrowTypeConverter()
@@ -81,16 +80,16 @@ class AioArrowCursor(WithAsyncFetch):
     async def execute(  # type: ignore[override]
         self,
         operation: str,
-        parameters: Optional[Union[Dict[str, Any], List[str]]] = None,
-        work_group: Optional[str] = None,
-        s3_staging_dir: Optional[str] = None,
-        cache_size: Optional[int] = 0,
-        cache_expiration_time: Optional[int] = 0,
-        result_reuse_enable: Optional[bool] = None,
-        result_reuse_minutes: Optional[int] = None,
-        paramstyle: Optional[str] = None,
+        parameters: dict[str, Any] | list[str] | None = None,
+        work_group: str | None = None,
+        s3_staging_dir: str | None = None,
+        cache_size: int | None = 0,
+        cache_expiration_time: int | None = 0,
+        result_reuse_enable: bool | None = None,
+        result_reuse_minutes: int | None = None,
+        paramstyle: str | None = None,
         **kwargs,
-    ) -> "AioArrowCursor":
+    ) -> AioArrowCursor:
         """Execute a SQL query asynchronously and return results as Arrow Tables.
 
         Args:
@@ -143,7 +142,7 @@ class AioArrowCursor(WithAsyncFetch):
 
     async def fetchone(  # type: ignore[override]
         self,
-    ) -> Optional[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+    ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
         """Fetch the next row of the result set.
 
         Wraps the synchronous fetch in ``asyncio.to_thread`` to avoid
@@ -161,8 +160,8 @@ class AioArrowCursor(WithAsyncFetch):
         return await asyncio.to_thread(result_set.fetchone)
 
     async def fetchmany(  # type: ignore[override]
-        self, size: Optional[int] = None
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        self, size: int | None = None
+    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         """Fetch multiple rows from the result set.
 
         Wraps the synchronous fetch in ``asyncio.to_thread`` to avoid
@@ -184,7 +183,7 @@ class AioArrowCursor(WithAsyncFetch):
 
     async def fetchall(  # type: ignore[override]
         self,
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         """Fetch all remaining rows from the result set.
 
         Wraps the synchronous fetch in ``asyncio.to_thread`` to avoid
@@ -207,7 +206,7 @@ class AioArrowCursor(WithAsyncFetch):
             raise StopAsyncIteration
         return row
 
-    def as_arrow(self) -> "Table":
+    def as_arrow(self) -> Table:
         """Return query results as an Apache Arrow Table.
 
         Returns:
@@ -218,7 +217,7 @@ class AioArrowCursor(WithAsyncFetch):
         result_set = cast(AthenaArrowResultSet, self.result_set)
         return result_set.as_arrow()
 
-    def as_polars(self) -> "pl.DataFrame":
+    def as_polars(self) -> pl.DataFrame:
         """Return query results as a Polars DataFrame.
 
         Returns:

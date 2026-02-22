@@ -1,14 +1,14 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import logging
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Pattern
+from re import Pattern
+from typing import Any
 
 from pyathena.error import DataError
 
-_logger = logging.getLogger(__name__)  # type: ignore
+_logger = logging.getLogger(__name__)
 
 
 class AthenaQueryExecution:
@@ -64,212 +64,212 @@ class AthenaQueryExecution:
 
     S3_ACL_OPTION_BUCKET_OWNER_FULL_CONTROL = "BUCKET_OWNER_FULL_CONTROL"
 
-    def __init__(self, response: Dict[str, Any]) -> None:
+    def __init__(self, response: dict[str, Any]) -> None:
         query_execution = response.get("QueryExecution")
         if not query_execution:
             raise DataError("KeyError `QueryExecution`")
 
         query_execution_context = query_execution.get("QueryExecutionContext", {})
-        self._database: Optional[str] = query_execution_context.get("Database")
-        self._catalog: Optional[str] = query_execution_context.get("Catalog")
+        self._database: str | None = query_execution_context.get("Database")
+        self._catalog: str | None = query_execution_context.get("Catalog")
 
-        self._query_id: Optional[str] = query_execution.get("QueryExecutionId")
+        self._query_id: str | None = query_execution.get("QueryExecutionId")
         if not self._query_id:
             raise DataError("KeyError `QueryExecutionId`")
-        self._query: Optional[str] = query_execution.get("Query")
+        self._query: str | None = query_execution.get("Query")
         if not self._query:
             raise DataError("KeyError `Query`")
-        self._statement_type: Optional[str] = query_execution.get("StatementType")
-        self._substatement_type: Optional[str] = query_execution.get("SubstatementType")
-        self._work_group: Optional[str] = query_execution.get("WorkGroup")
-        self._execution_parameters: List[str] = query_execution.get("ExecutionParameters", [])
+        self._statement_type: str | None = query_execution.get("StatementType")
+        self._substatement_type: str | None = query_execution.get("SubstatementType")
+        self._work_group: str | None = query_execution.get("WorkGroup")
+        self._execution_parameters: list[str] = query_execution.get("ExecutionParameters", [])
 
         status = query_execution.get("Status")
         if not status:
             raise DataError("KeyError `Status`")
-        self._state: Optional[str] = status.get("State")
-        self._state_change_reason: Optional[str] = status.get("StateChangeReason")
-        self._submission_date_time: Optional[datetime] = status.get("SubmissionDateTime")
-        self._completion_date_time: Optional[datetime] = status.get("CompletionDateTime")
+        self._state: str | None = status.get("State")
+        self._state_change_reason: str | None = status.get("StateChangeReason")
+        self._submission_date_time: datetime | None = status.get("SubmissionDateTime")
+        self._completion_date_time: datetime | None = status.get("CompletionDateTime")
         athena_error = status.get("AthenaError", {})
-        self._error_category: Optional[int] = athena_error.get("ErrorCategory")
-        self._error_type: Optional[int] = athena_error.get("ErrorType")
-        self._retryable: Optional[bool] = athena_error.get("Retryable")
-        self._error_message: Optional[str] = athena_error.get("ErrorMessage")
+        self._error_category: int | None = athena_error.get("ErrorCategory")
+        self._error_type: int | None = athena_error.get("ErrorType")
+        self._retryable: bool | None = athena_error.get("Retryable")
+        self._error_message: str | None = athena_error.get("ErrorMessage")
 
         statistics = query_execution.get("Statistics", {})
-        self._data_scanned_in_bytes: Optional[int] = statistics.get("DataScannedInBytes")
-        self._engine_execution_time_in_millis: Optional[int] = statistics.get(
+        self._data_scanned_in_bytes: int | None = statistics.get("DataScannedInBytes")
+        self._engine_execution_time_in_millis: int | None = statistics.get(
             "EngineExecutionTimeInMillis", None
         )
-        self._query_queue_time_in_millis: Optional[int] = statistics.get(
+        self._query_queue_time_in_millis: int | None = statistics.get(
             "QueryQueueTimeInMillis", None
         )
-        self._total_execution_time_in_millis: Optional[int] = statistics.get(
+        self._total_execution_time_in_millis: int | None = statistics.get(
             "TotalExecutionTimeInMillis", None
         )
-        self._query_planning_time_in_millis: Optional[int] = statistics.get(
+        self._query_planning_time_in_millis: int | None = statistics.get(
             "QueryPlanningTimeInMillis", None
         )
-        self._service_processing_time_in_millis: Optional[int] = statistics.get(
+        self._service_processing_time_in_millis: int | None = statistics.get(
             "ServiceProcessingTimeInMillis", None
         )
-        self._data_manifest_location: Optional[str] = statistics.get("DataManifestLocation")
+        self._data_manifest_location: str | None = statistics.get("DataManifestLocation")
         reuse_info = statistics.get("ResultReuseInformation", {})
-        self._reused_previous_result: Optional[bool] = reuse_info.get("ReusedPreviousResult")
+        self._reused_previous_result: bool | None = reuse_info.get("ReusedPreviousResult")
 
         result_conf = query_execution.get("ResultConfiguration", {})
-        self._output_location: Optional[str] = result_conf.get("OutputLocation")
+        self._output_location: str | None = result_conf.get("OutputLocation")
         encryption_conf = result_conf.get("EncryptionConfiguration", {})
-        self._encryption_option: Optional[str] = encryption_conf.get("EncryptionOption")
-        self._kms_key: Optional[str] = encryption_conf.get("KmsKey")
-        self._expected_bucket_owner: Optional[str] = result_conf.get("ExpectedBucketOwner")
+        self._encryption_option: str | None = encryption_conf.get("EncryptionOption")
+        self._kms_key: str | None = encryption_conf.get("KmsKey")
+        self._expected_bucket_owner: str | None = result_conf.get("ExpectedBucketOwner")
         acl_conf = result_conf.get("AclConfiguration", {})
-        self._s3_acl_option: Optional[str] = acl_conf.get("S3AclOption")
+        self._s3_acl_option: str | None = acl_conf.get("S3AclOption")
 
         engine_version = query_execution.get("EngineVersion", {})
-        self._selected_engine_version: Optional[str] = engine_version.get(
+        self._selected_engine_version: str | None = engine_version.get(
             "SelectedEngineVersion", None
         )
-        self._effective_engine_version: Optional[str] = engine_version.get(
+        self._effective_engine_version: str | None = engine_version.get(
             "EffectiveEngineVersion", None
         )
 
         reuse_conf = query_execution.get("ResultReuseConfiguration", {})
         reuse_age_conf = reuse_conf.get("ResultReuseByAgeConfiguration", {})
-        self._result_reuse_enabled: Optional[bool] = reuse_age_conf.get("Enabled")
-        self._result_reuse_minutes: Optional[int] = reuse_age_conf.get("MaxAgeInMinutes")
+        self._result_reuse_enabled: bool | None = reuse_age_conf.get("Enabled")
+        self._result_reuse_minutes: int | None = reuse_age_conf.get("MaxAgeInMinutes")
 
     @property
-    def database(self) -> Optional[str]:
+    def database(self) -> str | None:
         return self._database
 
     @property
-    def catalog(self) -> Optional[str]:
+    def catalog(self) -> str | None:
         return self._catalog
 
     @property
-    def query_id(self) -> Optional[str]:
+    def query_id(self) -> str | None:
         return self._query_id
 
     @property
-    def query(self) -> Optional[str]:
+    def query(self) -> str | None:
         return self._query
 
     @property
-    def statement_type(self) -> Optional[str]:
+    def statement_type(self) -> str | None:
         return self._statement_type
 
     @property
-    def substatement_type(self) -> Optional[str]:
+    def substatement_type(self) -> str | None:
         return self._substatement_type
 
     @property
-    def work_group(self) -> Optional[str]:
+    def work_group(self) -> str | None:
         return self._work_group
 
     @property
-    def execution_parameters(self) -> List[str]:
+    def execution_parameters(self) -> list[str]:
         return self._execution_parameters
 
     @property
-    def state(self) -> Optional[str]:
+    def state(self) -> str | None:
         return self._state
 
     @property
-    def state_change_reason(self) -> Optional[str]:
+    def state_change_reason(self) -> str | None:
         return self._state_change_reason
 
     @property
-    def submission_date_time(self) -> Optional[datetime]:
+    def submission_date_time(self) -> datetime | None:
         return self._submission_date_time
 
     @property
-    def completion_date_time(self) -> Optional[datetime]:
+    def completion_date_time(self) -> datetime | None:
         return self._completion_date_time
 
     @property
-    def error_category(self) -> Optional[int]:
+    def error_category(self) -> int | None:
         return self._error_category
 
     @property
-    def error_type(self) -> Optional[int]:
+    def error_type(self) -> int | None:
         return self._error_type
 
     @property
-    def retryable(self) -> Optional[bool]:
+    def retryable(self) -> bool | None:
         return self._retryable
 
     @property
-    def error_message(self) -> Optional[str]:
+    def error_message(self) -> str | None:
         return self._error_message
 
     @property
-    def data_scanned_in_bytes(self) -> Optional[int]:
+    def data_scanned_in_bytes(self) -> int | None:
         return self._data_scanned_in_bytes
 
     @property
-    def engine_execution_time_in_millis(self) -> Optional[int]:
+    def engine_execution_time_in_millis(self) -> int | None:
         return self._engine_execution_time_in_millis
 
     @property
-    def query_queue_time_in_millis(self) -> Optional[int]:
+    def query_queue_time_in_millis(self) -> int | None:
         return self._query_queue_time_in_millis
 
     @property
-    def total_execution_time_in_millis(self) -> Optional[int]:
+    def total_execution_time_in_millis(self) -> int | None:
         return self._total_execution_time_in_millis
 
     @property
-    def query_planning_time_in_millis(self) -> Optional[int]:
+    def query_planning_time_in_millis(self) -> int | None:
         return self._query_planning_time_in_millis
 
     @property
-    def service_processing_time_in_millis(self) -> Optional[int]:
+    def service_processing_time_in_millis(self) -> int | None:
         return self._service_processing_time_in_millis
 
     @property
-    def output_location(self) -> Optional[str]:
+    def output_location(self) -> str | None:
         return self._output_location
 
     @property
-    def data_manifest_location(self) -> Optional[str]:
+    def data_manifest_location(self) -> str | None:
         return self._data_manifest_location
 
     @property
-    def reused_previous_result(self) -> Optional[bool]:
+    def reused_previous_result(self) -> bool | None:
         return self._reused_previous_result
 
     @property
-    def encryption_option(self) -> Optional[str]:
+    def encryption_option(self) -> str | None:
         return self._encryption_option
 
     @property
-    def kms_key(self) -> Optional[str]:
+    def kms_key(self) -> str | None:
         return self._kms_key
 
     @property
-    def expected_bucket_owner(self) -> Optional[str]:
+    def expected_bucket_owner(self) -> str | None:
         return self._expected_bucket_owner
 
     @property
-    def s3_acl_option(self) -> Optional[str]:
+    def s3_acl_option(self) -> str | None:
         return self._s3_acl_option
 
     @property
-    def selected_engine_version(self) -> Optional[str]:
+    def selected_engine_version(self) -> str | None:
         return self._selected_engine_version
 
     @property
-    def effective_engine_version(self) -> Optional[str]:
+    def effective_engine_version(self) -> str | None:
         return self._effective_engine_version
 
     @property
-    def result_reuse_enabled(self) -> Optional[bool]:
+    def result_reuse_enabled(self) -> bool | None:
         return self._result_reuse_enabled
 
     @property
-    def result_reuse_minutes(self) -> Optional[int]:
+    def result_reuse_minutes(self) -> int | None:
         return self._result_reuse_minutes
 
 
@@ -304,43 +304,43 @@ class AthenaCalculationExecutionStatus:
     STATE_COMPLETED: str = "COMPLETED"
     STATE_FAILED: str = "FAILED"
 
-    def __init__(self, response: Dict[str, Any]) -> None:
+    def __init__(self, response: dict[str, Any]) -> None:
         status = response.get("Status")
         if not status:
             raise DataError("KeyError `Status`")
-        self._state: Optional[str] = status.get("State")
-        self._state_change_reason: Optional[str] = status.get("StateChangeReason")
-        self._submission_date_time: Optional[datetime] = status.get("SubmissionDateTime")
-        self._completion_date_time: Optional[datetime] = status.get("CompletionDateTime")
+        self._state: str | None = status.get("State")
+        self._state_change_reason: str | None = status.get("StateChangeReason")
+        self._submission_date_time: datetime | None = status.get("SubmissionDateTime")
+        self._completion_date_time: datetime | None = status.get("CompletionDateTime")
 
         statistics = response.get("Statistics")
         if not statistics:
             raise DataError("KeyError `Statistics`")
-        self._dpu_execution_in_millis: Optional[int] = statistics.get("DpuExecutionInMillis")
-        self._progress: Optional[str] = statistics.get("Progress")
+        self._dpu_execution_in_millis: int | None = statistics.get("DpuExecutionInMillis")
+        self._progress: str | None = statistics.get("Progress")
 
     @property
-    def state(self) -> Optional[str]:
+    def state(self) -> str | None:
         return self._state
 
     @property
-    def state_change_reason(self) -> Optional[str]:
+    def state_change_reason(self) -> str | None:
         return self._state_change_reason
 
     @property
-    def submission_date_time(self) -> Optional[datetime]:
+    def submission_date_time(self) -> datetime | None:
         return self._submission_date_time
 
     @property
-    def completion_date_time(self) -> Optional[datetime]:
+    def completion_date_time(self) -> datetime | None:
         return self._completion_date_time
 
     @property
-    def dpu_execution_in_millis(self) -> Optional[int]:
+    def dpu_execution_in_millis(self) -> int | None:
         return self._dpu_execution_in_millis
 
     @property
-    def progress(self) -> Optional[str]:
+    def progress(self) -> str | None:
         return self._progress
 
 
@@ -359,55 +359,55 @@ class AthenaCalculationExecution(AthenaCalculationExecutionStatus):
         https://docs.aws.amazon.com/athena/latest/APIReference/API_CalculationSummary.html
     """
 
-    def __init__(self, response: Dict[str, Any]) -> None:
+    def __init__(self, response: dict[str, Any]) -> None:
         super().__init__(response)
 
-        self._calculation_id: Optional[str] = response.get("CalculationExecutionId")
+        self._calculation_id: str | None = response.get("CalculationExecutionId")
         if not self._calculation_id:
             raise DataError("KeyError `CalculationExecutionId`")
-        self._session_id: Optional[str] = response.get("SessionId")
+        self._session_id: str | None = response.get("SessionId")
         if not self._session_id:
             raise DataError("KeyError `SessionId`")
-        self._description: Optional[str] = response.get("Description")
-        self._working_directory: Optional[str] = response.get("WorkingDirectory")
+        self._description: str | None = response.get("Description")
+        self._working_directory: str | None = response.get("WorkingDirectory")
 
         # If cancelled, the result does not exist.
         result = response.get("Result", {})
-        self._std_out_s3_uri: Optional[str] = result.get("StdOutS3Uri")
-        self._std_error_s3_uri: Optional[str] = result.get("StdErrorS3Uri")
-        self._result_s3_uri: Optional[str] = result.get("ResultS3Uri")
-        self._result_type: Optional[str] = result.get("ResultType")
+        self._std_out_s3_uri: str | None = result.get("StdOutS3Uri")
+        self._std_error_s3_uri: str | None = result.get("StdErrorS3Uri")
+        self._result_s3_uri: str | None = result.get("ResultS3Uri")
+        self._result_type: str | None = result.get("ResultType")
 
     @property
-    def calculation_id(self) -> Optional[str]:
+    def calculation_id(self) -> str | None:
         return self._calculation_id
 
     @property
-    def session_id(self) -> Optional[str]:
+    def session_id(self) -> str | None:
         return self._session_id
 
     @property
-    def description(self) -> Optional[str]:
+    def description(self) -> str | None:
         return self._description
 
     @property
-    def working_directory(self) -> Optional[str]:
+    def working_directory(self) -> str | None:
         return self._working_directory
 
     @property
-    def std_out_s3_uri(self) -> Optional[str]:
+    def std_out_s3_uri(self) -> str | None:
         return self._std_out_s3_uri
 
     @property
-    def std_error_s3_uri(self) -> Optional[str]:
+    def std_error_s3_uri(self) -> str | None:
         return self._std_error_s3_uri
 
     @property
-    def result_s3_uri(self) -> Optional[str]:
+    def result_s3_uri(self) -> str | None:
         return self._result_s3_uri
 
     @property
-    def result_type(self) -> Optional[str]:
+    def result_type(self) -> str | None:
         return self._result_type
 
 
@@ -442,45 +442,45 @@ class AthenaSessionStatus:
     STATE_DEGRADED: str = "DEGRADED"
     STATE_FAILED: str = "FAILED"
 
-    def __init__(self, response: Dict[str, Any]) -> None:
-        self._session_id: Optional[str] = response.get("SessionId")
+    def __init__(self, response: dict[str, Any]) -> None:
+        self._session_id: str | None = response.get("SessionId")
 
         status = response.get("Status")
         if not status:
             raise DataError("KeyError `Status`")
-        self._state: Optional[str] = status.get("State")
-        self._state_change_reason: Optional[str] = status.get("StateChangeReason")
-        self._start_date_time: Optional[datetime] = status.get("StartDateTime")
-        self._last_modified_date_time: Optional[datetime] = status.get("LastModifiedDateTime")
-        self._end_date_time: Optional[datetime] = status.get("EndDateTime")
-        self._idle_since_date_time: Optional[datetime] = status.get("IdleSinceDateTime")
+        self._state: str | None = status.get("State")
+        self._state_change_reason: str | None = status.get("StateChangeReason")
+        self._start_date_time: datetime | None = status.get("StartDateTime")
+        self._last_modified_date_time: datetime | None = status.get("LastModifiedDateTime")
+        self._end_date_time: datetime | None = status.get("EndDateTime")
+        self._idle_since_date_time: datetime | None = status.get("IdleSinceDateTime")
 
     @property
-    def session_id(self) -> Optional[str]:
+    def session_id(self) -> str | None:
         return self._session_id
 
     @property
-    def state(self) -> Optional[str]:
+    def state(self) -> str | None:
         return self._state
 
     @property
-    def state_change_reason(self) -> Optional[str]:
+    def state_change_reason(self) -> str | None:
         return self._state_change_reason
 
     @property
-    def start_date_time(self) -> Optional[datetime]:
+    def start_date_time(self) -> datetime | None:
         return self._start_date_time
 
     @property
-    def last_modified_date_time(self) -> Optional[datetime]:
+    def last_modified_date_time(self) -> datetime | None:
         return self._last_modified_date_time
 
     @property
-    def end_date_time(self) -> Optional[datetime]:
+    def end_date_time(self) -> datetime | None:
         return self._end_date_time
 
     @property
-    def idle_since_date_time(self) -> Optional[datetime]:
+    def idle_since_date_time(self) -> datetime | None:
         return self._idle_since_date_time
 
 
@@ -501,20 +501,20 @@ class AthenaDatabase:
         if not database:
             raise DataError("KeyError `Database`")
 
-        self._name: Optional[str] = database.get("Name")
-        self._description: Optional[str] = database.get("Description")
-        self._parameters: Dict[str, str] = database.get("Parameters", {})
+        self._name: str | None = database.get("Name")
+        self._description: str | None = database.get("Description")
+        self._parameters: dict[str, str] = database.get("Parameters", {})
 
     @property
-    def name(self) -> Optional[str]:
+    def name(self) -> str | None:
         return self._name
 
     @property
-    def description(self) -> Optional[str]:
+    def description(self) -> str | None:
         return self._description
 
     @property
-    def parameters(self) -> Dict[str, str]:
+    def parameters(self) -> dict[str, str]:
         return self._parameters
 
 
@@ -530,20 +530,20 @@ class AthenaTableMetadataColumn:
     """
 
     def __init__(self, response):
-        self._name: Optional[str] = response.get("Name")
-        self._type: Optional[str] = response.get("Type")
-        self._comment: Optional[str] = response.get("Comment")
+        self._name: str | None = response.get("Name")
+        self._type: str | None = response.get("Type")
+        self._comment: str | None = response.get("Comment")
 
     @property
-    def name(self) -> Optional[str]:
+    def name(self) -> str | None:
         return self._name
 
     @property
-    def type(self) -> Optional[str]:
+    def type(self) -> str | None:
         return self._type
 
     @property
-    def comment(self) -> Optional[str]:
+    def comment(self) -> str | None:
         return self._comment
 
 
@@ -560,20 +560,20 @@ class AthenaTableMetadataPartitionKey:
     """
 
     def __init__(self, response):
-        self._name: Optional[str] = response.get("Name")
-        self._type: Optional[str] = response.get("Type")
-        self._comment: Optional[str] = response.get("Comment")
+        self._name: str | None = response.get("Name")
+        self._type: str | None = response.get("Type")
+        self._comment: str | None = response.get("Comment")
 
     @property
-    def name(self) -> Optional[str]:
+    def name(self) -> str | None:
         return self._name
 
     @property
-    def type(self) -> Optional[str]:
+    def type(self) -> str | None:
         return self._type
 
     @property
-    def comment(self) -> Optional[str]:
+    def comment(self) -> str | None:
         return self._comment
 
 
@@ -597,76 +597,76 @@ class AthenaTableMetadata:
         if not table_metadata:
             raise DataError("KeyError `TableMetadata`")
 
-        self._name: Optional[str] = table_metadata.get("Name")
-        self._create_time: Optional[datetime] = table_metadata.get("CreateTime")
-        self._last_access_time: Optional[datetime] = table_metadata.get("LastAccessTime")
-        self._table_type: Optional[str] = table_metadata.get("TableType")
+        self._name: str | None = table_metadata.get("Name")
+        self._create_time: datetime | None = table_metadata.get("CreateTime")
+        self._last_access_time: datetime | None = table_metadata.get("LastAccessTime")
+        self._table_type: str | None = table_metadata.get("TableType")
 
         columns = table_metadata.get("Columns", [])
-        self._columns: List[AthenaTableMetadataColumn] = []
+        self._columns: list[AthenaTableMetadataColumn] = []
         for column in columns:
             self._columns.append(AthenaTableMetadataColumn(column))
 
         partition_keys = table_metadata.get("PartitionKeys", [])
-        self._partition_keys: List[AthenaTableMetadataPartitionKey] = []
+        self._partition_keys: list[AthenaTableMetadataPartitionKey] = []
         for key in partition_keys:
             self._partition_keys.append(AthenaTableMetadataPartitionKey(key))
 
-        self._parameters: Dict[str, str] = table_metadata.get("Parameters", {})
+        self._parameters: dict[str, str] = table_metadata.get("Parameters", {})
 
     @property
-    def name(self) -> Optional[str]:
+    def name(self) -> str | None:
         return self._name
 
     @property
-    def create_time(self) -> Optional[datetime]:
+    def create_time(self) -> datetime | None:
         return self._create_time
 
     @property
-    def last_access_time(self) -> Optional[datetime]:
+    def last_access_time(self) -> datetime | None:
         return self._last_access_time
 
     @property
-    def table_type(self) -> Optional[str]:
+    def table_type(self) -> str | None:
         return self._table_type
 
     @property
-    def columns(self) -> List[AthenaTableMetadataColumn]:
+    def columns(self) -> list[AthenaTableMetadataColumn]:
         return self._columns
 
     @property
-    def partition_keys(self) -> List[AthenaTableMetadataPartitionKey]:
+    def partition_keys(self) -> list[AthenaTableMetadataPartitionKey]:
         return self._partition_keys
 
     @property
-    def parameters(self) -> Dict[str, str]:
+    def parameters(self) -> dict[str, str]:
         return self._parameters
 
     @property
-    def comment(self) -> Optional[str]:
+    def comment(self) -> str | None:
         return self._parameters.get("comment")
 
     @property
-    def location(self) -> Optional[str]:
+    def location(self) -> str | None:
         return self._parameters.get("location")
 
     @property
-    def input_format(self) -> Optional[str]:
+    def input_format(self) -> str | None:
         return self._parameters.get("inputformat")
 
     @property
-    def output_format(self) -> Optional[str]:
+    def output_format(self) -> str | None:
         return self._parameters.get("outputformat")
 
     @property
-    def row_format(self) -> Optional[str]:
+    def row_format(self) -> str | None:
         serde = self.serde_serialization_lib
         if serde:
             return f"SERDE '{serde}'"
         return None
 
     @property
-    def file_format(self) -> Optional[str]:
+    def file_format(self) -> str | None:
         input = self.input_format
         output = self.output_format
         if input and output:
@@ -674,11 +674,11 @@ class AthenaTableMetadata:
         return None
 
     @property
-    def serde_serialization_lib(self) -> Optional[str]:
+    def serde_serialization_lib(self) -> str | None:
         return self._parameters.get("serde.serialization.lib")
 
     @property
-    def compression(self) -> Optional[str]:
+    def compression(self) -> str | None:
         if "write.compression" in self._parameters:  # text or json
             return self._parameters["write.compression"]
         if "serde.param.write.compression" in self._parameters:  # text or json
@@ -690,7 +690,7 @@ class AthenaTableMetadata:
         return None
 
     @property
-    def serde_properties(self) -> Dict[str, str]:
+    def serde_properties(self) -> dict[str, str]:
         return {
             k.replace("serde.param.", ""): v
             for k, v in self._parameters.items()
@@ -698,7 +698,7 @@ class AthenaTableMetadata:
         }
 
     @property
-    def table_properties(self) -> Dict[str, str]:
+    def table_properties(self) -> dict[str, str]:
         return {k: v for k, v in self._parameters.items() if not k.startswith("serde.param.")}
 
 

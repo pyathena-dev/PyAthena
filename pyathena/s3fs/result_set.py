@@ -1,9 +1,8 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import logging
 from io import TextIOWrapper
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
+from typing import TYPE_CHECKING, Any
 
 from fsspec import AbstractFileSystem
 
@@ -18,7 +17,7 @@ from pyathena.util import RetryConfig, parse_output_location
 if TYPE_CHECKING:
     from pyathena.connection import Connection
 
-CSVReaderType = Union[Type[DefaultCSVReader], Type[AthenaCSVReader]]
+CSVReaderType = type[DefaultCSVReader] | type[AthenaCSVReader]
 
 _logger = logging.getLogger(__name__)
 
@@ -57,14 +56,14 @@ class AthenaS3FSResultSet(AthenaResultSet):
 
     def __init__(
         self,
-        connection: "Connection[Any]",
+        connection: Connection[Any],
         converter: Converter,
         query_execution: AthenaQueryExecution,
         arraysize: int,
         retry_config: RetryConfig,
-        block_size: Optional[int] = None,
-        csv_reader: Optional[CSVReaderType] = None,
-        filesystem_class: Optional[Type[AbstractFileSystem]] = None,
+        block_size: int | None = None,
+        csv_reader: CSVReaderType | None = None,
+        filesystem_class: type[AbstractFileSystem] | None = None,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -80,9 +79,9 @@ class AthenaS3FSResultSet(AthenaResultSet):
         self._arraysize = arraysize
         self._block_size = block_size if block_size else self.DEFAULT_BLOCK_SIZE
         self._csv_reader_class: CSVReaderType = csv_reader or AthenaCSVReader
-        self._filesystem_class: Type[AbstractFileSystem] = filesystem_class or S3FileSystem
+        self._filesystem_class: type[AbstractFileSystem] = filesystem_class or S3FileSystem
         self._fs = self._create_s3_file_system()
-        self._csv_reader: Optional[Any] = None
+        self._csv_reader: Any | None = None
 
         if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
             self._init_csv_reader()
@@ -140,7 +139,7 @@ class AthenaS3FSResultSet(AthenaResultSet):
                 next(self._csv_reader)
 
         except Exception as e:
-            _logger.exception(f"Failed to open {path}.")
+            _logger.exception("Failed to open %s.", path)
             raise OperationalError(*e.args) from e
 
     def _fetch(self) -> None:
@@ -176,7 +175,7 @@ class AthenaS3FSResultSet(AthenaResultSet):
 
     def fetchone(
         self,
-    ) -> Optional[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+    ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
         """Fetch the next row of the result set.
 
         Returns:
@@ -192,8 +191,8 @@ class AthenaS3FSResultSet(AthenaResultSet):
         return self._rows.popleft()
 
     def fetchmany(
-        self, size: Optional[int] = None
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        self, size: int | None = None
+    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         """Fetch the next set of rows of the result set.
 
         Args:
@@ -215,7 +214,7 @@ class AthenaS3FSResultSet(AthenaResultSet):
 
     def fetchall(
         self,
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         """Fetch all remaining rows of the result set.
 
         Returns:

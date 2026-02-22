@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 from typing import TYPE_CHECKING
 
 from pyathena.aio.sqlalchemy.base import AthenaAioDialect
@@ -50,7 +49,7 @@ class AthenaAioPandasDialect(AthenaAioDialect):
         if "engine" in opts:
             cursor_kwargs.update({"engine": opts.pop("engine")})
         if "chunksize" in opts:
-            cursor_kwargs.update({"chunksize": int(opts.pop("chunksize"))})  # type: ignore
+            cursor_kwargs.update({"chunksize": int(opts.pop("chunksize"))})  # type: ignore[dict-item]
         if cursor_kwargs:
             opts.update({"cursor_kwargs": cursor_kwargs})
         self._connect_options = opts

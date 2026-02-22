@@ -1,12 +1,12 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import copy
 import logging
+from collections.abc import Iterator, MutableMapping
 from datetime import datetime
-from typing import Any, Dict, Iterator, MutableMapping, Optional
+from typing import Any
 
-_logger = logging.getLogger(__name__)  # type: ignore
+_logger = logging.getLogger(__name__)
 
 _API_FIELD_TO_S3_OBJECT_PROPERTY = {
     "ETag": "etag",
@@ -104,7 +104,7 @@ class S3Object(MutableMapping[str, Any]):
 
     def __init__(
         self,
-        init: Dict[str, Any],
+        init: dict[str, Any],
         **kwargs,
     ) -> None:
         if init:
@@ -162,7 +162,7 @@ class S3Object(MutableMapping[str, Any]):
     def __str__(self):
         return str(self.__dict__)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert S3Object to dictionary representation.
 
         Returns:
@@ -170,7 +170,7 @@ class S3Object(MutableMapping[str, Any]):
         """
         return copy.deepcopy(self.__dict__)
 
-    def to_api_repr(self) -> Dict[str, Any]:
+    def to_api_repr(self) -> dict[str, Any]:
         fields = {}
         for k, v in _API_FIELD_TO_S3_OBJECT_PROPERTY.items():
             if k in ["ETag", "ContentLength", "LastModified"]:
@@ -201,14 +201,14 @@ class S3PutObject:
         typically not instantiated directly by users.
     """
 
-    def __init__(self, response: Dict[str, Any]) -> None:
-        self._expiration: Optional[str] = response.get("Expiration")
-        self._version_id: Optional[str] = response.get("VersionId")
-        self._etag: Optional[str] = response.get("ETag")
-        self._checksum_crc32: Optional[str] = response.get("ChecksumCRC32")
-        self._checksum_crc32c: Optional[str] = response.get("ChecksumCRC32C")
-        self._checksum_sha1: Optional[str] = response.get("ChecksumSHA1")
-        self._checksum_sha256: Optional[str] = response.get("ChecksumSHA256")
+    def __init__(self, response: dict[str, Any]) -> None:
+        self._expiration: str | None = response.get("Expiration")
+        self._version_id: str | None = response.get("VersionId")
+        self._etag: str | None = response.get("ETag")
+        self._checksum_crc32: str | None = response.get("ChecksumCRC32")
+        self._checksum_crc32c: str | None = response.get("ChecksumCRC32C")
+        self._checksum_sha1: str | None = response.get("ChecksumSHA1")
+        self._checksum_sha256: str | None = response.get("ChecksumSHA256")
         self._server_side_encryption = response.get("ServerSideEncryption")
         self._sse_customer_algorithm = response.get("SSECustomerAlgorithm")
         self._sse_customer_key_md5 = response.get("SSECustomerKeyMD5")
@@ -218,62 +218,62 @@ class S3PutObject:
         self._request_charged = response.get("RequestCharged")
 
     @property
-    def expiration(self) -> Optional[str]:
+    def expiration(self) -> str | None:
         return self._expiration
 
     @property
-    def version_id(self) -> Optional[str]:
+    def version_id(self) -> str | None:
         return self._version_id
 
     @property
-    def etag(self) -> Optional[str]:
+    def etag(self) -> str | None:
         return self._etag
 
     @property
-    def checksum_crc32(self) -> Optional[str]:
+    def checksum_crc32(self) -> str | None:
         return self._checksum_crc32
 
     @property
-    def checksum_crc32c(self) -> Optional[str]:
+    def checksum_crc32c(self) -> str | None:
         return self._checksum_crc32c
 
     @property
-    def checksum_sha1(self) -> Optional[str]:
+    def checksum_sha1(self) -> str | None:
         return self._checksum_sha1
 
     @property
-    def checksum_sha256(self) -> Optional[str]:
+    def checksum_sha256(self) -> str | None:
         return self._checksum_sha256
 
     @property
-    def server_side_encryption(self) -> Optional[str]:
+    def server_side_encryption(self) -> str | None:
         return self._server_side_encryption
 
     @property
-    def sse_customer_algorithm(self) -> Optional[str]:
+    def sse_customer_algorithm(self) -> str | None:
         return self._sse_customer_algorithm
 
     @property
-    def sse_customer_key_md5(self) -> Optional[str]:
+    def sse_customer_key_md5(self) -> str | None:
         return self._sse_customer_key_md5
 
     @property
-    def sse_kms_key_id(self) -> Optional[str]:
+    def sse_kms_key_id(self) -> str | None:
         return self._sse_kms_key_id
 
     @property
-    def sse_kms_encryption_context(self) -> Optional[str]:
+    def sse_kms_encryption_context(self) -> str | None:
         return self._sse_kms_encryption_context
 
     @property
-    def bucket_key_enabled(self) -> Optional[bool]:
+    def bucket_key_enabled(self) -> bool | None:
         return self._bucket_key_enabled
 
     @property
-    def request_charged(self) -> Optional[str]:
+    def request_charged(self) -> str | None:
         return self._request_charged
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return copy.deepcopy(self.__dict__)
 
 
@@ -295,7 +295,7 @@ class S3MultipartUpload:
         Used internally by S3FileSystem for large file upload operations.
     """
 
-    def __init__(self, response: Dict[str, Any]) -> None:
+    def __init__(self, response: dict[str, Any]) -> None:
         self._abort_date = response.get("AbortDate")
         self._abort_rule_id = response.get("AbortRuleId")
         self._bucket = response.get("Bucket")
@@ -311,55 +311,55 @@ class S3MultipartUpload:
         self._checksum_algorithm = response.get("ChecksumAlgorithm")
 
     @property
-    def abort_date(self) -> Optional[datetime]:
+    def abort_date(self) -> datetime | None:
         return self._abort_date
 
     @property
-    def abort_rule_id(self) -> Optional[str]:
+    def abort_rule_id(self) -> str | None:
         return self._abort_rule_id
 
     @property
-    def bucket(self) -> Optional[str]:
+    def bucket(self) -> str | None:
         return self._bucket
 
     @property
-    def key(self) -> Optional[str]:
+    def key(self) -> str | None:
         return self._key
 
     @property
-    def upload_id(self) -> Optional[str]:
+    def upload_id(self) -> str | None:
         return self._upload_id
 
     @property
-    def server_side_encryption(self) -> Optional[str]:
+    def server_side_encryption(self) -> str | None:
         return self._server_side_encryption
 
     @property
-    def sse_customer_algorithm(self) -> Optional[str]:
+    def sse_customer_algorithm(self) -> str | None:
         return self._sse_customer_algorithm
 
     @property
-    def sse_customer_key_md5(self) -> Optional[str]:
+    def sse_customer_key_md5(self) -> str | None:
         return self._sse_customer_key_md5
 
     @property
-    def sse_kms_key_id(self) -> Optional[str]:
+    def sse_kms_key_id(self) -> str | None:
         return self._sse_kms_key_id
 
     @property
-    def sse_kms_encryption_context(self) -> Optional[str]:
+    def sse_kms_encryption_context(self) -> str | None:
         return self._sse_kms_encryption_context
 
     @property
-    def bucket_key_enabled(self) -> Optional[bool]:
+    def bucket_key_enabled(self) -> bool | None:
         return self._bucket_key_enabled
 
     @property
-    def request_charged(self) -> Optional[str]:
+    def request_charged(self) -> str | None:
         return self._request_charged
 
     @property
-    def checksum_algorithm(self) -> Optional[str]:
+    def checksum_algorithm(self) -> str | None:
         return self._checksum_algorithm
 
 
@@ -381,17 +381,17 @@ class S3MultipartUploadPart:
         by S3FileSystem for chunked upload operations.
     """
 
-    def __init__(self, part_number: int, response: Dict[str, Any]) -> None:
+    def __init__(self, part_number: int, response: dict[str, Any]) -> None:
         self._part_number = part_number
-        self._copy_source_version_id: Optional[str] = response.get("CopySourceVersionId")
+        self._copy_source_version_id: str | None = response.get("CopySourceVersionId")
         copy_part_result = response.get("CopyPartResult")
         if copy_part_result:
-            self._last_modified: Optional[datetime] = copy_part_result.get("LastModified")
-            self._etag: Optional[str] = copy_part_result.get("ETag")
-            self._checksum_crc32: Optional[str] = copy_part_result.get("ChecksumCRC32")
-            self._checksum_crc32c: Optional[str] = copy_part_result.get("ChecksumCRC32C")
-            self._checksum_sha1: Optional[str] = copy_part_result.get("ChecksumSHA1")
-            self._checksum_sha256: Optional[str] = copy_part_result.get("ChecksumSHA256")
+            self._last_modified: datetime | None = copy_part_result.get("LastModified")
+            self._etag: str | None = copy_part_result.get("ETag")
+            self._checksum_crc32: str | None = copy_part_result.get("ChecksumCRC32")
+            self._checksum_crc32c: str | None = copy_part_result.get("ChecksumCRC32C")
+            self._checksum_sha1: str | None = copy_part_result.get("ChecksumSHA1")
+            self._checksum_sha256: str | None = copy_part_result.get("ChecksumSHA256")
         else:
             self._last_modified = None
             self._etag = response.get("ETag")
@@ -399,70 +399,70 @@ class S3MultipartUploadPart:
             self._checksum_crc32c = response.get("ChecksumCRC32C")
             self._checksum_sha1 = response.get("ChecksumSHA1")
             self._checksum_sha256 = response.get("ChecksumSHA256")
-        self._server_side_encryption: Optional[str] = response.get("ServerSideEncryption")
-        self._sse_customer_algorithm: Optional[str] = response.get("SSECustomerAlgorithm")
-        self._sse_customer_key_md5: Optional[str] = response.get("SSECustomerKeyMD5")
-        self._sse_kms_key_id: Optional[str] = response.get("SSEKMSKeyId")
-        self._bucket_key_enabled: Optional[bool] = response.get("BucketKeyEnabled")
-        self._request_charged: Optional[str] = response.get("RequestCharged")
+        self._server_side_encryption: str | None = response.get("ServerSideEncryption")
+        self._sse_customer_algorithm: str | None = response.get("SSECustomerAlgorithm")
+        self._sse_customer_key_md5: str | None = response.get("SSECustomerKeyMD5")
+        self._sse_kms_key_id: str | None = response.get("SSEKMSKeyId")
+        self._bucket_key_enabled: bool | None = response.get("BucketKeyEnabled")
+        self._request_charged: str | None = response.get("RequestCharged")
 
     @property
     def part_number(self) -> int:
         return self._part_number
 
     @property
-    def copy_source_version_id(self) -> Optional[str]:
+    def copy_source_version_id(self) -> str | None:
         return self._copy_source_version_id
 
     @property
-    def last_modified(self) -> Optional[datetime]:
+    def last_modified(self) -> datetime | None:
         return self._last_modified
 
     @property
-    def etag(self) -> Optional[str]:
+    def etag(self) -> str | None:
         return self._etag
 
     @property
-    def checksum_crc32(self) -> Optional[str]:
+    def checksum_crc32(self) -> str | None:
         return self._checksum_crc32
 
     @property
-    def checksum_crc32c(self) -> Optional[str]:
+    def checksum_crc32c(self) -> str | None:
         return self._checksum_crc32c
 
     @property
-    def checksum_sha1(self) -> Optional[str]:
+    def checksum_sha1(self) -> str | None:
         return self._checksum_sha1
 
     @property
-    def checksum_sha256(self) -> Optional[str]:
+    def checksum_sha256(self) -> str | None:
         return self._checksum_sha256
 
     @property
-    def server_side_encryption(self) -> Optional[str]:
+    def server_side_encryption(self) -> str | None:
         return self._server_side_encryption
 
     @property
-    def sse_customer_algorithm(self) -> Optional[str]:
+    def sse_customer_algorithm(self) -> str | None:
         return self._sse_customer_algorithm
 
     @property
-    def sse_customer_key_md5(self) -> Optional[str]:
+    def sse_customer_key_md5(self) -> str | None:
         return self._sse_customer_key_md5
 
     @property
-    def sse_kms_key_id(self) -> Optional[str]:
+    def sse_kms_key_id(self) -> str | None:
         return self._sse_kms_key_id
 
     @property
-    def bucket_key_enabled(self) -> Optional[bool]:
+    def bucket_key_enabled(self) -> bool | None:
         return self._bucket_key_enabled
 
     @property
-    def request_charged(self) -> Optional[str]:
+    def request_charged(self) -> str | None:
         return self._request_charged
 
-    def to_api_repr(self) -> Dict[str, Any]:
+    def to_api_repr(self) -> dict[str, Any]:
         return {
             "ETag": self.etag,
             "ChecksumCRC32": self.checksum_crc32,
@@ -493,76 +493,76 @@ class S3CompleteMultipartUpload:
         Used internally by S3FileSystem operations.
     """
 
-    def __init__(self, response: Dict[str, Any]) -> None:
-        self._location: Optional[str] = response.get("Location")
-        self._bucket: Optional[str] = response.get("Bucket")
-        self._key: Optional[str] = response.get("Key")
-        self._expiration: Optional[str] = response.get("Expiration")
-        self._version_id: Optional[str] = response.get("VersionId")
-        self._etag: Optional[str] = response.get("ETag")
-        self._checksum_crc32: Optional[str] = response.get("ChecksumCRC32")
-        self._checksum_crc32c: Optional[str] = response.get("ChecksumCRC32C")
-        self._checksum_sha1: Optional[str] = response.get("ChecksumSHA1")
-        self._checksum_sha256: Optional[str] = response.get("ChecksumSHA256")
+    def __init__(self, response: dict[str, Any]) -> None:
+        self._location: str | None = response.get("Location")
+        self._bucket: str | None = response.get("Bucket")
+        self._key: str | None = response.get("Key")
+        self._expiration: str | None = response.get("Expiration")
+        self._version_id: str | None = response.get("VersionId")
+        self._etag: str | None = response.get("ETag")
+        self._checksum_crc32: str | None = response.get("ChecksumCRC32")
+        self._checksum_crc32c: str | None = response.get("ChecksumCRC32C")
+        self._checksum_sha1: str | None = response.get("ChecksumSHA1")
+        self._checksum_sha256: str | None = response.get("ChecksumSHA256")
         self._server_side_encryption = response.get("ServerSideEncryption")
         self._sse_kms_key_id = response.get("SSEKMSKeyId")
         self._bucket_key_enabled = response.get("BucketKeyEnabled")
         self._request_charged = response.get("RequestCharged")
 
     @property
-    def location(self) -> Optional[str]:
+    def location(self) -> str | None:
         return self._location
 
     @property
-    def bucket(self) -> Optional[str]:
+    def bucket(self) -> str | None:
         return self._bucket
 
     @property
-    def key(self) -> Optional[str]:
+    def key(self) -> str | None:
         return self._key
 
     @property
-    def expiration(self) -> Optional[str]:
+    def expiration(self) -> str | None:
         return self._expiration
 
     @property
-    def version_id(self) -> Optional[str]:
+    def version_id(self) -> str | None:
         return self._version_id
 
     @property
-    def etag(self) -> Optional[str]:
+    def etag(self) -> str | None:
         return self._etag
 
     @property
-    def checksum_crc32(self) -> Optional[str]:
+    def checksum_crc32(self) -> str | None:
         return self._checksum_crc32
 
     @property
-    def checksum_crc32c(self) -> Optional[str]:
+    def checksum_crc32c(self) -> str | None:
         return self._checksum_crc32c
 
     @property
-    def checksum_sha1(self) -> Optional[str]:
+    def checksum_sha1(self) -> str | None:
         return self._checksum_sha1
 
     @property
-    def checksum_sha256(self) -> Optional[str]:
+    def checksum_sha256(self) -> str | None:
         return self._checksum_sha256
 
     @property
-    def server_side_encryption(self) -> Optional[str]:
+    def server_side_encryption(self) -> str | None:
         return self._server_side_encryption
 
     @property
-    def sse_kms_key_id(self) -> Optional[str]:
+    def sse_kms_key_id(self) -> str | None:
         return self._sse_kms_key_id
 
     @property
-    def bucket_key_enabled(self) -> Optional[bool]:
+    def bucket_key_enabled(self) -> bool | None:
         return self._bucket_key_enabled
 
     @property
-    def request_charged(self) -> Optional[str]:
+    def request_charged(self) -> str | None:
         return self._request_charged
 
     def to_dict(self):

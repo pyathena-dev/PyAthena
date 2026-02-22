@@ -1,20 +1,15 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import logging
 import os
 import time
+from collections.abc import Callable
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
-    Dict,
+    ClassVar,
     Generic,
-    List,
-    Optional,
-    Type,
     TypeVar,
-    Union,
     cast,
     overload,
 )
@@ -33,7 +28,7 @@ from pyathena.util import RetryConfig
 if TYPE_CHECKING:
     from botocore.client import BaseClient
 
-_logger = logging.getLogger(__name__)  # type: ignore
+_logger = logging.getLogger(__name__)
 
 
 ConnectionCursor = TypeVar("ConnectionCursor", bound=BaseCursor)
@@ -84,7 +79,7 @@ class Connection(Generic[ConnectionCursor]):
 
     _ENV_S3_STAGING_DIR: str = "AWS_ATHENA_S3_STAGING_DIR"
     _ENV_WORK_GROUP: str = "AWS_ATHENA_WORK_GROUP"
-    _SESSION_PASSING_ARGS: List[str] = [
+    _SESSION_PASSING_ARGS: ClassVar[list[str]] = [
         "aws_access_key_id",
         "aws_secret_access_key",
         "aws_session_token",
@@ -92,7 +87,7 @@ class Connection(Generic[ConnectionCursor]):
         "botocore_session",
         "profile_name",
     ]
-    _CLIENT_PASSING_ARGS: List[str] = [
+    _CLIENT_PASSING_ARGS: ClassVar[list[str]] = [
         "aws_access_key_id",
         "aws_secret_access_key",
         "aws_session_token",
@@ -107,92 +102,92 @@ class Connection(Generic[ConnectionCursor]):
     @overload
     def __init__(
         self: Connection[Cursor],
-        s3_staging_dir: Optional[str] = ...,
-        region_name: Optional[str] = ...,
-        schema_name: Optional[str] = ...,
-        catalog_name: Optional[str] = ...,
-        work_group: Optional[str] = ...,
+        s3_staging_dir: str | None = ...,
+        region_name: str | None = ...,
+        schema_name: str | None = ...,
+        catalog_name: str | None = ...,
+        work_group: str | None = ...,
         poll_interval: float = ...,
-        encryption_option: Optional[str] = ...,
-        kms_key: Optional[str] = ...,
-        profile_name: Optional[str] = ...,
-        role_arn: Optional[str] = ...,
+        encryption_option: str | None = ...,
+        kms_key: str | None = ...,
+        profile_name: str | None = ...,
+        role_arn: str | None = ...,
         role_session_name: str = ...,
-        external_id: Optional[str] = ...,
-        serial_number: Optional[str] = ...,
+        external_id: str | None = ...,
+        serial_number: str | None = ...,
         duration_seconds: int = ...,
-        converter: Optional[Converter] = ...,
-        formatter: Optional[Formatter] = ...,
-        retry_config: Optional[RetryConfig] = ...,
+        converter: Converter | None = ...,
+        formatter: Formatter | None = ...,
+        retry_config: RetryConfig | None = ...,
         cursor_class: None = ...,
-        cursor_kwargs: Optional[Dict[str, Any]] = ...,
+        cursor_kwargs: dict[str, Any] | None = ...,
         kill_on_interrupt: bool = ...,
-        session: Optional[Session] = ...,
-        config: Optional[Config] = ...,
+        session: Session | None = ...,
+        config: Config | None = ...,
         result_reuse_enable: bool = ...,
         result_reuse_minutes: int = ...,
-        on_start_query_execution: Optional[Callable[[str], None]] = ...,
+        on_start_query_execution: Callable[[str], None] | None = ...,
         **kwargs,
     ) -> None: ...
 
     @overload
     def __init__(
         self: Connection[ConnectionCursor],
-        s3_staging_dir: Optional[str] = ...,
-        region_name: Optional[str] = ...,
-        schema_name: Optional[str] = ...,
-        catalog_name: Optional[str] = ...,
-        work_group: Optional[str] = ...,
+        s3_staging_dir: str | None = ...,
+        region_name: str | None = ...,
+        schema_name: str | None = ...,
+        catalog_name: str | None = ...,
+        work_group: str | None = ...,
         poll_interval: float = ...,
-        encryption_option: Optional[str] = ...,
-        kms_key: Optional[str] = ...,
-        profile_name: Optional[str] = ...,
-        role_arn: Optional[str] = ...,
+        encryption_option: str | None = ...,
+        kms_key: str | None = ...,
+        profile_name: str | None = ...,
+        role_arn: str | None = ...,
         role_session_name: str = ...,
-        external_id: Optional[str] = ...,
-        serial_number: Optional[str] = ...,
+        external_id: str | None = ...,
+        serial_number: str | None = ...,
         duration_seconds: int = ...,
-        converter: Optional[Converter] = ...,
-        formatter: Optional[Formatter] = ...,
-        retry_config: Optional[RetryConfig] = ...,
-        cursor_class: Type[ConnectionCursor] = ...,
-        cursor_kwargs: Optional[Dict[str, Any]] = ...,
+        converter: Converter | None = ...,
+        formatter: Formatter | None = ...,
+        retry_config: RetryConfig | None = ...,
+        cursor_class: type[ConnectionCursor] = ...,
+        cursor_kwargs: dict[str, Any] | None = ...,
         kill_on_interrupt: bool = ...,
-        session: Optional[Session] = ...,
-        config: Optional[Config] = ...,
+        session: Session | None = ...,
+        config: Config | None = ...,
         result_reuse_enable: bool = ...,
         result_reuse_minutes: int = ...,
-        on_start_query_execution: Optional[Callable[[str], None]] = ...,
+        on_start_query_execution: Callable[[str], None] | None = ...,
         **kwargs,
     ) -> None: ...
 
     def __init__(
         self,
-        s3_staging_dir: Optional[str] = None,
-        region_name: Optional[str] = None,
-        schema_name: Optional[str] = "default",
-        catalog_name: Optional[str] = "awsdatacatalog",
-        work_group: Optional[str] = None,
+        s3_staging_dir: str | None = None,
+        region_name: str | None = None,
+        schema_name: str | None = "default",
+        catalog_name: str | None = "awsdatacatalog",
+        work_group: str | None = None,
         poll_interval: float = 1,
-        encryption_option: Optional[str] = None,
-        kms_key: Optional[str] = None,
-        profile_name: Optional[str] = None,
-        role_arn: Optional[str] = None,
+        encryption_option: str | None = None,
+        kms_key: str | None = None,
+        profile_name: str | None = None,
+        role_arn: str | None = None,
         role_session_name: str = f"PyAthena-session-{int(time.time())}",
-        external_id: Optional[str] = None,
-        serial_number: Optional[str] = None,
+        external_id: str | None = None,
+        serial_number: str | None = None,
         duration_seconds: int = 3600,
-        converter: Optional[Converter] = None,
-        formatter: Optional[Formatter] = None,
-        retry_config: Optional[RetryConfig] = None,
-        cursor_class: Optional[Type[ConnectionCursor]] = None,
-        cursor_kwargs: Optional[Dict[str, Any]] = None,
+        converter: Converter | None = None,
+        formatter: Formatter | None = None,
+        retry_config: RetryConfig | None = None,
+        cursor_class: type[ConnectionCursor] | None = None,
+        cursor_kwargs: dict[str, Any] | None = None,
         kill_on_interrupt: bool = True,
-        session: Optional[Session] = None,
-        config: Optional[Config] = None,
+        session: Session | None = None,
+        config: Config | None = None,
         result_reuse_enable: bool = False,
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
-        on_start_query_execution: Optional[Callable[[str], None]] = None,
+        on_start_query_execution: Callable[[str], None] | None = None,
         **kwargs,
     ) -> None:
         """Initialize a new Athena database connection.
@@ -253,21 +248,21 @@ class Connection(Generic[ConnectionCursor]):
             "duration_seconds": duration_seconds,
         }
         if s3_staging_dir is not None:
-            self.s3_staging_dir: Optional[str] = s3_staging_dir or None
+            self.s3_staging_dir: str | None = s3_staging_dir or None
         else:
             self.s3_staging_dir = os.getenv(self._ENV_S3_STAGING_DIR)
         self.region_name = region_name
         self.schema_name = schema_name
         self.catalog_name = catalog_name
         if work_group:
-            self.work_group: Optional[str] = work_group
+            self.work_group: str | None = work_group
         else:
             self.work_group = os.getenv(self._ENV_WORK_GROUP)
         self.poll_interval = poll_interval
         self.encryption_option = encryption_option
         self.kms_key = kms_key
         self.profile_name = profile_name
-        self.config: Optional[Config] = config if config else Config()
+        self.config: Config | None = config if config else Config()
 
         if not self.s3_staging_dir and not self.work_group:
             raise ProgrammingError("Required argument `s3_staging_dir` or `work_group` not found.")
@@ -330,7 +325,7 @@ class Connection(Generic[ConnectionCursor]):
         self._converter = converter
         self._formatter = formatter if formatter else DefaultParameterFormatter()
         self._retry_config = retry_config if retry_config else RetryConfig()
-        self.cursor_class = cursor_class if cursor_class else cast(Type[ConnectionCursor], Cursor)
+        self.cursor_class = cursor_class if cursor_class else cast(type[ConnectionCursor], Cursor)
         self.cursor_kwargs = cursor_kwargs if cursor_kwargs else {}
         self.kill_on_interrupt = kill_on_interrupt
         self.result_reuse_enable = result_reuse_enable
@@ -339,14 +334,14 @@ class Connection(Generic[ConnectionCursor]):
 
     def _assume_role(
         self,
-        profile_name: Optional[str],
-        region_name: Optional[str],
+        profile_name: str | None,
+        region_name: str | None,
         role_arn: str,
         role_session_name: str,
-        external_id: Optional[str],
-        serial_number: Optional[str],
+        external_id: str | None,
+        serial_number: str | None,
         duration_seconds: int,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Assume an IAM role and return temporary credentials.
 
         Uses AWS STS to assume the specified IAM role and obtain temporary
@@ -396,16 +391,16 @@ class Connection(Generic[ConnectionCursor]):
                 }
             )
         response = client.assume_role(**request)
-        creds: Dict[str, Any] = response["Credentials"]
+        creds: dict[str, Any] = response["Credentials"]
         return creds
 
     def _get_session_token(
         self,
-        profile_name: Optional[str],
-        region_name: Optional[str],
-        serial_number: Optional[str],
+        profile_name: str | None,
+        region_name: str | None,
+        serial_number: str | None,
         duration_seconds: int,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Get session token using MFA authentication.
 
         Obtains temporary security credentials by providing MFA authentication.
@@ -435,11 +430,11 @@ class Connection(Generic[ConnectionCursor]):
             "TokenCode": token_code,
         }
         response = client.get_session_token(**request)
-        creds: Dict[str, Any] = response["Credentials"]
+        creds: dict[str, Any] = response["Credentials"]
         return creds
 
     @property
-    def _session_kwargs(self) -> Dict[str, Any]:
+    def _session_kwargs(self) -> dict[str, Any]:
         """Get session keyword arguments for AWS Session creation.
 
         Returns:
@@ -449,7 +444,7 @@ class Connection(Generic[ConnectionCursor]):
         return {k: v for k, v in self._kwargs.items() if k in self._SESSION_PASSING_ARGS}
 
     @property
-    def _client_kwargs(self) -> Dict[str, Any]:
+    def _client_kwargs(self) -> dict[str, Any]:
         """Get client keyword arguments for AWS client creation.
 
         Returns:
@@ -468,7 +463,7 @@ class Connection(Generic[ConnectionCursor]):
         return self._session
 
     @property
-    def client(self) -> "BaseClient":
+    def client(self) -> BaseClient:
         """Get the boto3 Athena client used for query operations.
 
         Returns:
@@ -507,11 +502,11 @@ class Connection(Generic[ConnectionCursor]):
     def cursor(self, cursor: None = ..., **kwargs) -> ConnectionCursor: ...
 
     @overload
-    def cursor(self, cursor: Type[FunctionalCursor], **kwargs) -> FunctionalCursor: ...
+    def cursor(self, cursor: type[FunctionalCursor], **kwargs) -> FunctionalCursor: ...
 
     def cursor(
-        self, cursor: Optional[Type[FunctionalCursor]] = None, **kwargs
-    ) -> Union[FunctionalCursor, ConnectionCursor]:
+        self, cursor: type[FunctionalCursor] | None = None, **kwargs
+    ) -> FunctionalCursor | ConnectionCursor:
         """Create a new cursor object for executing queries.
 
         Creates and returns a cursor object that can be used to execute SQL
@@ -574,7 +569,6 @@ class Connection(Generic[ConnectionCursor]):
             This method is called automatically when using the connection
             as a context manager (with statement).
         """
-        pass
 
     def commit(self) -> None:
         """Commit any pending transaction.
@@ -585,7 +579,6 @@ class Connection(Generic[ConnectionCursor]):
         Note:
             Athena queries are auto-committed and cannot be rolled back.
         """
-        pass
 
     def rollback(self) -> None:
         """Rollback any pending transaction.

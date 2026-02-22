@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 from sqlalchemy.testing import exclusions
 from sqlalchemy.testing.requirements import SuiteRequirements
 

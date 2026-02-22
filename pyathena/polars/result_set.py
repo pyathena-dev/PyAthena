@@ -1,19 +1,12 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import logging
 from collections import abc
+from collections.abc import Callable, Iterator
 from multiprocessing import cpu_count
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
-    Dict,
-    Iterator,
-    List,
-    Optional,
-    Tuple,
-    Union,
     cast,
 )
 
@@ -39,7 +32,7 @@ def _identity(x: Any) -> Any:
     return x
 
 
-class PolarsDataFrameIterator(abc.Iterator):  # type: ignore
+class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
     """Iterator for chunked DataFrame results from Athena queries.
 
     This class wraps either a Polars DataFrame iterator (for chunked reading) or
@@ -66,9 +59,9 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore
 
     def __init__(
         self,
-        reader: Union[Iterator["pl.DataFrame"], "pl.DataFrame"],
-        converters: Dict[str, Callable[[Optional[str]], Optional[Any]]],
-        column_names: List[str],
+        reader: Iterator[pl.DataFrame] | pl.DataFrame,
+        converters: dict[str, Callable[[str | None], Any | None]],
+        column_names: list[str],
     ) -> None:
         """Initialize the iterator.
 
@@ -80,13 +73,13 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore
         import polars as pl
 
         if isinstance(reader, pl.DataFrame):
-            self._reader: Iterator["pl.DataFrame"] = iter([reader])
+            self._reader: Iterator[pl.DataFrame] = iter([reader])
         else:
             self._reader = reader
         self._converters = converters
         self._column_names = column_names
 
-    def __next__(self) -> "pl.DataFrame":
+    def __next__(self) -> pl.DataFrame:
         """Get the next DataFrame chunk.
 
         Returns:
@@ -101,11 +94,11 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore
             self.close()
             raise
 
-    def __iter__(self) -> "PolarsDataFrameIterator":
+    def __iter__(self) -> PolarsDataFrameIterator:
         """Return self as iterator."""
         return self
 
-    def __enter__(self) -> "PolarsDataFrameIterator":
+    def __enter__(self) -> PolarsDataFrameIterator:
         """Context manager entry."""
         return self
 
@@ -120,7 +113,7 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore
         if isinstance(self._reader, GeneratorType):
             self._reader.close()
 
-    def iterrows(self) -> Iterator[Tuple[int, Dict[str, Any]]]:
+    def iterrows(self) -> Iterator[tuple[int, dict[str, Any]]]:
         """Iterate over rows as (index, row_dict) tuples.
 
         Yields:
@@ -137,7 +130,7 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore
                 yield (row_num, processed_row)
                 row_num += 1
 
-    def as_polars(self) -> "pl.DataFrame":
+    def as_polars(self) -> pl.DataFrame:
         """Collect all chunks into a single DataFrame.
 
         Returns:
@@ -145,7 +138,7 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore
         """
         import polars as pl
 
-        dfs = cast(List["pl.DataFrame"], list(self))
+        dfs = cast(list["pl.DataFrame"], list(self))
         if not dfs:
             return pl.DataFrame()
         if len(dfs) == 1:
@@ -198,17 +191,17 @@ class AthenaPolarsResultSet(AthenaResultSet):
 
     def __init__(
         self,
-        connection: "Connection[Any]",
+        connection: Connection[Any],
         converter: Converter,
         query_execution: AthenaQueryExecution,
         arraysize: int,
         retry_config: RetryConfig,
         unload: bool = False,
-        unload_location: Optional[str] = None,
-        block_size: Optional[int] = None,
-        cache_type: Optional[str] = None,
+        unload_location: str | None = None,
+        block_size: int | None = None,
+        cache_type: str | None = None,
         max_workers: int = (cpu_count() or 1) * 5,
-        chunksize: Optional[int] = None,
+        chunksize: int | None = None,
         **kwargs,
     ) -> None:
         """Initialize the Polars result set.
@@ -263,11 +256,11 @@ class AthenaPolarsResultSet(AthenaResultSet):
 
         # Cache column names for efficient access in fetchone()
         # Must be after _create_dataframe_iterator() which updates _metadata for unload
-        self._column_names_cache: List[str] = self._get_column_names()
+        self._column_names_cache: list[str] = self._get_column_names()
         self._iterrows = self._df_iter.iterrows()
 
     @property
-    def _csv_storage_options(self) -> Dict[str, Any]:
+    def _csv_storage_options(self) -> dict[str, Any]:
         """Get storage options for Polars CSV reading via fsspec.
 
         Polars read_csv uses fsspec for cloud storage access, which works
@@ -284,7 +277,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         }
 
     @property
-    def _parquet_storage_options(self) -> Dict[str, Any]:
+    def _parquet_storage_options(self) -> dict[str, Any]:
         """Get storage options for Polars Parquet reading via native object_store.
 
         Polars read_parquet uses Rust's native object_store crate, which requires
@@ -294,7 +287,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             Dictionary with AWS credentials and region for S3 access.
         """
         credentials = self.connection.session.get_credentials()
-        options: Dict[str, Any] = {}
+        options: dict[str, Any] = {}
         if credentials:
             frozen_credentials = credentials.get_frozen_credentials()
             options["aws_access_key_id"] = frozen_credentials.access_key
@@ -306,7 +299,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         return options
 
     @property
-    def dtypes(self) -> Dict[str, Any]:
+    def dtypes(self) -> dict[str, Any]:
         """Get Polars-compatible data types for result columns."""
         description = self.description if self.description else []
         return {
@@ -316,7 +309,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         }
 
     @property
-    def converters(self) -> Dict[str, Callable[[Optional[str]], Optional[Any]]]:
+    def converters(self) -> dict[str, Callable[[str | None], Any | None]]:
         """Get converter functions for each column.
 
         Returns:
@@ -325,7 +318,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         description = self.description if self.description else []
         return {d[0]: self._converter.get(d[1]) for d in description}
 
-    def _get_column_names(self) -> List[str]:
+    def _get_column_names(self) -> list[str]:
         """Get column names from description.
 
         Returns:
@@ -342,7 +335,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """
         if self._chunksize is not None:
             # Chunked mode: create lazy iterator
-            reader: Union[Iterator["pl.DataFrame"], "pl.DataFrame"] = (
+            reader: Iterator[pl.DataFrame] | pl.DataFrame = (
                 self._iter_parquet_chunks() if self.is_unload else self._iter_csv_chunks()
             )
         else:
@@ -353,7 +346,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
 
     def fetchone(
         self,
-    ) -> Optional[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+    ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
         """Fetch the next row of the query result.
 
         Returns:
@@ -368,8 +361,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
             return tuple([row[1][col] for col in self._column_names_cache])
 
     def fetchmany(
-        self, size: Optional[int] = None
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        self, size: int | None = None
+    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         """Fetch the next set of rows of the query result.
 
         Args:
@@ -391,7 +384,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
 
     def fetchall(
         self,
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         """Fetch all remaining rows of the query result.
 
         Returns:
@@ -442,7 +435,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             self._unload_location = "/".join(manifests[0].split("/")[:-1]) + "/"
         return True
 
-    def _read_csv(self) -> "pl.DataFrame":
+    def _read_csv(self) -> pl.DataFrame:
         """Read query results from CSV file in S3.
 
         Returns:
@@ -475,10 +468,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 df.columns = new_columns
             return df
         except Exception as e:
-            _logger.exception(f"Failed to read {self.output_location}.")
+            _logger.exception("Failed to read %s.", self.output_location)
             raise OperationalError(*e.args) from e
 
-    def _read_parquet(self) -> "pl.DataFrame":
+    def _read_parquet(self) -> pl.DataFrame:
         """Read query results from Parquet files in S3.
 
         Returns:
@@ -502,10 +495,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 **self._kwargs,
             )
         except Exception as e:
-            _logger.exception(f"Failed to read {self._unload_location}.")
+            _logger.exception("Failed to read %s.", self._unload_location)
             raise OperationalError(*e.args) from e
 
-    def _read_parquet_schema(self) -> Tuple[Dict[str, Any], ...]:
+    def _read_parquet_schema(self) -> tuple[dict[str, Any], ...]:
         """Read schema from Parquet files for metadata."""
         import polars as pl
 
@@ -521,10 +514,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
             schema = lazy_df.collect_schema()
             return to_column_info(schema)
         except Exception as e:
-            _logger.exception(f"Failed to read schema from {self._unload_location}.")
+            _logger.exception("Failed to read schema from %s.", self._unload_location)
             raise OperationalError(*e.args) from e
 
-    def _as_polars(self) -> "pl.DataFrame":
+    def _as_polars(self) -> pl.DataFrame:
         """Load query results as a Polars DataFrame.
 
         Reads from Parquet for UNLOAD queries, otherwise from CSV.
@@ -542,7 +535,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             df = self._read_csv()
         return df
 
-    def _as_polars_from_api(self, converter: Optional[Converter] = None) -> "pl.DataFrame":
+    def _as_polars_from_api(self, converter: Converter | None = None) -> pl.DataFrame:
         """Build a Polars DataFrame from GetQueryResults API.
 
         Used as a fallback when ``output_location`` is not available
@@ -561,7 +554,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         columns = [d[0] for d in description]
         return pl.DataFrame(self._rows_to_columnar(rows, columns))
 
-    def as_polars(self) -> "pl.DataFrame":
+    def as_polars(self) -> pl.DataFrame:
         """Return query results as a Polars DataFrame.
 
         Returns the query results as a Polars DataFrame. This is the primary
@@ -584,7 +577,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """
         return self._df_iter.as_polars()
 
-    def as_arrow(self) -> "Table":
+    def as_arrow(self) -> Table:
         """Return query results as an Apache Arrow Table.
 
         Converts the Polars DataFrame to an Apache Arrow Table for
@@ -609,7 +602,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 "pyarrow is required for as_arrow(). Install it with: pip install pyarrow"
             ) from e
 
-    def _get_csv_params(self) -> Tuple[str, bool, Optional[List[str]]]:
+    def _get_csv_params(self) -> tuple[str, bool, list[str] | None]:
         """Get CSV parsing parameters based on file type.
 
         Returns:
@@ -618,14 +611,14 @@ class AthenaPolarsResultSet(AthenaResultSet):
         if self.output_location and self.output_location.endswith(".txt"):
             separator = "\t"
             has_header = False
-            new_columns: Optional[List[str]] = self._get_column_names()
+            new_columns: list[str] | None = self._get_column_names()
         else:
             separator = ","
             has_header = True
             new_columns = None
         return separator, has_header, new_columns
 
-    def _iter_csv_chunks(self) -> Iterator["pl.DataFrame"]:
+    def _iter_csv_chunks(self) -> Iterator[pl.DataFrame]:
         """Iterate over CSV data in chunks using lazy evaluation.
 
         Yields:
@@ -661,10 +654,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
                     batch.columns = new_columns
                 yield batch
         except Exception as e:
-            _logger.exception(f"Failed to read {self.output_location}.")
+            _logger.exception("Failed to read %s.", self.output_location)
             raise OperationalError(*e.args) from e
 
-    def _iter_parquet_chunks(self) -> Iterator["pl.DataFrame"]:
+    def _iter_parquet_chunks(self) -> Iterator[pl.DataFrame]:
         """Iterate over Parquet data in chunks using lazy evaluation.
 
         Yields:
@@ -687,10 +680,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 storage_options=self._parquet_storage_options,
                 **self._kwargs,
             )
-            for batch in lazy_df.collect_batches(chunk_size=self._chunksize):
-                yield batch
+            yield from lazy_df.collect_batches(chunk_size=self._chunksize)
         except Exception as e:
-            _logger.exception(f"Failed to read {self._unload_location}.")
+            _logger.exception("Failed to read %s.", self._unload_location)
             raise OperationalError(*e.args) from e
 
     def iter_chunks(self) -> PolarsDataFrameIterator:

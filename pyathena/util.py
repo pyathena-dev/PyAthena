@@ -1,23 +1,24 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Callable, Iterable, Optional, Pattern, Tuple, cast
+from collections.abc import Callable, Iterable
+from re import Pattern
+from typing import Any, cast
 
 import tenacity
 from tenacity import after_log, retry_if_exception, stop_after_attempt, wait_exponential
 
 from pyathena import DataError
 
-_logger = logging.getLogger(__name__)  # type: ignore
+_logger = logging.getLogger(__name__)
 
 PATTERN_OUTPUT_LOCATION: Pattern[str] = re.compile(
     r"^s3://(?P<bucket>[a-zA-Z0-9.\-_]+)/(?P<key>.+)$"
 )
 
 
-def parse_output_location(output_location: str) -> Tuple[str, str]:
+def parse_output_location(output_location: str) -> tuple[str, str]:
     """Parse an S3 output location URL into bucket and key components.
 
     Args:
@@ -135,7 +136,7 @@ class RetryConfig:
 def retry_api_call(
     func: Callable[..., Any],
     config: RetryConfig,
-    logger: Optional[logging.Logger] = None,
+    logger: logging.Logger | None = None,
     *args,
     **kwargs,
 ) -> Any:
@@ -173,10 +174,10 @@ def retry_api_call(
         Does not retry on client errors or non-AWS exceptions.
     """
 
-    def _extract_code(ex: BaseException) -> Optional[str]:
-        resp = cast(Optional[dict[str, Any]], getattr(ex, "response", None))
-        err = cast(Optional[dict[str, Any]], (resp or {}).get("Error"))
-        return cast(Optional[str], (err or {}).get("Code"))
+    def _extract_code(ex: BaseException) -> str | None:
+        resp = cast(dict[str, Any] | None, getattr(ex, "response", None))
+        err = cast(dict[str, Any] | None, (resp or {}).get("Error"))
+        return cast(str | None, (err or {}).get("Code"))
 
     def _is_retryable(ex: BaseException) -> bool:
         code = _extract_code(ex)
@@ -190,7 +191,7 @@ def retry_api_call(
             max=config.max_delay,
             exp_base=config.exponential_base,
         ),
-        after=after_log(logger, logger.getEffectiveLevel()) if logger else None,  # type: ignore
+        after=after_log(logger, logger.getEffectiveLevel()) if logger else None,  # type: ignore[arg-type]
         reraise=True,
     )
     return retry(func, *args, **kwargs)

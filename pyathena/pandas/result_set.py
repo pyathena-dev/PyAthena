@@ -1,21 +1,13 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import logging
 from collections import abc
+from collections.abc import Callable, Iterable, Iterator
 from multiprocessing import cpu_count
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
-    Dict,
-    Iterable,
-    Iterator,
-    List,
-    Optional,
-    Tuple,
-    Type,
-    Union,
+    ClassVar,
 )
 
 from pyathena import OperationalError
@@ -31,14 +23,14 @@ if TYPE_CHECKING:
 
     from pyathena.connection import Connection
 
-_logger = logging.getLogger(__name__)  # type: ignore
+_logger = logging.getLogger(__name__)
 
 
-def _no_trunc_date(df: "DataFrame") -> "DataFrame":
+def _no_trunc_date(df: DataFrame) -> DataFrame:
     return df
 
 
-class PandasDataFrameIterator(abc.Iterator):  # type: ignore
+class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
     """Iterator for chunked DataFrame results from Athena queries.
 
     This class wraps either a pandas TextFileReader (for chunked reading) or
@@ -65,8 +57,8 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore
 
     def __init__(
         self,
-        reader: Union["TextFileReader", "DataFrame"],
-        trunc_date: Callable[["DataFrame"], "DataFrame"],
+        reader: TextFileReader | DataFrame,
+        trunc_date: Callable[[DataFrame], DataFrame],
     ) -> None:
         """Initialize the iterator.
 
@@ -82,7 +74,7 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore
             self._reader = reader
         self._trunc_date = trunc_date
 
-    def __next__(self) -> "DataFrame":
+    def __next__(self) -> DataFrame:
         """Get the next DataFrame chunk.
 
         Returns:
@@ -98,11 +90,11 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore
             self.close()
             raise
 
-    def __iter__(self) -> "PandasDataFrameIterator":
+    def __iter__(self) -> PandasDataFrameIterator:
         """Return self as iterator."""
         return self
 
-    def __enter__(self) -> "PandasDataFrameIterator":
+    def __enter__(self) -> PandasDataFrameIterator:
         """Context manager entry."""
         return self
 
@@ -117,7 +109,7 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore
         if isinstance(self._reader, TextFileReader):
             self._reader.close()
 
-    def iterrows(self) -> Iterator[Tuple[int, Dict[str, Any]]]:
+    def iterrows(self) -> Iterator[tuple[int, dict[str, Any]]]:
         """Iterate over rows as (index, row_dict) tuples.
 
         Row indices are continuous across all chunks, starting from 0.
@@ -134,7 +126,7 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore
                 yield (row_num, dict(zip(columns, row, strict=True)))
                 row_num += 1
 
-    def get_chunk(self, size: Optional[int] = None) -> "DataFrame":
+    def get_chunk(self, size: int | None = None) -> DataFrame:
         """Get a chunk of specified size.
 
         Args:
@@ -149,7 +141,7 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore
             return self._reader.get_chunk(size)
         return next(self._reader)
 
-    def as_pandas(self) -> "DataFrame":
+    def as_pandas(self) -> DataFrame:
         """Collect all chunks into a single DataFrame.
 
         Returns:
@@ -157,7 +149,7 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore
         """
         import pandas as pd
 
-        dfs: List["DataFrame"] = list(self)
+        dfs: list[DataFrame] = list(self)
         if not dfs:
             return pd.DataFrame()
         if len(dfs) == 1:
@@ -211,7 +203,7 @@ class AthenaPandasResultSet(AthenaResultSet):
     AUTO_CHUNK_SIZE_LARGE: int = 100_000
     AUTO_CHUNK_SIZE_MEDIUM: int = 50_000
 
-    _PARSE_DATES: List[str] = [
+    _PARSE_DATES: ClassVar[list[str]] = [
         "date",
         "time",
         "time with time zone",
@@ -221,20 +213,20 @@ class AthenaPandasResultSet(AthenaResultSet):
 
     def __init__(
         self,
-        connection: "Connection[Any]",
+        connection: Connection[Any],
         converter: Converter,
         query_execution: AthenaQueryExecution,
         arraysize: int,
         retry_config: RetryConfig,
         keep_default_na: bool = False,
-        na_values: Optional[Iterable[str]] = ("",),
+        na_values: Iterable[str] | None = ("",),
         quoting: int = 1,
         unload: bool = False,
-        unload_location: Optional[str] = None,
+        unload_location: str | None = None,
         engine: str = "auto",
-        chunksize: Optional[int] = None,
-        block_size: Optional[int] = None,
-        cache_type: Optional[str] = None,
+        chunksize: int | None = None,
+        block_size: int | None = None,
+        cache_type: str | None = None,
         max_workers: int = (cpu_count() or 1) * 5,
         auto_optimize_chunksize: bool = False,
         **kwargs,
@@ -282,13 +274,13 @@ class AthenaPandasResultSet(AthenaResultSet):
         self._cache_type = cache_type
         self._max_workers = max_workers
         self._auto_optimize_chunksize = auto_optimize_chunksize
-        self._data_manifest: List[str] = []
+        self._data_manifest: list[str] = []
         self._kwargs = kwargs
         self._fs = self.__s3_file_system()
 
         # Cache time column names for efficient _trunc_date processing
         description = self.description if self.description else []
-        self._time_columns: List[str] = [
+        self._time_columns: list[str] = [
             d[0] for d in description if d[1] in ("time", "time with time zone")
         ]
 
@@ -319,7 +311,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         return self._engine
 
     def _get_csv_engine(
-        self, file_size_bytes: Optional[int] = None, chunksize: Optional[int] = None
+        self, file_size_bytes: int | None = None, chunksize: int | None = None
     ) -> str:
         """Determine the appropriate CSV engine based on configuration and compatibility.
 
@@ -341,7 +333,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         # Auto-selection for "auto" or unknown engine values
         return self._get_optimal_csv_engine(file_size_bytes)
 
-    def _get_pyarrow_engine(self, file_size_bytes: Optional[int], chunksize: Optional[int]) -> str:
+    def _get_pyarrow_engine(self, file_size_bytes: int | None, chunksize: int | None) -> str:
         """Get PyArrow engine if compatible, otherwise return optimal engine."""
         # Check parameter compatibility
         if chunksize is not None or self._quoting != 1 or self.converters:
@@ -357,7 +349,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         except ImportError:
             return self._get_optimal_csv_engine(file_size_bytes)
 
-    def _get_available_engine(self, engine_candidates: List[str]) -> str:
+    def _get_available_engine(self, engine_candidates: list[str]) -> str:
         """Get the first available engine from a list of candidates.
 
         Args:
@@ -376,8 +368,8 @@ class AthenaPandasResultSet(AthenaResultSet):
             try:
                 module = importlib.import_module(engine)
                 return module.__name__
-            except ImportError as e:
-                error_msgs += f"\n - {str(e)}"
+            except ImportError as e:  # noqa: PERF203
+                error_msgs += f"\n - {e!s}"
 
         available_engines = ", ".join(f"'{e}'" for e in engine_candidates)
         raise ImportError(
@@ -386,7 +378,7 @@ class AthenaPandasResultSet(AthenaResultSet):
             f"{error_msgs}"
         )
 
-    def _get_optimal_csv_engine(self, file_size_bytes: Optional[int] = None) -> str:
+    def _get_optimal_csv_engine(self, file_size_bytes: int | None = None) -> str:
         """Get the optimal CSV engine based on file size.
 
         Args:
@@ -399,7 +391,7 @@ class AthenaPandasResultSet(AthenaResultSet):
             return "python"
         return "c"
 
-    def _auto_determine_chunksize(self, file_size_bytes: int) -> Optional[int]:
+    def _auto_determine_chunksize(self, file_size_bytes: int) -> int | None:
         """Determine appropriate chunksize for large files based on file size.
 
         This method provides a simple file-size-based chunksize determination.
@@ -435,7 +427,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         )
 
     @property
-    def dtypes(self) -> Dict[str, Type[Any]]:
+    def dtypes(self) -> dict[str, type[Any]]:
         """Get pandas-compatible data types for result columns.
 
         Returns:
@@ -452,18 +444,18 @@ class AthenaPandasResultSet(AthenaResultSet):
     @property
     def converters(
         self,
-    ) -> Dict[Optional[Any], Callable[[Optional[str]], Optional[Any]]]:
+    ) -> dict[Any | None, Callable[[str | None], Any | None]]:
         description = self.description if self.description else []
         return {
             d[0]: self._converter.get(d[1]) for d in description if d[1] in self._converter.mappings
         }
 
     @property
-    def parse_dates(self) -> List[Optional[Any]]:
+    def parse_dates(self) -> list[Any | None]:
         description = self.description if self.description else []
         return [d[0] for d in description if d[1] in self._PARSE_DATES]
 
-    def _trunc_date(self, df: "DataFrame") -> "DataFrame":
+    def _trunc_date(self, df: DataFrame) -> DataFrame:
         if self._time_columns:
             truncated = df.loc[:, self._time_columns].apply(lambda r: r.dt.time)
             for time_col in self._time_columns:
@@ -472,7 +464,7 @@ class AthenaPandasResultSet(AthenaResultSet):
 
     def fetchone(
         self,
-    ) -> Optional[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+    ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
         try:
             row = next(self._iterrows)
         except StopIteration:
@@ -483,8 +475,8 @@ class AthenaPandasResultSet(AthenaResultSet):
             return tuple([row[1][d[0]] for d in description])
 
     def fetchmany(
-        self, size: Optional[int] = None
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        self, size: int | None = None
+    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         if not size or size <= 0:
             size = self._arraysize
         rows = []
@@ -498,7 +490,7 @@ class AthenaPandasResultSet(AthenaResultSet):
 
     def fetchall(
         self,
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         rows = []
         while True:
             row = self.fetchone()
@@ -508,7 +500,7 @@ class AthenaPandasResultSet(AthenaResultSet):
                 break
         return rows
 
-    def _read_csv(self) -> Union["TextFileReader", "DataFrame"]:
+    def _read_csv(self) -> TextFileReader | DataFrame:
         import pandas as pd
 
         if not self.output_location:
@@ -546,8 +538,9 @@ class AthenaPandasResultSet(AthenaResultSet):
             effective_chunksize = self._auto_determine_chunksize(length)
             if effective_chunksize:
                 _logger.debug(
-                    f"Auto-determined chunksize: {effective_chunksize} "
-                    f"for file size: {length} bytes"
+                    "Auto-determined chunksize: %s for file size: %s bytes",
+                    effective_chunksize,
+                    length,
                 )
 
         csv_engine = self._get_csv_engine(length, effective_chunksize)
@@ -586,15 +579,17 @@ class AthenaPandasResultSet(AthenaResultSet):
             # Log performance information for large files
             if length > self.LARGE_FILE_THRESHOLD_BYTES:
                 mode = "chunked" if effective_chunksize else "full"
-                _logger.info(
-                    f"Reading {length} bytes from S3 in {mode} mode using {csv_engine} engine"
-                    + (f" with chunksize={effective_chunksize}" if effective_chunksize else "")
-                )
+                msg = "Reading %s bytes from S3 in %s mode using %s engine"
+                args: tuple[object, ...] = (length, mode, csv_engine)
+                if effective_chunksize:
+                    msg += " with chunksize=%s"
+                    args = (*args, effective_chunksize)
+                _logger.info(msg, *args)
 
             return result
 
         except Exception as e:
-            _logger.exception(f"Failed to read {self.output_location}.")
+            _logger.exception("Failed to read %s.", self.output_location)
             error_msg = str(e).lower()
             if any(
                 phrase in error_msg
@@ -617,7 +612,7 @@ class AthenaPandasResultSet(AthenaResultSet):
                 raise OperationalError(detailed_msg) from e
             raise OperationalError(*e.args) from e
 
-    def _read_parquet(self, engine) -> "DataFrame":
+    def _read_parquet(self, engine) -> DataFrame:
         import pandas as pd
 
         self._data_manifest = self._read_data_manifest()
@@ -648,10 +643,10 @@ class AthenaPandasResultSet(AthenaResultSet):
                 **kwargs,
             )
         except Exception as e:
-            _logger.exception(f"Failed to read {self.output_location}.")
+            _logger.exception("Failed to read %s.", self.output_location)
             raise OperationalError(*e.args) from e
 
-    def _read_parquet_schema(self, engine) -> Tuple[Dict[str, Any], ...]:
+    def _read_parquet_schema(self, engine) -> tuple[dict[str, Any], ...]:
         if engine == "pyarrow":
             from pyarrow import parquet
 
@@ -664,12 +659,12 @@ class AthenaPandasResultSet(AthenaResultSet):
                 dataset = parquet.ParquetDataset(f"{bucket}/{key}", filesystem=self._fs)
                 return to_column_info(dataset.schema)
             except Exception as e:
-                _logger.exception(f"Failed to read schema {bucket}/{key}.")
+                _logger.exception("Failed to read schema %s/%s.", bucket, key)
                 raise OperationalError(*e.args) from e
         else:
             raise ProgrammingError("Engine must be `pyarrow`.")
 
-    def _as_pandas(self) -> Union["TextFileReader", "DataFrame"]:
+    def _as_pandas(self) -> TextFileReader | DataFrame:
         if self.is_unload:
             engine = self._get_parquet_engine()
             df = self._read_parquet(engine)
@@ -681,7 +676,7 @@ class AthenaPandasResultSet(AthenaResultSet):
             df = self._read_csv()
         return df
 
-    def _as_pandas_from_api(self, converter: Optional[Converter] = None) -> "DataFrame":
+    def _as_pandas_from_api(self, converter: Converter | None = None) -> DataFrame:
         """Build a DataFrame from GetQueryResults API.
 
         Used as a fallback when ``output_location`` is not available
@@ -700,7 +695,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         columns = [d[0] for d in description]
         return pd.DataFrame(self._rows_to_columnar(rows, columns))
 
-    def as_pandas(self) -> Union[PandasDataFrameIterator, "DataFrame"]:
+    def as_pandas(self) -> PandasDataFrameIterator | DataFrame:
         if self._chunksize is None:
             return next(self._df_iter)
         return self._df_iter

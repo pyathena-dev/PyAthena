@@ -54,10 +54,10 @@ The code formatting uses [ruff](https://github.com/astral-sh/ruff).
 $ make fmt
 ```
 
-### Check format
+### Lint and check format
 
 ```bash
-$ make chk
+$ make lint
 ```
 
 ## GitHub Actions

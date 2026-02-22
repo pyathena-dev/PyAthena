@@ -1,11 +1,10 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import asyncio
 import logging
 import sys
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, cast
 
 from pyathena.aio.util import async_retry_api_call
 from pyathena.common import BaseCursor, CursorIterator
@@ -13,7 +12,7 @@ from pyathena.error import DatabaseError, OperationalError, ProgrammingError
 from pyathena.model import AthenaDatabase, AthenaQueryExecution, AthenaTableMetadata
 from pyathena.result_set import AthenaResultSet, WithResultSet
 
-_logger = logging.getLogger(__name__)  # type: ignore
+_logger = logging.getLogger(__name__)
 
 
 class AioBaseCursor(BaseCursor):
@@ -27,14 +26,14 @@ class AioBaseCursor(BaseCursor):
     async def _execute(  # type: ignore[override]
         self,
         operation: str,
-        parameters: Optional[Union[Dict[str, Any], List[str]]] = None,
-        work_group: Optional[str] = None,
-        s3_staging_dir: Optional[str] = None,
-        cache_size: Optional[int] = 0,
-        cache_expiration_time: Optional[int] = 0,
-        result_reuse_enable: Optional[bool] = None,
-        result_reuse_minutes: Optional[int] = None,
-        paramstyle: Optional[str] = None,
+        parameters: dict[str, Any] | list[str] | None = None,
+        work_group: str | None = None,
+        s3_staging_dir: str | None = None,
+        cache_size: int | None = 0,
+        cache_expiration_time: int | None = 0,
+        result_reuse_enable: bool | None = None,
+        result_reuse_minutes: int | None = None,
+        paramstyle: str | None = None,
     ) -> str:
         query, execution_parameters = self._prepare_query(operation, parameters, paramstyle)
 
@@ -118,8 +117,8 @@ class AioBaseCursor(BaseCursor):
             raise OperationalError(*e.args) from e
 
     async def _batch_get_query_execution(  # type: ignore[override]
-        self, query_ids: List[str]
-    ) -> List[AthenaQueryExecution]:
+        self, query_ids: list[str]
+    ) -> list[AthenaQueryExecution]:
         try:
             response = await async_retry_api_call(
                 self.connection._client.batch_get_query_execution,
@@ -138,10 +137,10 @@ class AioBaseCursor(BaseCursor):
 
     async def _list_query_executions(  # type: ignore[override]
         self,
-        work_group: Optional[str] = None,
-        next_token: Optional[str] = None,
-        max_results: Optional[int] = None,
-    ) -> Tuple[Optional[str], List[AthenaQueryExecution]]:
+        work_group: str | None = None,
+        next_token: str | None = None,
+        max_results: int | None = None,
+    ) -> tuple[str | None, list[AthenaQueryExecution]]:
         request = self._build_list_query_executions_request(
             work_group=work_group, next_token=next_token, max_results=max_results
         )
@@ -165,10 +164,10 @@ class AioBaseCursor(BaseCursor):
     async def _find_previous_query_id(  # type: ignore[override]
         self,
         query: str,
-        work_group: Optional[str],
+        work_group: str | None,
         cache_size: int = 0,
         cache_expiration_time: int = 0,
-    ) -> Optional[str]:
+    ) -> str | None:
         query_id = None
         if cache_size == 0 and cache_expiration_time > 0:
             cache_size = sys.maxsize
@@ -191,7 +190,7 @@ class AioBaseCursor(BaseCursor):
                         if e.state == AthenaQueryExecution.STATE_SUCCEEDED
                         and e.statement_type == AthenaQueryExecution.STATEMENT_TYPE_DML
                     ),
-                    key=lambda e: e.completion_date_time,  # type: ignore
+                    key=lambda e: e.completion_date_time,  # type: ignore[arg-type, return-value]
                     reverse=True,
                 ):
                     if (
@@ -213,10 +212,10 @@ class AioBaseCursor(BaseCursor):
 
     async def _list_databases(  # type: ignore[override]
         self,
-        catalog_name: Optional[str],
-        next_token: Optional[str] = None,
-        max_results: Optional[int] = None,
-    ) -> Tuple[Optional[str], List[AthenaDatabase]]:
+        catalog_name: str | None,
+        next_token: str | None = None,
+        max_results: int | None = None,
+    ) -> tuple[str | None, list[AthenaDatabase]]:
         request = self._build_list_databases_request(
             catalog_name=catalog_name,
             next_token=next_token,
@@ -239,10 +238,10 @@ class AioBaseCursor(BaseCursor):
 
     async def list_databases(  # type: ignore[override]
         self,
-        catalog_name: Optional[str],
-        max_results: Optional[int] = None,
-    ) -> List[AthenaDatabase]:
-        databases: List[AthenaDatabase] = []
+        catalog_name: str | None,
+        max_results: int | None = None,
+    ) -> list[AthenaDatabase]:
+        databases: list[AthenaDatabase] = []
         next_token = None
         while True:
             next_token, response = await self._list_databases(
@@ -258,8 +257,8 @@ class AioBaseCursor(BaseCursor):
     async def _get_table_metadata(  # type: ignore[override]
         self,
         table_name: str,
-        catalog_name: Optional[str] = None,
-        schema_name: Optional[str] = None,
+        catalog_name: str | None = None,
+        schema_name: str | None = None,
         logging_: bool = True,
     ) -> AthenaTableMetadata:
         request = self._build_get_table_metadata_request(
@@ -284,8 +283,8 @@ class AioBaseCursor(BaseCursor):
     async def get_table_metadata(  # type: ignore[override]
         self,
         table_name: str,
-        catalog_name: Optional[str] = None,
-        schema_name: Optional[str] = None,
+        catalog_name: str | None = None,
+        schema_name: str | None = None,
         logging_: bool = True,
     ) -> AthenaTableMetadata:
         return await self._get_table_metadata(
@@ -297,12 +296,12 @@ class AioBaseCursor(BaseCursor):
 
     async def _list_table_metadata(  # type: ignore[override]
         self,
-        catalog_name: Optional[str] = None,
-        schema_name: Optional[str] = None,
-        expression: Optional[str] = None,
-        next_token: Optional[str] = None,
-        max_results: Optional[int] = None,
-    ) -> Tuple[Optional[str], List[AthenaTableMetadata]]:
+        catalog_name: str | None = None,
+        schema_name: str | None = None,
+        expression: str | None = None,
+        next_token: str | None = None,
+        max_results: int | None = None,
+    ) -> tuple[str | None, list[AthenaTableMetadata]]:
         request = self._build_list_table_metadata_request(
             catalog_name=catalog_name,
             schema_name=schema_name,
@@ -328,12 +327,12 @@ class AioBaseCursor(BaseCursor):
 
     async def list_table_metadata(  # type: ignore[override]
         self,
-        catalog_name: Optional[str] = None,
-        schema_name: Optional[str] = None,
-        expression: Optional[str] = None,
-        max_results: Optional[int] = None,
-    ) -> List[AthenaTableMetadata]:
-        metadata: List[AthenaTableMetadata] = []
+        catalog_name: str | None = None,
+        schema_name: str | None = None,
+        expression: str | None = None,
+        max_results: int | None = None,
+    ) -> list[AthenaTableMetadata]:
+        metadata: list[AthenaTableMetadata] = []
         next_token = None
         while True:
             next_token, response = await self._list_table_metadata(
@@ -363,8 +362,8 @@ class WithAsyncFetch(AioBaseCursor, CursorIterator, WithResultSet):
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        self._query_id: Optional[str] = None
-        self._result_set: Optional[AthenaResultSet] = None
+        self._query_id: str | None = None
+        self._result_set: AthenaResultSet | None = None
 
     @property
     def arraysize(self) -> int:
@@ -376,8 +375,8 @@ class WithAsyncFetch(AioBaseCursor, CursorIterator, WithResultSet):
             raise ProgrammingError("arraysize must be a positive integer value.")
         self._arraysize = value
 
-    @property  # type: ignore
-    def result_set(self) -> Optional[AthenaResultSet]:
+    @property  # type: ignore[override]
+    def result_set(self) -> AthenaResultSet | None:
         return self._result_set
 
     @result_set.setter
@@ -385,7 +384,7 @@ class WithAsyncFetch(AioBaseCursor, CursorIterator, WithResultSet):
         self._result_set = val
 
     @property
-    def query_id(self) -> Optional[str]:
+    def query_id(self) -> str | None:
         return self._query_id
 
     @query_id.setter
@@ -393,7 +392,7 @@ class WithAsyncFetch(AioBaseCursor, CursorIterator, WithResultSet):
         self._query_id = val
 
     @property
-    def rownumber(self) -> Optional[int]:
+    def rownumber(self) -> int | None:
         return self.result_set.rownumber if self.result_set else None
 
     @property
@@ -408,7 +407,7 @@ class WithAsyncFetch(AioBaseCursor, CursorIterator, WithResultSet):
     async def executemany(  # type: ignore[override]
         self,
         operation: str,
-        seq_of_parameters: List[Optional[Union[Dict[str, Any], List[str]]]],
+        seq_of_parameters: list[dict[str, Any] | list[str] | None],
         **kwargs,
     ) -> None:
         """Execute a SQL query multiple times with different parameters.
@@ -435,7 +434,7 @@ class WithAsyncFetch(AioBaseCursor, CursorIterator, WithResultSet):
 
     def fetchone(
         self,
-    ) -> Optional[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+    ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
         """Fetch the next row of the result set.
 
         Returns:
@@ -450,8 +449,8 @@ class WithAsyncFetch(AioBaseCursor, CursorIterator, WithResultSet):
         return result_set.fetchone()
 
     def fetchmany(
-        self, size: Optional[int] = None
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        self, size: int | None = None
+    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         """Fetch multiple rows from the result set.
 
         Args:
@@ -470,7 +469,7 @@ class WithAsyncFetch(AioBaseCursor, CursorIterator, WithResultSet):
 
     def fetchall(
         self,
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         """Fetch all remaining rows from the result set.
 
         Returns:

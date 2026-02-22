@@ -1,12 +1,10 @@
-# -*- coding: utf-8 -*-
-
 import pytest
 
 from pyathena.converter import DefaultTypeConverter, _to_array, _to_struct
 
 
 @pytest.mark.parametrize(
-    "input_value,expected",
+    ("input_value", "expected"),
     [
         (None, None),
         (
@@ -28,7 +26,7 @@ def test_to_struct_json_formats(input_value, expected):
 
 
 @pytest.mark.parametrize(
-    "input_value,expected",
+    ("input_value", "expected"),
     [
         ("{a=1, b=2}", {"a": 1, "b": 2}),
         ("{}", {}),
@@ -47,7 +45,7 @@ def test_to_struct_athena_native_formats(input_value, expected):
 
 
 @pytest.mark.parametrize(
-    "input_value,expected",
+    ("input_value", "expected"),
     [
         # Single level nesting (Issue #627)
         (
@@ -153,7 +151,7 @@ def test_to_array_athena_unnamed_struct_elements():
 
 
 @pytest.mark.parametrize(
-    "input_value,expected",
+    ("input_value", "expected"),
     [
         # Array with nested structs (Issue #627)
         (
@@ -196,7 +194,7 @@ def test_to_struct_non_dict_json(input_value):
 
 
 @pytest.mark.parametrize(
-    "input_value,expected",
+    ("input_value", "expected"),
     [
         (None, None),
         (
@@ -227,7 +225,7 @@ def test_to_array_json_formats(input_value, expected):
 
 
 @pytest.mark.parametrize(
-    "input_value,expected",
+    ("input_value", "expected"),
     [
         ("[1, 2, 3]", [1, 2, 3]),
         ("[]", []),
@@ -248,7 +246,7 @@ def test_to_array_athena_native_formats(input_value, expected):
 
 
 @pytest.mark.parametrize(
-    "input_value,expected",
+    ("input_value", "expected"),
     [
         ("[ARRAY[1, 2], ARRAY[3, 4]]", None),  # Nested arrays (native format)
         ("[[1, 2], [3, 4]]", [[1, 2], [3, 4]]),  # Nested arrays (JSON format - parseable)
@@ -292,7 +290,7 @@ def test_to_array_invalid_formats(input_value):
 
 class TestDefaultTypeConverter:
     @pytest.mark.parametrize(
-        "input_value,expected",
+        ("input_value", "expected"),
         [
             ('{"name": "Alice", "age": 25}', {"name": "Alice", "age": 25}),
             (None, None),
@@ -308,7 +306,7 @@ class TestDefaultTypeConverter:
         assert result == expected
 
     @pytest.mark.parametrize(
-        "input_value,expected",
+        ("input_value", "expected"),
         [
             ("[1, 2, 3]", [1, 2, 3]),
             ('["a", "b", "c"]', ["a", "b", "c"]),

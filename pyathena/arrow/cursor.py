@@ -1,8 +1,8 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union, cast
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, cast
 
 from pyathena.arrow.converter import (
     DefaultArrowTypeConverter,
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     import polars as pl
     from pyarrow import Table
 
-_logger = logging.getLogger(__name__)  # type: ignore
+_logger = logging.getLogger(__name__)
 
 
 class ArrowCursor(WithFetch):
@@ -52,20 +52,20 @@ class ArrowCursor(WithFetch):
 
     def __init__(
         self,
-        s3_staging_dir: Optional[str] = None,
-        schema_name: Optional[str] = None,
-        catalog_name: Optional[str] = None,
-        work_group: Optional[str] = None,
+        s3_staging_dir: str | None = None,
+        schema_name: str | None = None,
+        catalog_name: str | None = None,
+        work_group: str | None = None,
         poll_interval: float = 1,
-        encryption_option: Optional[str] = None,
-        kms_key: Optional[str] = None,
+        encryption_option: str | None = None,
+        kms_key: str | None = None,
         kill_on_interrupt: bool = True,
         unload: bool = False,
         result_reuse_enable: bool = False,
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
-        on_start_query_execution: Optional[Callable[[str], None]] = None,
-        connect_timeout: Optional[float] = None,
-        request_timeout: Optional[float] = None,
+        on_start_query_execution: Callable[[str], None] | None = None,
+        connect_timeout: float | None = None,
+        request_timeout: float | None = None,
         **kwargs,
     ) -> None:
         """Initialize an ArrowCursor.
@@ -120,7 +120,7 @@ class ArrowCursor(WithFetch):
     @staticmethod
     def get_default_converter(
         unload: bool = False,
-    ) -> Union[DefaultArrowTypeConverter, DefaultArrowUnloadTypeConverter, Any]:
+    ) -> DefaultArrowTypeConverter | DefaultArrowUnloadTypeConverter | Any:
         if unload:
             return DefaultArrowUnloadTypeConverter()
         return DefaultArrowTypeConverter()
@@ -128,15 +128,15 @@ class ArrowCursor(WithFetch):
     def execute(
         self,
         operation: str,
-        parameters: Optional[Union[Dict[str, Any], List[str]]] = None,
-        work_group: Optional[str] = None,
-        s3_staging_dir: Optional[str] = None,
-        cache_size: Optional[int] = 0,
-        cache_expiration_time: Optional[int] = 0,
-        result_reuse_enable: Optional[bool] = None,
-        result_reuse_minutes: Optional[int] = None,
-        paramstyle: Optional[str] = None,
-        on_start_query_execution: Optional[Callable[[str], None]] = None,
+        parameters: dict[str, Any] | list[str] | None = None,
+        work_group: str | None = None,
+        s3_staging_dir: str | None = None,
+        cache_size: int | None = 0,
+        cache_expiration_time: int | None = 0,
+        result_reuse_enable: bool | None = None,
+        result_reuse_minutes: int | None = None,
+        paramstyle: str | None = None,
+        on_start_query_execution: Callable[[str], None] | None = None,
         **kwargs,
     ) -> ArrowCursor:
         """Execute a SQL query and return results as Apache Arrow Tables.
@@ -203,7 +203,7 @@ class ArrowCursor(WithFetch):
             raise OperationalError(query_execution.state_change_reason)
         return self
 
-    def as_arrow(self) -> "Table":
+    def as_arrow(self) -> Table:
         """Return query results as an Apache Arrow Table.
 
         Converts the entire result set into an Apache Arrow Table for efficient
@@ -227,7 +227,7 @@ class ArrowCursor(WithFetch):
         result_set = cast(AthenaArrowResultSet, self.result_set)
         return result_set.as_arrow()
 
-    def as_polars(self) -> "pl.DataFrame":
+    def as_polars(self) -> pl.DataFrame:
         """Return query results as a Polars DataFrame.
 
         Converts the Apache Arrow Table to a Polars DataFrame for

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import logging
@@ -6,7 +5,7 @@ import sys
 import time
 from abc import ABCMeta, abstractmethod
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pyathena
 from pyathena.converter import Converter, DefaultTypeConverter
@@ -26,7 +25,7 @@ from pyathena.util import RetryConfig, retry_api_call
 if TYPE_CHECKING:
     from pyathena.connection import Connection
 
-_logger = logging.getLogger(__name__)  # type: ignore
+_logger = logging.getLogger(__name__)
 
 
 class CursorIterator(metaclass=ABCMeta):
@@ -57,7 +56,7 @@ class CursorIterator(metaclass=ABCMeta):
     def __init__(self, **kwargs) -> None:
         super().__init__()
         self.arraysize: int = kwargs.get("arraysize", self.DEFAULT_FETCH_SIZE)
-        self._rownumber: Optional[int] = None
+        self._rownumber: int | None = None
         self._rowcount: int = -1  # By default, return -1 to indicate that this is not supported.
 
     @property
@@ -73,7 +72,7 @@ class CursorIterator(metaclass=ABCMeta):
         self._arraysize = value
 
     @property
-    def rownumber(self) -> Optional[int]:
+    def rownumber(self) -> int | None:
         return self._rownumber
 
     @property
@@ -151,17 +150,17 @@ class BaseCursor(metaclass=ABCMeta):
 
     def __init__(
         self,
-        connection: "Connection[Any]",
+        connection: Connection[Any],
         converter: Converter,
         formatter: Formatter,
         retry_config: RetryConfig,
-        s3_staging_dir: Optional[str],
-        schema_name: Optional[str],
-        catalog_name: Optional[str],
-        work_group: Optional[str],
+        s3_staging_dir: str | None,
+        schema_name: str | None,
+        catalog_name: str | None,
+        work_group: str | None,
         poll_interval: float,
-        encryption_option: Optional[str],
-        kms_key: Optional[str],
+        encryption_option: str | None,
+        kms_key: str | None,
         kill_on_interrupt: bool,
         result_reuse_enable: bool,
         result_reuse_minutes: int,
@@ -184,7 +183,7 @@ class BaseCursor(metaclass=ABCMeta):
         self._result_reuse_minutes = result_reuse_minutes
 
     @staticmethod
-    def get_default_converter(unload: bool = False) -> Union[DefaultTypeConverter, Any]:
+    def get_default_converter(unload: bool = False) -> DefaultTypeConverter | Any:
         """Get the default type converter for this cursor class.
 
         Args:
@@ -197,19 +196,19 @@ class BaseCursor(metaclass=ABCMeta):
         return DefaultTypeConverter()
 
     @property
-    def connection(self) -> "Connection[Any]":
+    def connection(self) -> Connection[Any]:
         return self._connection
 
     def _build_start_query_execution_request(
         self,
         query: str,
-        work_group: Optional[str] = None,
-        s3_staging_dir: Optional[str] = None,
-        result_reuse_enable: Optional[bool] = None,
-        result_reuse_minutes: Optional[int] = None,
-        execution_parameters: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
-        request: Dict[str, Any] = {
+        work_group: str | None = None,
+        s3_staging_dir: str | None = None,
+        result_reuse_enable: bool | None = None,
+        result_reuse_minutes: int | None = None,
+        execution_parameters: list[str] | None = None,
+    ) -> dict[str, Any]:
+        request: dict[str, Any] = {
             "QueryString": query,
             "QueryExecutionContext": {},
         }
@@ -217,7 +216,7 @@ class BaseCursor(metaclass=ABCMeta):
             request["QueryExecutionContext"].update({"Database": self._schema_name})
         if self._catalog_name:
             request["QueryExecutionContext"].update({"Catalog": self._catalog_name})
-        result_configuration: Dict[str, Any] = {}
+        result_configuration: dict[str, Any] = {}
         if self._s3_staging_dir or s3_staging_dir:
             result_configuration["OutputLocation"] = (
                 s3_staging_dir if s3_staging_dir else self._s3_staging_dir
@@ -251,10 +250,10 @@ class BaseCursor(metaclass=ABCMeta):
         self,
         session_id: str,
         code_block: str,
-        description: Optional[str] = None,
-        client_request_token: Optional[str] = None,
+        description: str | None = None,
+        client_request_token: str | None = None,
     ):
-        request: Dict[str, Any] = {
+        request: dict[str, Any] = {
             "SessionId": session_id,
             "CodeBlock": code_block,
         }
@@ -266,11 +265,11 @@ class BaseCursor(metaclass=ABCMeta):
 
     def _build_list_query_executions_request(
         self,
-        work_group: Optional[str],
-        next_token: Optional[str] = None,
-        max_results: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        request: Dict[str, Any] = {
+        work_group: str | None,
+        next_token: str | None = None,
+        max_results: int | None = None,
+    ) -> dict[str, Any]:
+        request: dict[str, Any] = {
             "MaxResults": max_results if max_results else self.LIST_QUERY_EXECUTIONS_MAX_RESULTS
         }
         if self._work_group or work_group:
@@ -281,13 +280,13 @@ class BaseCursor(metaclass=ABCMeta):
 
     def _build_list_table_metadata_request(
         self,
-        catalog_name: Optional[str],
-        schema_name: Optional[str],
-        expression: Optional[str] = None,
-        next_token: Optional[str] = None,
-        max_results: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        request: Dict[str, Any] = {
+        catalog_name: str | None,
+        schema_name: str | None,
+        expression: str | None = None,
+        next_token: str | None = None,
+        max_results: int | None = None,
+    ) -> dict[str, Any]:
+        request: dict[str, Any] = {
             "CatalogName": catalog_name if catalog_name else self._catalog_name,
             "DatabaseName": schema_name if schema_name else self._schema_name,
             "MaxResults": max_results if max_results else self.LIST_TABLE_METADATA_MAX_RESULTS,
@@ -302,11 +301,11 @@ class BaseCursor(metaclass=ABCMeta):
 
     def _build_list_databases_request(
         self,
-        catalog_name: Optional[str],
-        next_token: Optional[str] = None,
-        max_results: Optional[int] = None,
+        catalog_name: str | None,
+        next_token: str | None = None,
+        max_results: int | None = None,
     ):
-        request: Dict[str, Any] = {
+        request: dict[str, Any] = {
             "CatalogName": catalog_name if catalog_name else self._catalog_name,
             "MaxResults": max_results if max_results else self.LIST_DATABASES_MAX_RESULTS,
         }
@@ -318,10 +317,10 @@ class BaseCursor(metaclass=ABCMeta):
 
     def _list_databases(
         self,
-        catalog_name: Optional[str],
-        next_token: Optional[str] = None,
-        max_results: Optional[int] = None,
-    ) -> Tuple[Optional[str], List[AthenaDatabase]]:
+        catalog_name: str | None,
+        next_token: str | None = None,
+        max_results: int | None = None,
+    ) -> tuple[str | None, list[AthenaDatabase]]:
         request = self._build_list_databases_request(
             catalog_name=catalog_name,
             next_token=next_token,
@@ -344,9 +343,9 @@ class BaseCursor(metaclass=ABCMeta):
 
     def list_databases(
         self,
-        catalog_name: Optional[str],
-        max_results: Optional[int] = None,
-    ) -> List[AthenaDatabase]:
+        catalog_name: str | None,
+        max_results: int | None = None,
+    ) -> list[AthenaDatabase]:
         databases = []
         next_token = None
         while True:
@@ -363,10 +362,10 @@ class BaseCursor(metaclass=ABCMeta):
     def _build_get_table_metadata_request(
         self,
         table_name: str,
-        catalog_name: Optional[str] = None,
-        schema_name: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        request: Dict[str, Any] = {
+        catalog_name: str | None = None,
+        schema_name: str | None = None,
+    ) -> dict[str, Any]:
+        request: dict[str, Any] = {
             "CatalogName": catalog_name if catalog_name else self._catalog_name,
             "DatabaseName": schema_name if schema_name else self._schema_name,
             "TableName": table_name,
@@ -378,8 +377,8 @@ class BaseCursor(metaclass=ABCMeta):
     def _get_table_metadata(
         self,
         table_name: str,
-        catalog_name: Optional[str] = None,
-        schema_name: Optional[str] = None,
+        catalog_name: str | None = None,
+        schema_name: str | None = None,
         logging_: bool = True,
     ) -> AthenaTableMetadata:
         request = self._build_get_table_metadata_request(
@@ -404,8 +403,8 @@ class BaseCursor(metaclass=ABCMeta):
     def get_table_metadata(
         self,
         table_name: str,
-        catalog_name: Optional[str] = None,
-        schema_name: Optional[str] = None,
+        catalog_name: str | None = None,
+        schema_name: str | None = None,
         logging_: bool = True,
     ) -> AthenaTableMetadata:
         return self._get_table_metadata(
@@ -417,12 +416,12 @@ class BaseCursor(metaclass=ABCMeta):
 
     def _list_table_metadata(
         self,
-        catalog_name: Optional[str] = None,
-        schema_name: Optional[str] = None,
-        expression: Optional[str] = None,
-        next_token: Optional[str] = None,
-        max_results: Optional[int] = None,
-    ) -> Tuple[Optional[str], List[AthenaTableMetadata]]:
+        catalog_name: str | None = None,
+        schema_name: str | None = None,
+        expression: str | None = None,
+        next_token: str | None = None,
+        max_results: int | None = None,
+    ) -> tuple[str | None, list[AthenaTableMetadata]]:
         request = self._build_list_table_metadata_request(
             catalog_name=catalog_name,
             schema_name=schema_name,
@@ -448,11 +447,11 @@ class BaseCursor(metaclass=ABCMeta):
 
     def list_table_metadata(
         self,
-        catalog_name: Optional[str] = None,
-        schema_name: Optional[str] = None,
-        expression: Optional[str] = None,
-        max_results: Optional[int] = None,
-    ) -> List[AthenaTableMetadata]:
+        catalog_name: str | None = None,
+        schema_name: str | None = None,
+        expression: str | None = None,
+        max_results: int | None = None,
+    ) -> list[AthenaTableMetadata]:
         metadata = []
         next_token = None
         while True:
@@ -513,7 +512,7 @@ class BaseCursor(metaclass=ABCMeta):
         else:
             return AthenaCalculationExecution(response)
 
-    def _batch_get_query_execution(self, query_ids: List[str]) -> List[AthenaQueryExecution]:
+    def _batch_get_query_execution(self, query_ids: list[str]) -> list[AthenaQueryExecution]:
         try:
             response = retry_api_call(
                 self.connection._client.batch_get_query_execution,
@@ -532,10 +531,10 @@ class BaseCursor(metaclass=ABCMeta):
 
     def _list_query_executions(
         self,
-        work_group: Optional[str] = None,
-        next_token: Optional[str] = None,
-        max_results: Optional[int] = None,
-    ) -> Tuple[Optional[str], List[AthenaQueryExecution]]:
+        work_group: str | None = None,
+        next_token: str | None = None,
+        max_results: int | None = None,
+    ) -> tuple[str | None, list[AthenaQueryExecution]]:
         request = self._build_list_query_executions_request(
             work_group=work_group, next_token=next_token, max_results=max_results
         )
@@ -556,7 +555,7 @@ class BaseCursor(metaclass=ABCMeta):
                 return next_token, []
             return next_token, self._batch_get_query_execution(query_ids)
 
-    def __poll(self, query_id: str) -> Union[AthenaQueryExecution, AthenaCalculationExecution]:
+    def __poll(self, query_id: str) -> AthenaQueryExecution | AthenaCalculationExecution:
         while True:
             query_execution = self._get_query_execution(query_id)
             if query_execution.state in [
@@ -567,7 +566,7 @@ class BaseCursor(metaclass=ABCMeta):
                 return query_execution
             time.sleep(self._poll_interval)
 
-    def _poll(self, query_id: str) -> Union[AthenaQueryExecution, AthenaCalculationExecution]:
+    def _poll(self, query_id: str) -> AthenaQueryExecution | AthenaCalculationExecution:
         try:
             query_execution = self.__poll(query_id)
         except KeyboardInterrupt as e:
@@ -582,10 +581,10 @@ class BaseCursor(metaclass=ABCMeta):
     def _find_previous_query_id(
         self,
         query: str,
-        work_group: Optional[str],
+        work_group: str | None,
         cache_size: int = 0,
         cache_expiration_time: int = 0,
-    ) -> Optional[str]:
+    ) -> str | None:
         query_id = None
         if cache_size == 0 and cache_expiration_time > 0:
             cache_size = sys.maxsize
@@ -609,7 +608,7 @@ class BaseCursor(metaclass=ABCMeta):
                         and e.statement_type == AthenaQueryExecution.STATEMENT_TYPE_DML
                     ),
                     # https://github.com/python/mypy/issues/9656
-                    key=lambda e: e.completion_date_time,  # type: ignore
+                    key=lambda e: e.completion_date_time,  # type: ignore[arg-type, return-value]
                     reverse=True,
                 ):
                     if (
@@ -632,9 +631,9 @@ class BaseCursor(metaclass=ABCMeta):
     def _prepare_query(
         self,
         operation: str,
-        parameters: Optional[Union[Dict[str, Any], List[str]]] = None,
-        paramstyle: Optional[str] = None,
-    ) -> Tuple[str, Optional[List[str]]]:
+        parameters: dict[str, Any] | list[str] | None = None,
+        paramstyle: str | None = None,
+    ) -> tuple[str, list[str] | None]:
         """Format query and build execution parameters. No I/O.
 
         Args:
@@ -647,9 +646,9 @@ class BaseCursor(metaclass=ABCMeta):
         """
         if pyathena.paramstyle == "qmark" or paramstyle == "qmark":
             query = operation
-            execution_parameters = cast(Optional[List[str]], parameters)
+            execution_parameters = cast(list[str] | None, parameters)
         else:
-            query = self._formatter.format(operation, cast(Optional[Dict[str, Any]], parameters))
+            query = self._formatter.format(operation, cast(dict[str, Any] | None, parameters))
             execution_parameters = None
         _logger.debug(query)
         return query, execution_parameters
@@ -657,8 +656,8 @@ class BaseCursor(metaclass=ABCMeta):
     def _prepare_unload(
         self,
         operation: str,
-        s3_staging_dir: Optional[str],
-    ) -> Tuple[str, Optional[str]]:
+        s3_staging_dir: str | None,
+    ) -> tuple[str, str | None]:
         """Wrap operation with UNLOAD if enabled.
 
         Args:
@@ -683,14 +682,14 @@ class BaseCursor(metaclass=ABCMeta):
     def _execute(
         self,
         operation: str,
-        parameters: Optional[Union[Dict[str, Any], List[str]]] = None,
-        work_group: Optional[str] = None,
-        s3_staging_dir: Optional[str] = None,
-        cache_size: Optional[int] = 0,
-        cache_expiration_time: Optional[int] = 0,
-        result_reuse_enable: Optional[bool] = None,
-        result_reuse_minutes: Optional[int] = None,
-        paramstyle: Optional[str] = None,
+        parameters: dict[str, Any] | list[str] | None = None,
+        work_group: str | None = None,
+        s3_staging_dir: str | None = None,
+        cache_size: int | None = 0,
+        cache_expiration_time: int | None = 0,
+        result_reuse_enable: bool | None = None,
+        result_reuse_minutes: int | None = None,
+        paramstyle: str | None = None,
     ) -> str:
         query, execution_parameters = self._prepare_query(operation, parameters, paramstyle)
 
@@ -725,8 +724,8 @@ class BaseCursor(metaclass=ABCMeta):
         self,
         session_id: str,
         code_block: str,
-        description: Optional[str] = None,
-        client_request_token: Optional[str] = None,
+        description: str | None = None,
+        client_request_token: str | None = None,
     ) -> str:
         request = self._build_start_calculation_execution_request(
             session_id=session_id,
@@ -750,7 +749,7 @@ class BaseCursor(metaclass=ABCMeta):
     def execute(
         self,
         operation: str,
-        parameters: Optional[Union[Dict[str, Any], List[str]]] = None,
+        parameters: dict[str, Any] | list[str] | None = None,
         **kwargs,
     ):
         raise NotImplementedError  # pragma: no cover
@@ -759,7 +758,7 @@ class BaseCursor(metaclass=ABCMeta):
     def executemany(
         self,
         operation: str,
-        seq_of_parameters: List[Optional[Union[Dict[str, Any], List[str]]]],
+        seq_of_parameters: list[dict[str, Any] | list[str] | None],
         **kwargs,
     ) -> None:
         raise NotImplementedError  # pragma: no cover
@@ -783,11 +782,9 @@ class BaseCursor(metaclass=ABCMeta):
 
     def setinputsizes(self, sizes):  # noqa: B027
         """Does nothing by default"""
-        pass
 
     def setoutputsize(self, size, column=None):  # noqa: B027
         """Does nothing by default"""
-        pass
 
     def __enter__(self):
         return self

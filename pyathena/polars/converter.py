@@ -1,9 +1,9 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from copy import deepcopy
-from typing import Any, Callable, Dict, Optional
+from typing import Any
 
 from pyathena.converter import (
     Converter,
@@ -17,7 +17,7 @@ from pyathena.converter import (
 _logger = logging.getLogger(__name__)
 
 
-_DEFAULT_POLARS_CONVERTERS: Dict[str, Callable[[Optional[str]], Optional[Any]]] = {
+_DEFAULT_POLARS_CONVERTERS: dict[str, Callable[[str | None], Any | None]] = {
     "date": _to_date,
     "time": _to_time,
     "varbinary": _to_binary,
@@ -58,7 +58,7 @@ class DefaultPolarsTypeConverter(Converter):
         )
 
     @property
-    def _dtypes(self) -> Dict[str, Any]:
+    def _dtypes(self) -> dict[str, Any]:
         import polars as pl
 
         if not hasattr(self, "__dtypes"):
@@ -103,7 +103,7 @@ class DefaultPolarsTypeConverter(Converter):
             return pl.Decimal(precision=precision, scale=scale)
         return self._types.get(type_)
 
-    def convert(self, type_: str, value: Optional[str]) -> Optional[Any]:
+    def convert(self, type_: str, value: str | None) -> Any | None:
         converter = self.get(type_)
         return converter(value)
 
@@ -127,5 +127,5 @@ class DefaultPolarsUnloadTypeConverter(Converter):
             default=_to_default,
         )
 
-    def convert(self, type_: str, value: Optional[str]) -> Optional[Any]:
+    def convert(self, type_: str, value: str | None) -> Any | None:
         pass

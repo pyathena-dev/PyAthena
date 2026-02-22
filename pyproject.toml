@@ -135,6 +135,7 @@ line-length = 100
 exclude = [
     ".venv",
     ".tox",
+    "benchmarks",
 ]
 target-version = "py310"
 
@@ -150,7 +151,31 @@ select = [
     "C4",  # flake8-comprehensions
     "SIM",  # flake8-simplify
     "RET",  # flake8-return
-    # "UP",  # pyupgrade
+    "UP",  # pyupgrade
+    "PIE",  # flake8-pie
+    "PERF",  # perflint
+    "T20",  # flake8-print
+    "FLY",  # flynt
+    "ISC",  # flake8-implicit-str-concat
+    "RSE",  # flake8-raise
+    "RUF",  # ruff-specific rules
+    "PGH",  # pygrep-hooks
+    "G",  # flake8-logging-format
+    "PT",  # flake8-pytest-style
+]
+ignore = [
+    "RUF059",  # unused-unpacked-variable (too noisy for interface-heavy code)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "RUF012",  # mutable-class-default (test classes often use mutable defaults)
+]
+"pyathena/sqlalchemy/compiler.py" = [
+    "N802",  # SQLAlchemy TypeCompiler requires visit_UPPERCASE method names
+]
+"pyathena/aio/sqlalchemy/base.py" = [
+    "N801",  # SQLAlchemy async adapter naming convention (AsyncAdapt_*)
 ]
 
 [tool.mypy]

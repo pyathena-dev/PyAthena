@@ -1,10 +1,9 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import asyncio
 import logging
 from multiprocessing import cpu_count
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from fsspec.asyn import AsyncFileSystem
 from fsspec.callbacks import _DEFAULT_CALLBACK
@@ -60,14 +59,14 @@ class AioS3FileSystem(AsyncFileSystem):
 
     def __init__(
         self,
-        connection: Optional["Connection[Any]"] = None,
-        default_block_size: Optional[int] = None,
-        default_cache_type: Optional[str] = None,
+        connection: Connection[Any] | None = None,
+        default_block_size: int | None = None,
+        default_cache_type: str | None = None,
         max_workers: int = (cpu_count() or 1) * 5,
-        s3_additional_kwargs: Optional[Dict[str, Any]] = None,
+        s3_additional_kwargs: dict[str, Any] | None = None,
         asynchronous: bool = False,
-        loop: Optional[Any] = None,
-        batch_size: Optional[int] = None,
+        loop: Any | None = None,
+        batch_size: int | None = None,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -88,19 +87,17 @@ class AioS3FileSystem(AsyncFileSystem):
         self.dircache = self._sync_fs.dircache
 
     @staticmethod
-    def parse_path(path: str) -> Tuple[str, Optional[str], Optional[str]]:
+    def parse_path(path: str) -> tuple[str, str | None, str | None]:
         return S3FileSystem.parse_path(path)
 
     async def _info(self, path: str, **kwargs) -> S3Object:
         return await asyncio.to_thread(self._sync_fs.info, path, **kwargs)
 
-    async def _ls(
-        self, path: str, detail: bool = False, **kwargs
-    ) -> Union[List[S3Object], List[str]]:
+    async def _ls(self, path: str, detail: bool = False, **kwargs) -> list[S3Object] | list[str]:
         return await asyncio.to_thread(self._sync_fs.ls, path, detail=detail, **kwargs)
 
     async def _cat_file(
-        self, path: str, start: Optional[int] = None, end: Optional[int] = None, **kwargs
+        self, path: str, start: int | None = None, end: int | None = None, **kwargs
     ) -> bytes:
         return await asyncio.to_thread(self._sync_fs.cat_file, path, start=start, end=end, **kwargs)
 
@@ -125,7 +122,7 @@ class AioS3FileSystem(AsyncFileSystem):
     async def _makedirs(self, path: str, exist_ok: bool = False) -> None:
         await asyncio.to_thread(self._sync_fs.makedirs, path, exist_ok=exist_ok)
 
-    async def _rm(self, path: Union[str, List[str]], recursive: bool = False, **kwargs) -> None:
+    async def _rm(self, path: str | list[str], recursive: bool = False, **kwargs) -> None:
         """Remove files or directories using async parallel batch deletion.
 
         For multiple paths, chunks into batches of 1000 (S3 API limit) and uses
@@ -136,7 +133,7 @@ class AioS3FileSystem(AsyncFileSystem):
 
         bucket, _, _ = self.parse_path(path[0])
 
-        expand_paths: List[str] = []
+        expand_paths: list[str] = []
         for p in path:
             expanded = await asyncio.to_thread(self._sync_fs.expand_path, p, recursive=recursive)
             expand_paths.extend(expanded)
@@ -145,11 +142,11 @@ class AioS3FileSystem(AsyncFileSystem):
             return
 
         quiet = kwargs.pop("Quiet", True)
-        delete_objects: List[Dict[str, Any]] = []
+        delete_objects: list[dict[str, Any]] = []
         for p in expand_paths:
             _, key, version_id = self.parse_path(p)
             if key:
-                object_: Dict[str, Any] = {"Key": key}
+                object_: dict[str, Any] = {"Key": key}
                 if version_id:
                     object_["VersionId"] = version_id
                 delete_objects.append(object_)
@@ -162,7 +159,7 @@ class AioS3FileSystem(AsyncFileSystem):
             for i in range(0, len(delete_objects), self.DELETE_OBJECTS_MAX_KEYS)
         ]
 
-        async def _delete_chunk(chunk: List[Dict[str, Any]]) -> None:
+        async def _delete_chunk(chunk: list[dict[str, Any]]) -> None:
             request = {
                 "Bucket": bucket,
                 "Delete": {
@@ -220,8 +217,8 @@ class AioS3FileSystem(AsyncFileSystem):
         size1: int,
         bucket2: str,
         key2: str,
-        block_size: Optional[int] = None,
-        version_id1: Optional[str] = None,
+        block_size: int | None = None,
+        version_id1: str | None = None,
         **kwargs,
     ) -> None:
         block_size = block_size if block_size else S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE
@@ -231,7 +228,7 @@ class AioS3FileSystem(AsyncFileSystem):
         ):
             raise ValueError("Block size must be greater than 5MiB and less than 5GiB.")
 
-        copy_source: Dict[str, Any] = {
+        copy_source: dict[str, Any] = {
             "Bucket": bucket1,
             "Key": key1,
         }
@@ -251,7 +248,7 @@ class AioS3FileSystem(AsyncFileSystem):
             **kwargs,
         )
 
-        async def _upload_part(i: int, range_: Tuple[int, int]) -> Dict[str, Any]:
+        async def _upload_part(i: int, range_: tuple[int, int]) -> dict[str, Any]:
             result = await asyncio.to_thread(
                 self._sync_fs._upload_part_copy,
                 bucket=bucket2,
@@ -280,10 +277,10 @@ class AioS3FileSystem(AsyncFileSystem):
     async def _find(
         self,
         path: str,
-        maxdepth: Optional[int] = None,
+        maxdepth: int | None = None,
         withdirs: bool = False,
         **kwargs,
-    ) -> Union[Dict[str, S3Object], List[str]]:
+    ) -> dict[str, S3Object] | list[str]:
         detail = kwargs.pop("detail", False)
         files = await asyncio.to_thread(
             self._sync_fs._find, path, maxdepth=maxdepth, withdirs=withdirs, **kwargs
@@ -296,12 +293,12 @@ class AioS3FileSystem(AsyncFileSystem):
         self,
         path: str,
         mode: str = "rb",
-        block_size: Optional[int] = None,
-        cache_type: Optional[str] = None,
+        block_size: int | None = None,
+        cache_type: str | None = None,
         autocommit: bool = True,
-        cache_options: Optional[Dict[Any, Any]] = None,
+        cache_options: dict[Any, Any] | None = None,
         **kwargs,
-    ) -> "AioS3File":
+    ) -> AioS3File:
         if block_size is None:
             block_size = self._sync_fs.default_block_size
         if cache_type is None:
@@ -331,13 +328,13 @@ class AioS3FileSystem(AsyncFileSystem):
     def checksum(self, path: str, **kwargs) -> int:
         return cast(int, self._sync_fs.checksum(path, **kwargs))
 
-    def created(self, path: str) -> "datetime":
+    def created(self, path: str) -> datetime:
         return self._sync_fs.created(path)
 
-    def modified(self, path: str) -> "datetime":
+    def modified(self, path: str) -> datetime:
         return self._sync_fs.modified(path)
 
-    def invalidate_cache(self, path: Optional[str] = None) -> None:
+    def invalidate_cache(self, path: str | None = None) -> None:
         self._sync_fs.invalidate_cache(path)
 
     async def _touch(self, path: str, truncate: bool = True, **kwargs) -> None:
@@ -353,5 +350,3 @@ class AioS3File(S3File):
     through the ``S3Executor`` interface — the ``S3AioExecutor``
     provided by ``AioS3FileSystem`` uses the event loop instead of threads.
     """
-
-    pass

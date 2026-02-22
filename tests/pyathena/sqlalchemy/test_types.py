@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import pytest
 from sqlalchemy import Integer, String, types
 from sqlalchemy.sql import sqltypes
@@ -46,7 +45,7 @@ class TestAthenaStruct:
         assert struct_type.python_type is dict
 
     def test_invalid_field_specification(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Invalid field specification"):
             AthenaStruct(123)  # Invalid field type
 
     def test_visit_name(self):

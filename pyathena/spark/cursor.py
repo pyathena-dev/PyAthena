@@ -1,14 +1,13 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Union, cast
+from typing import Any, cast
 
 from pyathena import OperationalError, ProgrammingError
 from pyathena.model import AthenaCalculationExecution, AthenaCalculationExecutionStatus
 from pyathena.spark.common import SparkBaseCursor, WithCalculationExecution
 
-_logger = logging.getLogger(__name__)  # type: ignore
+_logger = logging.getLogger(__name__)
 
 
 class SparkCursor(SparkBaseCursor, WithCalculationExecution):
@@ -59,11 +58,11 @@ class SparkCursor(SparkBaseCursor, WithCalculationExecution):
 
     def __init__(
         self,
-        session_id: Optional[str] = None,
-        description: Optional[str] = None,
-        engine_configuration: Optional[Dict[str, Any]] = None,
-        notebook_version: Optional[str] = None,
-        session_idle_timeout_minutes: Optional[int] = None,
+        session_id: str | None = None,
+        description: str | None = None,
+        engine_configuration: dict[str, Any] | None = None,
+        notebook_version: str | None = None,
+        session_idle_timeout_minutes: int | None = None,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -76,10 +75,10 @@ class SparkCursor(SparkBaseCursor, WithCalculationExecution):
         )
 
     @property
-    def calculation_execution(self) -> Optional[AthenaCalculationExecution]:
+    def calculation_execution(self) -> AthenaCalculationExecution | None:
         return self._calculation_execution
 
-    def get_std_out(self) -> Optional[str]:
+    def get_std_out(self) -> str | None:
         """Get the standard output from the Spark calculation execution.
 
         Retrieves and returns the contents of the standard output generated
@@ -93,7 +92,7 @@ class SparkCursor(SparkBaseCursor, WithCalculationExecution):
             return None
         return self._read_s3_file_as_text(self._calculation_execution.std_out_s3_uri)
 
-    def get_std_error(self) -> Optional[str]:
+    def get_std_error(self) -> str | None:
         """Get the standard error from the Spark calculation execution.
 
         Retrieves and returns the contents of the standard error generated
@@ -111,11 +110,11 @@ class SparkCursor(SparkBaseCursor, WithCalculationExecution):
     def execute(
         self,
         operation: str,
-        parameters: Optional[Union[Dict[str, Any], List[str]]] = None,
-        session_id: Optional[str] = None,
-        description: Optional[str] = None,
-        client_request_token: Optional[str] = None,
-        work_group: Optional[str] = None,
+        parameters: dict[str, Any] | list[str] | None = None,
+        session_id: str | None = None,
+        description: str | None = None,
+        client_request_token: str | None = None,
+        work_group: str | None = None,
         **kwargs,
     ) -> SparkCursor:
         self._calculation_id = self._calculate(

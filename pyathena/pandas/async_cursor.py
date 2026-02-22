@@ -1,10 +1,10 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from concurrent.futures import Future
 from multiprocessing import cpu_count
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union, cast
+from typing import Any, cast
 
 from pyathena import ProgrammingError
 from pyathena.async_cursor import AsyncCursor
@@ -16,7 +16,7 @@ from pyathena.pandas.converter import (
 )
 from pyathena.pandas.result_set import AthenaPandasResultSet
 
-_logger = logging.getLogger(__name__)  # type: ignore
+_logger = logging.getLogger(__name__)
 
 
 class AsyncPandasCursor(AsyncCursor):
@@ -61,19 +61,19 @@ class AsyncPandasCursor(AsyncCursor):
 
     def __init__(
         self,
-        s3_staging_dir: Optional[str] = None,
-        schema_name: Optional[str] = None,
-        catalog_name: Optional[str] = None,
-        work_group: Optional[str] = None,
+        s3_staging_dir: str | None = None,
+        schema_name: str | None = None,
+        catalog_name: str | None = None,
+        work_group: str | None = None,
         poll_interval: float = 1,
-        encryption_option: Optional[str] = None,
-        kms_key: Optional[str] = None,
+        encryption_option: str | None = None,
+        kms_key: str | None = None,
         kill_on_interrupt: bool = True,
         max_workers: int = (cpu_count() or 1) * 5,
         arraysize: int = CursorIterator.DEFAULT_FETCH_SIZE,
         unload: bool = False,
         engine: str = "auto",
-        chunksize: Optional[int] = None,
+        chunksize: int | None = None,
         result_reuse_enable: bool = False,
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
         **kwargs,
@@ -100,7 +100,7 @@ class AsyncPandasCursor(AsyncCursor):
     @staticmethod
     def get_default_converter(
         unload: bool = False,
-    ) -> Union[DefaultPandasTypeConverter, Any]:
+    ) -> DefaultPandasTypeConverter | Any:
         if unload:
             return DefaultPandasUnloadTypeConverter()
         return DefaultPandasTypeConverter()
@@ -119,10 +119,10 @@ class AsyncPandasCursor(AsyncCursor):
         self,
         query_id: str,
         keep_default_na: bool = False,
-        na_values: Optional[Iterable[str]] = ("",),
+        na_values: Iterable[str] | None = ("",),
         quoting: int = 1,
-        unload_location: Optional[str] = None,
-        kwargs: Optional[Dict[str, Any]] = None,
+        unload_location: str | None = None,
+        kwargs: dict[str, Any] | None = None,
     ) -> AthenaPandasResultSet:
         if kwargs is None:
             kwargs = {}
@@ -146,19 +146,19 @@ class AsyncPandasCursor(AsyncCursor):
     def execute(
         self,
         operation: str,
-        parameters: Optional[Union[Dict[str, Any], List[str]]] = None,
-        work_group: Optional[str] = None,
-        s3_staging_dir: Optional[str] = None,
-        cache_size: Optional[int] = 0,
-        cache_expiration_time: Optional[int] = 0,
-        result_reuse_enable: Optional[bool] = None,
-        result_reuse_minutes: Optional[int] = None,
-        paramstyle: Optional[str] = None,
+        parameters: dict[str, Any] | list[str] | None = None,
+        work_group: str | None = None,
+        s3_staging_dir: str | None = None,
+        cache_size: int | None = 0,
+        cache_expiration_time: int | None = 0,
+        result_reuse_enable: bool | None = None,
+        result_reuse_minutes: int | None = None,
+        paramstyle: str | None = None,
         keep_default_na: bool = False,
-        na_values: Optional[Iterable[str]] = ("",),
+        na_values: Iterable[str] | None = ("",),
         quoting: int = 1,
         **kwargs,
-    ) -> Tuple[str, "Future[Union[AthenaPandasResultSet, Any]]"]:
+    ) -> tuple[str, Future[AthenaPandasResultSet | Any]]:
         operation, unload_location = self._prepare_unload(operation, s3_staging_dir)
         query_id = self._execute(
             operation,

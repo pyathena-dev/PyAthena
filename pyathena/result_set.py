@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import collections
@@ -8,13 +7,6 @@ from datetime import datetime
 from typing import (
     TYPE_CHECKING,
     Any,
-    Deque,
-    Dict,
-    List,
-    Optional,
-    Tuple,
-    Type,
-    Union,
     cast,
 )
 
@@ -27,7 +19,7 @@ from pyathena.util import RetryConfig, parse_output_location, retry_api_call
 if TYPE_CHECKING:
     from pyathena.connection import Connection
 
-_logger = logging.getLogger(__name__)  # type: ignore
+_logger = logging.getLogger(__name__)
 
 
 class AthenaResultSet(CursorIterator):
@@ -63,7 +55,7 @@ class AthenaResultSet(CursorIterator):
 
     def __init__(
         self,
-        connection: "Connection[Any]",
+        connection: Connection[Any],
         converter: Converter,
         query_execution: AthenaQueryExecution,
         arraysize: int,
@@ -71,9 +63,9 @@ class AthenaResultSet(CursorIterator):
         _pre_fetch: bool = True,
     ) -> None:
         super().__init__(arraysize=arraysize)
-        self._connection: Optional["Connection[Any]"] = connection
+        self._connection: Connection[Any] | None = connection
         self._converter = converter
-        self._query_execution: Optional[AthenaQueryExecution] = query_execution
+        self._query_execution: AthenaQueryExecution | None = query_execution
         if not self._query_execution:
             raise ProgrammingError("Required argument `query_execution` not found.")
         self._retry_config = retry_config
@@ -84,11 +76,11 @@ class AthenaResultSet(CursorIterator):
             **connection._client_kwargs,
         )
 
-        self._metadata: Optional[Tuple[Dict[str, Any], ...]] = None
-        self._rows: Deque[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]] = (
+        self._metadata: tuple[dict[str, Any], ...] | None = None
+        self._rows: collections.deque[tuple[Any | None, ...] | dict[Any, Any | None]] = (
             collections.deque()
         )
-        self._next_token: Optional[str] = None
+        self._next_token: str | None = None
 
         if self.state == AthenaQueryExecution.STATE_SUCCEEDED:
             self._rownumber = 0
@@ -96,151 +88,151 @@ class AthenaResultSet(CursorIterator):
                 self._pre_fetch()
 
     @property
-    def database(self) -> Optional[str]:
+    def database(self) -> str | None:
         if not self._query_execution:
             return None
         return self._query_execution.database
 
     @property
-    def catalog(self) -> Optional[str]:
+    def catalog(self) -> str | None:
         if not self._query_execution:
             return None
         return self._query_execution.catalog
 
     @property
-    def query_id(self) -> Optional[str]:
+    def query_id(self) -> str | None:
         if not self._query_execution:
             return None
         return self._query_execution.query_id
 
     @property
-    def query(self) -> Optional[str]:
+    def query(self) -> str | None:
         if not self._query_execution:
             return None
         return self._query_execution.query
 
     @property
-    def statement_type(self) -> Optional[str]:
+    def statement_type(self) -> str | None:
         if not self._query_execution:
             return None
         return self._query_execution.statement_type
 
     @property
-    def substatement_type(self) -> Optional[str]:
+    def substatement_type(self) -> str | None:
         if not self._query_execution:
             return None
         return self._query_execution.substatement_type
 
     @property
-    def work_group(self) -> Optional[str]:
+    def work_group(self) -> str | None:
         if not self._query_execution:
             return None
         return self._query_execution.work_group
 
     @property
-    def execution_parameters(self) -> List[str]:
+    def execution_parameters(self) -> list[str]:
         if not self._query_execution:
             return []
         return self._query_execution.execution_parameters
 
     @property
-    def state(self) -> Optional[str]:
+    def state(self) -> str | None:
         if not self._query_execution:
             return None
         return self._query_execution.state
 
     @property
-    def state_change_reason(self) -> Optional[str]:
+    def state_change_reason(self) -> str | None:
         if not self._query_execution:
             return None
         return self._query_execution.state_change_reason
 
     @property
-    def submission_date_time(self) -> Optional[datetime]:
+    def submission_date_time(self) -> datetime | None:
         if not self._query_execution:
             return None
         return self._query_execution.submission_date_time
 
     @property
-    def completion_date_time(self) -> Optional[datetime]:
+    def completion_date_time(self) -> datetime | None:
         if not self._query_execution:
             return None
         return self._query_execution.completion_date_time
 
     @property
-    def error_category(self) -> Optional[int]:
+    def error_category(self) -> int | None:
         if not self._query_execution:
             return None
         return self._query_execution.error_category
 
     @property
-    def error_type(self) -> Optional[int]:
+    def error_type(self) -> int | None:
         if not self._query_execution:
             return None
         return self._query_execution.error_type
 
     @property
-    def retryable(self) -> Optional[bool]:
+    def retryable(self) -> bool | None:
         if not self._query_execution:
             return None
         return self._query_execution.retryable
 
     @property
-    def error_message(self) -> Optional[str]:
+    def error_message(self) -> str | None:
         if not self._query_execution:
             return None
         return self._query_execution.error_message
 
     @property
-    def data_scanned_in_bytes(self) -> Optional[int]:
+    def data_scanned_in_bytes(self) -> int | None:
         if not self._query_execution:
             return None
         return self._query_execution.data_scanned_in_bytes
 
     @property
-    def engine_execution_time_in_millis(self) -> Optional[int]:
+    def engine_execution_time_in_millis(self) -> int | None:
         if not self._query_execution:
             return None
         return self._query_execution.engine_execution_time_in_millis
 
     @property
-    def query_queue_time_in_millis(self) -> Optional[int]:
+    def query_queue_time_in_millis(self) -> int | None:
         if not self._query_execution:
             return None
         return self._query_execution.query_queue_time_in_millis
 
     @property
-    def total_execution_time_in_millis(self) -> Optional[int]:
+    def total_execution_time_in_millis(self) -> int | None:
         if not self._query_execution:
             return None
         return self._query_execution.total_execution_time_in_millis
 
     @property
-    def query_planning_time_in_millis(self) -> Optional[int]:
+    def query_planning_time_in_millis(self) -> int | None:
         if not self._query_execution:
             return None
         return self._query_execution.query_planning_time_in_millis
 
     @property
-    def service_processing_time_in_millis(self) -> Optional[int]:
+    def service_processing_time_in_millis(self) -> int | None:
         if not self._query_execution:
             return None
         return self._query_execution.service_processing_time_in_millis
 
     @property
-    def output_location(self) -> Optional[str]:
+    def output_location(self) -> str | None:
         if not self._query_execution:
             return None
         return self._query_execution.output_location
 
     @property
-    def data_manifest_location(self) -> Optional[str]:
+    def data_manifest_location(self) -> str | None:
         if not self._query_execution:
             return None
         return self._query_execution.data_manifest_location
 
     @property
-    def reused_previous_result(self) -> Optional[bool]:
+    def reused_previous_result(self) -> bool | None:
         if not self._query_execution:
             return None
         return self._query_execution.reused_previous_result
@@ -259,49 +251,49 @@ class AthenaResultSet(CursorIterator):
         )
 
     @property
-    def encryption_option(self) -> Optional[str]:
+    def encryption_option(self) -> str | None:
         if not self._query_execution:
             return None
         return self._query_execution.encryption_option
 
     @property
-    def kms_key(self) -> Optional[str]:
+    def kms_key(self) -> str | None:
         if not self._query_execution:
             return None
         return self._query_execution.kms_key
 
     @property
-    def expected_bucket_owner(self) -> Optional[str]:
+    def expected_bucket_owner(self) -> str | None:
         if not self._query_execution:
             return None
         return self._query_execution.expected_bucket_owner
 
     @property
-    def s3_acl_option(self) -> Optional[str]:
+    def s3_acl_option(self) -> str | None:
         if not self._query_execution:
             return None
         return self._query_execution.s3_acl_option
 
     @property
-    def selected_engine_version(self) -> Optional[str]:
+    def selected_engine_version(self) -> str | None:
         if not self._query_execution:
             return None
         return self._query_execution.selected_engine_version
 
     @property
-    def effective_engine_version(self) -> Optional[str]:
+    def effective_engine_version(self) -> str | None:
         if not self._query_execution:
             return None
         return self._query_execution.effective_engine_version
 
     @property
-    def result_reuse_enabled(self) -> Optional[bool]:
+    def result_reuse_enabled(self) -> bool | None:
         if not self._query_execution:
             return None
         return self._query_execution.result_reuse_enabled
 
     @property
-    def result_reuse_minutes(self) -> Optional[int]:
+    def result_reuse_minutes(self) -> int | None:
         if not self._query_execution:
             return None
         return self._query_execution.result_reuse_minutes
@@ -309,7 +301,7 @@ class AthenaResultSet(CursorIterator):
     @property
     def description(
         self,
-    ) -> Optional[List[Tuple[str, str, None, None, int, int, str]]]:
+    ) -> list[tuple[str, str, None, None, int, int, str]] | None:
         if self._metadata is None:
             return None
         return [
@@ -326,21 +318,21 @@ class AthenaResultSet(CursorIterator):
         ]
 
     @property
-    def connection(self) -> "Connection[Any]":
+    def connection(self) -> Connection[Any]:
         if self.is_closed:
             raise ProgrammingError("AthenaResultSet is closed.")
         return cast("Connection[Any]", self._connection)
 
     def __get_query_results(
-        self, max_results: int, next_token: Optional[str] = None
-    ) -> Dict[str, Any]:
+        self, max_results: int, next_token: str | None = None
+    ) -> dict[str, Any]:
         if not self.query_id:
             raise ProgrammingError("QueryExecutionId is none or empty.")
         if self.state != AthenaQueryExecution.STATE_SUCCEEDED:
             raise ProgrammingError("QueryExecutionState is not SUCCEEDED.")
         if self.is_closed:
             raise ProgrammingError("AthenaResultSet is closed.")
-        request: Dict[str, Any] = {
+        request: dict[str, Any] = {
             "QueryExecutionId": self.query_id,
             "MaxResults": max_results,
         }
@@ -357,9 +349,9 @@ class AthenaResultSet(CursorIterator):
             _logger.exception("Failed to fetch result set.")
             raise OperationalError(*e.args) from e
         else:
-            return cast(Dict[str, Any], response)
+            return cast(dict[str, Any], response)
 
-    def __fetch(self, next_token: Optional[str] = None) -> Dict[str, Any]:
+    def __fetch(self, next_token: str | None = None) -> dict[str, Any]:
         return self.__get_query_results(self._arraysize, next_token)
 
     def _fetch(self) -> None:
@@ -379,7 +371,7 @@ class AthenaResultSet(CursorIterator):
 
     def fetchone(
         self,
-    ) -> Optional[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+    ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
         if not self._rows and self._next_token:
             self._fetch()
         if not self._rows:
@@ -390,8 +382,8 @@ class AthenaResultSet(CursorIterator):
         return self._rows.popleft()
 
     def fetchmany(
-        self, size: Optional[int] = None
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        self, size: int | None = None
+    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         if not size or size <= 0:
             size = self._arraysize
         rows = []
@@ -405,7 +397,7 @@ class AthenaResultSet(CursorIterator):
 
     def fetchall(
         self,
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         rows = []
         while True:
             row = self.fetchone()
@@ -415,7 +407,7 @@ class AthenaResultSet(CursorIterator):
                 break
         return rows
 
-    def _process_metadata(self, response: Dict[str, Any]) -> None:
+    def _process_metadata(self, response: dict[str, Any]) -> None:
         result_set = response.get("ResultSet")
         if not result_set:
             raise DataError("KeyError `ResultSet`")
@@ -427,7 +419,7 @@ class AthenaResultSet(CursorIterator):
             raise DataError("KeyError `ColumnInfo`")
         self._metadata = tuple(column_info)
 
-    def _process_update_count(self, response: Dict[str, Any]) -> None:
+    def _process_update_count(self, response: dict[str, Any]) -> None:
         update_count = response.get("UpdateCount")
         if (
             update_count is not None
@@ -446,10 +438,10 @@ class AthenaResultSet(CursorIterator):
     def _get_rows(
         self,
         offset: int,
-        metadata: Tuple[Any, ...],
-        rows: List[Dict[str, Any]],
-        converter: Optional[Converter] = None,
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        metadata: tuple[Any, ...],
+        rows: list[dict[str, Any]],
+        converter: Converter | None = None,
+    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         conv = converter or self._converter
         return [
             tuple(
@@ -462,8 +454,8 @@ class AthenaResultSet(CursorIterator):
         ]
 
     def _parse_result_rows(
-        self, response: Dict[str, Any]
-    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        self, response: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], str | None]:
         """Parse a GetQueryResults response into raw rows and next token.
 
         Handles response validation and pagination token extraction.
@@ -485,12 +477,12 @@ class AthenaResultSet(CursorIterator):
         next_token = response.get("NextToken")
         return rows, next_token
 
-    def _process_rows(self, rows: List[Dict[str, Any]], offset: int = 0) -> None:
+    def _process_rows(self, rows: list[dict[str, Any]], offset: int = 0) -> None:
         if rows and self._metadata:
             processed_rows = self._get_rows(offset, self._metadata, rows)
             self._rows.extend(processed_rows)
 
-    def _is_first_row_column_labels(self, rows: List[Dict[str, Any]]) -> bool:
+    def _is_first_row_column_labels(self, rows: list[dict[str, Any]]) -> bool:
         first_row_data = rows[0].get("Data", [])
         for meta, data in zip(self._metadata or (), first_row_data, strict=False):
             if meta.get("Name") != data.get("VarCharValue"):
@@ -499,8 +491,8 @@ class AthenaResultSet(CursorIterator):
 
     def _fetch_all_rows(
         self,
-        converter: Optional[Converter] = None,
-    ) -> List[Tuple[Optional[Any], ...]]:
+        converter: Converter | None = None,
+    ) -> list[tuple[Any | None, ...]]:
         """Fetch all rows via GetQueryResults API with type conversion.
 
         Paginates through all results from the beginning using MaxResults=1000.
@@ -529,8 +521,8 @@ class AthenaResultSet(CursorIterator):
         )
 
         converter = converter or DefaultTypeConverter()
-        all_rows: List[Tuple[Optional[Any], ...]] = []
-        next_token: Optional[str] = None
+        all_rows: list[tuple[Any | None, ...]] = []
+        next_token: str | None = None
 
         while True:
             response = self.__get_query_results(self.DEFAULT_FETCH_SIZE, next_token)
@@ -539,7 +531,7 @@ class AthenaResultSet(CursorIterator):
             offset = 1 if rows and self._is_first_row_column_labels(rows) else 0
             all_rows.extend(
                 cast(
-                    List[Tuple[Optional[Any], ...]],
+                    list[tuple[Any | None, ...]],
                     self._get_rows(offset, self._metadata, rows, converter),
                 )
             )
@@ -551,9 +543,9 @@ class AthenaResultSet(CursorIterator):
 
     @staticmethod
     def _rows_to_columnar(
-        rows: List[Tuple[Optional[Any], ...]],
-        columns: List[str],
-    ) -> Dict[str, List[Any]]:
+        rows: list[tuple[Any | None, ...]],
+        columns: list[str],
+    ) -> dict[str, list[Any]]:
         """Convert row-oriented data to columnar format.
 
         Args:
@@ -563,7 +555,7 @@ class AthenaResultSet(CursorIterator):
         Returns:
             Dictionary mapping column names to lists of values.
         """
-        columnar: Dict[str, List[Any]] = {col: [] for col in columns}
+        columnar: dict[str, list[Any]] = {col: [] for col in columns}
         for row in rows:
             for col, val in zip(columns, row, strict=False):
                 columnar[col].append(val)
@@ -587,7 +579,7 @@ class AthenaResultSet(CursorIterator):
         else:
             return cast(int, response["ContentLength"])
 
-    def _read_data_manifest(self) -> List[str]:
+    def _read_data_manifest(self) -> list[str]:
         if not self.data_manifest_location:
             raise ProgrammingError("DataManifestLocation is none or empty.")
         bucket, key = parse_output_location(self.data_manifest_location)
@@ -600,7 +592,7 @@ class AthenaResultSet(CursorIterator):
                 Key=key,
             )
         except Exception as e:
-            _logger.exception(f"Failed to read {bucket}/{key}.")
+            _logger.exception("Failed to read %s/%s.", bucket, key)
             raise OperationalError(*e.args) from e
         else:
             manifest: str = response["Body"].read().decode("utf-8").strip()
@@ -628,15 +620,15 @@ class AthenaResultSet(CursorIterator):
 
 class AthenaDictResultSet(AthenaResultSet):
     # You can override this to use OrderedDict or other dict-like types.
-    dict_type: Type[Any] = dict
+    dict_type: type[Any] = dict
 
     def _get_rows(
         self,
         offset: int,
-        metadata: Tuple[Any, ...],
-        rows: List[Dict[str, Any]],
-        converter: Optional[Converter] = None,
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        metadata: tuple[Any, ...],
+        rows: list[dict[str, Any]],
+        converter: Converter | None = None,
+    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         conv = converter or self._converter
         return [
             self.dict_type(
@@ -657,19 +649,19 @@ class WithResultSet:
         super().__init__()
 
     def _reset_state(self) -> None:
-        self.query_id = None  # type: ignore
+        self.query_id = None
         if self.result_set and not self.result_set.is_closed:
             self.result_set.close()
-        self.result_set = None  # type: ignore
+        self.result_set = None
 
-    @property  # type: ignore
+    @property
     @abstractmethod
-    def result_set(self) -> Optional[AthenaResultSet]:
+    def result_set(self) -> AthenaResultSet | None:
         raise NotImplementedError  # pragma: no cover
 
-    @result_set.setter  # type: ignore
+    @result_set.setter
     @abstractmethod
-    def result_set(self, val: Optional[AthenaResultSet]) -> None:
+    def result_set(self, val: AthenaResultSet | None) -> None:
         raise NotImplementedError  # pragma: no cover
 
     @property
@@ -679,209 +671,209 @@ class WithResultSet:
     @property
     def description(
         self,
-    ) -> Optional[List[Tuple[str, str, None, None, int, int, str]]]:
+    ) -> list[tuple[str, str, None, None, int, int, str]] | None:
         if not self.result_set:
             return None
         return self.result_set.description
 
     @property
-    def database(self) -> Optional[str]:
+    def database(self) -> str | None:
         if not self.result_set:
             return None
         return self.result_set.database
 
     @property
-    def catalog(self) -> Optional[str]:
+    def catalog(self) -> str | None:
         if not self.result_set:
             return None
         return self.result_set.catalog
 
-    @property  # type: ignore
+    @property
     @abstractmethod
-    def query_id(self) -> Optional[str]:
+    def query_id(self) -> str | None:
         raise NotImplementedError  # pragma: no cover
 
-    @query_id.setter  # type: ignore
+    @query_id.setter
     @abstractmethod
-    def query_id(self, val: Optional[str]) -> None:
+    def query_id(self, val: str | None) -> None:
         raise NotImplementedError  # pragma: no cover
 
     @property
-    def query(self) -> Optional[str]:
+    def query(self) -> str | None:
         if not self.result_set:
             return None
         return self.result_set.query
 
     @property
-    def statement_type(self) -> Optional[str]:
+    def statement_type(self) -> str | None:
         if not self.result_set:
             return None
         return self.result_set.statement_type
 
     @property
-    def substatement_type(self) -> Optional[str]:
+    def substatement_type(self) -> str | None:
         if not self.result_set:
             return None
         return self.result_set.substatement_type
 
     @property
-    def work_group(self) -> Optional[str]:
+    def work_group(self) -> str | None:
         if not self.result_set:
             return None
         return self.result_set.work_group
 
     @property
-    def execution_parameters(self) -> List[str]:
+    def execution_parameters(self) -> list[str]:
         if not self.result_set:
             return []
         return self.result_set.execution_parameters
 
     @property
-    def state(self) -> Optional[str]:
+    def state(self) -> str | None:
         if not self.result_set:
             return None
         return self.result_set.state
 
     @property
-    def state_change_reason(self) -> Optional[str]:
+    def state_change_reason(self) -> str | None:
         if not self.result_set:
             return None
         return self.result_set.state_change_reason
 
     @property
-    def submission_date_time(self) -> Optional[datetime]:
+    def submission_date_time(self) -> datetime | None:
         if not self.result_set:
             return None
         return self.result_set.submission_date_time
 
     @property
-    def completion_date_time(self) -> Optional[datetime]:
+    def completion_date_time(self) -> datetime | None:
         if not self.result_set:
             return None
         return self.result_set.completion_date_time
 
     @property
-    def error_category(self) -> Optional[int]:
+    def error_category(self) -> int | None:
         if not self.result_set:
             return None
         return self.result_set.error_category
 
     @property
-    def error_type(self) -> Optional[int]:
+    def error_type(self) -> int | None:
         if not self.result_set:
             return None
         return self.result_set.error_type
 
     @property
-    def retryable(self) -> Optional[bool]:
+    def retryable(self) -> bool | None:
         if not self.result_set:
             return None
         return self.result_set.retryable
 
     @property
-    def error_message(self) -> Optional[str]:
+    def error_message(self) -> str | None:
         if not self.result_set:
             return None
         return self.result_set.error_message
 
     @property
-    def data_scanned_in_bytes(self) -> Optional[int]:
+    def data_scanned_in_bytes(self) -> int | None:
         if not self.result_set:
             return None
         return self.result_set.data_scanned_in_bytes
 
     @property
-    def engine_execution_time_in_millis(self) -> Optional[int]:
+    def engine_execution_time_in_millis(self) -> int | None:
         if not self.result_set:
             return None
         return self.result_set.engine_execution_time_in_millis
 
     @property
-    def query_queue_time_in_millis(self) -> Optional[int]:
+    def query_queue_time_in_millis(self) -> int | None:
         if not self.result_set:
             return None
         return self.result_set.query_queue_time_in_millis
 
     @property
-    def total_execution_time_in_millis(self) -> Optional[int]:
+    def total_execution_time_in_millis(self) -> int | None:
         if not self.result_set:
             return None
         return self.result_set.total_execution_time_in_millis
 
     @property
-    def query_planning_time_in_millis(self) -> Optional[int]:
+    def query_planning_time_in_millis(self) -> int | None:
         if not self.result_set:
             return None
         return self.result_set.query_planning_time_in_millis
 
     @property
-    def service_processing_time_in_millis(self) -> Optional[int]:
+    def service_processing_time_in_millis(self) -> int | None:
         if not self.result_set:
             return None
         return self.result_set.service_processing_time_in_millis
 
     @property
-    def output_location(self) -> Optional[str]:
+    def output_location(self) -> str | None:
         if not self.result_set:
             return None
         return self.result_set.output_location
 
     @property
-    def data_manifest_location(self) -> Optional[str]:
+    def data_manifest_location(self) -> str | None:
         if not self.result_set:
             return None
         return self.result_set.data_manifest_location
 
     @property
-    def reused_previous_result(self) -> Optional[bool]:
+    def reused_previous_result(self) -> bool | None:
         if not self.result_set:
             return None
         return self.result_set.reused_previous_result
 
     @property
-    def encryption_option(self) -> Optional[str]:
+    def encryption_option(self) -> str | None:
         if not self.result_set:
             return None
         return self.result_set.encryption_option
 
     @property
-    def kms_key(self) -> Optional[str]:
+    def kms_key(self) -> str | None:
         if not self.result_set:
             return None
         return self.result_set.kms_key
 
     @property
-    def expected_bucket_owner(self) -> Optional[str]:
+    def expected_bucket_owner(self) -> str | None:
         if not self.result_set:
             return None
         return self.result_set.expected_bucket_owner
 
     @property
-    def s3_acl_option(self) -> Optional[str]:
+    def s3_acl_option(self) -> str | None:
         if not self.result_set:
             return None
         return self.result_set.s3_acl_option
 
     @property
-    def selected_engine_version(self) -> Optional[str]:
+    def selected_engine_version(self) -> str | None:
         if not self.result_set:
             return None
         return self.result_set.selected_engine_version
 
     @property
-    def effective_engine_version(self) -> Optional[str]:
+    def effective_engine_version(self) -> str | None:
         if not self.result_set:
             return None
         return self.result_set.effective_engine_version
 
     @property
-    def result_reuse_enabled(self) -> Optional[bool]:
+    def result_reuse_enabled(self) -> bool | None:
         if not self.result_set:
             return None
         return self.result_set.result_reuse_enabled
 
     @property
-    def result_reuse_minutes(self) -> Optional[int]:
+    def result_reuse_minutes(self) -> int | None:
         if not self.result_set:
             return None
         return self.result_set.result_reuse_minutes
@@ -914,8 +906,8 @@ class WithFetch(BaseCursor, CursorIterator, WithResultSet):
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        self._query_id: Optional[str] = None
-        self._result_set: Optional[AthenaResultSet] = None
+        self._query_id: str | None = None
+        self._result_set: AthenaResultSet | None = None
 
     @property
     def arraysize(self) -> int:
@@ -927,8 +919,8 @@ class WithFetch(BaseCursor, CursorIterator, WithResultSet):
             raise ProgrammingError("arraysize must be a positive integer value.")
         self._arraysize = value
 
-    @property  # type: ignore
-    def result_set(self) -> Optional[AthenaResultSet]:
+    @property
+    def result_set(self) -> AthenaResultSet | None:
         return self._result_set
 
     @result_set.setter
@@ -936,7 +928,7 @@ class WithFetch(BaseCursor, CursorIterator, WithResultSet):
         self._result_set = val
 
     @property
-    def query_id(self) -> Optional[str]:
+    def query_id(self) -> str | None:
         return self._query_id
 
     @query_id.setter
@@ -944,7 +936,7 @@ class WithFetch(BaseCursor, CursorIterator, WithResultSet):
         self._query_id = val
 
     @property
-    def rownumber(self) -> Optional[int]:
+    def rownumber(self) -> int | None:
         return self.result_set.rownumber if self.result_set else None
 
     @property
@@ -959,7 +951,7 @@ class WithFetch(BaseCursor, CursorIterator, WithResultSet):
     def executemany(
         self,
         operation: str,
-        seq_of_parameters: List[Optional[Union[Dict[str, Any], List[str]]]],
+        seq_of_parameters: list[dict[str, Any] | list[str] | None],
         **kwargs,
     ) -> None:
         """Execute a SQL query multiple times with different parameters.
@@ -986,7 +978,7 @@ class WithFetch(BaseCursor, CursorIterator, WithResultSet):
 
     def fetchone(
         self,
-    ) -> Optional[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+    ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
         """Fetch the next row of the result set.
 
         Returns:
@@ -1001,8 +993,8 @@ class WithFetch(BaseCursor, CursorIterator, WithResultSet):
         return result_set.fetchone()
 
     def fetchmany(
-        self, size: Optional[int] = None
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        self, size: int | None = None
+    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         """Fetch multiple rows from the result set.
 
         Args:
@@ -1021,7 +1013,7 @@ class WithFetch(BaseCursor, CursorIterator, WithResultSet):
 
     def fetchall(
         self,
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         """Fetch all remaining rows from the result set.
 
         Returns:

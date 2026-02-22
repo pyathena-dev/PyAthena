@@ -1,8 +1,7 @@
-# -*- coding: utf-8 -*-
 """Utility classes for PyAthena SQLAlchemy dialect."""
 
 
-class _HashableDict(dict):  # type: ignore
+class _HashableDict(dict):  # type: ignore[type-arg]
     """A dictionary subclass that can be used as a dictionary key.
 
     SQLAlchemy's reflection caching requires hashable objects. This class
@@ -10,5 +9,5 @@ class _HashableDict(dict):  # type: ignore
     making them hashable through tuple conversion.
     """
 
-    def __hash__(self):  # type: ignore
+    def __hash__(self):  # type: ignore[override]
         return hash(tuple(sorted(self.items())))

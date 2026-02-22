@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-
 from unittest.mock import Mock
 
 import pytest
@@ -189,18 +187,18 @@ class TestAthenaStatementCompiler:
     def test_visit_filter_func_wrong_argument_count(self):
         """Test filter() function with wrong number of arguments."""
         # Test error when wrong number of arguments provided
+        stmt = select(func.filter(self.test_table.c.numbers))
         with pytest.raises(
             exc.CompileError, match="filter\\(\\) function expects exactly 2 arguments"
         ):
-            stmt = select(func.filter(self.test_table.c.numbers))
             stmt.compile(dialect=self.dialect)
 
+        stmt = select(
+            func.filter(self.test_table.c.numbers, literal("x -> x > 0"), literal("extra_arg"))
+        )
         with pytest.raises(
             exc.CompileError, match="filter\\(\\) function expects exactly 2 arguments"
         ):
-            stmt = select(
-                func.filter(self.test_table.c.numbers, literal("x -> x > 0"), literal("extra_arg"))
-            )
             stmt.compile(dialect=self.dialect)
 
     def test_visit_filter_func_integration_example(self):

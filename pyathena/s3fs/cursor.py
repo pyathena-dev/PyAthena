@@ -1,8 +1,8 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List, Optional, Union, cast
+from collections.abc import Callable
+from typing import Any, cast
 
 from pyathena.common import CursorIterator
 from pyathena.error import OperationalError
@@ -48,18 +48,18 @@ class S3FSCursor(WithFetch):
 
     def __init__(
         self,
-        s3_staging_dir: Optional[str] = None,
-        schema_name: Optional[str] = None,
-        catalog_name: Optional[str] = None,
-        work_group: Optional[str] = None,
+        s3_staging_dir: str | None = None,
+        schema_name: str | None = None,
+        catalog_name: str | None = None,
+        work_group: str | None = None,
         poll_interval: float = 1,
-        encryption_option: Optional[str] = None,
-        kms_key: Optional[str] = None,
+        encryption_option: str | None = None,
+        kms_key: str | None = None,
         kill_on_interrupt: bool = True,
         result_reuse_enable: bool = False,
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
-        on_start_query_execution: Optional[Callable[[str], None]] = None,
-        csv_reader: Optional[CSVReaderType] = None,
+        on_start_query_execution: Callable[[str], None] | None = None,
+        csv_reader: CSVReaderType | None = None,
         **kwargs,
     ) -> None:
         """Initialize an S3FSCursor.
@@ -109,7 +109,7 @@ class S3FSCursor(WithFetch):
 
     @staticmethod
     def get_default_converter(
-        unload: bool = False,  # noqa: ARG004
+        unload: bool = False,
     ) -> DefaultS3FSTypeConverter:
         """Get the default type converter for S3FS cursor.
 
@@ -124,17 +124,17 @@ class S3FSCursor(WithFetch):
     def execute(
         self,
         operation: str,
-        parameters: Optional[Union[Dict[str, Any], List[str]]] = None,
-        work_group: Optional[str] = None,
-        s3_staging_dir: Optional[str] = None,
-        cache_size: Optional[int] = 0,
-        cache_expiration_time: Optional[int] = 0,
-        result_reuse_enable: Optional[bool] = None,
-        result_reuse_minutes: Optional[int] = None,
-        paramstyle: Optional[str] = None,
-        on_start_query_execution: Optional[Callable[[str], None]] = None,
+        parameters: dict[str, Any] | list[str] | None = None,
+        work_group: str | None = None,
+        s3_staging_dir: str | None = None,
+        cache_size: int | None = 0,
+        cache_expiration_time: int | None = 0,
+        result_reuse_enable: bool | None = None,
+        result_reuse_minutes: int | None = None,
+        paramstyle: str | None = None,
+        on_start_query_execution: Callable[[str], None] | None = None,
         **kwargs,
-    ) -> "S3FSCursor":
+    ) -> S3FSCursor:
         """Execute a SQL query and return results.
 
         Executes the SQL query on Amazon Athena and configures the result set

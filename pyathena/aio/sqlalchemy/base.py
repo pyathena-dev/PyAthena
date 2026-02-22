@@ -1,8 +1,8 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 from collections import deque
-from typing import TYPE_CHECKING, Any, Dict, List, MutableMapping, Optional, Tuple, Union, cast
+from collections.abc import MutableMapping
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import pool
 from sqlalchemy.engine import AdaptedConnection
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from sqlalchemy import URL
 
 
-class AsyncAdapt_pyathena_cursor:  # noqa: N801 - follows SQLAlchemy's internal async adapter naming convention (e.g. AsyncAdapt_asyncpg_dbapi)
+class AsyncAdapt_pyathena_cursor:
     """Wraps any async PyAthena cursor with a sync DBAPI interface.
 
     SQLAlchemy's async engine uses greenlet-based ``await_only()`` to call
@@ -68,7 +68,7 @@ class AsyncAdapt_pyathena_cursor:  # noqa: N801 - follows SQLAlchemy's internal 
     def executemany(
         self,
         operation: str,
-        seq_of_parameters: List[Optional[Union[Dict[str, Any], List[str]]]],
+        seq_of_parameters: list[dict[str, Any] | list[str] | None],
         **kwargs: Any,
     ) -> None:
         for parameters in seq_of_parameters:
@@ -80,7 +80,7 @@ class AsyncAdapt_pyathena_cursor:  # noqa: N801 - follows SQLAlchemy's internal 
             return self._rows.popleft()
         return None
 
-    def fetchmany(self, size: Optional[int] = None) -> Any:
+    def fetchmany(self, size: int | None = None) -> Any:
         if size is None:
             size = self._cursor.arraysize if hasattr(self._cursor, "arraysize") else 1
         return [self._rows.popleft() for _ in range(min(size, len(self._rows)))]
@@ -106,14 +106,14 @@ class AsyncAdapt_pyathena_cursor:  # noqa: N801 - follows SQLAlchemy's internal 
     def list_table_metadata(self, *args: Any, **kwargs: Any) -> Any:
         return await_only(self._cursor.list_table_metadata(*args, **kwargs))
 
-    def __enter__(self) -> "AsyncAdapt_pyathena_cursor":
+    def __enter__(self) -> AsyncAdapt_pyathena_cursor:
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         self.close()
 
 
-class AsyncAdapt_pyathena_connection(AdaptedConnection):  # noqa: N801 - follows SQLAlchemy's internal async adapter naming convention (e.g. AsyncAdapt_asyncpg_dbapi)
+class AsyncAdapt_pyathena_connection(AdaptedConnection):
     """Wraps ``AioConnection`` with a sync DBAPI interface.
 
     This adapted connection delegates ``cursor()`` to the underlying
@@ -121,9 +121,9 @@ class AsyncAdapt_pyathena_connection(AdaptedConnection):  # noqa: N801 - follows
     ``AsyncAdapt_pyathena_cursor``.
     """
 
-    __slots__ = ("dbapi", "_connection")
+    __slots__ = ("_connection", "dbapi")
 
-    def __init__(self, dbapi: "AsyncAdapt_pyathena_dbapi", connection: AioConnection) -> None:
+    def __init__(self, dbapi: AsyncAdapt_pyathena_dbapi, connection: AioConnection) -> None:
         self.dbapi = dbapi
         self._connection = connection  # type: ignore[assignment]
 
@@ -132,11 +132,11 @@ class AsyncAdapt_pyathena_connection(AdaptedConnection):  # noqa: N801 - follows
         return self._connection  # type: ignore[return-value]
 
     @property
-    def catalog_name(self) -> Optional[str]:
+    def catalog_name(self) -> str | None:
         return self._connection.catalog_name  # type: ignore[no-any-return]
 
     @property
-    def schema_name(self) -> Optional[str]:
+    def schema_name(self) -> str | None:
         return self._connection.schema_name  # type: ignore[no-any-return]
 
     def cursor(self) -> AsyncAdapt_pyathena_cursor:
@@ -153,7 +153,7 @@ class AsyncAdapt_pyathena_connection(AdaptedConnection):  # noqa: N801 - follows
         pass
 
 
-class AsyncAdapt_pyathena_dbapi:  # noqa: N801 - follows SQLAlchemy's internal async adapter naming convention (e.g. AsyncAdapt_asyncpg_dbapi)
+class AsyncAdapt_pyathena_dbapi:
     """Fake DBAPI module for the async SQLAlchemy engine.
 
     SQLAlchemy expects ``import_dbapi()`` to return a module-like object
@@ -201,21 +201,21 @@ class AthenaAioDialect(AthenaDialect):
     supports_statement_cache = True
 
     @classmethod
-    def get_pool_class(cls, url: "URL") -> type:
+    def get_pool_class(cls, url: URL) -> type:
         return pool.AsyncAdaptedQueuePool
 
     @classmethod
-    def import_dbapi(cls) -> "ModuleType":
+    def import_dbapi(cls) -> ModuleType:
         return AsyncAdapt_pyathena_dbapi()  # type: ignore[return-value]
 
     @classmethod
-    def dbapi(cls) -> "ModuleType":  # type: ignore[override]
+    def dbapi(cls) -> ModuleType:  # type: ignore[override]
         return AsyncAdapt_pyathena_dbapi()  # type: ignore[return-value]
 
-    def create_connect_args(self, url: "URL") -> Tuple[Tuple[str], MutableMapping[str, Any]]:
+    def create_connect_args(self, url: URL) -> tuple[tuple[str], MutableMapping[str, Any]]:
         opts = self._create_connect_args(url)
         self._connect_options = opts
-        return cast(Tuple[str], ()), opts
+        return cast(tuple[str], ()), opts
 
     def get_driver_connection(self, connection: Any) -> Any:
         return connection

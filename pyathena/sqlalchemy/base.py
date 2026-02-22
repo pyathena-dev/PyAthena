@@ -1,20 +1,12 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import contextlib
 import re
+from collections.abc import Mapping, MutableMapping
+from re import Pattern
 from typing import (
     TYPE_CHECKING,
     Any,
-    Dict,
-    List,
-    Mapping,
-    MutableMapping,
-    Optional,
-    Pattern,
-    Tuple,
-    Type,
-    Union,
     cast,
 )
 
@@ -64,7 +56,7 @@ if TYPE_CHECKING:
     from sqlalchemy.sql.schema import SchemaItem
 
 
-ischema_names: Dict[str, Type[Any]] = {
+ischema_names: dict[str, type[Any]] = {
     "boolean": types.BOOLEAN,
     "float": types.FLOAT,
     "double": get_double_type(),
@@ -137,28 +129,26 @@ class AthenaDialect(DefaultDialect):
     """
 
     name: str = "awsathena"
-    preparer: Type[IdentifierPreparer] = AthenaDMLIdentifierPreparer
-    statement_compiler: Type[SQLCompiler] = AthenaStatementCompiler
-    ddl_compiler: Type[DDLCompiler] = AthenaDDLCompiler
-    type_compiler: Type[GenericTypeCompiler] = AthenaTypeCompiler
+    preparer: type[IdentifierPreparer] = AthenaDMLIdentifierPreparer
+    statement_compiler: type[SQLCompiler] = AthenaStatementCompiler
+    ddl_compiler: type[DDLCompiler] = AthenaDDLCompiler
+    type_compiler: type[GenericTypeCompiler] = AthenaTypeCompiler
     default_paramstyle: str = pyathena.paramstyle
     cte_follows_insert: bool = True
     supports_alter: bool = False
-    supports_pk_autoincrement: Optional[bool] = False
+    supports_pk_autoincrement: bool | None = False
     supports_default_values: bool = False
     supports_empty_insert: bool = False
     supports_multivalues_insert: bool = True
     supports_native_decimal: bool = True
     supports_native_boolean: bool = True
-    supports_unicode_statements: Optional[bool] = True
-    supports_unicode_binds: Optional[bool] = True
+    supports_unicode_statements: bool | None = True
+    supports_unicode_binds: bool | None = True
     supports_statement_cache: bool = True
-    returns_unicode_strings: Optional[bool] = True
-    description_encoding: Optional[bool] = None
+    returns_unicode_strings: bool | None = True
+    description_encoding: bool | None = None
     postfetch_lastrowid: bool = False
-    construct_arguments: Optional[
-        List[Tuple[Type[Union["SchemaItem", "ClauseElement"]], Mapping[str, Any]]]
-    ] = [
+    construct_arguments: list[tuple[type[SchemaItem | ClauseElement], Mapping[str, Any]]] | None = [  # noqa: RUF012
         (
             schema.Table,
             {
@@ -183,15 +173,15 @@ class AthenaDialect(DefaultDialect):
         ),
     ]
 
-    colspecs = {
+    colspecs: dict[type[Any], type[Any]] = {  # noqa: RUF012
         types.DATE: AthenaDate,
         types.DATETIME: AthenaTimestamp,
         types.TIMESTAMP: AthenaTimestamp,
     }
 
-    ischema_names: Dict[str, Type[Any]] = ischema_names
+    ischema_names: dict[str, type[Any]] = ischema_names
 
-    _connect_options: Dict[str, Any] = {}  # type: ignore
+    _connect_options: dict[str, Any] = {}  # type: ignore[override]  # noqa: RUF012
     _pattern_column_type: Pattern[str] = re.compile(r"^([a-zA-Z]+)(?:$|[\(|<](.+)[\)|>]$)")
 
     def __init__(self, json_deserializer=None, json_serializer=None, **kwargs):
@@ -200,28 +190,28 @@ class AthenaDialect(DefaultDialect):
         self._json_serializer = json_serializer
 
     @classmethod
-    def import_dbapi(cls) -> "ModuleType":
+    def import_dbapi(cls) -> ModuleType:
         return pyathena
 
     @classmethod
-    def dbapi(cls) -> "ModuleType":  # type: ignore
+    def dbapi(cls) -> ModuleType:  # type: ignore[override]
         return pyathena
 
-    def _raw_connection(self, connection: Union[Engine, "Connection"]) -> "PoolProxiedConnection":
+    def _raw_connection(self, connection: Engine | Connection) -> PoolProxiedConnection:
         if isinstance(connection, Engine):
             return connection.raw_connection()
         return connection.connection
 
-    def create_connect_args(self, url: "URL") -> Tuple[Tuple[str], MutableMapping[str, Any]]:
+    def create_connect_args(self, url: URL) -> tuple[tuple[str], MutableMapping[str, Any]]:
         # Connection string format:
         #   awsathena+rest://
         #   {aws_access_key_id}:{aws_secret_access_key}@athena.{region_name}.amazonaws.com:443/
         #   {schema_name}?s3_staging_dir={s3_staging_dir}&...
         self._connect_options = self._create_connect_args(url)
-        return cast(Tuple[str], ()), self._connect_options
+        return cast(tuple[str], ()), self._connect_options
 
-    def _create_connect_args(self, url: "URL") -> Dict[str, Any]:
-        opts: Dict[str, Any] = {
+    def _create_connect_args(self, url: URL) -> dict[str, Any]:
+        opts: dict[str, Any] = {
             "aws_access_key_id": url.username if url.username else None,
             "aws_secret_access_key": url.password if url.password else None,
             "region_name": re.sub(
@@ -253,8 +243,8 @@ class AthenaDialect(DefaultDialect):
     @reflection.cache
     def _get_schemas(self, connection, **kw):
         raw_connection = self._raw_connection(connection)
-        catalog = raw_connection.catalog_name  # type: ignore
-        with raw_connection.driver_connection.cursor() as cursor:  # type: ignore
+        catalog = raw_connection.catalog_name  # type: ignore[union-attr]
+        with raw_connection.driver_connection.cursor() as cursor:  # type: ignore[union-attr]
             try:
                 return cursor.list_databases(catalog)
             except pyathena.error.OperationalError as e:
@@ -267,10 +257,10 @@ class AthenaDialect(DefaultDialect):
                 raise
 
     @reflection.cache
-    def _get_table(self, connection, table_name: str, schema: Optional[str] = None, **kw):
+    def _get_table(self, connection, table_name: str, schema: str | None = None, **kw):
         raw_connection = self._raw_connection(connection)
-        schema = schema if schema else raw_connection.schema_name  # type: ignore
-        with raw_connection.driver_connection.cursor() as cursor:  # type: ignore
+        schema = schema if schema else raw_connection.schema_name  # type: ignore[union-attr]
+        with raw_connection.driver_connection.cursor() as cursor:  # type: ignore[union-attr]
             try:
                 return cursor.get_table_metadata(table_name, schema_name=schema, logging_=False)
             except pyathena.error.OperationalError as e:
@@ -283,17 +273,17 @@ class AthenaDialect(DefaultDialect):
                 raise
 
     @reflection.cache
-    def _get_tables(self, connection, schema: Optional[str] = None, **kw):
+    def _get_tables(self, connection, schema: str | None = None, **kw):
         raw_connection = self._raw_connection(connection)
-        schema = schema if schema else raw_connection.schema_name  # type: ignore
-        with raw_connection.driver_connection.cursor() as cursor:  # type: ignore
+        schema = schema if schema else raw_connection.schema_name  # type: ignore[union-attr]
+        with raw_connection.driver_connection.cursor() as cursor:  # type: ignore[union-attr]
             return cursor.list_table_metadata(schema_name=schema)
 
     def get_schema_names(self, connection, **kw):
         schemas = self._get_schemas(connection, **kw)
         return [s.name for s in schemas]
 
-    def get_table_names(self, connection: "Connection", schema: Optional[str] = None, **kw):
+    def get_table_names(self, connection: Connection, schema: str | None = None, **kw):
         # Tables created by Athena are always classified as `EXTERNAL_TABLE`,
         # but Athena can also query tables classified as `MANAGED_TABLE`, `EXTERNAL`, or `customer`.
         # Managed Tables are created by default when creating tables via Spark when
@@ -307,18 +297,18 @@ class AthenaDialect(DefaultDialect):
             if t.table_type in ["EXTERNAL_TABLE", "MANAGED_TABLE", "EXTERNAL", "customer"]
         ]
 
-    def get_view_names(self, connection: "Connection", schema: Optional[str] = None, **kw):
+    def get_view_names(self, connection: Connection, schema: str | None = None, **kw):
         tables = self._get_tables(connection, schema, **kw)
         return [t.name for t in tables if t.table_type == "VIRTUAL_VIEW"]
 
     def get_table_comment(
-        self, connection: "Connection", table_name: str, schema: Optional[str] = None, **kw
+        self, connection: Connection, table_name: str, schema: str | None = None, **kw
     ):
         metadata = self._get_table(connection, table_name, schema=schema, **kw)
         return {"text": metadata.comment}
 
     def get_table_options(
-        self, connection: "Connection", table_name: str, schema: Optional[str] = None, **kw
+        self, connection: Connection, table_name: str, schema: str | None = None, **kw
     ):
         metadata = self._get_table(connection, table_name, schema=schema, **kw)
         # TODO The metadata retrieved from the API does not seem to include bucketing information.
@@ -331,9 +321,7 @@ class AthenaDialect(DefaultDialect):
             "awsathena_tblproperties": _HashableDict(metadata.table_properties),
         }
 
-    def has_table(
-        self, connection: "Connection", table_name: str, schema: Optional[str] = None, **kw
-    ):
+    def has_table(self, connection: Connection, table_name: str, schema: str | None = None, **kw):
         try:
             columns = self.get_columns(connection, table_name, schema)
             return bool(columns)
@@ -342,10 +330,10 @@ class AthenaDialect(DefaultDialect):
 
     @reflection.cache
     def get_view_definition(
-        self, connection: Connection, view_name: str, schema: Optional[str] = None, **kw
+        self, connection: Connection, view_name: str, schema: str | None = None, **kw
     ):
         raw_connection = self._raw_connection(connection)
-        schema = schema if schema else raw_connection.schema_name  # type: ignore
+        schema = schema if schema else raw_connection.schema_name  # type: ignore[union-attr]
         query = f"""SHOW CREATE VIEW "{schema}"."{view_name}";"""
         try:
             res = connection.scalars(text(query))
@@ -355,9 +343,7 @@ class AthenaDialect(DefaultDialect):
             return "\n".join(res)
 
     @reflection.cache
-    def get_columns(
-        self, connection: "Connection", table_name: str, schema: Optional[str] = None, **kw
-    ):
+    def get_columns(self, connection: Connection, table_name: str, schema: str | None = None, **kw):
         metadata = self._get_table(connection, table_name, schema=schema, **kw)
         columns = [
             {
@@ -411,20 +397,20 @@ class AthenaDialect(DefaultDialect):
         return col_type(*args)
 
     def get_foreign_keys(
-        self, connection: "Connection", table_name: str, schema: Optional[str] = None, **kw
-    ) -> List["ReflectedForeignKeyConstraint"]:
+        self, connection: Connection, table_name: str, schema: str | None = None, **kw
+    ) -> list[ReflectedForeignKeyConstraint]:
         # Athena has no support for foreign keys.
         return []  # pragma: no cover
 
     def get_pk_constraint(
-        self, connection: "Connection", table_name: str, schema: Optional[str] = None, **kw
-    ) -> "ReflectedPrimaryKeyConstraint":
+        self, connection: Connection, table_name: str, schema: str | None = None, **kw
+    ) -> ReflectedPrimaryKeyConstraint:
         # Athena has no support for primary keys.
         return {"name": None, "constrained_columns": []}  # pragma: no cover
 
     def get_indexes(
-        self, connection: "Connection", table_name: str, schema: Optional[str] = None, **kw
-    ) -> List["ReflectedIndex"]:
+        self, connection: Connection, table_name: str, schema: str | None = None, **kw
+    ) -> list[ReflectedIndex]:
         # Athena has no support for indexes.
         return []  # pragma: no cover
 
@@ -440,16 +426,16 @@ class AthenaDialect(DefaultDialect):
         else:
             cursor.execute(statement, parameters)
 
-    def do_rollback(self, dbapi_connection: "PoolProxiedConnection") -> None:
+    def do_rollback(self, dbapi_connection: PoolProxiedConnection) -> None:
         # No transactions for Athena
         pass  # pragma: no cover
 
     def _check_unicode_returns(
-        self, connection: "Connection", additional_tests: Optional[List[Any]] = None
+        self, connection: Connection, additional_tests: list[Any] | None = None
     ) -> bool:
         # Requests gives back Unicode strings
         return True  # pragma: no cover
 
-    def _check_unicode_description(self, connection: "Connection") -> bool:
+    def _check_unicode_description(self, connection: Connection) -> bool:
         # Requests gives back Unicode strings
         return True  # pragma: no cover

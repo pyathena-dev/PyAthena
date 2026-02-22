@@ -7,14 +7,14 @@ fmt:
 	uvx ruff@$(RUFF_VERSION) check --select I --fix .
 	uvx ruff@$(RUFF_VERSION) format .
 
-.PHONY: chk
-chk:
+.PHONY: lint
+lint:
 	uvx ruff@$(RUFF_VERSION) check .
 	uvx ruff@$(RUFF_VERSION) format --check .
 	uv run mypy .
 
 .PHONY: test
-test: chk
+test: lint
 	uv run pytest -n 8 --cov pyathena --cov-report html --cov-report term tests/pyathena/
 
 .PHONY: test-sqla

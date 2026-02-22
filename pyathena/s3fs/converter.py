@@ -1,9 +1,8 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import logging
 from copy import deepcopy
-from typing import Any, Optional
+from typing import Any
 
 from pyathena.converter import (
     _DEFAULT_CONVERTERS,
@@ -45,7 +44,7 @@ class DefaultS3FSTypeConverter(Converter):
             default=_to_default,
         )
 
-    def convert(self, type_: str, value: Optional[str]) -> Optional[Any]:
+    def convert(self, type_: str, value: str | None) -> Any | None:
         """Convert a string value to the appropriate Python type.
 
         Looks up the converter function for the given Athena type and applies

@@ -1,8 +1,7 @@
-# -*- coding: utf-8 -*-
 import contextlib
 from urllib.parse import quote_plus
 
-from sqlalchemy.testing.plugin.pytestplugin import *  # noqa
+from sqlalchemy.testing.plugin.pytestplugin import *  # noqa: F403
 from sqlalchemy.testing.plugin.pytestplugin import (
     pytest_sessionstart as sqlalchemy_pytest_sessionstart,
 )

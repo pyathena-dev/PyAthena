@@ -1,10 +1,9 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import logging
 from concurrent.futures import Future
 from multiprocessing import cpu_count
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, cast
 
 from pyathena.async_cursor import AsyncCursor
 from pyathena.common import CursorIterator
@@ -49,19 +48,19 @@ class AsyncS3FSCursor(AsyncCursor):
 
     def __init__(
         self,
-        s3_staging_dir: Optional[str] = None,
-        schema_name: Optional[str] = None,
-        catalog_name: Optional[str] = None,
-        work_group: Optional[str] = None,
+        s3_staging_dir: str | None = None,
+        schema_name: str | None = None,
+        catalog_name: str | None = None,
+        work_group: str | None = None,
         poll_interval: float = 1,
-        encryption_option: Optional[str] = None,
-        kms_key: Optional[str] = None,
+        encryption_option: str | None = None,
+        kms_key: str | None = None,
         kill_on_interrupt: bool = True,
         max_workers: int = (cpu_count() or 1) * 5,
         arraysize: int = CursorIterator.DEFAULT_FETCH_SIZE,
         result_reuse_enable: bool = False,
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
-        csv_reader: Optional[CSVReaderType] = None,
+        csv_reader: CSVReaderType | None = None,
         **kwargs,
     ) -> None:
         """Initialize an AsyncS3FSCursor.
@@ -109,7 +108,7 @@ class AsyncS3FSCursor(AsyncCursor):
 
     @staticmethod
     def get_default_converter(
-        unload: bool = False,  # noqa: ARG004
+        unload: bool = False,
     ) -> DefaultS3FSTypeConverter:
         """Get the default type converter for S3FS cursor.
 
@@ -143,7 +142,7 @@ class AsyncS3FSCursor(AsyncCursor):
     def _collect_result_set(
         self,
         query_id: str,
-        kwargs: Optional[Dict[str, Any]] = None,
+        kwargs: dict[str, Any] | None = None,
     ) -> AthenaS3FSResultSet:
         """Collect result set after query execution.
 
@@ -170,16 +169,16 @@ class AsyncS3FSCursor(AsyncCursor):
     def execute(
         self,
         operation: str,
-        parameters: Optional[Union[Dict[str, Any], List[str]]] = None,
-        work_group: Optional[str] = None,
-        s3_staging_dir: Optional[str] = None,
-        cache_size: Optional[int] = 0,
-        cache_expiration_time: Optional[int] = 0,
-        result_reuse_enable: Optional[bool] = None,
-        result_reuse_minutes: Optional[int] = None,
-        paramstyle: Optional[str] = None,
+        parameters: dict[str, Any] | list[str] | None = None,
+        work_group: str | None = None,
+        s3_staging_dir: str | None = None,
+        cache_size: int | None = 0,
+        cache_expiration_time: int | None = 0,
+        result_reuse_enable: bool | None = None,
+        result_reuse_minutes: int | None = None,
+        paramstyle: str | None = None,
         **kwargs,
-    ) -> Tuple[str, "Future[Union[AthenaS3FSResultSet, Any]]"]:
+    ) -> tuple[str, Future[AthenaS3FSResultSet | Any]]:
         """Execute a SQL query asynchronously.
 
         Submits the query to Athena and returns immediately with a query ID

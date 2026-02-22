@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import textwrap
 import time
 from concurrent.futures import ThreadPoolExecutor

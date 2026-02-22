@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import contextlib
 import random
 import string
@@ -427,7 +426,7 @@ class TestS3FSCursor:
             assert result == ("",)
 
     @pytest.mark.parametrize(
-        "csv_reader, expected_empty",
+        ("csv_reader", "expected_empty"),
         [
             (DefaultCSVReader, None),  # DefaultCSVReader: empty string becomes None
             (AthenaCSVReader, ""),  # AthenaCSVReader: empty string is preserved

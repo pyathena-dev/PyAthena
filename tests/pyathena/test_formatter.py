@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import textwrap
 from datetime import date, datetime
 from decimal import Decimal

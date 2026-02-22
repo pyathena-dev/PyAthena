@@ -1,9 +1,9 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from copy import deepcopy
-from typing import Any, Callable, Dict, Optional, Type
+from typing import Any
 
 from pyathena.converter import (
     Converter,
@@ -15,10 +15,10 @@ from pyathena.converter import (
     _to_time,
 )
 
-_logger = logging.getLogger(__name__)  # type: ignore
+_logger = logging.getLogger(__name__)
 
 
-_DEFAULT_ARROW_CONVERTERS: Dict[str, Callable[[Optional[str]], Optional[Any]]] = {
+_DEFAULT_ARROW_CONVERTERS: dict[str, Callable[[str | None], Any | None]] = {
     "date": _to_date,
     "time": _to_time,
     "decimal": _to_decimal,
@@ -62,7 +62,7 @@ class DefaultArrowTypeConverter(Converter):
         )
 
     @property
-    def _dtypes(self) -> Dict[str, Type[Any]]:
+    def _dtypes(self) -> dict[str, type[Any]]:
         if not hasattr(self, "__dtypes"):
             import pyarrow as pa
 
@@ -90,7 +90,7 @@ class DefaultArrowTypeConverter(Converter):
             }
         return self.__dtypes
 
-    def convert(self, type_: str, value: Optional[str]) -> Optional[Any]:
+    def convert(self, type_: str, value: str | None) -> Any | None:
         converter = self.get(type_)
         return converter(value)
 
@@ -114,5 +114,5 @@ class DefaultArrowUnloadTypeConverter(Converter):
             default=_to_default,
         )
 
-    def convert(self, type_: str, value: Optional[str]) -> Optional[Any]:
+    def convert(self, type_: str, value: str | None) -> Any | None:
         pass
