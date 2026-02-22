@@ -1,15 +1,16 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import logging
 import mimetypes
 import os.path
 import re
+from collections.abc import Callable
 from concurrent.futures import Future, as_completed
 from copy import deepcopy
 from datetime import datetime
 from multiprocessing import cpu_count
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Pattern, Tuple, Union, cast
+from re import Pattern
+from typing import TYPE_CHECKING, Any, cast
 
 import botocore.exceptions
 from boto3 import Session
@@ -36,7 +37,7 @@ from pyathena.util import RetryConfig, retry_api_call
 if TYPE_CHECKING:
     from pyathena.connection import Connection
 
-_logger = logging.getLogger(__name__)  # type: ignore
+_logger = logging.getLogger(__name__)
 
 
 class S3FileSystem(AbstractFileSystem):
@@ -102,9 +103,9 @@ class S3FileSystem(AbstractFileSystem):
 
     def __init__(
         self,
-        connection: Optional["Connection[Any]"] = None,
-        default_block_size: Optional[int] = None,
-        default_cache_type: Optional[str] = None,
+        connection: Connection[Any] | None = None,
+        default_block_size: int | None = None,
+        default_cache_type: str | None = None,
         max_workers: int = (cpu_count() or 1) * 5,
         s3_additional_kwargs=None,
         *args,
@@ -186,13 +187,13 @@ class S3FileSystem(AbstractFileSystem):
         )
 
     @staticmethod
-    def parse_path(path: str) -> Tuple[str, Optional[str], Optional[str]]:
+    def parse_path(path: str) -> tuple[str, str | None, str | None]:
         match = S3FileSystem.PATTERN_PATH.search(path)
         if match:
             return match.group("bucket"), match.group("key"), match.group("version_id")
         raise ValueError(f"Invalid S3 path format {path}.")
 
-    def _head_bucket(self, bucket, refresh: bool = False) -> Optional[S3Object]:
+    def _head_bucket(self, bucket, refresh: bool = False) -> S3Object | None:
         if bucket not in self.dircache or refresh:
             try:
                 self._call(
@@ -222,8 +223,8 @@ class S3FileSystem(AbstractFileSystem):
         return file
 
     def _head_object(
-        self, path: str, version_id: Optional[str] = None, refresh: bool = False
-    ) -> Optional[S3Object]:
+        self, path: str, version_id: str | None = None, refresh: bool = False
+    ) -> S3Object | None:
         bucket, key, path_version_id = self.parse_path(path)
         version_id = path_version_id if path_version_id else version_id
         if path not in self.dircache or refresh:
@@ -254,7 +255,7 @@ class S3FileSystem(AbstractFileSystem):
             file = self.dircache[path]
         return file
 
-    def _ls_buckets(self, refresh: bool = False) -> List[S3Object]:
+    def _ls_buckets(self, refresh: bool = False) -> list[S3Object]:
         if "" not in self.dircache or refresh:
             response = self._call(
                 self._client.list_buckets,
@@ -285,10 +286,10 @@ class S3FileSystem(AbstractFileSystem):
         path: str,
         prefix: str = "",
         delimiter: str = "/",
-        next_token: Optional[str] = None,
-        max_keys: Optional[int] = None,
+        next_token: str | None = None,
+        max_keys: int | None = None,
         refresh: bool = False,
-    ) -> List[S3Object]:
+    ) -> list[S3Object]:
         bucket, key, version_id = self.parse_path(path)
         if key:
             prefix = f"{key}/{prefix if prefix else ''}"
@@ -296,11 +297,11 @@ class S3FileSystem(AbstractFileSystem):
         # Create a cache key that includes the delimiter
         cache_key = (path, delimiter)
         if cache_key in self.dircache and not refresh:
-            return cast(List[S3Object], self.dircache[cache_key])
+            return cast(list[S3Object], self.dircache[cache_key])
 
-        files: List[S3Object] = []
+        files: list[S3Object] = []
         while True:
-            request: Dict[Any, Any] = {
+            request: dict[Any, Any] = {
                 "Bucket": bucket,
                 "Prefix": prefix,
                 "Delimiter": delimiter,
@@ -347,7 +348,7 @@ class S3FileSystem(AbstractFileSystem):
 
     def ls(
         self, path: str, detail: bool = False, refresh: bool = False, **kwargs
-    ) -> Union[List[S3Object], List[str]]:
+    ) -> list[S3Object] | list[str]:
         """List contents of an S3 path.
 
         Lists buckets (when path is root) or objects within a bucket/prefix.
@@ -398,7 +399,7 @@ class S3FileSystem(AbstractFileSystem):
                 version_id=None,
             )
         if not refresh:
-            caches: Union[List[S3Object], S3Object] = self._ls_from_cache(path)
+            caches: list[S3Object] | S3Object = self._ls_from_cache(path)
             if caches is not None:
                 if isinstance(caches, list):
                     cache = next((c for c in caches if c.name == path), None)
@@ -460,8 +461,8 @@ class S3FileSystem(AbstractFileSystem):
         raise FileNotFoundError(path)
 
     def _extract_parent_directories(
-        self, files: List[S3Object], bucket: str, base_key: Optional[str]
-    ) -> List[S3Object]:
+        self, files: list[S3Object], bucket: str, base_key: str | None
+    ) -> list[S3Object]:
         """Extract parent directory objects from file paths.
 
         When listing files without delimiter, S3 doesn't return directory entries.
@@ -521,10 +522,10 @@ class S3FileSystem(AbstractFileSystem):
     def _find(
         self,
         path: str,
-        maxdepth: Optional[int] = None,
-        withdirs: Optional[bool] = None,
+        maxdepth: int | None = None,
+        withdirs: bool | None = None,
         **kwargs,
-    ) -> List[S3Object]:
+    ) -> list[S3Object]:
         path = self._strip_protocol(path)
         if path in ["", "/"]:
             raise ValueError("Cannot traverse all files in S3.")
@@ -533,7 +534,7 @@ class S3FileSystem(AbstractFileSystem):
 
         # When maxdepth is specified, use a recursive approach with delimiter
         if maxdepth is not None:
-            result: List[S3Object] = []
+            result: list[S3Object] = []
 
             # List files and directories at current level
             current_items = self._ls_dirs(path, prefix=prefix, delimiter="/")
@@ -578,11 +579,11 @@ class S3FileSystem(AbstractFileSystem):
     def find(
         self,
         path: str,
-        maxdepth: Optional[int] = None,
-        withdirs: Optional[bool] = None,
+        maxdepth: int | None = None,
+        withdirs: bool | None = None,
         detail: bool = False,
         **kwargs,
-    ) -> Union[Dict[str, S3Object], List[str]]:
+    ) -> dict[str, S3Object] | list[str]:
         """Find all files below a given S3 path.
 
         Recursively searches for files under the specified path, with optional
@@ -670,7 +671,7 @@ class S3FileSystem(AbstractFileSystem):
             self.invalidate_cache(p)
 
     def _delete_object(
-        self, bucket: str, key: str, version_id: Optional[str] = None, **kwargs
+        self, bucket: str, key: str, version_id: str | None = None, **kwargs
     ) -> None:
         request = {
             "Bucket": bucket,
@@ -679,7 +680,7 @@ class S3FileSystem(AbstractFileSystem):
         if version_id:
             request.update({"VersionId": version_id})
 
-        _logger.debug(f"Delete object: s3://{bucket}/{key}?versionId={version_id}")
+        _logger.debug("Delete object: s3://%s/%s?versionId=%s", bucket, key, version_id)
         self._call(
             self._client.delete_object,
             **request,
@@ -700,7 +701,7 @@ class S3FileSystem(AbstractFileSystem):
         return S3ThreadPoolExecutor(max_workers=max_workers)
 
     def _delete_objects(
-        self, bucket: str, paths: List[str], max_workers: Optional[int] = None, **kwargs
+        self, bucket: str, paths: list[str], max_workers: int | None = None, **kwargs
     ) -> None:
         if not paths:
             return
@@ -735,7 +736,7 @@ class S3FileSystem(AbstractFileSystem):
             for f in as_completed(fs):
                 f.result()
 
-    def touch(self, path: str, truncate: bool = True, **kwargs) -> Dict[str, Any]:
+    def touch(self, path: str, truncate: bool = True, **kwargs) -> dict[str, Any]:
         bucket, key, version_id = self.parse_path(path)
         if version_id:
             raise ValueError("Cannot touch the file with the version specified.")
@@ -812,7 +813,7 @@ class S3FileSystem(AbstractFileSystem):
         self,
         bucket1: str,
         key1: str,
-        version_id1: Optional[str],
+        version_id1: str | None,
         bucket2: str,
         key2: str,
         **kwargs,
@@ -830,8 +831,12 @@ class S3FileSystem(AbstractFileSystem):
         }
 
         _logger.debug(
-            f"Copy object from s3://{bucket1}/{key1}?versionId={version_id1} "
-            f"to s3://{bucket2}/{key2}."
+            "Copy object from s3://%s/%s?versionId=%s to s3://%s/%s.",
+            bucket1,
+            key1,
+            version_id1,
+            bucket2,
+            key2,
         )
         self._call(self._client.copy_object, **request, **kwargs)
 
@@ -842,9 +847,9 @@ class S3FileSystem(AbstractFileSystem):
         size1: int,
         bucket2: str,
         key2: str,
-        max_workers: Optional[int] = None,
-        block_size: Optional[int] = None,
-        version_id1: Optional[str] = None,
+        max_workers: int | None = None,
+        block_size: int | None = None,
+        version_id1: str | None = None,
         **kwargs,
     ) -> None:
         max_workers = max_workers if max_workers else self.max_workers
@@ -896,7 +901,7 @@ class S3FileSystem(AbstractFileSystem):
                     }
                 )
 
-        parts.sort(key=lambda x: x["PartNumber"])  # type: ignore
+        parts.sort(key=lambda x: x["PartNumber"])  # type: ignore[arg-type, return-value]
         self._complete_multipart_upload(
             bucket=bucket2,
             key=key2,
@@ -905,7 +910,7 @@ class S3FileSystem(AbstractFileSystem):
         )
 
     def cat_file(
-        self, path: str, start: Optional[int] = None, end: Optional[int] = None, **kwargs
+        self, path: str, start: int | None = None, end: int | None = None, **kwargs
     ) -> bytes:
         bucket, key, version_id = self.parse_path(path)
         if start is not None or end is not None:
@@ -1073,7 +1078,7 @@ class S3FileSystem(AbstractFileSystem):
             "ExpiresIn": expiration,
         }
 
-        _logger.debug(f"Generate signed url: s3://{bucket}/{key}?versionId={version_id}")
+        _logger.debug("Generate signed url: s3://%s/%s?versionId=%s", bucket, key, version_id)
         return self._call(
             self._client.generate_presigned_url,
             **request,
@@ -1086,7 +1091,7 @@ class S3FileSystem(AbstractFileSystem):
         info = self.info(path)
         return cast(datetime, info.get("last_modified"))
 
-    def invalidate_cache(self, path: Optional[str] = None) -> None:
+    def invalidate_cache(self, path: str | None = None) -> None:
         if path is None:
             self.dircache.clear()
         else:
@@ -1099,10 +1104,10 @@ class S3FileSystem(AbstractFileSystem):
         self,
         path: str,
         mode: str = "rb",
-        block_size: Optional[int] = None,
-        cache_type: Optional[str] = None,
+        block_size: int | None = None,
+        cache_type: str | None = None,
         autocommit: bool = True,
-        cache_options: Optional[Dict[Any, Any]] = None,
+        cache_options: dict[Any, Any] | None = None,
         **kwargs,
     ) -> S3File:
         if block_size is None:
@@ -1132,10 +1137,10 @@ class S3FileSystem(AbstractFileSystem):
         self,
         bucket: str,
         key: str,
-        ranges: Optional[Tuple[int, int]] = None,
-        version_id: Optional[str] = None,
+        ranges: tuple[int, int] | None = None,
+        version_id: str | None = None,
         **kwargs,
-    ) -> Tuple[int, bytes]:
+    ) -> tuple[int, bytes]:
         request = {"Bucket": bucket, "Key": key}
         if ranges:
             range_ = S3File._format_ranges(ranges)
@@ -1146,7 +1151,13 @@ class S3FileSystem(AbstractFileSystem):
         if version_id:
             request.update({"VersionId": version_id})
 
-        _logger.debug(f"Get object: s3://{bucket}/{key}?versionId={version_id}&range={range_}")
+        _logger.debug(
+            "Get object: s3://%s/%s?versionId=%s&range=%s",
+            bucket,
+            key,
+            version_id,
+            range_,
+        )
         response = self._call(
             self._client.get_object,
             **request,
@@ -1154,12 +1165,12 @@ class S3FileSystem(AbstractFileSystem):
         )
         return ranges[0], cast(bytes, response["Body"].read())
 
-    def _put_object(self, bucket: str, key: str, body: Optional[bytes], **kwargs) -> S3PutObject:
-        request: Dict[str, Any] = {"Bucket": bucket, "Key": key}
+    def _put_object(self, bucket: str, key: str, body: bytes | None, **kwargs) -> S3PutObject:
+        request: dict[str, Any] = {"Bucket": bucket, "Key": key}
         if body:
             request.update({"Body": body})
 
-        _logger.debug(f"Put object: s3://{bucket}/{key}")
+        _logger.debug("Put object: s3://%s/%s", bucket, key)
         response = self._call(
             self._client.put_object,
             **request,
@@ -1173,7 +1184,7 @@ class S3FileSystem(AbstractFileSystem):
             "Key": key,
         }
 
-        _logger.debug(f"Create multipart upload to s3://{bucket}/{key}.")
+        _logger.debug("Create multipart upload to s3://%s/%s.", bucket, key)
         response = self._call(
             self._client.create_multipart_upload,
             **request,
@@ -1185,10 +1196,10 @@ class S3FileSystem(AbstractFileSystem):
         self,
         bucket: str,
         key: str,
-        copy_source: Union[str, Dict[str, Any]],
+        copy_source: str | dict[str, Any],
         upload_id: str,
         part_number: int,
-        copy_source_ranges: Optional[Tuple[int, int]] = None,
+        copy_source_ranges: tuple[int, int] | None = None,
         **kwargs,
     ) -> S3MultipartUploadPart:
         request = {
@@ -1202,7 +1213,11 @@ class S3FileSystem(AbstractFileSystem):
             range_ = S3File._format_ranges(copy_source_ranges)
             request.update({"CopySourceRange": range_})
         _logger.debug(
-            f"Upload part copy from {copy_source} to s3://{bucket}/{key} as part {part_number}."
+            "Upload part copy from %s to s3://%s/%s as part %s.",
+            copy_source,
+            bucket,
+            key,
+            part_number,
         )
         response = self._call(
             self._client.upload_part_copy,
@@ -1228,7 +1243,13 @@ class S3FileSystem(AbstractFileSystem):
             "Body": body,
         }
 
-        _logger.debug(f"Upload part of {upload_id} to s3://{bucket}/{key} as part {part_number}.")
+        _logger.debug(
+            "Upload part of %s to s3://%s/%s as part %s.",
+            upload_id,
+            bucket,
+            key,
+            part_number,
+        )
         response = self._call(
             self._client.upload_part,
             **request,
@@ -1237,7 +1258,7 @@ class S3FileSystem(AbstractFileSystem):
         return S3MultipartUploadPart(part_number, response)
 
     def _complete_multipart_upload(
-        self, bucket: str, key: str, upload_id: str, parts: List[Dict[str, Any]], **kwargs
+        self, bucket: str, key: str, upload_id: str, parts: list[dict[str, Any]], **kwargs
     ) -> S3CompleteMultipartUpload:
         request = {
             "Bucket": bucket,
@@ -1246,7 +1267,7 @@ class S3FileSystem(AbstractFileSystem):
             "MultipartUpload": {"Parts": parts},
         }
 
-        _logger.debug(f"Complete multipart upload {upload_id} to s3://{bucket}/{key}.")
+        _logger.debug("Complete multipart upload %s to s3://%s/%s.", upload_id, bucket, key)
         response = self._call(
             self._client.complete_multipart_upload,
             **request,
@@ -1254,12 +1275,12 @@ class S3FileSystem(AbstractFileSystem):
         )
         return S3CompleteMultipartUpload(response)
 
-    def _call(self, method: Union[str, Callable[..., Any]], **kwargs) -> Dict[str, Any]:
+    def _call(self, method: str | Callable[..., Any], **kwargs) -> dict[str, Any]:
         func = getattr(self._client, method) if isinstance(method, str) else method
         response = retry_api_call(
             func, config=self._retry_config, logger=_logger, **kwargs, **self.request_kwargs
         )
-        return cast(Dict[str, Any], response)
+        return cast(dict[str, Any], response)
 
 
 class S3File(AbstractBufferedFile):
@@ -1268,15 +1289,15 @@ class S3File(AbstractBufferedFile):
         fs: S3FileSystem,
         path: str,
         mode: str = "rb",
-        version_id: Optional[str] = None,
+        version_id: str | None = None,
         max_workers: int = (cpu_count() or 1) * 5,
-        executor: Optional[S3Executor] = None,
+        executor: S3Executor | None = None,
         block_size: int = S3FileSystem.DEFAULT_BLOCK_SIZE,
         cache_type: str = "bytes",
         autocommit: bool = True,
-        cache_options: Optional[Dict[Any, Any]] = None,
-        size: Optional[int] = None,
-        s3_additional_kwargs: Optional[Dict[str, Any]] = None,
+        cache_options: dict[Any, Any] | None = None,
+        size: int | None = None,
+        s3_additional_kwargs: dict[str, Any] | None = None,
         **kwargs,
     ) -> None:
         self.max_workers = max_workers
@@ -1304,7 +1325,7 @@ class S3File(AbstractBufferedFile):
                     f"The version_id: {version_id} specified in the argument and "
                     f"the version_id: {path_version_id} specified in the path do not match."
                 )
-            self.version_id: Optional[str] = version_id
+            self.version_id: str | None = version_id
         elif path_version_id:
             self.version_id = path_version_id
         else:
@@ -1332,8 +1353,8 @@ class S3File(AbstractBufferedFile):
         else:
             self._details = {}
 
-        self.multipart_upload: Optional[S3MultipartUpload] = None
-        self.multipart_upload_parts: List[Future[S3MultipartUploadPart]] = []
+        self.multipart_upload: S3MultipartUpload | None = None
+        self.multipart_upload_parts: list[Future[S3MultipartUploadPart]] = []
 
     def close(self) -> None:
         super().close()
@@ -1457,7 +1478,7 @@ class S3File(AbstractBufferedFile):
             if not self.multipart_upload:
                 raise RuntimeError("Multipart upload is not initialized.")
 
-            parts: List[Dict[str, Any]] = []
+            parts: list[dict[str, Any]] = []
             for f in as_completed(self.multipart_upload_parts):
                 result = f.result()
                 parts.append(
@@ -1519,13 +1540,13 @@ class S3File(AbstractBufferedFile):
         return object_
 
     @staticmethod
-    def _format_ranges(ranges: Tuple[int, int]):
+    def _format_ranges(ranges: tuple[int, int]):
         return f"bytes={ranges[0]}-{ranges[1] - 1}"
 
     @staticmethod
     def _get_ranges(
         start: int, end: int, max_workers: int, worker_block_size: int
-    ) -> List[Tuple[int, int]]:
+    ) -> list[tuple[int, int]]:
         ranges = []
         range_size = end - start
         if max_workers > 1 and range_size > worker_block_size:
@@ -1542,6 +1563,6 @@ class S3File(AbstractBufferedFile):
         return ranges
 
     @staticmethod
-    def _merge_objects(objects: List[Tuple[int, bytes]]) -> bytes:
+    def _merge_objects(objects: list[tuple[int, bytes]]) -> bytes:
         objects.sort(key=lambda x: x[0])
         return b"".join([obj for start, obj in objects])

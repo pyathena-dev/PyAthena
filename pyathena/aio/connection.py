@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import asyncio
@@ -33,7 +32,7 @@ class AioConnection(Connection[AioCursor]):
     async def create(
         cls,
         **kwargs: Any,
-    ) -> "AioConnection":
+    ) -> AioConnection:
         """Async factory for creating an ``AioConnection``.
 
         Runs the (potentially blocking) ``__init__`` in a thread so that
@@ -47,7 +46,7 @@ class AioConnection(Connection[AioCursor]):
         """
         return await asyncio.to_thread(cls, **kwargs)
 
-    async def __aenter__(self) -> "AioConnection":
+    async def __aenter__(self) -> AioConnection:
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:

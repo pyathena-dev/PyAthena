@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import pyarrow as pa
 
 from pyathena.arrow.util import to_column_info

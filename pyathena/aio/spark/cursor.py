@@ -1,9 +1,8 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, List, Optional, Union, cast
+from typing import Any, cast
 
 from pyathena.aio.util import async_retry_api_call
 from pyathena.error import DatabaseError, NotSupportedError, OperationalError, ProgrammingError
@@ -15,7 +14,7 @@ from pyathena.model import (
 from pyathena.spark.common import SparkBaseCursor, WithCalculationExecution
 from pyathena.util import parse_output_location
 
-_logger = logging.getLogger(__name__)  # type: ignore
+_logger = logging.getLogger(__name__)
 
 
 class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
@@ -44,11 +43,11 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
 
     def __init__(
         self,
-        session_id: Optional[str] = None,
-        description: Optional[str] = None,
-        engine_configuration: Optional[Dict[str, Any]] = None,
-        notebook_version: Optional[str] = None,
-        session_idle_timeout_minutes: Optional[int] = None,
+        session_id: str | None = None,
+        description: str | None = None,
+        engine_configuration: dict[str, Any] | None = None,
+        notebook_version: str | None = None,
+        session_idle_timeout_minutes: int | None = None,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -61,7 +60,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
         )
 
     @property
-    def calculation_execution(self) -> Optional[AthenaCalculationExecution]:
+    def calculation_execution(self) -> AthenaCalculationExecution | None:
         return self._calculation_execution
 
     # --- async overrides of SparkBaseCursor I/O methods ---
@@ -69,7 +68,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
     async def _get_calculation_execution_status(  # type: ignore[override]
         self, query_id: str
     ) -> AthenaCalculationExecutionStatus:
-        request: Dict[str, Any] = {"CalculationExecutionId": query_id}
+        request: dict[str, Any] = {"CalculationExecutionId": query_id}
         try:
             response = await async_retry_api_call(
                 self._connection.client.get_calculation_execution_status,
@@ -86,7 +85,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
     async def _get_calculation_execution(  # type: ignore[override]
         self, query_id: str
     ) -> AthenaCalculationExecution:
-        request: Dict[str, Any] = {"CalculationExecutionId": query_id}
+        request: dict[str, Any] = {"CalculationExecutionId": query_id}
         try:
             response = await async_retry_api_call(
                 self._connection.client.get_calculation_execution,
@@ -104,8 +103,8 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
         self,
         session_id: str,
         code_block: str,
-        description: Optional[str] = None,
-        client_request_token: Optional[str] = None,
+        description: str | None = None,
+        client_request_token: str | None = None,
     ) -> str:
         request = self._build_start_calculation_execution_request(
             session_id=session_id,
@@ -126,9 +125,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
             raise DatabaseError(*e.args) from e
         return cast(str, calculation_id)
 
-    async def __poll(
-        self, query_id: str
-    ) -> Union[AthenaQueryExecution, AthenaCalculationExecution]:
+    async def __poll(self, query_id: str) -> AthenaQueryExecution | AthenaCalculationExecution:
         while True:
             calculation_status = await self._get_calculation_execution_status(query_id)
             if calculation_status.state in [
@@ -141,7 +138,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
 
     async def _poll(  # type: ignore[override]
         self, query_id: str
-    ) -> Union[AthenaQueryExecution, AthenaCalculationExecution]:
+    ) -> AthenaQueryExecution | AthenaCalculationExecution:
         try:
             query_execution = await self.__poll(query_id)
         except asyncio.CancelledError:
@@ -154,7 +151,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
         return query_execution
 
     async def _cancel(self, query_id: str) -> None:  # type: ignore[override]
-        request: Dict[str, Any] = {"CalculationExecutionId": query_id}
+        request: dict[str, Any] = {"CalculationExecutionId": query_id}
         try:
             await async_retry_api_call(
                 self._connection.client.stop_calculation_execution,
@@ -167,7 +164,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
             raise OperationalError(*e.args) from e
 
     async def _terminate_session(self) -> None:  # type: ignore[override]
-        request: Dict[str, Any] = {"SessionId": self._session_id}
+        request: dict[str, Any] = {"SessionId": self._session_id}
         try:
             await async_retry_api_call(
                 self._connection.client.terminate_session,
@@ -192,7 +189,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
 
     # --- public API ---
 
-    async def get_std_out(self) -> Optional[str]:
+    async def get_std_out(self) -> str | None:
         """Get the standard output from the Spark calculation execution.
 
         Returns:
@@ -202,7 +199,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
             return None
         return await self._read_s3_file_as_text(self._calculation_execution.std_out_s3_uri)
 
-    async def get_std_error(self) -> Optional[str]:
+    async def get_std_error(self) -> str | None:
         """Get the standard error from the Spark calculation execution.
 
         Returns:
@@ -215,13 +212,13 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
     async def execute(  # type: ignore[override]
         self,
         operation: str,
-        parameters: Optional[Union[Dict[str, Any], List[str]]] = None,
-        session_id: Optional[str] = None,
-        description: Optional[str] = None,
-        client_request_token: Optional[str] = None,
-        work_group: Optional[str] = None,
+        parameters: dict[str, Any] | list[str] | None = None,
+        session_id: str | None = None,
+        description: str | None = None,
+        client_request_token: str | None = None,
+        work_group: str | None = None,
         **kwargs,
-    ) -> "AioSparkCursor":
+    ) -> AioSparkCursor:
         """Execute PySpark code asynchronously.
 
         Args:
@@ -267,7 +264,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
     async def executemany(  # type: ignore[override]
         self,
         operation: str,
-        seq_of_parameters: List[Optional[Union[Dict[str, Any], List[str]]]],
+        seq_of_parameters: list[dict[str, Any] | list[str] | None],
         **kwargs,
     ) -> None:
         raise NotSupportedError

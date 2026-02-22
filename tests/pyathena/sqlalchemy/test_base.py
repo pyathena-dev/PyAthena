@@ -1,10 +1,8 @@
-# -*- coding: utf-8 -*-
 import re
 import textwrap
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
-from typing import List
 from urllib.parse import quote_plus
 
 import numpy as np
@@ -2390,7 +2388,7 @@ SELECT {ENV.schema}.{table_name}.id, {ENV.schema}.{table_name}.name \n\
     def test_sqlalchemy_execute_with_execution_options_callback(self, engine):
         """Test callback functionality through SQLAlchemy execution_options."""
         engine, conn = engine
-        query_ids: List[str] = []
+        query_ids: list[str] = []
 
         def callback_function(query_id: str) -> None:
             query_ids.append(query_id)
@@ -2414,7 +2412,7 @@ SELECT {ENV.schema}.{table_name}.id, {ENV.schema}.{table_name}.name \n\
 
     def test_sqlalchemy_connection_level_callback(self, engine):
         """Test connection-level callback functionality through SQLAlchemy engine creation."""
-        query_ids: List[str] = []
+        query_ids: list[str] = []
 
         def callback_function(query_id: str) -> None:
             query_ids.append(query_id)

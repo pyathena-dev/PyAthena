@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import contextlib
 import json
 import logging
@@ -82,7 +81,7 @@ class TestCursor:
     def test_cache_size(self, cursor):
         # To test caching, we need to make sure the query is unique, otherwise
         # we might accidentally pick up the cache results from another CI run.
-        query = f"SELECT * FROM one_row -- {str(datetime.now(timezone.utc))}"
+        query = f"SELECT * FROM one_row -- {datetime.now(timezone.utc)!s}"
 
         cursor.execute(query)
         first_query_id = cursor.query_id
@@ -115,7 +114,7 @@ class TestCursor:
         assert third_query_id in [first_query_id, second_query_id]
 
     def test_cache_expiration_time(self, cursor):
-        query = f"SELECT * FROM one_row -- {str(datetime.now(timezone.utc))}"
+        query = f"SELECT * FROM one_row -- {datetime.now(timezone.utc)!s}"
 
         cursor.execute(query)
         query_id_1 = cursor.query_id
@@ -131,7 +130,7 @@ class TestCursor:
 
     def test_cache_expiration_time_with_cache_size(self, cursor):
         # Cache miss
-        query = f"SELECT * FROM one_row -- {str(datetime.now(timezone.utc))}"
+        query = f"SELECT * FROM one_row -- {datetime.now(timezone.utc)!s}"
 
         cursor.execute(query)
         query_id_1 = cursor.query_id
@@ -148,7 +147,7 @@ class TestCursor:
         assert query_id_3 not in [query_id_1, query_id_2]
 
         # Cache miss
-        query = f"SELECT * FROM one_row -- {str(datetime.now(timezone.utc))}"
+        query = f"SELECT * FROM one_row -- {datetime.now(timezone.utc)!s}"
 
         cursor.execute(query)
         query_id_4 = cursor.query_id
@@ -166,7 +165,7 @@ class TestCursor:
         assert query_id_6 not in [query_id_4, query_id_5]
 
         # Cache hit
-        query = f"SELECT * FROM one_row -- {str(datetime.now(timezone.utc))}"
+        query = f"SELECT * FROM one_row -- {datetime.now(timezone.utc)!s}"
 
         cursor.execute(query)
         query_id_7 = cursor.query_id
@@ -978,7 +977,7 @@ class TestComplexDataTypes:
     """Test complex data types (STRUCT, ARRAY, MAP) with actual Athena queries."""
 
     @pytest.mark.parametrize(
-        "query,description",
+        ("query", "description"),
         [
             ("SELECT ROW('John', 30) AS simple_struct", "simple_struct"),
             (
@@ -997,11 +996,11 @@ class TestComplexDataTypes:
     )
     def test_struct_types(self, cursor, query, description):
         """Test various STRUCT type scenarios to understand Athena's behavior."""
-        _logger.info(f"=== STRUCT Type Test: {description} ===")
+        _logger.info("=== STRUCT Type Test: %s ===", description)
         cursor.execute(query)
         result = cursor.fetchone()
         struct_value = result[0]
-        _logger.info(f"{description}: {struct_value!r} (type: {type(struct_value).__name__})")
+        _logger.info("%s: %r (type: %s)", description, struct_value, type(struct_value).__name__)
 
         # Validate struct value and converter behavior
         assert struct_value is not None, f"STRUCT value should not be None for {description}"
@@ -1009,7 +1008,7 @@ class TestComplexDataTypes:
         # Test struct conversion behavior
         if isinstance(struct_value, str):
             converted = _to_struct(struct_value)
-            _logger.info(f"{description}: Converted {struct_value!r} -> {converted!r}")
+            _logger.info("%s: Converted %r -> %r", description, struct_value, converted)
             # For string structs, conversion should succeed or return None for complex cases
             if converted is not None:
                 assert isinstance(converted, dict), (
@@ -1017,15 +1016,18 @@ class TestComplexDataTypes:
                 )
         elif isinstance(struct_value, dict):
             # Already converted by the cursor converter
-            _logger.info(f"{description}: Already converted to dict: {struct_value!r}")
+            _logger.info("%s: Already converted to dict: %r", description, struct_value)
         else:
             # Log unexpected types for debugging but don't fail
             _logger.warning(
-                f"{description}: Unexpected type {type(struct_value).__name__}: {struct_value!r}"
+                "%s: Unexpected type %s: %r",
+                description,
+                type(struct_value).__name__,
+                struct_value,
             )
 
     @pytest.mark.parametrize(
-        "query,description",
+        ("query", "description"),
         [
             ("SELECT ARRAY[1, 2, 3, 4, 5] AS simple_array", "simple_array"),
             ("SELECT ARRAY['apple', 'banana', 'cherry'] AS string_array", "string_array"),
@@ -1044,18 +1046,18 @@ class TestComplexDataTypes:
     )
     def test_array_types(self, cursor, query, description):
         """Test various ARRAY type scenarios."""
-        _logger.info(f"=== ARRAY Type Test: {description} ===")
+        _logger.info("=== ARRAY Type Test: %s ===", description)
         cursor.execute(query)
         result = cursor.fetchone()
         array_value = result[0]
-        _logger.info(f"{description}: {array_value!r} (type: {type(array_value).__name__})")
+        _logger.info("%s: %r (type: %s)", description, array_value, type(array_value).__name__)
 
         # Validate array value
         assert array_value is not None, f"ARRAY value should not be None for {description}"
-        _logger.info(f"{description}: Array value type {type(array_value).__name__}")
+        _logger.info("%s: Array value type %s", description, type(array_value).__name__)
 
     @pytest.mark.parametrize(
-        "query,description",
+        ("query", "description"),
         [
             (
                 "SELECT MAP(ARRAY[1, 2, 3], ARRAY['one', 'two', 'three']) AS simple_map",
@@ -1084,11 +1086,11 @@ class TestComplexDataTypes:
     )
     def test_map_types(self, cursor, query, description):
         """Test various MAP type scenarios."""
-        _logger.info(f"=== MAP Type Test: {description} ===")
+        _logger.info("=== MAP Type Test: %s ===", description)
         cursor.execute(query)
         result = cursor.fetchone()
         map_value = result[0]
-        _logger.info(f"{description}: {map_value!r} (type: {type(map_value).__name__})")
+        _logger.info("%s: %r (type: %s)", description, map_value, type(map_value).__name__)
 
         # Validate map value and converter behavior
         assert map_value is not None, f"MAP value should not be None for {description}"
@@ -1098,26 +1100,29 @@ class TestComplexDataTypes:
             # For complex MAP structures, string is expected (JSON or native format)
             if "ROW(" in map_value or "ARRAY[" in map_value:
                 # Complex structure, expect string format
-                _logger.info(f"{description}: Complex MAP kept as string: {map_value!r}")
+                _logger.info("%s: Complex MAP kept as string: %r", description, map_value)
             else:
                 # Simple MAP, try conversion
                 converted = _to_map(map_value)
-                _logger.info(f"{description}: Converted {map_value!r} -> {converted!r}")
+                _logger.info("%s: Converted %r -> %r", description, map_value, converted)
                 if converted is not None:
                     assert isinstance(converted, dict), (
                         f"Converted map should be dict for {description}"
                     )
         elif isinstance(map_value, dict):
             # Already converted by the cursor converter
-            _logger.info(f"{description}: Already converted to dict: {map_value!r}")
+            _logger.info("%s: Already converted to dict: %r", description, map_value)
         else:
             # Log unexpected types for debugging but don't fail
             _logger.warning(
-                f"{description}: Unexpected type {type(map_value).__name__}: {map_value!r}"
+                "%s: Unexpected type %s: %r",
+                description,
+                type(map_value).__name__,
+                map_value,
             )
 
     @pytest.mark.parametrize(
-        "query,description",
+        ("query", "description"),
         [
             (
                 "SELECT CAST(ROW(ARRAY[1, 2, 3], MAP(ARRAY['a', 'b'], ARRAY[1, 2])) AS JSON) "
@@ -1138,28 +1143,28 @@ class TestComplexDataTypes:
     )
     def test_complex_combinations(self, cursor, query, description):
         """Test complex combinations of data types."""
-        _logger.info(f"=== Complex Combination Test: {description} ===")
+        _logger.info("=== Complex Combination Test: %s ===", description)
         cursor.execute(query)
         result = cursor.fetchone()
         complex_value = result[0]
-        _logger.info(f"{description}: {complex_value!r} (type: {type(complex_value).__name__})")
+        _logger.info("%s: %r (type: %s)", description, complex_value, type(complex_value).__name__)
 
         # For JSON cast results, expect string values that can be parsed as JSON
         if isinstance(complex_value, str):
             try:
                 # Test that the JSON string can be parsed
                 parsed = json.loads(complex_value)
-                _logger.info(f"  Parsed JSON: {parsed!r}")
+                _logger.info("  Parsed JSON: %r", parsed)
                 assert parsed is not None, f"Parsed JSON should not be None for {description}"
             except json.JSONDecodeError as e:
                 raise AssertionError(f"JSON parsing failed for {description}: {e}") from e
         else:
             # If it's not a string, it should still be a valid value (not None)
             assert complex_value is not None, f"Complex value should not be None for {description}"
-        _logger.info(f"{description}: Complex value type {type(complex_value).__name__}")
+        _logger.info("%s: Complex value type %s", description, type(complex_value).__name__)
 
     @pytest.mark.parametrize(
-        "query,description",
+        ("query", "description"),
         [
             ("SELECT ARRAY[1, 2, 3, 4, 5] AS simple_array", "simple_array"),
             ("SELECT ARRAY['apple', 'banana', 'cherry'] AS string_array", "string_array"),
@@ -1188,11 +1193,11 @@ class TestComplexDataTypes:
     )
     def test_array_types_basic(self, cursor, query, description):
         """Test basic ARRAY type scenarios."""
-        _logger.info(f"=== ARRAY Type Test: {description} ===")
+        _logger.info("=== ARRAY Type Test: %s ===", description)
         cursor.execute(query)
         result = cursor.fetchone()
         array_value = result[0]
-        _logger.info(f"{description}: {array_value!r} (type: {type(array_value).__name__})")
+        _logger.info("%s: %r (type: %s)", description, array_value, type(array_value).__name__)
 
         # Validate array value
         assert array_value is not None or description == "empty_array", (
@@ -1202,10 +1207,10 @@ class TestComplexDataTypes:
             assert array_value == [], f"Empty array should be [] for {description}"
         else:
             assert isinstance(array_value, list), f"ARRAY value should be list for {description}"
-        _logger.info(f"{description}: Array value type {type(array_value).__name__}")
+        _logger.info("%s: Array value type %s", description, type(array_value).__name__)
 
     @pytest.mark.parametrize(
-        "query,description",
+        ("query", "description"),
         [
             (
                 "SELECT ARRAY[ROW(1, 'Alice'), ROW(2, 'Bob'), ROW(3, 'Charlie')] AS struct_array",
@@ -1225,11 +1230,11 @@ class TestComplexDataTypes:
     )
     def test_array_types_with_structs(self, cursor, query, description):
         """Test ARRAY types containing STRUCT elements."""
-        _logger.info(f"=== ARRAY with STRUCT Test: {description} ===")
+        _logger.info("=== ARRAY with STRUCT Test: %s ===", description)
         cursor.execute(query)
         result = cursor.fetchone()
         array_value = result[0]
-        _logger.info(f"{description}: {array_value!r} (type: {type(array_value).__name__})")
+        _logger.info("%s: %r (type: %s)", description, array_value, type(array_value).__name__)
 
         # Validate array value
         assert array_value is not None, f"ARRAY value should not be None for {description}"
@@ -1241,10 +1246,10 @@ class TestComplexDataTypes:
         assert isinstance(first_element, dict), (
             f"First array element should be dict (struct) for {description}"
         )
-        _logger.info(f"{description}: First element: {first_element!r}")
+        _logger.info("%s: First element: %r", description, first_element)
 
     @pytest.mark.parametrize(
-        "query,description",
+        ("query", "description"),
         [
             (
                 "SELECT CAST(ARRAY[1, 2, 3] AS JSON) AS arr_json",
@@ -1262,21 +1267,21 @@ class TestComplexDataTypes:
     )
     def test_array_types_json_cast(self, cursor, query, description):
         """Test ARRAY types with JSON casting."""
-        _logger.info(f"=== ARRAY JSON Cast Test: {description} ===")
+        _logger.info("=== ARRAY JSON Cast Test: %s ===", description)
         cursor.execute(query)
         result = cursor.fetchone()
         array_value = result[0]
-        _logger.info(f"{description}: {array_value!r} (type: {type(array_value).__name__})")
+        _logger.info("%s: %r (type: %s)", description, array_value, type(array_value).__name__)
 
         # Validate array value
         assert array_value is not None, f"ARRAY value should not be None for {description}"
         assert isinstance(array_value, list), (
             f"JSON cast ARRAY value should be list for {description}"
         )
-        _logger.info(f"{description}: JSON cast array type {type(array_value).__name__}")
+        _logger.info("%s: JSON cast array type %s", description, type(array_value).__name__)
 
     @pytest.mark.parametrize(
-        "query,description",
+        ("query", "description"),
         [
             ("SELECT CARDINALITY(ARRAY[1, 2, 3, 4, 5]) AS array_size", "array_size"),
             ("SELECT ARRAY[10, 20, 30, 40][2] AS array_element", "array_element"),
@@ -1286,12 +1291,15 @@ class TestComplexDataTypes:
     )
     def test_array_operations(self, cursor, query, description):
         """Test ARRAY operations and functions."""
-        _logger.info(f"=== ARRAY Operation Test: {description} ===")
+        _logger.info("=== ARRAY Operation Test: %s ===", description)
         cursor.execute(query)
         result = cursor.fetchone()
         operation_result = result[0]
         _logger.info(
-            f"{description}: {operation_result!r} (type: {type(operation_result).__name__})"
+            "%s: %r (type: %s)",
+            description,
+            operation_result,
+            type(operation_result).__name__,
         )
 
         # Validate operation result
@@ -1319,7 +1327,7 @@ class TestComplexDataTypes:
         cursor.execute("SELECT ARRAY[1, 2, 3] AS simple")
         result = cursor.fetchone()
         simple_array = result[0]
-        _logger.info(f"Simple array: {simple_array!r}")
+        _logger.info("Simple array: %r", simple_array)
         assert simple_array == [1, 2, 3]
 
         # Test array with struct conversion
@@ -1329,7 +1337,7 @@ class TestComplexDataTypes:
         )
         result = cursor.fetchone()
         struct_array = result[0]
-        _logger.info(f"Struct array: {struct_array!r}")
+        _logger.info("Struct array: %r", struct_array)
         assert isinstance(struct_array, list)
         assert len(struct_array) == 2
         assert isinstance(struct_array[0], dict)
@@ -1346,7 +1354,7 @@ class TestComplexDataTypes:
 
         for test_input, expected in test_cases:
             result = _to_array(test_input)
-            _logger.info(f"Converter test: {test_input!r} -> {result!r}")
+            _logger.info("Converter test: %r -> %r", test_input, result)
             assert result == expected, (
                 f"Converter failed for {test_input}: expected {expected}, got {result}"
             )

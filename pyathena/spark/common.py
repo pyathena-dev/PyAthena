@@ -1,11 +1,10 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import logging
 import time
 from abc import ABCMeta, abstractmethod
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Union, cast
+from typing import Any, cast
 
 import botocore
 
@@ -19,7 +18,7 @@ from pyathena.model import (
 )
 from pyathena.util import parse_output_location, retry_api_call
 
-_logger = logging.getLogger(__name__)  # type: ignore
+_logger = logging.getLogger(__name__)
 
 
 class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
@@ -50,11 +49,11 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
 
     def __init__(
         self,
-        session_id: Optional[str] = None,
-        description: Optional[str] = None,
-        engine_configuration: Optional[Dict[str, Any]] = None,
-        notebook_version: Optional[str] = None,
-        session_idle_timeout_minutes: Optional[int] = None,
+        session_id: str | None = None,
+        description: str | None = None,
+        engine_configuration: dict[str, Any] | None = None,
+        notebook_version: str | None = None,
+        session_idle_timeout_minutes: int | None = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -75,8 +74,8 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         else:
             self._session_id = self._start_session()
 
-        self._calculation_id: Optional[str] = None
-        self._calculation_execution: Optional[AthenaCalculationExecution] = None
+        self._calculation_id: str | None = None
+        self._calculation_execution: AthenaCalculationExecution | None = None
 
         self._client = self.connection.session.client(
             "s3",
@@ -90,11 +89,11 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         return self._session_id
 
     @property
-    def calculation_id(self) -> Optional[str]:
+    def calculation_id(self) -> str | None:
         return self._calculation_id
 
     @staticmethod
-    def get_default_engine_configuration() -> Dict[str, Any]:
+    def get_default_engine_configuration() -> dict[str, Any]:
         return {
             "CoordinatorDpuSize": 1,
             "MaxConcurrentDpus": 2,
@@ -113,7 +112,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         return cast(str, response["Body"].read().decode("utf-8").strip())
 
     def _get_session_status(self, session_id: str):
-        request: Dict[str, Any] = {"SessionId": session_id}
+        request: dict[str, Any] = {"SessionId": session_id}
         try:
             response = retry_api_call(
                 self._connection.client.get_session_status,
@@ -154,7 +153,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
                 isinstance(e, botocore.exceptions.ClientError)
                 and e.response["Error"]["Code"] == "InvalidRequestException"
             ):
-                _logger.exception(f"Session: {session_id} not found.")
+                _logger.exception("Session: %s not found.", session_id)
                 return False
             raise OperationalError(*e.args) from e
         else:
@@ -162,7 +161,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             return True
 
     def _start_session(self) -> str:
-        request: Dict[str, Any] = {
+        request: dict[str, Any] = {
             "WorkGroup": self._work_group,
             "EngineConfiguration": self._engine_configuration,
         }
@@ -199,7 +198,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             _logger.exception("Failed to terminate session.")
             raise OperationalError(*e.args) from e
 
-    def __poll(self, query_id: str) -> Union[AthenaQueryExecution, AthenaCalculationExecution]:
+    def __poll(self, query_id: str) -> AthenaQueryExecution | AthenaCalculationExecution:
         while True:
             calculation_status = self._get_calculation_execution_status(query_id)
             if calculation_status.state in [
@@ -210,7 +209,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
                 return self._get_calculation_execution(query_id)
             time.sleep(self._poll_interval)
 
-    def _poll(self, query_id: str) -> Union[AthenaQueryExecution, AthenaCalculationExecution]:
+    def _poll(self, query_id: str) -> AthenaQueryExecution | AthenaCalculationExecution:
         try:
             query_execution = self.__poll(query_id)
         except KeyboardInterrupt as e:
@@ -241,7 +240,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
     def executemany(
         self,
         operation: str,
-        seq_of_parameters: List[Optional[Union[Dict[str, Any], List[str]]]],
+        seq_of_parameters: list[dict[str, Any] | list[str] | None],
         **kwargs,
     ) -> None:
         raise NotSupportedError
@@ -278,7 +277,7 @@ class WithCalculationExecution:
 
     @property
     @abstractmethod
-    def calculation_execution(self) -> Optional[AthenaCalculationExecution]:
+    def calculation_execution(self) -> AthenaCalculationExecution | None:
         raise NotImplementedError  # pragma: no cover
 
     @property
@@ -288,77 +287,77 @@ class WithCalculationExecution:
 
     @property
     @abstractmethod
-    def calculation_id(self) -> Optional[str]:
+    def calculation_id(self) -> str | None:
         raise NotImplementedError  # pragma: no cover
 
     @property
-    def description(self) -> Optional[str]:
+    def description(self) -> str | None:
         if not self.calculation_execution:
             return None
         return self.calculation_execution.description
 
     @property
-    def working_directory(self) -> Optional[str]:
+    def working_directory(self) -> str | None:
         if not self.calculation_execution:
             return None
         return self.calculation_execution.working_directory
 
     @property
-    def state(self) -> Optional[str]:
+    def state(self) -> str | None:
         if not self.calculation_execution:
             return None
         return self.calculation_execution.state
 
     @property
-    def state_change_reason(self) -> Optional[str]:
+    def state_change_reason(self) -> str | None:
         if not self.calculation_execution:
             return None
         return self.calculation_execution.state_change_reason
 
     @property
-    def submission_date_time(self) -> Optional[datetime]:
+    def submission_date_time(self) -> datetime | None:
         if not self.calculation_execution:
             return None
         return self.calculation_execution.submission_date_time
 
     @property
-    def completion_date_time(self) -> Optional[datetime]:
+    def completion_date_time(self) -> datetime | None:
         if not self.calculation_execution:
             return None
         return self.calculation_execution.completion_date_time
 
     @property
-    def dpu_execution_in_millis(self) -> Optional[int]:
+    def dpu_execution_in_millis(self) -> int | None:
         if not self.calculation_execution:
             return None
         return self.calculation_execution.dpu_execution_in_millis
 
     @property
-    def progress(self) -> Optional[str]:
+    def progress(self) -> str | None:
         if not self.calculation_execution:
             return None
         return self.calculation_execution.progress
 
     @property
-    def std_out_s3_uri(self) -> Optional[str]:
+    def std_out_s3_uri(self) -> str | None:
         if not self.calculation_execution:
             return None
         return self.calculation_execution.std_out_s3_uri
 
     @property
-    def std_error_s3_uri(self) -> Optional[str]:
+    def std_error_s3_uri(self) -> str | None:
         if not self.calculation_execution:
             return None
         return self.calculation_execution.std_error_s3_uri
 
     @property
-    def result_s3_uri(self) -> Optional[str]:
+    def result_s3_uri(self) -> str | None:
         if not self.calculation_execution:
             return None
         return self.calculation_execution.result_s3_uri
 
     @property
-    def result_type(self) -> Optional[str]:
+    def result_type(self) -> str | None:
         if not self.calculation_execution:
             return None
         return self.calculation_execution.result_type

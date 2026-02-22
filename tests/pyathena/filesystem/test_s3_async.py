@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import os
 import tempfile
 import time
@@ -109,35 +108,35 @@ class TestAioS3FileSystem:
         assert actual[2] == "12345abcde"
 
     def test_parse_path_invalid(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Invalid S3 path format"):
             AioS3FileSystem.parse_path("http://bucket")
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Invalid S3 path format"):
             AioS3FileSystem.parse_path("s3://bucket?")
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Invalid S3 path format"):
             AioS3FileSystem.parse_path("s3://bucket?foo=bar")
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Invalid S3 path format"):
             AioS3FileSystem.parse_path("s3://bucket/path/to/obj?foo=bar")
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Invalid S3 path format"):
             AioS3FileSystem.parse_path("s3a://bucket?")
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Invalid S3 path format"):
             AioS3FileSystem.parse_path("s3a://bucket?foo=bar")
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Invalid S3 path format"):
             AioS3FileSystem.parse_path("s3a://bucket/path/to/obj?foo=bar")
 
     @pytest.fixture(scope="class")
     def fs(self, request):
         if not hasattr(request, "param"):
-            setattr(request, "param", {})  # noqa: B010
+            request.param = {}
         return AioS3FileSystem(connection=connect(), **request.param)
 
     @pytest.mark.parametrize(
-        ["fs", "start", "end", "target_data"],
+        ("fs", "start", "end", "target_data"),
         list(
             chain(
                 *[
@@ -170,7 +169,7 @@ class TestAioS3FileSystem:
             assert data == target_data, data
 
     @pytest.mark.parametrize(
-        ["base", "exp"],
+        ("base", "exp"),
         [
             (1, 2**10),
             (1, 2**20),
@@ -190,7 +189,7 @@ class TestAioS3FileSystem:
             assert actual == data
 
     @pytest.mark.parametrize(
-        ["base", "exp"],
+        ("base", "exp"),
         [
             (1, 2**10),
             (1, 2**20),
@@ -472,7 +471,7 @@ class TestAioS3FileSystem:
         assert fs._strip_protocol(path) in fs.glob(f"{dir_}/nested/test_*")
         assert fs._strip_protocol(path) in fs.glob(f"{dir_}/*/*")
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError):  # noqa: PT011
             fs.glob("*")
 
     @pytest.mark.asyncio
@@ -568,14 +567,14 @@ class TestAioS3FileSystem:
             f.write(b"data")
         info = await fs._info(path, refresh=True)
         assert info.size == 4
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Cannot touch"):
             await fs._touch(path, truncate=False)
         info = await fs._info(path, refresh=True)
         assert info.size == 4
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ["base", "exp"],
+        ("base", "exp"),
         [
             (1, 2**10),
             (1, 2**20),
@@ -607,7 +606,7 @@ class TestAioS3FileSystem:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ["base", "exp"],
+        ("base", "exp"),
         [
             (1, 2**10),
             (1, 2**20),
@@ -629,7 +628,7 @@ class TestAioS3FileSystem:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ["base", "exp"],
+        ("base", "exp"),
         [
             (1, 2**10),
             (1, 2**20),
@@ -654,7 +653,7 @@ class TestAioS3FileSystem:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ["base", "exp"],
+        ("base", "exp"),
         [
             (1, 2**10),
             (1, 2**20),
@@ -764,9 +763,9 @@ class TestAioS3FileSystem:
         assert [(row["col"],) for _, row in df.iterrows()] == [(123456789,)]
 
     @pytest.mark.parametrize(
-        ["line_count"],
+        "line_count",
         [
-            (1 * (2**20),),
+            1 * 2**20,
         ],
     )
     def test_pandas_write_csv(self, line_count):
@@ -775,7 +774,7 @@ class TestAioS3FileSystem:
         with tempfile.NamedTemporaryFile("w+t") as tmp:
             tmp.write("col1")
             tmp.write("\n")
-            for _ in range(0, line_count):
+            for _ in range(line_count):
                 tmp.write("a")
                 tmp.write("\n")
             tmp.flush()
@@ -816,7 +815,7 @@ class TestAioS3FileSystem:
 
 class TestAioS3File:
     @pytest.mark.parametrize(
-        ["objects", "target"],
+        ("objects", "target"),
         [
             ([(0, b"")], b""),
             ([(0, b"foo")], b"foo"),
@@ -831,7 +830,7 @@ class TestAioS3File:
         assert S3File._merge_objects(objects) == target
 
     @pytest.mark.parametrize(
-        ["start", "end", "max_workers", "worker_block_size", "ranges"],
+        ("start", "end", "max_workers", "worker_block_size", "ranges"),
         [
             (42, 1337, 1, 999, [(42, 1337)]),  # single worker
             (42, 1337, 2, 999, [(42, 42 + 999), (42 + 999, 1337)]),  # more workers

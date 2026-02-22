@@ -1,12 +1,9 @@
-# -*- coding: utf-8 -*-
 """Constants for PyAthena SQLAlchemy dialect."""
 
 from __future__ import annotations
 
-from typing import Set
-
 # https://docs.aws.amazon.com/athena/latest/ug/reserved-words.html#list-of-ddl-reserved-words
-DDL_RESERVED_WORDS: Set[str] = {
+DDL_RESERVED_WORDS: set[str] = {
     "all",
     "alter",
     "and",
@@ -147,7 +144,7 @@ DDL_RESERVED_WORDS: Set[str] = {
 }
 
 # https://docs.aws.amazon.com/athena/latest/ug/reserved-words.html#list-of-reserved-words-sql-select
-SELECT_STATEMENT_RESERVED_WORDS: Set[str] = {
+SELECT_STATEMENT_RESERVED_WORDS: set[str] = {
     "all",
     "and",
     "any",
@@ -258,4 +255,4 @@ SELECT_STATEMENT_RESERVED_WORDS: Set[str] = {
     "with",
 }
 
-RESERVED_WORDS: Set[str] = set(DDL_RESERVED_WORDS | SELECT_STATEMENT_RESERVED_WORDS)
+RESERVED_WORDS: set[str] = set(DDL_RESERVED_WORDS | SELECT_STATEMENT_RESERVED_WORDS)

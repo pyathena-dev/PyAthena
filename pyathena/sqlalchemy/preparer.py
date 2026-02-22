@@ -1,7 +1,6 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, Set
+from typing import TYPE_CHECKING
 
 from sqlalchemy.sql.compiler import ILLEGAL_INITIAL_CHARACTERS, IdentifierPreparer
 
@@ -27,7 +26,7 @@ class AthenaDMLIdentifierPreparer(IdentifierPreparer):
         https://docs.aws.amazon.com/athena/latest/ug/reserved-words.html
     """
 
-    reserved_words: Set[str] = SELECT_STATEMENT_RESERVED_WORDS
+    reserved_words: set[str] = SELECT_STATEMENT_RESERVED_WORDS
 
 
 class AthenaDDLIdentifierPreparer(IdentifierPreparer):
@@ -53,9 +52,9 @@ class AthenaDDLIdentifierPreparer(IdentifierPreparer):
 
     def __init__(
         self,
-        dialect: "Dialect",
+        dialect: Dialect,
         initial_quote: str = "`",
-        final_quote: Optional[str] = None,
+        final_quote: str | None = None,
         escape_quote: str = "`",
         quote_case_sensitive_collations: bool = True,
         omit_schema: bool = False,

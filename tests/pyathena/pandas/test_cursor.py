@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import contextlib
 import math
 import random
@@ -22,7 +21,7 @@ from tests.pyathena.conftest import connect
 
 class TestPandasCursor:
     @pytest.mark.parametrize(
-        "pandas_cursor, parquet_engine, chunksize",
+        ("pandas_cursor", "parquet_engine", "chunksize"),
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
@@ -40,7 +39,7 @@ class TestPandasCursor:
         assert pandas_cursor.fetchone() is None
 
     @pytest.mark.parametrize(
-        "pandas_cursor, parquet_engine, chunksize",
+        ("pandas_cursor", "parquet_engine", "chunksize"),
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
@@ -60,7 +59,7 @@ class TestPandasCursor:
         assert len(pandas_cursor.fetchmany(10)) == 5
 
     @pytest.mark.parametrize(
-        "pandas_cursor, chunksize",
+        ("pandas_cursor", "chunksize"),
         [
             ({}, None),
             ({}, 1_000),
@@ -81,7 +80,7 @@ class TestPandasCursor:
             assert len(df) == 15
 
     @pytest.mark.parametrize(
-        "pandas_cursor, parquet_engine, chunksize",
+        ("pandas_cursor", "parquet_engine", "chunksize"),
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
@@ -98,7 +97,7 @@ class TestPandasCursor:
         assert pandas_cursor.fetchall() == [(i,) for i in range(10000)]
 
     @pytest.mark.parametrize(
-        "pandas_cursor, parquet_engine, chunksize",
+        ("pandas_cursor", "parquet_engine", "chunksize"),
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
@@ -114,7 +113,7 @@ class TestPandasCursor:
         pytest.raises(StopIteration, pandas_cursor.__next__)
 
     @pytest.mark.parametrize(
-        "pandas_cursor, parquet_engine, chunksize",
+        ("pandas_cursor", "parquet_engine", "chunksize"),
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
@@ -143,7 +142,7 @@ class TestPandasCursor:
             pandas_cursor.arraysize = -1
 
     @pytest.mark.parametrize(
-        "pandas_cursor, chunksize",
+        ("pandas_cursor", "chunksize"),
         [
             ({}, None),
             ({}, 1_000),
@@ -224,7 +223,7 @@ class TestPandasCursor:
         ]
 
     @pytest.mark.parametrize(
-        "pandas_cursor, parquet_engine",
+        ("pandas_cursor", "parquet_engine"),
         [
             ({"cursor_kwargs": {"unload": True}}, "auto"),
             ({"cursor_kwargs": {"unload": True}}, "pyarrow"),
@@ -341,7 +340,7 @@ class TestPandasCursor:
         pytest.raises(ProgrammingError, pandas_cursor.as_pandas)
 
     @pytest.mark.parametrize(
-        "pandas_cursor, parquet_engine, chunksize",
+        ("pandas_cursor", "parquet_engine", "chunksize"),
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
@@ -362,7 +361,7 @@ class TestPandasCursor:
         assert [(row["number_of_rows"],) for _, row in df.iterrows()] == [(1,)]
 
     @pytest.mark.parametrize(
-        "pandas_cursor, parquet_engine, chunksize",
+        ("pandas_cursor", "parquet_engine", "chunksize"),
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
@@ -383,7 +382,7 @@ class TestPandasCursor:
         assert [(row["a"],) for _, row in df.iterrows()] == [(i,) for i in range(10000)]
 
     @pytest.mark.parametrize(
-        "pandas_cursor, chunksize",
+        ("pandas_cursor", "chunksize"),
         [
             ({}, None),
             ({}, 1_000),
@@ -513,7 +512,7 @@ class TestPandasCursor:
         ]
 
     @pytest.mark.parametrize(
-        "pandas_cursor, parquet_engine",
+        ("pandas_cursor", "parquet_engine"),
         [
             ({"cursor_kwargs": {"unload": True}}, "auto"),
             ({"cursor_kwargs": {"unload": True}}, "pyarrow"),
@@ -814,7 +813,7 @@ class TestPandasCursor:
                 mock_opt.assert_called_once()
 
     @pytest.mark.parametrize(
-        "pandas_cursor, parquet_engine, chunksize",
+        ("pandas_cursor", "parquet_engine", "chunksize"),
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
@@ -830,7 +829,7 @@ class TestPandasCursor:
         assert pandas_cursor.fetchall() == [("number_of_rows      ",)]
 
     @pytest.mark.parametrize(
-        "pandas_cursor, parquet_engine, chunksize",
+        ("pandas_cursor", "parquet_engine", "chunksize"),
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
@@ -861,7 +860,7 @@ class TestPandasCursor:
         assert df.shape[1] == 0
 
     @pytest.mark.parametrize(
-        "pandas_cursor, parquet_engine",
+        ("pandas_cursor", "parquet_engine"),
         [
             ({"cursor_kwargs": {"unload": True}}, "auto"),
             ({"cursor_kwargs": {"unload": True}}, "pyarrow"),
@@ -896,7 +895,7 @@ class TestPandasCursor:
         assert pandas_cursor.fetchone() is None
 
     @pytest.mark.parametrize(
-        "pandas_cursor, parquet_engine",
+        ("pandas_cursor", "parquet_engine"),
         [
             ({"cursor_kwargs": {"unload": False}}, "auto"),
             ({"cursor_kwargs": {"unload": True}}, "auto"),
@@ -926,7 +925,7 @@ class TestPandasCursor:
             assert rows == [(1, 2), (1, pd.NA), (pd.NA, pd.NA)]
 
     @pytest.mark.parametrize(
-        "pandas_cursor, parquet_engine",
+        ("pandas_cursor", "parquet_engine"),
         [
             ({"cursor_kwargs": {"unload": False}}, "auto"),
             ({"cursor_kwargs": {"unload": True}}, "auto"),
@@ -945,7 +944,7 @@ class TestPandasCursor:
         np.testing.assert_equal(rows, [(0.33,), (np.nan,)])
 
     @pytest.mark.parametrize(
-        "pandas_cursor, parquet_engine",
+        ("pandas_cursor", "parquet_engine"),
         [
             ({"cursor_kwargs": {"unload": False}}, "auto"),
             ({"cursor_kwargs": {"unload": True}}, "auto"),
@@ -964,7 +963,7 @@ class TestPandasCursor:
         assert rows == [(True, False), (False, None), (None, None)]
 
     @pytest.mark.parametrize(
-        "pandas_cursor, parquet_engine",
+        ("pandas_cursor", "parquet_engine"),
         [
             ({"cursor_kwargs": {"unload": False}}, "auto"),
             ({"cursor_kwargs": {"unload": True}}, "auto"),
@@ -985,7 +984,7 @@ class TestPandasCursor:
         assert sorted(pandas_cursor.fetchall()) == list(rows)
 
     @pytest.mark.parametrize(
-        "pandas_cursor, parquet_engine",
+        ("pandas_cursor", "parquet_engine"),
         [
             ({"cursor_kwargs": {"unload": False}}, "auto"),
             ({"cursor_kwargs": {"unload": True}}, "auto"),
@@ -1002,7 +1001,7 @@ class TestPandasCursor:
         pytest.raises(ProgrammingError, pandas_cursor.as_pandas)
 
     @pytest.mark.parametrize(
-        "pandas_cursor, parquet_engine",
+        ("pandas_cursor", "parquet_engine"),
         [
             ({"cursor_kwargs": {"unload": False}}, "auto"),
             ({"cursor_kwargs": {"unload": True}}, "auto"),
@@ -1020,7 +1019,7 @@ class TestPandasCursor:
         assert len(pandas_cursor.fetchall()) == 2
 
     @pytest.mark.parametrize(
-        "pandas_cursor, parquet_engine",
+        ("pandas_cursor", "parquet_engine"),
         [
             ({"cursor_kwargs": {"unload": False}}, "auto"),
             ({"cursor_kwargs": {"unload": True}}, "auto"),
@@ -1064,7 +1063,7 @@ class TestPandasCursor:
             ]
 
     @pytest.mark.parametrize(
-        "pandas_cursor, parquet_engine",
+        ("pandas_cursor", "parquet_engine"),
         [
             ({"cursor_kwargs": {"unload": False}}, "auto"),
             ({"cursor_kwargs": {"unload": True}}, "auto"),

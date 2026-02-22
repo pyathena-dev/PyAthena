@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import pytest
 
 from pyathena.aio.s3fs.cursor import AioS3FSCursor
@@ -61,9 +60,7 @@ class TestAioS3FSCursor:
 
     async def test_async_iterator(self, aio_s3fs_cursor):
         await aio_s3fs_cursor.execute("SELECT * FROM one_row")
-        rows = []
-        async for row in aio_s3fs_cursor:
-            rows.append(row)
+        rows = [row async for row in aio_s3fs_cursor]
         assert rows == [(1,)]
 
     async def test_context_manager(self):

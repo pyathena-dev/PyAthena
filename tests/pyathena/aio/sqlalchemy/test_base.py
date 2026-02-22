@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import pytest
 import sqlalchemy
 from sqlalchemy import text

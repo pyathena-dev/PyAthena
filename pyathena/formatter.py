@@ -1,19 +1,19 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import logging
 import textwrap
 import uuid
 from abc import ABCMeta, abstractmethod
+from collections.abc import Callable
 from copy import deepcopy
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Any, Callable, Dict, Optional, Tuple, Type
+from typing import Any
 
 from pyathena.error import ProgrammingError
 from pyathena.model import AthenaCompression, AthenaFileFormat
 
-_logger = logging.getLogger(__name__)  # type: ignore
+_logger = logging.getLogger(__name__)
 
 
 class Formatter(metaclass=ABCMeta):
@@ -33,8 +33,8 @@ class Formatter(metaclass=ABCMeta):
 
     def __init__(
         self,
-        mappings: Dict[Type[Any], Callable[[Formatter, Callable[[str], str], Any], Any]],
-        default: Optional[Callable[[Formatter, Callable[[str], str], Any], Any]] = None,
+        mappings: dict[type[Any], Callable[[Formatter, Callable[[str], str], Any], Any]],
+        default: Callable[[Formatter, Callable[[str], str], Any], Any] | None = None,
     ) -> None:
         self._mappings = mappings
         self._default = default
@@ -42,7 +42,7 @@ class Formatter(metaclass=ABCMeta):
     @property
     def mappings(
         self,
-    ) -> Dict[Type[Any], Callable[[Formatter, Callable[[str], str], Any], Any]]:
+    ) -> dict[type[Any], Callable[[Formatter, Callable[[str], str], Any], Any]]:
         """Get the current parameter formatting mappings.
 
         Returns:
@@ -50,7 +50,7 @@ class Formatter(metaclass=ABCMeta):
         """
         return self._mappings
 
-    def get(self, type_) -> Optional[Callable[[Formatter, Callable[[str], str], Any], Any]]:
+    def get(self, type_) -> Callable[[Formatter, Callable[[str], str], Any], Any] | None:
         """Get the formatting function for a specific Python type.
 
         Args:
@@ -63,21 +63,21 @@ class Formatter(metaclass=ABCMeta):
 
     def set(
         self,
-        type_: Type[Any],
+        type_: type[Any],
         formatter: Callable[[Formatter, Callable[[str], str], Any], Any],
     ) -> None:
         self.mappings[type_] = formatter
 
-    def remove(self, type_: Type[Any]) -> None:
+    def remove(self, type_: type[Any]) -> None:
         self.mappings.pop(type_, None)
 
     def update(
-        self, mappings: Dict[Type[Any], Callable[[Formatter, Callable[[str], str], Any], Any]]
+        self, mappings: dict[type[Any], Callable[[Formatter, Callable[[str], str], Any], Any]]
     ) -> None:
         self.mappings.update(mappings)
 
     @abstractmethod
-    def format(self, operation: str, parameters: Optional[Dict[str, Any]] = None) -> str:
+    def format(self, operation: str, parameters: dict[str, Any] | None = None) -> str:
         raise NotImplementedError  # pragma: no cover
 
     @staticmethod
@@ -86,7 +86,7 @@ class Formatter(metaclass=ABCMeta):
         s3_staging_dir: str,
         format_: str = AthenaFileFormat.FILE_FORMAT_PARQUET,
         compression: str = AthenaCompression.COMPRESSION_SNAPPY,
-    ) -> Tuple[str, Optional[str]]:
+    ) -> tuple[str, str | None]:
         """Wrap a SELECT query with UNLOAD statement for high-performance result retrieval.
 
         Transforms SELECT or WITH queries into UNLOAD statements that export results
@@ -129,9 +129,9 @@ class Formatter(metaclass=ABCMeta):
             raise ProgrammingError("Query is none or empty.")
 
         operation_upper = operation.strip().upper()
-        if operation_upper.startswith("SELECT") or operation_upper.startswith("WITH"):
+        if operation_upper.startswith(("SELECT", "WITH")):
             now = datetime.now(timezone.utc).strftime("%Y%m%d")
-            location = f"{s3_staging_dir}unload/{now}/{str(uuid.uuid4())}/"
+            location = f"{s3_staging_dir}unload/{now}/{uuid.uuid4()!s}/"
             operation = textwrap.dedent(
                 f"""
                 UNLOAD (
@@ -220,7 +220,7 @@ def _format_decimal(formatter: Formatter, escaper: Callable[[str], str], val: An
     return f"DECIMAL {escaped}"
 
 
-_DEFAULT_FORMATTERS: Dict[Type[Any], Callable[[Formatter, Callable[[str], str], Any], Any]] = {
+_DEFAULT_FORMATTERS: dict[type[Any], Callable[[Formatter, Callable[[str], str], Any], Any]] = {
     type(None): _format_none,
     date: _format_date,
     datetime: _format_datetime,
@@ -263,24 +263,18 @@ class DefaultParameterFormatter(Formatter):
     def __init__(self) -> None:
         super().__init__(mappings=deepcopy(_DEFAULT_FORMATTERS), default=None)
 
-    def format(self, operation: str, parameters: Optional[Dict[str, Any]] = None) -> str:
+    def format(self, operation: str, parameters: dict[str, Any] | None = None) -> str:
         if not operation or not operation.strip():
             raise ProgrammingError("Query is none or empty.")
         operation = operation.strip()
 
         operation_upper = operation.upper()
-        if (
-            operation_upper.startswith("SELECT")
-            or operation_upper.startswith("WITH")
-            or operation_upper.startswith("INSERT")
-            or operation_upper.startswith("UPDATE")
-            or operation_upper.startswith("MERGE")
-        ):
+        if operation_upper.startswith(("SELECT", "WITH", "INSERT", "UPDATE", "MERGE")):
             escaper = _escape_presto
         else:
             escaper = _escape_hive
 
-        kwargs: Optional[Dict[str, Any]] = None
+        kwargs: dict[str, Any] | None = None
         if parameters is not None:
             kwargs = {}
             if not parameters:

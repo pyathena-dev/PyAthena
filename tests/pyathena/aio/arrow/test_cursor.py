@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import pytest
 
 from pyathena.arrow.result_set import AthenaArrowResultSet

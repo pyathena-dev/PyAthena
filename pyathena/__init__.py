@@ -1,10 +1,9 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import datetime
-from typing import TYPE_CHECKING, Any, FrozenSet, Type, overload
+from typing import TYPE_CHECKING, Any, overload
 
-from pyathena.error import *  # noqa
+from pyathena.error import *  # noqa: F403
 
 if TYPE_CHECKING:
     from pyathena.aio.connection import AioConnection
@@ -28,7 +27,7 @@ threadsafety: int = 2
 paramstyle: str = "pyformat"
 
 
-class DBAPITypeObject(FrozenSet[str]):
+class DBAPITypeObject(frozenset[str]):
     """Type Objects and Constructors
 
     https://www.python.org/dev/peps/pep-0249/#type-objects-and-constructors
@@ -60,22 +59,22 @@ TIME: DBAPITypeObject = DBAPITypeObject(("time", "time with time zone"))
 DATETIME: DBAPITypeObject = DBAPITypeObject(("timestamp", "timestamp with time zone"))
 JSON: DBAPITypeObject = DBAPITypeObject(("json",))
 
-Date: Type[datetime.date] = datetime.date
-Time: Type[datetime.time] = datetime.time
-Timestamp: Type[datetime.datetime] = datetime.datetime
+Date: type[datetime.date] = datetime.date
+Time: type[datetime.time] = datetime.time
+Timestamp: type[datetime.datetime] = datetime.datetime
 
 
 @overload
-def connect(*args, cursor_class: None = ..., **kwargs) -> "Connection[Cursor]": ...
+def connect(*args, cursor_class: None = ..., **kwargs) -> Connection[Cursor]: ...
 
 
 @overload
 def connect(
-    *args, cursor_class: Type[ConnectionCursor], **kwargs
-) -> "Connection[ConnectionCursor]": ...
+    *args, cursor_class: type[ConnectionCursor], **kwargs
+) -> Connection[ConnectionCursor]: ...
 
 
-def connect(*args, **kwargs) -> "Connection[Any]":
+def connect(*args, **kwargs) -> Connection[Any]:
     """Create a new database connection to Amazon Athena.
 
     This function provides the main entry point for establishing connections
@@ -131,7 +130,7 @@ def connect(*args, **kwargs) -> "Connection[Any]":
     return Connection(*args, **kwargs)
 
 
-async def aio_connect(*args, **kwargs) -> "AioConnection":
+async def aio_connect(*args, **kwargs) -> AioConnection:
     """Create a new async database connection to Amazon Athena.
 
     This is the async counterpart of :func:`connect`. It returns an

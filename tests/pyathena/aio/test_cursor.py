@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import re
 from datetime import datetime
 
@@ -59,9 +58,7 @@ class TestAioCursor:
 
     async def test_async_iterator(self, aio_cursor):
         await aio_cursor.execute("SELECT * FROM one_row")
-        rows = []
-        async for row in aio_cursor:
-            rows.append(row)
+        rows = [row async for row in aio_cursor]
         assert rows == [(1,)]
 
     async def test_execute_returns_self(self, aio_cursor):

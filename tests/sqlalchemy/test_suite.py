@@ -1,6 +1,5 @@
-# -*- coding: utf-8 -*-
 import pytest
-from sqlalchemy.testing.suite import *  # noqa
+from sqlalchemy.testing.suite import *  # noqa: F403
 from sqlalchemy.testing.suite import FetchLimitOffsetTest as _FetchLimitOffsetTest
 from sqlalchemy.testing.suite import HasTableTest as _HasTableTest
 from sqlalchemy.testing.suite import InsertBehaviorTest as _InsertBehaviorTest
@@ -8,25 +7,25 @@ from sqlalchemy.testing.suite import IntegerTest as _IntegerTest
 from sqlalchemy.testing.suite import StringTest as _StringTest
 from sqlalchemy.testing.suite import TrueDivTest as _TrueDivTest
 
-del BinaryTest  # noqa
-del ComponentReflectionTest  # noqa
-del ComponentReflectionTestExtra  # noqa
-del CompositeKeyReflectionTest  # noqa
-del CTETest  # noqa
-del DateTimeMicrosecondsTest  # noqa
-del DifficultParametersTest  # noqa
-del DistinctOnTest  # noqa
-del HasIndexTest  # noqa
-del IdentityAutoincrementTest  # noqa
-del JoinTest  # noqa
-del LongNameBlowoutTest  # noqa
-del QuotedNameArgumentTest  # noqa
-del RowCountTest  # noqa
-del SimpleUpdateDeleteTest  # noqa
-del TimeMicrosecondsTest  # noqa
-del TimeTest  # noqa
-del TimestampMicrosecondsTest  # noqa
-del UuidTest  # noqa
+del BinaryTest  # noqa: F821
+del ComponentReflectionTest  # noqa: F821
+del ComponentReflectionTestExtra  # noqa: F821
+del CompositeKeyReflectionTest  # noqa: F821
+del CTETest  # noqa: F821
+del DateTimeMicrosecondsTest  # noqa: F821
+del DifficultParametersTest  # noqa: F821
+del DistinctOnTest  # noqa: F821
+del HasIndexTest  # noqa: F821
+del IdentityAutoincrementTest  # noqa: F821
+del JoinTest  # noqa: F821
+del LongNameBlowoutTest  # noqa: F821
+del QuotedNameArgumentTest  # noqa: F821
+del RowCountTest  # noqa: F821
+del SimpleUpdateDeleteTest  # noqa: F821
+del TimeMicrosecondsTest  # noqa: F821
+del TimeTest  # noqa: F821
+del TimestampMicrosecondsTest  # noqa: F821
+del UuidTest  # noqa: F821
 
 
 class HasTableTest(_HasTableTest):

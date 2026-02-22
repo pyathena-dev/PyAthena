@@ -1,18 +1,12 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Iterable
 from multiprocessing import cpu_count
 from typing import (
     TYPE_CHECKING,
     Any,
-    Dict,
-    Iterable,
-    List,
-    Optional,
-    Tuple,
-    Union,
     cast,
 )
 
@@ -29,7 +23,7 @@ from pyathena.pandas.result_set import AthenaPandasResultSet, PandasDataFrameIte
 if TYPE_CHECKING:
     from pandas import DataFrame
 
-_logger = logging.getLogger(__name__)  # type: ignore
+_logger = logging.getLogger(__name__)
 
 
 class AioPandasCursor(WithAsyncFetch):
@@ -48,19 +42,19 @@ class AioPandasCursor(WithAsyncFetch):
 
     def __init__(
         self,
-        s3_staging_dir: Optional[str] = None,
-        schema_name: Optional[str] = None,
-        catalog_name: Optional[str] = None,
-        work_group: Optional[str] = None,
+        s3_staging_dir: str | None = None,
+        schema_name: str | None = None,
+        catalog_name: str | None = None,
+        work_group: str | None = None,
         poll_interval: float = 1,
-        encryption_option: Optional[str] = None,
-        kms_key: Optional[str] = None,
+        encryption_option: str | None = None,
+        kms_key: str | None = None,
         kill_on_interrupt: bool = True,
         unload: bool = False,
         engine: str = "auto",
-        chunksize: Optional[int] = None,
-        block_size: Optional[int] = None,
-        cache_type: Optional[str] = None,
+        chunksize: int | None = None,
+        block_size: int | None = None,
+        cache_type: str | None = None,
         max_workers: int = (cpu_count() or 1) * 5,
         result_reuse_enable: bool = False,
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
@@ -87,12 +81,12 @@ class AioPandasCursor(WithAsyncFetch):
         self._cache_type = cache_type
         self._max_workers = max_workers
         self._auto_optimize_chunksize = auto_optimize_chunksize
-        self._result_set: Optional[AthenaPandasResultSet] = None
+        self._result_set: AthenaPandasResultSet | None = None
 
     @staticmethod
     def get_default_converter(
         unload: bool = False,
-    ) -> Union[DefaultPandasTypeConverter, Any]:
+    ) -> DefaultPandasTypeConverter | Any:
         if unload:
             return DefaultPandasUnloadTypeConverter()
         return DefaultPandasTypeConverter()
@@ -100,19 +94,19 @@ class AioPandasCursor(WithAsyncFetch):
     async def execute(  # type: ignore[override]
         self,
         operation: str,
-        parameters: Optional[Union[Dict[str, Any], List[str]]] = None,
-        work_group: Optional[str] = None,
-        s3_staging_dir: Optional[str] = None,
-        cache_size: Optional[int] = 0,
-        cache_expiration_time: Optional[int] = 0,
-        result_reuse_enable: Optional[bool] = None,
-        result_reuse_minutes: Optional[int] = None,
-        paramstyle: Optional[str] = None,
+        parameters: dict[str, Any] | list[str] | None = None,
+        work_group: str | None = None,
+        s3_staging_dir: str | None = None,
+        cache_size: int | None = 0,
+        cache_expiration_time: int | None = 0,
+        result_reuse_enable: bool | None = None,
+        result_reuse_minutes: int | None = None,
+        paramstyle: str | None = None,
         keep_default_na: bool = False,
-        na_values: Optional[Iterable[str]] = ("",),
+        na_values: Iterable[str] | None = ("",),
         quoting: int = 1,
         **kwargs,
-    ) -> "AioPandasCursor":
+    ) -> AioPandasCursor:
         """Execute a SQL query asynchronously and return results as pandas DataFrames.
 
         Args:
@@ -175,7 +169,7 @@ class AioPandasCursor(WithAsyncFetch):
 
     async def fetchone(  # type: ignore[override]
         self,
-    ) -> Optional[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+    ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
         """Fetch the next row of the result set.
 
         Wraps the synchronous fetch in ``asyncio.to_thread`` to avoid
@@ -193,8 +187,8 @@ class AioPandasCursor(WithAsyncFetch):
         return await asyncio.to_thread(result_set.fetchone)
 
     async def fetchmany(  # type: ignore[override]
-        self, size: Optional[int] = None
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        self, size: int | None = None
+    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         """Fetch multiple rows from the result set.
 
         Wraps the synchronous fetch in ``asyncio.to_thread`` to avoid
@@ -216,7 +210,7 @@ class AioPandasCursor(WithAsyncFetch):
 
     async def fetchall(  # type: ignore[override]
         self,
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         """Fetch all remaining rows from the result set.
 
         Wraps the synchronous fetch in ``asyncio.to_thread`` to avoid
@@ -239,7 +233,7 @@ class AioPandasCursor(WithAsyncFetch):
             raise StopAsyncIteration
         return row
 
-    def as_pandas(self) -> Union["DataFrame", PandasDataFrameIterator]:
+    def as_pandas(self) -> DataFrame | PandasDataFrameIterator:
         """Return DataFrame or PandasDataFrameIterator based on chunksize setting.
 
         Returns:

@@ -1,9 +1,9 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 from pyathena.util import RetryConfig, retry_api_call
 
@@ -11,7 +11,7 @@ from pyathena.util import RetryConfig, retry_api_call
 async def async_retry_api_call(
     func: Callable[..., Any],
     config: RetryConfig,
-    logger: Optional[logging.Logger] = None,
+    logger: logging.Logger | None = None,
     *args: Any,
     **kwargs: Any,
 ) -> Any:

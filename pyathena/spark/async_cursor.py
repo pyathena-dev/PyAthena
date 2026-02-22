@@ -1,8 +1,7 @@
-# -*- coding: utf-8 -*-
 import logging
 from concurrent.futures import Future, ThreadPoolExecutor
 from multiprocessing import cpu_count
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from pyathena.model import AthenaCalculationExecution
 from pyathena.spark.common import SparkBaseCursor
@@ -10,7 +9,7 @@ from pyathena.spark.common import SparkBaseCursor
 if TYPE_CHECKING:
     from pyathena.model import AthenaQueryExecution
 
-_logger = logging.getLogger(__name__)  # type: ignore
+_logger = logging.getLogger(__name__)
 
 
 class AsyncSparkCursor(SparkBaseCursor):
@@ -68,11 +67,11 @@ class AsyncSparkCursor(SparkBaseCursor):
 
     def __init__(
         self,
-        session_id: Optional[str] = None,
-        description: Optional[str] = None,
-        engine_configuration: Optional[Dict[str, Any]] = None,
-        notebook_version: Optional[str] = None,
-        session_idle_timeout_minutes: Optional[int] = None,
+        session_id: str | None = None,
+        description: str | None = None,
+        engine_configuration: dict[str, Any] | None = None,
+        notebook_version: str | None = None,
+        session_idle_timeout_minutes: int | None = None,
         max_workers: int = (cpu_count() or 1) * 5,
         **kwargs,
     ):
@@ -96,7 +95,7 @@ class AsyncSparkCursor(SparkBaseCursor):
 
     def get_std_out(
         self, calculation_execution: AthenaCalculationExecution
-    ) -> "Optional[Future[str]]":
+    ) -> "Future[str] | None":
         if not calculation_execution.std_out_s3_uri:
             return None
         return self._executor.submit(
@@ -105,7 +104,7 @@ class AsyncSparkCursor(SparkBaseCursor):
 
     def get_std_error(
         self, calculation_execution: AthenaCalculationExecution
-    ) -> "Optional[Future[str]]":
+    ) -> "Future[str] | None":
         if not calculation_execution.std_error_s3_uri:
             return None
         return self._executor.submit(
@@ -120,13 +119,13 @@ class AsyncSparkCursor(SparkBaseCursor):
     def execute(
         self,
         operation: str,
-        parameters: Optional[Union[Dict[str, Any], List[str]]] = None,
-        session_id: Optional[str] = None,
-        description: Optional[str] = None,
-        client_request_token: Optional[str] = None,
-        work_group: Optional[str] = None,
+        parameters: dict[str, Any] | list[str] | None = None,
+        session_id: str | None = None,
+        description: str | None = None,
+        client_request_token: str | None = None,
+        work_group: str | None = None,
         **kwargs,
-    ) -> Tuple[str, "Future[Union[AthenaQueryExecution, AthenaCalculationExecution]]"]:
+    ) -> tuple[str, "Future[AthenaQueryExecution | AthenaCalculationExecution]"]:
         calculation_id = self._calculate(
             session_id=session_id if session_id else self._session_id,
             code_block=operation,

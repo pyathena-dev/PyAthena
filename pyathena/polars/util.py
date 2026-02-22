@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Utilities for converting Polars types to Athena metadata.
 
 This module provides functions to convert Polars schema and type information
@@ -8,13 +7,13 @@ reading query results in Polars format.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, Tuple
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import polars as pl
 
 
-def to_column_info(schema: "pl.Schema") -> Tuple[Dict[str, Any], ...]:
+def to_column_info(schema: pl.Schema) -> tuple[dict[str, Any], ...]:
     """Convert a Polars schema to Athena column information.
 
     Iterates through all fields in the schema and converts each field's
@@ -46,7 +45,7 @@ def to_column_info(schema: "pl.Schema") -> Tuple[Dict[str, Any], ...]:
     return tuple(columns)
 
 
-def get_athena_type(dtype: Any) -> Tuple[str, int, int]:
+def get_athena_type(dtype: Any) -> tuple[str, int, int]:
     """Map a Polars data type to an Athena SQL type.
 
     Converts Polars type identifiers to corresponding Athena SQL type names
@@ -73,7 +72,7 @@ def get_athena_type(dtype: Any) -> Tuple[str, int, int]:
     base_dtype = dtype.base_type() if hasattr(dtype, "base_type") else dtype
 
     # Type mapping: Polars type -> (Athena type, precision, scale)
-    type_mapping: Dict[Any, Tuple[str, int, int]] = {
+    type_mapping: dict[Any, tuple[str, int, int]] = {
         pl.Boolean: ("boolean", 0, 0),
         pl.Int8: ("tinyint", 3, 0),
         pl.Int16: ("smallint", 5, 0),

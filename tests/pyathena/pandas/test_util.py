@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import textwrap
 import uuid
 from datetime import date, datetime
@@ -32,9 +31,9 @@ def test_get_chunks():
     assert list(get_chunks(pd.DataFrame())) == []
 
     # invalid
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Chunk size argument must be greater than zero"):
         list(get_chunks(df, chunksize=0))
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Chunk size argument must be greater than zero"):
         list(get_chunks(df, chunksize=-1))
 
 
@@ -48,7 +47,7 @@ def test_reset_index():
     assert list(df.columns) == ["__index__", "a"]
 
     df = pd.DataFrame({"a": [1, 2, 3, 4, 5]})
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Duplicate name"):
         reset_index(df, index_label="a")
 
 
@@ -167,7 +166,7 @@ def test_generate_ddl():
             "col_timestamp": [datetime(2020, 1, 1, 0, 0, 0)],
             "col_date": [date(2020, 12, 31)],
             "col_timedelta": [np.timedelta64(1, "D")],
-            "col_binary": ["foobar".encode()],
+            "col_binary": [b"foobar"],
         }
     )
     # Explicitly specify column order
@@ -306,12 +305,12 @@ def test_generate_ddl():
 
     # complex
     df = pd.DataFrame({"col_complex": np.complex128([1.0, 2.0, 3.0, 4.0, 5.0])})
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="is not supported"):
         generate_ddl(df, "test_table", "s3://bucket/path/to/")
 
     # time
     df = pd.DataFrame({"col_time": [datetime(2020, 1, 1, 0, 0, 0).time()]}, index=["i"])
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="is not supported"):
         generate_ddl(df, "test_table", "s3://bucket/path/to/")
 
 
@@ -326,7 +325,7 @@ def test_to_sql(cursor):
             "col_boolean": np.bool_([True]),
             "col_timestamp": [datetime(2020, 1, 1, 0, 0, 0)],
             "col_date": [date(2020, 12, 31)],
-            "col_binary": "foobar".encode(),
+            "col_binary": b"foobar",
         }
     )
     # Explicitly specify column order
@@ -387,7 +386,7 @@ def test_to_sql(cursor):
             True,
             datetime(2020, 1, 1, 0, 0, 0),
             date(2020, 12, 31),
-            "foobar".encode(),
+            b"foobar",
         )
     ]
     assert [(d[0], d[1]) for d in cursor.description] == [
@@ -423,7 +422,7 @@ def test_to_sql(cursor):
             True,
             datetime(2020, 1, 1, 0, 0, 0),
             date(2020, 12, 31),
-            "foobar".encode(),
+            b"foobar",
         ),
         (
             1,
@@ -434,7 +433,7 @@ def test_to_sql(cursor):
             True,
             datetime(2020, 1, 1, 0, 0, 0),
             date(2020, 12, 31),
-            "foobar".encode(),
+            b"foobar",
         ),
     ]
 
@@ -521,7 +520,7 @@ def test_to_sql_invalid_args(cursor):
     table_name = f"""to_sql_{str(uuid.uuid4()).replace("-", "")}"""
     location = f"{ENV.s3_staging_dir}{ENV.schema}/{table_name}/"
     # invalid if_exists
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="is not valid for if_exists"):
         to_sql(
             df,
             table_name,
@@ -532,7 +531,7 @@ def test_to_sql_invalid_args(cursor):
             compression="snappy",
         )
     # invalid compression
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="is not valid for compression"):
         to_sql(
             df,
             table_name,
@@ -544,7 +543,7 @@ def test_to_sql_invalid_args(cursor):
         )
 
     # invalid partition key (None)
-    with pytest.raises(ValueError) as exc_info:
+    with pytest.raises(ValueError, match="is None, no data will be written") as exc_info:
         to_sql(
             df,
             table_name,
@@ -561,7 +560,7 @@ def test_to_sql_invalid_args(cursor):
     )
     # invalid partition key value (None)
     df_with_none = pd.DataFrame({"col_int": np.int32([1]), "partition_key": [None]})
-    with pytest.raises(ValueError) as exc_info:
+    with pytest.raises(ValueError, match="contains None values") as exc_info:
         to_sql(
             df_with_none,
             table_name,

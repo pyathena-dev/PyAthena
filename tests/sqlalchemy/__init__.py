@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 from sqlalchemy.dialects import registry
 
 registry.register("awsathena", "pyathena.sqlalchemy.base", "AthenaDialect")

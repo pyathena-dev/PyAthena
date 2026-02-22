@@ -1,12 +1,11 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import csv
 from collections.abc import Iterator
-from typing import Any, List, Optional, Tuple
+from typing import Any
 
 
-class DefaultCSVReader(Iterator[List[str]]):
+class DefaultCSVReader(Iterator[list[str]]):
     """CSV reader using Python's standard csv module.
 
     This reader wraps Python's standard csv.reader and treats empty fields
@@ -34,14 +33,14 @@ class DefaultCSVReader(Iterator[List[str]]):
             file_obj: File-like object to read from.
             delimiter: Field delimiter character.
         """
-        self._file: Optional[Any] = file_obj
+        self._file: Any | None = file_obj
         self._reader = csv.reader(file_obj, delimiter=delimiter)
 
-    def __iter__(self) -> "DefaultCSVReader":
+    def __iter__(self) -> DefaultCSVReader:
         """Iterate over rows in the CSV file."""
         return self
 
-    def __next__(self) -> List[str]:
+    def __next__(self) -> list[str]:
         """Read and parse the next line.
 
         Returns:
@@ -65,7 +64,7 @@ class DefaultCSVReader(Iterator[List[str]]):
             self._file.close()
             self._file = None
 
-    def __enter__(self) -> "DefaultCSVReader":
+    def __enter__(self) -> DefaultCSVReader:
         """Enter context manager."""
         return self
 
@@ -74,7 +73,7 @@ class DefaultCSVReader(Iterator[List[str]]):
         self.close()
 
 
-class AthenaCSVReader(Iterator[List[Optional[str]]]):
+class AthenaCSVReader(Iterator[list[str | None]]):
     """CSV reader that distinguishes between NULL and empty string.
 
     This is the default reader for S3FSCursor.
@@ -105,14 +104,14 @@ class AthenaCSVReader(Iterator[List[Optional[str]]]):
             file_obj: File-like object to read from.
             delimiter: Field delimiter character.
         """
-        self._file: Optional[Any] = file_obj
+        self._file: Any | None = file_obj
         self._delimiter = delimiter
 
-    def __iter__(self) -> "AthenaCSVReader":
+    def __iter__(self) -> AthenaCSVReader:
         """Iterate over rows in the CSV file."""
         return self
 
-    def __next__(self) -> List[Optional[str]]:
+    def __next__(self) -> list[str | None]:
         """Read and parse the next line.
 
         Returns:
@@ -163,7 +162,7 @@ class AthenaCSVReader(Iterator[List[Optional[str]]]):
             i += 1
         return in_quotes
 
-    def _parse_line(self, line: str) -> List[Optional[str]]:
+    def _parse_line(self, line: str) -> list[str | None]:
         """Parse a single CSV line preserving NULL vs empty string distinction.
 
         Args:
@@ -176,7 +175,7 @@ class AthenaCSVReader(Iterator[List[Optional[str]]]):
         if not line:
             return [None]
 
-        fields: List[Optional[str]] = []
+        fields: list[str | None] = []
         pos = 0
         length = len(line)
 
@@ -197,7 +196,7 @@ class AthenaCSVReader(Iterator[List[Optional[str]]]):
 
         return fields
 
-    def _parse_quoted_field(self, line: str, pos: int) -> Tuple[str, int]:
+    def _parse_quoted_field(self, line: str, pos: int) -> tuple[str, int]:
         """Parse a quoted field starting at pos.
 
         Args:
@@ -231,7 +230,7 @@ class AthenaCSVReader(Iterator[List[Optional[str]]]):
 
         return "".join(value_parts), pos
 
-    def _parse_unquoted_field(self, line: str, pos: int) -> Tuple[str, int]:
+    def _parse_unquoted_field(self, line: str, pos: int) -> tuple[str, int]:
         """Parse an unquoted field starting at pos.
 
         Args:
@@ -261,7 +260,7 @@ class AthenaCSVReader(Iterator[List[Optional[str]]]):
             self._file.close()
             self._file = None
 
-    def __enter__(self) -> "AthenaCSVReader":
+    def __enter__(self) -> AthenaCSVReader:
         """Enter context manager."""
         return self
 

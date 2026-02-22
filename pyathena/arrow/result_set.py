@@ -1,17 +1,11 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
-    Dict,
-    List,
-    Optional,
-    Tuple,
-    Type,
-    Union,
+    ClassVar,
 )
 
 from pyathena import OperationalError
@@ -28,7 +22,7 @@ if TYPE_CHECKING:
 
     from pyathena.connection import Connection
 
-_logger = logging.getLogger(__name__)  # type: ignore
+_logger = logging.getLogger(__name__)
 
 
 class AthenaArrowResultSet(AthenaResultSet):
@@ -69,7 +63,7 @@ class AthenaArrowResultSet(AthenaResultSet):
 
     DEFAULT_BLOCK_SIZE = 1024 * 1024 * 128
 
-    _timestamp_parsers: List[str] = [
+    _timestamp_parsers: ClassVar[list[str]] = [
         "%Y-%m-%d",
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d %H:%M:%S %Z",
@@ -87,16 +81,16 @@ class AthenaArrowResultSet(AthenaResultSet):
 
     def __init__(
         self,
-        connection: "Connection[Any]",
+        connection: Connection[Any],
         converter: Converter,
         query_execution: AthenaQueryExecution,
         arraysize: int,
         retry_config: RetryConfig,
-        block_size: Optional[int] = None,
+        block_size: int | None = None,
         unload: bool = False,
-        unload_location: Optional[str] = None,
-        connect_timeout: Optional[float] = None,
-        request_timeout: Optional[float] = None,
+        unload_location: str | None = None,
+        connect_timeout: float | None = None,
+        request_timeout: float | None = None,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -137,7 +131,7 @@ class AthenaArrowResultSet(AthenaResultSet):
         if self._request_timeout is not None:
             timeout_kwargs["request_timeout"] = self._request_timeout
 
-        if "role_arn" in connection._kwargs and connection._kwargs["role_arn"]:
+        if connection._kwargs.get("role_arn"):
             external_id = connection._kwargs.get("external_id")
             fs = fs.S3FileSystem(
                 role_arn=connection._kwargs["role_arn"],
@@ -193,13 +187,13 @@ class AthenaArrowResultSet(AthenaResultSet):
         return fs
 
     @property
-    def timestamp_parsers(self) -> List[str]:
+    def timestamp_parsers(self) -> list[str]:
         from pyarrow.csv import ISO8601
 
-        return [ISO8601] + self._timestamp_parsers
+        return [ISO8601, *self._timestamp_parsers]
 
     @property
-    def column_types(self) -> Dict[str, Type[Any]]:
+    def column_types(self) -> dict[str, type[Any]]:
         description = self.description if self.description else []
         return {
             d[0]: dtype
@@ -208,7 +202,7 @@ class AthenaArrowResultSet(AthenaResultSet):
         }
 
     @property
-    def converters(self) -> Dict[str, Callable[[Optional[str]], Optional[Any]]]:
+    def converters(self) -> dict[str, Callable[[str | None], Any | None]]:
         description = self.description if self.description else []
         return {d[0]: self._converter.get(d[1]) for d in description}
 
@@ -228,7 +222,7 @@ class AthenaArrowResultSet(AthenaResultSet):
 
     def fetchone(
         self,
-    ) -> Optional[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+    ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
         if not self._rows:
             self._fetch()
         if not self._rows:
@@ -239,8 +233,8 @@ class AthenaArrowResultSet(AthenaResultSet):
         return self._rows.popleft()
 
     def fetchmany(
-        self, size: Optional[int] = None
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+        self, size: int | None = None
+    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         if not size or size <= 0:
             size = self._arraysize
         rows = []
@@ -254,7 +248,7 @@ class AthenaArrowResultSet(AthenaResultSet):
 
     def fetchall(
         self,
-    ) -> List[Union[Tuple[Optional[Any], ...], Dict[Any, Optional[Any]]]]:
+    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         rows = []
         while True:
             row = self.fetchone()
@@ -264,7 +258,7 @@ class AthenaArrowResultSet(AthenaResultSet):
                 break
         return rows
 
-    def _read_csv(self) -> "Table":
+    def _read_csv(self) -> Table:
         import pyarrow as pa
         from pyarrow import csv
 
@@ -319,10 +313,10 @@ class AthenaArrowResultSet(AthenaResultSet):
                 ),
             )
         except Exception as e:
-            _logger.exception(f"Failed to read {bucket}/{key}.")
+            _logger.exception("Failed to read %s/%s.", bucket, key)
             raise OperationalError(*e.args) from e
 
-    def _read_parquet(self) -> "Table":
+    def _read_parquet(self) -> Table:
         import pyarrow as pa
         from pyarrow import parquet
 
@@ -337,10 +331,10 @@ class AthenaArrowResultSet(AthenaResultSet):
             dataset = parquet.ParquetDataset(f"{bucket}/{key}", filesystem=self._fs)
             return dataset.read(use_threads=True)
         except Exception as e:
-            _logger.exception(f"Failed to read {bucket}/{key}.")
+            _logger.exception("Failed to read %s/%s.", bucket, key)
             raise OperationalError(*e.args) from e
 
-    def _as_arrow(self) -> "Table":
+    def _as_arrow(self) -> Table:
         if self.is_unload:
             table = self._read_parquet()
             self._metadata = to_column_info(table.schema)
@@ -348,7 +342,7 @@ class AthenaArrowResultSet(AthenaResultSet):
             table = self._read_csv()
         return table
 
-    def _as_arrow_from_api(self, converter: Optional[Converter] = None) -> "Table":
+    def _as_arrow_from_api(self, converter: Converter | None = None) -> Table:
         """Build an Arrow Table from GetQueryResults API.
 
         Used as a fallback when ``output_location`` is not available
@@ -367,10 +361,10 @@ class AthenaArrowResultSet(AthenaResultSet):
         columns = [d[0] for d in description]
         return pa.table(self._rows_to_columnar(rows, columns))
 
-    def as_arrow(self) -> "Table":
+    def as_arrow(self) -> Table:
         return self._table
 
-    def as_polars(self) -> "pl.DataFrame":
+    def as_polars(self) -> pl.DataFrame:
         """Return query results as a Polars DataFrame.
 
         Converts the Apache Arrow Table to a Polars DataFrame for

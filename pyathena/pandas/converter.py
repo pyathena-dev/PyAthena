@@ -1,9 +1,9 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from copy import deepcopy
-from typing import Any, Callable, Dict, Optional, Type
+from typing import Any
 
 from pyathena.converter import (
     Converter,
@@ -14,10 +14,10 @@ from pyathena.converter import (
     _to_json,
 )
 
-_logger = logging.getLogger(__name__)  # type: ignore
+_logger = logging.getLogger(__name__)
 
 
-_DEFAULT_PANDAS_CONVERTERS: Dict[str, Callable[[Optional[str]], Optional[Any]]] = {
+_DEFAULT_PANDAS_CONVERTERS: dict[str, Callable[[str | None], Any | None]] = {
     "boolean": _to_boolean,
     "decimal": _to_decimal,
     "varbinary": _to_binary,
@@ -59,7 +59,7 @@ class DefaultPandasTypeConverter(Converter):
         )
 
     @property
-    def _dtypes(self) -> Dict[str, Type[Any]]:
+    def _dtypes(self) -> dict[str, type[Any]]:
         if not hasattr(self, "__dtypes"):
             import pandas as pd
 
@@ -80,7 +80,7 @@ class DefaultPandasTypeConverter(Converter):
             }
         return self.__dtypes
 
-    def convert(self, type_: str, value: Optional[str]) -> Optional[Any]:
+    def convert(self, type_: str, value: str | None) -> Any | None:
         pass
 
 
@@ -103,5 +103,5 @@ class DefaultPandasUnloadTypeConverter(Converter):
             default=_to_default,
         )
 
-    def convert(self, type_: str, value: Optional[str]) -> Optional[Any]:
+    def convert(self, type_: str, value: str | None) -> Any | None:
         pass

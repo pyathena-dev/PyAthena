@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import concurrent
@@ -6,6 +5,7 @@ import logging
 import textwrap
 import uuid
 from collections import OrderedDict
+from collections.abc import Callable, Iterator
 from concurrent.futures.process import ProcessPoolExecutor
 from concurrent.futures.thread import ThreadPoolExecutor
 from copy import deepcopy
@@ -13,13 +13,6 @@ from multiprocessing import cpu_count
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
-    Dict,
-    Iterator,
-    List,
-    Optional,
-    Type,
-    Union,
 )
 
 from boto3 import Session
@@ -34,10 +27,10 @@ if TYPE_CHECKING:
     from pyathena.connection import Connection
     from pyathena.cursor import Cursor
 
-_logger = logging.getLogger(__name__)  # type: ignore
+_logger = logging.getLogger(__name__)
 
 
-def get_chunks(df: "DataFrame", chunksize: Optional[int] = None) -> Iterator["DataFrame"]:
+def get_chunks(df: DataFrame, chunksize: int | None = None) -> Iterator[DataFrame]:
     """Split a DataFrame into chunks of specified size.
 
     Args:
@@ -67,7 +60,7 @@ def get_chunks(df: "DataFrame", chunksize: Optional[int] = None) -> Iterator["Da
         yield df[start_i:end_i]
 
 
-def reset_index(df: "DataFrame", index_label: Optional[str] = None) -> None:
+def reset_index(df: DataFrame, index_label: str | None = None) -> None:
     """Reset the DataFrame index and add it as a column.
 
     Args:
@@ -84,7 +77,7 @@ def reset_index(df: "DataFrame", index_label: Optional[str] = None) -> None:
         raise ValueError("Duplicate name in index/columns") from e
 
 
-def as_pandas(cursor: "Cursor", coerce_float: bool = False) -> "DataFrame":
+def as_pandas(cursor: Cursor, coerce_float: bool = False) -> DataFrame:
     """Convert cursor results to a pandas DataFrame.
 
     Fetches all remaining rows from the cursor and converts them to a
@@ -107,7 +100,7 @@ def as_pandas(cursor: "Cursor", coerce_float: bool = False) -> "DataFrame":
     return DataFrame.from_records(cursor.fetchall(), columns=names, coerce_float=coerce_float)
 
 
-def to_sql_type_mappings(col: "Series") -> str:
+def to_sql_type_mappings(col: Series) -> str:
     """Map a pandas Series data type to an Athena SQL type.
 
     Infers the appropriate Athena SQL type based on the pandas Series dtype.
@@ -151,13 +144,13 @@ def to_sql_type_mappings(col: "Series") -> str:
 
 
 def to_parquet(
-    df: "DataFrame",
+    df: DataFrame,
     bucket_name: str,
     prefix: str,
     retry_config: RetryConfig,
-    session_kwargs: Dict[str, Any],
-    client_kwargs: Dict[str, Any],
-    compression: Optional[str] = None,
+    session_kwargs: dict[str, Any],
+    client_kwargs: dict[str, Any],
+    compression: str | None = None,
     flavor: str = "spark",
 ) -> str:
     """Write a DataFrame to S3 as a Parquet file.
@@ -197,20 +190,20 @@ def to_parquet(
 
 
 def to_sql(
-    df: "DataFrame",
+    df: DataFrame,
     name: str,
-    conn: "Connection[Any]",
+    conn: Connection[Any],
     location: str,
     schema: str = "default",
     index: bool = False,
-    index_label: Optional[str] = None,
-    partitions: Optional[List[str]] = None,
-    chunksize: Optional[int] = None,
+    index_label: str | None = None,
+    partitions: list[str] | None = None,
+    chunksize: int | None = None,
     if_exists: str = "fail",
-    compression: Optional[str] = None,
+    compression: str | None = None,
     flavor: str = "spark",
-    type_mappings: Callable[["Series"], str] = to_sql_type_mappings,
-    executor_class: Type[Union[ThreadPoolExecutor, ProcessPoolExecutor]] = ThreadPoolExecutor,
+    type_mappings: Callable[[Series], str] = to_sql_type_mappings,
+    executor_class: type[ThreadPoolExecutor | ProcessPoolExecutor] = ThreadPoolExecutor,
     max_workers: int = (cpu_count() or 1) * 5,
     repair_table=True,
 ) -> None:
@@ -296,7 +289,7 @@ def to_sql(
     if index:
         reset_index(df, index_label)
     with executor_class(max_workers=max_workers) as e:
-        futures = []
+        futures: list[concurrent.futures.Future[Any]] = []
         session_kwargs = deepcopy(conn._session_kwargs)
         session_kwargs.update({"profile_name": conn.profile_name})
         client_kwargs = deepcopy(conn._client_kwargs)
@@ -318,38 +311,38 @@ def to_sql(
                         f"{location}{partition_prefix}/",
                     )
                 )
-                for chunk in get_chunks(group, chunksize):
-                    futures.append(
-                        e.submit(
-                            to_parquet,
-                            chunk,
-                            bucket_name,
-                            f"{key_prefix}{partition_prefix}/",
-                            conn._retry_config,
-                            session_kwargs,
-                            client_kwargs,
-                            compression,
-                            flavor,
-                        )
-                    )
-        else:
-            for chunk in get_chunks(df, chunksize):
-                futures.append(
+                futures.extend(
                     e.submit(
                         to_parquet,
                         chunk,
                         bucket_name,
-                        key_prefix,
+                        f"{key_prefix}{partition_prefix}/",
                         conn._retry_config,
                         session_kwargs,
                         client_kwargs,
                         compression,
                         flavor,
                     )
+                    for chunk in get_chunks(group, chunksize)
                 )
+        else:
+            futures.extend(
+                e.submit(
+                    to_parquet,
+                    chunk,
+                    bucket_name,
+                    key_prefix,
+                    conn._retry_config,
+                    session_kwargs,
+                    client_kwargs,
+                    compression,
+                    flavor,
+                )
+                for chunk in get_chunks(df, chunksize)
+            )
         for future in concurrent.futures.as_completed(futures):
             result = future.result()
-            _logger.info(f"to_parquet: {result}")
+            _logger.info("to_parquet: %s", result)
 
     ddl = generate_ddl(
         df=df,
@@ -374,7 +367,7 @@ def to_sql(
             cursor.execute(add_partition)
 
 
-def get_column_names_and_types(df: "DataFrame", type_mappings) -> "OrderedDict[str, str]":
+def get_column_names_and_types(df: DataFrame, type_mappings) -> OrderedDict[str, str]:
     """Extract column names and their SQL types from a DataFrame.
 
     Args:
@@ -385,18 +378,18 @@ def get_column_names_and_types(df: "DataFrame", type_mappings) -> "OrderedDict[s
         An OrderedDict mapping column names to their SQL type strings.
     """
     return OrderedDict(
-        ((str(df.columns[i]), type_mappings(df.iloc[:, i])) for i in range(len(df.columns)))
+        (str(df.columns[i]), type_mappings(df.iloc[:, i])) for i in range(len(df.columns))
     )
 
 
 def generate_ddl(
-    df: "DataFrame",
+    df: DataFrame,
     name: str,
     location: str,
     schema: str = "default",
-    partitions: Optional[List[str]] = None,
-    compression: Optional[str] = None,
-    type_mappings: Callable[["Series"], str] = to_sql_type_mappings,
+    partitions: list[str] | None = None,
+    compression: str | None = None,
+    type_mappings: Callable[[Series], str] = to_sql_type_mappings,
 ) -> str:
     """Generate CREATE EXTERNAL TABLE DDL for a DataFrame.
 

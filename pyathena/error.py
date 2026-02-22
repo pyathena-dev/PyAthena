@@ -1,14 +1,13 @@
-# -*- coding: utf-8 -*-
 __all__ = [
-    "Error",
-    "Warning",
-    "InterfaceError",
+    "DataError",
     "DatabaseError",
+    "Error",
+    "InterfaceError",
     "InternalError",
+    "NotSupportedError",
     "OperationalError",
     "ProgrammingError",
-    "DataError",
-    "NotSupportedError",
+    "Warning",
 ]
 
 
@@ -20,8 +19,6 @@ class Error(Exception):
     Python Database API Specification v2.0 (PEP 249).
     """
 
-    pass
-
 
 class Warning(Exception):  # noqa: N818
     """Exception for non-fatal warnings.
@@ -31,8 +28,6 @@ class Warning(Exception):  # noqa: N818
     but follows the DB API 2.0 specification.
     """
 
-    pass
-
 
 class InterfaceError(Error):
     """Exception for errors related to the database interface.
@@ -40,8 +35,6 @@ class InterfaceError(Error):
     Raised when there's an error in the database interface itself,
     such as connection problems or interface misuse.
     """
-
-    pass
 
 
 class DatabaseError(Error):
@@ -52,8 +45,6 @@ class DatabaseError(Error):
     error types inherit from this class.
     """
 
-    pass
-
 
 class InternalError(DatabaseError):
     """Exception for internal database errors.
@@ -61,8 +52,6 @@ class InternalError(DatabaseError):
     Raised when there's an internal error in the database system
     that is not due to user actions or programming errors.
     """
-
-    pass
 
 
 class OperationalError(DatabaseError):
@@ -73,8 +62,6 @@ class OperationalError(DatabaseError):
     invalid query syntax that wasn't caught at the programming level.
     """
 
-    pass
-
 
 class ProgrammingError(DatabaseError):
     """Exception for programming errors in database operations.
@@ -83,8 +70,6 @@ class ProgrammingError(DatabaseError):
     being used, such as calling methods in the wrong order, using
     invalid parameters, or attempting operations on closed connections.
     """
-
-    pass
 
 
 class IntegrityError(DatabaseError):
@@ -95,8 +80,6 @@ class IntegrityError(DatabaseError):
     constraint failures.
     """
 
-    pass
-
 
 class DataError(DatabaseError):
     """Exception for errors due to invalid data.
@@ -106,8 +89,6 @@ class DataError(DatabaseError):
     or malformed data structures.
     """
 
-    pass
-
 
 class NotSupportedError(DatabaseError):
     """Exception for unsupported database operations.
@@ -116,5 +97,3 @@ class NotSupportedError(DatabaseError):
     by Athena, such as transactions (commit/rollback) or certain
     SQL features that are not available in the Athena query engine.
     """
-
-    pass

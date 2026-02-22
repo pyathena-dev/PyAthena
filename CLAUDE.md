@@ -16,13 +16,13 @@ PyAthena is a Python DB API 2.0 (PEP 249) compliant client for Amazon Athena. Se
 
 ### Code Quality — Always Run Before Committing
 ```bash
-make fmt   # Auto-fix formatting and imports
-make chk   # Lint + format check + mypy
+make format   # Auto-fix formatting and imports
+make lint   # Lint + format check + mypy
 ```
 
 ### Testing
 ```bash
-# ALWAYS run `make chk` first — tests will fail if lint doesn't pass
+# ALWAYS run `make lint` first — tests will fail if lint doesn't pass
 make test       # Unit tests (runs chk first)
 make test-sqla  # SQLAlchemy dialect tests
 ```

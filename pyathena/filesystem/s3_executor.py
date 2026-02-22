@@ -1,11 +1,11 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import asyncio
 from abc import ABCMeta, abstractmethod
+from collections.abc import Callable
 from concurrent.futures import Future
 from concurrent.futures.thread import ThreadPoolExecutor
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, TypeVar
 
 T = TypeVar("T")
 
@@ -29,7 +29,7 @@ class S3Executor(metaclass=ABCMeta):
         """Shut down the executor, freeing any resources."""
         ...
 
-    def __enter__(self) -> "S3Executor":
+    def __enter__(self) -> S3Executor:
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
@@ -71,7 +71,7 @@ class S3AioExecutor(S3Executor):
         RuntimeError: If the event loop is not running when ``submit`` is called.
     """
 
-    def __init__(self, loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
+    def __init__(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
         self._loop = loop
 
     def submit(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> Future[T]:

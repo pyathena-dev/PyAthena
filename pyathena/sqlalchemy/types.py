@@ -1,8 +1,7 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import types
 from sqlalchemy.sql import sqltypes
@@ -13,7 +12,7 @@ if TYPE_CHECKING:
     from sqlalchemy.sql.type_api import _LiteralProcessorType
 
 
-def get_double_type() -> Type[Any]:
+def get_double_type() -> type[Any]:
     """Get the appropriate type for DOUBLE based on SQLAlchemy version.
 
     SQLAlchemy 2.0+ provides a native DOUBLE type, while earlier versions
@@ -51,12 +50,12 @@ class AthenaTimestamp(TypeEngine[datetime]):
     render_bind_cast = True
 
     @staticmethod
-    def process(value: Optional[Union[datetime, Any]]) -> str:
+    def process(value: datetime | Any | None) -> str:
         if isinstance(value, datetime):
             return f"""TIMESTAMP '{value.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]}'"""
-        return f"TIMESTAMP '{str(value)}'"
+        return f"TIMESTAMP '{value!s}'"
 
-    def literal_processor(self, dialect: "Dialect") -> Optional["_LiteralProcessorType[datetime]"]:
+    def literal_processor(self, dialect: Dialect) -> _LiteralProcessorType[datetime] | None:
         return self.process
 
 
@@ -80,12 +79,12 @@ class AthenaDate(TypeEngine[date]):
     render_bind_cast = True
 
     @staticmethod
-    def process(value: Union[date, datetime, Any]) -> str:
+    def process(value: date | datetime | Any) -> str:
         if isinstance(value, (date, datetime)):
             f"DATE '{value:%Y-%m-%d}'"
-        return f"DATE '{str(value)}'"
+        return f"DATE '{value!s}'"
 
-    def literal_processor(self, dialect: "Dialect") -> Optional["_LiteralProcessorType[date]"]:
+    def literal_processor(self, dialect: Dialect) -> _LiteralProcessorType[date] | None:
         return self.process
 
 
@@ -108,7 +107,7 @@ class TINYINT(Tinyint):
     __visit_name__ = "TINYINT"
 
 
-class AthenaStruct(TypeEngine[Dict[str, Any]]):
+class AthenaStruct(TypeEngine[dict[str, Any]]):
     """SQLAlchemy type for Athena STRUCT/ROW complex type.
 
     STRUCT represents a record with named fields, similar to a database row
@@ -139,8 +138,8 @@ class AthenaStruct(TypeEngine[Dict[str, Any]]):
 
     __visit_name__ = "struct"
 
-    def __init__(self, *fields: Union[str, Tuple[str, Any]]) -> None:
-        self.fields: Dict[str, TypeEngine[Any]] = {}
+    def __init__(self, *fields: str | tuple[str, Any]) -> None:
+        self.fields: dict[str, TypeEngine[Any]] = {}
 
         for field in fields:
             if isinstance(field, str):
@@ -169,7 +168,7 @@ class STRUCT(AthenaStruct):
     __visit_name__ = "STRUCT"
 
 
-class AthenaMap(TypeEngine[Dict[str, Any]]):
+class AthenaMap(TypeEngine[dict[str, Any]]):
     """SQLAlchemy type for Athena MAP complex type.
 
     MAP represents a collection of key-value pairs where all keys have the
@@ -222,7 +221,7 @@ class MAP(AthenaMap):
     __visit_name__ = "MAP"
 
 
-class AthenaArray(TypeEngine[List[Any]]):
+class AthenaArray(TypeEngine[list[Any]]):
     """SQLAlchemy type for Athena ARRAY complex type.
 
     ARRAY represents an ordered collection of elements of the same type.

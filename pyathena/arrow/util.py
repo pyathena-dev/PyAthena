@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Utilities for converting PyArrow types to Athena metadata.
 
 This module provides functions to convert PyArrow schema and type information
@@ -8,14 +7,14 @@ reading query results in Apache Arrow format.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, Tuple, cast
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from pyarrow import Schema
     from pyarrow.lib import DataType
 
 
-def to_column_info(schema: "Schema") -> Tuple[Dict[str, Any], ...]:
+def to_column_info(schema: Schema) -> tuple[dict[str, Any], ...]:
     """Convert a PyArrow schema to Athena column information.
 
     Iterates through all fields in the schema and converts each field's
@@ -47,7 +46,7 @@ def to_column_info(schema: "Schema") -> Tuple[Dict[str, Any], ...]:
     return tuple(columns)
 
 
-def get_athena_type(type_: "DataType") -> Tuple[str, int, int]:
+def get_athena_type(type_: DataType) -> tuple[str, int, int]:
     """Map a PyArrow data type to an Athena SQL type.
 
     Converts PyArrow type identifiers to corresponding Athena SQL type names
