@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-import itertools
 import logging
 import mimetypes
 import os.path
 import re
 from concurrent.futures import Future, as_completed
-from concurrent.futures.thread import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime
 from multiprocessing import cpu_count
@@ -23,6 +21,7 @@ from fsspec.spec import AbstractBufferedFile
 from fsspec.utils import tokenize
 
 import pyathena
+from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
     S3MultipartUpload,
@@ -686,6 +685,20 @@ class S3FileSystem(AbstractFileSystem):
             **request,
         )
 
+    def _create_executor(self, max_workers: int) -> S3Executor:
+        """Create an executor strategy for parallel operations.
+
+        Subclasses can override to provide alternative execution strategies
+        (e.g., asyncio-based execution).
+
+        Args:
+            max_workers: Maximum number of parallel workers.
+
+        Returns:
+            An S3Executor instance.
+        """
+        return S3ThreadPoolExecutor(max_workers=max_workers)
+
     def _delete_objects(
         self, bucket: str, paths: List[str], max_workers: Optional[int] = None, **kwargs
     ) -> None:
@@ -703,7 +716,7 @@ class S3FileSystem(AbstractFileSystem):
                     object_.update({"VersionId": version_id})
                 delete_objects.append(object_)
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with self._create_executor(max_workers=max_workers) as executor:
             fs = []
             for delete in [
                 delete_objects[i : i + self.DELETE_OBJECTS_MAX_KEYS]
@@ -861,7 +874,7 @@ class S3FileSystem(AbstractFileSystem):
             **kwargs,
         )
         parts = []
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with self._create_executor(max_workers=max_workers) as executor:
             fs = [
                 executor.submit(
                     self._upload_part_copy,
@@ -1106,6 +1119,7 @@ class S3FileSystem(AbstractFileSystem):
             mode,
             version_id=None,
             max_workers=max_workers,
+            executor=self._create_executor(max_workers=max_workers),
             block_size=block_size,
             cache_type=cache_type,
             autocommit=autocommit,
@@ -1256,6 +1270,7 @@ class S3File(AbstractBufferedFile):
         mode: str = "rb",
         version_id: Optional[str] = None,
         max_workers: int = (cpu_count() or 1) * 5,
+        executor: Optional[S3Executor] = None,
         block_size: int = S3FileSystem.DEFAULT_BLOCK_SIZE,
         cache_type: str = "bytes",
         autocommit: bool = True,
@@ -1265,7 +1280,7 @@ class S3File(AbstractBufferedFile):
         **kwargs,
     ) -> None:
         self.max_workers = max_workers
-        self._executor = ThreadPoolExecutor(max_workers=max_workers)
+        self._executor: S3Executor = executor or S3ThreadPoolExecutor(max_workers=max_workers)
         self.s3_additional_kwargs = s3_additional_kwargs if s3_additional_kwargs else {}
 
         super().__init__(
@@ -1481,24 +1496,18 @@ class S3File(AbstractBufferedFile):
             start, end, max_workers=self.max_workers, worker_block_size=self.blocksize
         )
         if len(ranges) > 1:
-            object_ = self._merge_objects(
-                list(
-                    self._executor.map(
-                        lambda bucket, key, ranges, version_id, kwargs: self.fs._get_object(
-                            bucket=bucket,
-                            key=key,
-                            ranges=ranges,
-                            version_id=version_id,
-                            **kwargs,
-                        ),
-                        itertools.repeat(self.bucket),
-                        itertools.repeat(self.key),
-                        ranges,
-                        itertools.repeat(self.version_id),
-                        itertools.repeat(self.s3_additional_kwargs),
-                    )
+            futures = [
+                self._executor.submit(
+                    self.fs._get_object,
+                    bucket=self.bucket,
+                    key=self.key,
+                    ranges=r,
+                    version_id=self.version_id,
+                    **self.s3_additional_kwargs,
                 )
-            )
+                for r in ranges
+            ]
+            object_ = self._merge_objects([f.result() for f in as_completed(futures)])
         else:
             object_ = self.fs._get_object(
                 self.bucket,

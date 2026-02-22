@@ -5,6 +5,8 @@ import logging
 from io import TextIOWrapper
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
 
+from fsspec import AbstractFileSystem
+
 from pyathena.converter import Converter
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.filesystem.s3 import S3FileSystem
@@ -62,6 +64,7 @@ class AthenaS3FSResultSet(AthenaResultSet):
         retry_config: RetryConfig,
         block_size: Optional[int] = None,
         csv_reader: Optional[CSVReaderType] = None,
+        filesystem_class: Optional[Type[AbstractFileSystem]] = None,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -77,6 +80,7 @@ class AthenaS3FSResultSet(AthenaResultSet):
         self._arraysize = arraysize
         self._block_size = block_size if block_size else self.DEFAULT_BLOCK_SIZE
         self._csv_reader_class: CSVReaderType = csv_reader or AthenaCSVReader
+        self._filesystem_class: Type[AbstractFileSystem] = filesystem_class or S3FileSystem
         self._fs = self._create_s3_file_system()
         self._csv_reader: Optional[Any] = None
 
@@ -92,9 +96,9 @@ class AthenaS3FSResultSet(AthenaResultSet):
         if not self._csv_reader and not self._rows and pre_fetched_rows:
             self._rows.extend(pre_fetched_rows)
 
-    def _create_s3_file_system(self) -> S3FileSystem:
+    def _create_s3_file_system(self) -> AbstractFileSystem:
         """Create S3FileSystem using connection settings."""
-        return S3FileSystem(
+        return self._filesystem_class(
             connection=self.connection,
             default_block_size=self._block_size,
         )
