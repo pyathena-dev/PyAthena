@@ -1,8 +1,8 @@
 RUFF_VERSION := 0.14.14
 TOX_VERSION := 4.34.1
 
-.PHONY: fmt
-fmt:
+.PHONY: format
+format:
 	# TODO: https://github.com/astral-sh/uv/issues/5903
 	uvx ruff@$(RUFF_VERSION) check --select I --fix .
 	uvx ruff@$(RUFF_VERSION) format .

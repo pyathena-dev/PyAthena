@@ -51,7 +51,7 @@ The code formatting uses [ruff](https://github.com/astral-sh/ruff).
 ### Appy format
 
 ```bash
-$ make fmt
+$ make format
 ```
 
 ### Lint and check format
