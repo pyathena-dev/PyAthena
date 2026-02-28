@@ -149,8 +149,10 @@ class AthenaS3FSResultSet(AthenaResultSet):
         if not self._csv_reader:
             return
 
-        description = self.description if self.description else []
-        column_types = [d[1] for d in description]
+        col_types = self._column_types
+        if not col_types:
+            description = self.description if self.description else []
+            col_types = tuple(d[1] for d in description)
         col_hints = self._column_type_hints
 
         rows_fetched = 0
@@ -171,12 +173,12 @@ class AthenaS3FSResultSet(AthenaResultSet):
                         )
                         if hint
                         else self._converter.convert(col_type, value if value != "" else None)
-                        for col_type, value, hint in zip(column_types, row, col_hints, strict=False)
+                        for col_type, value, hint in zip(col_types, row, col_hints, strict=False)
                     )
                 else:
                     converted_row = tuple(
                         self._converter.convert(col_type, value if value != "" else None)
-                        for col_type, value in zip(column_types, row, strict=False)
+                        for col_type, value in zip(col_types, row, strict=False)
                     )
             else:
                 if col_hints:
@@ -184,12 +186,12 @@ class AthenaS3FSResultSet(AthenaResultSet):
                         self._converter.convert(col_type, value, type_hint=hint)
                         if hint
                         else self._converter.convert(col_type, value)
-                        for col_type, value, hint in zip(column_types, row, col_hints, strict=False)
+                        for col_type, value, hint in zip(col_types, row, col_hints, strict=False)
                     )
                 else:
                     converted_row = tuple(
                         self._converter.convert(col_type, value)
-                        for col_type, value in zip(column_types, row, strict=False)
+                        for col_type, value in zip(col_types, row, strict=False)
                     )
             self._rows.append(converted_row)
             rows_fetched += 1

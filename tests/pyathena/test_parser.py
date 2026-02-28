@@ -180,6 +180,15 @@ class TestTypedValueConverter:
         assert isinstance(result["age"], int)
         assert isinstance(result["name"], str)
 
+    def test_nested_array_json(self, converter):
+        """JSON path: nested array like [[1,2],[3]] must be parsed via json.loads."""
+        parser = TypeSignatureParser()
+        node = parser.parse("array(array(integer))")
+        result = converter.convert("[[1, 2], [3]]", node)
+        assert result == [[1, 2], [3]]
+        assert isinstance(result[0], list)
+        assert isinstance(result[0][0], int)
+
     def test_map_json_null_value_preserved(self, converter):
         """JSON path: map with null values vs "null" string values."""
         parser = TypeSignatureParser()

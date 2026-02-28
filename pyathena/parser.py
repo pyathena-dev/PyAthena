@@ -279,7 +279,7 @@ class TypedValueConverter:
 
         # Try JSON first (only if content looks like JSON)
         inner_preview = value[1:10] if len(value) > 10 else value[1:-1]
-        if '"' in inner_preview or value.startswith(("[{", "[null")):
+        if '"' in inner_preview or value.startswith(("[{", "[null", "[[")):
             try:
                 parsed = json.loads(value)
                 if isinstance(parsed, list):

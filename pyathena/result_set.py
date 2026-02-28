@@ -87,6 +87,8 @@ class AthenaResultSet(CursorIterator):
         )
 
         self._metadata: tuple[dict[str, Any], ...] | None = None
+        self._column_types: tuple[str, ...] | None = None
+        self._column_names: tuple[str, ...] | None = None
         self._column_type_hints: tuple[str | None, ...] | None = None
         self._rows: collections.deque[tuple[Any | None, ...] | dict[Any, Any | None]] = (
             collections.deque()
@@ -429,14 +431,16 @@ class AthenaResultSet(CursorIterator):
         if column_info is None:
             raise DataError("KeyError `ColumnInfo`")
         self._metadata = tuple(column_info)
+        self._column_types = tuple(m.get("Type", "") for m in self._metadata)
+        self._column_names = tuple(m.get("Name", "") for m in self._metadata)
         if self._result_set_type_hints and any(
-            m.get("Type", "").lower() in self._COMPLEX_TYPES for m in self._metadata
+            t.lower() in self._COMPLEX_TYPES for t in self._column_types
         ):
             hints = tuple(
                 self._result_set_type_hints.get(m.get("Name", "").lower())
-                if m.get("Type", "").lower() in self._COMPLEX_TYPES
+                if t.lower() in self._COMPLEX_TYPES
                 else None
-                for m in self._metadata
+                for m, t in zip(self._metadata, self._column_types, strict=True)
             )
             if any(hints):
                 self._column_type_hints = hints
@@ -465,16 +469,25 @@ class AthenaResultSet(CursorIterator):
         converter: Converter | None = None,
     ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         conv = converter or self._converter
+        col_types = self._column_types
         col_hints = self._column_type_hints
-        if col_hints:
+        if col_hints and col_types:
             return [
                 tuple(
-                    conv.convert(meta.get("Type"), row.get("VarCharValue"), type_hint=hint)
+                    conv.convert(col_type, row.get("VarCharValue"), type_hint=hint)
                     if hint
-                    else conv.convert(meta.get("Type"), row.get("VarCharValue"))
-                    for meta, row, hint in zip(
-                        metadata, rows[i].get("Data", []), col_hints, strict=False
+                    else conv.convert(col_type, row.get("VarCharValue"))
+                    for col_type, row, hint in zip(
+                        col_types, rows[i].get("Data", []), col_hints, strict=False
                     )
+                )
+                for i in range(offset, len(rows))
+            ]
+        if col_types:
+            return [
+                tuple(
+                    conv.convert(col_type, row.get("VarCharValue"))
+                    for col_type, row in zip(col_types, rows[i].get("Data", []), strict=False)
                 )
                 for i in range(offset, len(rows))
             ]
@@ -639,6 +652,8 @@ class AthenaResultSet(CursorIterator):
         self._connection = None
         self._query_execution = None
         self._metadata = None
+        self._column_types = None
+        self._column_names = None
         self._rows.clear()
         self._next_token = None
         self._rownumber = None
@@ -663,18 +678,37 @@ class AthenaDictResultSet(AthenaResultSet):
         converter: Converter | None = None,
     ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         conv = converter or self._converter
+        col_types = self._column_types
+        col_names = self._column_names
         col_hints = self._column_type_hints
-        if col_hints:
+        if col_hints and col_types and col_names:
             return [
                 self.dict_type(
                     (
-                        meta.get("Name"),
-                        conv.convert(meta.get("Type"), row.get("VarCharValue"), type_hint=hint)
+                        name,
+                        conv.convert(col_type, row.get("VarCharValue"), type_hint=hint)
                         if hint
-                        else conv.convert(meta.get("Type"), row.get("VarCharValue")),
+                        else conv.convert(col_type, row.get("VarCharValue")),
                     )
-                    for meta, row, hint in zip(
-                        metadata, rows[i].get("Data", []), col_hints, strict=False
+                    for name, col_type, row, hint in zip(
+                        col_names,
+                        col_types,
+                        rows[i].get("Data", []),
+                        col_hints,
+                        strict=False,
+                    )
+                )
+                for i in range(offset, len(rows))
+            ]
+        if col_types and col_names:
+            return [
+                self.dict_type(
+                    (
+                        name,
+                        conv.convert(col_type, row.get("VarCharValue")),
+                    )
+                    for name, col_type, row in zip(
+                        col_names, col_types, rows[i].get("Data", []), strict=False
                     )
                 )
                 for i in range(offset, len(rows))
