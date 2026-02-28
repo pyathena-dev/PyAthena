@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import logging
 from copy import deepcopy
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pyathena.converter import (
     _DEFAULT_CONVERTERS,
     Converter,
     _to_default,
 )
+
+if TYPE_CHECKING:
+    from pyathena.converter import DefaultTypeConverter
 
 _logger = logging.getLogger(__name__)
 
@@ -43,8 +46,9 @@ class DefaultS3FSTypeConverter(Converter):
             mappings=deepcopy(_DEFAULT_CONVERTERS),
             default=_to_default,
         )
+        self._default_type_converter: DefaultTypeConverter | None = None
 
-    def convert(self, type_: str, value: str | None) -> Any | None:
+    def convert(self, type_: str, value: str | None, type_hint: str | None = None) -> Any | None:
         """Convert a string value to the appropriate Python type.
 
         Looks up the converter function for the given Athena type and applies
@@ -53,9 +57,19 @@ class DefaultS3FSTypeConverter(Converter):
         Args:
             type_: The Athena data type name (e.g., "integer", "varchar", "date").
             value: The string value to convert, or None.
+            type_hint: Optional Athena DDL type signature for precise complex type
+                conversion (e.g., "array(varchar)").
 
         Returns:
             The converted Python value, or None if the input value was None.
         """
+        if value is None:
+            return None
+        if type_hint:
+            if self._default_type_converter is None:
+                from pyathena.converter import DefaultTypeConverter
+
+                self._default_type_converter = DefaultTypeConverter()
+            return self._default_type_converter.convert(type_, value, type_hint=type_hint)
         converter = self.get(type_)
         return converter(value)

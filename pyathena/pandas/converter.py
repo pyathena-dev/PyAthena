@@ -80,7 +80,7 @@ class DefaultPandasTypeConverter(Converter):
             }
         return self.__dtypes
 
-    def convert(self, type_: str, value: str | None) -> Any | None:
+    def convert(self, type_: str, value: str | None, type_hint: str | None = None) -> Any | None:
         pass
 
 
@@ -103,5 +103,5 @@ class DefaultPandasUnloadTypeConverter(Converter):
             default=_to_default,
         )
 
-    def convert(self, type_: str, value: str | None) -> Any | None:
+    def convert(self, type_: str, value: str | None, type_hint: str | None = None) -> Any | None:
         pass

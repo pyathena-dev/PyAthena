@@ -144,7 +144,11 @@ class AsyncCursor(BaseCursor):
         """
         return cast("Future[AthenaQueryExecution]", self._executor.submit(self._poll, query_id))
 
-    def _collect_result_set(self, query_id: str) -> AthenaResultSet:
+    def _collect_result_set(
+        self,
+        query_id: str,
+        result_set_type_hints: dict[str | int, str] | None = None,
+    ) -> AthenaResultSet:
         query_execution = cast(AthenaQueryExecution, self._poll(query_id))
         return self._result_set_class(
             connection=self._connection,
@@ -152,6 +156,7 @@ class AsyncCursor(BaseCursor):
             query_execution=query_execution,
             arraysize=self._arraysize,
             retry_config=self._retry_config,
+            result_set_type_hints=result_set_type_hints,
         )
 
     def execute(
@@ -165,6 +170,7 @@ class AsyncCursor(BaseCursor):
         result_reuse_enable: bool | None = None,
         result_reuse_minutes: int | None = None,
         paramstyle: str | None = None,
+        result_set_type_hints: dict[str | int, str] | None = None,
         **kwargs,
     ) -> tuple[str, Future[AthenaResultSet | Any]]:
         """Execute a SQL query asynchronously.
@@ -183,6 +189,9 @@ class AsyncCursor(BaseCursor):
             result_reuse_enable: Enable result reuse for identical queries (optional).
             result_reuse_minutes: Result reuse duration in minutes (optional).
             paramstyle: Parameter style to use (optional).
+            result_set_type_hints: Optional dictionary mapping column names to
+                Athena DDL type signatures for precise type conversion within
+                complex types.
             **kwargs: Additional execution parameters.
 
         Returns:
@@ -207,7 +216,9 @@ class AsyncCursor(BaseCursor):
             result_reuse_minutes=result_reuse_minutes,
             paramstyle=paramstyle,
         )
-        return query_id, self._executor.submit(self._collect_result_set, query_id)
+        return query_id, self._executor.submit(
+            self._collect_result_set, query_id, result_set_type_hints
+        )
 
     def executemany(
         self,

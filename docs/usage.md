@@ -389,6 +389,112 @@ The `on_start_query_execution` callback is supported by the following cursor typ
 Note: `AsyncCursor` and its variants do not support this callback as they already
 return the query ID immediately through their different execution model.
 
+## Type hints for complex types
+
+*New in version 3.30.0.*
+
+The Athena API does not return element-level type information for complex types
+(array, map, row/struct). PyAthena parses the string representation returned by
+Athena, but without type metadata the converter can only apply heuristics — which
+may produce incorrect Python types for nested values (e.g. integers left as strings
+inside a struct).
+
+The `result_set_type_hints` parameter solves this by letting you provide Athena DDL
+type signatures for specific columns. The converter then uses precise, recursive
+type-aware conversion instead of heuristics.
+
+```python
+from pyathena import connect
+
+cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                 region_name="us-west-2").cursor()
+cursor.execute(
+    "SELECT col_array, col_map, col_struct FROM one_row_complex",
+    result_set_type_hints={
+        "col_array": "array(integer)",
+        "col_map": "map(integer, integer)",
+        "col_struct": "row(a integer, b integer)",
+    },
+)
+row = cursor.fetchone()
+# col_struct values are now integers, not strings:
+# {"a": 1, "b": 2} instead of {"a": "1", "b": "2"}
+```
+
+Column name matching is case-insensitive. Type hints support arbitrarily nested types:
+
+```python
+cursor.execute(
+    """
+    SELECT CAST(
+      ROW(ROW('2024-01-01', 123), 4.736, 0.583)
+      AS ROW(header ROW(stamp VARCHAR, seq INTEGER), x DOUBLE, y DOUBLE)
+    ) AS positions
+    """,
+    result_set_type_hints={
+        "positions": "row(header row(stamp varchar, seq integer), x double, y double)",
+    },
+)
+row = cursor.fetchone()
+positions = row[0]
+# positions["header"]["seq"] == 123 (int, not "123")
+# positions["x"] == 4.736 (float, not "4.736")
+```
+
+### Hive-style syntax
+
+You can paste type signatures from Hive DDL or ``DESCRIBE TABLE`` output directly.
+Hive-style angle brackets and colons are automatically converted to Trino-style syntax:
+
+```python
+# Both are equivalent:
+result_set_type_hints={"col": "array(struct(a integer, b varchar))"}   # Trino
+result_set_type_hints={"col": "array<struct<a:int,b:varchar>>"}        # Hive
+```
+
+The ``int`` alias is also supported and resolves to ``integer``.
+
+### Index-based hints for duplicate column names
+
+When a query produces columns with the same alias (e.g. ``SELECT a AS x, b AS x``),
+name-based hints cannot distinguish between them. Use integer keys to specify hints
+by zero-based column position:
+
+```python
+cursor.execute(
+    "SELECT a AS x, b AS x FROM my_table",
+    result_set_type_hints={
+        0: "array(integer)",   # first "x" column
+        1: "map(varchar, integer)",  # second "x" column
+    },
+)
+```
+
+Integer (index-based) hints take priority over string (name-based) hints for the same
+column. You can mix both styles in the same dictionary.
+
+### Constraints
+
+* **Nested arrays in native format** — Athena's native (non-JSON) string representation
+  does not clearly delimit nested arrays. If your query returns nested arrays
+  (e.g. `array(array(integer))`), use `CAST(... AS JSON)` in your query to get
+  JSON-formatted output, which is parsed reliably.
+* **Arrow, Pandas, and Polars cursors** — These cursors accept `result_set_type_hints`
+  but their converters do not currently use the hints because they rely on their own
+  type systems. The parameter is passed through for forward compatibility and for
+  result sets that fall back to the default conversion path.
+
+### Breaking change in 3.30.0
+
+Prior to 3.30.0, PyAthena attempted to infer Python types for scalar values inside
+complex types using heuristics (e.g. `"123"` → `123`). Starting with 3.30.0, values
+inside complex types are **kept as strings** unless `result_set_type_hints` is provided.
+This change avoids silent misconversion but means existing code that relied on the
+heuristic behavior may see string values where it previously saw integers or floats.
+
+To restore typed conversion, pass `result_set_type_hints` with the appropriate type
+signatures for the affected columns.
+
 ## Environment variables
 
 Support [Boto3 environment variables](https://boto3.amazonaws.com/v1/documentation/api/latest/guide/configuration.html#using-environment-variables).

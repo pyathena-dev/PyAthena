@@ -79,6 +79,7 @@ class AioCursor(WithAsyncFetch):
         result_reuse_enable: bool | None = None,
         result_reuse_minutes: int | None = None,
         paramstyle: str | None = None,
+        result_set_type_hints: dict[str | int, str] | None = None,
         **kwargs,
     ) -> AioCursor:
         """Execute a SQL query asynchronously.
@@ -93,6 +94,9 @@ class AioCursor(WithAsyncFetch):
             result_reuse_enable: Enable result reuse (optional).
             result_reuse_minutes: Result reuse duration in minutes (optional).
             paramstyle: Parameter style to use (optional).
+            result_set_type_hints: Optional dictionary mapping column names to
+                Athena DDL type signatures for precise type conversion within
+                complex types.
             **kwargs: Additional execution parameters.
 
         Returns:
@@ -119,6 +123,7 @@ class AioCursor(WithAsyncFetch):
                 query_execution,
                 self.arraysize,
                 self._retry_config,
+                result_set_type_hints=result_set_type_hints,
             )
         else:
             raise OperationalError(query_execution.state_change_reason)

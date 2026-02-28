@@ -90,7 +90,7 @@ class DefaultArrowTypeConverter(Converter):
             }
         return self.__dtypes
 
-    def convert(self, type_: str, value: str | None) -> Any | None:
+    def convert(self, type_: str, value: str | None, type_hint: str | None = None) -> Any | None:
         converter = self.get(type_)
         return converter(value)
 
@@ -114,5 +114,5 @@ class DefaultArrowUnloadTypeConverter(Converter):
             default=_to_default,
         )
 
-    def convert(self, type_: str, value: str | None) -> Any | None:
+    def convert(self, type_: str, value: str | None, type_hint: str | None = None) -> Any | None:
         pass

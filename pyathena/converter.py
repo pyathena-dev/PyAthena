@@ -12,6 +12,13 @@ from typing import Any
 
 from dateutil.tz import gettz
 
+from pyathena.parser import (
+    TypedValueConverter,
+    TypeNode,
+    TypeSignatureParser,
+    _normalize_hive_syntax,
+    _split_array_items,
+)
 from pyathena.util import strtobool
 
 _logger = logging.getLogger(__name__)
@@ -266,44 +273,6 @@ def _parse_array_native(inner: str) -> list[Any] | None:
     return result if result else None
 
 
-def _split_array_items(inner: str) -> list[str]:
-    """Split array items by comma, respecting brace and bracket groupings.
-
-    Args:
-        inner: Interior content of array without brackets.
-
-    Returns:
-        List of item strings.
-    """
-    items = []
-    current_item = ""
-    brace_depth = 0
-    bracket_depth = 0
-
-    for char in inner:
-        if char == "{":
-            brace_depth += 1
-        elif char == "}":
-            brace_depth -= 1
-        elif char == "[":
-            bracket_depth += 1
-        elif char == "]":
-            bracket_depth -= 1
-        elif char == "," and brace_depth == 0 and bracket_depth == 0:
-            # Top-level comma - end current item
-            items.append(current_item.strip())
-            current_item = ""
-            continue
-
-        current_item += char
-
-    # Add the last item
-    if current_item.strip():
-        items.append(current_item.strip())
-
-    return items
-
-
 def _parse_map_native(inner: str) -> dict[str, Any] | None:
     """Parse map native format: key1=value1, key2=value2.
 
@@ -395,24 +364,22 @@ def _parse_unnamed_struct(inner: str) -> dict[str, Any]:
 
 
 def _convert_value(value: str) -> Any:
-    """Convert string value to appropriate Python type.
+    """Convert string value without type inference.
+
+    Returns the string as-is, except for null which becomes None.
+    This is a safe default that avoids incorrect type conversions
+    (e.g., converting varchar "1234" to int 1234 inside complex types).
+
+    Use :class:`~pyathena.parser.TypedValueConverter` for type-aware conversion.
 
     Args:
         value: String value to convert.
 
     Returns:
-        Converted value as int, float, bool, None, or string.
+        None for "null" values, otherwise the original string.
     """
     if value.lower() == "null":
         return None
-    if value.lower() == "true":
-        return True
-    if value.lower() == "false":
-        return False
-    if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
-        return int(value)
-    if "." in value and value.replace(".", "", 1).replace("-", "", 1).isdigit():
-        return float(value)
     return value
 
 
@@ -549,7 +516,7 @@ class Converter(metaclass=ABCMeta):
         self.mappings.update(mappings)
 
     @abstractmethod
-    def convert(self, type_: str, value: str | None) -> Any | None:
+    def convert(self, type_: str, value: str | None, type_hint: str | None = None) -> Any | None:
         raise NotImplementedError  # pragma: no cover
 
 
@@ -569,17 +536,76 @@ class DefaultTypeConverter(Converter):
         - Complex types: array, map, row/struct
         - JSON: json
 
+    When ``type_hint`` is provided (an Athena DDL type signature string like
+    ``"array(row(name varchar, age integer))"``), nested values within complex
+    types are converted according to the specified types instead of using
+    heuristic inference.
+
     Example:
         >>> converter = DefaultTypeConverter()
         >>> converter.convert('integer', '42')
         42
         >>> converter.convert('date', '2023-01-15')
         datetime.date(2023, 1, 15)
+        >>> converter.convert('array', '[1, 2, 3]', type_hint='array(varchar)')
+        ['1', '2', '3']
     """
 
     def __init__(self) -> None:
         super().__init__(mappings=deepcopy(_DEFAULT_CONVERTERS), default=_to_default)
+        self._parser = TypeSignatureParser()
+        self._typed_converter = TypedValueConverter(
+            converters=_DEFAULT_CONVERTERS,
+            default_converter=_to_default,
+            struct_parser=_to_struct,
+        )
+        self._parsed_hints: dict[str, TypeNode] = {}
 
-    def convert(self, type_: str, value: str | None) -> Any | None:
+    def convert(self, type_: str, value: str | None, type_hint: str | None = None) -> Any | None:
+        """Convert a string value to the appropriate Python type.
+
+        When ``type_hint`` is provided, uses the typed converter for precise
+        conversion of complex types. If the typed converter returns ``None``
+        (indicating a parse failure), falls back to the standard untyped
+        converter so that data is never silently lost.
+
+        Args:
+            type_: The Athena data type name (e.g., "integer", "varchar", "array").
+            value: The string value to convert, or None.
+            type_hint: Optional Athena DDL type signature for precise complex type
+                conversion (e.g., "array(varchar)", "row(name varchar, age integer)").
+
+        Returns:
+            The converted Python value, or None if the input value was None.
+        """
+        if value is None:
+            return None
+        if type_hint:
+            type_node = self._parse_type_hint(type_hint)
+            result = self._typed_converter.convert(value, type_node)
+            if result is not None:
+                return result
+            # Typed conversion returned None — this means a parse failure
+            # (actual SQL NULLs are caught by the `value is None` check above).
+            # Fall back to untyped conversion to avoid silent data loss.
+            return self.get(type_)(value)
         converter = self.get(type_)
         return converter(value)
+
+    def _parse_type_hint(self, type_hint: str) -> TypeNode:
+        """Parse a type hint string into a TypeNode, with caching.
+
+        Normalizes Hive-style syntax (``array<int>``) to Trino-style
+        (``array(integer)``) before parsing, so both syntaxes share the
+        same cache entry.
+
+        Args:
+            type_hint: Athena DDL type signature string.
+
+        Returns:
+            Parsed TypeNode.
+        """
+        normalized = _normalize_hive_syntax(type_hint)
+        if normalized not in self._parsed_hints:
+            self._parsed_hints[normalized] = self._parser.parse(normalized)
+        return self._parsed_hints[normalized]

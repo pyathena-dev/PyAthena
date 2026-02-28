@@ -229,6 +229,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         cache_type: str | None = None,
         max_workers: int = (cpu_count() or 1) * 5,
         auto_optimize_chunksize: bool = False,
+        result_set_type_hints: dict[str | int, str] | None = None,
         **kwargs,
     ) -> None:
         """Initialize AthenaPandasResultSet with pandas-specific configurations.
@@ -252,6 +253,8 @@ class AthenaPandasResultSet(AthenaResultSet):
             max_workers: Maximum worker threads for parallel operations.
             auto_optimize_chunksize: Enable automatic chunksize determination
                                    for large files when chunksize is None.
+            result_set_type_hints: Optional dictionary mapping column names to
+                Athena DDL type signatures for precise type conversion.
             **kwargs: Additional arguments passed to pandas.read_csv/read_parquet.
         """
         super().__init__(
@@ -260,6 +263,7 @@ class AthenaPandasResultSet(AthenaResultSet):
             query_execution=query_execution,
             arraysize=1,  # Fetch one row to retrieve metadata
             retry_config=retry_config,
+            result_set_type_hints=result_set_type_hints,
         )
         self._rows.clear()  # Clear pre_fetch data
         self._arraysize = arraysize

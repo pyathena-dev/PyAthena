@@ -142,12 +142,16 @@ class AsyncS3FSCursor(AsyncCursor):
     def _collect_result_set(
         self,
         query_id: str,
+        result_set_type_hints: dict[str | int, str] | None = None,
         kwargs: dict[str, Any] | None = None,
     ) -> AthenaS3FSResultSet:
         """Collect result set after query execution.
 
         Args:
             query_id: The Athena query execution ID.
+            result_set_type_hints: Optional dictionary mapping column names to
+                Athena DDL type signatures for precise type conversion within
+                complex types.
             kwargs: Additional keyword arguments for result set.
 
         Returns:
@@ -163,6 +167,7 @@ class AsyncS3FSCursor(AsyncCursor):
             arraysize=self._arraysize,
             retry_config=self._retry_config,
             csv_reader=self._csv_reader,
+            result_set_type_hints=result_set_type_hints,
             **kwargs,
         )
 
@@ -177,6 +182,7 @@ class AsyncS3FSCursor(AsyncCursor):
         result_reuse_enable: bool | None = None,
         result_reuse_minutes: int | None = None,
         paramstyle: str | None = None,
+        result_set_type_hints: dict[str | int, str] | None = None,
         **kwargs,
     ) -> tuple[str, Future[AthenaS3FSResultSet | Any]]:
         """Execute a SQL query asynchronously.
@@ -194,6 +200,9 @@ class AsyncS3FSCursor(AsyncCursor):
             result_reuse_enable: Enable Athena result reuse for this query.
             result_reuse_minutes: Minutes to reuse cached results.
             paramstyle: Parameter style ('qmark' or 'pyformat').
+            result_set_type_hints: Optional dictionary mapping column names to
+                Athena DDL type signatures for precise type conversion within
+                complex types.
             **kwargs: Additional execution parameters.
 
         Returns:
@@ -220,6 +229,7 @@ class AsyncS3FSCursor(AsyncCursor):
             self._executor.submit(
                 self._collect_result_set,
                 query_id,
+                result_set_type_hints,
                 kwargs,
             ),
         )

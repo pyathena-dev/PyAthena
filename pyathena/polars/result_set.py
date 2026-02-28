@@ -202,6 +202,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         cache_type: str | None = None,
         max_workers: int = (cpu_count() or 1) * 5,
         chunksize: int | None = None,
+        result_set_type_hints: dict[str | int, str] | None = None,
         **kwargs,
     ) -> None:
         """Initialize the Polars result set.
@@ -220,6 +221,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
             chunksize: Number of rows per chunk for memory-efficient processing.
                       If specified, data is loaded lazily in chunks for all data
                       access methods including fetchone(), fetchmany(), and iter_chunks().
+            result_set_type_hints: Optional dictionary mapping column names to
+                Athena DDL type signatures for precise type conversion.
             **kwargs: Additional arguments passed to Polars read functions.
         """
         super().__init__(
@@ -228,6 +231,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             query_execution=query_execution,
             arraysize=1,  # Fetch one row to retrieve metadata
             retry_config=retry_config,
+            result_set_type_hints=result_set_type_hints,
         )
         self._rows.clear()  # Clear pre_fetch data
         self._arraysize = arraysize

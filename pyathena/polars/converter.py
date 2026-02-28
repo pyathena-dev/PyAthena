@@ -103,7 +103,7 @@ class DefaultPolarsTypeConverter(Converter):
             return pl.Decimal(precision=precision, scale=scale)
         return self._types.get(type_)
 
-    def convert(self, type_: str, value: str | None) -> Any | None:
+    def convert(self, type_: str, value: str | None, type_hint: str | None = None) -> Any | None:
         converter = self.get(type_)
         return converter(value)
 
@@ -127,5 +127,5 @@ class DefaultPolarsUnloadTypeConverter(Converter):
             default=_to_default,
         )
 
-    def convert(self, type_: str, value: str | None) -> Any | None:
+    def convert(self, type_: str, value: str | None, type_hint: str | None = None) -> Any | None:
         pass

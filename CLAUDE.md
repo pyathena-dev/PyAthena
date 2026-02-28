@@ -42,6 +42,19 @@ export $(cat .env | xargs) && uv run pytest tests/pyathena/test_file.py -v
 - Use pytest fixtures from `conftest.py`
 - New features require tests; changes to SQLAlchemy dialects must pass `make test-sqla`
 
+#### Test Conventions
+- **Class-based tests** for integration tests that use fixtures (cursors, engines): `class TestCursor:` with methods like `def test_fetchone(self, cursor):`
+- **Standalone functions** for unit tests of pure logic (converters, parsers, utils): `def test_to_struct_json_formats(input_value, expected):`
+- Test file naming mirrors source: `pyathena/parser.py` → `tests/pyathena/test_parser.py`
+- **Fixtures**: Cursor/engine fixtures are defined in `conftest.py` and injected by name (e.g., `cursor`, `engine`, `async_cursor`). Use `indirect=True` parametrization to pass connection options:
+  ```python
+  @pytest.mark.parametrize("engine", [{"driver": "rest"}], indirect=True)
+  def test_query(self, engine):
+      engine, conn = engine
+  ```
+- **Parametrize** with `@pytest.mark.parametrize(("input", "expected"), [...])` for data-driven tests
+- **Integration tests** (need AWS) use cursor/engine fixtures with real Athena queries; **unit tests** (no AWS) call functions directly with test data
+
 ## Architecture — Key Design Decisions
 
 These are non-obvious conventions that can't be discovered by reading code alone.

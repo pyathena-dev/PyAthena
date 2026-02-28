@@ -149,6 +149,7 @@ class AsyncArrowCursor(AsyncCursor):
     def _collect_result_set(
         self,
         query_id: str,
+        result_set_type_hints: dict[str | int, str] | None = None,
         unload_location: str | None = None,
         kwargs: dict[str, Any] | None = None,
     ) -> AthenaArrowResultSet:
@@ -165,6 +166,7 @@ class AsyncArrowCursor(AsyncCursor):
             unload_location=unload_location,
             connect_timeout=self._connect_timeout,
             request_timeout=self._request_timeout,
+            result_set_type_hints=result_set_type_hints,
             **kwargs,
         )
 
@@ -179,6 +181,7 @@ class AsyncArrowCursor(AsyncCursor):
         result_reuse_enable: bool | None = None,
         result_reuse_minutes: int | None = None,
         paramstyle: str | None = None,
+        result_set_type_hints: dict[str | int, str] | None = None,
         **kwargs,
     ) -> tuple[str, Future[AthenaArrowResultSet | Any]]:
         operation, unload_location = self._prepare_unload(operation, s3_staging_dir)
@@ -198,6 +201,7 @@ class AsyncArrowCursor(AsyncCursor):
             self._executor.submit(
                 self._collect_result_set,
                 query_id,
+                result_set_type_hints,
                 unload_location,
                 kwargs,
             ),

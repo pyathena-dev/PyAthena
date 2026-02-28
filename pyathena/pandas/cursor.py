@@ -153,6 +153,7 @@ class PandasCursor(WithFetch):
         na_values: Iterable[str] | None = ("",),
         quoting: int = 1,
         on_start_query_execution: Callable[[str], None] | None = None,
+        result_set_type_hints: dict[str | int, str] | None = None,
         **kwargs,
     ) -> PandasCursor:
         """Execute a SQL query and return results as pandas DataFrames.
@@ -175,6 +176,9 @@ class PandasCursor(WithFetch):
             na_values: Additional values to treat as NA.
             quoting: CSV quoting behavior (pandas csv.QUOTE_* constants).
             on_start_query_execution: Callback called when query starts.
+            result_set_type_hints: Optional dictionary mapping column names to
+                Athena DDL type signatures for precise type conversion within
+                complex types.
             **kwargs: Additional pandas read_csv/read_parquet parameters.
 
         Returns:
@@ -224,6 +228,7 @@ class PandasCursor(WithFetch):
                 cache_type=kwargs.pop("cache_type", self._cache_type),
                 max_workers=kwargs.pop("max_workers", self._max_workers),
                 auto_optimize_chunksize=self._auto_optimize_chunksize,
+                result_set_type_hints=result_set_type_hints,
                 **kwargs,
             )
         else:

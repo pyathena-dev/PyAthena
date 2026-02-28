@@ -35,6 +35,7 @@ class AthenaAioResultSet(AthenaResultSet):
         query_execution: AthenaQueryExecution,
         arraysize: int,
         retry_config: RetryConfig,
+        result_set_type_hints: dict[str | int, str] | None = None,
     ) -> None:
         super().__init__(
             connection=connection,
@@ -43,6 +44,7 @@ class AthenaAioResultSet(AthenaResultSet):
             arraysize=arraysize,
             retry_config=retry_config,
             _pre_fetch=False,
+            result_set_type_hints=result_set_type_hints,
         )
 
     @classmethod
@@ -53,6 +55,7 @@ class AthenaAioResultSet(AthenaResultSet):
         query_execution: AthenaQueryExecution,
         arraysize: int,
         retry_config: RetryConfig,
+        result_set_type_hints: dict[str | int, str] | None = None,
     ) -> AthenaAioResultSet:
         """Async factory method.
 
@@ -64,11 +67,20 @@ class AthenaAioResultSet(AthenaResultSet):
             query_execution: Query execution metadata.
             arraysize: Number of rows to fetch per request.
             retry_config: Retry configuration for API calls.
+            result_set_type_hints: Optional dictionary mapping column names to
+                Athena DDL type signatures for precise type conversion.
 
         Returns:
             A fully initialized ``AthenaAioResultSet``.
         """
-        result_set = cls(connection, converter, query_execution, arraysize, retry_config)
+        result_set = cls(
+            connection,
+            converter,
+            query_execution,
+            arraysize,
+            retry_config,
+            result_set_type_hints=result_set_type_hints,
+        )
         if result_set.state == AthenaQueryExecution.STATE_SUCCEEDED:
             await result_set._async_pre_fetch()
         return result_set
