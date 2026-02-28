@@ -571,6 +571,78 @@ class TestCursor:
             NUMBER,
         ]
 
+    def test_complex_with_type_hints(self, cursor):
+        # 1. Basic complex columns from one_row_complex
+        cursor.execute(
+            """
+            SELECT col_array, col_map, col_struct
+            FROM one_row_complex
+            """,
+            result_set_type_hints={
+                "col_array": "array(integer)",
+                "col_map": "map(integer, integer)",
+                "col_struct": "row(a integer, b integer)",
+            },
+        )
+        row = cursor.fetchone()
+        assert row[0] == [1, 2]
+        assert row[1] == {"1": 2, "3": 4}
+        assert row[2] == {"a": 1, "b": 2}
+        # Without type hints col_struct values are strings; with hints they are ints
+        assert isinstance(row[2]["a"], int)
+        assert isinstance(row[2]["b"], int)
+        # Map values should also be ints
+        assert isinstance(row[1]["1"], int)
+
+        # 2. Nested struct
+        cursor.execute(
+            """
+            SELECT CAST(
+              ROW(ROW('2024-01-01', 123), 4.736, 0.583)
+              AS ROW(header ROW(stamp VARCHAR, seq INTEGER), x DOUBLE, y DOUBLE)
+            ) AS positions
+            """,
+            result_set_type_hints={
+                "positions": "row(header row(stamp varchar, seq integer), x double, y double)",
+            },
+        )
+        row = cursor.fetchone()
+        positions = row[0]
+        assert positions["header"]["stamp"] == "2024-01-01"
+        assert positions["header"]["seq"] == 123
+        assert isinstance(positions["header"]["seq"], int)
+        assert positions["x"] == 4.736
+        assert isinstance(positions["x"], float)
+        assert positions["y"] == 0.583
+        assert isinstance(positions["y"], float)
+
+        # 3. Array of nested structs
+        cursor.execute(
+            """
+            SELECT CAST(
+              ARRAY[
+                ROW(ROW(1, 2), ROW(CAST(0.5 AS DOUBLE))),
+                ROW(ROW(3, 4), ROW(CAST(1.5 AS DOUBLE)))
+              ]
+              AS ARRAY(ROW(pos ROW(x INTEGER, y INTEGER), vel ROW(x DOUBLE)))
+            ) AS data
+            """,
+            result_set_type_hints={
+                "data": "array(row(pos row(x integer, y integer), vel row(x double)))",
+            },
+        )
+        row = cursor.fetchone()
+        data = row[0]
+        assert len(data) == 2
+        assert data[0]["pos"]["x"] == 1
+        assert isinstance(data[0]["pos"]["x"], int)
+        assert data[0]["pos"]["y"] == 2
+        assert isinstance(data[0]["pos"]["y"], int)
+        assert data[0]["vel"]["x"] == 0.5
+        assert isinstance(data[0]["vel"]["x"], float)
+        assert data[1]["pos"]["x"] == 3
+        assert data[1]["vel"]["x"] == 1.5
+
     def test_cancel(self, cursor):
         def cancel(c):
             time.sleep(randint(5, 10))
