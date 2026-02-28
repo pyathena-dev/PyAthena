@@ -86,7 +86,7 @@ class TypeSignatureParser:
         inner = type_str[paren_idx + 1 : -1].strip()
 
         if type_name in ("row", "struct"):
-            parts = self._split_top_level(inner)
+            parts = self._split_type_args(inner)
             field_names: list[str] = []
             children: list[TypeNode] = []
             for part in parts:
@@ -107,7 +107,7 @@ class TypeSignatureParser:
             return TypeNode(type_name=type_name, children=[child])
 
         if type_name == "map":
-            parts = self._split_top_level(inner)
+            parts = self._split_type_args(inner)
             if len(parts) == 2:
                 key_type = self.parse(parts[0])
                 value_type = self.parse(parts[1])
@@ -117,7 +117,7 @@ class TypeSignatureParser:
         # Types with parameters like decimal(10, 2), varchar(255)
         return TypeNode(type_name=type_name)
 
-    def _split_top_level(self, s: str, delimiter: str = ",") -> list[str]:
+    def _split_type_args(self, s: str, delimiter: str = ",") -> list[str]:
         """Split a string by delimiter, respecting nested parentheses.
 
         Args:
