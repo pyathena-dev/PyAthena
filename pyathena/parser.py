@@ -387,7 +387,7 @@ class TypedValueConverter:
                 if isinstance(parsed, dict):
                     result: dict[str, Any] = {}
                     for i, (k, v) in enumerate(parsed.items()):
-                        ft = field_types[i] if i < len(field_types) else TypeNode("varchar")
+                        ft = self._get_field_type(k, field_names, field_types, i)
                         result[k] = (
                             self.convert(self._to_json_str(v), ft) if v is not None else None
                         )

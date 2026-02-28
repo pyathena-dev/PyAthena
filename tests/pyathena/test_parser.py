@@ -170,6 +170,16 @@ class TestTypedValueConverter:
         assert isinstance(result["inner"]["a"], int)
         assert isinstance(result["val"], float)
 
+    def test_struct_json_name_based_type_matching(self, converter):
+        """JSON path: field types are matched by name, not position order."""
+        parser = TypeSignatureParser()
+        node = parser.parse("row(name varchar, age integer)")
+        # JSON keys in reverse order compared to type definition
+        result = converter.convert('{"age": 25, "name": "Alice"}', node)
+        assert result == {"age": 25, "name": "Alice"}
+        assert isinstance(result["age"], int)
+        assert isinstance(result["name"], str)
+
     def test_map_json_null_value_preserved(self, converter):
         """JSON path: map with null values vs "null" string values."""
         parser = TypeSignatureParser()
