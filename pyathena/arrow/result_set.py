@@ -91,7 +91,7 @@ class AthenaArrowResultSet(AthenaResultSet):
         unload_location: str | None = None,
         connect_timeout: float | None = None,
         request_timeout: float | None = None,
-        result_set_type_hints: dict[str, str] | None = None,
+        result_set_type_hints: dict[str | int, str] | None = None,
         **kwargs,
     ) -> None:
         super().__init__(

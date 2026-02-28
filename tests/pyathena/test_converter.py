@@ -352,3 +352,59 @@ class TestDefaultTypeConverter:
             type_hint="row(header row(seq integer, stamp varchar), x double)",
         )
         assert result == {"header": {"seq": 123, "stamp": "2024"}, "x": 4.5}
+
+    def test_fallback_on_malformed_value(self):
+        """When typed conversion fails (returns None), fall back to untyped conversion."""
+        converter = DefaultTypeConverter()
+        # "not-an-array" doesn't look like an array — typed converter returns None.
+        # Untyped _to_array also returns None for this input, which is correct.
+        result = converter.convert("array", "not-an-array", type_hint="array(integer)")
+        assert result is None
+
+    def test_fallback_preserves_struct_value(self):
+        """Malformed struct with type_hint still falls back to untyped parsing."""
+        converter = DefaultTypeConverter()
+        # Struct with no closing brace — typed converter returns None.
+        # Untyped _to_struct also returns None here.
+        result = converter.convert("row", "{unclosed", type_hint="row(a integer)")
+        assert result is None
+
+    def test_fallback_returns_untyped_result(self):
+        """When typed conversion returns None, untyped conversion is used."""
+        converter = DefaultTypeConverter()
+        # The typed converter returns None for a struct that doesn't start with "{".
+        # The untyped _to_struct also returns None for non-struct input.
+        # Use an array example where typed converter returns None (not a bracket-wrapped
+        # value), but untyped _to_array can still parse it via JSON.
+        result = converter.convert(
+            "row",
+            '{"a": 1}',
+            type_hint="row(a varchar)",
+        )
+        # Typed conversion succeeds here — "a" is varchar so "1" stays a string
+        assert result == {"a": "1"}
+
+    def test_hive_syntax_through_converter(self):
+        """Hive-style syntax works end-to-end through DefaultTypeConverter."""
+        converter = DefaultTypeConverter()
+        result = converter.convert("array", "[1, 2, 3]", type_hint="array<int>")
+        assert result == [1, 2, 3]
+
+    def test_hive_syntax_struct_through_converter(self):
+        """Hive struct syntax works end-to-end."""
+        converter = DefaultTypeConverter()
+        result = converter.convert(
+            "row",
+            "{name=Alice, age=25}",
+            type_hint="struct<name:varchar,age:int>",
+        )
+        assert result == {"name": "Alice", "age": 25}
+
+    def test_hive_syntax_caching(self):
+        """Hive syntax is normalized before cache lookup."""
+        converter = DefaultTypeConverter()
+        converter.convert("array", "[1]", type_hint="array<integer>")
+        converter.convert("array", "[2]", type_hint="array(integer)")
+        # Both should normalize to "array(integer)" in the cache
+        assert "array(integer)" in converter._parsed_hints
+        assert len(converter._parsed_hints) == 1

@@ -64,7 +64,7 @@ class AthenaS3FSResultSet(AthenaResultSet):
         block_size: int | None = None,
         csv_reader: CSVReaderType | None = None,
         filesystem_class: type[AbstractFileSystem] | None = None,
-        result_set_type_hints: dict[str, str] | None = None,
+        result_set_type_hints: dict[str | int, str] | None = None,
         **kwargs,
     ) -> None:
         super().__init__(

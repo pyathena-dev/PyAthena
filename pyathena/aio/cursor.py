@@ -79,7 +79,7 @@ class AioCursor(WithAsyncFetch):
         result_reuse_enable: bool | None = None,
         result_reuse_minutes: int | None = None,
         paramstyle: str | None = None,
-        result_set_type_hints: dict[str, str] | None = None,
+        result_set_type_hints: dict[str | int, str] | None = None,
         **kwargs,
     ) -> AioCursor:
         """Execute a SQL query asynchronously.

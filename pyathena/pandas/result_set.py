@@ -229,7 +229,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         cache_type: str | None = None,
         max_workers: int = (cpu_count() or 1) * 5,
         auto_optimize_chunksize: bool = False,
-        result_set_type_hints: dict[str, str] | None = None,
+        result_set_type_hints: dict[str | int, str] | None = None,
         **kwargs,
     ) -> None:
         """Initialize AthenaPandasResultSet with pandas-specific configurations.

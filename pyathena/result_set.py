@@ -65,7 +65,7 @@ class AthenaResultSet(CursorIterator):
         arraysize: int,
         retry_config: RetryConfig,
         _pre_fetch: bool = True,
-        result_set_type_hints: dict[str, str] | None = None,
+        result_set_type_hints: dict[str | int, str] | None = None,
     ) -> None:
         super().__init__(arraysize=arraysize)
         self._connection: Connection[Any] | None = connection
@@ -74,11 +74,14 @@ class AthenaResultSet(CursorIterator):
         if not self._query_execution:
             raise ProgrammingError("Required argument `query_execution` not found.")
         self._retry_config = retry_config
-        self._result_set_type_hints = (
-            {k.lower(): v for k, v in result_set_type_hints.items()}
-            if result_set_type_hints
-            else None
-        )
+        self._hints_by_name: dict[str, str] = {}
+        self._hints_by_index: dict[int, str] = {}
+        if result_set_type_hints:
+            for k, v in result_set_type_hints.items():
+                if isinstance(k, int):
+                    self._hints_by_index[k] = v
+                else:
+                    self._hints_by_name[k.lower()] = v
         self._client = connection.session.client(
             "s3",
             region_name=connection.region_name,
@@ -433,17 +436,39 @@ class AthenaResultSet(CursorIterator):
         self._metadata = tuple(column_info)
         self._column_types = tuple(m.get("Type", "") for m in self._metadata)
         self._column_names = tuple(m.get("Name", "") for m in self._metadata)
-        if self._result_set_type_hints and any(
+        if (self._hints_by_name or self._hints_by_index) and any(
             t.lower() in self._COMPLEX_TYPES for t in self._column_types
         ):
             hints = tuple(
-                self._result_set_type_hints.get(m.get("Name", "").lower())
-                if t.lower() in self._COMPLEX_TYPES
-                else None
-                for m, t in zip(self._metadata, self._column_types, strict=True)
+                self._resolve_type_hint(i, m.get("Name", "").lower(), t.lower())
+                for i, (m, t) in enumerate(zip(self._metadata, self._column_types, strict=True))
             )
             if any(hints):
                 self._column_type_hints = hints
+
+    def _resolve_type_hint(
+        self, index: int, col_name_lower: str, col_type_lower: str
+    ) -> str | None:
+        """Look up the type hint for a column by index then by name.
+
+        Index-based hints take priority over name-based hints, allowing
+        callers to disambiguate duplicate column names.
+
+        Args:
+            index: Zero-based column position.
+            col_name_lower: Lowercased column name from metadata.
+            col_type_lower: Lowercased column type from metadata.
+
+        Returns:
+            The type hint string, or None if the column has no hint or
+            is not a complex type.
+        """
+        if col_type_lower not in self._COMPLEX_TYPES:
+            return None
+        hint = self._hints_by_index.get(index)
+        if hint is not None:
+            return hint
+        return self._hints_by_name.get(col_name_lower)
 
     def _process_update_count(self, response: dict[str, Any]) -> None:
         update_count = response.get("UpdateCount")

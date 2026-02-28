@@ -12,7 +12,13 @@ from typing import Any
 
 from dateutil.tz import gettz
 
-from pyathena.parser import TypedValueConverter, TypeNode, TypeSignatureParser, _split_array_items
+from pyathena.parser import (
+    TypedValueConverter,
+    TypeNode,
+    TypeSignatureParser,
+    _normalize_hive_syntax,
+    _split_array_items,
+)
 from pyathena.util import strtobool
 
 _logger = logging.getLogger(__name__)
@@ -559,8 +565,9 @@ class DefaultTypeConverter(Converter):
         """Convert a string value to the appropriate Python type.
 
         When ``type_hint`` is provided, uses the typed converter for precise
-        conversion of complex types. Otherwise, uses the standard converter
-        for the given Athena type.
+        conversion of complex types. If the typed converter returns ``None``
+        (indicating a parse failure), falls back to the standard untyped
+        converter so that data is never silently lost.
 
         Args:
             type_: The Athena data type name (e.g., "integer", "varchar", "array").
@@ -575,12 +582,22 @@ class DefaultTypeConverter(Converter):
             return None
         if type_hint:
             type_node = self._parse_type_hint(type_hint)
-            return self._typed_converter.convert(value, type_node)
+            result = self._typed_converter.convert(value, type_node)
+            if result is not None:
+                return result
+            # Typed conversion returned None — this means a parse failure
+            # (actual SQL NULLs are caught by the `value is None` check above).
+            # Fall back to untyped conversion to avoid silent data loss.
+            return self.get(type_)(value)
         converter = self.get(type_)
         return converter(value)
 
     def _parse_type_hint(self, type_hint: str) -> TypeNode:
         """Parse a type hint string into a TypeNode, with caching.
+
+        Normalizes Hive-style syntax (``array<int>``) to Trino-style
+        (``array(integer)``) before parsing, so both syntaxes share the
+        same cache entry.
 
         Args:
             type_hint: Athena DDL type signature string.
@@ -588,6 +605,7 @@ class DefaultTypeConverter(Converter):
         Returns:
             Parsed TypeNode.
         """
-        if type_hint not in self._parsed_hints:
-            self._parsed_hints[type_hint] = self._parser.parse(type_hint)
-        return self._parsed_hints[type_hint]
+        normalized = _normalize_hive_syntax(type_hint)
+        if normalized not in self._parsed_hints:
+            self._parsed_hints[normalized] = self._parser.parse(normalized)
+        return self._parsed_hints[normalized]

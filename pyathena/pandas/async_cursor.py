@@ -118,7 +118,7 @@ class AsyncPandasCursor(AsyncCursor):
     def _collect_result_set(
         self,
         query_id: str,
-        result_set_type_hints: dict[str, str] | None = None,
+        result_set_type_hints: dict[str | int, str] | None = None,
         keep_default_na: bool = False,
         na_values: Iterable[str] | None = ("",),
         quoting: int = 1,
@@ -156,7 +156,7 @@ class AsyncPandasCursor(AsyncCursor):
         result_reuse_enable: bool | None = None,
         result_reuse_minutes: int | None = None,
         paramstyle: str | None = None,
-        result_set_type_hints: dict[str, str] | None = None,
+        result_set_type_hints: dict[str | int, str] | None = None,
         keep_default_na: bool = False,
         na_values: Iterable[str] | None = ("",),
         quoting: int = 1,

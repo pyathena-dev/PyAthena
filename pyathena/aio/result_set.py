@@ -35,7 +35,7 @@ class AthenaAioResultSet(AthenaResultSet):
         query_execution: AthenaQueryExecution,
         arraysize: int,
         retry_config: RetryConfig,
-        result_set_type_hints: dict[str, str] | None = None,
+        result_set_type_hints: dict[str | int, str] | None = None,
     ) -> None:
         super().__init__(
             connection=connection,
@@ -55,7 +55,7 @@ class AthenaAioResultSet(AthenaResultSet):
         query_execution: AthenaQueryExecution,
         arraysize: int,
         retry_config: RetryConfig,
-        result_set_type_hints: dict[str, str] | None = None,
+        result_set_type_hints: dict[str | int, str] | None = None,
     ) -> AthenaAioResultSet:
         """Async factory method.
 

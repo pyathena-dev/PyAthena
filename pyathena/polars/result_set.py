@@ -202,7 +202,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         cache_type: str | None = None,
         max_workers: int = (cpu_count() or 1) * 5,
         chunksize: int | None = None,
-        result_set_type_hints: dict[str, str] | None = None,
+        result_set_type_hints: dict[str | int, str] | None = None,
         **kwargs,
     ) -> None:
         """Initialize the Polars result set.

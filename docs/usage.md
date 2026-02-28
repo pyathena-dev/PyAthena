@@ -441,6 +441,38 @@ positions = row[0]
 # positions["x"] == 4.736 (float, not "4.736")
 ```
 
+### Hive-style syntax
+
+You can paste type signatures from Hive DDL or ``DESCRIBE TABLE`` output directly.
+Hive-style angle brackets and colons are automatically converted to Trino-style syntax:
+
+```python
+# Both are equivalent:
+result_set_type_hints={"col": "array(struct(a integer, b varchar))"}   # Trino
+result_set_type_hints={"col": "array<struct<a:int,b:varchar>>"}        # Hive
+```
+
+The ``int`` alias is also supported and resolves to ``integer``.
+
+### Index-based hints for duplicate column names
+
+When a query produces columns with the same alias (e.g. ``SELECT a AS x, b AS x``),
+name-based hints cannot distinguish between them. Use integer keys to specify hints
+by zero-based column position:
+
+```python
+cursor.execute(
+    "SELECT a AS x, b AS x FROM my_table",
+    result_set_type_hints={
+        0: "array(integer)",   # first "x" column
+        1: "map(varchar, integer)",  # second "x" column
+    },
+)
+```
+
+Integer (index-based) hints take priority over string (name-based) hints for the same
+column. You can mix both styles in the same dictionary.
+
 ### Constraints
 
 * **Nested arrays in native format** — Athena's native (non-JSON) string representation

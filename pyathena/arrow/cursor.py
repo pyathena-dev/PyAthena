@@ -137,7 +137,7 @@ class ArrowCursor(WithFetch):
         result_reuse_minutes: int | None = None,
         paramstyle: str | None = None,
         on_start_query_execution: Callable[[str], None] | None = None,
-        result_set_type_hints: dict[str, str] | None = None,
+        result_set_type_hints: dict[str | int, str] | None = None,
         **kwargs,
     ) -> ArrowCursor:
         """Execute a SQL query and return results as Apache Arrow Tables.

@@ -147,7 +147,7 @@ class AsyncCursor(BaseCursor):
     def _collect_result_set(
         self,
         query_id: str,
-        result_set_type_hints: dict[str, str] | None = None,
+        result_set_type_hints: dict[str | int, str] | None = None,
     ) -> AthenaResultSet:
         query_execution = cast(AthenaQueryExecution, self._poll(query_id))
         return self._result_set_class(
@@ -170,7 +170,7 @@ class AsyncCursor(BaseCursor):
         result_reuse_enable: bool | None = None,
         result_reuse_minutes: int | None = None,
         paramstyle: str | None = None,
-        result_set_type_hints: dict[str, str] | None = None,
+        result_set_type_hints: dict[str | int, str] | None = None,
         **kwargs,
     ) -> tuple[str, Future[AthenaResultSet | Any]]:
         """Execute a SQL query asynchronously.

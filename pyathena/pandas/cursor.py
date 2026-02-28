@@ -153,7 +153,7 @@ class PandasCursor(WithFetch):
         na_values: Iterable[str] | None = ("",),
         quoting: int = 1,
         on_start_query_execution: Callable[[str], None] | None = None,
-        result_set_type_hints: dict[str, str] | None = None,
+        result_set_type_hints: dict[str | int, str] | None = None,
         **kwargs,
     ) -> PandasCursor:
         """Execute a SQL query and return results as pandas DataFrames.
