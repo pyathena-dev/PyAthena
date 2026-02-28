@@ -3,12 +3,13 @@ from __future__ import annotations
 import binascii
 import json
 import logging
+import re
 from abc import ABCMeta, abstractmethod
 from collections.abc import Callable
 from copy import deepcopy
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import Any
+from typing import Any, ClassVar
 
 from dateutil.tz import gettz
 
@@ -16,7 +17,6 @@ from pyathena.parser import (
     TypedValueConverter,
     TypeNode,
     TypeSignatureParser,
-    _normalize_hive_syntax,
     _split_array_items,
 )
 from pyathena.util import strtobool
@@ -551,6 +551,9 @@ class DefaultTypeConverter(Converter):
         ['1', '2', '3']
     """
 
+    _HIVE_SYNTAX_RE: ClassVar[re.Pattern[str]] = re.compile(r"[<>:]")
+    _HIVE_REPLACEMENTS: ClassVar[dict[str, str]] = {"<": "(", ">": ")", ":": " "}
+
     def __init__(self) -> None:
         super().__init__(mappings=deepcopy(_DEFAULT_CONVERTERS), default=_to_default)
         self._parser = TypeSignatureParser()
@@ -560,6 +563,25 @@ class DefaultTypeConverter(Converter):
             struct_parser=_to_struct,
         )
         self._parsed_hints: dict[str, TypeNode] = {}
+
+    @staticmethod
+    def _normalize_hive_syntax(type_str: str) -> str:
+        """Normalize Hive-style DDL syntax to Trino-style.
+
+        Converts angle-bracket notation (``array<struct<a:int>>``) to
+        parenthesized notation (``array(struct(a int))``).
+
+        Args:
+            type_str: Type signature string, possibly using Hive syntax.
+
+        Returns:
+            Normalized type signature using Trino-style parenthesized notation.
+        """
+        if "<" not in type_str:
+            return type_str
+        return DefaultTypeConverter._HIVE_SYNTAX_RE.sub(
+            lambda m: DefaultTypeConverter._HIVE_REPLACEMENTS[m.group()], type_str
+        )
 
     def convert(self, type_: str, value: str | None, type_hint: str | None = None) -> Any | None:
         """Convert a string value to the appropriate Python type.
@@ -605,7 +627,7 @@ class DefaultTypeConverter(Converter):
         Returns:
             Parsed TypeNode.
         """
-        normalized = _normalize_hive_syntax(type_hint)
+        normalized = self._normalize_hive_syntax(type_hint)
         if normalized not in self._parsed_hints:
             self._parsed_hints[normalized] = self._parser.parse(normalized)
         return self._parsed_hints[normalized]

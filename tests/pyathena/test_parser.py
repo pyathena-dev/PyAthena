@@ -5,7 +5,6 @@ from pyathena.parser import (
     TypedValueConverter,
     TypeNode,
     TypeSignatureParser,
-    _normalize_hive_syntax,
 )
 
 
@@ -108,55 +107,6 @@ class TestTypeSignatureParser:
         node = parser.parse("array(int)")
         assert node.type_name == "array"
         assert node.children[0].type_name == "integer"
-
-    def test_hive_syntax_simple(self):
-        parser = TypeSignatureParser()
-        node = parser.parse(_normalize_hive_syntax("array<int>"))
-        assert node.type_name == "array"
-        assert node.children[0].type_name == "integer"
-
-    def test_hive_syntax_struct(self):
-        parser = TypeSignatureParser()
-        node = parser.parse(_normalize_hive_syntax("struct<a:int,b:varchar>"))
-        assert node.type_name == "struct"
-        assert node.field_names == ["a", "b"]
-        assert node.children[0].type_name == "integer"
-        assert node.children[1].type_name == "varchar"
-
-    def test_hive_syntax_nested(self):
-        parser = TypeSignatureParser()
-        node = parser.parse(_normalize_hive_syntax("array<struct<a:int,b:varchar>>"))
-        assert node.type_name == "array"
-        struct_node = node.children[0]
-        assert struct_node.type_name == "struct"
-        assert struct_node.field_names == ["a", "b"]
-        assert struct_node.children[0].type_name == "integer"
-        assert struct_node.children[1].type_name == "varchar"
-
-    def test_hive_syntax_map(self):
-        parser = TypeSignatureParser()
-        node = parser.parse(_normalize_hive_syntax("map<string,int>"))
-        assert node.type_name == "map"
-        assert node.children[0].type_name == "string"
-        assert node.children[1].type_name == "integer"
-
-    def test_mixed_syntax(self):
-        """Hive angle brackets wrapping Trino-style parenthesized inner type."""
-        parser = TypeSignatureParser()
-        node = parser.parse(_normalize_hive_syntax("array<row(a int, b varchar)>"))
-        assert node.type_name == "array"
-        row_node = node.children[0]
-        assert row_node.type_name == "row"
-        assert row_node.field_names == ["a", "b"]
-        assert row_node.children[0].type_name == "integer"
-        assert row_node.children[1].type_name == "varchar"
-
-    def test_normalize_hive_syntax_noop(self):
-        """Trino-style input passes through unchanged."""
-        assert _normalize_hive_syntax("array(integer)") == "array(integer)"
-
-    def test_normalize_hive_syntax_replaces(self):
-        assert _normalize_hive_syntax("array<struct<a:int>>") == "array(struct(a int))"
 
     def test_trailing_modifier_after_paren(self):
         """Type with content after closing paren should not break parsing."""

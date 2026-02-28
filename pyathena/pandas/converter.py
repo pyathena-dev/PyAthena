@@ -81,7 +81,8 @@ class DefaultPandasTypeConverter(Converter):
         return self.__dtypes
 
     def convert(self, type_: str, value: str | None, type_hint: str | None = None) -> Any | None:
-        pass
+        converter = self.get(type_)
+        return converter(value)
 
 
 class DefaultPandasUnloadTypeConverter(Converter):
@@ -104,4 +105,5 @@ class DefaultPandasUnloadTypeConverter(Converter):
         )
 
     def convert(self, type_: str, value: str | None, type_hint: str | None = None) -> Any | None:
-        pass
+        converter = self.get(type_)
+        return converter(value)

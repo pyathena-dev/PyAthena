@@ -408,3 +408,50 @@ class TestDefaultTypeConverter:
         # Both should normalize to "array(integer)" in the cache
         assert "array(integer)" in converter._parsed_hints
         assert len(converter._parsed_hints) == 1
+
+    def test_normalize_hive_syntax_noop(self):
+        """Trino-style input passes through unchanged."""
+        assert DefaultTypeConverter._normalize_hive_syntax("array(integer)") == "array(integer)"
+
+    def test_normalize_hive_syntax_replaces(self):
+        assert (
+            DefaultTypeConverter._normalize_hive_syntax("array<struct<a:int>>")
+            == "array(struct(a int))"
+        )
+
+    def test_normalize_hive_syntax_struct(self):
+        converter = DefaultTypeConverter()
+        result = converter.convert(
+            "row",
+            "{name=Alice, age=25}",
+            type_hint="struct<name:varchar,age:int>",
+        )
+        assert result == {"name": "Alice", "age": 25}
+
+    def test_normalize_hive_syntax_nested(self):
+        converter = DefaultTypeConverter()
+        result = converter.convert(
+            "array",
+            "[{a=1, b=hello}, {a=2, b=world}]",
+            type_hint="array<struct<a:int,b:varchar>>",
+        )
+        assert result == [{"a": 1, "b": "hello"}, {"a": 2, "b": "world"}]
+
+    def test_normalize_hive_syntax_map(self):
+        converter = DefaultTypeConverter()
+        result = converter.convert(
+            "map",
+            '{"x": 1, "y": 2}',
+            type_hint="map<string,int>",
+        )
+        assert result == {"x": 1, "y": 2}
+
+    def test_normalize_hive_syntax_mixed(self):
+        """Hive angle brackets wrapping Trino-style parenthesized inner type."""
+        converter = DefaultTypeConverter()
+        result = converter.convert(
+            "array",
+            "[{a=1, b=hello}]",
+            type_hint="array<row(a int, b varchar)>",
+        )
+        assert result == [{"a": 1, "b": "hello"}]

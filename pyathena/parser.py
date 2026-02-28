@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -10,28 +9,6 @@ from typing import Any
 _TYPE_ALIASES: dict[str, str] = {
     "int": "integer",
 }
-
-# Pattern for normalizing Hive-style type signatures to Trino-style.
-# Matches angle brackets and colons used in Hive DDL (e.g., array<struct<a:int>>).
-_HIVE_SYNTAX_RE: re.Pattern[str] = re.compile(r"[<>:]")
-_HIVE_REPLACEMENTS: dict[str, str] = {"<": "(", ">": ")", ":": " "}
-
-
-def _normalize_hive_syntax(type_str: str) -> str:
-    """Normalize Hive-style DDL syntax to Trino-style.
-
-    Converts angle-bracket notation (``array<struct<a:int>>``) to
-    parenthesized notation (``array(struct(a int))``).
-
-    Args:
-        type_str: Type signature string, possibly using Hive syntax.
-
-    Returns:
-        Normalized type signature using Trino-style parenthesized notation.
-    """
-    if "<" not in type_str:
-        return type_str
-    return _HIVE_SYNTAX_RE.sub(lambda m: _HIVE_REPLACEMENTS[m.group()], type_str)
 
 
 def _split_array_items(inner: str) -> list[str]:
