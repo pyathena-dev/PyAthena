@@ -70,7 +70,11 @@ class AthenaResultSet(CursorIterator):
         if not self._query_execution:
             raise ProgrammingError("Required argument `query_execution` not found.")
         self._retry_config = retry_config
-        self._result_set_type_hints = result_set_type_hints
+        self._result_set_type_hints = (
+            {k.lower(): v for k, v in result_set_type_hints.items()}
+            if result_set_type_hints
+            else None
+        )
         self._client = connection.session.client(
             "s3",
             region_name=connection.region_name,
@@ -452,7 +456,11 @@ class AthenaResultSet(CursorIterator):
                     conv.convert(
                         meta.get("Type"),
                         row.get("VarCharValue"),
-                        type_hint=hints.get(meta.get("Name", "")) if hints else None,
+                        **(
+                            {"type_hint": hints[meta.get("Name", "").lower()]}
+                            if hints and meta.get("Name", "").lower() in hints
+                            else {}
+                        ),
                     )
                     for meta, row in zip(metadata, rows[i].get("Data", []), strict=False)
                 ]
@@ -646,7 +654,11 @@ class AthenaDictResultSet(AthenaResultSet):
                         conv.convert(
                             meta.get("Type"),
                             row.get("VarCharValue"),
-                            type_hint=hints.get(meta.get("Name", "")) if hints else None,
+                            **(
+                                {"type_hint": hints[meta.get("Name", "").lower()]}
+                                if hints and meta.get("Name", "").lower() in hints
+                                else {}
+                            ),
                         ),
                     )
                     for meta, row in zip(metadata, rows[i].get("Data", []), strict=False)

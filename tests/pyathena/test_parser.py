@@ -136,3 +136,44 @@ class TestTypedValueConverter:
         node = parser.parse("row(header row(seq integer, stamp varchar), x double)")
         result = converter.convert("{header={seq=123, stamp=2024}, x=4.5}", node)
         assert result == {"header": {"seq": 123, "stamp": "2024"}, "x": 4.5}
+
+    def test_array_of_row_json(self, converter):
+        """JSON path: array(row(...)) with nested dict elements."""
+        parser = TypeSignatureParser()
+        node = parser.parse("array(row(x integer, y double))")
+        result = converter.convert('[{"x": 1, "y": 2.5}, {"x": 3, "y": 4.0}]', node)
+        assert result == [{"x": 1, "y": 2.5}, {"x": 3, "y": 4.0}]
+        assert isinstance(result[0]["x"], int)
+        assert isinstance(result[0]["y"], float)
+
+    def test_null_string_preserved_in_json(self, converter):
+        """JSON path: string "null" in array(varchar) must not become None."""
+        parser = TypeSignatureParser()
+        node = parser.parse("array(varchar)")
+        result = converter.convert('["null", "x"]', node)
+        assert result == ["null", "x"]
+
+    def test_map_with_row_value_native(self, converter):
+        """Native path: map(varchar, row(...)) with nested struct values."""
+        parser = TypeSignatureParser()
+        node = parser.parse("map(varchar, row(x integer, y integer))")
+        result = converter.convert("{a={x=1, y=2}, b={x=3, y=4}}", node)
+        assert result == {"a": {"x": 1, "y": 2}, "b": {"x": 3, "y": 4}}
+        assert isinstance(result["a"]["x"], int)
+
+    def test_nested_row_json(self, converter):
+        """JSON path: row containing row with nested dict values."""
+        parser = TypeSignatureParser()
+        node = parser.parse("row(inner row(a integer, b varchar), val double)")
+        result = converter.convert('{"inner": {"a": 10, "b": "hello"}, "val": 3.14}', node)
+        assert result == {"inner": {"a": 10, "b": "hello"}, "val": 3.14}
+        assert isinstance(result["inner"]["a"], int)
+        assert isinstance(result["val"], float)
+
+    def test_map_json_null_value_preserved(self, converter):
+        """JSON path: map with null values vs "null" string values."""
+        parser = TypeSignatureParser()
+        node = parser.parse("map(varchar, varchar)")
+        result = converter.convert('{"a": null, "b": "null"}', node)
+        assert result["a"] is None
+        assert result["b"] == "null"

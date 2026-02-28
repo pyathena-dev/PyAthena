@@ -169,7 +169,11 @@ class AthenaS3FSResultSet(AthenaResultSet):
                     self._converter.convert(
                         col_type,
                         value if value != "" else None,
-                        type_hint=hints.get(col_name) if hints else None,
+                        **(
+                            {"type_hint": hints[col_name.lower()]}
+                            if hints and col_name.lower() in hints
+                            else {}
+                        ),
                     )
                     for col_type, col_name, value in zip(
                         column_types, column_names, row, strict=False
@@ -180,7 +184,11 @@ class AthenaS3FSResultSet(AthenaResultSet):
                     self._converter.convert(
                         col_type,
                         value,
-                        type_hint=hints.get(col_name) if hints else None,
+                        **(
+                            {"type_hint": hints[col_name.lower()]}
+                            if hints and col_name.lower() in hints
+                            else {}
+                        ),
                     )
                     for col_type, col_name, value in zip(
                         column_types, column_names, row, strict=False

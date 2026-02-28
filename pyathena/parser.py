@@ -213,6 +213,23 @@ class TypedValueConverter:
         converter_fn = self._converters.get(type_node.type_name, self._default_converter)
         return converter_fn(value)
 
+    @staticmethod
+    def _to_json_str(value: Any) -> str:
+        """Convert a JSON-parsed value back to a string for further conversion.
+
+        Uses json.dumps for dict/list to produce valid JSON, and str() for
+        scalar types to produce converter-compatible strings.
+
+        Args:
+            value: A value from json.loads output.
+
+        Returns:
+            String representation suitable for type conversion.
+        """
+        if isinstance(value, (dict, list)):
+            return json.dumps(value)
+        return str(value)
+
     def _convert_element(self, value: str, type_node: TypeNode) -> Any:
         """Convert a single element within a complex type using type information.
 
@@ -249,7 +266,7 @@ class TypedValueConverter:
             parsed = json.loads(value)
             if isinstance(parsed, list):
                 return [
-                    None if elem is None else self._convert_element(str(elem), element_type)
+                    None if elem is None else self.convert(self._to_json_str(elem), element_type)
                     for elem in parsed
                 ]
         except json.JSONDecodeError:
@@ -304,9 +321,11 @@ class TypedValueConverter:
                 parsed = json.loads(value)
                 if isinstance(parsed, dict):
                     return {
-                        str(
-                            self._convert_element(str(k), key_type) if k is not None else k
-                        ): self._convert_element(str(v), value_type) if v is not None else None
+                        str(self.convert(self._to_json_str(k), key_type) if k is not None else k): (
+                            self.convert(self._to_json_str(v), value_type)
+                            if v is not None
+                            else None
+                        )
                         for k, v in parsed.items()
                     }
             except json.JSONDecodeError:
@@ -317,10 +336,7 @@ class TypedValueConverter:
         if not inner:
             return {}
 
-        if any(char in inner for char in "()[]"):
-            return None
-
-        pairs = [pair.strip() for pair in inner.split(",")]
+        pairs = _split_array_items(inner)
         result: dict[str, Any] = {}
         for pair in pairs:
             if "=" not in pair:
@@ -328,11 +344,23 @@ class TypedValueConverter:
             k, v = pair.split("=", 1)
             k = k.strip()
             v = v.strip()
-            if any(char in k for char in '{}="') or any(char in v for char in '{}="'):
+            if any(char in k for char in '{}="'):
                 continue
-            converted_key = self._convert_element(k, key_type)
-            converted_value = self._convert_element(v, value_type)
-            result[str(converted_key)] = converted_value
+            if v.startswith("{") and v.endswith("}"):
+                if value_type.type_name in ("row", "struct"):
+                    result[str(self._convert_element(k, key_type))] = self._convert_typed_struct(
+                        v, value_type
+                    )
+                elif value_type.type_name == "map":
+                    result[str(self._convert_element(k, key_type))] = self._convert_typed_map(
+                        v, value_type
+                    )
+                else:
+                    result[str(self._convert_element(k, key_type))] = self._struct_parser(v)
+            else:
+                converted_key = self._convert_element(k, key_type)
+                converted_value = self._convert_element(v, value_type)
+                result[str(converted_key)] = converted_value
 
         return result if result else None
 
@@ -361,7 +389,9 @@ class TypedValueConverter:
                     result: dict[str, Any] = {}
                     for i, (k, v) in enumerate(parsed.items()):
                         ft = field_types[i] if i < len(field_types) else TypeNode("varchar")
-                        result[k] = self._convert_element(str(v), ft) if v is not None else None
+                        result[k] = (
+                            self.convert(self._to_json_str(v), ft) if v is not None else None
+                        )
                     return result
             except json.JSONDecodeError:
                 pass

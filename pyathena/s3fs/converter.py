@@ -43,6 +43,7 @@ class DefaultS3FSTypeConverter(Converter):
             mappings=deepcopy(_DEFAULT_CONVERTERS),
             default=_to_default,
         )
+        self._default_type_converter: Any | None = None
 
     def convert(self, type_: str, value: str | None, type_hint: str | None = None) -> Any | None:
         """Convert a string value to the appropriate Python type.
@@ -62,10 +63,10 @@ class DefaultS3FSTypeConverter(Converter):
         if value is None:
             return None
         if type_hint:
-            from pyathena.converter import DefaultTypeConverter
+            if self._default_type_converter is None:
+                from pyathena.converter import DefaultTypeConverter
 
-            # Delegate to DefaultTypeConverter for type_hint-based conversion
-            dtc = DefaultTypeConverter()
-            return dtc.convert(type_, value, type_hint=type_hint)
+                self._default_type_converter = DefaultTypeConverter()
+            return self._default_type_converter.convert(type_, value, type_hint=type_hint)
         converter = self.get(type_)
         return converter(value)
