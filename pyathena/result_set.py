@@ -61,6 +61,7 @@ class AthenaResultSet(CursorIterator):
         arraysize: int,
         retry_config: RetryConfig,
         _pre_fetch: bool = True,
+        result_set_type_hints: dict[str, str] | None = None,
     ) -> None:
         super().__init__(arraysize=arraysize)
         self._connection: Connection[Any] | None = connection
@@ -69,6 +70,7 @@ class AthenaResultSet(CursorIterator):
         if not self._query_execution:
             raise ProgrammingError("Required argument `query_execution` not found.")
         self._retry_config = retry_config
+        self._result_set_type_hints = result_set_type_hints
         self._client = connection.session.client(
             "s3",
             region_name=connection.region_name,
@@ -443,10 +445,15 @@ class AthenaResultSet(CursorIterator):
         converter: Converter | None = None,
     ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         conv = converter or self._converter
+        hints = self._result_set_type_hints
         return [
             tuple(
                 [
-                    conv.convert(meta.get("Type"), row.get("VarCharValue"))
+                    conv.convert(
+                        meta.get("Type"),
+                        row.get("VarCharValue"),
+                        type_hint=hints.get(meta.get("Name", "")) if hints else None,
+                    )
                     for meta, row in zip(metadata, rows[i].get("Data", []), strict=False)
                 ]
             )
@@ -630,12 +637,17 @@ class AthenaDictResultSet(AthenaResultSet):
         converter: Converter | None = None,
     ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         conv = converter or self._converter
+        hints = self._result_set_type_hints
         return [
             self.dict_type(
                 [
                     (
                         meta.get("Name"),
-                        conv.convert(meta.get("Type"), row.get("VarCharValue")),
+                        conv.convert(
+                            meta.get("Type"),
+                            row.get("VarCharValue"),
+                            type_hint=hints.get(meta.get("Name", "")) if hints else None,
+                        ),
                     )
                     for meta, row in zip(metadata, rows[i].get("Data", []), strict=False)
                 ]

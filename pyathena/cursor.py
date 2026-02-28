@@ -95,32 +95,36 @@ class Cursor(WithFetch):
         result_reuse_minutes: int | None = None,
         paramstyle: str | None = None,
         on_start_query_execution: Callable[[str], None] | None = None,
+        result_set_type_hints: dict[str, str] | None = None,
         **kwargs,
     ) -> Cursor:
         """Execute a SQL query.
 
         Args:
-            operation: SQL query string to execute
-            parameters: Query parameters (optional)
+            operation: SQL query string to execute.
+            parameters: Query parameters (optional).
             on_start_query_execution: Callback function called immediately after
-                                    start_query_execution API is called.
-                                    Function signature: (query_id: str) -> None
-                                    This allows early access to query_id for
-                                    monitoring/cancellation.
-            **kwargs: Additional execution parameters
+                start_query_execution API is called.
+                Function signature: (query_id: str) -> None
+                This allows early access to query_id for
+                monitoring/cancellation.
+            result_set_type_hints: Optional dictionary mapping column names to
+                Athena DDL type signatures for precise type conversion within
+                complex types. For example:
+                ``{"tags": "array(varchar)", "metadata": "map(varchar, integer)"}``
+            **kwargs: Additional execution parameters.
 
         Returns:
-            Cursor: Self reference for method chaining
+            Self reference for method chaining.
 
-        Example with callback for early query ID access:
-            def on_execution_started(query_id):
-                print(f"Query execution started: {query_id}")
-                # Store query_id for potential cancellation from another thread
-                global current_query_id
-                current_query_id = query_id
-
-            cursor.execute("SELECT * FROM large_table",
-                         on_start_query_execution=on_execution_started)
+        Example:
+            >>> cursor.execute(
+            ...     "SELECT * FROM table_with_complex_types",
+            ...     result_set_type_hints={
+            ...         "tags": "array(varchar)",
+            ...         "metadata": "map(varchar, integer)",
+            ...     }
+            ... )
         """
         self._reset_state()
         self.query_id = self._execute(
@@ -150,6 +154,7 @@ class Cursor(WithFetch):
                 query_execution,
                 self.arraysize,
                 self._retry_config,
+                result_set_type_hints=result_set_type_hints,
             )
         else:
             raise OperationalError(query_execution.state_change_reason)

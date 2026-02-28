@@ -91,6 +91,7 @@ class AthenaArrowResultSet(AthenaResultSet):
         unload_location: str | None = None,
         connect_timeout: float | None = None,
         request_timeout: float | None = None,
+        result_set_type_hints: dict[str, str] | None = None,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -99,6 +100,7 @@ class AthenaArrowResultSet(AthenaResultSet):
             query_execution=query_execution,
             arraysize=1,  # Fetch one row to retrieve metadata
             retry_config=retry_config,
+            result_set_type_hints=result_set_type_hints,
         )
         self._rows.clear()  # Clear pre_fetch data
         self._arraysize = arraysize

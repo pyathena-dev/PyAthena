@@ -64,6 +64,7 @@ class AthenaS3FSResultSet(AthenaResultSet):
         block_size: int | None = None,
         csv_reader: CSVReaderType | None = None,
         filesystem_class: type[AbstractFileSystem] | None = None,
+        result_set_type_hints: dict[str, str] | None = None,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -72,6 +73,7 @@ class AthenaS3FSResultSet(AthenaResultSet):
             query_execution=query_execution,
             arraysize=1,  # Fetch one row to retrieve metadata
             retry_config=retry_config,
+            result_set_type_hints=result_set_type_hints,
         )
         # Save pre-fetched rows (from Athena API) in case CSV reading is not available
         pre_fetched_rows = list(self._rows)
@@ -149,6 +151,8 @@ class AthenaS3FSResultSet(AthenaResultSet):
 
         description = self.description if self.description else []
         column_types = [d[1] for d in description]
+        column_names = [d[0] for d in description]
+        hints = self._result_set_type_hints
 
         rows_fetched = 0
         while rows_fetched < self._arraysize:
@@ -162,13 +166,25 @@ class AthenaS3FSResultSet(AthenaResultSet):
             # DefaultCSVReader returns empty string which needs conversion
             if self._csv_reader_class is DefaultCSVReader:
                 converted_row = tuple(
-                    self._converter.convert(col_type, value if value != "" else None)
-                    for col_type, value in zip(column_types, row, strict=False)
+                    self._converter.convert(
+                        col_type,
+                        value if value != "" else None,
+                        type_hint=hints.get(col_name) if hints else None,
+                    )
+                    for col_type, col_name, value in zip(
+                        column_types, column_names, row, strict=False
+                    )
                 )
             else:
                 converted_row = tuple(
-                    self._converter.convert(col_type, value)
-                    for col_type, value in zip(column_types, row, strict=False)
+                    self._converter.convert(
+                        col_type,
+                        value,
+                        type_hint=hints.get(col_name) if hints else None,
+                    )
+                    for col_type, col_name, value in zip(
+                        column_types, column_names, row, strict=False
+                    )
                 )
             self._rows.append(converted_row)
             rows_fetched += 1

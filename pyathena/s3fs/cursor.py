@@ -133,6 +133,7 @@ class S3FSCursor(WithFetch):
         result_reuse_minutes: int | None = None,
         paramstyle: str | None = None,
         on_start_query_execution: Callable[[str], None] | None = None,
+        result_set_type_hints: dict[str, str] | None = None,
         **kwargs,
     ) -> S3FSCursor:
         """Execute a SQL query and return results.
@@ -151,6 +152,9 @@ class S3FSCursor(WithFetch):
             result_reuse_minutes: Minutes to reuse cached results.
             paramstyle: Parameter style ('qmark' or 'pyformat').
             on_start_query_execution: Callback called when query starts.
+            result_set_type_hints: Optional dictionary mapping column names to
+                Athena DDL type signatures for precise type conversion within
+                complex types.
             **kwargs: Additional execution parameters.
 
         Returns:
@@ -188,6 +192,7 @@ class S3FSCursor(WithFetch):
                 arraysize=self.arraysize,
                 retry_config=self._retry_config,
                 csv_reader=self._csv_reader,
+                result_set_type_hints=result_set_type_hints,
                 **kwargs,
             )
         else:

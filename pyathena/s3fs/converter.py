@@ -44,7 +44,7 @@ class DefaultS3FSTypeConverter(Converter):
             default=_to_default,
         )
 
-    def convert(self, type_: str, value: str | None) -> Any | None:
+    def convert(self, type_: str, value: str | None, type_hint: str | None = None) -> Any | None:
         """Convert a string value to the appropriate Python type.
 
         Looks up the converter function for the given Athena type and applies
@@ -53,9 +53,19 @@ class DefaultS3FSTypeConverter(Converter):
         Args:
             type_: The Athena data type name (e.g., "integer", "varchar", "date").
             value: The string value to convert, or None.
+            type_hint: Optional Athena DDL type signature for precise complex type
+                conversion (e.g., "array(varchar)").
 
         Returns:
             The converted Python value, or None if the input value was None.
         """
+        if value is None:
+            return None
+        if type_hint:
+            from pyathena.converter import DefaultTypeConverter
+
+            # Delegate to DefaultTypeConverter for type_hint-based conversion
+            dtc = DefaultTypeConverter()
+            return dtc.convert(type_, value, type_hint=type_hint)
         converter = self.get(type_)
         return converter(value)
