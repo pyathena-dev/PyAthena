@@ -53,6 +53,10 @@ class AthenaResultSet(CursorIterator):
         https://docs.aws.amazon.com/athena/latest/APIReference/API_GetQueryResults.html
     """
 
+    # https://docs.aws.amazon.com/athena/latest/ug/data-types.html
+    # Athena complex types that benefit from type hint conversion.
+    _COMPLEX_TYPES: frozenset[str] = frozenset({"array", "map", "row", "struct"})
+
     def __init__(
         self,
         connection: Connection[Any],
@@ -425,10 +429,17 @@ class AthenaResultSet(CursorIterator):
         if column_info is None:
             raise DataError("KeyError `ColumnInfo`")
         self._metadata = tuple(column_info)
-        if self._result_set_type_hints:
-            self._column_type_hints = tuple(
-                self._result_set_type_hints.get(m.get("Name", "").lower()) for m in self._metadata
+        if self._result_set_type_hints and any(
+            m.get("Type", "").lower() in self._COMPLEX_TYPES for m in self._metadata
+        ):
+            hints = tuple(
+                self._result_set_type_hints.get(m.get("Name", "").lower())
+                if m.get("Type", "").lower() in self._COMPLEX_TYPES
+                else None
+                for m in self._metadata
             )
+            if any(hints):
+                self._column_type_hints = hints
 
     def _process_update_count(self, response: dict[str, Any]) -> None:
         update_count = response.get("UpdateCount")
