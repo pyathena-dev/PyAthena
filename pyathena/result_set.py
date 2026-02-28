@@ -83,6 +83,7 @@ class AthenaResultSet(CursorIterator):
         )
 
         self._metadata: tuple[dict[str, Any], ...] | None = None
+        self._column_type_hints: tuple[str | None, ...] | None = None
         self._rows: collections.deque[tuple[Any | None, ...] | dict[Any, Any | None]] = (
             collections.deque()
         )
@@ -424,6 +425,10 @@ class AthenaResultSet(CursorIterator):
         if column_info is None:
             raise DataError("KeyError `ColumnInfo`")
         self._metadata = tuple(column_info)
+        if self._result_set_type_hints:
+            self._column_type_hints = tuple(
+                self._result_set_type_hints.get(m.get("Name", "").lower()) for m in self._metadata
+            )
 
     def _process_update_count(self, response: dict[str, Any]) -> None:
         update_count = response.get("UpdateCount")
@@ -449,21 +454,23 @@ class AthenaResultSet(CursorIterator):
         converter: Converter | None = None,
     ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         conv = converter or self._converter
-        hints = self._result_set_type_hints
+        col_hints = self._column_type_hints
+        if col_hints:
+            return [
+                tuple(
+                    conv.convert(meta.get("Type"), row.get("VarCharValue"), type_hint=hint)
+                    if hint
+                    else conv.convert(meta.get("Type"), row.get("VarCharValue"))
+                    for meta, row, hint in zip(
+                        metadata, rows[i].get("Data", []), col_hints, strict=False
+                    )
+                )
+                for i in range(offset, len(rows))
+            ]
         return [
             tuple(
-                [
-                    conv.convert(
-                        meta.get("Type"),
-                        row.get("VarCharValue"),
-                        **(
-                            {"type_hint": hints[meta.get("Name", "").lower()]}
-                            if hints and meta.get("Name", "").lower() in hints
-                            else {}
-                        ),
-                    )
-                    for meta, row in zip(metadata, rows[i].get("Data", []), strict=False)
-                ]
+                conv.convert(meta.get("Type"), row.get("VarCharValue"))
+                for meta, row in zip(metadata, rows[i].get("Data", []), strict=False)
             )
             for i in range(offset, len(rows))
         ]
@@ -645,24 +652,29 @@ class AthenaDictResultSet(AthenaResultSet):
         converter: Converter | None = None,
     ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         conv = converter or self._converter
-        hints = self._result_set_type_hints
-        return [
-            self.dict_type(
-                [
+        col_hints = self._column_type_hints
+        if col_hints:
+            return [
+                self.dict_type(
                     (
                         meta.get("Name"),
-                        conv.convert(
-                            meta.get("Type"),
-                            row.get("VarCharValue"),
-                            **(
-                                {"type_hint": hints[meta.get("Name", "").lower()]}
-                                if hints and meta.get("Name", "").lower() in hints
-                                else {}
-                            ),
-                        ),
+                        conv.convert(meta.get("Type"), row.get("VarCharValue"), type_hint=hint)
+                        if hint
+                        else conv.convert(meta.get("Type"), row.get("VarCharValue")),
                     )
-                    for meta, row in zip(metadata, rows[i].get("Data", []), strict=False)
-                ]
+                    for meta, row, hint in zip(
+                        metadata, rows[i].get("Data", []), col_hints, strict=False
+                    )
+                )
+                for i in range(offset, len(rows))
+            ]
+        return [
+            self.dict_type(
+                (
+                    meta.get("Name"),
+                    conv.convert(meta.get("Type"), row.get("VarCharValue")),
+                )
+                for meta, row in zip(metadata, rows[i].get("Data", []), strict=False)
             )
             for i in range(offset, len(rows))
         ]

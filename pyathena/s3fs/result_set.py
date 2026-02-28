@@ -151,8 +151,7 @@ class AthenaS3FSResultSet(AthenaResultSet):
 
         description = self.description if self.description else []
         column_types = [d[1] for d in description]
-        column_names = [d[0] for d in description]
-        hints = self._result_set_type_hints
+        col_hints = self._column_type_hints
 
         rows_fetched = 0
         while rows_fetched < self._arraysize:
@@ -165,35 +164,33 @@ class AthenaS3FSResultSet(AthenaResultSet):
             # AthenaCSVReader returns None for NULL values directly,
             # DefaultCSVReader returns empty string which needs conversion
             if self._csv_reader_class is DefaultCSVReader:
-                converted_row = tuple(
-                    self._converter.convert(
-                        col_type,
-                        value if value != "" else None,
-                        **(
-                            {"type_hint": hints[col_name.lower()]}
-                            if hints and col_name.lower() in hints
-                            else {}
-                        ),
+                if col_hints:
+                    converted_row = tuple(
+                        self._converter.convert(
+                            col_type, value if value != "" else None, type_hint=hint
+                        )
+                        if hint
+                        else self._converter.convert(col_type, value if value != "" else None)
+                        for col_type, value, hint in zip(column_types, row, col_hints, strict=False)
                     )
-                    for col_type, col_name, value in zip(
-                        column_types, column_names, row, strict=False
+                else:
+                    converted_row = tuple(
+                        self._converter.convert(col_type, value if value != "" else None)
+                        for col_type, value in zip(column_types, row, strict=False)
                     )
-                )
             else:
-                converted_row = tuple(
-                    self._converter.convert(
-                        col_type,
-                        value,
-                        **(
-                            {"type_hint": hints[col_name.lower()]}
-                            if hints and col_name.lower() in hints
-                            else {}
-                        ),
+                if col_hints:
+                    converted_row = tuple(
+                        self._converter.convert(col_type, value, type_hint=hint)
+                        if hint
+                        else self._converter.convert(col_type, value)
+                        for col_type, value, hint in zip(column_types, row, col_hints, strict=False)
                     )
-                    for col_type, col_name, value in zip(
-                        column_types, column_names, row, strict=False
+                else:
+                    converted_row = tuple(
+                        self._converter.convert(col_type, value)
+                        for col_type, value in zip(column_types, row, strict=False)
                     )
-                )
             self._rows.append(converted_row)
             rows_fetched += 1
 

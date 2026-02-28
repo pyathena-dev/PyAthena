@@ -58,6 +58,23 @@ class TypeNode:
     type_name: str
     children: list[TypeNode] = field(default_factory=list)
     field_names: list[str] | None = None
+    _field_type_map: dict[str, TypeNode] | None = field(default=None, repr=False)
+
+    def get_field_type(self, name: str) -> TypeNode | None:
+        """Look up a child type node by field name using a cached dict.
+
+        Returns:
+            The TypeNode for the named field, or None if not found.
+        """
+        if self._field_type_map is None and self.field_names:
+            self._field_type_map = {
+                fn: self.children[i]
+                for i, fn in enumerate(self.field_names)
+                if i < len(self.children)
+            }
+        if self._field_type_map:
+            return self._field_type_map.get(name)
+        return None
 
 
 class TypeSignatureParser:
@@ -260,16 +277,20 @@ class TypedValueConverter:
 
         element_type = type_node.children[0] if type_node.children else TypeNode("varchar")
 
-        # Try JSON first
-        try:
-            parsed = json.loads(value)
-            if isinstance(parsed, list):
-                return [
-                    None if elem is None else self.convert(self._to_json_str(elem), element_type)
-                    for elem in parsed
-                ]
-        except json.JSONDecodeError:
-            pass
+        # Try JSON first (only if content looks like JSON)
+        inner_preview = value[1:10] if len(value) > 10 else value[1:-1]
+        if '"' in inner_preview or value.startswith(("[{", "[null")):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, list):
+                    return [
+                        None
+                        if elem is None
+                        else self.convert(self._to_json_str(elem), element_type)
+                        for elem in parsed
+                    ]
+            except json.JSONDecodeError:
+                pass
 
         # Native format
         inner = value[1:-1].strip()
@@ -376,7 +397,6 @@ class TypedValueConverter:
         if not (value.startswith("{") and value.endswith("}")):
             return None
 
-        field_names = type_node.field_names or []
         field_types = type_node.children or []
 
         # Try JSON first
@@ -387,7 +407,7 @@ class TypedValueConverter:
                 if isinstance(parsed, dict):
                     result: dict[str, Any] = {}
                     for i, (k, v) in enumerate(parsed.items()):
-                        ft = self._get_field_type(k, field_names, field_types, i)
+                        ft = self._get_field_type(k, type_node, i)
                         result[k] = (
                             self.convert(self._to_json_str(v), ft) if v is not None else None
                         )
@@ -413,7 +433,7 @@ class TypedValueConverter:
                 if any(char in k for char in '{}="'):
                     continue
 
-                ft = self._get_field_type(k, field_names, field_types, field_index)
+                ft = self._get_field_type(k, type_node, field_index)
                 field_index += 1
 
                 if v.startswith("{") and v.endswith("}"):
@@ -428,6 +448,7 @@ class TypedValueConverter:
             return result if result else None
 
         # Unnamed struct
+        field_names = type_node.field_names or []
         values = [v.strip() for v in inner.split(",")]
         result = {}
         for i, v in enumerate(values):
@@ -436,30 +457,29 @@ class TypedValueConverter:
             result[name] = self._convert_element(v, ft)
         return result
 
+    @staticmethod
     def _get_field_type(
-        self,
         field_name: str,
-        field_names: list[str],
-        field_types: list[TypeNode],
+        type_node: TypeNode,
         field_index: int,
     ) -> TypeNode:
         """Look up the type for a struct field by name or index.
 
-        Tries name-based lookup first, then falls back to positional index.
+        Uses the TypeNode's cached dict for O(1) name lookup, then falls
+        back to positional index.
 
         Args:
             field_name: Name of the field to look up.
-            field_names: List of known field names from the type hint.
-            field_types: List of corresponding field types.
+            type_node: The parent row/struct TypeNode.
             field_index: Current positional index as fallback.
 
         Returns:
             TypeNode for the field, defaulting to varchar if not found.
         """
-        if field_name in field_names:
-            idx = field_names.index(field_name)
-            if idx < len(field_types):
-                return field_types[idx]
+        ft = type_node.get_field_type(field_name)
+        if ft is not None:
+            return ft
+        field_types = type_node.children or []
         if field_index < len(field_types):
             return field_types[field_index]
         return TypeNode("varchar")
