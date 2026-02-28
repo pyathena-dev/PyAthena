@@ -6,24 +6,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-@dataclass
-class TypeNode:
-    """Parsed representation of an Athena DDL type signature.
-
-    Represents a node in a type tree, where complex types (array, map, row)
-    have children representing their element/field types.
-
-    Attributes:
-        type_name: The base type name (e.g., "array", "map", "row", "varchar").
-        children: Child type nodes for complex types.
-        field_names: Field names for row/struct types (parallel to children).
-    """
-
-    type_name: str
-    children: list[TypeNode] = field(default_factory=list)
-    field_names: list[str] | None = None
-
-
 def _split_array_items(inner: str) -> list[str]:
     """Split array items by comma, respecting brace and bracket groupings.
 
@@ -58,6 +40,24 @@ def _split_array_items(inner: str) -> list[str]:
         items.append(current_item.strip())
 
     return items
+
+
+@dataclass
+class TypeNode:
+    """Parsed representation of an Athena DDL type signature.
+
+    Represents a node in a type tree, where complex types (array, map, row)
+    have children representing their element/field types.
+
+    Attributes:
+        type_name: The base type name (e.g., "array", "map", "row", "varchar").
+        children: Child type nodes for complex types.
+        field_names: Field names for row/struct types (parallel to children).
+    """
+
+    type_name: str
+    children: list[TypeNode] = field(default_factory=list)
+    field_names: list[str] | None = None
 
 
 class TypeSignatureParser:
