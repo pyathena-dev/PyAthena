@@ -158,6 +158,13 @@ class TestTypeSignatureParser:
     def test_normalize_hive_syntax_replaces(self):
         assert _normalize_hive_syntax("array<struct<a:int>>") == "array(struct(a int))"
 
+    def test_trailing_modifier_after_paren(self):
+        """Type with content after closing paren should not break parsing."""
+        parser = TypeSignatureParser()
+        # Simulates a hypothetical "timestamp(3) with time zone" style input
+        node = parser.parse("decimal(10, 2) extra")
+        assert node.type_name == "decimal"
+
 
 class TestTypedValueConverter:
     @pytest.fixture
@@ -261,3 +268,10 @@ class TestTypedValueConverter:
         result = converter.convert('{"a": null, "b": "null"}', node)
         assert result["a"] is None
         assert result["b"] == "null"
+
+    def test_unnamed_struct_with_nested_value(self, converter):
+        """Unnamed struct split must respect nested braces."""
+        parser = TypeSignatureParser()
+        node = parser.parse("row(inner row(x integer, y integer), val varchar)")
+        result = converter.convert("{inner={x=1, y=2}, val=hello}", node)
+        assert result == {"inner": {"x": 1, "y": 2}, "val": "hello"}

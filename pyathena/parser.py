@@ -130,7 +130,8 @@ class TypeSignatureParser:
         type_name = type_str[:paren_idx].strip().lower()
         type_name = _TYPE_ALIASES.get(type_name, type_name)
 
-        inner = type_str[paren_idx + 1 : -1].strip()
+        close_idx = self._find_matching_paren(type_str, paren_idx)
+        inner = type_str[paren_idx + 1 : close_idx].strip()
 
         if type_name in ("row", "struct"):
             parts = self._split_type_args(inner)
@@ -191,6 +192,27 @@ class TypeSignatureParser:
         if current:
             parts.append("".join(current).strip())
         return parts
+
+    @staticmethod
+    def _find_matching_paren(s: str, open_idx: int) -> int:
+        """Find the index of the closing parenthesis matching the one at *open_idx*.
+
+        Args:
+            s: The full string.
+            open_idx: Index of the opening ``(``.
+
+        Returns:
+            Index of the matching ``)``.
+        """
+        depth = 0
+        for i in range(open_idx, len(s)):
+            if s[i] == "(":
+                depth += 1
+            elif s[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    return i
+        return len(s) - 1
 
     def _find_field_name_boundary(self, part: str) -> int:
         """Find the boundary between field name and type in a row field definition.
@@ -479,7 +501,7 @@ class TypedValueConverter:
 
         # Unnamed struct
         field_names = type_node.field_names or []
-        values = [v.strip() for v in inner.split(",")]
+        values = _split_array_items(inner)
         result = {}
         for i, v in enumerate(values):
             ft = field_types[i] if i < len(field_types) else TypeNode("varchar")
