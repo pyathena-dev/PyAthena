@@ -117,15 +117,14 @@ class TypeSignatureParser:
         # Types with parameters like decimal(10, 2), varchar(255)
         return TypeNode(type_name=type_name)
 
-    def _split_type_args(self, s: str, delimiter: str = ",") -> list[str]:
-        """Split a string by delimiter, respecting nested parentheses.
+    def _split_type_args(self, s: str) -> list[str]:
+        """Split a type signature argument string by comma, respecting nested parentheses.
 
         Args:
-            s: String to split.
-            delimiter: Character to split on.
+            s: Type signature argument string to split.
 
         Returns:
-            List of parts split at top-level delimiters.
+            List of type argument strings.
         """
         parts: list[str] = []
         current: list[str] = []
@@ -136,7 +135,7 @@ class TypeSignatureParser:
                 depth += 1
             elif char == ")":
                 depth -= 1
-            elif char == delimiter and depth == 0:
+            elif char == "," and depth == 0:
                 parts.append("".join(current).strip())
                 current = []
                 continue

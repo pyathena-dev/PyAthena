@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import logging
 from copy import deepcopy
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pyathena.converter import (
     _DEFAULT_CONVERTERS,
     Converter,
     _to_default,
 )
+
+if TYPE_CHECKING:
+    from pyathena.converter import DefaultTypeConverter
 
 _logger = logging.getLogger(__name__)
 
@@ -43,7 +46,7 @@ class DefaultS3FSTypeConverter(Converter):
             mappings=deepcopy(_DEFAULT_CONVERTERS),
             default=_to_default,
         )
-        self._default_type_converter: Any | None = None
+        self._default_type_converter: DefaultTypeConverter | None = None
 
     def convert(self, type_: str, value: str | None, type_hint: str | None = None) -> Any | None:
         """Convert a string value to the appropriate Python type.

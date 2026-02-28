@@ -556,16 +556,31 @@ class DefaultTypeConverter(Converter):
         self._parsed_hints: dict[str, TypeNode] = {}
 
     def convert(self, type_: str, value: str | None, type_hint: str | None = None) -> Any | None:
+        """Convert a string value to the appropriate Python type.
+
+        When ``type_hint`` is provided, uses the typed converter for precise
+        conversion of complex types. Otherwise, uses the standard converter
+        for the given Athena type.
+
+        Args:
+            type_: The Athena data type name (e.g., "integer", "varchar", "array").
+            value: The string value to convert, or None.
+            type_hint: Optional Athena DDL type signature for precise complex type
+                conversion (e.g., "array(varchar)", "row(name varchar, age integer)").
+
+        Returns:
+            The converted Python value, or None if the input value was None.
+        """
         if value is None:
             return None
         if type_hint:
-            type_node = self._get_or_parse_hint(type_hint)
+            type_node = self._parse_type_hint(type_hint)
             return self._typed_converter.convert(value, type_node)
         converter = self.get(type_)
         return converter(value)
 
-    def _get_or_parse_hint(self, type_hint: str) -> TypeNode:
-        """Get or parse a type hint string into a TypeNode, with caching.
+    def _parse_type_hint(self, type_hint: str) -> TypeNode:
+        """Parse a type hint string into a TypeNode, with caching.
 
         Args:
             type_hint: Athena DDL type signature string.
