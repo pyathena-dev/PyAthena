@@ -667,13 +667,13 @@ class TestPandasCursor:
             result_set._engine = "auto"
             result_set._chunksize = None  # No chunking by default
 
-            # Small file should prefer C engine (compatibility-first approach)
+            # Small file should use C engine
             engine = result_set._get_optimal_csv_engine(1024)  # 1KB
             assert engine == "c"
 
-            # Large file should prefer Python engine (avoid C parser int32 limits)
+            # Large file should also use C engine
             engine = result_set._get_optimal_csv_engine(100 * 1024 * 1024)  # 100MB
-            assert engine == "python"
+            assert engine == "c"
 
     def test_auto_determine_chunksize(self):
         """Test _auto_determine_chunksize method behavior."""

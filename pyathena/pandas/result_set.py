@@ -389,10 +389,9 @@ class AthenaPandasResultSet(AthenaResultSet):
             file_size_bytes: Size of the CSV file in bytes.
 
         Returns:
-            'python' for large files (>50MB) to avoid C parser limits, otherwise 'c'.
+            Always returns 'c' as the C engine is faster and the previously
+            assumed 32-bit integer limitation does not exist in modern pandas.
         """
-        if file_size_bytes and file_size_bytes > self.LARGE_FILE_THRESHOLD_BYTES:
-            return "python"
         return "c"
 
     def _auto_determine_chunksize(self, file_size_bytes: int) -> int | None:
@@ -594,26 +593,6 @@ class AthenaPandasResultSet(AthenaResultSet):
 
         except Exception as e:
             _logger.exception("Failed to read %s.", self.output_location)
-            error_msg = str(e).lower()
-            if any(
-                phrase in error_msg
-                for phrase in ["signed integer", "maximum", "overflow", "int32", "c parser"]
-            ):
-                # Enhanced error message with specific recommendations
-                file_mb = (length or 0) // (1024 * 1024)
-                detailed_msg = (
-                    f"Large dataset processing error ({file_mb}MB file): {e}. "
-                    "This is likely due to pandas C parser limitations. "
-                    "Recommended solutions:\n"
-                    "1. Set chunksize: cursor = connection.cursor(PandasCursor, chunksize=50000)\n"
-                    "2. Enable auto-optimization: "
-                    "cursor = connection.cursor(PandasCursor, auto_optimize_chunksize=True)\n"
-                    "3. Use PyArrow engine: "
-                    "cursor = connection.cursor(PandasCursor, engine='pyarrow')\n"
-                    "4. Use Python engine: "
-                    "cursor = connection.cursor(PandasCursor, engine='python')"
-                )
-                raise OperationalError(detailed_msg) from e
             raise OperationalError(*e.args) from e
 
     def _read_parquet(self, engine) -> DataFrame:
