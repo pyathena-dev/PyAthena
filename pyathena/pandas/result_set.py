@@ -326,32 +326,22 @@ class AthenaPandasResultSet(AthenaResultSet):
         Returns:
             CSV engine name ('pyarrow', 'c', or 'python').
         """
-        effective_chunksize = chunksize if chunksize is not None else self._chunksize
-
-        if self._engine == "pyarrow":
-            return self._get_pyarrow_engine(file_size_bytes, effective_chunksize)
-
         if self._engine in ("c", "python"):
             return self._engine
 
-        # Auto-selection for "auto" or unknown engine values
-        return self._get_optimal_csv_engine(file_size_bytes)
+        if self._engine == "pyarrow":
+            effective_chunksize = chunksize if chunksize is not None else self._chunksize
+            if effective_chunksize is not None or self._quoting != 1 or self.converters:
+                return "c"
+            if file_size_bytes is not None and file_size_bytes < self.PYARROW_MIN_FILE_SIZE_BYTES:
+                return "c"
+            try:
+                return self._get_available_engine(["pyarrow"])
+            except ImportError:
+                return "c"
 
-    def _get_pyarrow_engine(self, file_size_bytes: int | None, chunksize: int | None) -> str:
-        """Get PyArrow engine if compatible, otherwise return optimal engine."""
-        # Check parameter compatibility
-        if chunksize is not None or self._quoting != 1 or self.converters:
-            return self._get_optimal_csv_engine(file_size_bytes)
-
-        # Check file size compatibility
-        if file_size_bytes is not None and file_size_bytes < self.PYARROW_MIN_FILE_SIZE_BYTES:
-            return self._get_optimal_csv_engine(file_size_bytes)
-
-        # Check availability
-        try:
-            return self._get_available_engine(["pyarrow"])
-        except ImportError:
-            return self._get_optimal_csv_engine(file_size_bytes)
+        # "auto" or unknown → C engine (same as pandas default)
+        return "c"
 
     def _get_available_engine(self, engine_candidates: list[str]) -> str:
         """Get the first available engine from a list of candidates.
@@ -381,18 +371,6 @@ class AthenaPandasResultSet(AthenaResultSet):
             f"Trying to import the above resulted in these errors:"
             f"{error_msgs}"
         )
-
-    def _get_optimal_csv_engine(self, file_size_bytes: int | None = None) -> str:
-        """Get the optimal CSV engine based on file size.
-
-        Args:
-            file_size_bytes: Size of the CSV file in bytes.
-
-        Returns:
-            Always returns 'c' as the C engine is faster and the previously
-            assumed 32-bit integer limitation does not exist in modern pandas.
-        """
-        return "c"
 
     def _auto_determine_chunksize(self, file_size_bytes: int) -> int | None:
         """Determine appropriate chunksize for large files based on file size.
