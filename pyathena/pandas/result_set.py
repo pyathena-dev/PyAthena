@@ -320,27 +320,32 @@ class AthenaPandasResultSet(AthenaResultSet):
         """Determine the appropriate CSV engine based on configuration and compatibility.
 
         Args:
-            file_size_bytes: Size of the CSV file in bytes.
+            file_size_bytes: Size of the CSV file in bytes. Only used for PyArrow
+                compatibility checks (minimum file size threshold).
             chunksize: Chunksize parameter (overrides self._chunksize if provided).
 
         Returns:
             CSV engine name ('pyarrow', 'c', or 'python').
         """
-        if self._engine in ("c", "python"):
-            return self._engine
+        if self._engine == "python":
+            return "python"
 
+        # Use PyArrow only when explicitly requested and all compatibility
+        # checks pass; otherwise fall through to the C engine default.
         if self._engine == "pyarrow":
             effective_chunksize = chunksize if chunksize is not None else self._chunksize
-            if effective_chunksize is not None or self._quoting != 1 or self.converters:
-                return "c"
-            if file_size_bytes is not None and file_size_bytes < self.PYARROW_MIN_FILE_SIZE_BYTES:
-                return "c"
-            try:
-                return self._get_available_engine(["pyarrow"])
-            except ImportError:
-                return "c"
+            is_compatible = (
+                effective_chunksize is None
+                and self._quoting == 1
+                and not self.converters
+                and (file_size_bytes is None or file_size_bytes >= self.PYARROW_MIN_FILE_SIZE_BYTES)
+            )
+            if is_compatible:
+                try:
+                    return self._get_available_engine(["pyarrow"])
+                except ImportError:
+                    pass
 
-        # "auto" or unknown → C engine (same as pandas default)
         return "c"
 
     def _get_available_engine(self, engine_candidates: list[str]) -> str:
