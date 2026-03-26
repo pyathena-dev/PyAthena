@@ -658,23 +658,6 @@ class TestPandasCursor:
         cursor.close()
         conn.close()
 
-    def test_get_optimal_csv_engine(self):
-        """Test _get_optimal_csv_engine method behavior."""
-
-        # Mock the parent class initialization
-        with patch("pyathena.pandas.result_set.AthenaResultSet.__init__"):
-            result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)
-            result_set._engine = "auto"
-            result_set._chunksize = None  # No chunking by default
-
-            # Small file should prefer C engine (compatibility-first approach)
-            engine = result_set._get_optimal_csv_engine(1024)  # 1KB
-            assert engine == "c"
-
-            # Large file should prefer Python engine (avoid C parser int32 limits)
-            engine = result_set._get_optimal_csv_engine(100 * 1024 * 1024)  # 100MB
-            assert engine == "python"
-
     def test_auto_determine_chunksize(self):
         """Test _auto_determine_chunksize method behavior."""
 
@@ -747,58 +730,46 @@ class TestPandasCursor:
 
             # Test PyArrow with incompatible chunksize (via parameter)
             with (
-                patch.object(result_set, "_get_available_engine", return_value="pyarrow"),
                 patch.object(
                     type(result_set), "converters", new_callable=PropertyMock, return_value={}
                 ),
-                patch.object(result_set, "_get_optimal_csv_engine", return_value="c") as mock_opt,
             ):
                 engine = result_set._get_csv_engine(chunksize=1000)
                 assert engine == "c"
-                mock_opt.assert_called_once()
 
             # Test PyArrow with incompatible chunksize (via instance variable)
             result_set._chunksize = 1000
             with (
-                patch.object(result_set, "_get_available_engine", return_value="pyarrow"),
                 patch.object(
                     type(result_set), "converters", new_callable=PropertyMock, return_value={}
                 ),
-                patch.object(result_set, "_get_optimal_csv_engine", return_value="c") as mock_opt,
             ):
                 engine = result_set._get_csv_engine()
                 assert engine == "c"
-                mock_opt.assert_called_once()
 
             # Test PyArrow with incompatible quoting
             result_set._chunksize = None
             result_set._quoting = 0  # Non-default quoting
             with (
-                patch.object(result_set, "_get_available_engine", return_value="pyarrow"),
                 patch.object(
                     type(result_set), "converters", new_callable=PropertyMock, return_value={}
                 ),
-                patch.object(result_set, "_get_optimal_csv_engine", return_value="c") as mock_opt,
             ):
                 engine = result_set._get_csv_engine()
                 assert engine == "c"
-                mock_opt.assert_called_once()
 
             # Test PyArrow with incompatible converters
             result_set._quoting = 1  # Reset to default
             with (
-                patch.object(result_set, "_get_available_engine", return_value="pyarrow"),
                 patch.object(
                     type(result_set),
                     "converters",
                     new_callable=PropertyMock,
                     return_value={"col1": str},
                 ),
-                patch.object(result_set, "_get_optimal_csv_engine", return_value="c") as mock_opt,
             ):
                 engine = result_set._get_csv_engine()
                 assert engine == "c"
-                mock_opt.assert_called_once()
 
             # Test PyArrow specification (when unavailable)
             with (
@@ -806,11 +777,9 @@ class TestPandasCursor:
                 patch.object(
                     type(result_set), "converters", new_callable=PropertyMock, return_value={}
                 ),
-                patch.object(result_set, "_get_optimal_csv_engine", return_value="c") as mock_opt,
             ):
                 engine = result_set._get_csv_engine()
                 assert engine == "c"
-                mock_opt.assert_called_once()
 
     @pytest.mark.parametrize(
         ("pandas_cursor", "parquet_engine", "chunksize"),

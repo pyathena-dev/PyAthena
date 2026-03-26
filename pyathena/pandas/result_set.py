@@ -320,38 +320,33 @@ class AthenaPandasResultSet(AthenaResultSet):
         """Determine the appropriate CSV engine based on configuration and compatibility.
 
         Args:
-            file_size_bytes: Size of the CSV file in bytes.
+            file_size_bytes: Size of the CSV file in bytes. Only used for PyArrow
+                compatibility checks (minimum file size threshold).
             chunksize: Chunksize parameter (overrides self._chunksize if provided).
 
         Returns:
             CSV engine name ('pyarrow', 'c', or 'python').
         """
-        effective_chunksize = chunksize if chunksize is not None else self._chunksize
+        if self._engine == "python":
+            return "python"
 
+        # Use PyArrow only when explicitly requested and all compatibility
+        # checks pass; otherwise fall through to the C engine default.
         if self._engine == "pyarrow":
-            return self._get_pyarrow_engine(file_size_bytes, effective_chunksize)
+            effective_chunksize = chunksize if chunksize is not None else self._chunksize
+            is_compatible = (
+                effective_chunksize is None
+                and self._quoting == 1
+                and not self.converters
+                and (file_size_bytes is None or file_size_bytes >= self.PYARROW_MIN_FILE_SIZE_BYTES)
+            )
+            if is_compatible:
+                try:
+                    return self._get_available_engine(["pyarrow"])
+                except ImportError:
+                    pass
 
-        if self._engine in ("c", "python"):
-            return self._engine
-
-        # Auto-selection for "auto" or unknown engine values
-        return self._get_optimal_csv_engine(file_size_bytes)
-
-    def _get_pyarrow_engine(self, file_size_bytes: int | None, chunksize: int | None) -> str:
-        """Get PyArrow engine if compatible, otherwise return optimal engine."""
-        # Check parameter compatibility
-        if chunksize is not None or self._quoting != 1 or self.converters:
-            return self._get_optimal_csv_engine(file_size_bytes)
-
-        # Check file size compatibility
-        if file_size_bytes is not None and file_size_bytes < self.PYARROW_MIN_FILE_SIZE_BYTES:
-            return self._get_optimal_csv_engine(file_size_bytes)
-
-        # Check availability
-        try:
-            return self._get_available_engine(["pyarrow"])
-        except ImportError:
-            return self._get_optimal_csv_engine(file_size_bytes)
+        return "c"
 
     def _get_available_engine(self, engine_candidates: list[str]) -> str:
         """Get the first available engine from a list of candidates.
@@ -381,19 +376,6 @@ class AthenaPandasResultSet(AthenaResultSet):
             f"Trying to import the above resulted in these errors:"
             f"{error_msgs}"
         )
-
-    def _get_optimal_csv_engine(self, file_size_bytes: int | None = None) -> str:
-        """Get the optimal CSV engine based on file size.
-
-        Args:
-            file_size_bytes: Size of the CSV file in bytes.
-
-        Returns:
-            'python' for large files (>50MB) to avoid C parser limits, otherwise 'c'.
-        """
-        if file_size_bytes and file_size_bytes > self.LARGE_FILE_THRESHOLD_BYTES:
-            return "python"
-        return "c"
 
     def _auto_determine_chunksize(self, file_size_bytes: int) -> int | None:
         """Determine appropriate chunksize for large files based on file size.
@@ -594,26 +576,6 @@ class AthenaPandasResultSet(AthenaResultSet):
 
         except Exception as e:
             _logger.exception("Failed to read %s.", self.output_location)
-            error_msg = str(e).lower()
-            if any(
-                phrase in error_msg
-                for phrase in ["signed integer", "maximum", "overflow", "int32", "c parser"]
-            ):
-                # Enhanced error message with specific recommendations
-                file_mb = (length or 0) // (1024 * 1024)
-                detailed_msg = (
-                    f"Large dataset processing error ({file_mb}MB file): {e}. "
-                    "This is likely due to pandas C parser limitations. "
-                    "Recommended solutions:\n"
-                    "1. Set chunksize: cursor = connection.cursor(PandasCursor, chunksize=50000)\n"
-                    "2. Enable auto-optimization: "
-                    "cursor = connection.cursor(PandasCursor, auto_optimize_chunksize=True)\n"
-                    "3. Use PyArrow engine: "
-                    "cursor = connection.cursor(PandasCursor, engine='pyarrow')\n"
-                    "4. Use Python engine: "
-                    "cursor = connection.cursor(PandasCursor, engine='python')"
-                )
-                raise OperationalError(detailed_msg) from e
             raise OperationalError(*e.args) from e
 
     def _read_parquet(self, engine) -> DataFrame:
