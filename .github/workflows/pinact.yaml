@@ -13,11 +13,11 @@ jobs:
   pinact:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.head_ref }}
           persist-credentials: false
-      - uses: suzuki-shunsuke/pinact-action@v2.0.0
+      - uses: suzuki-shunsuke/pinact-action@cf51507d80d4d6522a07348e3d58790290eaf0b6 # v2.0.0
         with:
           app_id: ${{ vars.BOT_APP_ID }}
           app_private_key: ${{ secrets.BOT_APP_PRIVATE_KEY }}

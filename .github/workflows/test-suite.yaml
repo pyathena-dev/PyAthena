@@ -26,16 +26,16 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
       # TODO: In the case of Python 3.13+, the following error occurs, so install Python using setup-python.
       #   ../meson.build:44:2: ERROR: Problem encountered: Cannot compile
       #   `Python.h`. Perhaps you need to install python-dev|python-devel
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: ${{ matrix.python-version }}
         if: matrix.python-version == '3.13' || matrix.python-version == '3.14'
@@ -43,7 +43,7 @@ jobs:
           make tool
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7 # v6.0.0
         with:
           role-to-assume: arn:aws:iam::676287850544:role/github-actions-oidc-pyathena
           role-session-name: PyAthenaTestSession
