@@ -17,7 +17,7 @@ jobs:
         with:
           ref: ${{ github.head_ref }}
           persist-credentials: false
-      - uses: suzuki-shunsuke/pinact-action@v2
+      - uses: suzuki-shunsuke/pinact-action@v2.0.0
         with:
           app_id: ${{ vars.BOT_APP_ID }}
           app_private_key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
