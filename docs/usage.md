@@ -202,6 +202,34 @@ and the query was a DML statement (the assumption being that you always want to 
 
 The S3 staging directory is not checked, so it's possible that the location of the results is not in your provided `s3_staging_dir`.
 
+## Federated passthrough queries
+
+Athena's [federated query](https://docs.aws.amazon.com/athena/latest/ug/connect-to-a-data-source.html) feature lets you query data in external sources (PostgreSQL, MySQL, Snowflake, etc.) through Lambda-based connectors. By default Athena's planner translates your SQL into the source dialect, but for complex queries — or when you need a feature only the source supports — you can use **passthrough queries** to push native SQL directly to the source.
+
+Passthrough queries use the `TABLE(<connector>.system.query(query => '...'))` syntax. Because PyAthena passes the SQL string through to Athena unchanged, **no client-side changes are required** — these queries work out of the box.
+
+```python
+from pyathena import connect
+
+cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                 region_name="us-west-2").cursor()
+
+cursor.execute("""
+    SELECT * FROM TABLE(
+        my_postgres_connector.system.query(
+            query => 'SELECT id, name FROM public.users WHERE created_at > NOW() - INTERVAL ''7 days'''
+        )
+    )
+""")
+print(cursor.fetchall())
+```
+
+The connector (`my_postgres_connector` above) must be registered in Athena as a data source connector first; see the [Athena documentation](https://docs.aws.amazon.com/athena/latest/ug/connectors-passthrough-queries.html) for the connector setup steps and the list of connectors that support passthrough.
+
+```{note}
+Result columns from a passthrough query come back with the source system's types, which Athena maps to its own type system. When using `PandasCursor` or `ArrowCursor`, verify that the resulting dtypes match your expectations — connector-specific types (e.g., PostgreSQL `json`, MySQL `geometry`) may be returned as strings.
+```
+
 (query-execution-callback)=
 
 ## Query execution callback
