@@ -609,3 +609,16 @@ from pyathena import connect
 cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                  region_name="us-west-2").cursor()
 ```
+
+### Unsupported: JWT Trusted Identity Propagation
+
+Amazon Athena supports [JWT-based Trusted Identity Propagation (TIP)](https://docs.aws.amazon.com/athena/latest/ug/security-iam-trusted-identity-propagation.html) for the official **JDBC and ODBC drivers**, allowing enterprise SSO identities (Okta, Entra ID, etc.) to be propagated to Athena and Lake Formation for fine-grained access control.
+
+**PyAthena does not support JWT TIP**, because this auth flow is not exposed through the AWS SDK (`boto3` / `botocore`). PyAthena builds its Athena client via boto3 and therefore relies on standard IAM-based credentials.
+
+If your environment requires JWT TIP, the options are:
+
+- Use the [Athena JDBC driver](https://docs.aws.amazon.com/athena/latest/ug/connect-with-jdbc.html) or [ODBC driver](https://docs.aws.amazon.com/athena/latest/ug/odbc-driver.html) directly.
+- Use IAM Identity Center with role-based access (assume-role flow) — see the [Assume role provider](#assume-role-provider) examples above. This is not byte-equivalent to TIP but satisfies most SSO-driven access-control requirements.
+
+This is a limitation of the AWS SDK, not of PyAthena. If `boto3`/`botocore` adds JWT TIP support in the future, PyAthena will expose it via `Connection`.
