@@ -13,35 +13,35 @@ lint:
 	uvx ruff@$(RUFF_VERSION) format --check .
 	uv run mypy .
 
-.PHONY: test
-test: lint
+.PHONY: test/pyathena
+test/pyathena: lint
 	uv run pytest -n 8 --cov pyathena --cov-report html --cov-report term tests/pyathena/
 
-.PHONY: test-sqla
-test-sqla:
+.PHONY: test/sqla
+test/sqla:
 	uv run pytest -n 8 --cov pyathena --cov-report html --cov-report term tests/sqlalchemy/
 
-.PHONY: test-sqla-async
-test-sqla-async:
+.PHONY: test/sqla-async
+test/sqla-async:
 	uv run pytest -n 8 --cov pyathena --cov-report html --cov-report term tests/sqlalchemy/ --dburi async
 
 .PHONY: tox
 tox:
 	uvx tox@$(TOX_VERSION) -c pyproject.toml run
 
-.PHONY: docs
-docs:
+.PHONY: docs/build
+docs/build:
 	uv run sphinx-multiversion docs docs/_build/html
 	echo '<meta http-equiv="refresh" content="0; url=./master/index.html">' > docs/_build/html/index.html
 	echo 'pyathena.dev' > docs/_build/html/CNAME
 	touch docs/_build/html/.nojekyll
 
-.PHONY: docs-lint
-docs-lint:
+.PHONY: docs/lint
+docs/lint:
 	mise exec -- markdownlint-cli2
 
-.PHONY: docs-lint-fix
-docs-lint-fix:
+.PHONY: docs/format
+docs/format:
 	mise exec -- markdownlint-cli2 --fix
 
 .PHONY: tool

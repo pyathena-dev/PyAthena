@@ -226,9 +226,9 @@ allowlist_externals =
     make
 commands =
     uv sync --group dev
-    pyathena: make test
-    sqla: make test-sqla
-    sqla_async: make test-sqla-async
+    pyathena: make test/pyathena
+    sqla: make test/sqla
+    sqla_async: make test/sqla-async
 passenv =
     TOXENV
     AWS_*

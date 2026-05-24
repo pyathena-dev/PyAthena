@@ -28,8 +28,9 @@ make lint   # Lint + format check + mypy
 
 ```bash
 # ALWAYS run `make lint` first — tests will fail if lint doesn't pass
-make test       # Unit tests (runs chk first)
-make test-sqla  # SQLAlchemy dialect tests
+make test/pyathena    # Unit tests (runs lint first)
+make test/sqla        # SQLAlchemy dialect tests
+make test/sqla-async  # SQLAlchemy async dialect tests
 ```
 
 Tests require AWS environment variables. Use a `.env` file (gitignored):
@@ -73,8 +74,9 @@ export $(cat .env | xargs) && uv run pytest tests/pyathena/test_file.py -v
 
 ```bash
 mise install          # one-time: installs markdownlint-cli2
-make docs-lint        # check
-make docs-lint-fix    # auto-fix what's possible
+make docs/lint        # check
+make docs/format      # auto-fix what's possible
+make docs/build       # build the Sphinx site under docs/_build/html
 ```
 
 ## Architecture — Key Design Decisions
