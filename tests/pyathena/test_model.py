@@ -34,6 +34,17 @@ class TestAthenaQueryExecution:
                     "ResultReuseConfiguration": {
                         "ResultReuseByAgeConfiguration": {"Enabled": True, "MaxAgeInMinutes": 5}
                     },
+                    "ManagedQueryResultsConfiguration": {
+                        "Enabled": True,
+                        "EncryptionConfiguration": {
+                            "KmsKey": "test_managed_kms_key",
+                        },
+                    },
+                    "QueryResultsS3AccessGrantsConfiguration": {
+                        "EnableS3AccessGrants": True,
+                        "CreateUserLevelPrefix": True,
+                        "AuthenticationType": "DIRECTORY_IDENTITY",
+                    },
                     "QueryExecutionContext": {
                         "Database": "test_database",
                         "Catalog": "test_catalog",
@@ -57,7 +68,9 @@ class TestAthenaQueryExecution:
                         "TotalExecutionTimeInMillis": 4567890,
                         "QueryQueueTimeInMillis": 34567890,
                         "QueryPlanningTimeInMillis": 567890,
+                        "ServicePreProcessingTimeInMillis": 12345,
                         "ServiceProcessingTimeInMillis": 67890,
+                        "DpuCount": 4.0,
                         "ResultReuseInformation": {"ReusedPreviousResult": True},
                     },
                     "WorkGroup": "test_work_group",
@@ -92,7 +105,9 @@ class TestAthenaQueryExecution:
         assert actual.query_queue_time_in_millis == 34567890
         assert actual.total_execution_time_in_millis == 4567890
         assert actual.query_planning_time_in_millis == 567890
+        assert actual.service_pre_processing_time_in_millis == 12345
         assert actual.service_processing_time_in_millis == 67890
+        assert actual.dpu_count == 4.0
         assert actual.output_location == "s3://bucket/path/to/output/"
         assert actual.data_manifest_location == "s3://bucket/path/to/data_manifest/"
         assert actual.reused_previous_result
@@ -104,6 +119,29 @@ class TestAthenaQueryExecution:
         assert actual.effective_engine_version == "Athena engine version 2"
         assert actual.result_reuse_enabled
         assert actual.result_reuse_minutes == 5
+        assert actual.managed_query_results_enabled
+        assert actual.managed_query_results_kms_key == "test_managed_kms_key"
+        assert actual.enable_s3_access_grants
+        assert actual.create_user_level_prefix
+        assert actual.s3_access_grants_authentication_type == "DIRECTORY_IDENTITY"
+
+    def test_init_without_optional_fields(self):
+        actual = AthenaQueryExecution(
+            {
+                "QueryExecution": {
+                    "QueryExecutionId": "12345678-90ab-cdef-1234-567890abcdef",
+                    "Query": "SELECT 1",
+                    "Status": {"State": "SUCCEEDED"},
+                }
+            }
+        )
+        assert actual.service_pre_processing_time_in_millis is None
+        assert actual.dpu_count is None
+        assert actual.managed_query_results_enabled is None
+        assert actual.managed_query_results_kms_key is None
+        assert actual.enable_s3_access_grants is None
+        assert actual.create_user_level_prefix is None
+        assert actual.s3_access_grants_authentication_type is None
 
 
 class TestAthenaCalculationExecution:

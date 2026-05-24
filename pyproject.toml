@@ -5,8 +5,8 @@ authors = [
     {name = "laughingman7743", email = "laughingman7743@gmail.com"},
 ]
 dependencies = [
-    "boto3>=1.26.4",
-    "botocore>=1.29.4",
+    "boto3>=1.38.2",
+    "botocore>=1.41.2",
     "tenacity>=4.1.0",
     "fsspec",
     "python-dateutil",
