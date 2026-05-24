@@ -156,6 +156,16 @@ pyathena.error.DatabaseError: An error occurred (InvalidRequestException) when c
 
 If for some reason you cannot use the reuse feature of Athena engine version 3, please use the {ref}`Cache configuration <cache-configuration>` implemented by PyAthena.
 
+:::{note}
+**Semantic-equivalence matching (November 2025)**
+
+As of November 2025, Athena's result reuse no longer requires byte-for-byte identical query text. Result reuse is now triggered when a query is **semantically equivalent** to a previously executed query — cosmetic differences such as whitespace, comments, or keyword casing no longer prevent a cache hit.
+
+This behavior change happens server-side; PyAthena does not need to be updated, and existing code using `result_reuse_enable` continues to work unchanged. Users who relied on exact-string matching for cache invalidation should be aware that more queries may now reuse prior results than before.
+
+See the [Athena documentation](https://docs.aws.amazon.com/athena/latest/ug/reusing-query-results.html) for the latest rules on what counts as semantically equivalent.
+:::
+
 (cache-configuration)=
 
 ### Cache configuration
