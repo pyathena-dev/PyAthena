@@ -130,6 +130,7 @@ location
   value: s3://bucket/path/to/
 
   Example:
+
   ```python
   Table("some_table", metadata, ..., awsathena_location="s3://bucket/path/to/")
   ```
@@ -140,6 +141,7 @@ compression
   Description: Specifies the compression format.
 
   Value:
+
 - BZIP2
 - DEFLATE
 - GZIP
@@ -151,6 +153,7 @@ compression
 - NONE|UNCOMPRESSED
 
   Example:
+
   ```python
   Table("some_table", metadata, ..., awsathena_compression="SNAPPY")
   ```
@@ -161,6 +164,7 @@ row_format
   Description: Specifies the row format of the table and its underlying source data if applicable.
 
   Value:
+
 - [DELIMITED FIELDS TERMINATED BY char [ESCAPED BY char]]
 - [DELIMITED COLLECTION ITEMS TERMINATED BY char]
 - [MAP KEYS TERMINATED BY char]
@@ -169,6 +173,7 @@ row_format
 - SERDE 'serde_name'
 
   Example:
+
   ```python
   Table("some_table", metadata, ..., awsathena_row_format="SERDE 'org.openx.data.jsonserde.JsonSerDe'")
   ```
@@ -179,6 +184,7 @@ file_format
   Description: Specifies the file format for table data.
 
   Value:
+
 - SEQUENCEFILE
 - TEXTFILE
 - RCFILE
@@ -189,6 +195,7 @@ file_format
 - INPUTFORMAT input_format_classname OUTPUTFORMAT output_format_classname
 
   Example:
+
   ```python
   Table("some_table", metadata, ..., awsathena_file_format="PARQUET")
   Table("some_table", metadata, ..., awsathena_file_format="INPUTFORMAT 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat' OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat'")
@@ -200,11 +207,13 @@ serdeproperties
   Description: Specifies one or more custom properties allowed in SerDe.
 
   Value:
+
   ```python
   { "property_name": "property_value", "property_name": "property_value", ... }
   ```
 
   Example:
+
   ```python
   Table("some_table", metadata, ..., awsathena_serdeproperties={
       "separatorChar": ",", "escapeChar": "\\\\"
@@ -217,11 +226,13 @@ tblproperties
   Description: Specifies custom metadata key-value pairs for the table definition in addition to predefined table properties.
 
   Value:
+
   ```python
   { "property_name": "property_value", "property_name": "property_value", ... }
   ```
 
   Example:
+
   ```python
   Table("some_table", metadata, ..., awsathena_tblproperties={
       "projection.enabled": "true",
@@ -239,6 +250,7 @@ bucket_count
   Value: Integer value greater than or equal to 0
 
   Example:
+
   ```python
   Table("some_table", metadata, ..., awsathena_bucket_count=5)
   ```
@@ -268,6 +280,7 @@ partition
   Value: True / False
 
   Example:
+
   ```python
   Column("some_column", types.String, ..., awsathena_partition=True)
   ```
@@ -279,6 +292,7 @@ partition_transform
   Only has an effect for ICEBERG tables and when partition is set to true for the column.
 
   Value:
+
 - year
 - month
 - day
@@ -287,6 +301,7 @@ partition_transform
 - truncate
 
   Example:
+
   ```python
   Column("some_column", types.Date, ..., awsathena_partition=True, awsathena_partition_transform='year')
   ```
@@ -301,6 +316,7 @@ partition_transform_bucket_count
   Value: Integer value greater than or equal to 0
 
   Example:
+
   ```python
   Column("some_column", types.String, ..., awsathena_partition=True, awsathena_partition_transform='bucket', awsathena_partition_transform_bucket_count=5)
   ```
@@ -315,6 +331,7 @@ partition_transform_truncate_length
   Value: Integer value greater than or equal to 0
 
   Example:
+
   ```python
   Column("some_column", types.String, ..., awsathena_partition=True, awsathena_partition_transform='truncate', awsathena_partition_transform_truncate_length=5)
   ```
@@ -327,6 +344,7 @@ cluster
   Value: True / False
 
   Example:
+
   ```python
   Column("some_column", types.String, ..., awsathena_cluster=True)
   ```

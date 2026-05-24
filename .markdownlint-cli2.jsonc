@@ -2,7 +2,7 @@
   // https://github.com/DavidAnson/markdownlint/blob/main/doc/Rules.md
   "config": {
     "default": true,
-    // Line length: docs have long URLs, code blocks, and prose lines
+    // Docs have long URLs and code lines that would be awkward to wrap
     "MD013": false,
     // Match existing style: dash bullets, 2-space nested indent
     "MD004": { "style": "dash" },
@@ -13,16 +13,10 @@
     },
     // Cursor docs intentionally repeat subsection names ("Basic usage") under different cursors
     "MD024": { "siblings_only": true },
-    // Don't require fenced code blocks to specify a language
-    "MD040": false,
-    // Don't require blank lines around code fences / lists — existing docs intermix them
-    "MD031": false,
-    "MD032": false,
-    // Allow `$ command` style in shell snippets (testing.md, README)
+    // `$ command` style is intentional in docs/testing.md and README shell snippets
     "MD014": false,
-    // Allow bare URLs
-    "MD034": false,
-    // First line need not be a top-level heading (some files start with MyST ref targets)
+    // MyST `(label)=` ref targets must come before the first heading, so the
+    // first line of many docs/*.md files is not an H1
     "MD041": false
   },
   "globs": [

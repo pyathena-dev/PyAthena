@@ -33,12 +33,14 @@ make test-sqla  # SQLAlchemy dialect tests
 ```
 
 Tests require AWS environment variables. Use a `.env` file (gitignored):
+
 ```bash
 AWS_DEFAULT_REGION=<region>
 AWS_ATHENA_S3_STAGING_DIR=s3://<bucket>/<path>/
 AWS_ATHENA_WORKGROUP=<workgroup>
 AWS_ATHENA_SPARK_WORKGROUP=<spark-workgroup>
 ```
+
 ```bash
 export $(cat .env | xargs) && uv run pytest tests/pyathena/test_file.py -v
 ```
@@ -53,11 +55,13 @@ export $(cat .env | xargs) && uv run pytest tests/pyathena/test_file.py -v
 - **Standalone functions** for unit tests of pure logic (converters, parsers, utils): `def test_to_struct_json_formats(input_value, expected):`
 - Test file naming mirrors source: `pyathena/parser.py` → `tests/pyathena/test_parser.py`
 - **Fixtures**: Cursor/engine fixtures are defined in `conftest.py` and injected by name (e.g., `cursor`, `engine`, `async_cursor`). Use `indirect=True` parametrization to pass connection options:
+
   ```python
   @pytest.mark.parametrize("engine", [{"driver": "rest"}], indirect=True)
   def test_query(self, engine):
       engine, conn = engine
   ```
+
 - **Parametrize** with `@pytest.mark.parametrize(("input", "expected"), [...])` for data-driven tests
 - **Integration tests** (need AWS) use cursor/engine fixtures with real Athena queries; **unit tests** (no AWS) call functions directly with test data
 
@@ -65,10 +69,10 @@ export $(cat .env | xargs) && uv run pytest tests/pyathena/test_file.py -v
 
 `docs/**/*.md` and project-root `*.md` files are linted with [markdownlint-cli2](https://github.com/DavidAnson/markdownlint-cli2). The config lives at `.markdownlint-cli2.jsonc`. CI runs lint + Sphinx build on PRs that touch docs (`.github/workflows/docs-lint.yaml`).
 
-`markdownlint-cli2` is pinned in `.mise.toml` (along with `node`), so [`mise`](https://mise.jdx.dev/) installs the exact version used in CI. Run locally:
+`markdownlint-cli2` is pinned in `.mise.toml`, so [`mise`](https://mise.jdx.dev/) installs the exact version used in CI. Run locally:
 
 ```bash
-mise install          # one-time: installs node + markdownlint-cli2
+mise install          # one-time: installs markdownlint-cli2
 make docs-lint        # check
 make docs-lint-fix    # auto-fix what's possible
 ```
@@ -88,6 +92,7 @@ Each cursor type lives in its own subpackage (`pandas/`, `arrow/`, `polars/`, `s
 ### Filesystem (fsspec) Compatibility
 
 `pyathena/filesystem/s3.py` implements fsspec's `AbstractFileSystem`. When modifying:
+
 - Match `s3fs` library behavior where possible (users migrate from it)
 - Use `delimiter="/"` in S3 API calls to minimize requests
 - Handle edge cases: empty paths, trailing slashes, bucket-only paths
