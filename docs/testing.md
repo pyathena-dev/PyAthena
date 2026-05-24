@@ -33,8 +33,9 @@ $ export AWS_ATHENA_MANAGED_WORKGROUP=pyathena-managed
 
 ```bash
 $ pip install uv or pipx install uv or brew install uv or mise install uv
-$ make test
-$ make test-sqla
+$ make test/pyathena
+$ make test/sqla
+$ make test/sqla-async
 ```
 
 ## Run test multiple Python versions

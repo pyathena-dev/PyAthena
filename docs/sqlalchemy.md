@@ -8,6 +8,8 @@ Supported SQLAlchemy is 1.0.0 or higher.
 For async support (`create_async_engine`), install with `pip install PyAthena[aiosqlalchemy]`
 (requires SQLAlchemy 2.0+).
 
+## Basic usage
+
 ### Sync
 
 ```python
@@ -128,6 +130,7 @@ location
   value: s3://bucket/path/to/
 
   Example:
+
   ```python
   Table("some_table", metadata, ..., awsathena_location="s3://bucket/path/to/")
   ```
@@ -138,17 +141,19 @@ compression
   Description: Specifies the compression format.
 
   Value:
-  * BZIP2
-  * DEFLATE
-  * GZIP
-  * LZ4
-  * LZO
-  * SNAPPY
-  * ZLIB
-  * ZSTD
-  * NONE|UNCOMPRESSED
+
+- BZIP2
+- DEFLATE
+- GZIP
+- LZ4
+- LZO
+- SNAPPY
+- ZLIB
+- ZSTD
+- NONE|UNCOMPRESSED
 
   Example:
+
   ```python
   Table("some_table", metadata, ..., awsathena_compression="SNAPPY")
   ```
@@ -159,14 +164,16 @@ row_format
   Description: Specifies the row format of the table and its underlying source data if applicable.
 
   Value:
-  * [DELIMITED FIELDS TERMINATED BY char [ESCAPED BY char]]
-  * [DELIMITED COLLECTION ITEMS TERMINATED BY char]
-  * [MAP KEYS TERMINATED BY char]
-  * [LINES TERMINATED BY char]
-  * [NULL DEFINED AS char]
-  * SERDE 'serde_name'
+
+- [DELIMITED FIELDS TERMINATED BY char [ESCAPED BY char]]
+- [DELIMITED COLLECTION ITEMS TERMINATED BY char]
+- [MAP KEYS TERMINATED BY char]
+- [LINES TERMINATED BY char]
+- [NULL DEFINED AS char]
+- SERDE 'serde_name'
 
   Example:
+
   ```python
   Table("some_table", metadata, ..., awsathena_row_format="SERDE 'org.openx.data.jsonserde.JsonSerDe'")
   ```
@@ -177,16 +184,18 @@ file_format
   Description: Specifies the file format for table data.
 
   Value:
-  * SEQUENCEFILE
-  * TEXTFILE
-  * RCFILE
-  * ORC
-  * PARQUET
-  * AVRO
-  * ION
-  * INPUTFORMAT input_format_classname OUTPUTFORMAT output_format_classname
+
+- SEQUENCEFILE
+- TEXTFILE
+- RCFILE
+- ORC
+- PARQUET
+- AVRO
+- ION
+- INPUTFORMAT input_format_classname OUTPUTFORMAT output_format_classname
 
   Example:
+
   ```python
   Table("some_table", metadata, ..., awsathena_file_format="PARQUET")
   Table("some_table", metadata, ..., awsathena_file_format="INPUTFORMAT 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat' OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat'")
@@ -198,11 +207,13 @@ serdeproperties
   Description: Specifies one or more custom properties allowed in SerDe.
 
   Value:
+
   ```python
   { "property_name": "property_value", "property_name": "property_value", ... }
   ```
 
   Example:
+
   ```python
   Table("some_table", metadata, ..., awsathena_serdeproperties={
       "separatorChar": ",", "escapeChar": "\\\\"
@@ -215,11 +226,13 @@ tblproperties
   Description: Specifies custom metadata key-value pairs for the table definition in addition to predefined table properties.
 
   Value:
+
   ```python
   { "property_name": "property_value", "property_name": "property_value", ... }
   ```
 
   Example:
+
   ```python
   Table("some_table", metadata, ..., awsathena_tblproperties={
       "projection.enabled": "true",
@@ -237,6 +250,7 @@ bucket_count
   Value: Integer value greater than or equal to 0
 
   Example:
+
   ```python
   Table("some_table", metadata, ..., awsathena_bucket_count=5)
   ```
@@ -266,6 +280,7 @@ partition
   Value: True / False
 
   Example:
+
   ```python
   Column("some_column", types.String, ..., awsathena_partition=True)
   ```
@@ -277,14 +292,16 @@ partition_transform
   Only has an effect for ICEBERG tables and when partition is set to true for the column.
 
   Value:
-  * year
-  * month
-  * day
-  * hour
-  * bucket
-  * truncate
+
+- year
+- month
+- day
+- hour
+- bucket
+- truncate
 
   Example:
+
   ```python
   Column("some_column", types.Date, ..., awsathena_partition=True, awsathena_partition_transform='year')
   ```
@@ -299,6 +316,7 @@ partition_transform_bucket_count
   Value: Integer value greater than or equal to 0
 
   Example:
+
   ```python
   Column("some_column", types.String, ..., awsathena_partition=True, awsathena_partition_transform='bucket', awsathena_partition_transform_bucket_count=5)
   ```
@@ -313,6 +331,7 @@ partition_transform_truncate_length
   Value: Integer value greater than or equal to 0
 
   Example:
+
   ```python
   Column("some_column", types.String, ..., awsathena_partition=True, awsathena_partition_transform='truncate', awsathena_partition_transform_truncate_length=5)
   ```
@@ -325,6 +344,7 @@ cluster
   Value: True / False
 
   Example:
+
   ```python
   Column("some_column", types.String, ..., awsathena_cluster=True)
   ```
@@ -564,11 +584,11 @@ with engine.connect() as connection:
 
 The `on_start_query_execution` callback is supported by all PyAthena SQLAlchemy dialects:
 
-* `awsathena` and `awsathena+rest` (default cursor)
-* `awsathena+pandas` (pandas cursor)
-* `awsathena+arrow` (arrow cursor)
-* `awsathena+polars` (polars cursor)
-* `awsathena+s3fs` (S3FS cursor)
+- `awsathena` and `awsathena+rest` (default cursor)
+- `awsathena+pandas` (pandas cursor)
+- `awsathena+arrow` (arrow cursor)
+- `awsathena+polars` (polars cursor)
+- `awsathena+s3fs` (S3FS cursor)
 
 Usage with different dialects:
 
@@ -1089,10 +1109,10 @@ print(type(result.json_col))  # <class 'dict'>
 
 Athena's JSON type support has specific limitations:
 
-* **JSON objects are fully supported** - Objects with key-value pairs work correctly
-* **Top-level JSON arrays are not supported** - Direct CAST of arrays like `[1, 2, 3]` will fail
-* **Arrays within objects are supported** - JSON objects can contain arrays as property values
-* **DML only** - JSON type is supported for SELECT queries but not in CREATE TABLE statements
+- **JSON objects are fully supported** - Objects with key-value pairs work correctly
+- **Top-level JSON arrays are not supported** - Direct CAST of arrays like `[1, 2, 3]` will fail
+- **Arrays within objects are supported** - JSON objects can contain arrays as property values
+- **DML only** - JSON type is supported for SELECT queries but not in CREATE TABLE statements
 
 ```python
 # Supported: JSON object with nested array
