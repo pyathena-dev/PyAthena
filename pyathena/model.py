@@ -111,9 +111,13 @@ class AthenaQueryExecution:
         self._query_planning_time_in_millis: int | None = statistics.get(
             "QueryPlanningTimeInMillis", None
         )
+        self._service_pre_processing_time_in_millis: int | None = statistics.get(
+            "ServicePreProcessingTimeInMillis", None
+        )
         self._service_processing_time_in_millis: int | None = statistics.get(
             "ServiceProcessingTimeInMillis", None
         )
+        self._dpu_count: float | None = statistics.get("DpuCount")
         self._data_manifest_location: str | None = statistics.get("DataManifestLocation")
         reuse_info = statistics.get("ResultReuseInformation", {})
         self._reused_previous_result: bool | None = reuse_info.get("ReusedPreviousResult")
@@ -126,6 +130,24 @@ class AthenaQueryExecution:
         self._expected_bucket_owner: str | None = result_conf.get("ExpectedBucketOwner")
         acl_conf = result_conf.get("AclConfiguration", {})
         self._s3_acl_option: str | None = acl_conf.get("S3AclOption")
+
+        managed_results_conf = query_execution.get("ManagedQueryResultsConfiguration", {})
+        self._managed_query_results_enabled: bool | None = managed_results_conf.get("Enabled")
+        managed_results_encryption_conf = managed_results_conf.get("EncryptionConfiguration", {})
+        self._managed_query_results_kms_key: str | None = managed_results_encryption_conf.get(
+            "KmsKey"
+        )
+
+        s3_access_grants_conf = query_execution.get("QueryResultsS3AccessGrantsConfiguration", {})
+        self._enable_s3_access_grants: bool | None = s3_access_grants_conf.get(
+            "EnableS3AccessGrants"
+        )
+        self._create_user_level_prefix: bool | None = s3_access_grants_conf.get(
+            "CreateUserLevelPrefix"
+        )
+        self._s3_access_grants_authentication_type: str | None = s3_access_grants_conf.get(
+            "AuthenticationType"
+        )
 
         engine_version = query_execution.get("EngineVersion", {})
         self._selected_engine_version: str | None = engine_version.get(
@@ -225,8 +247,16 @@ class AthenaQueryExecution:
         return self._query_planning_time_in_millis
 
     @property
+    def service_pre_processing_time_in_millis(self) -> int | None:
+        return self._service_pre_processing_time_in_millis
+
+    @property
     def service_processing_time_in_millis(self) -> int | None:
         return self._service_processing_time_in_millis
+
+    @property
+    def dpu_count(self) -> float | None:
+        return self._dpu_count
 
     @property
     def output_location(self) -> str | None:
@@ -271,6 +301,26 @@ class AthenaQueryExecution:
     @property
     def result_reuse_minutes(self) -> int | None:
         return self._result_reuse_minutes
+
+    @property
+    def managed_query_results_enabled(self) -> bool | None:
+        return self._managed_query_results_enabled
+
+    @property
+    def managed_query_results_kms_key(self) -> str | None:
+        return self._managed_query_results_kms_key
+
+    @property
+    def enable_s3_access_grants(self) -> bool | None:
+        return self._enable_s3_access_grants
+
+    @property
+    def create_user_level_prefix(self) -> bool | None:
+        return self._create_user_level_prefix
+
+    @property
+    def s3_access_grants_authentication_type(self) -> str | None:
+        return self._s3_access_grants_authentication_type
 
 
 class AthenaCalculationExecutionStatus:

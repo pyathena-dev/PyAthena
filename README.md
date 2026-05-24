@@ -21,7 +21,7 @@ PyAthena is a Python [DB API 2.0 (PEP 249)](https://www.python.org/dev/peps/pep-
 
 ## Requirements
 
-* Python
+- Python
 
   - CPython 3.10, 3.11, 3.12, 3.13, 3.14
 
@@ -77,10 +77,10 @@ Many of the implementations in this library are based on [PyHive](https://github
 
 ## Links
 
-- Documentation: https://pyathena.dev/
-- PyPI Releases: https://pypi.org/project/PyAthena/
-- Source Code: https://github.com/pyathena-dev/PyAthena/
-- Issue Tracker: https://github.com/pyathena-dev/PyAthena/issues
+- Documentation: <https://pyathena.dev/>
+- PyPI Releases: <https://pypi.org/project/PyAthena/>
+- Source Code: <https://github.com/pyathena-dev/PyAthena/>
+- Issue Tracker: <https://github.com/pyathena-dev/PyAthena/issues>
 
 ## Logo
 

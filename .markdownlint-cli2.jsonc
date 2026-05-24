@@ -1,0 +1,34 @@
+{
+  // https://github.com/DavidAnson/markdownlint/blob/main/doc/Rules.md
+  "config": {
+    "default": true,
+    // Docs have long URLs and code lines that would be awkward to wrap
+    "MD013": false,
+    // Match existing style: dash bullets, 2-space nested indent
+    "MD004": { "style": "dash" },
+    "MD007": { "indent": 2 },
+    // Allow inline HTML used by README (centered images) and MyST admonitions
+    "MD033": {
+      "allowed_elements": ["details", "summary", "br", "kbd", "sub", "sup", "div", "img", "p", "a"]
+    },
+    // Cursor docs intentionally repeat subsection names ("Basic usage") under different cursors
+    "MD024": { "siblings_only": true },
+    // `$ command` style is intentional in docs/testing.md and README shell snippets
+    "MD014": false,
+    // MyST `(label)=` ref targets must come before the first heading, so the
+    // first line of many docs/*.md files is not an H1
+    "MD041": false
+  },
+  "globs": [
+    "docs/**/*.md",
+    "*.md"
+  ],
+  "ignores": [
+    "docs/_build/**",
+    "node_modules/**",
+    ".venv/**",
+    ".tox/**",
+    ".pytest_cache/**",
+    ".serena/**"
+  ]
+}

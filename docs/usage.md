@@ -156,6 +156,16 @@ pyathena.error.DatabaseError: An error occurred (InvalidRequestException) when c
 
 If for some reason you cannot use the reuse feature of Athena engine version 3, please use the {ref}`Cache configuration <cache-configuration>` implemented by PyAthena.
 
+:::{note}
+**Semantic-equivalence matching (November 2025)**
+
+As of November 2025, Athena's result reuse no longer requires byte-for-byte identical query text. Result reuse is now triggered when a query is **semantically equivalent** to a previously executed query — cosmetic differences such as whitespace, comments, or keyword casing no longer prevent a cache hit.
+
+This behavior change happens server-side; PyAthena does not need to be updated, and existing code using `result_reuse_enable` continues to work unchanged. Users who relied on exact-string matching for cache invalidation should be aware that more queries may now reuse prior results than before.
+
+See the [Athena documentation](https://docs.aws.amazon.com/athena/latest/ug/reusing-query-results.html) for the latest rules on what counts as semantically equivalent.
+:::
+
 (cache-configuration)=
 
 ### Cache configuration
@@ -407,12 +417,12 @@ cursor.execute(
 
 The `on_start_query_execution` callback is supported by the following cursor types:
 
-* `Cursor` (default cursor)
-* `DictCursor`
-* `ArrowCursor`
-* `PandasCursor`
-* `PolarsCursor`
-* `S3FSCursor`
+- `Cursor` (default cursor)
+- `DictCursor`
+- `ArrowCursor`
+- `PandasCursor`
+- `PolarsCursor`
+- `S3FSCursor`
 
 Note: `AsyncCursor` and its variants do not support this callback as they already
 return the query ID immediately through their different execution model.
@@ -503,11 +513,11 @@ column. You can mix both styles in the same dictionary.
 
 ### Constraints
 
-* **Nested arrays in native format** — Athena's native (non-JSON) string representation
+- **Nested arrays in native format** — Athena's native (non-JSON) string representation
   does not clearly delimit nested arrays. If your query returns nested arrays
   (e.g. `array(array(integer))`), use `CAST(... AS JSON)` in your query to get
   JSON-formatted output, which is parsed reliably.
-* **Arrow, Pandas, and Polars cursors** — These cursors accept `result_set_type_hints`
+- **Arrow, Pandas, and Polars cursors** — These cursors accept `result_set_type_hints`
   but their converters do not currently use the hints because they rely on their own
   type systems. The parameter is passed through for forward compatibility and for
   result sets that fall back to the default conversion path.
@@ -637,3 +647,16 @@ from pyathena import connect
 cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                  region_name="us-west-2").cursor()
 ```
+
+### Unsupported: JWT Trusted Identity Propagation
+
+Amazon Athena supports [JWT-based Trusted Identity Propagation (TIP)](https://docs.aws.amazon.com/athena/latest/ug/security-iam-trusted-identity-propagation.html) for the official **JDBC and ODBC drivers**, allowing enterprise SSO identities (Okta, Entra ID, etc.) to be propagated to Athena and Lake Formation for fine-grained access control.
+
+**PyAthena does not support JWT TIP**, because this auth flow is not exposed through the AWS SDK (`boto3` / `botocore`). PyAthena builds its Athena client via boto3 and therefore relies on standard IAM-based credentials.
+
+If your environment requires JWT TIP, the options are:
+
+- Use the [Athena JDBC driver](https://docs.aws.amazon.com/athena/latest/ug/connect-with-jdbc.html) or [ODBC driver](https://docs.aws.amazon.com/athena/latest/ug/odbc-driver.html) directly.
+- Use IAM Identity Center with role-based access (assume-role flow) — see the [Assume role provider](#assume-role-provider) examples above. This is not byte-equivalent to TIP but satisfies most SSO-driven access-control requirements.
+
+This is a limitation of the AWS SDK, not of PyAthena. If `boto3`/`botocore` adds JWT TIP support in the future, PyAthena will expose it via `Connection`.
