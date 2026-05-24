@@ -8,6 +8,8 @@ Supported SQLAlchemy is 1.0.0 or higher.
 For async support (`create_async_engine`), install with `pip install PyAthena[aiosqlalchemy]`
 (requires SQLAlchemy 2.0+).
 
+## Basic usage
+
 ### Sync
 
 ```python
@@ -138,15 +140,15 @@ compression
   Description: Specifies the compression format.
 
   Value:
-  * BZIP2
-  * DEFLATE
-  * GZIP
-  * LZ4
-  * LZO
-  * SNAPPY
-  * ZLIB
-  * ZSTD
-  * NONE|UNCOMPRESSED
+- BZIP2
+- DEFLATE
+- GZIP
+- LZ4
+- LZO
+- SNAPPY
+- ZLIB
+- ZSTD
+- NONE|UNCOMPRESSED
 
   Example:
   ```python
@@ -159,12 +161,12 @@ row_format
   Description: Specifies the row format of the table and its underlying source data if applicable.
 
   Value:
-  * [DELIMITED FIELDS TERMINATED BY char [ESCAPED BY char]]
-  * [DELIMITED COLLECTION ITEMS TERMINATED BY char]
-  * [MAP KEYS TERMINATED BY char]
-  * [LINES TERMINATED BY char]
-  * [NULL DEFINED AS char]
-  * SERDE 'serde_name'
+- [DELIMITED FIELDS TERMINATED BY char [ESCAPED BY char]]
+- [DELIMITED COLLECTION ITEMS TERMINATED BY char]
+- [MAP KEYS TERMINATED BY char]
+- [LINES TERMINATED BY char]
+- [NULL DEFINED AS char]
+- SERDE 'serde_name'
 
   Example:
   ```python
@@ -177,14 +179,14 @@ file_format
   Description: Specifies the file format for table data.
 
   Value:
-  * SEQUENCEFILE
-  * TEXTFILE
-  * RCFILE
-  * ORC
-  * PARQUET
-  * AVRO
-  * ION
-  * INPUTFORMAT input_format_classname OUTPUTFORMAT output_format_classname
+- SEQUENCEFILE
+- TEXTFILE
+- RCFILE
+- ORC
+- PARQUET
+- AVRO
+- ION
+- INPUTFORMAT input_format_classname OUTPUTFORMAT output_format_classname
 
   Example:
   ```python
@@ -277,12 +279,12 @@ partition_transform
   Only has an effect for ICEBERG tables and when partition is set to true for the column.
 
   Value:
-  * year
-  * month
-  * day
-  * hour
-  * bucket
-  * truncate
+- year
+- month
+- day
+- hour
+- bucket
+- truncate
 
   Example:
   ```python
@@ -564,11 +566,11 @@ with engine.connect() as connection:
 
 The `on_start_query_execution` callback is supported by all PyAthena SQLAlchemy dialects:
 
-* `awsathena` and `awsathena+rest` (default cursor)
-* `awsathena+pandas` (pandas cursor)
-* `awsathena+arrow` (arrow cursor)
-* `awsathena+polars` (polars cursor)
-* `awsathena+s3fs` (S3FS cursor)
+- `awsathena` and `awsathena+rest` (default cursor)
+- `awsathena+pandas` (pandas cursor)
+- `awsathena+arrow` (arrow cursor)
+- `awsathena+polars` (polars cursor)
+- `awsathena+s3fs` (S3FS cursor)
 
 Usage with different dialects:
 
@@ -1089,10 +1091,10 @@ print(type(result.json_col))  # <class 'dict'>
 
 Athena's JSON type support has specific limitations:
 
-* **JSON objects are fully supported** - Objects with key-value pairs work correctly
-* **Top-level JSON arrays are not supported** - Direct CAST of arrays like `[1, 2, 3]` will fail
-* **Arrays within objects are supported** - JSON objects can contain arrays as property values
-* **DML only** - JSON type is supported for SELECT queries but not in CREATE TABLE statements
+- **JSON objects are fully supported** - Objects with key-value pairs work correctly
+- **Top-level JSON arrays are not supported** - Direct CAST of arrays like `[1, 2, 3]` will fail
+- **Arrays within objects are supported** - JSON objects can contain arrays as property values
+- **DML only** - JSON type is supported for SELECT queries but not in CREATE TABLE statements
 
 ```python
 # Supported: JSON object with nested array

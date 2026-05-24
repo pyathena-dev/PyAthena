@@ -1,0 +1,40 @@
+{
+  // https://github.com/DavidAnson/markdownlint/blob/main/doc/Rules.md
+  "config": {
+    "default": true,
+    // Line length: docs have long URLs, code blocks, and prose lines
+    "MD013": false,
+    // Match existing style: dash bullets, 2-space nested indent
+    "MD004": { "style": "dash" },
+    "MD007": { "indent": 2 },
+    // Allow inline HTML used by README (centered images) and MyST admonitions
+    "MD033": {
+      "allowed_elements": ["details", "summary", "br", "kbd", "sub", "sup", "div", "img", "p", "a"]
+    },
+    // Cursor docs intentionally repeat subsection names ("Basic usage") under different cursors
+    "MD024": { "siblings_only": true },
+    // Don't require fenced code blocks to specify a language
+    "MD040": false,
+    // Don't require blank lines around code fences / lists — existing docs intermix them
+    "MD031": false,
+    "MD032": false,
+    // Allow `$ command` style in shell snippets (testing.md, README)
+    "MD014": false,
+    // Allow bare URLs
+    "MD034": false,
+    // First line need not be a top-level heading (some files start with MyST ref targets)
+    "MD041": false
+  },
+  "globs": [
+    "docs/**/*.md",
+    "*.md"
+  ],
+  "ignores": [
+    "docs/_build/**",
+    "node_modules/**",
+    ".venv/**",
+    ".tox/**",
+    ".pytest_cache/**",
+    ".serena/**"
+  ]
+}

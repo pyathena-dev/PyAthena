@@ -293,7 +293,6 @@ cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                  region_name="us-west-2").cursor(cursor=AsyncDictCursor, dict_type=OrderedDict)
 ```
 
-
 ## AioCursor
 
 See {ref}`aio-cursor`.

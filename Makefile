@@ -36,6 +36,14 @@ docs:
 	echo 'pyathena.dev' > docs/_build/html/CNAME
 	touch docs/_build/html/.nojekyll
 
+.PHONY: docs-lint
+docs-lint:
+	mise exec -- markdownlint-cli2
+
+.PHONY: docs-lint-fix
+docs-lint-fix:
+	mise exec -- markdownlint-cli2 --fix
+
 .PHONY: tool
 tool:
 	uv tool install ruff@$(RUFF_VERSION)

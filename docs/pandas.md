@@ -33,7 +33,7 @@ df = as_pandas(cursor)
 print(df.describe())
 ```
 
-If you want to use the query results output to S3 directly, you can use [PandasCursor](#pandas-cursor).
+If you want to use the query results output to S3 directly, you can use {ref}`pandas-cursor`.
 This cursor fetches query results faster than the default cursor. (See [benchmark results](https://github.com/pyathena-dev/PyAthena/tree/master/benchmarks).)
 
 (to-sql)=
@@ -392,7 +392,7 @@ for df in df_iter:
     print(df.head())
 ```
 
-**Memory-efficient iteration with iter_chunks()**
+#### Memory-efficient iteration with iter_chunks()
 
 PandasCursor provides an `iter_chunks()` method for convenient chunked processing:
 
@@ -456,7 +456,7 @@ df_iter.get_chunk(10)
 df_iter.get_chunk(10)  # raise StopIteration
 ```
 
-**Auto-optimization of chunksize**
+#### Auto-optimization of chunksize
 
 PandasCursor can automatically determine optimal chunksize based on result file size when enabled:
 
@@ -506,7 +506,7 @@ AthenaPandasResultSet.AUTO_CHUNK_SIZE_LARGE = 200_000  # Larger chunks
 AthenaPandasResultSet.AUTO_CHUNK_SIZE_MEDIUM = 100_000
 ```
 
-**Performance tuning options**
+#### Performance tuning options
 
 PandasCursor accepts additional pandas.read_csv() options for performance optimization:
 
@@ -829,4 +829,3 @@ async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
     await cursor.execute("SELECT * FROM many_rows")
     df = cursor.as_pandas()
 ```
-

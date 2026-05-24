@@ -649,4 +649,3 @@ async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
     await cursor.execute("SELECT * FROM many_rows")
     df = cursor.as_polars()
 ```
-

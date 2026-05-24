@@ -379,12 +379,12 @@ cursor.execute(
 
 The `on_start_query_execution` callback is supported by the following cursor types:
 
-* `Cursor` (default cursor)
-* `DictCursor`
-* `ArrowCursor`
-* `PandasCursor`
-* `PolarsCursor`
-* `S3FSCursor`
+- `Cursor` (default cursor)
+- `DictCursor`
+- `ArrowCursor`
+- `PandasCursor`
+- `PolarsCursor`
+- `S3FSCursor`
 
 Note: `AsyncCursor` and its variants do not support this callback as they already
 return the query ID immediately through their different execution model.
@@ -475,11 +475,11 @@ column. You can mix both styles in the same dictionary.
 
 ### Constraints
 
-* **Nested arrays in native format** — Athena's native (non-JSON) string representation
+- **Nested arrays in native format** — Athena's native (non-JSON) string representation
   does not clearly delimit nested arrays. If your query returns nested arrays
   (e.g. `array(array(integer))`), use `CAST(... AS JSON)` in your query to get
   JSON-formatted output, which is parsed reliably.
-* **Arrow, Pandas, and Polars cursors** — These cursors accept `result_set_type_hints`
+- **Arrow, Pandas, and Polars cursors** — These cursors accept `result_set_type_hints`
   but their converters do not currently use the hints because they rely on their own
   type systems. The parameter is passed through for forward compatibility and for
   result sets that fall back to the default conversion path.

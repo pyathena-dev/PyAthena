@@ -21,7 +21,7 @@ PyAthena is a Python [DB API 2.0 (PEP 249)](https://www.python.org/dev/peps/pep-
 
 ## Requirements
 
-* Python
+- Python
 
   - CPython 3.10, 3.11, 3.12, 3.13, 3.14
 
