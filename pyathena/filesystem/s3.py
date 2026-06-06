@@ -1409,11 +1409,18 @@ class S3File(AbstractBufferedFile):
                 )
 
     def _upload_chunk(self, final: bool = False) -> bool:
+        # The return value controls whether fsspec's flush() resets self.buffer
+        # afterwards: it does so only when this returns a value other than False.
+        # Returning ``not final`` keeps the buffer intact on the final flush so a
+        # deferred commit() (autocommit=False, i.e. inside an fsspec transaction)
+        # can still read the bytes; resetting it there would upload an empty
+        # object for small files. Mid-stream chunks (final=False) return True so
+        # fsspec clears the already-uploaded buffer between parts.
         if self.tell() < self.blocksize:
             # Files smaller than block size in size cannot be multipart uploaded.
             if self.autocommit and final:
                 self.commit()
-            return True
+            return not final
 
         if not self.multipart_upload:
             raise RuntimeError("Multipart upload is not initialized.")
@@ -1456,7 +1463,7 @@ class S3File(AbstractBufferedFile):
 
         if self.autocommit and final:
             self.commit()
-        return True
+        return not final
 
     def commit(self) -> None:
         if self.tell() == 0:
