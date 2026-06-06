@@ -189,6 +189,50 @@ class TestAioS3FileSystem:
             assert actual == data
 
     @pytest.mark.parametrize(
+        "size",
+        [
+            2**10,  # < block size: one-shot PutObject path (the GH-719 regression)
+            10 * 2**20,  # > block size (5 MiB): multipart path via the async executor
+        ],
+    )
+    def test_write_transaction(self, fs, size):
+        # GH-719 regression for the async filesystem: AioS3File inherits
+        # _upload_chunk/commit from S3File, so the transaction fix must hold here
+        # too, including the multipart path driven by the async executor.
+        data = b"a" * size
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_async_write_transaction/{uuid.uuid4()}"
+        )
+        with fs.transaction, fs.open(path, "wb") as f:
+            f.write(data)
+        with fs.open(path, "rb") as f:
+            actual = f.read()
+            assert len(actual) == len(data)
+            assert actual == data
+
+    def test_write_transaction_rollback(self, fs):
+        # Kept small-only on purpose: the multipart discard()/abort path is
+        # already exercised by the sync test (AioS3File inherits discard()),
+        # so there is no need to pay for another large upload here.
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_async_write_transaction_rollback/{uuid.uuid4()}"
+        )
+
+        def write_then_fail():
+            with fs.transaction:
+                f = fs.open(path, "wb")
+                f.write(b"hello world")
+                f.close()
+                raise RuntimeError("rollback")
+
+        with pytest.raises(RuntimeError):
+            write_then_fail()
+        fs.invalidate_cache(path)
+        assert not fs.exists(path)
+
+    @pytest.mark.parametrize(
         ("base", "exp"),
         [
             (1, 2**10),
