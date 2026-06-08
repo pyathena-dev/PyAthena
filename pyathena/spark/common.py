@@ -201,6 +201,8 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
     def __poll(self, query_id: str) -> AthenaQueryExecution | AthenaCalculationExecution:
         while True:
             calculation_status = self._get_calculation_execution_status(query_id)
+            if self._on_poll:
+                self._on_poll(calculation_status)
             if calculation_status.state in [
                 AthenaCalculationExecutionStatus.STATE_COMPLETED,
                 AthenaCalculationExecutionStatus.STATE_FAILED,

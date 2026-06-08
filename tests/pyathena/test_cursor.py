@@ -11,6 +11,7 @@ from concurrent.futures.thread import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from random import randint
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -933,6 +934,68 @@ class TestCursor:
         # Verify query completed successfully
         row = cursor.fetchone()
         assert row == (5,)
+
+    def test_on_poll_invoked_each_iteration(self):
+        """on_poll fires once per poll iteration with the current execution (no AWS)."""
+        states = [
+            AthenaQueryExecution.STATE_QUEUED,
+            AthenaQueryExecution.STATE_RUNNING,
+            AthenaQueryExecution.STATE_SUCCEEDED,
+        ]
+        executions = [MagicMock(state=state) for state in states]
+        received = []
+
+        cursor = Cursor.__new__(Cursor)  # bypass __init__ to avoid AWS calls
+        cursor._poll_interval = 0
+        cursor._kill_on_interrupt = False
+        cursor._on_poll = received.append
+
+        with patch.object(Cursor, "_get_query_execution", side_effect=executions):
+            result = cursor._poll("query_id")
+
+        # Callback received every state in order, including the terminal one
+        assert [execution.state for execution in received] == states
+        assert result is executions[-1]
+
+    def test_on_poll_none_is_noop(self):
+        """A None on_poll callback does not affect polling (no AWS)."""
+        execution = MagicMock(state=AthenaQueryExecution.STATE_SUCCEEDED)
+
+        cursor = Cursor.__new__(Cursor)  # bypass __init__ to avoid AWS calls
+        cursor._poll_interval = 0
+        cursor._kill_on_interrupt = False
+        cursor._on_poll = None
+
+        with patch.object(Cursor, "_get_query_execution", return_value=execution):
+            result = cursor._poll("query_id")
+
+        assert result is execution
+
+    def test_on_poll_connection_level(self):
+        """Connection-level on_poll fires during query execution."""
+        states = []
+
+        with contextlib.closing(
+            connect(on_poll=lambda execution: states.append(execution.state))
+        ) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+
+            assert len(states) >= 1
+            assert states[-1] == AthenaQueryExecution.STATE_SUCCEEDED
+            assert cursor.fetchone() == (1,)
+
+    def test_on_poll_cursor_level(self):
+        """on_poll passed via cursor() fires during query execution."""
+        states = []
+
+        with contextlib.closing(connect()) as conn:
+            cursor = conn.cursor(on_poll=lambda execution: states.append(execution.state))
+            cursor.execute("SELECT 1")
+
+            assert len(states) >= 1
+            assert states[-1] == AthenaQueryExecution.STATE_SUCCEEDED
+            assert cursor.fetchone() == (1,)
 
     def test_null_vs_empty_string(self, cursor):
         """
