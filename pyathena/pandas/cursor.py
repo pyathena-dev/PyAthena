@@ -79,7 +79,6 @@ class PandasCursor(WithFetch):
         result_reuse_enable: bool = False,
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
         auto_optimize_chunksize: bool = False,
-        on_start_query_execution: Callable[[str], None] | None = None,
         **kwargs,
     ) -> None:
         """Initialize PandasCursor with configuration options.
@@ -105,7 +104,6 @@ class PandasCursor(WithFetch):
             auto_optimize_chunksize: Enable automatic chunksize determination for
                                    large files. Only effective when chunksize is None.
                                    Default: False (no automatic chunking).
-            on_start_query_execution: Callback for query start events.
             **kwargs: Additional arguments passed to pandas.read_csv.
         """
         super().__init__(
@@ -128,7 +126,6 @@ class PandasCursor(WithFetch):
         self._cache_type = cache_type
         self._max_workers = max_workers
         self._auto_optimize_chunksize = auto_optimize_chunksize
-        self._on_start_query_execution = on_start_query_execution
 
     @staticmethod
     def get_default_converter(

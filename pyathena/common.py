@@ -173,6 +173,7 @@ class BaseCursor(metaclass=ABCMeta):
         kill_on_interrupt: bool,
         result_reuse_enable: bool,
         result_reuse_minutes: int,
+        on_start_query_execution: Callable[[str], None] | None = None,
         on_poll: OnPollCallback | None = None,
         **kwargs,
     ) -> None:
@@ -191,6 +192,10 @@ class BaseCursor(metaclass=ABCMeta):
         self._kill_on_interrupt = kill_on_interrupt
         self._result_reuse_enable = result_reuse_enable
         self._result_reuse_minutes = result_reuse_minutes
+        # ``on_start_query_execution`` is invoked only by cursors whose ``execute()``
+        # supports it (the synchronous cursors). Async/aio/Spark cursors return the
+        # query id immediately through their execution model and do not invoke it.
+        self._on_start_query_execution = on_start_query_execution
         self._on_poll = on_poll
 
     @staticmethod
