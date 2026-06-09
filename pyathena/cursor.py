@@ -52,7 +52,6 @@ class Cursor(WithFetch):
         kill_on_interrupt: bool = True,
         result_reuse_enable: bool = False,
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
-        on_start_query_execution: Callable[[str], None] | None = None,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -69,7 +68,6 @@ class Cursor(WithFetch):
             **kwargs,
         )
         self._result_set_class = AthenaResultSet
-        self._on_start_query_execution = on_start_query_execution
 
     @property
     def arraysize(self) -> int:

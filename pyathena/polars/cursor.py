@@ -74,7 +74,6 @@ class PolarsCursor(WithFetch):
         unload: bool = False,
         result_reuse_enable: bool = False,
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
-        on_start_query_execution: Callable[[str], None] | None = None,
         block_size: int | None = None,
         cache_type: str | None = None,
         max_workers: int = (cpu_count() or 1) * 5,
@@ -95,7 +94,6 @@ class PolarsCursor(WithFetch):
             unload: Enable UNLOAD for high-performance Parquet output.
             result_reuse_enable: Enable Athena query result reuse.
             result_reuse_minutes: Minutes to reuse cached results.
-            on_start_query_execution: Callback invoked when query starts.
             block_size: S3 read block size.
             cache_type: S3 caching strategy.
             max_workers: Maximum worker threads for parallel S3 operations.
@@ -123,7 +121,6 @@ class PolarsCursor(WithFetch):
             **kwargs,
         )
         self._unload = unload
-        self._on_start_query_execution = on_start_query_execution
         self._block_size = block_size
         self._cache_type = cache_type
         self._max_workers = max_workers

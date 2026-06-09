@@ -18,7 +18,7 @@ from boto3.session import Session
 from botocore.config import Config
 
 import pyathena
-from pyathena.common import BaseCursor, CursorIterator
+from pyathena.common import BaseCursor, CursorIterator, OnPollCallback
 from pyathena.converter import Converter
 from pyathena.cursor import Cursor
 from pyathena.error import NotSupportedError, ProgrammingError
@@ -127,6 +127,7 @@ class Connection(Generic[ConnectionCursor]):
         result_reuse_enable: bool = ...,
         result_reuse_minutes: int = ...,
         on_start_query_execution: Callable[[str], None] | None = ...,
+        on_poll: OnPollCallback | None = ...,
         **kwargs,
     ) -> None: ...
 
@@ -158,6 +159,7 @@ class Connection(Generic[ConnectionCursor]):
         result_reuse_enable: bool = ...,
         result_reuse_minutes: int = ...,
         on_start_query_execution: Callable[[str], None] | None = ...,
+        on_poll: OnPollCallback | None = ...,
         **kwargs,
     ) -> None: ...
 
@@ -188,6 +190,7 @@ class Connection(Generic[ConnectionCursor]):
         result_reuse_enable: bool = False,
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
         on_start_query_execution: Callable[[str], None] | None = None,
+        on_poll: OnPollCallback | None = None,
         **kwargs,
     ) -> None:
         """Initialize a new Athena database connection.
@@ -224,6 +227,10 @@ class Connection(Generic[ConnectionCursor]):
             result_reuse_enable: Enable Athena query result reuse. Defaults to False.
             result_reuse_minutes: Minutes to reuse cached results.
             on_start_query_execution: Callback function called when query starts.
+            on_poll: Callback invoked once per poll iteration with the current
+                execution object (``AthenaQueryExecution``, or
+                ``AthenaCalculationExecutionStatus`` for Spark). Useful for
+                monitoring live query progress. Defaults to None.
             **kwargs: Additional arguments passed to boto3 Session and client.
 
         Raises:
@@ -331,6 +338,7 @@ class Connection(Generic[ConnectionCursor]):
         self.result_reuse_enable = result_reuse_enable
         self.result_reuse_minutes = result_reuse_minutes
         self.on_start_query_execution = on_start_query_execution
+        self.on_poll = on_poll
 
     def _assume_role(
         self,
@@ -555,6 +563,7 @@ class Connection(Generic[ConnectionCursor]):
             on_start_query_execution=kwargs.pop(
                 "on_start_query_execution", self.on_start_query_execution
             ),
+            on_poll=kwargs.pop("on_poll", self.on_poll),
             **kwargs,
         )
 

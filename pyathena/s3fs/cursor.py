@@ -58,7 +58,6 @@ class S3FSCursor(WithFetch):
         kill_on_interrupt: bool = True,
         result_reuse_enable: bool = False,
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
-        on_start_query_execution: Callable[[str], None] | None = None,
         csv_reader: CSVReaderType | None = None,
         **kwargs,
     ) -> None:
@@ -75,7 +74,6 @@ class S3FSCursor(WithFetch):
             kill_on_interrupt: Cancel running query on keyboard interrupt.
             result_reuse_enable: Enable Athena query result reuse.
             result_reuse_minutes: Minutes to reuse cached results.
-            on_start_query_execution: Callback invoked when query starts.
             csv_reader: CSV reader class to use for parsing results.
                 Use AthenaCSVReader (default) to distinguish between NULL
                 (unquoted empty) and empty string (quoted empty "").
@@ -104,7 +102,6 @@ class S3FSCursor(WithFetch):
             result_reuse_minutes=result_reuse_minutes,
             **kwargs,
         )
-        self._on_start_query_execution = on_start_query_execution
         self._csv_reader = csv_reader
 
     @staticmethod

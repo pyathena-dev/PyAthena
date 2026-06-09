@@ -4,6 +4,7 @@ import logging
 import sys
 import time
 from abc import ABCMeta, abstractmethod
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, cast
 
@@ -26,6 +27,14 @@ if TYPE_CHECKING:
     from pyathena.connection import Connection
 
 _logger = logging.getLogger(__name__)
+
+OnPollCallback = Callable[[AthenaQueryExecution | AthenaCalculationExecutionStatus], None]
+"""Type of the optional ``on_poll`` callback.
+
+Invoked once per poll iteration with the current execution object: an
+:class:`~pyathena.model.AthenaQueryExecution` for SQL queries, or an
+:class:`~pyathena.model.AthenaCalculationExecutionStatus` for Spark calculations.
+"""
 
 
 class CursorIterator(metaclass=ABCMeta):
@@ -164,6 +173,8 @@ class BaseCursor(metaclass=ABCMeta):
         kill_on_interrupt: bool,
         result_reuse_enable: bool,
         result_reuse_minutes: int,
+        on_start_query_execution: Callable[[str], None] | None = None,
+        on_poll: OnPollCallback | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -181,6 +192,11 @@ class BaseCursor(metaclass=ABCMeta):
         self._kill_on_interrupt = kill_on_interrupt
         self._result_reuse_enable = result_reuse_enable
         self._result_reuse_minutes = result_reuse_minutes
+        # ``on_start_query_execution`` is invoked only by cursors whose ``execute()``
+        # supports it (the synchronous cursors). Async/aio/Spark cursors return the
+        # query id immediately through their execution model and do not invoke it.
+        self._on_start_query_execution = on_start_query_execution
+        self._on_poll = on_poll
 
     @staticmethod
     def get_default_converter(unload: bool = False) -> DefaultTypeConverter | Any:
@@ -558,6 +574,8 @@ class BaseCursor(metaclass=ABCMeta):
     def __poll(self, query_id: str) -> AthenaQueryExecution | AthenaCalculationExecution:
         while True:
             query_execution = self._get_query_execution(query_id)
+            if self._on_poll:
+                self._on_poll(query_execution)
             if query_execution.state in [
                 AthenaQueryExecution.STATE_SUCCEEDED,
                 AthenaQueryExecution.STATE_FAILED,

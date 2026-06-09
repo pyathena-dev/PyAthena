@@ -427,6 +427,86 @@ The `on_start_query_execution` callback is supported by the following cursor typ
 Note: `AsyncCursor` and its variants do not support this callback as they already
 return the query ID immediately through their different execution model.
 
+## Query polling callback
+
+PyAthena provides an `on_poll` callback that is invoked once per poll iteration with the
+current query execution object, while PyAthena waits for the query to finish. This is useful
+for rendering live query progress (state, elapsed time, data scanned) in interactive
+environments such as Jupyter notebooks.
+
+The callback is optional (`None` by default), so there is no impact on existing behaviour or
+performance when it is not used. It must be a **synchronous** function with the signature
+`Callable[[AthenaQueryExecution], None]` (for Spark calculations it receives an
+`AthenaCalculationExecutionStatus`). It is invoked on every poll, including the final
+iteration that observes the terminal state (`SUCCEEDED`, `FAILED`, or `CANCELLED`).
+
+Unlike `on_start_query_execution`, `on_poll` is configured at the connection or cursor level
+only (there is no execute-level override).
+
+### Connection-level callback
+
+```python
+from pyathena import connect
+
+def on_poll(query_execution):
+    print(
+        f"State: {query_execution.state}, "
+        f"scanned: {query_execution.data_scanned_in_bytes} bytes"
+    )
+
+cursor = connect(
+    s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+    region_name="us-west-2",
+    on_poll=on_poll,
+).cursor()
+
+cursor.execute("SELECT * FROM many_rows")  # on_poll is invoked on each poll
+```
+
+### Cursor-level callback
+
+```python
+from pyathena import connect
+
+def on_poll(query_execution):
+    print(f"State: {query_execution.state}")
+
+conn = connect(
+    s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+    region_name="us-west-2",
+)
+cursor = conn.cursor(on_poll=on_poll)
+cursor.execute("SELECT * FROM many_rows")
+```
+
+### Asynchronous cursors
+
+`on_poll` also works with the asynchronous cursors. Because polling runs in a background
+thread (or event loop), the callback runs there too, so keep it lightweight and thread-safe:
+
+```python
+from pyathena import connect
+from pyathena.pandas.async_cursor import AsyncPandasCursor
+
+def on_poll(query_execution):
+    print(f"State: {query_execution.state}")
+
+conn = connect(
+    s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+    region_name="us-west-2",
+)
+cursor = conn.cursor(AsyncPandasCursor, on_poll=on_poll)
+query_id, future = cursor.execute("SELECT * FROM many_rows")
+result = future.result()
+```
+
+### Supported cursor types
+
+`on_poll` is supported by **all** cursor types, since polling is shared by the base cursor:
+the synchronous cursors, the `Async*` cursors, the native-async `Aio*` cursors, and the Spark
+cursors. For Spark cursors the callback receives the per-poll
+`AthenaCalculationExecutionStatus` rather than an `AthenaQueryExecution`.
+
 ## Type hints for complex types
 
 *New in version 3.30.0.*

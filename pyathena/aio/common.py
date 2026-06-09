@@ -83,6 +83,8 @@ class AioBaseCursor(BaseCursor):
     async def __poll(self, query_id: str) -> AthenaQueryExecution:
         while True:
             query_execution = await self._get_query_execution(query_id)
+            if self._on_poll:
+                self._on_poll(query_execution)
             if query_execution.state in [
                 AthenaQueryExecution.STATE_SUCCEEDED,
                 AthenaQueryExecution.STATE_FAILED,

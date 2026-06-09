@@ -172,6 +172,20 @@ class TestAsyncCursor:
             AthenaQueryExecution.STATE_CANCELLED,
         ]
 
+    def test_on_poll(self):
+        """on_poll fires during async polling (issue #723 example)."""
+        states = []
+
+        with contextlib.closing(
+            connect(on_poll=lambda execution: states.append(execution.state))
+        ) as conn:
+            cursor = conn.cursor(AsyncCursor)
+            _, future = cursor.execute("SELECT 1")
+            future.result()
+
+            assert len(states) >= 1
+            assert states[-1] == AthenaQueryExecution.STATE_SUCCEEDED
+
     def test_bad_query(self, async_cursor):
         query_id, future = async_cursor.execute(
             "SELECT does_not_exist FROM this_really_does_not_exist"

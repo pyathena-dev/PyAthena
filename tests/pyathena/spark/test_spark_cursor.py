@@ -2,11 +2,13 @@ import textwrap
 import time
 from concurrent.futures import ThreadPoolExecutor
 from random import randint
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from pyathena import DatabaseError, OperationalError
 from pyathena.model import AthenaCalculationExecutionStatus
+from pyathena.spark.cursor import SparkCursor
 from tests import ENV
 
 
@@ -145,3 +147,29 @@ class TestSparkCursor:
                     )
                 ),
             )
+
+
+def test_spark_on_poll_invoked_each_iteration():
+    """on_poll fires once per Spark calculation poll iteration with the status (no AWS)."""
+    states = [
+        AthenaCalculationExecutionStatus.STATE_CREATING,
+        AthenaCalculationExecutionStatus.STATE_RUNNING,
+        AthenaCalculationExecutionStatus.STATE_COMPLETED,
+    ]
+    statuses = [MagicMock(state=state) for state in states]
+    final_execution = MagicMock()
+    received = []
+
+    cursor = SparkCursor.__new__(SparkCursor)  # bypass __init__ to avoid AWS calls
+    cursor._poll_interval = 0
+    cursor._kill_on_interrupt = False
+    cursor._on_poll = received.append
+
+    with (
+        patch.object(SparkCursor, "_get_calculation_execution_status", side_effect=statuses),
+        patch.object(SparkCursor, "_get_calculation_execution", return_value=final_execution),
+    ):
+        result = cursor._poll("calculation_id")
+
+    assert [status.state for status in received] == states
+    assert result is final_execution

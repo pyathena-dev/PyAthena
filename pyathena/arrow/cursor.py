@@ -63,7 +63,6 @@ class ArrowCursor(WithFetch):
         unload: bool = False,
         result_reuse_enable: bool = False,
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
-        on_start_query_execution: Callable[[str], None] | None = None,
         connect_timeout: float | None = None,
         request_timeout: float | None = None,
         **kwargs,
@@ -82,7 +81,6 @@ class ArrowCursor(WithFetch):
             unload: Enable UNLOAD for high-performance Parquet output.
             result_reuse_enable: Enable Athena query result reuse.
             result_reuse_minutes: Minutes to reuse cached results.
-            on_start_query_execution: Callback invoked when query starts.
             connect_timeout: Socket connection timeout in seconds for S3 operations.
                 Defaults to AWS SDK default (typically 1 second) if not specified.
             request_timeout: Request timeout in seconds for S3 operations.
@@ -113,7 +111,6 @@ class ArrowCursor(WithFetch):
             **kwargs,
         )
         self._unload = unload
-        self._on_start_query_execution = on_start_query_execution
         self._connect_timeout = connect_timeout
         self._request_timeout = request_timeout
 
