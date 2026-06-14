@@ -223,12 +223,12 @@ TEST_TYPE =
 allowlist_externals =
     uv
     uvx
-    make
+    just
 commands =
     uv sync --group dev
-    pyathena: make test/pyathena
-    sqla: make test/sqla
-    sqla_async: make test/sqla-async
+    pyathena: just test pyathena
+    sqla: just test sqla
+    sqla_async: just test sqla-async
 passenv =
     TOXENV
     AWS_*

@@ -1,3 +1,4 @@
 [tools]
 python = "3.12"
+just = "latest"
 "npm:markdownlint-cli2" = "0.18.1"
