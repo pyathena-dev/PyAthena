@@ -39,8 +39,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
         if: matrix.python-version == '3.13' || matrix.python-version == '3.14'
+      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: just
       - run: |
-          make tool
+          just tool
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7 # v6.0.0
@@ -51,4 +54,4 @@ jobs:
 
       - name: Test
         run: |
-          make tox
+          just tox

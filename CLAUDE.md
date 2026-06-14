@@ -20,17 +20,17 @@ PyAthena is a Python DB API 2.0 (PEP 249) compliant client for Amazon Athena. Se
 ### Code Quality — Always Run Before Committing
 
 ```bash
-make format   # Auto-fix formatting and imports
-make lint   # Lint + format check + mypy
+just format   # Auto-fix formatting and imports
+just lint   # Lint + format check + mypy
 ```
 
 ### Testing
 
 ```bash
-# ALWAYS run `make lint` first — tests will fail if lint doesn't pass
-make test/pyathena    # Unit tests (runs lint first)
-make test/sqla        # SQLAlchemy dialect tests
-make test/sqla-async  # SQLAlchemy async dialect tests
+# ALWAYS run `just lint` first — tests will fail if lint doesn't pass
+just test pyathena    # Unit tests (runs lint first)
+just test sqla        # SQLAlchemy dialect tests
+just test sqla-async  # SQLAlchemy async dialect tests
 ```
 
 Tests require AWS environment variables. Use a `.env` file (gitignored):
@@ -48,7 +48,7 @@ export $(cat .env | xargs) && uv run pytest tests/pyathena/test_file.py -v
 
 - Tests mirror source structure under `tests/pyathena/`
 - Use pytest fixtures from `conftest.py`
-- New features require tests; changes to SQLAlchemy dialects must pass `make test-sqla`
+- New features require tests; changes to SQLAlchemy dialects must pass `just test sqla`
 
 #### Test Conventions
 
@@ -74,9 +74,9 @@ export $(cat .env | xargs) && uv run pytest tests/pyathena/test_file.py -v
 
 ```bash
 mise install          # one-time: installs markdownlint-cli2
-make docs/lint        # check
-make docs/format      # auto-fix what's possible
-make docs/build       # build the Sphinx site under docs/_build/html
+just docs lint        # check
+just docs format      # auto-fix what's possible
+just docs build       # build the Sphinx site under docs/_build/html
 ```
 
 ## Architecture — Key Design Decisions

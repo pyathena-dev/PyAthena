@@ -31,18 +31,20 @@ $ export AWS_ATHENA_MANAGED_WORKGROUP=pyathena-managed
 
 ## Run test
 
+The task runner uses [just](https://github.com/casey/just). Install it with `mise use -g just`, `brew install just`, or `cargo install just`.
+
 ```bash
 $ pip install uv or pipx install uv or brew install uv or mise install uv
-$ make test/pyathena
-$ make test/sqla
-$ make test/sqla-async
+$ just test pyathena
+$ just test sqla
+$ just test sqla-async
 ```
 
 ## Run test multiple Python versions
 
 ```bash
 $ pip install uv or pipx install uv or brew install uv or mise install uv
-$ make tox
+$ just tox
 ```
 
 ## Code formatting
@@ -52,13 +54,13 @@ The code formatting uses [ruff](https://github.com/astral-sh/ruff).
 ### Appy format
 
 ```bash
-$ make format
+$ just format
 ```
 
 ### Lint and check format
 
 ```bash
-$ make lint
+$ just lint
 ```
 
 ## GitHub Actions
