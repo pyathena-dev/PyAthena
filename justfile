@@ -18,8 +18,16 @@ lint:
     uv run mypy .
 
 # Run tests: just test (pyathena|sqla|sqla-async)
-test target:
-    @just _test-{{target}}
+test target="help":
+    @just _test-{{ if target =~ "^-" { "help" } else { target } }}
+
+_test-help:
+    @echo "Usage: just test <target>"
+    @echo ""
+    @echo "Targets:"
+    @echo "  pyathena    Run unit tests (runs lint first)"
+    @echo "  sqla        Run SQLAlchemy dialect tests"
+    @echo "  sqla-async  Run SQLAlchemy async dialect tests"
 
 _test-pyathena: lint
     uv run pytest -n 8 --cov pyathena --cov-report html --cov-report term tests/pyathena/
@@ -35,8 +43,16 @@ tox:
     uvx tox@{{TOX_VERSION}} -c pyproject.toml run
 
 # Docs: just docs (build|lint|format)
-docs target:
-    @just _docs-{{target}}
+docs target="help":
+    @just _docs-{{ if target =~ "^-" { "help" } else { target } }}
+
+_docs-help:
+    @echo "Usage: just docs <target>"
+    @echo ""
+    @echo "Targets:"
+    @echo "  build   Build the Sphinx documentation site (docs/_build/html)"
+    @echo "  lint    Lint Markdown with markdownlint-cli2"
+    @echo "  format  Auto-fix Markdown with markdownlint-cli2"
 
 _docs-build:
     uv run sphinx-multiversion docs docs/_build/html
