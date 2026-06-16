@@ -998,7 +998,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "boto3", specifier = ">=1.38.2" },
+    { name = "boto3", specifier = ">=1.41.2" },
     { name = "botocore", specifier = ">=1.41.2" },
     { name = "fsspec" },
     { name = "pandas", marker = "python_full_version >= '3.13' and extra == 'pandas'", specifier = ">=2.3.0" },
