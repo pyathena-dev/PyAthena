@@ -39,6 +39,13 @@ if TYPE_CHECKING:
     _DialectArgDict = Mapping[str, Any]
     CreateColumn = Any
 
+# Prefix of the Athena data catalog name registered for an Amazon S3 Tables
+# table bucket (e.g. ``s3tablescatalog/my-bucket``). S3 Tables are
+# Iceberg-backed and use managed storage, so their CREATE TABLE statements must
+# not include a LOCATION clause.
+# https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-integrations-query-athena.html
+S3_TABLES_CATALOG_PREFIX = "s3tablescatalog/"
+
 
 class AthenaTypeCompiler(GenericTypeCompiler):
     """Type compiler for Amazon Athena SQL types.
@@ -305,6 +312,11 @@ class AthenaDDLCompiler(DDLCompiler):
 
     - External table creation (EXTERNAL keyword for Hive-style tables)
     - Iceberg table creation (managed tables with ACID support)
+    - Amazon S3 Tables (Iceberg-backed, managed storage): targeted by a
+      three-part ``catalog.namespace.table`` identifier whose catalog segment is
+      ``s3tablescatalog/<table-bucket>``; the LOCATION clause is omitted since
+      storage is managed. Set the table's ``schema`` to
+      ``s3tablescatalog/<table-bucket>.<namespace>``.
     - File formats: PARQUET, ORC, TEXTFILE, JSON, AVRO, etc.
     - Row formats with SerDe specifications
     - Compression settings for various file formats
@@ -445,6 +457,26 @@ class AthenaDDLCompiler(DDLCompiler):
             text.append(")")
         return "\n".join(text)
 
+    @staticmethod
+    def _is_s3_tables(table: Table) -> bool:
+        """Return whether the table targets an Amazon S3 Tables catalog.
+
+        S3 Tables are addressed by a three-part identifier whose catalog segment
+        is ``s3tablescatalog/<table-bucket>`` (e.g.
+        ``s3tablescatalog/my-bucket.namespace.table``). Such tables use managed
+        storage, so their DDL must omit the LOCATION clause.
+
+        Args:
+            table: The table being compiled.
+
+        Returns:
+            True if the table's schema catalog segment is an S3 Tables catalog.
+        """
+        schema = table.schema
+        if not schema:
+            return False
+        return schema.split(".", 1)[0].startswith(S3_TABLES_CATALOG_PREFIX)
+
     def _get_table_location(
         self, table: Table, dialect_opts: _DialectArgDict, connect_opts: Mapping[str, Any]
     ) -> str | None:
@@ -466,6 +498,9 @@ class AthenaDDLCompiler(DDLCompiler):
     def _get_table_location_specification(
         self, table: Table, dialect_opts: _DialectArgDict, connect_opts: Mapping[str, Any]
     ) -> str:
+        if self._is_s3_tables(table):
+            # S3 Tables use managed storage; CREATE TABLE must not set a LOCATION.
+            return ""
         location = self._get_table_location(table, dialect_opts, connect_opts)
         text = []
         if location:

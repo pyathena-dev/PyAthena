@@ -7,10 +7,46 @@ from sqlalchemy.sql.compiler import ILLEGAL_INITIAL_CHARACTERS, IdentifierPrepar
 from pyathena.sqlalchemy.constants import DDL_RESERVED_WORDS, SELECT_STATEMENT_RESERVED_WORDS
 
 if TYPE_CHECKING:
+    from typing import Any
+
     from sqlalchemy import Dialect
 
 
-class AthenaDMLIdentifierPreparer(IdentifierPreparer):
+class AthenaBaseIdentifierPreparer(IdentifierPreparer):
+    """Base identifier preparer shared by Athena's DML and DDL preparers.
+
+    Athena identifiers can be three-part (``catalog.namespace.table``), which is
+    required to target S3 Tables catalogs such as ``s3tablescatalog/<bucket>``.
+    SQLAlchemy's default :meth:`IdentifierPreparer.quote_schema` treats the whole
+    schema string as a single identifier, so a dotted schema like
+    ``s3tablescatalog/bucket.ns`` collapses into one quoted token
+    (catalog and namespace merged) instead of two separately quoted tokens.
+
+    See Also:
+        :class:`AthenaDMLIdentifierPreparer`: Preparer for DML statements.
+        :class:`AthenaDDLIdentifierPreparer`: Preparer for DDL statements.
+    """
+
+    def quote_schema(self, schema: str, force: Any = None) -> str:
+        """Quote a possibly multi-part (``catalog.namespace``) schema name.
+
+        Each dot-separated part is quoted independently so the catalog and
+        namespace round-trip correctly in both DDL (backtick) and DML
+        (double-quote) statements. Athena database and namespace names cannot
+        contain a dot, so the separator is unambiguous; a schema without a dot
+        is quoted exactly as before.
+
+        Args:
+            schema: The schema name, optionally qualified as ``catalog.namespace``.
+            force: Unused; kept for SQLAlchemy API compatibility.
+
+        Returns:
+            The quoted, dot-joined schema identifier.
+        """
+        return ".".join(self.quote(part) for part in schema.split("."))
+
+
+class AthenaDMLIdentifierPreparer(AthenaBaseIdentifierPreparer):
     """Identifier preparer for Athena DML (SELECT, INSERT, etc.) statements.
 
     This preparer handles quoting and escaping of identifiers in DML statements.
@@ -29,7 +65,7 @@ class AthenaDMLIdentifierPreparer(IdentifierPreparer):
     reserved_words: set[str] = SELECT_STATEMENT_RESERVED_WORDS
 
 
-class AthenaDDLIdentifierPreparer(IdentifierPreparer):
+class AthenaDDLIdentifierPreparer(AthenaBaseIdentifierPreparer):
     """Identifier preparer for Athena DDL (CREATE, ALTER, DROP) statements.
 
     This preparer handles quoting and escaping of identifiers in DDL statements.

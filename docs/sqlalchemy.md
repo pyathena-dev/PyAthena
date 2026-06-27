@@ -363,6 +363,54 @@ If you want to limit the column options to specific table names only, specify th
 awsathena+rest://:@athena.us-west-2.amazonaws.com:443/default?partition=table1.column1%2Ctable1.column2&cluster=table2.column1%2Ctable2.column2&...
 ```
 
+## Amazon S3 Tables
+
+[Amazon S3 Tables](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables.html) are Iceberg-backed
+tables stored in a dedicated table bucket with their own data catalog. Athena registers each table bucket as a
+catalog named `s3tablescatalog/<table-bucket>`, so an S3 Tables table is addressed by a three-part identifier
+`catalog.namespace.table`.
+
+To target an S3 Tables table, set the `schema` to the dotted `s3tablescatalog/<table-bucket>.<namespace>` form.
+The dialect quotes the catalog, namespace, and table independently, and because S3 Tables use managed storage it
+omits the `LOCATION` clause automatically (so `awsathena_location` is not required).
+
+```python
+table = Table(
+    "some_table",
+    MetaData(schema="s3tablescatalog/my-bucket.my_namespace"),
+    Column("id", types.Integer),
+    Column("dt", types.Date, awsathena_partition=True, awsathena_partition_transform="day"),
+    awsathena_tblproperties={"table_type": "ICEBERG"},
+)
+table.create(bind=conn)
+```
+
+which builds the following statement:
+
+```sql
+CREATE TABLE `s3tablescatalog/my-bucket`.my_namespace.some_table (
+  id INT,
+  dt DATE
+)
+PARTITIONED BY (
+  day(dt)
+)
+TBLPROPERTIES (
+  'table_type' = 'ICEBERG'
+)
+```
+
+All Iceberg partition transforms (`year`, `month`, `day`, `hour`, `bucket`, `truncate`) are supported, the same as
+for other Iceberg tables. CTAS (`CREATE TABLE ... AS SELECT`) is not modeled as a SQLAlchemy construct; issue it as
+raw SQL via `text()`, using the double-quoted three-part identifier:
+
+```python
+conn.execute(text(
+    'CREATE TABLE "s3tablescatalog/my-bucket"."my_namespace"."some_table" '
+    "WITH (table_type = 'ICEBERG') AS SELECT 1 AS id"
+))
+```
+
 ## Temporal/Time-travel with Iceberg
 
 Athena supports time-travel queries on Iceberg tables by either a version_id or a timestamp. The `FOR TIMESTAMP AS OF`
