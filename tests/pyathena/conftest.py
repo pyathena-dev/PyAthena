@@ -76,6 +76,7 @@ def create_engine(**kwargs):
     conn_str = SQLALCHEMY_CONNECTION_STRING.replace("+rest", f"+{driver}")
     for arg in [
         "bucket_count",
+        "catalog_name",
         "cluster",
         "compression",
         "duration_seconds",

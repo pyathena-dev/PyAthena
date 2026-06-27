@@ -12,6 +12,12 @@ permissions:
   id-token: write
   contents: read
 
+# Cancel superseded runs: overlapping runs stampede the account's Athena
+# concurrent-query quota (TooManyRequestsException) and fail each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     uses: ./.github/workflows/test-suite.yaml

@@ -31,6 +31,13 @@ class Env:
         )
         self.default_work_group = os.getenv("AWS_ATHENA_DEFAULT_WORKGROUP", "primary")
         self.managed_work_group = os.getenv("AWS_ATHENA_MANAGED_WORKGROUP")
+        # Optional Amazon S3 Tables configuration for the SQLAlchemy dialect tests.
+        # `s3tables_catalog` is the registered table-bucket catalog, e.g.
+        # "s3tablescatalog/<table-bucket>"; `s3tables_namespace` is a namespace that
+        # already exists in it. These are optional so the suite stays runnable
+        # without an S3 Tables bucket; the S3 Tables tests skip when they are unset.
+        self.s3tables_catalog = os.getenv("AWS_ATHENA_S3_TABLES_CATALOG")
+        self.s3tables_namespace = os.getenv("AWS_ATHENA_S3_TABLES_NAMESPACE")
         self.schema = "pyathena_test_" + "".join(
             random.choices(string.ascii_lowercase + string.digits, k=10)
         )

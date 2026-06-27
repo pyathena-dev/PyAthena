@@ -20,6 +20,14 @@ Parameters:
   ManagedWorkGroupName:
     Type: String
     Default: "pyathena-managed"
+  S3TablesBucketName:
+    Type: String
+    Default: "laughingman7743-pyathena-s3-tables"
+    Description: Name of the Amazon S3 Tables table bucket used by the SQLAlchemy S3 Tables tests.
+  S3TablesNamespaceName:
+    Type: String
+    Default: "pyathena"
+    Description: Namespace created in the S3 Tables table bucket for the SQLAlchemy S3 Tables tests.
   OIDCProviderArn:
     Type: String
     Default: ""
@@ -119,6 +127,30 @@ Resources:
                 ]
                 Resource: [
                   !Sub "arn:aws:s3:::*"
+                ]
+        - PolicyName: s3tables-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Amazon S3 Tables data plane: create/query/drop namespaces and
+              # tables in the table bucket used by the SQLAlchemy S3 Tables tests.
+              - Effect: Allow
+                Action: [
+                  "s3tables:*"
+                ]
+                Resource: [
+                  !Sub "arn:aws:s3tables:${AWS::Region}:${AWS::AccountId}:bucket/*"
+                ]
+              # Resolve the federated `s3tablescatalog` Glue catalog and obtain
+              # Lake Formation data access when querying S3 Tables from Athena.
+              - Effect: Allow
+                Action: [
+                  "glue:GetCatalog",
+                  "glue:GetCatalogs",
+                  "lakeformation:GetDataAccess"
+                ]
+                Resource: [
+                  "*"
                 ]
   SparkRole:
     Type: AWS::IAM::Role
@@ -268,6 +300,83 @@ Resources:
           SelectedEngineVersion: "Athena engine version 3"
         ManagedQueryResultsConfiguration:
           Enabled: true
+
+  # S3 staging bucket for Athena query results and test data. Created outside
+  # CloudFormation and imported into the stack. Retain on delete/replace so the
+  # bucket and its data survive stack operations.
+  # NOTE: Because the bucket is retained, recreating the stack from scratch will
+  # fail with an AlreadyExists error on this resource; re-import it instead
+  # (create-change-set --change-set-type IMPORT --resources-to-import ...).
+  S3StagingBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${BucketName}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: delete
+            Status: Enabled
+            ExpirationInDays: 1
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+              NewerNoncurrentVersions: 1
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+
+  # Amazon S3 Tables infrastructure for the SQLAlchemy S3 Tables tests.
+  # UnreferencedFileRemoval garbage-collects files left behind by dropped test
+  # tables; 1 day is the most aggressive setting to keep test storage costs low.
+  S3TablesBucket:
+    Type: AWS::S3Tables::TableBucket
+    Properties:
+      TableBucketName: !Sub "${S3TablesBucketName}"
+      UnreferencedFileRemoval:
+        Status: Enabled
+        UnreferencedDays: 1
+        NoncurrentDays: 1
+
+  S3TablesNamespace:
+    Type: AWS::S3Tables::Namespace
+    Properties:
+      TableBucketARN: !GetAtt S3TablesBucket.TableBucketARN
+      Namespace: !Sub "${S3TablesNamespaceName}"
+
+  # One-time, per-Region integration: register S3 Tables into the Glue Data
+  # Catalog as the federated `s3tablescatalog` catalog so Athena can query them.
+  # IAM_ALLOWED_PRINCIPALS default permissions select IAM-based access control
+  # (no Lake Formation grants needed; the OIDC role's IAM policy governs access).
+  S3TablesCatalog:
+    Type: AWS::Glue::Catalog
+    Properties:
+      Name: s3tablescatalog
+      Description: Federated catalog that maps S3 Tables into the Glue Data Catalog
+      FederatedCatalog:
+        Identifier: !Sub "arn:aws:s3tables:${AWS::Region}:${AWS::AccountId}:bucket/*"
+        ConnectionName: aws:s3tables
+      CreateDatabaseDefaultPermissions:
+        - Principal:
+            DataLakePrincipalIdentifier: IAM_ALLOWED_PRINCIPALS
+          Permissions:
+            - ALL
+      CreateTableDefaultPermissions:
+        - Principal:
+            DataLakePrincipalIdentifier: IAM_ALLOWED_PRINCIPALS
+          Permissions:
+            - ALL
 
   GithubOidc:
     Type: AWS::IAM::OIDCProvider
