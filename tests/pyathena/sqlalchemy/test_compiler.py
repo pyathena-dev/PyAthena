@@ -1,8 +1,9 @@
 from unittest.mock import Mock
 
 import pytest
-from sqlalchemy import Column, Integer, MetaData, String, Table, exc, func, select
+from sqlalchemy import Column, Date, Integer, MetaData, String, Table, exc, func, select
 from sqlalchemy.sql import literal
+from sqlalchemy.sql.ddl import CreateTable
 
 from pyathena.sqlalchemy.base import AthenaDialect
 from pyathena.sqlalchemy.compiler import AthenaTypeCompiler
@@ -225,3 +226,60 @@ class TestAthenaStatementCompiler:
 
         sql_str = str(compiled)
         assert "length(" in sql_str
+
+
+# Compile-only (no AWS) tests for S3 Tables / multi-part identifier support.
+# Amazon S3 Tables are addressed by a three-part identifier whose catalog segment
+# is ``s3tablescatalog/<table-bucket>`` and use managed storage, so their CREATE
+# TABLE statements must omit the LOCATION clause.
+
+
+def test_create_table_s3tables_three_part_identifier_no_location():
+    table = Table(
+        "tbl",
+        MetaData(schema="s3tablescatalog/bucket.ns"),
+        Column("id", Integer),
+        Column("name", String),
+        awsathena_tblproperties={"table_type": "ICEBERG"},
+    )
+    ddl = str(CreateTable(table).compile(dialect=AthenaDialect()))
+    assert "CREATE TABLE `s3tablescatalog/bucket`.ns.tbl (" in ddl
+    assert "CREATE EXTERNAL TABLE" not in ddl
+    assert "LOCATION" not in ddl
+    assert "'table_type' = 'ICEBERG'" in ddl
+
+
+def test_select_s3tables_three_part_identifier():
+    table = Table(
+        "tbl",
+        MetaData(schema="s3tablescatalog/bucket.ns"),
+        Column("id", Integer),
+    )
+    dml = str(select(table).compile(dialect=AthenaDialect()))
+    assert 'FROM "s3tablescatalog/bucket".ns.tbl' in dml
+
+
+def test_create_table_s3tables_partition_transform():
+    table = Table(
+        "tbl",
+        MetaData(schema="s3tablescatalog/bucket.ns"),
+        Column("id", Integer),
+        Column("dt", Date, awsathena_partition=True, awsathena_partition_transform="day"),
+        awsathena_tblproperties={"table_type": "ICEBERG"},
+    )
+    ddl = str(CreateTable(table).compile(dialect=AthenaDialect()))
+    assert "PARTITIONED BY (" in ddl
+    assert "day(dt)" in ddl
+    assert "LOCATION" not in ddl
+
+
+def test_create_iceberg_table_without_catalog_still_requires_location():
+    # Regression: a non-S3-Tables Iceberg table must still demand a location.
+    table = Table(
+        "tbl",
+        MetaData(schema="some_db"),
+        Column("id", Integer),
+        awsathena_tblproperties={"table_type": "ICEBERG"},
+    )
+    with pytest.raises(exc.CompileError, match="location of the table should be specified"):
+        CreateTable(table).compile(dialect=AthenaDialect())

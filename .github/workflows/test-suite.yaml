@@ -18,6 +18,11 @@ jobs:
       AWS_ATHENA_WORKGROUP: pyathena
       AWS_ATHENA_SPARK_WORKGROUP: pyathena-spark
       AWS_ATHENA_MANAGED_WORKGROUP: pyathena-managed
+      # Registered S3 Tables catalog (s3tablescatalog/<table-bucket>) and namespace
+      # for the SQLAlchemy S3 Tables tests; the table bucket, namespace, and the
+      # AWS analytics-services integration are provisioned out of band.
+      AWS_ATHENA_S3_TABLES_CATALOG: s3tablescatalog/pyathena
+      AWS_ATHENA_S3_TABLES_NAMESPACE: pyathena_test
 
     strategy:
       fail-fast: false

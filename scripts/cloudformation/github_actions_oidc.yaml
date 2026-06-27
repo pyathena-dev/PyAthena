@@ -120,6 +120,30 @@ Resources:
                 Resource: [
                   !Sub "arn:aws:s3:::*"
                 ]
+        - PolicyName: s3tables-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Amazon S3 Tables data plane: create/query/drop namespaces and
+              # tables in the table bucket used by the SQLAlchemy S3 Tables tests.
+              - Effect: Allow
+                Action: [
+                  "s3tables:*"
+                ]
+                Resource: [
+                  !Sub "arn:aws:s3tables:${AWS::Region}:${AWS::AccountId}:bucket/*"
+                ]
+              # Resolve the federated `s3tablescatalog` Glue catalog and obtain
+              # Lake Formation data access when querying S3 Tables from Athena.
+              - Effect: Allow
+                Action: [
+                  "glue:GetCatalog",
+                  "glue:GetCatalogs",
+                  "lakeformation:GetDataAccess"
+                ]
+                Resource: [
+                  "*"
+                ]
   SparkRole:
     Type: AWS::IAM::Role
     Properties:
