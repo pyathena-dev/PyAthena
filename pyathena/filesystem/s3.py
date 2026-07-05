@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import mimetypes
 import os.path
 import re
@@ -101,6 +102,9 @@ class S3FileSystem(AbstractFileSystem):
     # https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
     # The maximum size of a part in a multipart upload is 5GiB.
     MULTIPART_UPLOAD_MAX_PART_SIZE: int = 5 * 2**30  # 5GiB
+    # https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
+    # The maximum number of parts in a multipart upload is 10,000.
+    MULTIPART_UPLOAD_MAX_PARTS: int = 10000
     # https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjects.html
     DELETE_OBJECTS_MAX_KEYS: int = 1000
     DEFAULT_BLOCK_SIZE: int = 5 * 2**20  # 5MiB
@@ -1075,6 +1079,88 @@ class S3FileSystem(AbstractFileSystem):
             upload_id=cast(str, multipart_upload.upload_id),
             parts=parts,
         )
+
+    def pipe_file(self, path: str, value: bytes, mode: str = "overwrite", **kwargs) -> None:
+        """Write bytes into the path with direct S3 API calls.
+
+        Uploads small data with a single PutObject request instead of the
+        inherited ``open()`` + ``write()`` path, and switches to a parallel
+        multipart upload when the data exceeds the block size.
+
+        Args:
+            path: S3 path (s3://bucket/key) to write to.
+            value: The bytes to write.
+            mode: "overwrite" (default) or "create". With "create", raise
+                FileExistsError when the object already exists.
+            **kwargs: Additional parameters passed to the PutObject or
+                CreateMultipartUpload API (e.g., ContentType, StorageClass).
+
+        Raises:
+            FileExistsError: If the mode is "create" and the path already
+                exists.
+            ValueError: If the path does not contain a key or specifies a
+                version.
+        """
+        bucket, key, version_id = self.parse_path(path)
+        if version_id:
+            raise ValueError("Cannot write to the file with the version specified.")
+        if not key:
+            raise ValueError("Cannot write to a bucket.")
+        if mode == "create" and self.exists(path):
+            raise FileExistsError(path)
+
+        size = len(value)
+        if size <= self.default_block_size:
+            self._put_object(bucket=bucket, key=key, body=value, **kwargs)
+        else:
+            # The part size must be large enough to fit within the maximum
+            # number of parts of a multipart upload.
+            part_size = max(
+                self.default_block_size, math.ceil(size / self.MULTIPART_UPLOAD_MAX_PARTS)
+            )
+            ranges = S3File._get_ranges(
+                0, size, max_workers=max(self.max_workers, 2), worker_block_size=part_size
+            )
+            multipart_upload = self._create_multipart_upload(bucket=bucket, key=key, **kwargs)
+            upload_id = cast(str, multipart_upload.upload_id)
+            try:
+                parts: list[dict[str, Any]] = []
+                with self._create_executor(max_workers=self.max_workers) as executor:
+                    futures = [
+                        executor.submit(
+                            self._upload_part,
+                            bucket=bucket,
+                            key=key,
+                            upload_id=upload_id,
+                            part_number=i + 1,
+                            body=value[range_[0] : range_[1]],
+                        )
+                        for i, range_ in enumerate(ranges)
+                    ]
+                    for future in as_completed(futures):
+                        result = future.result()
+                        parts.append(
+                            {
+                                "ETag": result.etag,
+                                "PartNumber": result.part_number,
+                            }
+                        )
+                parts.sort(key=lambda x: x["PartNumber"])
+                self._complete_multipart_upload(
+                    bucket=bucket,
+                    key=key,
+                    upload_id=upload_id,
+                    parts=parts,
+                )
+            except Exception:
+                self._call(
+                    self._client.abort_multipart_upload,
+                    Bucket=bucket,
+                    Key=key,
+                    UploadId=upload_id,
+                )
+                raise
+        self.invalidate_cache(path)
 
     def cat_file(
         self, path: str, start: int | None = None, end: int | None = None, **kwargs

@@ -232,6 +232,89 @@ class TestS3FileSystem:
             fs.rmdir("s3://bucket")
         fs._call.assert_not_called()
 
+    def test_pipe_file_small_uses_put_object(self):
+        fs = self._make_fs()
+        fs.default_block_size = S3FileSystem.DEFAULT_BLOCK_SIZE
+        fs._put_object = mock.MagicMock()
+
+        fs.pipe_file("s3://bucket/key", b"data", ContentType="text/plain")
+        fs._put_object.assert_called_once_with(
+            bucket="bucket", key="key", body=b"data", ContentType="text/plain"
+        )
+
+    def test_pipe_file_create_mode(self):
+        fs = self._make_fs()
+        fs.default_block_size = S3FileSystem.DEFAULT_BLOCK_SIZE
+        fs._put_object = mock.MagicMock()
+
+        fs.exists = mock.MagicMock(return_value=True)
+        with pytest.raises(FileExistsError):
+            fs.pipe_file("s3://bucket/key", b"data", mode="create")
+        fs._put_object.assert_not_called()
+
+        fs.exists = mock.MagicMock(return_value=False)
+        fs.pipe_file("s3://bucket/key", b"data", mode="create")
+        fs._put_object.assert_called_once()
+
+    def test_pipe_file_invalid_path_raises(self):
+        fs = self._make_fs()
+        with pytest.raises(ValueError, match="Cannot write to a bucket"):
+            fs.pipe_file("s3://bucket", b"data")
+        with pytest.raises(ValueError, match="version"):
+            fs.pipe_file("s3://bucket/key?versionId=12345abcde", b"data")
+
+    def test_pipe_file_large_uses_multipart_upload(self):
+        fs = self._make_fs()
+        fs.default_block_size = 5
+        fs._put_object = mock.MagicMock()
+        fs._create_multipart_upload = mock.MagicMock(
+            return_value=SimpleNamespace(upload_id="uploadid")
+        )
+        uploaded: dict[int, bytes] = {}
+
+        def upload_part(**kwargs):
+            uploaded[kwargs["part_number"]] = kwargs["body"]
+            return SimpleNamespace(
+                etag=f'"e{kwargs["part_number"]}"', part_number=kwargs["part_number"]
+            )
+
+        fs._upload_part = mock.MagicMock(side_effect=upload_part)
+        fs._complete_multipart_upload = mock.MagicMock()
+
+        fs.pipe_file("s3://bucket/key", b"0123456789ABCDEF", ContentType="text/plain")
+
+        fs._put_object.assert_not_called()
+        fs._create_multipart_upload.assert_called_once_with(
+            bucket="bucket", key="key", ContentType="text/plain"
+        )
+        # The data is split into block-size parts and reassembled in order.
+        assert uploaded == {1: b"01234", 2: b"56789", 3: b"ABCDE", 4: b"F"}
+        fs._complete_multipart_upload.assert_called_once_with(
+            bucket="bucket",
+            key="key",
+            upload_id="uploadid",
+            parts=[{"ETag": f'"e{i}"', "PartNumber": i} for i in range(1, 5)],
+        )
+
+    def test_pipe_file_aborts_multipart_upload_on_failure(self):
+        fs = self._make_fs()
+        fs.default_block_size = 5
+        fs._create_multipart_upload = mock.MagicMock(
+            return_value=SimpleNamespace(upload_id="uploadid")
+        )
+        fs._upload_part = mock.MagicMock(side_effect=RuntimeError("upload failed"))
+        fs._complete_multipart_upload = mock.MagicMock()
+
+        with pytest.raises(RuntimeError, match="upload failed"):
+            fs.pipe_file("s3://bucket/key", b"0123456789ABCDEF")
+        fs._complete_multipart_upload.assert_not_called()
+        fs._call.assert_called_once_with(
+            fs._client.abort_multipart_upload,
+            Bucket="bucket",
+            Key="key",
+            UploadId="uploadid",
+        )
+
     def test_metadata_with_version_id(self):
         fs = self._make_fs()
         fs._call.return_value = {"Metadata": {}}
@@ -774,7 +857,8 @@ class TestS3FileSystem:
             (1, 2**10),
             # (10, 2**10),
             # (100, 2**10),
-            (1, 2**20),
+            (1, 2**20),  # < block size (5 MiB): single PutObject
+            (6, 2**20),  # > block size (5 MiB): parallel multipart upload
             # (10, 2**20),
             # (100, 2**20),
             # (1024, 2**20),
@@ -793,6 +877,19 @@ class TestS3FileSystem:
         )
         fs.pipe(path, data)
         assert fs.cat(path) == data
+
+    def test_pipe_file_create_mode_and_kwargs(self, fs):
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_pipe_file_create/{uuid.uuid4()}"
+        )
+        data = b"0123456789"
+        fs.pipe_file(path, data, ContentType="text/plain")
+        assert fs.cat(path) == data
+        assert fs.metadata(path).content_type == "text/plain"
+
+        with pytest.raises(FileExistsError):
+            fs.pipe_file(path, data, mode="create")
 
     def test_cat_ranges(self, fs):
         data = b"1234567890abcdefghijklmnopqrstuvwxyz"
