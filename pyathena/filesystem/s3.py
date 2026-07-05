@@ -32,6 +32,7 @@ from pyathena.filesystem.s3_object import (
     S3MultipartUploadPart,
     S3Object,
     S3ObjectType,
+    S3ObjectVersion,
     S3PutObject,
     S3StorageClass,
 )
@@ -71,6 +72,10 @@ class S3FileSystem(AbstractFileSystem):
         allow_bucket_creation: Whether mkdir/makedirs may create buckets.
             Defaults to False.
         allow_bucket_deletion: Whether rmdir may delete buckets.
+            Defaults to False.
+        version_aware: Whether reads pin the object version observed at
+            open time and ls may list all versions. Requires the
+            s3:GetObjectVersion / s3:ListBucketVersions permissions.
             Defaults to False.
 
     Example:
@@ -140,6 +145,7 @@ class S3FileSystem(AbstractFileSystem):
         s3_additional_kwargs=None,
         allow_bucket_creation: bool = False,
         allow_bucket_deletion: bool = False,
+        version_aware: bool = False,
         *args,
         **kwargs,
     ) -> None:
@@ -163,6 +169,7 @@ class S3FileSystem(AbstractFileSystem):
         self.s3_additional_kwargs = s3_additional_kwargs if s3_additional_kwargs else {}
         self.allow_bucket_creation = allow_bucket_creation
         self.allow_bucket_deletion = allow_bucket_deletion
+        self.version_aware = version_aware
 
         requester_pays = kwargs.pop("requester_pays", False)
         self.request_kwargs = {"RequestPayer": "requester"} if requester_pays else {}
@@ -273,6 +280,10 @@ class S3FileSystem(AbstractFileSystem):
                 )
             except FileNotFoundError:
                 return None
+            if self.version_aware and not version_id:
+                # Pin the version of the object so that subsequent reads see
+                # the version observed here even if the object is overwritten.
+                version_id = response.get("VersionId")
             file = S3Object(
                 init=response,
                 type=S3ObjectType.S3_OBJECT_TYPE_FILE,
@@ -388,7 +399,9 @@ class S3FileSystem(AbstractFileSystem):
             path: S3 path to list (e.g., "s3://bucket" or "s3://bucket/prefix").
             detail: If True, return S3Object instances; if False, return paths as strings.
             refresh: If True, bypass cache and fetch fresh results from S3.
-            **kwargs: Additional arguments (ignored for S3).
+            **kwargs: Additional arguments including:
+                versions: If True, list all versions of the objects. Requires
+                    the filesystem to be constructed with ``version_aware=True``.
 
         Returns:
             List of S3Object instances (if detail=True) or paths as strings (if detail=False).
@@ -398,9 +411,16 @@ class S3FileSystem(AbstractFileSystem):
             >>> fs.ls("s3://my-bucket")  # List objects in bucket
             >>> fs.ls("s3://my-bucket/", detail=True)  # Get detailed object info
         """
+        versions = kwargs.pop("versions", False)
+        if versions and not self.version_aware:
+            raise ValueError(
+                "Cannot list the object versions unless the filesystem is version aware."
+            )
         path = self._strip_protocol(path).rstrip("/")
         if path in ["", "/"]:
             files = self._ls_buckets(refresh)
+        elif versions:
+            files = self._ls_object_versions(path)
         else:
             files = self._ls_dirs(path, refresh=refresh)
             if not files and "/" in path:
@@ -408,6 +428,70 @@ class S3FileSystem(AbstractFileSystem):
                 if file:
                     files = [file]
         return list(files) if detail else [f.name for f in files]
+
+    def _ls_object_versions(self, path: str) -> list[S3Object]:
+        """List a prefix including all versions of the objects.
+
+        The listing is always fetched from S3 and is not cached, because the
+        dircache stores the current view of a path.
+        """
+        bucket, key, _ = self.parse_path(path)
+        prefix = f"{key}/" if key else ""
+
+        files: list[S3Object] = []
+        next_key_marker: str | None = None
+        next_version_id_marker: str | None = None
+        while True:
+            request: dict[str, Any] = {
+                "Bucket": bucket,
+                "Prefix": prefix,
+                "Delimiter": "/",
+            }
+            if next_key_marker:
+                request.update(
+                    {
+                        "KeyMarker": next_key_marker,
+                        "VersionIdMarker": next_version_id_marker,
+                    }
+                )
+            response = self._call(
+                self._client.list_object_versions,
+                **request,
+            )
+            files.extend(
+                S3Object(
+                    init={
+                        "ContentLength": 0,
+                        "ContentType": None,
+                        "StorageClass": S3StorageClass.S3_STORAGE_CLASS_DIRECTORY,
+                        "ETag": None,
+                        "LastModified": None,
+                    },
+                    type=S3ObjectType.S3_OBJECT_TYPE_DIRECTORY,
+                    bucket=bucket,
+                    key=c["Prefix"][:-1].rstrip("/"),
+                    version_id=None,
+                )
+                for c in response.get("CommonPrefixes", [])
+            )
+            files.extend(
+                S3Object(
+                    init=v,
+                    type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+                    bucket=bucket,
+                    key=v["Key"],
+                    version_id=v.get("VersionId"),
+                    is_latest=v.get("IsLatest", False),
+                )
+                for v in response.get("Versions", [])
+            )
+            if not response.get("IsTruncated"):
+                break
+            next_key_marker = response.get("NextKeyMarker")
+            next_version_id_marker = response.get("NextVersionIdMarker")
+            if not next_key_marker:
+                break
+        return files
 
     def info(self, path: str, **kwargs) -> S3Object:
         refresh = kwargs.pop("refresh", False)
@@ -1640,6 +1724,60 @@ class S3FileSystem(AbstractFileSystem):
                 break
         return uploads
 
+    def object_version_info(
+        self, path: str, delete_markers: bool = False, **kwargs
+    ) -> list[S3ObjectVersion]:
+        """List the versions of the objects under the path.
+
+        Args:
+            path: S3 path (s3://bucket/key or a key prefix) to list the
+                versions for.
+            delete_markers: Whether to include delete markers in the result.
+            **kwargs: Additional parameters passed to the ListObjectVersions
+                API.
+
+        Returns:
+            List of S3ObjectVersion instances describing the versions.
+        """
+        bucket, key, _ = self.parse_path(path)
+
+        _logger.debug("List object versions: s3://%s/%s", bucket, key)
+        versions: list[S3ObjectVersion] = []
+        next_key_marker: str | None = None
+        next_version_id_marker: str | None = None
+        while True:
+            request: dict[str, Any] = {"Bucket": bucket}
+            if key:
+                request.update({"Prefix": key})
+            if next_key_marker:
+                request.update(
+                    {
+                        "KeyMarker": next_key_marker,
+                        "VersionIdMarker": next_version_id_marker,
+                    }
+                )
+            response = self._call(
+                self._client.list_object_versions,
+                **request,
+                **kwargs,
+            )
+            versions.extend(
+                S3ObjectVersion(bucket=bucket, is_delete_marker=False, response=v)
+                for v in response.get("Versions", [])
+            )
+            if delete_markers:
+                versions.extend(
+                    S3ObjectVersion(bucket=bucket, is_delete_marker=True, response=m)
+                    for m in response.get("DeleteMarkers", [])
+                )
+            if not response.get("IsTruncated"):
+                break
+            next_key_marker = response.get("NextKeyMarker")
+            next_version_id_marker = response.get("NextVersionIdMarker")
+            if not next_key_marker:
+                break
+        return versions
+
     def clear_multipart_uploads(self, path: str) -> None:
         """Abort any incomplete multipart uploads in the bucket.
 
@@ -1953,6 +2091,10 @@ class S3File(AbstractBufferedFile):
         self._details: S3Object | dict[str, Any]
         if "r" in mode:
             info = self.fs.info(self.path, version_id=self.version_id)
+            if self.fs.version_aware and not self.version_id:
+                # Pin the version observed at open time so that reads are
+                # consistent even if the object is overwritten.
+                self.version_id = info.get("version_id")
             if etag := info.get("etag"):
                 self.s3_additional_kwargs.update({"IfMatch": etag})
             self._details = info

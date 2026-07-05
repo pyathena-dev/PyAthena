@@ -144,6 +144,7 @@ class TestS3FileSystem:
         fs.allow_bucket_deletion = False
         fs.s3_additional_kwargs = {}
         fs._intrans = False
+        fs.version_aware = False
         return fs
 
     def test_ls_from_cache_with_cached_object(self):
@@ -359,6 +360,98 @@ class TestS3FileSystem:
         fs.open.assert_called_once()
         opened.__enter__.return_value.write.assert_called_once_with(b"data")
         fs._put_object.assert_not_called()
+
+    def test_head_object_version_aware(self):
+        fs = self._make_fs()
+        fs._call.return_value = {"ContentLength": 4, "ETag": '"etag"', "VersionId": "v1"}
+
+        # The observed version is pinned only in version-aware mode.
+        assert fs._head_object("bucket/key").version_id is None
+
+        fs = self._make_fs()
+        fs.version_aware = True
+        fs._call.return_value = {"ContentLength": 4, "ETag": '"etag"', "VersionId": "v1"}
+        assert fs._head_object("bucket/key").version_id == "v1"
+
+    def test_object_version_info_paginates(self):
+        fs = self._make_fs()
+        fs._call.side_effect = [
+            {
+                "Versions": [
+                    {"Key": "key", "VersionId": "v2", "IsLatest": True, "Size": 4},
+                ],
+                "DeleteMarkers": [
+                    {"Key": "key", "VersionId": "m1", "IsLatest": False},
+                ],
+                "IsTruncated": True,
+                "NextKeyMarker": "key",
+                "NextVersionIdMarker": "v2",
+            },
+            {
+                "Versions": [
+                    {"Key": "key", "VersionId": "v1", "IsLatest": False, "Size": 2},
+                ],
+                "IsTruncated": False,
+            },
+        ]
+
+        actual = fs.object_version_info("s3://bucket/key")
+        assert [(v.key, v.version_id, v.is_latest, v.size) for v in actual] == [
+            ("key", "v2", True, 4),
+            ("key", "v1", False, 2),
+        ]
+        assert all(not v.is_delete_marker for v in actual)
+        fs._call.assert_any_call(fs._client.list_object_versions, Bucket="bucket", Prefix="key")
+        fs._call.assert_any_call(
+            fs._client.list_object_versions,
+            Bucket="bucket",
+            Prefix="key",
+            KeyMarker="key",
+            VersionIdMarker="v2",
+        )
+
+    def test_object_version_info_with_delete_markers(self):
+        fs = self._make_fs()
+        fs._call.return_value = {
+            "Versions": [{"Key": "key", "VersionId": "v1", "IsLatest": False}],
+            "DeleteMarkers": [{"Key": "key", "VersionId": "m1", "IsLatest": True}],
+            "IsTruncated": False,
+        }
+
+        actual = fs.object_version_info("s3://bucket/key", delete_markers=True)
+        assert [(v.version_id, v.is_delete_marker) for v in actual] == [
+            ("v1", False),
+            ("m1", True),
+        ]
+
+    def test_ls_versions_requires_version_aware(self):
+        fs = self._make_fs()
+        with pytest.raises(ValueError, match="version aware"):
+            fs.ls("s3://bucket/path", versions=True)
+
+    def test_ls_versions(self):
+        fs = self._make_fs()
+        fs.version_aware = True
+        fs._call.return_value = {
+            "CommonPrefixes": [{"Prefix": "path/dir/"}],
+            "Versions": [
+                {"Key": "path/key", "VersionId": "v2", "IsLatest": True, "Size": 4},
+                {"Key": "path/key", "VersionId": "v1", "IsLatest": False, "Size": 2},
+            ],
+            "IsTruncated": False,
+        }
+
+        actual = fs.ls("s3://bucket/path", detail=True, versions=True)
+        fs._call.assert_called_once_with(
+            fs._client.list_object_versions, Bucket="bucket", Prefix="path/", Delimiter="/"
+        )
+        assert [(f.name, f.version_id, f.is_latest) for f in actual] == [
+            ("bucket/path/dir", None, None),
+            ("bucket/path/key", "v2", True),
+            ("bucket/path/key", "v1", False),
+        ]
+        assert actual[1].size == 4
+        assert actual[2].size == 2
 
     def test_metadata_with_version_id(self):
         fs = self._make_fs()
@@ -1309,6 +1402,34 @@ class TestS3FileSystem:
         fs.clear_multipart_uploads(prefix_path)
         uploads = fs.list_multipart_uploads(prefix_path)
         assert not any(u.upload_id == upload.upload_id for u in uploads)
+
+    def test_object_version_info(self, fs):
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_object_version_info/{uuid.uuid4()}"
+        )
+        fs.pipe(path, b"data")
+
+        versions = fs.object_version_info(path)
+        assert len(versions) == 1
+        version = versions[0]
+        bucket, key, _ = fs.parse_path(path)
+        assert version.bucket == bucket
+        assert version.key == key
+        assert version.name == f"{bucket}/{key}"
+        assert version.is_latest
+        assert not version.is_delete_marker
+        assert version.size == 4
+        # An unversioned bucket reports the "null" version.
+        assert version.version_id
+
+    @pytest.mark.parametrize("fs", [{"version_aware": True}], indirect=True)
+    def test_version_aware_read(self, fs):
+        # On an unversioned bucket, the version-aware mode is a no-op for
+        # reads: HeadObject returns no version to pin.
+        path = f"s3://{ENV.s3_staging_bucket}/{ENV.s3_filesystem_test_file_key}"
+        with fs.open(path, "rb") as f:
+            assert f.read() == b"0123456789"
 
     def test_file_url_metadata_getxattr_setxattr(self, fs):
         path = (

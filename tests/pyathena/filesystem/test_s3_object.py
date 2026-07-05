@@ -7,6 +7,7 @@ from pyathena.filesystem.s3_object import (
     S3MultipartUploadPart,
     S3Object,
     S3ObjectType,
+    S3ObjectVersion,
     S3PutObject,
     S3StorageClass,
 )
@@ -164,6 +165,54 @@ class TestS3Metadata:
         assert actual != {"attr1": "value1"}
         # System-defined metadata is not part of the mapping.
         assert "content_type" not in actual
+
+
+class TestS3ObjectVersion:
+    def test_init(self):
+        actual = S3ObjectVersion(
+            bucket="test_bucket",
+            is_delete_marker=False,
+            response={
+                "Key": "test_key",
+                "VersionId": "test_version_id",
+                "IsLatest": True,
+                "LastModified": datetime(2015, 1, 1, 0, 0, 0),
+                "ETag": '"test_etag"',
+                "Size": 100,
+                "StorageClass": "STANDARD",
+                "Owner": {"DisplayName": "test_owner", "ID": "test_owner_id"},
+            },
+        )
+        assert actual.bucket == "test_bucket"
+        assert actual.key == "test_key"
+        assert actual.name == "test_bucket/test_key"
+        assert actual.version_id == "test_version_id"
+        assert actual.is_latest is True
+        assert actual.is_delete_marker is False
+        assert actual.last_modified == datetime(2015, 1, 1, 0, 0, 0)
+        assert actual.etag == '"test_etag"'
+        assert actual.size == 100
+        assert actual.storage_class == "STANDARD"
+        assert actual.owner
+        assert actual.owner.display_name == "test_owner"
+        assert actual.owner.id == "test_owner_id"
+
+    def test_init_delete_marker(self):
+        actual = S3ObjectVersion(
+            bucket="test_bucket",
+            is_delete_marker=True,
+            response={
+                "Key": "test_key",
+                "VersionId": "test_version_id",
+                "IsLatest": True,
+                "LastModified": datetime(2015, 1, 1, 0, 0, 0),
+            },
+        )
+        assert actual.is_delete_marker is True
+        assert actual.etag is None
+        assert actual.size is None
+        assert actual.storage_class is None
+        assert actual.owner is None
 
 
 class TestS3PutObject:
