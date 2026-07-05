@@ -5,7 +5,7 @@ import math
 import mimetypes
 import os.path
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future, as_completed
 from copy import deepcopy
 from datetime import datetime
@@ -52,12 +52,14 @@ class S3FileSystem(AbstractFileSystem):
     designed to be compatible with s3fs while offering PyAthena-specific optimizations.
 
     The filesystem supports standard S3 operations including:
+
     - Listing objects and directories
     - Reading and writing files
     - Copying and moving objects
     - Reading and writing object metadata, tags, and canned ACLs
     - Multipart uploads for large files, including management of
       incomplete uploads
+    - Version-aware reads and object version listing (see ``version_aware``)
     - Creating and removing buckets (disabled by default; see
       ``allow_bucket_creation`` / ``allow_bucket_deletion``)
     - Various S3 storage classes and encryption options
@@ -234,6 +236,35 @@ class S3FileSystem(AbstractFileSystem):
             return match.group("bucket"), match.group("key"), match.group("version_id")
         raise ValueError(f"Invalid S3 path format {path}.")
 
+    @staticmethod
+    def _directory_object(bucket: str, key: str | None, version_id: str | None = None) -> S3Object:
+        """Build an S3Object representing a directory entry."""
+        return S3Object(
+            init={
+                "ContentLength": 0,
+                "ContentType": None,
+                "StorageClass": S3StorageClass.S3_STORAGE_CLASS_DIRECTORY,
+                "ETag": None,
+                "LastModified": None,
+            },
+            type=S3ObjectType.S3_OBJECT_TYPE_DIRECTORY,
+            bucket=bucket,
+            key=key,
+            version_id=version_id,
+        )
+
+    @staticmethod
+    def _versioned_file_object(bucket: str, version: dict[str, Any]) -> S3Object:
+        """Build an S3Object from a ListObjectVersions Versions entry."""
+        return S3Object(
+            init=version,
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket=bucket,
+            key=version["Key"],
+            version_id=version.get("VersionId"),
+            is_latest=version.get("IsLatest", False),
+        )
+
     def _head_bucket(self, bucket, refresh: bool = False) -> S3Object | None:
         if bucket not in self.dircache or refresh:
             try:
@@ -356,19 +387,7 @@ class S3FileSystem(AbstractFileSystem):
                 **request,
             )
             files.extend(
-                S3Object(
-                    init={
-                        "ContentLength": 0,
-                        "ContentType": None,
-                        "StorageClass": S3StorageClass.S3_STORAGE_CLASS_DIRECTORY,
-                        "ETag": None,
-                        "LastModified": None,
-                    },
-                    type=S3ObjectType.S3_OBJECT_TYPE_DIRECTORY,
-                    bucket=bucket,
-                    key=c["Prefix"][:-1].rstrip("/"),
-                    version_id=version_id,
-                )
+                self._directory_object(bucket, c["Prefix"][:-1].rstrip("/"), version_id)
                 for c in response.get("CommonPrefixes", [])
             )
             files.extend(
@@ -439,14 +458,35 @@ class S3FileSystem(AbstractFileSystem):
         prefix = f"{key}/" if key else ""
 
         files: list[S3Object] = []
+        for response in self._list_object_versions_pages(bucket, prefix=prefix, delimiter="/"):
+            files.extend(
+                self._directory_object(bucket, c["Prefix"][:-1].rstrip("/"))
+                for c in response.get("CommonPrefixes", [])
+            )
+            files.extend(
+                self._versioned_file_object(bucket, v) for v in response.get("Versions", [])
+            )
+
+        if not files and key:
+            # The path may point at an object rather than a key prefix.
+            files = [
+                self._versioned_file_object(bucket, v)
+                for response in self._list_object_versions_pages(bucket, prefix=key, delimiter="/")
+                for v in response.get("Versions", [])
+                if v["Key"] == key
+            ]
+        return files
+
+    def _list_object_versions_pages(
+        self, bucket: str, prefix: str, delimiter: str | None = None, **kwargs
+    ) -> Iterator[dict[str, Any]]:
+        """Iterate over the pages of a ListObjectVersions request."""
         next_key_marker: str | None = None
         next_version_id_marker: str | None = None
         while True:
-            request: dict[str, Any] = {
-                "Bucket": bucket,
-                "Prefix": prefix,
-                "Delimiter": "/",
-            }
+            request: dict[str, Any] = {"Bucket": bucket, "Prefix": prefix}
+            if delimiter:
+                request.update({"Delimiter": delimiter})
             if next_key_marker:
                 request.update(
                     {
@@ -457,62 +497,15 @@ class S3FileSystem(AbstractFileSystem):
             response = self._call(
                 self._client.list_object_versions,
                 **request,
+                **kwargs,
             )
-            files.extend(
-                S3Object(
-                    init={
-                        "ContentLength": 0,
-                        "ContentType": None,
-                        "StorageClass": S3StorageClass.S3_STORAGE_CLASS_DIRECTORY,
-                        "ETag": None,
-                        "LastModified": None,
-                    },
-                    type=S3ObjectType.S3_OBJECT_TYPE_DIRECTORY,
-                    bucket=bucket,
-                    key=c["Prefix"][:-1].rstrip("/"),
-                    version_id=None,
-                )
-                for c in response.get("CommonPrefixes", [])
-            )
-            files.extend(
-                S3Object(
-                    init=v,
-                    type=S3ObjectType.S3_OBJECT_TYPE_FILE,
-                    bucket=bucket,
-                    key=v["Key"],
-                    version_id=v.get("VersionId"),
-                    is_latest=v.get("IsLatest", False),
-                )
-                for v in response.get("Versions", [])
-            )
+            yield response
             if not response.get("IsTruncated"):
                 break
             next_key_marker = response.get("NextKeyMarker")
             next_version_id_marker = response.get("NextVersionIdMarker", "")
             if not next_key_marker:
                 break
-
-        if not files and key:
-            # The path may point at an object rather than a key prefix.
-            files = [
-                S3Object(
-                    init={
-                        "ContentLength": version.size or 0,
-                        "ContentType": None,
-                        "StorageClass": version.storage_class,
-                        "ETag": version.etag,
-                        "LastModified": version.last_modified,
-                    },
-                    type=S3ObjectType.S3_OBJECT_TYPE_FILE,
-                    bucket=bucket,
-                    key=version.key,
-                    version_id=version.version_id,
-                    is_latest=version.is_latest,
-                )
-                for version in self.object_version_info(path)
-                if version.key == key
-            ]
-        return files
 
     def info(self, path: str, **kwargs) -> S3Object:
         refresh = kwargs.pop("refresh", False)
@@ -544,20 +537,22 @@ class S3FileSystem(AbstractFileSystem):
                     cache = None
 
                 if cache:
-                    return cache
-                return S3Object(
-                    init={
-                        "ContentLength": 0,
-                        "ContentType": None,
-                        "StorageClass": S3StorageClass.S3_STORAGE_CLASS_DIRECTORY,
-                        "ETag": None,
-                        "LastModified": None,
-                    },
-                    type=S3ObjectType.S3_OBJECT_TYPE_DIRECTORY,
-                    bucket=bucket,
-                    key=key.rstrip("/") if key else None,
-                    version_id=version_id,
-                )
+                    if (
+                        self.version_aware
+                        and not version_id
+                        and cache.get("type") == S3ObjectType.S3_OBJECT_TYPE_FILE
+                        and not cache.get("version_id")
+                    ):
+                        # A version-aware lookup needs the version to pin;
+                        # treat a version-less cached entry (e.g., populated
+                        # by a listing) as stale and head the object again.
+                        refresh = True
+                    else:
+                        return cache
+                else:
+                    return self._directory_object(
+                        bucket, key.rstrip("/") if key else None, version_id
+                    )
         if key:
             object_info = self._head_object(path, refresh=refresh, version_id=version_id)
             if object_info:
@@ -580,19 +575,7 @@ class S3FileSystem(AbstractFileSystem):
             or response.get("Contents", [])
             or response.get("CommonPrefixes", [])
         ):
-            return S3Object(
-                init={
-                    "ContentLength": 0,
-                    "ContentType": None,
-                    "StorageClass": S3StorageClass.S3_STORAGE_CLASS_DIRECTORY,
-                    "ETag": None,
-                    "LastModified": None,
-                },
-                type=S3ObjectType.S3_OBJECT_TYPE_DIRECTORY,
-                bucket=bucket,
-                key=key.rstrip("/") if key else None,
-                version_id=version_id,
-            )
+            return self._directory_object(bucket, key.rstrip("/") if key else None, version_id)
         raise FileNotFoundError(path)
 
     def _extract_parent_directories(
@@ -634,25 +617,7 @@ class S3FileSystem(AbstractFileSystem):
                         dir_path = "/".join(parts[:i])
                     dirs.add(dir_path)
 
-        # Create S3Object instances for directories
-        directory_objects = []
-        for dir_path in dirs:
-            dir_obj = S3Object(
-                init={
-                    "ContentLength": 0,
-                    "ContentType": None,
-                    "StorageClass": S3StorageClass.S3_STORAGE_CLASS_DIRECTORY,
-                    "ETag": None,
-                    "LastModified": None,
-                },
-                type=S3ObjectType.S3_OBJECT_TYPE_DIRECTORY,
-                bucket=bucket,
-                key=dir_path,
-                version_id=None,
-            )
-            directory_objects.append(dir_obj)
-
-        return directory_objects
+        return [self._directory_object(bucket, dir_path) for dir_path in dirs]
 
     def _find(
         self,
@@ -1288,10 +1253,8 @@ class S3FileSystem(AbstractFileSystem):
         """
         try:
             # The futures are in part-number order.
-            parts = [
-                {"ETag": result.etag, "PartNumber": result.part_number}
-                for result in (future.result() for future in futures)
-            ]
+            results = [future.result() for future in futures]
+            parts = [{"ETag": r.etag, "PartNumber": r.part_number} for r in results]
             return self._complete_multipart_upload(
                 bucket=bucket,
                 key=key,
@@ -1760,24 +1723,7 @@ class S3FileSystem(AbstractFileSystem):
 
         _logger.debug(f"List object versions: s3://{bucket}/{key}")
         versions: list[S3ObjectVersion] = []
-        next_key_marker: str | None = None
-        next_version_id_marker: str | None = None
-        while True:
-            request: dict[str, Any] = {"Bucket": bucket}
-            if key:
-                request.update({"Prefix": key})
-            if next_key_marker:
-                request.update(
-                    {
-                        "KeyMarker": next_key_marker,
-                        "VersionIdMarker": next_version_id_marker,
-                    }
-                )
-            response = self._call(
-                self._client.list_object_versions,
-                **request,
-                **kwargs,
-            )
+        for response in self._list_object_versions_pages(bucket, prefix=key or "", **kwargs):
             versions.extend(
                 S3ObjectVersion(bucket=bucket, is_delete_marker=False, response=v)
                 for v in response.get("Versions", [])
@@ -1787,12 +1733,6 @@ class S3FileSystem(AbstractFileSystem):
                     S3ObjectVersion(bucket=bucket, is_delete_marker=True, response=m)
                     for m in response.get("DeleteMarkers", [])
                 )
-            if not response.get("IsTruncated"):
-                break
-            next_key_marker = response.get("NextKeyMarker")
-            next_version_id_marker = response.get("NextVersionIdMarker", "")
-            if not next_key_marker:
-                break
         return versions
 
     def clear_multipart_uploads(self, path: str) -> None:
@@ -2091,14 +2031,11 @@ class S3File(AbstractBufferedFile):
         self.append_block = False
         self._details: S3Object | dict[str, Any]
         if "r" in mode:
-            # In version-aware mode, bypass the dircache (which may have been
-            # populated by a listing without version information) so that the
-            # version observed here is the one that is pinned.
-            refresh = self.fs.version_aware and not self.version_id
-            info = self.fs.info(self.path, version_id=self.version_id, refresh=refresh)
+            info = self.fs.info(self.path, version_id=self.version_id)
             if self.fs.version_aware and not self.version_id:
                 # Pin the version observed at open time so that reads are
-                # consistent even if the object is overwritten.
+                # consistent even if the object is overwritten. info() heads
+                # the object when the cached entry carries no version.
                 self.version_id = info.get("version_id")
             if etag := info.get("etag"):
                 self.s3_additional_kwargs.update({"IfMatch": etag})
@@ -2243,22 +2180,19 @@ class S3File(AbstractBufferedFile):
             if not self.multipart_upload:
                 raise RuntimeError("Multipart upload is not initialized.")
 
-            parts: list[dict[str, Any]] = []
-            for f in as_completed(self.multipart_upload_parts):
-                result = f.result()
-                parts.append(
-                    {
-                        "ETag": result.etag,
-                        "PartNumber": result.part_number,
-                    }
+            try:
+                self.fs._finish_multipart_upload(
+                    bucket=self.bucket,
+                    key=self.key,
+                    upload_id=cast(str, self.multipart_upload.upload_id),
+                    futures=self.multipart_upload_parts,
                 )
-            parts.sort(key=lambda x: x["PartNumber"])
-            self.fs._complete_multipart_upload(
-                bucket=self.bucket,
-                key=self.key,
-                upload_id=cast(str, self.multipart_upload.upload_id),
-                parts=parts,
-            )
+            except Exception:
+                # The multipart upload has been aborted by the helper;
+                # prevent discard() from aborting it again.
+                self.multipart_upload = None
+                self.multipart_upload_parts = []
+                raise
 
         self.fs.invalidate_cache(self.path)
 

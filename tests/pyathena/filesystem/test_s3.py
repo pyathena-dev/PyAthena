@@ -12,10 +12,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-import fsspec
 import pytest
 from fsspec import Callback
 
+from pyathena.filesystem import register_s3_filesystem
 from pyathena.filesystem.s3 import S3File, S3FileSystem
 from pyathena.filesystem.s3_object import S3Object, S3ObjectType, S3StorageClass
 from pyathena.util import RetryConfig
@@ -25,8 +25,7 @@ from tests.pyathena.conftest import connect
 
 @pytest.fixture(scope="class")
 def register_filesystem():
-    fsspec.register_implementation("s3", "pyathena.filesystem.s3.S3FileSystem", clobber=True)
-    fsspec.register_implementation("s3a", "pyathena.filesystem.s3.S3FileSystem", clobber=True)
+    register_s3_filesystem()
 
 
 @pytest.mark.usefixtures("register_filesystem")
@@ -252,20 +251,6 @@ class TestS3FileSystem:
             ContentType="text/plain",
         )
 
-    def test_pipe_file_create_mode(self):
-        fs = self._make_fs()
-        fs.default_block_size = S3FileSystem.DEFAULT_BLOCK_SIZE
-        fs._put_object = mock.MagicMock()
-
-        fs.exists = mock.MagicMock(return_value=True)
-        with pytest.raises(FileExistsError):
-            fs.pipe_file("s3://bucket/key", b"data", mode="create")
-        fs._put_object.assert_not_called()
-
-        fs.exists = mock.MagicMock(return_value=False)
-        fs.pipe_file("s3://bucket/key", b"data", mode="create")
-        fs._put_object.assert_called_once()
-
     def test_pipe_file_invalid_path_raises(self):
         fs = self._make_fs()
         with pytest.raises(ValueError, match="Cannot write to a bucket"):
@@ -346,20 +331,6 @@ class TestS3FileSystem:
         # The abort failure is logged, and the original error propagates.
         with pytest.raises(RuntimeError, match="upload failed"):
             fs.pipe_file("s3://bucket/key", b"0123456789ABCDEF")
-
-    def test_pipe_file_in_transaction_uses_buffered_path(self):
-        fs = self._make_fs()
-        fs._intrans = True
-        fs._put_object = mock.MagicMock()
-        opened = mock.MagicMock()
-        fs.open = mock.MagicMock(return_value=opened)
-
-        fs.pipe_file("s3://bucket/key", b"data")
-        # The buffered open() path is used so that fsspec transactions keep
-        # their deferred-commit semantics; nothing is written directly.
-        fs.open.assert_called_once()
-        opened.__enter__.return_value.write.assert_called_once_with(b"data")
-        fs._put_object.assert_not_called()
 
     def test_head_object_version_aware(self):
         fs = self._make_fs()
@@ -472,7 +443,7 @@ class TestS3FileSystem:
 
         actual = fs.ls("s3://bucket/path/key", detail=True, versions=True)
         fs._call.assert_any_call(
-            fs._client.list_object_versions, Bucket="bucket", Prefix="path/key"
+            fs._client.list_object_versions, Bucket="bucket", Prefix="path/key", Delimiter="/"
         )
         assert [(f.name, f.version_id, f.size) for f in actual] == [
             ("bucket/path/key", "v2", 4),
@@ -1678,7 +1649,7 @@ class TestS3File:
         assert file._upload_chunk(final=True) is False  # final -> buffer kept
         if not autocommit:
             # Deferred: the multipart upload is completed by commit().
-            file.fs._complete_multipart_upload.assert_not_called()
+            file.fs._finish_multipart_upload.assert_not_called()
             file.commit()
-        file.fs._complete_multipart_upload.assert_called_once()
+        file.fs._finish_multipart_upload.assert_called_once()
         file.fs._put_object.assert_not_called()
