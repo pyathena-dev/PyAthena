@@ -801,7 +801,9 @@ class S3FileSystem(AbstractFileSystem):
                 )
             except botocore.exceptions.ParamValidationError as e:
                 raise ValueError(f"Bucket create failed {bucket!r}: {e}") from e
-            self.invalidate_cache("")
+            # invalidate_cache walks parent paths and never pops the root
+            # entry itself, so evict the cached bucket listing directly.
+            self.dircache.pop("", None)
             self.invalidate_cache(bucket)
         else:
             # Raises FileNotFoundError if the bucket does not exist
@@ -852,7 +854,9 @@ class S3FileSystem(AbstractFileSystem):
             Bucket=bucket,
         )
         self.invalidate_cache(bucket)
-        self.invalidate_cache("")
+        # invalidate_cache walks parent paths and never pops the root
+        # entry itself, so evict the cached bucket listing directly.
+        self.dircache.pop("", None)
 
     def touch(self, path: str, truncate: bool = True, **kwargs) -> dict[str, Any]:
         bucket, key, version_id = self.parse_path(path)
@@ -1210,8 +1214,8 @@ class S3FileSystem(AbstractFileSystem):
             **kwargs: Additional parameters passed to the HeadObject API.
 
         Returns:
-            Dictionary of the user-defined metadata with the keys' underscores
-            replaced by hyphens.
+            Dictionary of the user-defined metadata. The keys are returned
+            as stored in S3 (S3 normalizes them to lowercase).
         """
         bucket, key, version_id = self.parse_path(path)
         if not key:
@@ -1226,25 +1230,20 @@ class S3FileSystem(AbstractFileSystem):
             **request,
             **kwargs,
         )
-        return {k.replace("_", "-"): v for k, v in response["Metadata"].items()}
+        return cast(dict[str, Any], response["Metadata"])
 
     def getxattr(self, path: str, attr_name: str, **kwargs) -> Any:
         """Get an attribute from the user-defined metadata of the path.
 
         Args:
             path: S3 path (s3://bucket/key) to get the attribute for.
-            attr_name: The name of the attribute. Underscores are replaced
-                by hyphens to match the metadata key format.
+            attr_name: The name of the attribute.
             **kwargs: Additional parameters passed to :meth:`metadata`.
 
         Returns:
             The value of the attribute, or None if the attribute is not set.
         """
-        attr_name = attr_name.replace("_", "-")
-        xattr = self.metadata(path, **kwargs)
-        if attr_name in xattr:
-            return xattr[attr_name]
-        return None
+        return self.metadata(path, **kwargs).get(attr_name)
 
     def setxattr(self, path: str, copy_kwargs: dict[str, Any] | None = None, **kw_args) -> None:
         """Set the user-defined metadata of the path.
@@ -1259,17 +1258,20 @@ class S3FileSystem(AbstractFileSystem):
             copy_kwargs: Additional parameters to use for the underlying
                 CopyObject API call.
             **kw_args: Key-value pairs to set, where the values must be
-                strings. Does not alter existing fields, unless the field
-                appears here - if the value is None, delete the field.
+                strings. The keys are used as-is; names that are not valid
+                Python identifiers (e.g., containing hyphens) can be passed
+                by unpacking a dictionary. Does not alter existing fields,
+                unless the field appears here - if the value is None, delete
+                the field.
 
         Example:
             >>> fs = S3FileSystem()
-            >>> fs.setxattr("s3://bucket/key", attribute_1="value1")
+            >>> fs.setxattr("s3://bucket/key", attribute1="value1")
+            >>> fs.setxattr("s3://bucket/key", **{"attribute-2": "value2"})
         """
         bucket, key, version_id = self.parse_path(path)
         if not key:
             raise ValueError("Cannot set metadata of a bucket.")
-        kw_args = {k.replace("_", "-"): v for k, v in kw_args.items()}
         metadata = self.metadata(path)
         metadata.update(**kw_args)
         # Remove all keys that are None.
@@ -1371,12 +1373,16 @@ class S3FileSystem(AbstractFileSystem):
                 PutBucketAcl API.
         """
         bucket, key, version_id = self.parse_path(path)
+        # Validate before any ACL is applied so that a recursive call cannot
+        # partially apply object ACLs and then fail on the bucket ACL.
+        if not key and acl not in self.BUCKET_ACLS:
+            raise ValueError(f"ACL not in {self.BUCKET_ACLS}.")
+        if key and acl not in self.OBJECT_ACLS:
+            raise ValueError(f"ACL not in {self.OBJECT_ACLS}.")
         if recursive:
             for p in self.find(path, withdirs=False):
                 self.chmod(p, acl, recursive=False, **kwargs)
         elif key:
-            if acl not in self.OBJECT_ACLS:
-                raise ValueError(f"ACL not in {self.OBJECT_ACLS}.")
             request: dict[str, Any] = {"Bucket": bucket, "Key": key, "ACL": acl}
             if version_id:
                 request.update({"VersionId": version_id})
@@ -1388,9 +1394,6 @@ class S3FileSystem(AbstractFileSystem):
                 **kwargs,
             )
         if not key:
-            if acl not in self.BUCKET_ACLS:
-                raise ValueError(f"ACL not in {self.BUCKET_ACLS}.")
-
             _logger.debug("Put bucket acl: s3://%s", bucket)
             self._call(
                 self._client.put_bucket_acl,
@@ -1407,20 +1410,24 @@ class S3FileSystem(AbstractFileSystem):
         to abort all of them.
 
         Args:
-            path: S3 bucket name or path (e.g., "bucket" or "s3://bucket").
+            path: S3 bucket or prefix path (e.g., "bucket", "s3://bucket" or
+                "s3://bucket/prefix"). If the path contains a key prefix,
+                only the uploads under that prefix are listed.
 
         Returns:
             List of S3MultipartUpload instances describing the in-progress
             multipart uploads.
         """
-        bucket, _, _ = self.parse_path(path)
+        bucket, key, _ = self.parse_path(path)
 
-        _logger.debug("List multipart uploads: s3://%s", bucket)
+        _logger.debug("List multipart uploads: s3://%s/%s", bucket, key)
         uploads: list[S3MultipartUpload] = []
         next_key_marker: str | None = None
         next_upload_id_marker: str | None = None
         while True:
             request: dict[str, Any] = {"Bucket": bucket}
+            if key:
+                request.update({"Prefix": key})
             if next_key_marker:
                 request.update(
                     {"KeyMarker": next_key_marker, "UploadIdMarker": next_upload_id_marker}
@@ -1436,16 +1443,20 @@ class S3FileSystem(AbstractFileSystem):
                 break
             next_key_marker = response.get("NextKeyMarker")
             next_upload_id_marker = response.get("NextUploadIdMarker")
+            if not next_key_marker or not next_upload_id_marker:
+                break
         return uploads
 
     def clear_multipart_uploads(self, path: str) -> None:
         """Abort any incomplete multipart uploads in the bucket.
 
         Args:
-            path: S3 bucket name or path (e.g., "bucket" or "s3://bucket").
+            path: S3 bucket or prefix path (e.g., "bucket", "s3://bucket" or
+                "s3://bucket/prefix"). If the path contains a key prefix,
+                only the uploads under that prefix are aborted.
         """
         bucket, _, _ = self.parse_path(path)
-        for upload in self.list_multipart_uploads(bucket):
+        for upload in self.list_multipart_uploads(path):
             self._call(
                 self._client.abort_multipart_upload,
                 Bucket=bucket,

@@ -823,9 +823,9 @@ class TestAioS3FileSystem:
         await fs._pipe_file(path, b"data")
 
         assert fs.metadata(path) == {}
-        fs.setxattr(path, attr_1="value1")
-        assert fs.metadata(path) == {"attr-1": "value1"}
-        assert fs.getxattr(path, "attr_1") == "value1"
+        fs.setxattr(path, attr1="value1")
+        assert fs.metadata(path) == {"attr1": "value1"}
+        assert fs.getxattr(path, "attr1") == "value1"
         assert fs.getxattr(path, "missing") is None
 
         assert fs.get_tags(path) == {}

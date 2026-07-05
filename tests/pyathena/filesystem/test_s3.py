@@ -864,14 +864,17 @@ class TestS3FileSystem:
         fs.pipe(path, data)
         assert fs.metadata(path) == {}
 
-        fs.setxattr(path, attr_1="value1", attr_2="value2")
-        assert fs.metadata(path) == {"attr-1": "value1", "attr-2": "value2"}
-        assert fs.getxattr(path, "attr_1") == "value1"
+        # The keys are stored as-is; hyphenated names can be passed by
+        # unpacking a dictionary.
+        fs.setxattr(path, attr1="value1", **{"attr-2": "value2"})
+        assert fs.metadata(path) == {"attr1": "value1", "attr-2": "value2"}
+        assert fs.getxattr(path, "attr1") == "value1"
+        assert fs.getxattr(path, "attr-2") == "value2"
         assert fs.getxattr(path, "missing") is None
 
         # Setting a field to None deletes it, and the content is preserved.
-        fs.setxattr(path, attr_2=None, attr_3="value3")
-        assert fs.metadata(path) == {"attr-1": "value1", "attr-3": "value3"}
+        fs.setxattr(path, attr3="value3", **{"attr-2": None})
+        assert fs.metadata(path) == {"attr1": "value1", "attr3": "value3"}
         assert fs.cat(path) == data
 
         with pytest.raises(FileNotFoundError):
@@ -900,19 +903,26 @@ class TestS3FileSystem:
         assert fs.get_tags(path) == {"tag3": "value3"}
 
     def test_list_and_clear_multipart_uploads(self, fs):
+        # Scope the list/clear to a unique prefix so that parallel test
+        # workers' in-flight multipart uploads in the shared bucket are
+        # not aborted.
         bucket = ENV.s3_staging_bucket
-        key = f"{ENV.s3_staging_key}{ENV.schema}/filesystem/test_multipart_uploads/{uuid.uuid4()}"
+        prefix = (
+            f"{ENV.s3_staging_key}{ENV.schema}/filesystem/test_multipart_uploads/{uuid.uuid4()}"
+        )
+        prefix_path = f"s3://{bucket}/{prefix}"
+        key = f"{prefix}/file"
         upload = fs._create_multipart_upload(bucket=bucket, key=key)
 
-        uploads = fs.list_multipart_uploads(bucket)
+        uploads = fs.list_multipart_uploads(prefix_path)
         listed = next((u for u in uploads if u.upload_id == upload.upload_id), None)
         assert listed
         assert listed.bucket == bucket
         assert listed.key == key
         assert listed.initiated
 
-        fs.clear_multipart_uploads(bucket)
-        uploads = fs.list_multipart_uploads(f"s3://{bucket}")
+        fs.clear_multipart_uploads(prefix_path)
+        uploads = fs.list_multipart_uploads(prefix_path)
         assert not any(u.upload_id == upload.upload_id for u in uploads)
 
     def test_file_url_metadata_getxattr_setxattr(self, fs):
@@ -922,18 +932,18 @@ class TestS3FileSystem:
         )
         data = b"0123456789"
         fs.pipe(path, data)
-        fs.setxattr(path, attr_1="value1")
+        fs.setxattr(path, attr1="value1")
 
         with fs.open(path, "rb") as f:
-            assert f.metadata() == {"attr-1": "value1"}
-            assert f.getxattr("attr_1") == "value1"
+            assert f.metadata() == {"attr1": "value1"}
+            assert f.getxattr("attr1") == "value1"
             url = f.url(expiration=100)
             with urllib.request.urlopen(url) as r:
                 assert r.read() == data
 
         with fs.open(path, "wb") as f:
             with pytest.raises(NotImplementedError):
-                f.setxattr(attr_2="value2")
+                f.setxattr(attr2="value2")
             f.write(data)
 
     def test_pandas_read_csv(self):
@@ -1033,6 +1043,7 @@ class TestS3FileSystemMocked:
         fs = self._make_fs()
         fs.exists = mock.MagicMock(return_value=False)
         fs._client.meta.region_name = "ap-northeast-1"
+        fs.dircache[""] = ["stale-bucket-listing"]
 
         fs.mkdir("s3://new-bucket")
         fs._call.assert_called_once_with(
@@ -1040,6 +1051,8 @@ class TestS3FileSystemMocked:
             Bucket="new-bucket",
             CreateBucketConfiguration={"LocationConstraint": "ap-northeast-1"},
         )
+        # The cached bucket listing must be evicted.
+        assert "" not in fs.dircache
 
     def test_mkdir_creates_bucket_in_us_east_1_without_location_constraint(self):
         fs = self._make_fs()
@@ -1096,9 +1109,12 @@ class TestS3FileSystemMocked:
 
     def test_rmdir_deletes_bucket(self):
         fs = self._make_fs()
+        fs.dircache[""] = ["stale-bucket-listing"]
 
         fs.rmdir("s3://bucket")
         fs._call.assert_called_once_with(fs._client.delete_bucket, Bucket="bucket")
+        # The cached bucket listing must be evicted.
+        assert "" not in fs.dircache
 
     def test_rmdir_key_raises(self):
         fs = self._make_fs()
@@ -1115,7 +1131,8 @@ class TestS3FileSystemMocked:
         fs = self._make_fs()
         fs._call.return_value = {"Metadata": {"foo_bar": "baz"}}
 
-        assert fs.metadata("s3://bucket/key") == {"foo-bar": "baz"}
+        # The keys are returned as stored, without any transformation.
+        assert fs.metadata("s3://bucket/key") == {"foo_bar": "baz"}
         fs._call.assert_called_once_with(fs._client.head_object, Bucket="bucket", Key="key")
 
     def test_metadata_with_version_id(self):
@@ -1136,26 +1153,30 @@ class TestS3FileSystemMocked:
         fs = self._make_fs()
         fs.metadata = mock.MagicMock(return_value={"attr-1": "value1"})
 
-        assert fs.getxattr("s3://bucket/key", "attr_1") == "value1"
+        # The attribute name is looked up as-is, without any transformation.
         assert fs.getxattr("s3://bucket/key", "attr-1") == "value1"
+        assert fs.getxattr("s3://bucket/key", "attr_1") is None
         assert fs.getxattr("s3://bucket/key", "missing") is None
 
     def test_setxattr(self):
         fs = self._make_fs()
-        fs.metadata = mock.MagicMock(return_value={"attr-1": "value1", "attr-2": "value2"})
+        fs.metadata = mock.MagicMock(return_value={"attr1": "value1", "attr2": "value2"})
 
+        # The keys are used as-is; hyphenated names can be passed by
+        # unpacking a dictionary.
         fs.setxattr(
             "s3://bucket/key",
             copy_kwargs={"ContentType": "text/plain"},
-            attr_2=None,
-            attr_3="value3",
+            attr2=None,
+            attr3="value3",
+            **{"attr-4": "value4"},
         )
         fs._call.assert_called_once_with(
             fs._client.copy_object,
             CopySource={"Bucket": "bucket", "Key": "key"},
             Bucket="bucket",
             Key="key",
-            Metadata={"attr-1": "value1", "attr-3": "value3"},
+            Metadata={"attr1": "value1", "attr3": "value3", "attr-4": "value4"},
             MetadataDirective="REPLACE",
             ContentType="text/plain",
         )
@@ -1231,6 +1252,9 @@ class TestS3FileSystemMocked:
         with pytest.raises(ValueError, match="ACL not in"):
             # A valid object ACL that is not valid for buckets.
             fs.chmod("s3://bucket", "bucket-owner-full-control")
+        with pytest.raises(ValueError, match="ACL not in"):
+            # A recursive call must validate before applying any ACL.
+            fs.chmod("s3://bucket", "bucket-owner-full-control", recursive=True)
         fs._call.assert_not_called()
 
     def test_chmod_recursive(self):
@@ -1272,6 +1296,15 @@ class TestS3FileSystemMocked:
             Bucket="bucket",
             KeyMarker="key1",
             UploadIdMarker="upload1",
+        )
+
+    def test_list_multipart_uploads_with_prefix(self):
+        fs = self._make_fs()
+        fs._call.return_value = {"Uploads": [], "IsTruncated": False}
+
+        assert fs.list_multipart_uploads("s3://bucket/path/to/prefix") == []
+        fs._call.assert_called_once_with(
+            fs._client.list_multipart_uploads, Bucket="bucket", Prefix="path/to/prefix"
         )
 
     def test_clear_multipart_uploads(self):
@@ -1458,13 +1491,13 @@ class TestS3File:
 
     def test_metadata_and_getxattr_delegate_to_fs(self):
         file = self._make_write_file(b"", autocommit=True)
-        file.fs.metadata.return_value = {"attr-1": "value1"}
+        file.fs.metadata.return_value = {"attr1": "value1"}
         file.fs.getxattr.return_value = "value1"
 
-        assert file.metadata() == {"attr-1": "value1"}
+        assert file.metadata() == {"attr1": "value1"}
         file.fs.metadata.assert_called_once_with("s3://bucket/key.txt")
-        assert file.getxattr("attr_1") == "value1"
-        file.fs.getxattr.assert_called_once_with("s3://bucket/key.txt", "attr_1")
+        assert file.getxattr("attr1") == "value1"
+        file.fs.getxattr.assert_called_once_with("s3://bucket/key.txt", "attr1")
 
     def test_setxattr_write_mode_raises(self):
         file = self._make_write_file(b"", autocommit=True)
@@ -1472,7 +1505,7 @@ class TestS3File:
         file._closed = False
 
         with pytest.raises(NotImplementedError):
-            file.setxattr(attr_1="value1")
+            file.setxattr(attr1="value1")
         file.fs.setxattr.assert_not_called()
         # Neutralize __del__, which would otherwise try to flush the
         # partially-constructed file.
@@ -1483,8 +1516,8 @@ class TestS3File:
         file.mode = "rb"
         file._closed = False
 
-        file.setxattr(copy_kwargs={"ContentType": "text/plain"}, attr_1="value1")
+        file.setxattr(copy_kwargs={"ContentType": "text/plain"}, attr1="value1")
         file.fs.setxattr.assert_called_once_with(
-            "s3://bucket/key.txt", copy_kwargs={"ContentType": "text/plain"}, attr_1="value1"
+            "s3://bucket/key.txt", copy_kwargs={"ContentType": "text/plain"}, attr1="value1"
         )
         file._closed = True
