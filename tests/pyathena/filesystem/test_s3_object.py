@@ -148,6 +148,10 @@ class TestS3MultipartUpload:
                 "BucketKeyEnabled": True,
                 "RequestCharged": "requester",
                 "ChecksumAlgorithm": "CRC32",
+                "Initiated": datetime(2015, 1, 1, 0, 0, 0),
+                "StorageClass": "STANDARD",
+                "Owner": {"DisplayName": "test_owner", "ID": "test_owner_id"},
+                "Initiator": {"DisplayName": "test_initiator", "ID": "test_initiator_id"},
             }
         )
         assert actual.abort_date == datetime(2015, 1, 1, 0, 0, 0)
@@ -163,6 +167,27 @@ class TestS3MultipartUpload:
         assert actual.bucket_key_enabled is True
         assert actual.request_charged == "requester"
         assert actual.checksum_algorithm == "CRC32"
+        assert actual.initiated == datetime(2015, 1, 1, 0, 0, 0)
+        assert actual.storage_class == "STANDARD"
+        assert actual.owner
+        assert actual.owner.display_name == "test_owner"
+        assert actual.owner.id == "test_owner_id"
+        assert actual.initiator
+        assert actual.initiator.display_name == "test_initiator"
+        assert actual.initiator.id == "test_initiator_id"
+
+    def test_init_without_list_fields(self):
+        actual = S3MultipartUpload(
+            {
+                "Bucket": "test_bucket",
+                "Key": "test_key",
+                "UploadId": "test_upload_id",
+            }
+        )
+        assert actual.initiated is None
+        assert actual.storage_class is None
+        assert actual.owner is None
+        assert actual.initiator is None
 
 
 class TestS3MultipartUploadPart:

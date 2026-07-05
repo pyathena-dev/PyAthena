@@ -10,7 +10,7 @@ from fsspec.callbacks import _DEFAULT_CALLBACK
 
 from pyathena.filesystem.s3 import S3File, S3FileSystem
 from pyathena.filesystem.s3_executor import S3AioExecutor
-from pyathena.filesystem.s3_object import S3Object
+from pyathena.filesystem.s3_object import S3MultipartUpload, S3Object
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -322,8 +322,38 @@ class AioS3FileSystem(AsyncFileSystem):
             **kwargs,
         )
 
+    async def _rmdir(self, path: str) -> None:
+        await asyncio.to_thread(self._sync_fs.rmdir, path)
+
+    def rmdir(self, path: str) -> None:
+        self._sync_fs.rmdir(path)
+
     def sign(self, path: str, expiration: int = 3600, **kwargs) -> str:
         return cast(str, self._sync_fs.sign(path, expiration=expiration, **kwargs))
+
+    def metadata(self, path: str, **kwargs) -> dict[str, Any]:
+        return self._sync_fs.metadata(path, **kwargs)
+
+    def getxattr(self, path: str, attr_name: str, **kwargs) -> Any:
+        return self._sync_fs.getxattr(path, attr_name, **kwargs)
+
+    def setxattr(self, path: str, copy_kwargs: dict[str, Any] | None = None, **kwargs) -> None:
+        self._sync_fs.setxattr(path, copy_kwargs=copy_kwargs, **kwargs)
+
+    def get_tags(self, path: str) -> dict[str, str]:
+        return self._sync_fs.get_tags(path)
+
+    def put_tags(self, path: str, tags: dict[str, str], mode: str = "o") -> None:
+        self._sync_fs.put_tags(path, tags, mode=mode)
+
+    def chmod(self, path: str, acl: str, recursive: bool = False, **kwargs) -> None:
+        self._sync_fs.chmod(path, acl, recursive=recursive, **kwargs)
+
+    def list_multipart_uploads(self, path: str) -> list[S3MultipartUpload]:
+        return self._sync_fs.list_multipart_uploads(path)
+
+    def clear_multipart_uploads(self, path: str) -> None:
+        self._sync_fs.clear_multipart_uploads(path)
 
     def checksum(self, path: str, **kwargs) -> int:
         return cast(int, self._sync_fs.checksum(path, **kwargs))

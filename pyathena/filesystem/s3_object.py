@@ -277,6 +277,27 @@ class S3PutObject:
         return copy.deepcopy(self.__dict__)
 
 
+class S3Owner:
+    """Represents the owner or initiator of an S3 object or multipart upload.
+
+    Attributes:
+        display_name: The display name of the owner.
+        id: The canonical user ID of the owner.
+    """
+
+    def __init__(self, response: dict[str, Any]) -> None:
+        self._display_name: str | None = response.get("DisplayName")
+        self._id: str | None = response.get("ID")
+
+    @property
+    def display_name(self) -> str | None:
+        return self._display_name
+
+    @property
+    def id(self) -> str | None:
+        return self._id
+
+
 class S3MultipartUpload:
     """Represents an S3 multipart upload operation.
 
@@ -309,6 +330,13 @@ class S3MultipartUpload:
         self._bucket_key_enabled = response.get("BucketKeyEnabled")
         self._request_charged = response.get("RequestCharged")
         self._checksum_algorithm = response.get("ChecksumAlgorithm")
+        # The following fields are returned by the ListMultipartUploads API.
+        self._initiated: datetime | None = response.get("Initiated")
+        self._storage_class: str | None = response.get("StorageClass")
+        owner = response.get("Owner")
+        self._owner: S3Owner | None = S3Owner(owner) if owner else None
+        initiator = response.get("Initiator")
+        self._initiator: S3Owner | None = S3Owner(initiator) if initiator else None
 
     @property
     def abort_date(self) -> datetime | None:
@@ -361,6 +389,22 @@ class S3MultipartUpload:
     @property
     def checksum_algorithm(self) -> str | None:
         return self._checksum_algorithm
+
+    @property
+    def initiated(self) -> datetime | None:
+        return self._initiated
+
+    @property
+    def storage_class(self) -> str | None:
+        return self._storage_class
+
+    @property
+    def owner(self) -> S3Owner | None:
+        return self._owner
+
+    @property
+    def initiator(self) -> S3Owner | None:
+        return self._initiator
 
 
 class S3MultipartUploadPart:
