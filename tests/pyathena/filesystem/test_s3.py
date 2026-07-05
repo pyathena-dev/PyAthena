@@ -227,10 +227,9 @@ class TestS3FileSystem:
         fs.mkdir("s3://bucket/path/to/dir")
         fs._call.assert_not_called()
 
-    def test_mkdir_key_without_create_parents_checks_bucket(self):
+    def test_mkdir_key_without_create_parents_raises(self):
         fs = self._make_fs()
         fs.exists = mock.MagicMock(return_value=False)
-        fs.ls = mock.MagicMock(side_effect=FileNotFoundError("bucket"))
 
         with pytest.raises(FileNotFoundError):
             fs.mkdir("s3://bucket/path/to/dir", create_parents=False)
@@ -448,8 +447,8 @@ class TestS3FileSystem:
         fs = self._make_fs()
         fs.list_multipart_uploads = mock.MagicMock(
             return_value=[
-                SimpleNamespace(key="key1", upload_id="upload1"),
-                SimpleNamespace(key="key2", upload_id="upload2"),
+                SimpleNamespace(bucket="bucket", key="key1", upload_id="upload1"),
+                SimpleNamespace(bucket="bucket", key="key2", upload_id="upload2"),
             ]
         )
 

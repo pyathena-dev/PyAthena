@@ -806,17 +806,17 @@ class S3FileSystem(AbstractFileSystem):
             self.dircache.pop("", None)
             self.invalidate_cache(bucket)
         else:
-            # Raises FileNotFoundError if the bucket does not exist
+            # exists() has already confirmed the bucket does not exist,
             # and it is not requested to be created.
-            self.ls(bucket)
+            raise FileNotFoundError(bucket)
 
     def makedirs(self, path: str, exist_ok: bool = False) -> None:
         """Recursively create a directory, creating the bucket if necessary.
 
         Args:
             path: S3 path (e.g., "s3://bucket" or "s3://bucket/prefix").
-            exist_ok: If False, raise FileExistsError when the bucket
-                already exists.
+            exist_ok: If False, raise FileExistsError when the path is a
+                bucket that already exists.
         """
         try:
             self.mkdir(path, create_parents=True)
@@ -1273,11 +1273,11 @@ class S3FileSystem(AbstractFileSystem):
         if not key:
             raise ValueError("Cannot set metadata of a bucket.")
         metadata = self.metadata(path)
-        metadata.update(**kw_args)
-        # Remove all keys that are None.
-        for kw_key in kw_args:
-            if kw_args[kw_key] is None:
-                metadata.pop(kw_key, None)
+        for k, v in kw_args.items():
+            if v is None:
+                metadata.pop(k, None)
+            else:
+                metadata[k] = v
 
         copy_source: dict[str, Any] = {"Bucket": bucket, "Key": key}
         if version_id:
@@ -1387,7 +1387,11 @@ class S3FileSystem(AbstractFileSystem):
                 ]
                 for future in as_completed(futures):
                     future.result()
-        elif key:
+            if key:
+                # A key prefix is not an object itself; only the objects
+                # below it have ACLs.
+                return
+        if key:
             request: dict[str, Any] = {"Bucket": bucket, "Key": key, "ACL": acl}
             if version_id:
                 request.update({"VersionId": version_id})
@@ -1398,7 +1402,7 @@ class S3FileSystem(AbstractFileSystem):
                 **request,
                 **kwargs,
             )
-        if not key:
+        else:
             _logger.debug("Put bucket acl: s3://%s", bucket)
             self._call(
                 self._client.put_bucket_acl,
@@ -1460,14 +1464,22 @@ class S3FileSystem(AbstractFileSystem):
                 "s3://bucket/prefix"). If the path contains a key prefix,
                 only the uploads under that prefix are aborted.
         """
-        bucket, _, _ = self.parse_path(path)
-        for upload in self.list_multipart_uploads(path):
-            self._call(
-                self._client.abort_multipart_upload,
-                Bucket=bucket,
-                Key=upload.key,
-                UploadId=upload.upload_id,
-            )
+        uploads = self.list_multipart_uploads(path)
+        if not uploads:
+            return
+        with self._create_executor(max_workers=self.max_workers) as executor:
+            futures = [
+                executor.submit(
+                    self._call,
+                    self._client.abort_multipart_upload,
+                    Bucket=upload.bucket,
+                    Key=upload.key,
+                    UploadId=upload.upload_id,
+                )
+                for upload in uploads
+            ]
+            for future in as_completed(futures):
+                future.result()
 
     def created(self, path: str) -> datetime:
         return self.modified(path)
@@ -1700,6 +1712,8 @@ class S3FileSystem(AbstractFileSystem):
 
 
 class S3File(AbstractBufferedFile):
+    fs: S3FileSystem
+
     def __init__(
         self,
         fs: S3FileSystem,
@@ -1752,6 +1766,7 @@ class S3File(AbstractBufferedFile):
             raise ValueError(f"Block size must be >= {self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE}MB.")
 
         self.append_block = False
+        self._details: S3Object | dict[str, Any]
         if "r" in mode:
             info = self.fs.info(self.path, version_id=self.version_id)
             if etag := info.get("etag"):
@@ -1803,9 +1818,7 @@ class S3File(AbstractBufferedFile):
                             bucket=self.bucket,
                             key=self.key,
                             copy_source=self.path,
-                            upload_id=cast(
-                                str, cast(S3MultipartUpload, self.multipart_upload).upload_id
-                            ),
+                            upload_id=cast(str, self.multipart_upload.upload_id),
                             part_number=i + 1,
                             copy_source_ranges=range_,
                         )
@@ -1817,9 +1830,7 @@ class S3File(AbstractBufferedFile):
                         bucket=self.bucket,
                         key=self.key,
                         copy_source=self.path,
-                        upload_id=cast(
-                            str, cast(S3MultipartUpload, self.multipart_upload).upload_id
-                        ),
+                        upload_id=cast(str, self.multipart_upload.upload_id),
                         part_number=1,
                     )
                 )
@@ -1958,7 +1969,7 @@ class S3File(AbstractBufferedFile):
         Returns:
             Dictionary of the user-defined metadata.
         """
-        return cast(dict[str, Any], self.fs.metadata(self.path, **kwargs))
+        return self.fs.metadata(self.path, **kwargs)
 
     def getxattr(self, xattr_name: str, **kwargs) -> Any:
         """Get an attribute from the user-defined metadata of the file.

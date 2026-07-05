@@ -44,7 +44,6 @@ def test_translate_client_error_to_exception(code, expected):
         ("SlowDown", errno.EBUSY),
         ("ServiceUnavailable", errno.EBUSY),
         ("OperationAborted", errno.EBUSY),
-        ("MethodNotAllowed", errno.EPERM),
         ("InternalError", errno.EIO),
     ],
 )

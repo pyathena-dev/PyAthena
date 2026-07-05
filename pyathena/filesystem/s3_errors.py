@@ -58,7 +58,6 @@ _ERROR_CODE_TO_ERRNO: dict[str, int] = {
     "RestoreAlreadyInProgress": errno.EBUSY,
     "ServiceUnavailable": errno.EBUSY,
     "SlowDown": errno.EBUSY,
-    "MethodNotAllowed": errno.EPERM,
 }
 
 # Fallbacks by HTTP status code for error codes not listed above.
