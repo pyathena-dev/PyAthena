@@ -130,6 +130,338 @@ class TestS3FileSystem:
         with pytest.raises(ValueError, match="Invalid S3 path format"):
             S3FileSystem.parse_path("s3a://bucket/path/to/obj?foo=bar")
 
+    @staticmethod
+    def _make_fs():
+        # Build a minimal S3FileSystem without touching AWS, bypassing
+        # __init__ which would require a boto3 client.
+        fs = S3FileSystem.__new__(S3FileSystem)
+        fs.dircache = {}
+        fs._client = mock.MagicMock()
+        fs._call = mock.MagicMock()
+        fs._retry_config = RetryConfig()
+        fs.request_kwargs = {}
+        fs.max_workers = 4
+        return fs
+
+    def test_call_translates_client_error(self):
+        fs = self._make_fs()
+        del fs._call  # Use the real method instead of the mock.
+        func = mock.MagicMock(
+            side_effect=botocore.exceptions.ClientError(
+                {"Error": {"Code": "AccessDenied", "Message": "Access Denied"}}, "HeadObject"
+            )
+        )
+        with pytest.raises(PermissionError, match="Access Denied"):
+            fs._call(func)
+
+    def test_ls_from_cache_with_cached_object(self):
+        fs = self._make_fs()
+        obj = S3Object(
+            init={
+                "ContentLength": 4,
+                "ContentType": None,
+                "StorageClass": S3StorageClass.S3_STORAGE_CLASS_STANDARD,
+                "ETag": '"etag"',
+                "LastModified": None,
+            },
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket="bucket",
+            key="key",
+        )
+        fs.dircache["bucket/key"] = obj
+
+        assert fs._ls_from_cache("bucket/key") is obj
+        # A child path of a cached object entry must not fail; it falls
+        # through to the S3 API instead (fsspec's implementation assumes
+        # every cache value is a listing and raises TypeError here).
+        assert fs._ls_from_cache("bucket/key/child") is None
+
+    def test_mkdir_creates_bucket(self):
+        fs = self._make_fs()
+        fs.exists = mock.MagicMock(return_value=False)
+        fs._client.meta.region_name = "ap-northeast-1"
+        fs.dircache[""] = ["stale-bucket-listing"]
+
+        fs.mkdir("s3://new-bucket")
+        fs._call.assert_called_once_with(
+            fs._client.create_bucket,
+            Bucket="new-bucket",
+            CreateBucketConfiguration={"LocationConstraint": "ap-northeast-1"},
+        )
+        # The cached bucket listing must be evicted.
+        assert "" not in fs.dircache
+
+    def test_mkdir_creates_bucket_in_us_east_1_without_location_constraint(self):
+        fs = self._make_fs()
+        fs.exists = mock.MagicMock(return_value=False)
+        fs._client.meta.region_name = "us-east-1"
+
+        fs.mkdir("s3://new-bucket")
+        fs._call.assert_called_once_with(fs._client.create_bucket, Bucket="new-bucket")
+
+    def test_mkdir_creates_bucket_with_acl(self):
+        fs = self._make_fs()
+        fs.exists = mock.MagicMock(return_value=False)
+        fs._client.meta.region_name = "us-east-1"
+
+        fs.mkdir("s3://new-bucket", acl="private")
+        fs._call.assert_called_once_with(
+            fs._client.create_bucket, Bucket="new-bucket", ACL="private"
+        )
+
+        with pytest.raises(ValueError, match="ACL not in"):
+            fs.mkdir("s3://another-bucket", acl="invalid-acl")
+
+    def test_mkdir_existing_bucket_raises(self):
+        fs = self._make_fs()
+        fs.exists = mock.MagicMock(return_value=True)
+
+        with pytest.raises(FileExistsError):
+            fs.mkdir("s3://bucket")
+        fs._call.assert_not_called()
+
+    def test_mkdir_key_under_existing_bucket_is_noop(self):
+        fs = self._make_fs()
+        fs.exists = mock.MagicMock(return_value=True)
+
+        fs.mkdir("s3://bucket/path/to/dir")
+        fs._call.assert_not_called()
+
+    def test_mkdir_key_without_create_parents_checks_bucket(self):
+        fs = self._make_fs()
+        fs.exists = mock.MagicMock(return_value=False)
+        fs.ls = mock.MagicMock(side_effect=FileNotFoundError("bucket"))
+
+        with pytest.raises(FileNotFoundError):
+            fs.mkdir("s3://bucket/path/to/dir", create_parents=False)
+        fs._call.assert_not_called()
+
+    def test_makedirs_exist_ok(self):
+        fs = self._make_fs()
+        fs.mkdir = mock.MagicMock(side_effect=FileExistsError("bucket"))
+
+        fs.makedirs("s3://bucket", exist_ok=True)
+        with pytest.raises(FileExistsError):
+            fs.makedirs("s3://bucket", exist_ok=False)
+
+    def test_rmdir_deletes_bucket(self):
+        fs = self._make_fs()
+        fs.dircache[""] = ["stale-bucket-listing"]
+
+        fs.rmdir("s3://bucket")
+        fs._call.assert_called_once_with(fs._client.delete_bucket, Bucket="bucket")
+        # The cached bucket listing must be evicted.
+        assert "" not in fs.dircache
+
+    def test_rmdir_key_raises(self):
+        fs = self._make_fs()
+        fs.exists = mock.MagicMock(return_value=True)
+        with pytest.raises(FileExistsError):
+            fs.rmdir("s3://bucket/existing-key")
+
+        fs.exists = mock.MagicMock(return_value=False)
+        with pytest.raises(FileNotFoundError):
+            fs.rmdir("s3://bucket/nonexistent-key")
+        fs._call.assert_not_called()
+
+    def test_metadata(self):
+        fs = self._make_fs()
+        fs._call.return_value = {"Metadata": {"foo_bar": "baz"}}
+
+        # The keys are returned as stored, without any transformation.
+        assert fs.metadata("s3://bucket/key") == {"foo_bar": "baz"}
+        fs._call.assert_called_once_with(fs._client.head_object, Bucket="bucket", Key="key")
+
+    def test_metadata_with_version_id(self):
+        fs = self._make_fs()
+        fs._call.return_value = {"Metadata": {}}
+
+        assert fs.metadata("s3://bucket/key?versionId=12345abcde") == {}
+        fs._call.assert_called_once_with(
+            fs._client.head_object, Bucket="bucket", Key="key", VersionId="12345abcde"
+        )
+
+    def test_metadata_bucket_raises(self):
+        fs = self._make_fs()
+        with pytest.raises(ValueError, match="Cannot get metadata"):
+            fs.metadata("s3://bucket")
+
+    def test_getxattr(self):
+        fs = self._make_fs()
+        fs.metadata = mock.MagicMock(return_value={"attr-1": "value1"})
+
+        # The attribute name is looked up as-is, without any transformation.
+        assert fs.getxattr("s3://bucket/key", "attr-1") == "value1"
+        assert fs.getxattr("s3://bucket/key", "attr_1") is None
+        assert fs.getxattr("s3://bucket/key", "missing") is None
+
+    def test_setxattr(self):
+        fs = self._make_fs()
+        fs.metadata = mock.MagicMock(return_value={"attr1": "value1", "attr2": "value2"})
+
+        # The keys are used as-is; hyphenated names can be passed by
+        # unpacking a dictionary.
+        fs.setxattr(
+            "s3://bucket/key",
+            copy_kwargs={"ContentType": "text/plain"},
+            attr2=None,
+            attr3="value3",
+            **{"attr-4": "value4"},
+        )
+        fs._call.assert_called_once_with(
+            fs._client.copy_object,
+            CopySource={"Bucket": "bucket", "Key": "key"},
+            Bucket="bucket",
+            Key="key",
+            Metadata={"attr1": "value1", "attr3": "value3", "attr-4": "value4"},
+            MetadataDirective="REPLACE",
+            ContentType="text/plain",
+        )
+
+    def test_setxattr_bucket_raises(self):
+        fs = self._make_fs()
+        with pytest.raises(ValueError, match="Cannot set metadata"):
+            fs.setxattr("s3://bucket", attr_1="value1")
+
+    def test_get_tags(self):
+        fs = self._make_fs()
+        fs._call.return_value = {"TagSet": [{"Key": "tag1", "Value": "value1"}]}
+
+        assert fs.get_tags("s3://bucket/key") == {"tag1": "value1"}
+        fs._call.assert_called_once_with(fs._client.get_object_tagging, Bucket="bucket", Key="key")
+
+    def test_put_tags_overwrite(self):
+        fs = self._make_fs()
+        fs.get_tags = mock.MagicMock(return_value={"tag1": "value1"})
+
+        fs.put_tags("s3://bucket/key", {"tag2": "value2"})
+        fs.get_tags.assert_not_called()
+        fs._call.assert_called_once_with(
+            fs._client.put_object_tagging,
+            Bucket="bucket",
+            Key="key",
+            Tagging={"TagSet": [{"Key": "tag2", "Value": "value2"}]},
+        )
+
+    def test_put_tags_merge(self):
+        fs = self._make_fs()
+        fs.get_tags = mock.MagicMock(return_value={"tag1": "value1"})
+
+        fs.put_tags("s3://bucket/key", {"tag2": "value2"}, mode="m")
+        fs._call.assert_called_once_with(
+            fs._client.put_object_tagging,
+            Bucket="bucket",
+            Key="key",
+            Tagging={
+                "TagSet": [
+                    {"Key": "tag1", "Value": "value1"},
+                    {"Key": "tag2", "Value": "value2"},
+                ]
+            },
+        )
+
+    def test_put_tags_invalid_mode_raises(self):
+        fs = self._make_fs()
+        with pytest.raises(ValueError, match="Mode must be"):
+            fs.put_tags("s3://bucket/key", {"tag1": "value1"}, mode="x")
+
+    def test_chmod_object(self):
+        fs = self._make_fs()
+
+        fs.chmod("s3://bucket/key", "bucket-owner-full-control")
+        fs._call.assert_called_once_with(
+            fs._client.put_object_acl,
+            Bucket="bucket",
+            Key="key",
+            ACL="bucket-owner-full-control",
+        )
+
+    def test_chmod_bucket(self):
+        fs = self._make_fs()
+
+        fs.chmod("s3://bucket", "private")
+        fs._call.assert_called_once_with(fs._client.put_bucket_acl, Bucket="bucket", ACL="private")
+
+    def test_chmod_invalid_acl_raises(self):
+        fs = self._make_fs()
+        with pytest.raises(ValueError, match="ACL not in"):
+            fs.chmod("s3://bucket/key", "invalid-acl")
+        with pytest.raises(ValueError, match="ACL not in"):
+            # A valid object ACL that is not valid for buckets.
+            fs.chmod("s3://bucket", "bucket-owner-full-control")
+        with pytest.raises(ValueError, match="ACL not in"):
+            # A recursive call must validate before applying any ACL.
+            fs.chmod("s3://bucket", "bucket-owner-full-control", recursive=True)
+        fs._call.assert_not_called()
+
+    def test_chmod_recursive(self):
+        fs = self._make_fs()
+        fs.find = mock.MagicMock(return_value=["bucket/key1", "bucket/key2"])
+
+        fs.chmod("s3://bucket/path", "private", recursive=True)
+        assert fs._call.call_count == 2
+        fs._call.assert_any_call(
+            fs._client.put_object_acl, Bucket="bucket", Key="key1", ACL="private"
+        )
+        fs._call.assert_any_call(
+            fs._client.put_object_acl, Bucket="bucket", Key="key2", ACL="private"
+        )
+
+    def test_list_multipart_uploads_paginates(self):
+        fs = self._make_fs()
+        fs._call.side_effect = [
+            {
+                "Uploads": [{"Key": "key1", "UploadId": "upload1"}],
+                "IsTruncated": True,
+                "NextKeyMarker": "key1",
+                "NextUploadIdMarker": "upload1",
+            },
+            {
+                "Uploads": [{"Key": "key2", "UploadId": "upload2"}],
+                "IsTruncated": False,
+            },
+        ]
+
+        actual = fs.list_multipart_uploads("s3://bucket")
+        assert [(u.bucket, u.key, u.upload_id) for u in actual] == [
+            ("bucket", "key1", "upload1"),
+            ("bucket", "key2", "upload2"),
+        ]
+        fs._call.assert_any_call(fs._client.list_multipart_uploads, Bucket="bucket")
+        fs._call.assert_any_call(
+            fs._client.list_multipart_uploads,
+            Bucket="bucket",
+            KeyMarker="key1",
+            UploadIdMarker="upload1",
+        )
+
+    def test_list_multipart_uploads_with_prefix(self):
+        fs = self._make_fs()
+        fs._call.return_value = {"Uploads": [], "IsTruncated": False}
+
+        assert fs.list_multipart_uploads("s3://bucket/path/to/prefix") == []
+        fs._call.assert_called_once_with(
+            fs._client.list_multipart_uploads, Bucket="bucket", Prefix="path/to/prefix"
+        )
+
+    def test_clear_multipart_uploads(self):
+        fs = self._make_fs()
+        fs.list_multipart_uploads = mock.MagicMock(
+            return_value=[
+                SimpleNamespace(key="key1", upload_id="upload1"),
+                SimpleNamespace(key="key2", upload_id="upload2"),
+            ]
+        )
+
+        fs.clear_multipart_uploads("bucket")
+        assert fs._call.call_count == 2
+        fs._call.assert_any_call(
+            fs._client.abort_multipart_upload, Bucket="bucket", Key="key1", UploadId="upload1"
+        )
+        fs._call.assert_any_call(
+            fs._client.abort_multipart_upload, Bucket="bucket", Key="key2", UploadId="upload2"
+        )
+
     @pytest.fixture(scope="class")
     def fs(self, request):
         if not hasattr(request, "param"):
@@ -989,341 +1321,6 @@ class TestS3FileSystem:
 
             actual = pandas.read_csv(path)
             pandas.testing.assert_frame_equal(actual, df)
-
-
-class TestS3FileSystemMocked:
-    """Unit tests for S3FileSystem methods with a mocked client (no AWS access)."""
-
-    @staticmethod
-    def _make_fs():
-        # Build a minimal S3FileSystem without touching AWS, bypassing
-        # __init__ which would require a boto3 client.
-        fs = S3FileSystem.__new__(S3FileSystem)
-        fs.dircache = {}
-        fs._client = mock.MagicMock()
-        fs._call = mock.MagicMock()
-        fs._retry_config = RetryConfig()
-        fs.request_kwargs = {}
-        return fs
-
-    def test_call_translates_client_error(self):
-        fs = self._make_fs()
-        del fs._call  # Use the real method instead of the mock.
-        func = mock.MagicMock(
-            side_effect=botocore.exceptions.ClientError(
-                {"Error": {"Code": "AccessDenied", "Message": "Access Denied"}}, "HeadObject"
-            )
-        )
-        with pytest.raises(PermissionError, match="Access Denied"):
-            fs._call(func)
-
-    def test_ls_from_cache_with_cached_object(self):
-        fs = self._make_fs()
-        obj = S3Object(
-            init={
-                "ContentLength": 4,
-                "ContentType": None,
-                "StorageClass": S3StorageClass.S3_STORAGE_CLASS_STANDARD,
-                "ETag": '"etag"',
-                "LastModified": None,
-            },
-            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
-            bucket="bucket",
-            key="key",
-        )
-        fs.dircache["bucket/key"] = obj
-
-        assert fs._ls_from_cache("bucket/key") is obj
-        # A child path of a cached object entry must not fail; it falls
-        # through to the S3 API instead (fsspec's implementation assumes
-        # every cache value is a listing and raises TypeError here).
-        assert fs._ls_from_cache("bucket/key/child") is None
-
-    def test_mkdir_creates_bucket(self):
-        fs = self._make_fs()
-        fs.exists = mock.MagicMock(return_value=False)
-        fs._client.meta.region_name = "ap-northeast-1"
-        fs.dircache[""] = ["stale-bucket-listing"]
-
-        fs.mkdir("s3://new-bucket")
-        fs._call.assert_called_once_with(
-            fs._client.create_bucket,
-            Bucket="new-bucket",
-            CreateBucketConfiguration={"LocationConstraint": "ap-northeast-1"},
-        )
-        # The cached bucket listing must be evicted.
-        assert "" not in fs.dircache
-
-    def test_mkdir_creates_bucket_in_us_east_1_without_location_constraint(self):
-        fs = self._make_fs()
-        fs.exists = mock.MagicMock(return_value=False)
-        fs._client.meta.region_name = "us-east-1"
-
-        fs.mkdir("s3://new-bucket")
-        fs._call.assert_called_once_with(fs._client.create_bucket, Bucket="new-bucket")
-
-    def test_mkdir_creates_bucket_with_acl(self):
-        fs = self._make_fs()
-        fs.exists = mock.MagicMock(return_value=False)
-        fs._client.meta.region_name = "us-east-1"
-
-        fs.mkdir("s3://new-bucket", acl="private")
-        fs._call.assert_called_once_with(
-            fs._client.create_bucket, Bucket="new-bucket", ACL="private"
-        )
-
-        with pytest.raises(ValueError, match="ACL not in"):
-            fs.mkdir("s3://another-bucket", acl="invalid-acl")
-
-    def test_mkdir_existing_bucket_raises(self):
-        fs = self._make_fs()
-        fs.exists = mock.MagicMock(return_value=True)
-
-        with pytest.raises(FileExistsError):
-            fs.mkdir("s3://bucket")
-        fs._call.assert_not_called()
-
-    def test_mkdir_key_under_existing_bucket_is_noop(self):
-        fs = self._make_fs()
-        fs.exists = mock.MagicMock(return_value=True)
-
-        fs.mkdir("s3://bucket/path/to/dir")
-        fs._call.assert_not_called()
-
-    def test_mkdir_key_without_create_parents_checks_bucket(self):
-        fs = self._make_fs()
-        fs.exists = mock.MagicMock(return_value=False)
-        fs.ls = mock.MagicMock(side_effect=FileNotFoundError("bucket"))
-
-        with pytest.raises(FileNotFoundError):
-            fs.mkdir("s3://bucket/path/to/dir", create_parents=False)
-        fs._call.assert_not_called()
-
-    def test_makedirs_exist_ok(self):
-        fs = self._make_fs()
-        fs.mkdir = mock.MagicMock(side_effect=FileExistsError("bucket"))
-
-        fs.makedirs("s3://bucket", exist_ok=True)
-        with pytest.raises(FileExistsError):
-            fs.makedirs("s3://bucket", exist_ok=False)
-
-    def test_rmdir_deletes_bucket(self):
-        fs = self._make_fs()
-        fs.dircache[""] = ["stale-bucket-listing"]
-
-        fs.rmdir("s3://bucket")
-        fs._call.assert_called_once_with(fs._client.delete_bucket, Bucket="bucket")
-        # The cached bucket listing must be evicted.
-        assert "" not in fs.dircache
-
-    def test_rmdir_key_raises(self):
-        fs = self._make_fs()
-        fs.exists = mock.MagicMock(return_value=True)
-        with pytest.raises(FileExistsError):
-            fs.rmdir("s3://bucket/existing-key")
-
-        fs.exists = mock.MagicMock(return_value=False)
-        with pytest.raises(FileNotFoundError):
-            fs.rmdir("s3://bucket/nonexistent-key")
-        fs._call.assert_not_called()
-
-    def test_metadata(self):
-        fs = self._make_fs()
-        fs._call.return_value = {"Metadata": {"foo_bar": "baz"}}
-
-        # The keys are returned as stored, without any transformation.
-        assert fs.metadata("s3://bucket/key") == {"foo_bar": "baz"}
-        fs._call.assert_called_once_with(fs._client.head_object, Bucket="bucket", Key="key")
-
-    def test_metadata_with_version_id(self):
-        fs = self._make_fs()
-        fs._call.return_value = {"Metadata": {}}
-
-        assert fs.metadata("s3://bucket/key?versionId=12345abcde") == {}
-        fs._call.assert_called_once_with(
-            fs._client.head_object, Bucket="bucket", Key="key", VersionId="12345abcde"
-        )
-
-    def test_metadata_bucket_raises(self):
-        fs = self._make_fs()
-        with pytest.raises(ValueError, match="Cannot get metadata"):
-            fs.metadata("s3://bucket")
-
-    def test_getxattr(self):
-        fs = self._make_fs()
-        fs.metadata = mock.MagicMock(return_value={"attr-1": "value1"})
-
-        # The attribute name is looked up as-is, without any transformation.
-        assert fs.getxattr("s3://bucket/key", "attr-1") == "value1"
-        assert fs.getxattr("s3://bucket/key", "attr_1") is None
-        assert fs.getxattr("s3://bucket/key", "missing") is None
-
-    def test_setxattr(self):
-        fs = self._make_fs()
-        fs.metadata = mock.MagicMock(return_value={"attr1": "value1", "attr2": "value2"})
-
-        # The keys are used as-is; hyphenated names can be passed by
-        # unpacking a dictionary.
-        fs.setxattr(
-            "s3://bucket/key",
-            copy_kwargs={"ContentType": "text/plain"},
-            attr2=None,
-            attr3="value3",
-            **{"attr-4": "value4"},
-        )
-        fs._call.assert_called_once_with(
-            fs._client.copy_object,
-            CopySource={"Bucket": "bucket", "Key": "key"},
-            Bucket="bucket",
-            Key="key",
-            Metadata={"attr1": "value1", "attr3": "value3", "attr-4": "value4"},
-            MetadataDirective="REPLACE",
-            ContentType="text/plain",
-        )
-
-    def test_setxattr_bucket_raises(self):
-        fs = self._make_fs()
-        with pytest.raises(ValueError, match="Cannot set metadata"):
-            fs.setxattr("s3://bucket", attr_1="value1")
-
-    def test_get_tags(self):
-        fs = self._make_fs()
-        fs._call.return_value = {"TagSet": [{"Key": "tag1", "Value": "value1"}]}
-
-        assert fs.get_tags("s3://bucket/key") == {"tag1": "value1"}
-        fs._call.assert_called_once_with(fs._client.get_object_tagging, Bucket="bucket", Key="key")
-
-    def test_put_tags_overwrite(self):
-        fs = self._make_fs()
-        fs.get_tags = mock.MagicMock(return_value={"tag1": "value1"})
-
-        fs.put_tags("s3://bucket/key", {"tag2": "value2"})
-        fs.get_tags.assert_not_called()
-        fs._call.assert_called_once_with(
-            fs._client.put_object_tagging,
-            Bucket="bucket",
-            Key="key",
-            Tagging={"TagSet": [{"Key": "tag2", "Value": "value2"}]},
-        )
-
-    def test_put_tags_merge(self):
-        fs = self._make_fs()
-        fs.get_tags = mock.MagicMock(return_value={"tag1": "value1"})
-
-        fs.put_tags("s3://bucket/key", {"tag2": "value2"}, mode="m")
-        fs._call.assert_called_once_with(
-            fs._client.put_object_tagging,
-            Bucket="bucket",
-            Key="key",
-            Tagging={
-                "TagSet": [
-                    {"Key": "tag1", "Value": "value1"},
-                    {"Key": "tag2", "Value": "value2"},
-                ]
-            },
-        )
-
-    def test_put_tags_invalid_mode_raises(self):
-        fs = self._make_fs()
-        with pytest.raises(ValueError, match="Mode must be"):
-            fs.put_tags("s3://bucket/key", {"tag1": "value1"}, mode="x")
-
-    def test_chmod_object(self):
-        fs = self._make_fs()
-
-        fs.chmod("s3://bucket/key", "bucket-owner-full-control")
-        fs._call.assert_called_once_with(
-            fs._client.put_object_acl,
-            Bucket="bucket",
-            Key="key",
-            ACL="bucket-owner-full-control",
-        )
-
-    def test_chmod_bucket(self):
-        fs = self._make_fs()
-
-        fs.chmod("s3://bucket", "private")
-        fs._call.assert_called_once_with(fs._client.put_bucket_acl, Bucket="bucket", ACL="private")
-
-    def test_chmod_invalid_acl_raises(self):
-        fs = self._make_fs()
-        with pytest.raises(ValueError, match="ACL not in"):
-            fs.chmod("s3://bucket/key", "invalid-acl")
-        with pytest.raises(ValueError, match="ACL not in"):
-            # A valid object ACL that is not valid for buckets.
-            fs.chmod("s3://bucket", "bucket-owner-full-control")
-        with pytest.raises(ValueError, match="ACL not in"):
-            # A recursive call must validate before applying any ACL.
-            fs.chmod("s3://bucket", "bucket-owner-full-control", recursive=True)
-        fs._call.assert_not_called()
-
-    def test_chmod_recursive(self):
-        fs = self._make_fs()
-        fs.find = mock.MagicMock(return_value=["bucket/key1", "bucket/key2"])
-
-        fs.chmod("s3://bucket/path", "private", recursive=True)
-        assert fs._call.call_count == 2
-        fs._call.assert_any_call(
-            fs._client.put_object_acl, Bucket="bucket", Key="key1", ACL="private"
-        )
-        fs._call.assert_any_call(
-            fs._client.put_object_acl, Bucket="bucket", Key="key2", ACL="private"
-        )
-
-    def test_list_multipart_uploads_paginates(self):
-        fs = self._make_fs()
-        fs._call.side_effect = [
-            {
-                "Uploads": [{"Key": "key1", "UploadId": "upload1"}],
-                "IsTruncated": True,
-                "NextKeyMarker": "key1",
-                "NextUploadIdMarker": "upload1",
-            },
-            {
-                "Uploads": [{"Key": "key2", "UploadId": "upload2"}],
-                "IsTruncated": False,
-            },
-        ]
-
-        actual = fs.list_multipart_uploads("s3://bucket")
-        assert [(u.bucket, u.key, u.upload_id) for u in actual] == [
-            ("bucket", "key1", "upload1"),
-            ("bucket", "key2", "upload2"),
-        ]
-        fs._call.assert_any_call(fs._client.list_multipart_uploads, Bucket="bucket")
-        fs._call.assert_any_call(
-            fs._client.list_multipart_uploads,
-            Bucket="bucket",
-            KeyMarker="key1",
-            UploadIdMarker="upload1",
-        )
-
-    def test_list_multipart_uploads_with_prefix(self):
-        fs = self._make_fs()
-        fs._call.return_value = {"Uploads": [], "IsTruncated": False}
-
-        assert fs.list_multipart_uploads("s3://bucket/path/to/prefix") == []
-        fs._call.assert_called_once_with(
-            fs._client.list_multipart_uploads, Bucket="bucket", Prefix="path/to/prefix"
-        )
-
-    def test_clear_multipart_uploads(self):
-        fs = self._make_fs()
-        fs.list_multipart_uploads = mock.MagicMock(
-            return_value=[
-                SimpleNamespace(key="key1", upload_id="upload1"),
-                SimpleNamespace(key="key2", upload_id="upload2"),
-            ]
-        )
-
-        fs.clear_multipart_uploads("bucket")
-        assert fs._call.call_count == 2
-        fs._call.assert_any_call(
-            fs._client.abort_multipart_upload, Bucket="bucket", Key="key1", UploadId="upload1"
-        )
-        fs._call.assert_any_call(
-            fs._client.abort_multipart_upload, Bucket="bucket", Key="key2", UploadId="upload2"
-        )
 
 
 class TestS3File:

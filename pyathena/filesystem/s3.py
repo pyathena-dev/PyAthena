@@ -1380,8 +1380,13 @@ class S3FileSystem(AbstractFileSystem):
         if key and acl not in self.OBJECT_ACLS:
             raise ValueError(f"ACL not in {self.OBJECT_ACLS}.")
         if recursive:
-            for p in self.find(path, withdirs=False):
-                self.chmod(p, acl, recursive=False, **kwargs)
+            with self._create_executor(max_workers=self.max_workers) as executor:
+                futures = [
+                    executor.submit(self.chmod, p, acl, recursive=False, **kwargs)
+                    for p in self.find(path, withdirs=False)
+                ]
+                for future in as_completed(futures):
+                    future.result()
         elif key:
             request: dict[str, Any] = {"Bucket": bucket, "Key": key, "ACL": acl}
             if version_id:
