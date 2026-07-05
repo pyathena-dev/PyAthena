@@ -1,4 +1,3 @@
-import fsspec
+from pyathena.filesystem import register_s3_filesystem
 
-fsspec.register_implementation("s3", "pyathena.filesystem.s3.S3FileSystem", clobber=True)
-fsspec.register_implementation("s3a", "pyathena.filesystem.s3.S3FileSystem", clobber=True)
+register_s3_filesystem()
