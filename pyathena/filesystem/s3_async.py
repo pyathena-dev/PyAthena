@@ -64,6 +64,8 @@ class AioS3FileSystem(AsyncFileSystem):
         default_cache_type: str | None = None,
         max_workers: int = (cpu_count() or 1) * 5,
         s3_additional_kwargs: dict[str, Any] | None = None,
+        allow_bucket_creation: bool = False,
+        allow_bucket_deletion: bool = False,
         asynchronous: bool = False,
         loop: Any | None = None,
         batch_size: int | None = None,
@@ -81,6 +83,8 @@ class AioS3FileSystem(AsyncFileSystem):
             default_cache_type=default_cache_type,
             max_workers=max_workers,
             s3_additional_kwargs=s3_additional_kwargs,
+            allow_bucket_creation=allow_bucket_creation,
+            allow_bucket_deletion=allow_bucket_deletion,
             **kwargs,
         )
         # Share dircache for cache coherence between async and sync instances

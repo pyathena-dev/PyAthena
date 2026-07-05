@@ -124,6 +124,8 @@ class S3FileSystem(AbstractFileSystem):
         default_cache_type: str | None = None,
         max_workers: int = (cpu_count() or 1) * 5,
         s3_additional_kwargs=None,
+        allow_bucket_creation: bool = False,
+        allow_bucket_deletion: bool = False,
         *args,
         **kwargs,
     ) -> None:
@@ -145,6 +147,8 @@ class S3FileSystem(AbstractFileSystem):
         self.default_cache_type = default_cache_type if default_cache_type else "bytes"
         self.max_workers = max_workers
         self.s3_additional_kwargs = s3_additional_kwargs if s3_additional_kwargs else {}
+        self.allow_bucket_creation = allow_bucket_creation
+        self.allow_bucket_deletion = allow_bucket_deletion
 
         requester_pays = kwargs.pop("requester_pays", False)
         self.request_kwargs = {"RequestPayer": "requester"} if requester_pays else {}
@@ -757,6 +761,10 @@ class S3FileSystem(AbstractFileSystem):
         bucket does not exist yet), and does nothing for key prefixes under
         an existing bucket.
 
+        Bucket lifecycle operations are disabled by default because they are
+        infrastructure-level changes; pass ``allow_bucket_creation=True`` to
+        the filesystem constructor to enable bucket creation.
+
         Args:
             path: S3 path (e.g., "s3://bucket" or "s3://bucket/prefix").
             create_parents: If True, create the bucket when it does not exist,
@@ -770,6 +778,8 @@ class S3FileSystem(AbstractFileSystem):
             FileExistsError: If the path is a bucket that already exists.
             FileNotFoundError: If the bucket does not exist and
                 ``create_parents`` is False.
+            PermissionError: If the bucket would be created but bucket
+                creation is not enabled on this filesystem instance.
             ValueError: If the ACL is invalid or the path is empty.
         """
         path = self._strip_protocol(path).rstrip("/")
@@ -782,6 +792,11 @@ class S3FileSystem(AbstractFileSystem):
                 raise FileExistsError(bucket)
             # Do nothing as the bucket already exists.
         elif not key or create_parents:
+            if not self.allow_bucket_creation:
+                raise PermissionError(
+                    "Bucket creation is disabled. "
+                    "Set allow_bucket_creation=True on the filesystem to enable it."
+                )
             acl = kwargs.pop("acl", "")
             if acl and acl not in self.BUCKET_ACLS:
                 raise ValueError(f"ACL not in {self.BUCKET_ACLS}.")
@@ -830,6 +845,10 @@ class S3FileSystem(AbstractFileSystem):
         S3 has no real directories below the bucket level, so only bucket
         paths can be removed.
 
+        Bucket lifecycle operations are disabled by default because they are
+        infrastructure-level changes; pass ``allow_bucket_deletion=True`` to
+        the filesystem constructor to enable bucket deletion.
+
         Args:
             path: S3 bucket path (e.g., "s3://bucket").
 
@@ -838,6 +857,8 @@ class S3FileSystem(AbstractFileSystem):
                 may have meant ``rm(path, recursive=True)``.
             FileNotFoundError: If the path contains a key that does not exist,
                 or the bucket does not exist.
+            PermissionError: If bucket deletion is not enabled on this
+                filesystem instance.
             OSError: If the bucket is not empty.
         """
         path = self._strip_protocol(path).rstrip("/")
@@ -847,6 +868,11 @@ class S3FileSystem(AbstractFileSystem):
                 # The user may have meant rm(path, recursive=True).
                 raise FileExistsError(path)
             raise FileNotFoundError(path)
+        if not self.allow_bucket_deletion:
+            raise PermissionError(
+                "Bucket deletion is disabled. "
+                "Set allow_bucket_deletion=True on the filesystem to enable it."
+            )
 
         _logger.debug("Delete bucket: s3://%s", bucket)
         self._call(
