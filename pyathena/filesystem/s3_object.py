@@ -236,13 +236,6 @@ class S3Metadata(Mapping[str, str]):
     def __len__(self) -> int:
         return len(self._user_metadata)
 
-    def __eq__(self, other: object) -> bool:
-        if isinstance(other, S3Metadata):
-            return self._user_metadata == other._user_metadata
-        if isinstance(other, Mapping):
-            return self._user_metadata == dict(other)
-        return NotImplemented
-
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({self._user_metadata!r})"
 
