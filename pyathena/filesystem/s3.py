@@ -488,9 +488,30 @@ class S3FileSystem(AbstractFileSystem):
             if not response.get("IsTruncated"):
                 break
             next_key_marker = response.get("NextKeyMarker")
-            next_version_id_marker = response.get("NextVersionIdMarker")
+            next_version_id_marker = response.get("NextVersionIdMarker", "")
             if not next_key_marker:
                 break
+
+        if not files and key:
+            # The path may point at an object rather than a key prefix.
+            files = [
+                S3Object(
+                    init={
+                        "ContentLength": version.size or 0,
+                        "ContentType": None,
+                        "StorageClass": version.storage_class,
+                        "ETag": version.etag,
+                        "LastModified": version.last_modified,
+                    },
+                    type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+                    bucket=bucket,
+                    key=version.key,
+                    version_id=version.version_id,
+                    is_latest=version.is_latest,
+                )
+                for version in self.object_version_info(path)
+                if version.key == key
+            ]
         return files
 
     def info(self, path: str, **kwargs) -> S3Object:
@@ -794,7 +815,7 @@ class S3FileSystem(AbstractFileSystem):
         if version_id:
             request.update({"VersionId": version_id})
 
-        _logger.debug("Delete object: s3://%s/%s?versionId=%s", bucket, key, version_id)
+        _logger.debug(f"Delete object: s3://{bucket}/{key}?versionId={version_id}")
         self._call(
             self._client.delete_object,
             **request,
@@ -906,7 +927,7 @@ class S3FileSystem(AbstractFileSystem):
                 # us-east-1 does not accept a location constraint.
                 request.update({"CreateBucketConfiguration": {"LocationConstraint": region_name}})
 
-            _logger.debug("Create bucket: s3://%s", bucket)
+            _logger.debug(f"Create bucket: s3://{bucket}")
             try:
                 self._call(
                     self._client.create_bucket,
@@ -981,7 +1002,7 @@ class S3FileSystem(AbstractFileSystem):
                 "Set allow_bucket_deletion=True on the filesystem to enable it."
             )
 
-        _logger.debug("Delete bucket: s3://%s", bucket)
+        _logger.debug(f"Delete bucket: s3://{bucket}")
         self._call(
             self._client.delete_bucket,
             Bucket=bucket,
@@ -1086,12 +1107,8 @@ class S3FileSystem(AbstractFileSystem):
         }
 
         _logger.debug(
-            "Copy object from s3://%s/%s?versionId=%s to s3://%s/%s.",
-            bucket1,
-            key1,
-            version_id1,
-            bucket2,
-            key2,
+            f"Copy object from s3://{bucket1}/{key1}?versionId={version_id1} "
+            f"to s3://{bucket2}/{key2}."
         )
         self._call(self._client.copy_object, **request, **kwargs)
 
@@ -1293,7 +1310,7 @@ class S3FileSystem(AbstractFileSystem):
                 )
             except Exception:
                 _logger.exception(
-                    "Failed to abort multipart upload %s to s3://%s/%s.", upload_id, bucket, key
+                    f"Failed to abort multipart upload {upload_id} to s3://{bucket}/{key}."
                 )
             raise
 
@@ -1466,7 +1483,7 @@ class S3FileSystem(AbstractFileSystem):
             "ExpiresIn": expiration,
         }
 
-        _logger.debug("Generate signed url: s3://%s/%s?versionId=%s", bucket, key, version_id)
+        _logger.debug(f"Generate signed url: s3://{bucket}/{key}?versionId={version_id}")
         return self._call(
             self._client.generate_presigned_url,
             **request,
@@ -1492,7 +1509,7 @@ class S3FileSystem(AbstractFileSystem):
         if version_id:
             request.update({"VersionId": version_id})
 
-        _logger.debug("Head object metadata: s3://%s/%s?versionId=%s", bucket, key, version_id)
+        _logger.debug(f"Head object metadata: s3://{bucket}/{key}?versionId={version_id}")
         response = self._call(
             self._client.head_object,
             **request,
@@ -1551,7 +1568,7 @@ class S3FileSystem(AbstractFileSystem):
         if version_id:
             copy_source.update({"VersionId": version_id})
 
-        _logger.debug("Set object metadata: s3://%s/%s?versionId=%s", bucket, key, version_id)
+        _logger.debug(f"Set object metadata: s3://{bucket}/{key}?versionId={version_id}")
         self._call(
             self._client.copy_object,
             CopySource=copy_source,
@@ -1579,7 +1596,7 @@ class S3FileSystem(AbstractFileSystem):
         if version_id:
             request.update({"VersionId": version_id})
 
-        _logger.debug("Get object tagging: s3://%s/%s?versionId=%s", bucket, key, version_id)
+        _logger.debug(f"Get object tagging: s3://{bucket}/{key}?versionId={version_id}")
         response = self._call(
             self._client.get_object_tagging,
             **request,
@@ -1621,7 +1638,7 @@ class S3FileSystem(AbstractFileSystem):
         if version_id:
             request.update({"VersionId": version_id})
 
-        _logger.debug("Put object tagging: s3://%s/%s?versionId=%s", bucket, key, version_id)
+        _logger.debug(f"Put object tagging: s3://{bucket}/{key}?versionId={version_id}")
         self._call(
             self._client.put_object_tagging,
             **request,
@@ -1664,14 +1681,14 @@ class S3FileSystem(AbstractFileSystem):
             if version_id:
                 request.update({"VersionId": version_id})
 
-            _logger.debug("Put object acl: s3://%s/%s?versionId=%s", bucket, key, version_id)
+            _logger.debug(f"Put object acl: s3://{bucket}/{key}?versionId={version_id}")
             self._call(
                 self._client.put_object_acl,
                 **request,
                 **kwargs,
             )
         else:
-            _logger.debug("Put bucket acl: s3://%s", bucket)
+            _logger.debug(f"Put bucket acl: s3://{bucket}")
             self._call(
                 self._client.put_bucket_acl,
                 Bucket=bucket,
@@ -1697,7 +1714,7 @@ class S3FileSystem(AbstractFileSystem):
         """
         bucket, key, _ = self.parse_path(path)
 
-        _logger.debug("List multipart uploads: s3://%s/%s", bucket, key)
+        _logger.debug(f"List multipart uploads: s3://{bucket}/{key}")
         uploads: list[S3MultipartUpload] = []
         next_key_marker: str | None = None
         next_upload_id_marker: str | None = None
@@ -1741,7 +1758,7 @@ class S3FileSystem(AbstractFileSystem):
         """
         bucket, key, _ = self.parse_path(path)
 
-        _logger.debug("List object versions: s3://%s/%s", bucket, key)
+        _logger.debug(f"List object versions: s3://{bucket}/{key}")
         versions: list[S3ObjectVersion] = []
         next_key_marker: str | None = None
         next_version_id_marker: str | None = None
@@ -1773,7 +1790,7 @@ class S3FileSystem(AbstractFileSystem):
             if not response.get("IsTruncated"):
                 break
             next_key_marker = response.get("NextKeyMarker")
-            next_version_id_marker = response.get("NextVersionIdMarker")
+            next_version_id_marker = response.get("NextVersionIdMarker", "")
             if not next_key_marker:
                 break
         return versions
@@ -1898,13 +1915,7 @@ class S3FileSystem(AbstractFileSystem):
         if version_id:
             request.update({"VersionId": version_id})
 
-        _logger.debug(
-            "Get object: s3://%s/%s?versionId=%s&range=%s",
-            bucket,
-            key,
-            version_id,
-            range_,
-        )
+        _logger.debug(f"Get object: s3://{bucket}/{key}?versionId={version_id}&range={range_}")
         response = self._call(
             self._client.get_object,
             **request,
@@ -1917,7 +1928,7 @@ class S3FileSystem(AbstractFileSystem):
         if body:
             request.update({"Body": body})
 
-        _logger.debug("Put object: s3://%s/%s", bucket, key)
+        _logger.debug(f"Put object: s3://{bucket}/{key}")
         response = self._call(
             self._client.put_object,
             **request,
@@ -1931,7 +1942,7 @@ class S3FileSystem(AbstractFileSystem):
             "Key": key,
         }
 
-        _logger.debug("Create multipart upload to s3://%s/%s.", bucket, key)
+        _logger.debug(f"Create multipart upload to s3://{bucket}/{key}.")
         response = self._call(
             self._client.create_multipart_upload,
             **request,
@@ -1960,11 +1971,7 @@ class S3FileSystem(AbstractFileSystem):
             range_ = S3File._format_ranges(copy_source_ranges)
             request.update({"CopySourceRange": range_})
         _logger.debug(
-            "Upload part copy from %s to s3://%s/%s as part %s.",
-            copy_source,
-            bucket,
-            key,
-            part_number,
+            f"Upload part copy from {copy_source} to s3://{bucket}/{key} as part {part_number}."
         )
         response = self._call(
             self._client.upload_part_copy,
@@ -1990,13 +1997,7 @@ class S3FileSystem(AbstractFileSystem):
             "Body": body,
         }
 
-        _logger.debug(
-            "Upload part of %s to s3://%s/%s as part %s.",
-            upload_id,
-            bucket,
-            key,
-            part_number,
-        )
+        _logger.debug(f"Upload part of {upload_id} to s3://{bucket}/{key} as part {part_number}.")
         response = self._call(
             self._client.upload_part,
             **request,
@@ -2014,7 +2015,7 @@ class S3FileSystem(AbstractFileSystem):
             "MultipartUpload": {"Parts": parts},
         }
 
-        _logger.debug("Complete multipart upload %s to s3://%s/%s.", upload_id, bucket, key)
+        _logger.debug(f"Complete multipart upload {upload_id} to s3://{bucket}/{key}.")
         response = self._call(
             self._client.complete_multipart_upload,
             **request,
@@ -2090,7 +2091,11 @@ class S3File(AbstractBufferedFile):
         self.append_block = False
         self._details: S3Object | dict[str, Any]
         if "r" in mode:
-            info = self.fs.info(self.path, version_id=self.version_id)
+            # In version-aware mode, bypass the dircache (which may have been
+            # populated by a listing without version information) so that the
+            # version observed here is the one that is pinned.
+            refresh = self.fs.version_aware and not self.version_id
+            info = self.fs.info(self.path, version_id=self.version_id, refresh=refresh)
             if self.fs.version_aware and not self.version_id:
                 # Pin the version observed at open time so that reads are
                 # consistent even if the object is overwritten.

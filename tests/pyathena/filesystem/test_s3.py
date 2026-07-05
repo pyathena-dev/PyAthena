@@ -453,6 +453,32 @@ class TestS3FileSystem:
         assert actual[1].size == 4
         assert actual[2].size == 2
 
+    def test_ls_versions_object_path_falls_back_to_the_key(self):
+        fs = self._make_fs()
+        fs.version_aware = True
+        fs._call.side_effect = [
+            # The prefix listing returns nothing: the path is an object.
+            {"IsTruncated": False},
+            {
+                "Versions": [
+                    {"Key": "path/key", "VersionId": "v2", "IsLatest": True, "Size": 4},
+                    {"Key": "path/key", "VersionId": "v1", "IsLatest": False, "Size": 2},
+                    # A sibling key sharing the prefix is excluded.
+                    {"Key": "path/key2", "VersionId": "x1", "IsLatest": True, "Size": 1},
+                ],
+                "IsTruncated": False,
+            },
+        ]
+
+        actual = fs.ls("s3://bucket/path/key", detail=True, versions=True)
+        fs._call.assert_any_call(
+            fs._client.list_object_versions, Bucket="bucket", Prefix="path/key"
+        )
+        assert [(f.name, f.version_id, f.size) for f in actual] == [
+            ("bucket/path/key", "v2", 4),
+            ("bucket/path/key", "v1", 2),
+        ]
+
     def test_metadata_with_version_id(self):
         fs = self._make_fs()
         fs._call.return_value = {"Metadata": {}}

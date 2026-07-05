@@ -2,9 +2,9 @@ import logging
 
 import fsspec
 
-_logger = logging.getLogger(__name__)
+from pyathena.filesystem.s3 import S3FileSystem
 
-_S3_FILESYSTEM_CLASS = "pyathena.filesystem.s3.S3FileSystem"
+_logger = logging.getLogger(__name__)
 
 
 def register_s3_filesystem(clobber: bool = True) -> None:
@@ -17,25 +17,23 @@ def register_s3_filesystem(clobber: bool = True) -> None:
     implementation and s3fs-specific settings (e.g., the ``S3FS_LOGGING_LEVEL``
     environment variable) have no effect.
 
-    A filesystem class that has already been registered explicitly (present
-    in ``fsspec.registry``) is left untouched, so registering another
-    implementation before importing ``pyathena.pandas`` / ``pyathena.polars``
-    opts out of the replacement. To restore s3fs afterwards::
+    A filesystem class that has already been registered explicitly is also
+    overwritten, with a warning log. To restore another implementation,
+    re-register it after importing ``pyathena.pandas`` / ``pyathena.polars``::
 
         fsspec.register_implementation("s3", s3fs.S3FileSystem, clobber=True)
 
     Args:
-        clobber: Whether to replace an existing lazy registration of the
+        clobber: Whether to replace an existing registration of the
             protocols.
     """
     for protocol in ("s3", "s3a"):
-        if protocol in fsspec.registry:
-            # A filesystem class has been registered explicitly
-            # (e.g., the user registered s3fs); leave it alone.
-            _logger.debug(
-                "The %r protocol is already registered in the fsspec registry, skipping.",
-                protocol,
+        registered = fsspec.registry.get(protocol)
+        if registered is not None and registered is not S3FileSystem:
+            _logger.warning(
+                f"The fsspec {protocol!r} protocol is already registered as "
+                f"{registered.__module__}.{registered.__qualname__} and will be overwritten by "
+                f"{S3FileSystem.__module__}.{S3FileSystem.__qualname__}."
             )
-            continue
-        _logger.debug("Registering %s as the fsspec %r protocol.", _S3_FILESYSTEM_CLASS, protocol)
-        fsspec.register_implementation(protocol, _S3_FILESYSTEM_CLASS, clobber=clobber)
+        _logger.debug(f"Registering {S3FileSystem} as the fsspec {protocol!r} protocol.")
+        fsspec.register_implementation(protocol, S3FileSystem, clobber=clobber)
