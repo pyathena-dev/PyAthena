@@ -4,8 +4,10 @@ Maps botocore ``ClientError`` responses to the matching ``OSError`` subclasses
 so that filesystem operations raise natural Python exceptions
 (e.g. ``403`` -> ``PermissionError``, ``404`` -> ``FileNotFoundError``).
 
-Error codes are documented in
-https://docs.aws.amazon.com/AmazonS3/latest/API/ErrorResponses.html
+The error codes are taken from the official list of Amazon S3 error codes:
+https://docs.aws.amazon.com/AmazonS3/latest/API/API_Error.html
+(see also https://docs.aws.amazon.com/AmazonS3/latest/API/ErrorResponses.html).
+The mapping to Python exceptions is PyAthena's own.
 """
 
 from __future__ import annotations
@@ -16,7 +18,12 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import botocore.exceptions
 
-# S3 error codes that map to a specific Python built-in exception.
+# S3 error codes (https://docs.aws.amazon.com/AmazonS3/latest/API/API_Error.html)
+# that map to a specific Python built-in exception.
+# The "403" / "404" entries are not S3 error codes: HEAD requests
+# (HeadObject/HeadBucket) have no response body, so botocore reports the
+# HTTP status code as the error code instead.
+# https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html
 _ERROR_CODE_TO_EXCEPTION: dict[str, type[Exception]] = {
     "AccessDenied": PermissionError,
     "AccountProblem": PermissionError,
@@ -42,7 +49,8 @@ _ERROR_CODE_TO_EXCEPTION: dict[str, type[Exception]] = {
     "404": FileNotFoundError,
 }
 
-# S3 error codes that map to an OSError with a specific errno.
+# S3 error codes (https://docs.aws.amazon.com/AmazonS3/latest/API/API_Error.html)
+# that map to an OSError with a specific errno.
 _ERROR_CODE_TO_ERRNO: dict[str, int] = {
     "BucketNotEmpty": errno.ENOTEMPTY,
     "InternalError": errno.EIO,
