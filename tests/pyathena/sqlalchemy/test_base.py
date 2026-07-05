@@ -26,6 +26,25 @@ from pyathena.sqlalchemy.types import (
 )
 from tests.pyathena.conftest import ENV
 
+# Amazon S3 Tables tests need a pre-provisioned table-bucket catalog and namespace.
+# Skip them unless AWS_ATHENA_S3_TABLES_CATALOG / AWS_ATHENA_S3_TABLES_NAMESPACE are set.
+requires_s3_tables = pytest.mark.skipif(
+    not ENV.s3tables_catalog or not ENV.s3tables_namespace,
+    reason="AWS_ATHENA_S3_TABLES_CATALOG / AWS_ATHENA_S3_TABLES_NAMESPACE are not configured",
+)
+
+
+def unique_s3tables_table_name(base: str) -> str:
+    """Return a per-run-unique S3 Tables table name.
+
+    Other integration tests isolate themselves with a random per-process
+    ``ENV.schema``, but the S3 Tables tests share one fixed namespace
+    (``ENV.s3tables_namespace``). The CI matrix runs ``tests/pyathena`` once per
+    Python version in parallel against the same account, so a fixed table name
+    would collide across those concurrent jobs; a random suffix keeps them apart.
+    """
+    return f"{base}_{uuid.uuid4().hex[:8]}"
+
 
 class TestSQLAlchemyAthena:
     @pytest.mark.parametrize(
@@ -2018,6 +2037,106 @@ OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat'
 
         tblproperties = actual.dialect_options["awsathena"]["tblproperties"]
         assert tblproperties["table_type"] == "ICEBERG"
+
+    @requires_s3_tables
+    @pytest.mark.parametrize("engine", [{"catalog_name": ENV.s3tables_catalog}], indirect=True)
+    def test_create_s3tables_iceberg_table(self, engine):
+        engine, conn = engine
+        # S3 Tables select the catalog via the connection ``catalog_name`` and use
+        # the namespace as the schema, so the DDL is a two-part ``namespace.table``
+        # identifier with no LOCATION (managed storage).
+        schema = ENV.s3tables_namespace
+        table_name = unique_s3tables_table_name("test_create_s3tables_iceberg_table")
+        table = Table(
+            table_name,
+            MetaData(schema=schema),
+            Column("col_1", types.String),
+            Column("col_2", types.Integer),
+            awsathena_tblproperties={"table_type": "ICEBERG"},
+        )
+        ddl = CreateTable(table).compile(bind=conn)
+
+        assert str(ddl) == textwrap.dedent(
+            f"""
+            CREATE TABLE {ENV.s3tables_namespace}.{table_name} (
+            \tcol_1 STRING,
+            \tcol_2 INT
+            )
+            TBLPROPERTIES (
+            \t'table_type' = 'ICEBERG'
+            )
+            """
+        )
+
+        try:
+            table.create(bind=conn)
+            actual = Table(table_name, MetaData(schema=schema), autoload_with=conn)
+            tblproperties = actual.dialect_options["awsathena"]["tblproperties"]
+            assert tblproperties["table_type"] == "ICEBERG"
+        finally:
+            # Idempotent unquoted drop: tolerates a table that was never created
+            # while still surfacing systematic DROP failures, which would
+            # otherwise leak tables into the shared fixed namespace.
+            conn.execute(text(f"DROP TABLE IF EXISTS {schema}.{table_name}"))
+
+    @requires_s3_tables
+    @pytest.mark.parametrize("engine", [{"catalog_name": ENV.s3tables_catalog}], indirect=True)
+    def test_create_s3tables_iceberg_table_with_partition_transform(self, engine):
+        engine, conn = engine
+        schema = ENV.s3tables_namespace
+        table_name = unique_s3tables_table_name("test_create_s3tables_partition_transform")
+        table = Table(
+            table_name,
+            MetaData(schema=schema),
+            Column("col_1", types.String),
+            Column("dt", types.Date, awsathena_partition=True, awsathena_partition_transform="day"),
+            awsathena_tblproperties={"table_type": "ICEBERG"},
+        )
+        ddl = CreateTable(table).compile(bind=conn)
+
+        assert str(ddl) == textwrap.dedent(
+            f"""
+            CREATE TABLE {ENV.s3tables_namespace}.{table_name} (
+            \tcol_1 STRING,
+            \tdt DATE
+            )
+            PARTITIONED BY (
+            \tday(dt)
+            )
+            TBLPROPERTIES (
+            \t'table_type' = 'ICEBERG'
+            )
+            """
+        )
+
+        try:
+            table.create(bind=conn)
+        finally:
+            conn.execute(text(f"DROP TABLE IF EXISTS {schema}.{table_name}"))
+
+    @requires_s3_tables
+    @pytest.mark.parametrize("engine", [{"catalog_name": ENV.s3tables_catalog}], indirect=True)
+    def test_create_s3tables_table_as_select(self, engine):
+        engine, conn = engine
+        # CTAS is not modeled as a SQLAlchemy construct; exercise it as raw SQL.
+        # With the catalog selected on the connection the identifier is two-part
+        # (namespace.table); managed Iceberg CTAS requires is_external=false.
+        # Identifiers are left unquoted: DROP TABLE is Hive DDL and rejects the
+        # double quotes that the Trino CTAS/SELECT statements accept.
+        table_name = unique_s3tables_table_name("test_create_s3tables_table_as_select")
+        fqtn = f"{ENV.s3tables_namespace}.{table_name}"
+        try:
+            conn.execute(
+                text(
+                    f"CREATE TABLE {fqtn} "
+                    "WITH (table_type = 'ICEBERG', is_external = false) AS "
+                    "SELECT 1 AS id, 'a' AS name"
+                )
+            )
+            rows = conn.execute(text(f"SELECT id, name FROM {fqtn}")).fetchall()
+            assert rows == [(1, "a")]
+        finally:
+            conn.execute(text(f"DROP TABLE IF EXISTS {fqtn}"))
 
     def test_insert_from_select_cte_follows_insert_one(self, engine):
         engine, conn = engine

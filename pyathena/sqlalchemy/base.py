@@ -207,8 +207,7 @@ class AthenaDialect(DefaultDialect):
         #   awsathena+rest://
         #   {aws_access_key_id}:{aws_secret_access_key}@athena.{region_name}.amazonaws.com:443/
         #   {schema_name}?s3_staging_dir={s3_staging_dir}&...
-        self._connect_options = self._create_connect_args(url)
-        return cast(tuple[str], ()), self._connect_options
+        return cast(tuple[str], ()), self._create_connect_args(url)
 
     def _create_connect_args(self, url: URL) -> dict[str, Any]:
         opts: dict[str, Any] = {
@@ -238,6 +237,12 @@ class AthenaDialect(DefaultDialect):
             opts.update({"result_reuse_enable": bool(strtobool(opts["result_reuse_enable"]))})
         if "result_reuse_minutes" in opts:
             opts.update({"result_reuse_minutes": int(opts["result_reuse_minutes"])})
+        # Store on the dialect so compilers can consult connection options
+        # (e.g. catalog_name for S3 Tables detection). Assigned here rather than
+        # in create_connect_args because subclass dialects call this method
+        # directly and mutate the returned dict afterwards; sharing the same
+        # object keeps _connect_options in sync with their updates.
+        self._connect_options = opts
         return opts
 
     @reflection.cache

@@ -1,11 +1,14 @@
 from unittest.mock import Mock
 
 import pytest
-from sqlalchemy import Column, Integer, MetaData, String, Table, exc, func, select
+from sqlalchemy import Column, Date, Integer, MetaData, String, Table, exc, func, select
+from sqlalchemy.engine.url import make_url
 from sqlalchemy.sql import literal
+from sqlalchemy.sql.ddl import CreateTable
 
 from pyathena.sqlalchemy.base import AthenaDialect
 from pyathena.sqlalchemy.compiler import AthenaTypeCompiler
+from pyathena.sqlalchemy.pandas import AthenaPandasDialect
 from pyathena.sqlalchemy.types import ARRAY, MAP, STRUCT, AthenaArray, AthenaMap, AthenaStruct
 from tests import ENV
 
@@ -225,3 +228,135 @@ class TestAthenaStatementCompiler:
 
         sql_str = str(compiled)
         assert "length(" in sql_str
+
+
+class TestAthenaDDLCompiler:
+    """Compile-only (no AWS) tests for the DDL compiler's S3 Tables support.
+
+    S3 Tables are queried by setting the connection ``catalog_name`` to
+    ``s3tablescatalog/<table-bucket>`` and using the namespace as the table
+    schema (a two-part ``namespace.table`` identifier). They use managed
+    storage, so CREATE TABLE emits only TBLPROPERTIES (no LOCATION, ROW FORMAT,
+    or STORED AS clauses).
+    """
+
+    def _s3tables_dialect(self, **connect_opts):
+        dialect = AthenaDialect()
+        dialect._connect_options = {
+            "catalog_name": "s3tablescatalog/bucket",
+            "schema_name": "pyathena",
+            **connect_opts,
+        }
+        return dialect
+
+    def test_create_table_s3tables_catalog_omits_location(self):
+        table = Table(
+            "tbl",
+            MetaData(schema="pyathena"),
+            Column("id", Integer),
+            Column("name", String),
+            awsathena_tblproperties={"table_type": "ICEBERG"},
+        )
+        ddl = str(CreateTable(table).compile(dialect=self._s3tables_dialect()))
+        assert "CREATE TABLE pyathena.tbl (" in ddl
+        assert "CREATE EXTERNAL TABLE" not in ddl
+        assert "LOCATION" not in ddl
+        assert "'table_type' = 'ICEBERG'" in ddl
+
+    def test_create_table_s3tables_partition_transform(self):
+        table = Table(
+            "tbl",
+            MetaData(schema="pyathena"),
+            Column("id", Integer),
+            Column("dt", Date, awsathena_partition=True, awsathena_partition_transform="day"),
+            awsathena_tblproperties={"table_type": "ICEBERG"},
+        )
+        ddl = str(CreateTable(table).compile(dialect=self._s3tables_dialect()))
+        assert "PARTITIONED BY (" in ddl
+        assert "day(dt)" in ddl
+        assert "LOCATION" not in ddl
+
+    def test_create_iceberg_table_without_s3tables_catalog_requires_location(self):
+        # Regression: an Iceberg table on a non-S3-Tables catalog still needs a location.
+        table = Table(
+            "tbl",
+            MetaData(schema="some_db"),
+            Column("id", Integer),
+            awsathena_tblproperties={"table_type": "ICEBERG"},
+        )
+        with pytest.raises(exc.CompileError, match="location of the table should be specified"):
+            CreateTable(table).compile(dialect=AthenaDialect())
+
+    def test_create_table_s3tables_catalog_case_insensitive(self):
+        # Athena resolves catalog names case-insensitively, so detection must too.
+        table = Table(
+            "tbl",
+            MetaData(schema="pyathena"),
+            Column("id", Integer),
+            awsathena_tblproperties={"table_type": "ICEBERG"},
+        )
+        dialect = self._s3tables_dialect(catalog_name="S3TablesCatalog/bucket")
+        ddl = str(CreateTable(table).compile(dialect=dialect))
+        assert "LOCATION" not in ddl
+
+    def test_create_table_s3tables_non_iceberg_raises(self):
+        # S3 Tables support only Iceberg tables; a missing table_type must fail at
+        # compile time instead of emitting CREATE EXTERNAL TABLE without LOCATION.
+        table = Table(
+            "tbl",
+            MetaData(schema="pyathena"),
+            Column("id", Integer),
+        )
+        with pytest.raises(exc.CompileError, match="S3 Tables support only Iceberg tables"):
+            CreateTable(table).compile(dialect=self._s3tables_dialect())
+
+    def test_create_table_s3tables_explicit_location_raises(self):
+        # An explicit awsathena_location conflicts with managed storage and must not
+        # be silently discarded.
+        table = Table(
+            "tbl",
+            MetaData(schema="pyathena"),
+            Column("id", Integer),
+            awsathena_location="s3://bucket/path/to/",
+            awsathena_tblproperties={"table_type": "ICEBERG"},
+        )
+        with pytest.raises(exc.CompileError, match="managed storage"):
+            CreateTable(table).compile(dialect=self._s3tables_dialect())
+
+    def test_create_table_s3tables_omits_connection_level_formats(self):
+        # Connection-level file_format/row_format must not leak STORED AS or
+        # ROW FORMAT clauses into managed Iceberg DDL.
+        table = Table(
+            "tbl",
+            MetaData(schema="pyathena"),
+            Column("id", Integer),
+            awsathena_tblproperties={"table_type": "ICEBERG"},
+        )
+        dialect = self._s3tables_dialect(file_format="PARQUET", row_format="SERDE 'serde.Class'")
+        ddl = str(CreateTable(table).compile(dialect=dialect))
+        assert "STORED AS" not in ddl
+        assert "ROW FORMAT" not in ddl
+        assert "LOCATION" not in ddl
+        assert "'table_type' = 'ICEBERG'" in ddl
+
+    def test_create_connect_args_stores_connect_options_for_subclass_dialects(self):
+        # Subclass dialects (pandas, arrow, etc.) call _create_connect_args directly
+        # from their own create_connect_args; the connection options (including
+        # catalog_name for S3 Tables detection) must still land on the dialect.
+        dialect = AthenaPandasDialect()
+        dialect.create_connect_args(
+            make_url(
+                "awsathena+pandas://athena.us-west-2.amazonaws.com:443/pyathena"
+                "?s3_staging_dir=s3://bucket/path/to/"
+                "&catalog_name=s3tablescatalog/bucket"
+            )
+        )
+        assert dialect._connect_options["catalog_name"] == "s3tablescatalog/bucket"
+        table = Table(
+            "tbl",
+            MetaData(schema="pyathena"),
+            Column("id", Integer),
+            awsathena_tblproperties={"table_type": "ICEBERG"},
+        )
+        ddl = str(CreateTable(table).compile(dialect=dialect))
+        assert "LOCATION" not in ddl

@@ -363,6 +363,63 @@ If you want to limit the column options to specific table names only, specify th
 awsathena+rest://:@athena.us-west-2.amazonaws.com:443/default?partition=table1.column1%2Ctable1.column2&cluster=table2.column1%2Ctable2.column2&...
 ```
 
+## Amazon S3 Tables
+
+[Amazon S3 Tables](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables.html) are Iceberg-backed
+tables stored in a dedicated table bucket. Once the table bucket is integrated with the AWS analytics services,
+Athena registers it as a catalog named `s3tablescatalog/<table-bucket>`, with the S3 Tables namespace as the
+database.
+
+Athena does not accept a three-part `catalog.namespace.table` identifier in DDL, so select the catalog on the
+**connection** with `catalog_name` and use the namespace as the table `schema`. Because S3 Tables use managed
+storage, the dialect omits the `LOCATION`, `ROW FORMAT`, and `STORED AS` clauses automatically. Tables must
+declare `awsathena_tblproperties={"table_type": "ICEBERG"}` (S3 Tables support only Iceberg), and
+`awsathena_location` must not be set — the dialect raises a compile-time error otherwise.
+
+```python
+engine = create_engine(
+    "awsathena+rest://athena.us-west-2.amazonaws.com:443/my_namespace"
+    "?s3_staging_dir=s3://my-bucket/athena-results/"
+    "&catalog_name=s3tablescatalog/my-table-bucket"
+)
+
+table = Table(
+    "some_table",
+    MetaData(schema="my_namespace"),
+    Column("id", types.Integer),
+    Column("dt", types.Date, awsathena_partition=True, awsathena_partition_transform="day"),
+    awsathena_tblproperties={"table_type": "ICEBERG"},
+)
+with engine.connect() as conn:
+    table.create(bind=conn)
+```
+
+which builds the following statement:
+
+```sql
+CREATE TABLE my_namespace.some_table (
+  id INT,
+  dt DATE
+)
+PARTITIONED BY (
+  day(dt)
+)
+TBLPROPERTIES (
+  'table_type' = 'ICEBERG'
+)
+```
+
+All Iceberg partition transforms (`year`, `month`, `day`, `hour`, `bucket`, `truncate`) are supported, the same as
+for other Iceberg tables. CTAS (`CREATE TABLE ... AS SELECT`) is not modeled as a SQLAlchemy construct; issue it as
+raw SQL via `text()`. Managed Iceberg CTAS requires `is_external = false`:
+
+```python
+conn.execute(text(
+    'CREATE TABLE "my_namespace"."some_table" '
+    "WITH (table_type = 'ICEBERG', is_external = false) AS SELECT 1 AS id"
+))
+```
+
 ## Temporal/Time-travel with Iceberg
 
 Athena supports time-travel queries on Iceberg tables by either a version_id or a timestamp. The `FOR TIMESTAMP AS OF`

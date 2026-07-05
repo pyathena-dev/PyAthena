@@ -39,6 +39,13 @@ if TYPE_CHECKING:
     _DialectArgDict = Mapping[str, Any]
     CreateColumn = Any
 
+# Prefix of the Athena data catalog name registered for an Amazon S3 Tables
+# table bucket (e.g. ``s3tablescatalog/my-bucket``). It is selected via the
+# connection ``catalog_name``. S3 Tables are Iceberg-backed and use managed
+# storage, so their CREATE TABLE statements must not include a LOCATION clause.
+# https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-integrations-query-athena.html
+S3_TABLES_CATALOG_PREFIX = "s3tablescatalog/"
+
 
 class AthenaTypeCompiler(GenericTypeCompiler):
     """Type compiler for Amazon Athena SQL types.
@@ -305,6 +312,10 @@ class AthenaDDLCompiler(DDLCompiler):
 
     - External table creation (EXTERNAL keyword for Hive-style tables)
     - Iceberg table creation (managed tables with ACID support)
+    - Amazon S3 Tables (Iceberg-backed, managed storage): set the connection
+      ``catalog_name`` to ``s3tablescatalog/<table-bucket>`` and use the
+      namespace as the table ``schema``. The LOCATION clause is omitted since
+      storage is managed.
     - File formats: PARQUET, ORC, TEXTFILE, JSON, AVRO, etc.
     - Row formats with SerDe specifications
     - Compression settings for various file formats
@@ -444,6 +455,74 @@ class AthenaDDLCompiler(DDLCompiler):
                 text.append(serde_properties)
             text.append(")")
         return "\n".join(text)
+
+    @staticmethod
+    def _is_s3_tables_catalog(connect_opts: Mapping[str, Any]) -> bool:
+        """Return whether the connection targets an Amazon S3 Tables catalog.
+
+        S3 Tables are queried by setting the connection ``catalog_name`` to
+        ``s3tablescatalog/<table-bucket>`` and using the namespace as the table
+        ``schema`` (a two-part ``namespace.table`` identifier). Athena rejects a
+        three-part ``catalog.namespace.table`` identifier in DDL, so the catalog
+        must be selected at the connection level. Such tables use managed
+        storage, so their CREATE TABLE statement must omit the LOCATION clause.
+
+        Args:
+            connect_opts: The dialect connection options.
+
+        Returns:
+            True if ``catalog_name`` names an S3 Tables catalog.
+        """
+        if not connect_opts:
+            return False
+        catalog = connect_opts.get("catalog_name") or ""
+        # Athena resolves catalog names case-insensitively.
+        return catalog.lower().startswith(S3_TABLES_CATALOG_PREFIX)
+
+    def _is_iceberg_table(
+        self, dialect_opts: _DialectArgDict, connect_opts: Mapping[str, Any]
+    ) -> bool:
+        """Return whether the table properties declare an Iceberg table.
+
+        Args:
+            dialect_opts: The table's ``awsathena_*`` dialect options.
+            connect_opts: The dialect connection options.
+
+        Returns:
+            True if the rendered TBLPROPERTIES set ``table_type`` to Iceberg.
+        """
+        table_properties = self._get_table_properties_specification(
+            dialect_opts, connect_opts
+        ).lower()
+        return ("table_type" in table_properties) and ("iceberg" in table_properties)
+
+    def _validate_s3_tables_create_table(
+        self, dialect_opts: _DialectArgDict, connect_opts: Mapping[str, Any]
+    ) -> None:
+        """Validate a CREATE TABLE compiled against an S3 Tables catalog.
+
+        S3 Tables support only Iceberg tables on managed storage, so the table
+        must declare ``table_type`` ICEBERG and must not specify a location.
+        Raising here surfaces a clear client-side error instead of emitting DDL
+        that Athena would reject.
+
+        Args:
+            dialect_opts: The table's ``awsathena_*`` dialect options.
+            connect_opts: The dialect connection options.
+
+        Raises:
+            exc.CompileError: If the table is not Iceberg or specifies a location.
+        """
+        if not self._is_iceberg_table(dialect_opts, connect_opts):
+            raise exc.CompileError(
+                "S3 Tables support only Iceberg tables; specify the dialect keyword "
+                "argument `awsathena_tblproperties={'table_type': 'ICEBERG'}`"
+            )
+        if dialect_opts["location"]:
+            raise exc.CompileError(
+                "S3 Tables use managed storage and do not accept a table location; "
+                "remove the dialect keyword argument `awsathena_location`"
+            )
 
     def _get_table_location(
         self, table: Table, dialect_opts: _DialectArgDict, connect_opts: Mapping[str, Any]
@@ -662,12 +741,7 @@ class AthenaDDLCompiler(DDLCompiler):
         dialect = cast("AthenaDialect", self.dialect)
         connect_opts = dialect._connect_options
 
-        table_properties = self._get_table_properties_specification(
-            dialect_opts, connect_opts
-        ).lower()
-        is_iceberg = False
-        if ("table_type" in table_properties) and ("iceberg" in table_properties):
-            is_iceberg = True
+        is_iceberg = self._is_iceberg_table(dialect_opts, connect_opts)
 
         # https://docs.aws.amazon.com/athena/latest/ug/querying-iceberg-creating-tables.html
         text = ["\nCREATE TABLE"] if is_iceberg else ["\nCREATE EXTERNAL TABLE"]
@@ -705,11 +779,19 @@ class AthenaDDLCompiler(DDLCompiler):
         dialect_opts: _DialectArgDict = table.dialect_options["awsathena"]
         dialect = cast("AthenaDialect", self.dialect)
         connect_opts = dialect._connect_options
-        text = [
-            self._get_row_format_specification(dialect_opts, connect_opts),
-            self._get_serde_properties_specification(dialect_opts, connect_opts),
-            self._get_file_format_specification(dialect_opts, connect_opts),
-            self._get_table_location_specification(table, dialect_opts, connect_opts),
-            self._get_table_properties_specification(dialect_opts, connect_opts),
-        ]
+        if self._is_s3_tables_catalog(connect_opts):
+            # S3 Tables are managed Iceberg tables: ROW FORMAT, SERDEPROPERTIES,
+            # STORED AS, and LOCATION are not accepted, so emit only TBLPROPERTIES.
+            self._validate_s3_tables_create_table(dialect_opts, connect_opts)
+            text = [
+                self._get_table_properties_specification(dialect_opts, connect_opts),
+            ]
+        else:
+            text = [
+                self._get_row_format_specification(dialect_opts, connect_opts),
+                self._get_serde_properties_specification(dialect_opts, connect_opts),
+                self._get_file_format_specification(dialect_opts, connect_opts),
+                self._get_table_location_specification(table, dialect_opts, connect_opts),
+                self._get_table_properties_specification(dialect_opts, connect_opts),
+            ]
         return "\n".join([t for t in text if t])
