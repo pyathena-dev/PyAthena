@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 import logging
-from collections.abc import Iterator, MutableMapping
+from collections.abc import Iterator, Mapping, MutableMapping
 from datetime import datetime
 from typing import Any
 
@@ -182,6 +182,142 @@ class S3Object(MutableMapping[str, Any]):
         return fields
 
 
+class S3Metadata(Mapping[str, str]):
+    """Represents the metadata of an S3 object as returned by HeadObject.
+
+    Behaves as a read-only mapping of the user-defined metadata
+    (``x-amz-meta-*``, whose keys are arbitrary user-chosen strings), so it
+    is a drop-in for implementations that return the user-defined metadata
+    as a plain dictionary, and compares equal to such dictionaries. The
+    system-defined metadata (content type, encryption settings, storage
+    class, etc.) is exposed as typed properties.
+
+    Example:
+        >>> metadata = fs.metadata("s3://bucket/key")
+        >>> metadata["attr1"]  # user-defined metadata
+        'value1'
+        >>> metadata.content_type  # system-defined metadata
+        'text/plain'
+
+    See https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html
+    """
+
+    def __init__(self, response: dict[str, Any]) -> None:
+        self._cache_control: str | None = response.get("CacheControl")
+        self._content_disposition: str | None = response.get("ContentDisposition")
+        self._content_encoding: str | None = response.get("ContentEncoding")
+        self._content_language: str | None = response.get("ContentLanguage")
+        self._content_length: int | None = response.get("ContentLength")
+        self._content_type: str | None = response.get("ContentType")
+        self._etag: str | None = response.get("ETag")
+        self._expiration: str | None = response.get("Expiration")
+        self._expires: datetime | None = response.get("Expires")
+        self._last_modified: datetime | None = response.get("LastModified")
+        # https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html#API_HeadObject_ResponseSyntax
+        # Amazon S3 returns this header for all objects except for
+        # S3 Standard storage class objects.
+        self._storage_class: str = response.get(
+            "StorageClass", S3StorageClass.S3_STORAGE_CLASS_STANDARD
+        )
+        self._server_side_encryption: str | None = response.get("ServerSideEncryption")
+        self._sse_customer_algorithm: str | None = response.get("SSECustomerAlgorithm")
+        self._sse_kms_key_id: str | None = response.get("SSEKMSKeyId")
+        self._bucket_key_enabled: bool | None = response.get("BucketKeyEnabled")
+        self._website_redirect_location: str | None = response.get("WebsiteRedirectLocation")
+        self._version_id: str | None = response.get("VersionId")
+        self._user_metadata: dict[str, str] = response.get("Metadata", {})
+
+    def __getitem__(self, key: str) -> str:
+        return self._user_metadata[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._user_metadata)
+
+    def __len__(self) -> int:
+        return len(self._user_metadata)
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({self._user_metadata!r})"
+
+    @property
+    def cache_control(self) -> str | None:
+        return self._cache_control
+
+    @property
+    def content_disposition(self) -> str | None:
+        return self._content_disposition
+
+    @property
+    def content_encoding(self) -> str | None:
+        return self._content_encoding
+
+    @property
+    def content_language(self) -> str | None:
+        return self._content_language
+
+    @property
+    def content_length(self) -> int | None:
+        return self._content_length
+
+    @property
+    def content_type(self) -> str | None:
+        return self._content_type
+
+    @property
+    def etag(self) -> str | None:
+        return self._etag
+
+    @property
+    def expiration(self) -> str | None:
+        return self._expiration
+
+    @property
+    def expires(self) -> datetime | None:
+        return self._expires
+
+    @property
+    def last_modified(self) -> datetime | None:
+        return self._last_modified
+
+    @property
+    def storage_class(self) -> str:
+        return self._storage_class
+
+    @property
+    def server_side_encryption(self) -> str | None:
+        return self._server_side_encryption
+
+    @property
+    def sse_customer_algorithm(self) -> str | None:
+        return self._sse_customer_algorithm
+
+    @property
+    def sse_kms_key_id(self) -> str | None:
+        return self._sse_kms_key_id
+
+    @property
+    def bucket_key_enabled(self) -> bool | None:
+        return self._bucket_key_enabled
+
+    @property
+    def website_redirect_location(self) -> str | None:
+        return self._website_redirect_location
+
+    @property
+    def version_id(self) -> str | None:
+        return self._version_id
+
+    @property
+    def user_metadata(self) -> dict[str, str]:
+        """A copy of the user-defined metadata (``x-amz-meta-*``).
+
+        The keys are arbitrary user-chosen strings, returned as stored in S3
+        (S3 normalizes them to lowercase). The same key/value pairs are also
+        accessible directly through the mapping interface of this class.
+        """
+        return dict(self._user_metadata)
+
+
 class S3PutObject:
     """Represents the response from an S3 PUT object operation.
 
@@ -277,6 +413,27 @@ class S3PutObject:
         return copy.deepcopy(self.__dict__)
 
 
+class S3Owner:
+    """Represents the owner or initiator of an S3 object or multipart upload.
+
+    Attributes:
+        display_name: The display name of the owner.
+        id: The canonical user ID of the owner.
+    """
+
+    def __init__(self, response: dict[str, Any]) -> None:
+        self._display_name: str | None = response.get("DisplayName")
+        self._id: str | None = response.get("ID")
+
+    @property
+    def display_name(self) -> str | None:
+        return self._display_name
+
+    @property
+    def id(self) -> str | None:
+        return self._id
+
+
 class S3MultipartUpload:
     """Represents an S3 multipart upload operation.
 
@@ -290,9 +447,12 @@ class S3MultipartUpload:
         upload_id: Unique identifier for the multipart upload.
         server_side_encryption: Encryption method applied to the upload.
         abort_date/abort_rule_id: Lifecycle rule information for upload cleanup.
+        initiated/storage_class/owner/initiator: Fields returned by the
+            ListMultipartUploads API for in-progress uploads.
 
     Note:
-        Used internally by S3FileSystem for large file upload operations.
+        Used internally by S3FileSystem for large file upload operations,
+        and returned by ``S3FileSystem.list_multipart_uploads``.
     """
 
     def __init__(self, response: dict[str, Any]) -> None:
@@ -309,6 +469,13 @@ class S3MultipartUpload:
         self._bucket_key_enabled = response.get("BucketKeyEnabled")
         self._request_charged = response.get("RequestCharged")
         self._checksum_algorithm = response.get("ChecksumAlgorithm")
+        # The following fields are returned by the ListMultipartUploads API.
+        self._initiated: datetime | None = response.get("Initiated")
+        self._storage_class: str | None = response.get("StorageClass")
+        owner = response.get("Owner")
+        self._owner: S3Owner | None = S3Owner(owner) if owner else None
+        initiator = response.get("Initiator")
+        self._initiator: S3Owner | None = S3Owner(initiator) if initiator else None
 
     @property
     def abort_date(self) -> datetime | None:
@@ -361,6 +528,22 @@ class S3MultipartUpload:
     @property
     def checksum_algorithm(self) -> str | None:
         return self._checksum_algorithm
+
+    @property
+    def initiated(self) -> datetime | None:
+        return self._initiated
+
+    @property
+    def storage_class(self) -> str | None:
+        return self._storage_class
+
+    @property
+    def owner(self) -> S3Owner | None:
+        return self._owner
+
+    @property
+    def initiator(self) -> S3Owner | None:
+        return self._initiator
 
 
 class S3MultipartUploadPart:

@@ -17,7 +17,8 @@ import pytest
 from fsspec import Callback
 
 from pyathena.filesystem.s3 import S3File, S3FileSystem
-from pyathena.filesystem.s3_object import S3ObjectType, S3StorageClass
+from pyathena.filesystem.s3_object import S3Object, S3ObjectType, S3StorageClass
+from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
 
@@ -127,6 +128,176 @@ class TestS3FileSystem:
 
         with pytest.raises(ValueError, match="Invalid S3 path format"):
             S3FileSystem.parse_path("s3a://bucket/path/to/obj?foo=bar")
+
+    @staticmethod
+    def _make_fs():
+        # Build a minimal S3FileSystem without touching AWS, bypassing
+        # __init__ which would require a boto3 client.
+        fs = S3FileSystem.__new__(S3FileSystem)
+        fs.dircache = {}
+        fs._client = mock.MagicMock()
+        fs._call = mock.MagicMock()
+        fs._retry_config = RetryConfig()
+        fs.request_kwargs = {}
+        fs.max_workers = 4
+        fs.allow_bucket_creation = False
+        fs.allow_bucket_deletion = False
+        return fs
+
+    def test_ls_from_cache_with_cached_object(self):
+        fs = self._make_fs()
+        obj = S3Object(
+            init={
+                "ContentLength": 4,
+                "ContentType": None,
+                "StorageClass": S3StorageClass.S3_STORAGE_CLASS_STANDARD,
+                "ETag": '"etag"',
+                "LastModified": None,
+            },
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket="bucket",
+            key="key",
+        )
+        fs.dircache["bucket/key"] = obj
+
+        assert fs._ls_from_cache("bucket/key") is obj
+        # A child path of a cached object entry must not fail; it falls
+        # through to the S3 API instead (fsspec's implementation assumes
+        # every cache value is a listing and raises TypeError here).
+        assert fs._ls_from_cache("bucket/key/child") is None
+
+    def test_mkdir_creates_bucket(self):
+        fs = self._make_fs()
+        fs.allow_bucket_creation = True
+        fs.exists = mock.MagicMock(return_value=False)
+        fs._client.meta.region_name = "ap-northeast-1"
+        fs.dircache[""] = ["stale-bucket-listing"]
+
+        fs.mkdir("s3://new-bucket")
+        fs._call.assert_called_once_with(
+            fs._client.create_bucket,
+            Bucket="new-bucket",
+            CreateBucketConfiguration={"LocationConstraint": "ap-northeast-1"},
+        )
+        # The cached bucket listing must be evicted.
+        assert "" not in fs.dircache
+
+    def test_mkdir_creates_bucket_in_us_east_1_without_location_constraint(self):
+        fs = self._make_fs()
+        fs.allow_bucket_creation = True
+        fs.exists = mock.MagicMock(return_value=False)
+        fs._client.meta.region_name = "us-east-1"
+
+        fs.mkdir("s3://new-bucket")
+        fs._call.assert_called_once_with(fs._client.create_bucket, Bucket="new-bucket")
+
+    def test_mkdir_creates_bucket_with_acl(self):
+        fs = self._make_fs()
+        fs.allow_bucket_creation = True
+        fs.exists = mock.MagicMock(return_value=False)
+        fs._client.meta.region_name = "us-east-1"
+
+        fs.mkdir("s3://new-bucket", acl="private")
+        fs._call.assert_called_once_with(
+            fs._client.create_bucket, Bucket="new-bucket", ACL="private"
+        )
+
+        with pytest.raises(ValueError, match="ACL not in"):
+            fs.mkdir("s3://another-bucket", acl="invalid-acl")
+
+    def test_mkdir_bucket_creation_disabled(self):
+        # Bucket creation is disabled by default.
+        fs = self._make_fs()
+        fs.exists = mock.MagicMock(return_value=False)
+
+        with pytest.raises(PermissionError, match="Bucket creation is disabled"):
+            fs.mkdir("s3://new-bucket")
+        fs._call.assert_not_called()
+
+    def test_rmdir_deletes_bucket(self):
+        fs = self._make_fs()
+        fs.allow_bucket_deletion = True
+        fs.dircache[""] = ["stale-bucket-listing"]
+
+        fs.rmdir("s3://bucket")
+        fs._call.assert_called_once_with(fs._client.delete_bucket, Bucket="bucket")
+        # The cached bucket listing must be evicted.
+        assert "" not in fs.dircache
+
+    def test_rmdir_bucket_deletion_disabled(self):
+        # Bucket deletion is disabled by default.
+        fs = self._make_fs()
+
+        with pytest.raises(PermissionError, match="Bucket deletion is disabled"):
+            fs.rmdir("s3://bucket")
+        fs._call.assert_not_called()
+
+    def test_metadata_with_version_id(self):
+        fs = self._make_fs()
+        fs._call.return_value = {"Metadata": {}}
+
+        assert fs.metadata("s3://bucket/key?versionId=12345abcde") == {}
+        fs._call.assert_called_once_with(
+            fs._client.head_object, Bucket="bucket", Key="key", VersionId="12345abcde"
+        )
+
+    def test_chmod_object(self):
+        fs = self._make_fs()
+
+        fs.chmod("s3://bucket/key", "bucket-owner-full-control")
+        fs._call.assert_called_once_with(
+            fs._client.put_object_acl,
+            Bucket="bucket",
+            Key="key",
+            ACL="bucket-owner-full-control",
+        )
+
+    def test_chmod_bucket(self):
+        fs = self._make_fs()
+
+        fs.chmod("s3://bucket", "private")
+        fs._call.assert_called_once_with(fs._client.put_bucket_acl, Bucket="bucket", ACL="private")
+
+    def test_chmod_recursive(self):
+        fs = self._make_fs()
+        fs.find = mock.MagicMock(return_value=["bucket/key1", "bucket/key2"])
+
+        fs.chmod("s3://bucket/path", "private", recursive=True)
+        assert fs._call.call_count == 2
+        fs._call.assert_any_call(
+            fs._client.put_object_acl, Bucket="bucket", Key="key1", ACL="private"
+        )
+        fs._call.assert_any_call(
+            fs._client.put_object_acl, Bucket="bucket", Key="key2", ACL="private"
+        )
+
+    def test_list_multipart_uploads_paginates(self):
+        fs = self._make_fs()
+        fs._call.side_effect = [
+            {
+                "Uploads": [{"Key": "key1", "UploadId": "upload1"}],
+                "IsTruncated": True,
+                "NextKeyMarker": "key1",
+                "NextUploadIdMarker": "upload1",
+            },
+            {
+                "Uploads": [{"Key": "key2", "UploadId": "upload2"}],
+                "IsTruncated": False,
+            },
+        ]
+
+        actual = fs.list_multipart_uploads("s3://bucket")
+        assert [(u.bucket, u.key, u.upload_id) for u in actual] == [
+            ("bucket", "key1", "upload1"),
+            ("bucket", "key2", "upload2"),
+        ]
+        fs._call.assert_any_call(fs._client.list_multipart_uploads, Bucket="bucket")
+        fs._call.assert_any_call(
+            fs._client.list_multipart_uploads,
+            Bucket="bucket",
+            KeyMarker="key1",
+            UploadIdMarker="upload1",
+        )
 
     @pytest.fixture(scope="class")
     def fs(self, request):
@@ -828,6 +999,169 @@ class TestS3FileSystem:
         assert requested + 100 < expires
         assert data == b"0123456789"
 
+    def test_mkdir_and_rmdir(self, fs):
+        # The bucket already exists; raised regardless of the flags.
+        with pytest.raises(FileExistsError):
+            fs.mkdir(f"s3://{ENV.s3_staging_bucket}")
+        # exist_ok suppresses the error.
+        fs.makedirs(f"s3://{ENV.s3_staging_bucket}", exist_ok=True)
+        with pytest.raises(FileExistsError):
+            fs.makedirs(f"s3://{ENV.s3_staging_bucket}", exist_ok=False)
+        # Creating a key prefix under an existing bucket requires no operation.
+        fs.mkdir(
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_mkdir/{uuid.uuid4()}"
+        )
+
+        # Bucket creation/deletion are disabled by default.
+        nonexistent = f"s3://pyathena-test-{uuid.uuid4()}"
+        with pytest.raises(PermissionError, match="Bucket creation is disabled"):
+            fs.mkdir(nonexistent)
+        with pytest.raises(PermissionError, match="Bucket deletion is disabled"):
+            fs.rmdir(f"s3://{ENV.s3_staging_bucket}")
+        # The bucket does not exist, and it is not requested to be created.
+        with pytest.raises(FileNotFoundError):
+            fs.mkdir(f"{nonexistent}/dir", create_parents=False)
+
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_rmdir/{uuid.uuid4()}"
+        )
+        fs.pipe(path, b"data")
+        # Only bucket paths can be removed.
+        with pytest.raises(FileExistsError):
+            fs.rmdir(path)
+        with pytest.raises(FileNotFoundError):
+            fs.rmdir(f"{path}/nonexistent")
+
+    def test_metadata_getxattr_setxattr(self, fs):
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_metadata/{uuid.uuid4()}"
+        )
+        data = b"0123456789"
+        fs.pipe(path, data)
+        assert fs.metadata(path) == {}
+
+        # The keys are stored as-is; hyphenated names can be passed by
+        # unpacking a dictionary.
+        fs.setxattr(path, attr1="value1", **{"attr-2": "value2"})
+        assert fs.metadata(path) == {"attr1": "value1", "attr-2": "value2"}
+        assert fs.getxattr(path, "attr1") == "value1"
+        assert fs.getxattr(path, "attr-2") == "value2"
+        assert fs.getxattr(path, "missing") is None
+
+        # Setting a field to None deletes it, and the content is preserved.
+        fs.setxattr(path, attr3="value3", **{"attr-2": None})
+        assert fs.metadata(path) == {"attr1": "value1", "attr3": "value3"}
+        assert fs.cat(path) == data
+
+        # copy_kwargs are passed to the underlying CopyObject API. The system
+        # metadata is exposed as typed properties on the returned S3Metadata,
+        # and the user-defined metadata through its mapping interface.
+        fs.setxattr(path, copy_kwargs={"ContentType": "text/plain"}, attr4="value4")
+        metadata = fs.metadata(path)
+        assert metadata.content_type == "text/plain"
+        assert metadata["attr4"] == "value4"
+        assert metadata.user_metadata == {"attr1": "value1", "attr3": "value3", "attr4": "value4"}
+        assert metadata.content_length == len(data)
+        assert metadata.etag
+        assert fs.getxattr(path, "attr4") == "value4"
+
+        with pytest.raises(FileNotFoundError):
+            fs.metadata(
+                f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+                f"filesystem/test_metadata/nonexistent-{uuid.uuid4()}"
+            )
+        with pytest.raises(ValueError, match="Cannot get metadata"):
+            fs.metadata(f"s3://{ENV.s3_staging_bucket}")
+        with pytest.raises(ValueError, match="Cannot set metadata"):
+            fs.setxattr(f"s3://{ENV.s3_staging_bucket}", attr1="value1")
+
+    def test_get_and_put_tags(self, fs):
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_tags/{uuid.uuid4()}"
+        )
+        fs.pipe(path, b"data")
+        assert fs.get_tags(path) == {}
+
+        fs.put_tags(path, {"tag1": "value1"})
+        assert fs.get_tags(path) == {"tag1": "value1"}
+
+        # Merge mode keeps the existing tags.
+        fs.put_tags(path, {"tag2": "value2"}, mode="m")
+        assert fs.get_tags(path) == {"tag1": "value1", "tag2": "value2"}
+
+        # Overwrite mode replaces the existing tags.
+        fs.put_tags(path, {"tag3": "value3"}, mode="o")
+        assert fs.get_tags(path) == {"tag3": "value3"}
+
+        with pytest.raises(ValueError, match="Mode must be"):
+            fs.put_tags(path, {"tag4": "value4"}, mode="x")
+
+    def test_chmod_validation(self, fs):
+        # Canned ACLs are validated before any API call; applying ACLs is
+        # not integration-tested because the test bucket has ACLs disabled.
+        with pytest.raises(ValueError, match="ACL not in"):
+            fs.chmod(f"s3://{ENV.s3_staging_bucket}/key", "invalid-acl")
+        with pytest.raises(ValueError, match="ACL not in"):
+            # A valid object ACL that is not valid for buckets.
+            fs.chmod(f"s3://{ENV.s3_staging_bucket}", "bucket-owner-full-control")
+        with pytest.raises(ValueError, match="ACL not in"):
+            # A recursive call must validate before applying any ACL.
+            fs.chmod(f"s3://{ENV.s3_staging_bucket}", "bucket-owner-full-control", recursive=True)
+
+    def test_error_translation_permission_error(self):
+        # Unsigned access to a private object: 403 -> PermissionError.
+        anon_fs = S3FileSystem(anon=True, skip_instance_cache=True)
+        with pytest.raises(PermissionError):
+            anon_fs.info(f"s3://{ENV.s3_staging_bucket}/{ENV.s3_filesystem_test_file_key}")
+
+    def test_list_and_clear_multipart_uploads(self, fs):
+        # Scope the list/clear to a unique prefix so that parallel test
+        # workers' in-flight multipart uploads in the shared bucket are
+        # not aborted.
+        bucket = ENV.s3_staging_bucket
+        prefix = (
+            f"{ENV.s3_staging_key}{ENV.schema}/filesystem/test_multipart_uploads/{uuid.uuid4()}"
+        )
+        prefix_path = f"s3://{bucket}/{prefix}"
+        key = f"{prefix}/file"
+        upload = fs._create_multipart_upload(bucket=bucket, key=key)
+
+        uploads = fs.list_multipart_uploads(prefix_path)
+        listed = next((u for u in uploads if u.upload_id == upload.upload_id), None)
+        assert listed
+        assert listed.bucket == bucket
+        assert listed.key == key
+        assert listed.initiated
+
+        fs.clear_multipart_uploads(prefix_path)
+        uploads = fs.list_multipart_uploads(prefix_path)
+        assert not any(u.upload_id == upload.upload_id for u in uploads)
+
+    def test_file_url_metadata_getxattr_setxattr(self, fs):
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_file_helpers/{uuid.uuid4()}"
+        )
+        data = b"0123456789"
+        fs.pipe(path, data)
+        fs.setxattr(path, attr1="value1")
+
+        with fs.open(path, "rb") as f:
+            assert f.metadata() == {"attr1": "value1"}
+            assert f.getxattr("attr1") == "value1"
+            url = f.url(expiration=100)
+            with urllib.request.urlopen(url) as r:
+                assert r.read() == data
+
+        with fs.open(path, "wb") as f:
+            with pytest.raises(NotImplementedError):
+                f.setxattr(attr2="value2")
+            f.write(data)
+
     def test_pandas_read_csv(self):
         import pandas
 
@@ -890,6 +1224,7 @@ class TestS3File:
         file.multipart_upload_parts = []
         file.buffer = io.BytesIO(data)
         file.loc = len(data)  # tell() returns self.loc
+        file._executor = mock.MagicMock()
         return file
 
     @staticmethod

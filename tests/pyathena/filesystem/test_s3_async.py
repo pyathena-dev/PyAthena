@@ -796,6 +796,42 @@ class TestAioS3FileSystem:
         assert requested + 100 < expires
         assert data == b"0123456789"
 
+    @pytest.mark.asyncio
+    async def test_mkdir_and_rmdir(self, fs):
+        # The bucket already exists.
+        with pytest.raises(FileExistsError):
+            await fs._mkdir(f"s3://{ENV.s3_staging_bucket}")
+        await fs._makedirs(f"s3://{ENV.s3_staging_bucket}", exist_ok=True)
+
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_async_rmdir/{uuid.uuid4()}"
+        )
+        await fs._pipe_file(path, b"data")
+        # Only bucket paths can be removed.
+        with pytest.raises(FileExistsError):
+            await fs._rmdir(path)
+        with pytest.raises(FileNotFoundError):
+            fs.rmdir(f"{path}/nonexistent")
+
+    @pytest.mark.asyncio
+    async def test_metadata_and_tags(self, fs):
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_async_metadata/{uuid.uuid4()}"
+        )
+        await fs._pipe_file(path, b"data")
+
+        assert fs.metadata(path) == {}
+        fs.setxattr(path, attr1="value1")
+        assert fs.metadata(path) == {"attr1": "value1"}
+        assert fs.getxattr(path, "attr1") == "value1"
+        assert fs.getxattr(path, "missing") is None
+
+        assert fs.get_tags(path) == {}
+        fs.put_tags(path, {"tag1": "value1"})
+        assert fs.get_tags(path) == {"tag1": "value1"}
+
     def test_pandas_read_csv(self):
         import pandas
 
