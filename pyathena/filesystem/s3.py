@@ -26,6 +26,7 @@ from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
+    S3Metadata,
     S3MultipartUpload,
     S3MultipartUploadPart,
     S3Object,
@@ -1232,16 +1233,18 @@ class S3FileSystem(AbstractFileSystem):
             **request,
         )
 
-    def metadata(self, path: str, **kwargs) -> dict[str, Any]:
-        """Return the user-defined metadata (``x-amz-meta-*``) of the path.
+    def metadata(self, path: str, **kwargs) -> S3Metadata:
+        """Return the metadata of the path.
 
         Args:
             path: S3 path (s3://bucket/key) to get metadata for.
             **kwargs: Additional parameters passed to the HeadObject API.
 
         Returns:
-            Dictionary of the user-defined metadata. The keys are returned
-            as stored in S3 (S3 normalizes them to lowercase).
+            S3Metadata, which behaves as a read-only mapping of the
+            user-defined metadata (``x-amz-meta-*``) and exposes the
+            system-defined metadata (content type, encryption settings,
+            etc.) as typed properties.
         """
         bucket, key, version_id = self.parse_path(path)
         if not key:
@@ -1256,9 +1259,9 @@ class S3FileSystem(AbstractFileSystem):
             **request,
             **kwargs,
         )
-        return cast(dict[str, Any], response["Metadata"])
+        return S3Metadata(response)
 
-    def getxattr(self, path: str, attr_name: str, **kwargs) -> Any:
+    def getxattr(self, path: str, attr_name: str, **kwargs) -> str | None:
         """Get an attribute from the user-defined metadata of the path.
 
         Args:
@@ -1298,7 +1301,7 @@ class S3FileSystem(AbstractFileSystem):
         bucket, key, version_id = self.parse_path(path)
         if not key:
             raise ValueError("Cannot set metadata of a bucket.")
-        metadata = self.metadata(path)
+        metadata = dict(self.metadata(path))
         for k, v in kw_args.items():
             if v is None:
                 metadata.pop(k, None)
@@ -1984,8 +1987,8 @@ class S3File(AbstractBufferedFile):
         """
         return cast(str, self.fs.sign(self.path, expiration=expiration, **kwargs))
 
-    def metadata(self, **kwargs) -> dict[str, Any]:
-        """Return the user-defined metadata of the file.
+    def metadata(self, **kwargs) -> S3Metadata:
+        """Return the metadata of the file.
 
         See :meth:`S3FileSystem.metadata`.
 
@@ -1993,11 +1996,13 @@ class S3File(AbstractBufferedFile):
             **kwargs: Additional parameters passed to the HeadObject API.
 
         Returns:
-            Dictionary of the user-defined metadata.
+            S3Metadata, which behaves as a read-only mapping of the
+            user-defined metadata and exposes the system-defined metadata
+            as typed properties.
         """
         return self.fs.metadata(self.path, **kwargs)
 
-    def getxattr(self, xattr_name: str, **kwargs) -> Any:
+    def getxattr(self, xattr_name: str, **kwargs) -> str | None:
         """Get an attribute from the user-defined metadata of the file.
 
         See :meth:`S3FileSystem.getxattr`.

@@ -1056,10 +1056,16 @@ class TestS3FileSystem:
         assert fs.metadata(path) == {"attr1": "value1", "attr3": "value3"}
         assert fs.cat(path) == data
 
-        # copy_kwargs are passed to the underlying CopyObject API.
+        # copy_kwargs are passed to the underlying CopyObject API. The system
+        # metadata is exposed as typed properties on the returned S3Metadata,
+        # and the user-defined metadata through its mapping interface.
         fs.setxattr(path, copy_kwargs={"ContentType": "text/plain"}, attr4="value4")
-        info = fs.info(path, refresh=True)
-        assert info.get("content_type") == "text/plain"
+        metadata = fs.metadata(path)
+        assert metadata.content_type == "text/plain"
+        assert metadata["attr4"] == "value4"
+        assert metadata.user_metadata == {"attr1": "value1", "attr3": "value3", "attr4": "value4"}
+        assert metadata.content_length == len(data)
+        assert metadata.etag
         assert fs.getxattr(path, "attr4") == "value4"
 
         with pytest.raises(FileNotFoundError):

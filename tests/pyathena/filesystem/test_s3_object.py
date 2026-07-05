@@ -2,6 +2,7 @@ from datetime import datetime
 
 from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
+    S3Metadata,
     S3MultipartUpload,
     S3MultipartUploadPart,
     S3Object,
@@ -93,6 +94,76 @@ class TestS3Object:
             "ContentType": "application/json",
             "StorageClass": "STANDARD",
         }
+
+
+class TestS3Metadata:
+    def test_init(self):
+        actual = S3Metadata(
+            {
+                "CacheControl": "no-cache",
+                "ContentDisposition": "attachment",
+                "ContentEncoding": "gzip",
+                "ContentLanguage": "en",
+                "ContentLength": 1024,
+                "ContentType": "text/plain",
+                "ETag": '"test_etag"',
+                "Expiration": "test_expiration",
+                "Expires": datetime(2015, 1, 1, 0, 0, 0),
+                "LastModified": datetime(2015, 1, 2, 0, 0, 0),
+                "StorageClass": "STANDARD_IA",
+                "ServerSideEncryption": "AES256",
+                "SSECustomerAlgorithm": "test_sse_customer_algorithm",
+                "SSEKMSKeyId": "test_sse_kms_key_id",
+                "BucketKeyEnabled": True,
+                "WebsiteRedirectLocation": "test_website_redirect_location",
+                "VersionId": "test_version_id",
+                "Metadata": {"attr1": "value1", "attr-2": "value2"},
+            }
+        )
+        assert actual.cache_control == "no-cache"
+        assert actual.content_disposition == "attachment"
+        assert actual.content_encoding == "gzip"
+        assert actual.content_language == "en"
+        assert actual.content_length == 1024
+        assert actual.content_type == "text/plain"
+        assert actual.etag == '"test_etag"'
+        assert actual.expiration == "test_expiration"
+        assert actual.expires == datetime(2015, 1, 1, 0, 0, 0)
+        assert actual.last_modified == datetime(2015, 1, 2, 0, 0, 0)
+        assert actual.storage_class == "STANDARD_IA"
+        assert actual.server_side_encryption == "AES256"
+        assert actual.sse_customer_algorithm == "test_sse_customer_algorithm"
+        assert actual.sse_kms_key_id == "test_sse_kms_key_id"
+        assert actual.bucket_key_enabled is True
+        assert actual.website_redirect_location == "test_website_redirect_location"
+        assert actual.version_id == "test_version_id"
+        assert actual.user_metadata == {"attr1": "value1", "attr-2": "value2"}
+
+    def test_init_defaults(self):
+        actual = S3Metadata({})
+        assert actual.content_type is None
+        # StorageClass is omitted from responses for S3 Standard objects.
+        assert actual.storage_class == S3StorageClass.S3_STORAGE_CLASS_STANDARD
+        assert actual.user_metadata == {}
+        assert actual == {}
+
+    def test_mapping_interface(self):
+        # The mapping interface exposes the user-defined metadata, so the
+        # object is a drop-in for a plain user-metadata dictionary.
+        actual = S3Metadata(
+            {"ContentType": "text/plain", "Metadata": {"attr1": "value1", "attr-2": "value2"}}
+        )
+        assert actual["attr1"] == "value1"
+        assert actual.get("attr-2") == "value2"
+        assert actual.get("missing") is None
+        assert "attr1" in actual
+        assert len(actual) == 2
+        assert sorted(actual) == ["attr-2", "attr1"]
+        assert dict(actual) == {"attr1": "value1", "attr-2": "value2"}
+        assert actual == {"attr1": "value1", "attr-2": "value2"}
+        assert actual != {"attr1": "value1"}
+        # System-defined metadata is not part of the mapping.
+        assert "content_type" not in actual
 
 
 class TestS3PutObject:

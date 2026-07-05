@@ -10,7 +10,7 @@ from fsspec.callbacks import _DEFAULT_CALLBACK
 
 from pyathena.filesystem.s3 import S3File, S3FileSystem
 from pyathena.filesystem.s3_executor import S3AioExecutor
-from pyathena.filesystem.s3_object import S3MultipartUpload, S3Object
+from pyathena.filesystem.s3_object import S3Metadata, S3MultipartUpload, S3Object
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -335,10 +335,10 @@ class AioS3FileSystem(AsyncFileSystem):
     def sign(self, path: str, expiration: int = 3600, **kwargs) -> str:
         return cast(str, self._sync_fs.sign(path, expiration=expiration, **kwargs))
 
-    def metadata(self, path: str, **kwargs) -> dict[str, Any]:
+    def metadata(self, path: str, **kwargs) -> S3Metadata:
         return self._sync_fs.metadata(path, **kwargs)
 
-    def getxattr(self, path: str, attr_name: str, **kwargs) -> Any:
+    def getxattr(self, path: str, attr_name: str, **kwargs) -> str | None:
         return self._sync_fs.getxattr(path, attr_name, **kwargs)
 
     def setxattr(self, path: str, copy_kwargs: dict[str, Any] | None = None, **kwargs) -> None:
