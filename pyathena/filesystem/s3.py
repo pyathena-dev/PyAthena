@@ -1049,9 +1049,8 @@ class S3FileSystem(AbstractFileSystem):
             key=key2,
             **kwargs,
         )
-        parts = []
         with self._create_executor(max_workers=max_workers) as executor:
-            fs = [
+            futures = [
                 executor.submit(
                     self._upload_part_copy,
                     bucket=bucket2,
@@ -1063,29 +1062,23 @@ class S3FileSystem(AbstractFileSystem):
                 )
                 for i, range_ in enumerate(ranges)
             ]
-            for f in as_completed(fs):
-                result = f.result()
-                parts.append(
-                    {
-                        "ETag": result.etag,
-                        "PartNumber": result.part_number,
-                    }
-                )
+            self._finish_multipart_upload(
+                bucket=bucket2,
+                key=key2,
+                upload_id=cast(str, multipart_upload.upload_id),
+                futures=futures,
+            )
 
-        parts.sort(key=lambda x: x["PartNumber"])  # type: ignore[arg-type, return-value]
-        self._complete_multipart_upload(
-            bucket=bucket2,
-            key=key2,
-            upload_id=cast(str, multipart_upload.upload_id),
-            parts=parts,
-        )
-
-    def pipe_file(self, path: str, value: bytes, mode: str = "overwrite", **kwargs) -> None:
+    def pipe_file(
+        self, path: str, value: bytes | bytearray | memoryview, mode: str = "overwrite", **kwargs
+    ) -> None:
         """Write bytes into the path with direct S3 API calls.
 
         Uploads small data with a single PutObject request instead of the
         inherited ``open()`` + ``write()`` path, and switches to a parallel
-        multipart upload when the data exceeds the block size.
+        multipart upload when the data exceeds the block size. Inside an
+        fsspec transaction, the write goes through the inherited buffered
+        path so that the deferred-commit semantics are kept.
 
         Args:
             path: S3 path (s3://bucket/key) to write to.
@@ -1094,6 +1087,11 @@ class S3FileSystem(AbstractFileSystem):
                 FileExistsError when the object already exists.
             **kwargs: Additional parameters passed to the PutObject or
                 CreateMultipartUpload API (e.g., ContentType, StorageClass).
+                The ``block_size``, ``max_worker``, and
+                ``s3_additional_kwargs`` parameters of the ``open()`` path
+                are also accepted. Note that parameters that must be
+                repeated on every UploadPart request (e.g., SSE-C keys) are
+                not supported on the multipart path.
 
         Raises:
             FileExistsError: If the mode is "create" and the path already
@@ -1101,6 +1099,11 @@ class S3FileSystem(AbstractFileSystem):
             ValueError: If the path does not contain a key or specifies a
                 version.
         """
+        if self._intrans:
+            # Defer to the buffered open() path so that fsspec transactions
+            # keep their deferred-commit semantics.
+            super().pipe_file(path, value, mode=mode, **kwargs)
+            return
         bucket, key, version_id = self.parse_path(path)
         if version_id:
             raise ValueError("Cannot write to the file with the version specified.")
@@ -1108,59 +1111,107 @@ class S3FileSystem(AbstractFileSystem):
             raise ValueError("Cannot write to a bucket.")
         if mode == "create" and self.exists(path):
             raise FileExistsError(path)
+        if not isinstance(value, bytes):
+            # Accept bytes-like values (bytearray, memoryview) as the
+            # inherited buffered path did.
+            value = bytes(value)
+
+        block_size = kwargs.pop("block_size", None) or self.default_block_size
+        max_worker = kwargs.pop("max_worker", None) or self.max_workers
+        request_kwargs = {
+            **self.s3_additional_kwargs,
+            **kwargs.pop("s3_additional_kwargs", {}),
+            **kwargs,
+        }
 
         size = len(value)
-        if size <= self.default_block_size:
-            self._put_object(bucket=bucket, key=key, body=value, **kwargs)
+        # A single PutObject request accepts up to the maximum part size.
+        if size <= min(block_size, self.MULTIPART_UPLOAD_MAX_PART_SIZE):
+            self._put_object(bucket=bucket, key=key, body=value, **request_kwargs)
         else:
-            # The part size must be large enough to fit within the maximum
-            # number of parts of a multipart upload.
-            part_size = max(
-                self.default_block_size, math.ceil(size / self.MULTIPART_UPLOAD_MAX_PARTS)
+            # The part size must satisfy the minimum/maximum part size and
+            # fit within the maximum number of parts of a multipart upload.
+            part_size = min(
+                max(
+                    block_size,
+                    self.MULTIPART_UPLOAD_MIN_PART_SIZE,
+                    math.ceil(size / self.MULTIPART_UPLOAD_MAX_PARTS),
+                ),
+                self.MULTIPART_UPLOAD_MAX_PART_SIZE,
             )
-            ranges = S3File._get_ranges(
-                0, size, max_workers=max(self.max_workers, 2), worker_block_size=part_size
+            offsets = range(0, size, part_size)
+            multipart_upload = self._create_multipart_upload(
+                bucket=bucket, key=key, **request_kwargs
             )
-            multipart_upload = self._create_multipart_upload(bucket=bucket, key=key, **kwargs)
-            upload_id = cast(str, multipart_upload.upload_id)
-            try:
-                parts: list[dict[str, Any]] = []
-                with self._create_executor(max_workers=self.max_workers) as executor:
-                    futures = [
-                        executor.submit(
-                            self._upload_part,
-                            bucket=bucket,
-                            key=key,
-                            upload_id=upload_id,
-                            part_number=i + 1,
-                            body=value[range_[0] : range_[1]],
-                        )
-                        for i, range_ in enumerate(ranges)
-                    ]
-                    for future in as_completed(futures):
-                        result = future.result()
-                        parts.append(
-                            {
-                                "ETag": result.etag,
-                                "PartNumber": result.part_number,
-                            }
-                        )
-                parts.sort(key=lambda x: x["PartNumber"])
-                self._complete_multipart_upload(
+            with self._create_executor(max_workers=min(len(offsets), max_worker)) as executor:
+                futures = [
+                    executor.submit(
+                        self._upload_part,
+                        bucket=bucket,
+                        key=key,
+                        upload_id=cast(str, multipart_upload.upload_id),
+                        part_number=i + 1,
+                        body=value[offset : offset + part_size],
+                    )
+                    for i, offset in enumerate(offsets)
+                ]
+                self._finish_multipart_upload(
                     bucket=bucket,
                     key=key,
-                    upload_id=upload_id,
-                    parts=parts,
+                    upload_id=cast(str, multipart_upload.upload_id),
+                    futures=futures,
                 )
-            except Exception:
+        self.invalidate_cache(path)
+
+    def _finish_multipart_upload(
+        self,
+        bucket: str,
+        key: str,
+        upload_id: str,
+        futures: list[Future[S3MultipartUploadPart]],
+    ) -> S3CompleteMultipartUpload:
+        """Collect the uploaded parts and complete the multipart upload.
+
+        When any part fails, the remaining parts are cancelled and the
+        multipart upload is aborted so that no incomplete upload is left
+        behind, then the original error is re-raised.
+
+        Args:
+            bucket: S3 bucket name.
+            key: Object key being uploaded.
+            upload_id: Unique identifier for the multipart upload.
+            futures: Futures of the part uploads, in part-number order.
+
+        Returns:
+            S3CompleteMultipartUpload of the completed upload.
+        """
+        try:
+            # The futures are in part-number order.
+            parts = [
+                {"ETag": result.etag, "PartNumber": result.part_number}
+                for result in (future.result() for future in futures)
+            ]
+            return self._complete_multipart_upload(
+                bucket=bucket,
+                key=key,
+                upload_id=upload_id,
+                parts=parts,
+            )
+        except Exception:
+            for future in futures:
+                future.cancel()
+            try:
                 self._call(
                     self._client.abort_multipart_upload,
                     Bucket=bucket,
                     Key=key,
                     UploadId=upload_id,
                 )
-                raise
-        self.invalidate_cache(path)
+            except Exception:
+                _logger.exception(
+                    "Failed to abort multipart upload %s to s3://%s/%s.", upload_id, bucket, key
+                )
+            raise
 
     def cat_file(
         self, path: str, start: int | None = None, end: int | None = None, **kwargs
@@ -2175,7 +2226,9 @@ class S3File(AbstractBufferedFile):
             range_start = start
             while True:
                 range_end = range_start + worker_block_size
-                if range_end > end:
+                if range_end >= end:
+                    # Also when the size is an exact multiple of the block
+                    # size, so that no empty trailing range is generated.
                     ranges.append((range_start, end))
                     break
                 ranges.append((range_start, range_end))

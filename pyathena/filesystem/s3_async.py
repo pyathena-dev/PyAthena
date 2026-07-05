@@ -111,8 +111,10 @@ class AioS3FileSystem(AsyncFileSystem):
     async def _rm_file(self, path: str, **kwargs) -> None:
         await asyncio.to_thread(self._sync_fs.rm_file, path, **kwargs)
 
-    async def _pipe_file(self, path: str, value: bytes, **kwargs) -> None:
-        await asyncio.to_thread(self._sync_fs.pipe_file, path, value, **kwargs)
+    async def _pipe_file(
+        self, path: str, value: bytes | bytearray | memoryview, mode: str = "overwrite", **kwargs
+    ) -> None:
+        await asyncio.to_thread(self._sync_fs.pipe_file, path, value, mode=mode, **kwargs)
 
     async def _put_file(self, lpath: str, rpath: str, callback=_DEFAULT_CALLBACK, **kwargs) -> None:
         await asyncio.to_thread(self._sync_fs.put_file, lpath, rpath, callback=callback, **kwargs)

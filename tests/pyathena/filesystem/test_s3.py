@@ -142,6 +142,8 @@ class TestS3FileSystem:
         fs.max_workers = 4
         fs.allow_bucket_creation = False
         fs.allow_bucket_deletion = False
+        fs.s3_additional_kwargs = {}
+        fs._intrans = False
         return fs
 
     def test_ls_from_cache_with_cached_object(self):
@@ -235,11 +237,18 @@ class TestS3FileSystem:
     def test_pipe_file_small_uses_put_object(self):
         fs = self._make_fs()
         fs.default_block_size = S3FileSystem.DEFAULT_BLOCK_SIZE
+        fs.s3_additional_kwargs = {"ServerSideEncryption": "AES256"}
         fs._put_object = mock.MagicMock()
 
+        # The filesystem-level s3_additional_kwargs are merged with the
+        # call-level kwargs, as in the open() path.
         fs.pipe_file("s3://bucket/key", b"data", ContentType="text/plain")
         fs._put_object.assert_called_once_with(
-            bucket="bucket", key="key", body=b"data", ContentType="text/plain"
+            bucket="bucket",
+            key="key",
+            body=b"data",
+            ServerSideEncryption="AES256",
+            ContentType="text/plain",
         )
 
     def test_pipe_file_create_mode(self):
@@ -266,6 +275,10 @@ class TestS3FileSystem:
     def test_pipe_file_large_uses_multipart_upload(self):
         fs = self._make_fs()
         fs.default_block_size = 5
+        # Shrink the part-size limits so the test data is split without
+        # allocating real 5 MiB payloads.
+        fs.MULTIPART_UPLOAD_MIN_PART_SIZE = 5
+        fs.MULTIPART_UPLOAD_MAX_PART_SIZE = 2**30
         fs._put_object = mock.MagicMock()
         fs._create_multipart_upload = mock.MagicMock(
             return_value=SimpleNamespace(upload_id="uploadid")
@@ -299,6 +312,8 @@ class TestS3FileSystem:
     def test_pipe_file_aborts_multipart_upload_on_failure(self):
         fs = self._make_fs()
         fs.default_block_size = 5
+        fs.MULTIPART_UPLOAD_MIN_PART_SIZE = 5
+        fs.MULTIPART_UPLOAD_MAX_PART_SIZE = 2**30
         fs._create_multipart_upload = mock.MagicMock(
             return_value=SimpleNamespace(upload_id="uploadid")
         )
@@ -314,6 +329,36 @@ class TestS3FileSystem:
             Key="key",
             UploadId="uploadid",
         )
+
+    def test_pipe_file_abort_failure_does_not_mask_the_original_error(self):
+        fs = self._make_fs()
+        fs.default_block_size = 5
+        fs.MULTIPART_UPLOAD_MIN_PART_SIZE = 5
+        fs.MULTIPART_UPLOAD_MAX_PART_SIZE = 2**30
+        fs._create_multipart_upload = mock.MagicMock(
+            return_value=SimpleNamespace(upload_id="uploadid")
+        )
+        fs._upload_part = mock.MagicMock(side_effect=RuntimeError("upload failed"))
+        fs._complete_multipart_upload = mock.MagicMock()
+        fs._call = mock.MagicMock(side_effect=RuntimeError("abort failed"))
+
+        # The abort failure is logged, and the original error propagates.
+        with pytest.raises(RuntimeError, match="upload failed"):
+            fs.pipe_file("s3://bucket/key", b"0123456789ABCDEF")
+
+    def test_pipe_file_in_transaction_uses_buffered_path(self):
+        fs = self._make_fs()
+        fs._intrans = True
+        fs._put_object = mock.MagicMock()
+        opened = mock.MagicMock()
+        fs.open = mock.MagicMock(return_value=opened)
+
+        fs.pipe_file("s3://bucket/key", b"data")
+        # The buffered open() path is used so that fsspec transactions keep
+        # their deferred-commit semantics; nothing is written directly.
+        fs.open.assert_called_once()
+        opened.__enter__.return_value.write.assert_called_once_with(b"data")
+        fs._put_object.assert_not_called()
 
     def test_metadata_with_version_id(self):
         fs = self._make_fs()
@@ -891,6 +936,33 @@ class TestS3FileSystem:
         with pytest.raises(FileExistsError):
             fs.pipe_file(path, data, mode="create")
 
+    def test_pipe_file_transaction(self, fs):
+        # Inside an fsspec transaction the write is deferred to the commit.
+        data = b"0123456789"
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_pipe_file_transaction/{uuid.uuid4()}"
+        )
+        with fs.transaction:
+            fs.pipe_file(path, data)
+        assert fs.cat(path) == data
+
+        # Raising inside the transaction must leave no object behind.
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_pipe_file_transaction/{uuid.uuid4()}"
+        )
+
+        def write_then_fail():
+            with fs.transaction:
+                fs.pipe_file(path, data)
+                raise RuntimeError("rollback")
+
+        with pytest.raises(RuntimeError):
+            write_then_fail()
+        fs.invalidate_cache(path)
+        assert not fs.exists(path)
+
     def test_cat_ranges(self, fs):
         data = b"1234567890abcdefghijklmnopqrstuvwxyz"
         path = (
@@ -1375,6 +1447,10 @@ class TestS3File:
             (42, 1337, 2, 1295, [(42, 1337)]),  # single block
             (42, 1337, 2, 1296, [(42, 1337)]),  # single block
             (42, 1337, 2, 1294, [(42, 1336), (1336, 1337)]),  # single block too small
+            # The size is an exact multiple of the block size:
+            # no empty trailing range is generated.
+            (0, 10, 2, 5, [(0, 5), (5, 10)]),
+            (42, 2632, 2, 1295, [(42, 1337), (1337, 2632)]),
         ],
     )
     def test_get_ranges(self, start, end, max_workers, worker_block_size, ranges):
