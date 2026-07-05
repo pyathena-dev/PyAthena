@@ -447,9 +447,12 @@ class S3MultipartUpload:
         upload_id: Unique identifier for the multipart upload.
         server_side_encryption: Encryption method applied to the upload.
         abort_date/abort_rule_id: Lifecycle rule information for upload cleanup.
+        initiated/storage_class/owner/initiator: Fields returned by the
+            ListMultipartUploads API for in-progress uploads.
 
     Note:
-        Used internally by S3FileSystem for large file upload operations.
+        Used internally by S3FileSystem for large file upload operations,
+        and returned by ``S3FileSystem.list_multipart_uploads``.
     """
 
     def __init__(self, response: dict[str, Any]) -> None:

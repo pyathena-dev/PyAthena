@@ -53,15 +53,24 @@ class S3FileSystem(AbstractFileSystem):
     - Listing objects and directories
     - Reading and writing files
     - Copying and moving objects
-    - Creating and removing directories
-    - Multipart uploads for large files
+    - Reading and writing object metadata, tags, and canned ACLs
+    - Multipart uploads for large files, including management of
+      incomplete uploads
+    - Creating and removing buckets (disabled by default; see
+      ``allow_bucket_creation`` / ``allow_bucket_deletion``)
     - Various S3 storage classes and encryption options
+    - Translating S3 error responses into standard Python exceptions
+      (e.g., ``404`` -> ``FileNotFoundError``, ``403`` -> ``PermissionError``)
 
     Attributes:
         session: The boto3 session used for S3 operations.
         client: The S3 client for direct API calls.
         config: Boto3 configuration for the client.
         retry_config: Configuration for retry behavior on failed operations.
+        allow_bucket_creation: Whether mkdir/makedirs may create buckets.
+            Defaults to False.
+        allow_bucket_deletion: Whether rmdir may delete buckets.
+            Defaults to False.
 
     Example:
         >>> from pyathena.filesystem.s3 import S3FileSystem
@@ -829,10 +838,19 @@ class S3FileSystem(AbstractFileSystem):
     def makedirs(self, path: str, exist_ok: bool = False) -> None:
         """Recursively create a directory, creating the bucket if necessary.
 
+        Creating the bucket requires ``allow_bucket_creation=True`` on the
+        filesystem constructor; see :meth:`mkdir`.
+
         Args:
             path: S3 path (e.g., "s3://bucket" or "s3://bucket/prefix").
             exist_ok: If False, raise FileExistsError when the path is a
                 bucket that already exists.
+
+        Raises:
+            FileExistsError: If the path is a bucket that already exists and
+                ``exist_ok`` is False.
+            PermissionError: If the bucket would be created but bucket
+                creation is not enabled on this filesystem instance.
         """
         try:
             self.mkdir(path, create_parents=True)
