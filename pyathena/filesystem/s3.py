@@ -22,7 +22,7 @@ from fsspec.spec import AbstractBufferedFile
 from fsspec.utils import tokenize
 
 import pyathena
-from pyathena.filesystem.s3_errors import translate_client_error
+from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
@@ -1707,7 +1707,7 @@ class S3FileSystem(AbstractFileSystem):
                 func, config=self._retry_config, logger=_logger, **kwargs, **self.request_kwargs
             )
         except botocore.exceptions.ClientError as e:
-            raise translate_client_error(e) from e
+            raise S3ClientError(e).os_error from e
         return cast(dict[str, Any], response)
 
 
