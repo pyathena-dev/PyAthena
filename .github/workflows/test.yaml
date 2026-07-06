@@ -7,6 +7,10 @@ on:
       - '**.md'
   schedule:
     - cron:  '0 0 * * 0'
+  # Allows refreshing the README status badge on demand: the badge reflects
+  # the latest run on the default branch, which is otherwise only the weekly
+  # scheduled run and stays red for up to a week after a transient failure.
+  workflow_dispatch:
 
 permissions:
   id-token: write
