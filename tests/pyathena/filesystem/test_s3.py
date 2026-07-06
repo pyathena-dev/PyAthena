@@ -15,6 +15,7 @@ from unittest import mock
 import pytest
 from fsspec import Callback
 
+import pyathena
 from pyathena.filesystem import register_s3_filesystem
 from pyathena.filesystem.s3 import S3File, S3FileSystem
 from pyathena.filesystem.s3_object import S3Object, S3ObjectType, S3StorageClass
@@ -146,6 +147,28 @@ class TestS3FileSystem:
         fs._intrans = False
         fs.version_aware = False
         return fs
+
+    def test_get_client_compatible_with_s3fs(self):
+        # Only constructs a boto3 client; no AWS access.
+        fs = S3FileSystem(
+            key="test_access_key",
+            secret="test_secret_key",
+            region_name="us-east-1",
+            use_ssl=False,
+            skip_instance_cache=True,
+        )
+        # use_ssl=False is honored (previously dropped by a truthiness check).
+        assert fs._client.meta.endpoint_url.startswith("http://")
+        assert pyathena.user_agent_extra in fs._client.meta.config.user_agent_extra
+
+        fs = S3FileSystem(
+            key="test_access_key",
+            secret="test_secret_key",
+            region_name="us-east-1",
+            endpoint_url="http://localhost:9000",
+            skip_instance_cache=True,
+        )
+        assert fs._client.meta.endpoint_url == "http://localhost:9000"
 
     def test_ls_from_cache_with_cached_object(self):
         fs = self._make_fs()

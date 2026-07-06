@@ -10,7 +10,7 @@ from copy import deepcopy
 from datetime import datetime
 from multiprocessing import cpu_count
 from re import Pattern
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import botocore.exceptions
 from boto3 import Session
@@ -22,6 +22,7 @@ from fsspec.spec import AbstractBufferedFile
 from fsspec.utils import tokenize
 
 import pyathena
+from pyathena.connection import Connection
 from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import (
@@ -36,9 +37,6 @@ from pyathena.filesystem.s3_object import (
     S3StorageClass,
 )
 from pyathena.util import RetryConfig, retry_api_call
-
-if TYPE_CHECKING:
-    from pyathena.connection import Connection
 
 _logger = logging.getLogger(__name__)
 
@@ -173,55 +171,59 @@ class S3FileSystem(AbstractFileSystem):
         self.request_kwargs = {"RequestPayer": "requester"} if requester_pays else {}
 
     def _get_client_compatible_with_s3fs(self, **kwargs) -> BaseClient:
-        """
-        https://github.com/fsspec/s3fs/blob/2023.4.0/s3fs/core.py#L457-L535
-        """
-        from pyathena.connection import Connection
+        """Build a boto3 S3 client from s3fs-compatible constructor arguments.
 
+        Accepts the constructor arguments that s3fs users pass through fsspec
+        storage options — ``key``/``username``, ``secret``/``password``,
+        ``token``, ``anon``, ``use_ssl``, ``endpoint_url``,
+        ``connect_timeout``/``read_timeout``, and the ``client_kwargs`` /
+        ``config_kwargs`` dictionaries — in addition to boto3 session
+        arguments such as ``region_name`` and ``profile_name``.
+
+        Args:
+            **kwargs: The filesystem constructor arguments.
+
+        Returns:
+            A boto3 S3 client configured from the arguments.
+        """
         config_kwargs = deepcopy(kwargs.pop("config_kwargs", {}))
+        client_kwargs = deepcopy(kwargs.pop("client_kwargs", {}))
+
         user_agent_extra = config_kwargs.pop("user_agent_extra", None)
-        if user_agent_extra:
-            if pyathena.user_agent_extra not in user_agent_extra:
-                config_kwargs.update(
-                    {"user_agent_extra": f"{pyathena.user_agent_extra} {user_agent_extra}"}
-                )
-            else:
-                config_kwargs.update({"user_agent_extra": user_agent_extra})
-        else:
-            config_kwargs.update({"user_agent_extra": pyathena.user_agent_extra})
-        connect_timeout = kwargs.pop("connect_timeout", None)
-        if connect_timeout:
+        if user_agent_extra and pyathena.user_agent_extra not in user_agent_extra:
+            user_agent_extra = f"{pyathena.user_agent_extra} {user_agent_extra}"
+        config_kwargs.update({"user_agent_extra": user_agent_extra or pyathena.user_agent_extra})
+        if connect_timeout := kwargs.pop("connect_timeout", None):
             config_kwargs.update({"connect_timeout": connect_timeout})
-        read_timeout = kwargs.pop("read_timeout", None)
-        if read_timeout:
+        if read_timeout := kwargs.pop("read_timeout", None):
             config_kwargs.update({"read_timeout": read_timeout})
 
-        client_kwargs = deepcopy(kwargs.pop("client_kwargs", {}))
         use_ssl = kwargs.pop("use_ssl", None)
-        if use_ssl:
+        if use_ssl is not None:
             client_kwargs.update({"use_ssl": use_ssl})
-        endpoint_url = kwargs.pop("endpoint_url", None)
-        if endpoint_url:
+        if endpoint_url := kwargs.pop("endpoint_url", None):
             client_kwargs.update({"endpoint_url": endpoint_url})
-        anon = kwargs.pop("anon", False)
-        if anon:
+        if kwargs.pop("anon", False):
             config_kwargs.update({"signature_version": UNSIGNED})
         else:
             creds = {
-                "aws_access_key_id": kwargs.pop("key", kwargs.pop("username", None)),
-                "aws_secret_access_key": kwargs.pop("secret", kwargs.pop("password", None)),
-                "aws_session_token": kwargs.pop("token", None),
+                key: value
+                for key, value in {
+                    "aws_access_key_id": kwargs.pop("key", kwargs.pop("username", None)),
+                    "aws_secret_access_key": kwargs.pop("secret", kwargs.pop("password", None)),
+                    "aws_session_token": kwargs.pop("token", None),
+                }.items()
+                if value is not None
             }
-            kwargs.update(**creds)
-            client_kwargs.update(**creds)
+            kwargs.update(creds)
+            client_kwargs.update(creds)
 
-        config = Config(**config_kwargs)
         session = Session(
             **{k: v for k, v in kwargs.items() if k in Connection._SESSION_PASSING_ARGS}
         )
         return session.client(
             "s3",
-            config=config,
+            config=Config(**config_kwargs),
             **{k: v for k, v in client_kwargs.items() if k in Connection._CLIENT_PASSING_ARGS},
         )
 
