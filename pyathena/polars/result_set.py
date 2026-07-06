@@ -472,7 +472,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 df.columns = new_columns
             return df
         except Exception as e:
-            _logger.exception("Failed to read %s.", self.output_location)
+            _logger.exception(f"Failed to read {self.output_location}.")
             raise OperationalError(*e.args) from e
 
     def _read_parquet(self) -> pl.DataFrame:
@@ -499,7 +499,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 **self._kwargs,
             )
         except Exception as e:
-            _logger.exception("Failed to read %s.", self._unload_location)
+            _logger.exception(f"Failed to read {self._unload_location}.")
             raise OperationalError(*e.args) from e
 
     def _read_parquet_schema(self) -> tuple[dict[str, Any], ...]:
@@ -518,7 +518,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             schema = lazy_df.collect_schema()
             return to_column_info(schema)
         except Exception as e:
-            _logger.exception("Failed to read schema from %s.", self._unload_location)
+            _logger.exception(f"Failed to read schema from {self._unload_location}.")
             raise OperationalError(*e.args) from e
 
     def _as_polars(self) -> pl.DataFrame:
@@ -658,7 +658,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
                     batch.columns = new_columns
                 yield batch
         except Exception as e:
-            _logger.exception("Failed to read %s.", self.output_location)
+            _logger.exception(f"Failed to read {self.output_location}.")
             raise OperationalError(*e.args) from e
 
     def _iter_parquet_chunks(self) -> Iterator[pl.DataFrame]:
@@ -686,7 +686,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             )
             yield from lazy_df.collect_batches(chunk_size=self._chunksize)
         except Exception as e:
-            _logger.exception("Failed to read %s.", self._unload_location)
+            _logger.exception(f"Failed to read {self._unload_location}.")
             raise OperationalError(*e.args) from e
 
     def iter_chunks(self) -> PolarsDataFrameIterator:

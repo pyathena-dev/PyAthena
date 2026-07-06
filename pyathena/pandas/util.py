@@ -342,7 +342,7 @@ def to_sql(
             )
         for future in concurrent.futures.as_completed(futures):
             result = future.result()
-            _logger.info("to_parquet: %s", result)
+            _logger.info(f"to_parquet: {result}")
 
     ddl = generate_ddl(
         df=df,

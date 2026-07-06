@@ -524,9 +524,8 @@ class AthenaPandasResultSet(AthenaResultSet):
             effective_chunksize = self._auto_determine_chunksize(length)
             if effective_chunksize:
                 _logger.debug(
-                    "Auto-determined chunksize: %s for file size: %s bytes",
-                    effective_chunksize,
-                    length,
+                    f"Auto-determined chunksize: {effective_chunksize} "
+                    f"for file size: {length} bytes"
                 )
 
         csv_engine = self._get_csv_engine(length, effective_chunksize)
@@ -565,17 +564,16 @@ class AthenaPandasResultSet(AthenaResultSet):
             # Log performance information for large files
             if length > self.LARGE_FILE_THRESHOLD_BYTES:
                 mode = "chunked" if effective_chunksize else "full"
-                msg = "Reading %s bytes from S3 in %s mode using %s engine"
-                args: tuple[object, ...] = (length, mode, csv_engine)
-                if effective_chunksize:
-                    msg += " with chunksize=%s"
-                    args = (*args, effective_chunksize)
-                _logger.info(msg, *args)
+                chunksize = f" with chunksize={effective_chunksize}" if effective_chunksize else ""
+                _logger.info(
+                    f"Reading {length} bytes from S3 in {mode} mode "
+                    f"using {csv_engine} engine{chunksize}"
+                )
 
             return result
 
         except Exception as e:
-            _logger.exception("Failed to read %s.", self.output_location)
+            _logger.exception(f"Failed to read {self.output_location}.")
             raise OperationalError(*e.args) from e
 
     def _read_parquet(self, engine) -> DataFrame:
@@ -609,7 +607,7 @@ class AthenaPandasResultSet(AthenaResultSet):
                 **kwargs,
             )
         except Exception as e:
-            _logger.exception("Failed to read %s.", self.output_location)
+            _logger.exception(f"Failed to read {self.output_location}.")
             raise OperationalError(*e.args) from e
 
     def _read_parquet_schema(self, engine) -> tuple[dict[str, Any], ...]:
@@ -625,7 +623,7 @@ class AthenaPandasResultSet(AthenaResultSet):
                 dataset = parquet.ParquetDataset(f"{bucket}/{key}", filesystem=self._fs)
                 return to_column_info(dataset.schema)
             except Exception as e:
-                _logger.exception("Failed to read schema %s/%s.", bucket, key)
+                _logger.exception(f"Failed to read schema {bucket}/{key}.")
                 raise OperationalError(*e.args) from e
         else:
             raise ProgrammingError("Engine must be `pyarrow`.")

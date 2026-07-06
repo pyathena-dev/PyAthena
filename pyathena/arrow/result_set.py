@@ -315,7 +315,7 @@ class AthenaArrowResultSet(AthenaResultSet):
                 ),
             )
         except Exception as e:
-            _logger.exception("Failed to read %s/%s.", bucket, key)
+            _logger.exception(f"Failed to read {bucket}/{key}.")
             raise OperationalError(*e.args) from e
 
     def _read_parquet(self) -> Table:
@@ -333,7 +333,7 @@ class AthenaArrowResultSet(AthenaResultSet):
             dataset = parquet.ParquetDataset(f"{bucket}/{key}", filesystem=self._fs)
             return dataset.read(use_threads=True)
         except Exception as e:
-            _logger.exception("Failed to read %s/%s.", bucket, key)
+            _logger.exception(f"Failed to read {bucket}/{key}.")
             raise OperationalError(*e.args) from e
 
     def _as_arrow(self) -> Table:
