@@ -66,8 +66,9 @@ fs.rm("s3://YOUR_S3_BUCKET/path/to/", recursive=True)
 ```
 
 Writes with `pipe`/`pipe_file` issue a single PutObject request for data up to the
-block size (5 MiB by default) and switch to a parallel multipart upload for larger
-data. Inside an [fsspec transaction](https://filesystem-spec.readthedocs.io/en/latest/features.html#transactions),
+block size (5 MiB by default); larger data is uploaded as a parallel multipart upload
+through the buffered file path. Inside an
+[fsspec transaction](https://filesystem-spec.readthedocs.io/en/latest/features.html#transactions),
 writes are deferred until the transaction commits and are discarded on rollback.
 
 ## Error translation

@@ -5,7 +5,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from itertools import chain
 from pathlib import Path
@@ -139,6 +139,7 @@ class TestS3FileSystem:
         fs._retry_config = RetryConfig()
         fs.request_kwargs = {}
         fs.max_workers = 4
+        fs.default_block_size = S3FileSystem.DEFAULT_BLOCK_SIZE
         fs.allow_bucket_creation = False
         fs.allow_bucket_deletion = False
         fs.s3_additional_kwargs = {}
@@ -258,56 +259,39 @@ class TestS3FileSystem:
         with pytest.raises(ValueError, match="version"):
             fs.pipe_file("s3://bucket/key?versionId=12345abcde", b"data")
 
-    def test_pipe_file_large_uses_multipart_upload(self):
+    def test_finish_multipart_upload(self):
         fs = self._make_fs()
-        fs.default_block_size = 5
-        # Shrink the part-size limits so the test data is split without
-        # allocating real 5 MiB payloads.
-        fs.MULTIPART_UPLOAD_MIN_PART_SIZE = 5
-        fs.MULTIPART_UPLOAD_MAX_PART_SIZE = 2**30
-        fs._put_object = mock.MagicMock()
-        fs._create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
-        )
-        uploaded: dict[int, bytes] = {}
-
-        def upload_part(**kwargs):
-            uploaded[kwargs["part_number"]] = kwargs["body"]
-            return SimpleNamespace(
-                etag=f'"e{kwargs["part_number"]}"', part_number=kwargs["part_number"]
-            )
-
-        fs._upload_part = mock.MagicMock(side_effect=upload_part)
         fs._complete_multipart_upload = mock.MagicMock()
+        futures = []
+        for part_number in (1, 2):
+            future: Future[SimpleNamespace] = Future()
+            future.set_result(SimpleNamespace(etag=f'"e{part_number}"', part_number=part_number))
+            futures.append(future)
 
-        fs.pipe_file("s3://bucket/key", b"0123456789ABCDEF", ContentType="text/plain")
-
-        fs._put_object.assert_not_called()
-        fs._create_multipart_upload.assert_called_once_with(
-            bucket="bucket", key="key", ContentType="text/plain"
+        fs._finish_multipart_upload(
+            bucket="bucket", key="key", upload_id="uploadid", futures=futures
         )
-        # The data is split into block-size parts and reassembled in order.
-        assert uploaded == {1: b"01234", 2: b"56789", 3: b"ABCDE", 4: b"F"}
         fs._complete_multipart_upload.assert_called_once_with(
             bucket="bucket",
             key="key",
             upload_id="uploadid",
-            parts=[{"ETag": f'"e{i}"', "PartNumber": i} for i in range(1, 5)],
+            parts=[
+                {"ETag": '"e1"', "PartNumber": 1},
+                {"ETag": '"e2"', "PartNumber": 2},
+            ],
         )
+        fs._call.assert_not_called()
 
-    def test_pipe_file_aborts_multipart_upload_on_failure(self):
+    def test_finish_multipart_upload_aborts_on_failure(self):
         fs = self._make_fs()
-        fs.default_block_size = 5
-        fs.MULTIPART_UPLOAD_MIN_PART_SIZE = 5
-        fs.MULTIPART_UPLOAD_MAX_PART_SIZE = 2**30
-        fs._create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
-        )
-        fs._upload_part = mock.MagicMock(side_effect=RuntimeError("upload failed"))
         fs._complete_multipart_upload = mock.MagicMock()
+        future: Future[SimpleNamespace] = Future()
+        future.set_exception(RuntimeError("upload failed"))
 
         with pytest.raises(RuntimeError, match="upload failed"):
-            fs.pipe_file("s3://bucket/key", b"0123456789ABCDEF")
+            fs._finish_multipart_upload(
+                bucket="bucket", key="key", upload_id="uploadid", futures=[future]
+            )
         fs._complete_multipart_upload.assert_not_called()
         fs._call.assert_called_once_with(
             fs._client.abort_multipart_upload,
@@ -316,21 +300,18 @@ class TestS3FileSystem:
             UploadId="uploadid",
         )
 
-    def test_pipe_file_abort_failure_does_not_mask_the_original_error(self):
+    def test_finish_multipart_upload_abort_failure_does_not_mask_the_original_error(self):
         fs = self._make_fs()
-        fs.default_block_size = 5
-        fs.MULTIPART_UPLOAD_MIN_PART_SIZE = 5
-        fs.MULTIPART_UPLOAD_MAX_PART_SIZE = 2**30
-        fs._create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
-        )
-        fs._upload_part = mock.MagicMock(side_effect=RuntimeError("upload failed"))
         fs._complete_multipart_upload = mock.MagicMock()
         fs._call = mock.MagicMock(side_effect=RuntimeError("abort failed"))
+        future: Future[SimpleNamespace] = Future()
+        future.set_exception(RuntimeError("upload failed"))
 
         # The abort failure is logged, and the original error propagates.
         with pytest.raises(RuntimeError, match="upload failed"):
-            fs.pipe_file("s3://bucket/key", b"0123456789ABCDEF")
+            fs._finish_multipart_upload(
+                bucket="bucket", key="key", upload_id="uploadid", futures=[future]
+            )
 
     def test_head_object_version_aware(self):
         fs = self._make_fs()
