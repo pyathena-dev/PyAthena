@@ -698,13 +698,25 @@ class BaseCursor(metaclass=ABCMeta):
             compression=AthenaCompression.COMPRESSION_SNAPPY,
         )
 
+    def _call_on_start_query_execution(self, query_id: str, options: ExecuteOptions) -> None:
+        """Invoke the connection-level and execute-level query-start callbacks.
+
+        Both callbacks are invoked if set. Called by cursors whose execution
+        model supports early access to the query ID (the synchronous and aio
+        cursors) immediately after the StartQueryExecution API call.
+        """
+        if self._on_start_query_execution:
+            self._on_start_query_execution(query_id)
+        if options.on_start_query_execution:
+            options.on_start_query_execution(query_id)
+
     def _execute(
         self,
         operation: str,
         parameters: dict[str, Any] | list[str] | None = None,
         options: ExecuteOptions | None = None,
     ) -> str:
-        options = options if options is not None else ExecuteOptions()
+        options = ExecuteOptions.resolve(options)
         query, execution_parameters = self._prepare_query(operation, parameters, options.paramstyle)
 
         request = self._build_start_query_execution_request(

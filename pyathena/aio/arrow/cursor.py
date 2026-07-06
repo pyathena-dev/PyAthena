@@ -141,11 +141,7 @@ class AioArrowCursor(WithAsyncFetch):
         )
 
         # Call user callbacks immediately after start_query_execution
-        # Both connection-level and execute-level callbacks are invoked if set
-        if self._on_start_query_execution:
-            self._on_start_query_execution(self.query_id)
-        if options.on_start_query_execution:
-            options.on_start_query_execution(self.query_id)
+        self._call_on_start_query_execution(self.query_id, options)
 
         query_execution = await self._poll(self.query_id)
         if query_execution.state == AthenaQueryExecution.STATE_SUCCEEDED:

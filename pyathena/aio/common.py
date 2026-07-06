@@ -30,7 +30,7 @@ class AioBaseCursor(BaseCursor):
         parameters: dict[str, Any] | list[str] | None = None,
         options: ExecuteOptions | None = None,
     ) -> str:
-        options = options if options is not None else ExecuteOptions()
+        options = ExecuteOptions.resolve(options)
         query, execution_parameters = self._prepare_query(operation, parameters, options.paramstyle)
 
         request = self._build_start_query_execution_request(
