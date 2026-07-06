@@ -5,17 +5,18 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from itertools import chain
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-import fsspec
 import pytest
 from fsspec import Callback
 
+import pyathena
+from pyathena.filesystem import register_s3_filesystem
 from pyathena.filesystem.s3 import S3File, S3FileSystem
 from pyathena.filesystem.s3_object import S3Object, S3ObjectType, S3StorageClass
 from pyathena.util import RetryConfig
@@ -25,8 +26,7 @@ from tests.pyathena.conftest import connect
 
 @pytest.fixture(scope="class")
 def register_filesystem():
-    fsspec.register_implementation("s3", "pyathena.filesystem.s3.S3FileSystem", clobber=True)
-    fsspec.register_implementation("s3a", "pyathena.filesystem.s3.S3FileSystem", clobber=True)
+    register_s3_filesystem()
 
 
 @pytest.mark.usefixtures("register_filesystem")
@@ -140,9 +140,35 @@ class TestS3FileSystem:
         fs._retry_config = RetryConfig()
         fs.request_kwargs = {}
         fs.max_workers = 4
+        fs.default_block_size = S3FileSystem.DEFAULT_BLOCK_SIZE
         fs.allow_bucket_creation = False
         fs.allow_bucket_deletion = False
+        fs.s3_additional_kwargs = {}
+        fs._intrans = False
+        fs.version_aware = False
         return fs
+
+    def test_get_client_compatible_with_s3fs(self):
+        # Only constructs a boto3 client; no AWS access.
+        fs = S3FileSystem(
+            key="test_access_key",
+            secret="test_secret_key",
+            region_name="us-east-1",
+            use_ssl=False,
+            skip_instance_cache=True,
+        )
+        # use_ssl=False is honored (previously dropped by a truthiness check).
+        assert fs._client.meta.endpoint_url.startswith("http://")
+        assert pyathena.user_agent_extra in fs._client.meta.config.user_agent_extra
+
+        fs = S3FileSystem(
+            key="test_access_key",
+            secret="test_secret_key",
+            region_name="us-east-1",
+            endpoint_url="http://localhost:9000",
+            skip_instance_cache=True,
+        )
+        assert fs._client.meta.endpoint_url == "http://localhost:9000"
 
     def test_ls_from_cache_with_cached_object(self):
         fs = self._make_fs()
@@ -231,6 +257,202 @@ class TestS3FileSystem:
         with pytest.raises(PermissionError, match="Bucket deletion is disabled"):
             fs.rmdir("s3://bucket")
         fs._call.assert_not_called()
+
+    def test_pipe_file_small_uses_put_object(self):
+        fs = self._make_fs()
+        fs.default_block_size = S3FileSystem.DEFAULT_BLOCK_SIZE
+        fs.s3_additional_kwargs = {"ServerSideEncryption": "AES256"}
+        fs._put_object = mock.MagicMock()
+
+        # The filesystem-level s3_additional_kwargs are merged with the
+        # call-level kwargs, as in the open() path.
+        fs.pipe_file("s3://bucket/key", b"data", ContentType="text/plain")
+        fs._put_object.assert_called_once_with(
+            bucket="bucket",
+            key="key",
+            body=b"data",
+            ServerSideEncryption="AES256",
+            ContentType="text/plain",
+        )
+
+    def test_pipe_file_invalid_path_raises(self):
+        fs = self._make_fs()
+        with pytest.raises(ValueError, match="Cannot write to a bucket"):
+            fs.pipe_file("s3://bucket", b"data")
+        with pytest.raises(ValueError, match="version"):
+            fs.pipe_file("s3://bucket/key?versionId=12345abcde", b"data")
+
+    def test_finish_multipart_upload(self):
+        fs = self._make_fs()
+        fs._complete_multipart_upload = mock.MagicMock()
+        futures = []
+        for part_number in (1, 2):
+            future: Future[SimpleNamespace] = Future()
+            future.set_result(SimpleNamespace(etag=f'"e{part_number}"', part_number=part_number))
+            futures.append(future)
+
+        fs._finish_multipart_upload(
+            bucket="bucket", key="key", upload_id="uploadid", futures=futures
+        )
+        fs._complete_multipart_upload.assert_called_once_with(
+            bucket="bucket",
+            key="key",
+            upload_id="uploadid",
+            parts=[
+                {"ETag": '"e1"', "PartNumber": 1},
+                {"ETag": '"e2"', "PartNumber": 2},
+            ],
+        )
+        fs._call.assert_not_called()
+
+    def test_finish_multipart_upload_aborts_on_failure(self):
+        fs = self._make_fs()
+        fs._complete_multipart_upload = mock.MagicMock()
+        future: Future[SimpleNamespace] = Future()
+        future.set_exception(RuntimeError("upload failed"))
+
+        with pytest.raises(RuntimeError, match="upload failed"):
+            fs._finish_multipart_upload(
+                bucket="bucket", key="key", upload_id="uploadid", futures=[future]
+            )
+        fs._complete_multipart_upload.assert_not_called()
+        fs._call.assert_called_once_with(
+            fs._client.abort_multipart_upload,
+            Bucket="bucket",
+            Key="key",
+            UploadId="uploadid",
+        )
+
+    def test_finish_multipart_upload_abort_failure_does_not_mask_the_original_error(self):
+        fs = self._make_fs()
+        fs._complete_multipart_upload = mock.MagicMock()
+        fs._call = mock.MagicMock(side_effect=RuntimeError("abort failed"))
+        future: Future[SimpleNamespace] = Future()
+        future.set_exception(RuntimeError("upload failed"))
+
+        # The abort failure is logged, and the original error propagates.
+        with pytest.raises(RuntimeError, match="upload failed"):
+            fs._finish_multipart_upload(
+                bucket="bucket", key="key", upload_id="uploadid", futures=[future]
+            )
+
+    def test_head_object_version_aware(self):
+        fs = self._make_fs()
+        fs._call.return_value = {"ContentLength": 4, "ETag": '"etag"', "VersionId": "v1"}
+
+        # The observed version is pinned only in version-aware mode.
+        assert fs._head_object("bucket/key").version_id is None
+
+        fs = self._make_fs()
+        fs.version_aware = True
+        fs._call.return_value = {"ContentLength": 4, "ETag": '"etag"', "VersionId": "v1"}
+        assert fs._head_object("bucket/key").version_id == "v1"
+
+    def test_object_version_info_paginates(self):
+        fs = self._make_fs()
+        fs._call.side_effect = [
+            {
+                "Versions": [
+                    {"Key": "key", "VersionId": "v2", "IsLatest": True, "Size": 4},
+                ],
+                "DeleteMarkers": [
+                    {"Key": "key", "VersionId": "m1", "IsLatest": False},
+                ],
+                "IsTruncated": True,
+                "NextKeyMarker": "key",
+                "NextVersionIdMarker": "v2",
+            },
+            {
+                "Versions": [
+                    {"Key": "key", "VersionId": "v1", "IsLatest": False, "Size": 2},
+                ],
+                "IsTruncated": False,
+            },
+        ]
+
+        actual = fs.object_version_info("s3://bucket/key")
+        assert [(v.key, v.version_id, v.is_latest, v.size) for v in actual] == [
+            ("key", "v2", True, 4),
+            ("key", "v1", False, 2),
+        ]
+        assert all(not v.is_delete_marker for v in actual)
+        fs._call.assert_any_call(fs._client.list_object_versions, Bucket="bucket", Prefix="key")
+        fs._call.assert_any_call(
+            fs._client.list_object_versions,
+            Bucket="bucket",
+            Prefix="key",
+            KeyMarker="key",
+            VersionIdMarker="v2",
+        )
+
+    def test_object_version_info_with_delete_markers(self):
+        fs = self._make_fs()
+        fs._call.return_value = {
+            "Versions": [{"Key": "key", "VersionId": "v1", "IsLatest": False}],
+            "DeleteMarkers": [{"Key": "key", "VersionId": "m1", "IsLatest": True}],
+            "IsTruncated": False,
+        }
+
+        actual = fs.object_version_info("s3://bucket/key", delete_markers=True)
+        assert [(v.version_id, v.is_delete_marker) for v in actual] == [
+            ("v1", False),
+            ("m1", True),
+        ]
+
+    def test_ls_versions_requires_version_aware(self):
+        fs = self._make_fs()
+        with pytest.raises(ValueError, match="version aware"):
+            fs.ls("s3://bucket/path", versions=True)
+
+    def test_ls_versions(self):
+        fs = self._make_fs()
+        fs.version_aware = True
+        fs._call.return_value = {
+            "CommonPrefixes": [{"Prefix": "path/dir/"}],
+            "Versions": [
+                {"Key": "path/key", "VersionId": "v2", "IsLatest": True, "Size": 4},
+                {"Key": "path/key", "VersionId": "v1", "IsLatest": False, "Size": 2},
+            ],
+            "IsTruncated": False,
+        }
+
+        actual = fs.ls("s3://bucket/path", detail=True, versions=True)
+        fs._call.assert_called_once_with(
+            fs._client.list_object_versions, Bucket="bucket", Prefix="path/", Delimiter="/"
+        )
+        assert [(f.name, f.version_id, f.is_latest) for f in actual] == [
+            ("bucket/path/dir", None, None),
+            ("bucket/path/key", "v2", True),
+            ("bucket/path/key", "v1", False),
+        ]
+        assert actual[1].size == 4
+        assert actual[2].size == 2
+
+    def test_ls_versions_object_path_falls_back_to_the_key(self):
+        fs = self._make_fs()
+        fs.version_aware = True
+        fs._call.side_effect = [
+            # The prefix listing returns nothing: the path is an object.
+            {"IsTruncated": False},
+            {
+                "Versions": [
+                    {"Key": "path/key", "VersionId": "v2", "IsLatest": True, "Size": 4},
+                    {"Key": "path/key", "VersionId": "v1", "IsLatest": False, "Size": 2},
+                    # A sibling key sharing the prefix is excluded.
+                    {"Key": "path/key2", "VersionId": "x1", "IsLatest": True, "Size": 1},
+                ],
+                "IsTruncated": False,
+            },
+        ]
+
+        actual = fs.ls("s3://bucket/path/key", detail=True, versions=True)
+        fs._call.assert_any_call(
+            fs._client.list_object_versions, Bucket="bucket", Prefix="path/key", Delimiter="/"
+        )
+        assert [(f.name, f.version_id, f.size) for f in actual] == [
+            ("bucket/path/key", "v2", 4),
+            ("bucket/path/key", "v1", 2),
+        ]
 
     def test_metadata_with_version_id(self):
         fs = self._make_fs()
@@ -774,7 +996,8 @@ class TestS3FileSystem:
             (1, 2**10),
             # (10, 2**10),
             # (100, 2**10),
-            (1, 2**20),
+            (1, 2**20),  # < block size (5 MiB): single PutObject
+            (6, 2**20),  # > block size (5 MiB): parallel multipart upload
             # (10, 2**20),
             # (100, 2**20),
             # (1024, 2**20),
@@ -793,6 +1016,46 @@ class TestS3FileSystem:
         )
         fs.pipe(path, data)
         assert fs.cat(path) == data
+
+    def test_pipe_file_create_mode_and_kwargs(self, fs):
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_pipe_file_create/{uuid.uuid4()}"
+        )
+        data = b"0123456789"
+        fs.pipe_file(path, data, ContentType="text/plain")
+        assert fs.cat(path) == data
+        assert fs.metadata(path).content_type == "text/plain"
+
+        with pytest.raises(FileExistsError):
+            fs.pipe_file(path, data, mode="create")
+
+    def test_pipe_file_transaction(self, fs):
+        # Inside an fsspec transaction the write is deferred to the commit.
+        data = b"0123456789"
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_pipe_file_transaction/{uuid.uuid4()}"
+        )
+        with fs.transaction:
+            fs.pipe_file(path, data)
+        assert fs.cat(path) == data
+
+        # Raising inside the transaction must leave no object behind.
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_pipe_file_transaction/{uuid.uuid4()}"
+        )
+
+        def write_then_fail():
+            with fs.transaction:
+                fs.pipe_file(path, data)
+                raise RuntimeError("rollback")
+
+        with pytest.raises(RuntimeError):
+            write_then_fail()
+        fs.invalidate_cache(path)
+        assert not fs.exists(path)
 
     def test_cat_ranges(self, fs):
         data = b"1234567890abcdefghijklmnopqrstuvwxyz"
@@ -1141,6 +1404,34 @@ class TestS3FileSystem:
         uploads = fs.list_multipart_uploads(prefix_path)
         assert not any(u.upload_id == upload.upload_id for u in uploads)
 
+    def test_object_version_info(self, fs):
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_object_version_info/{uuid.uuid4()}"
+        )
+        fs.pipe(path, b"data")
+
+        versions = fs.object_version_info(path)
+        assert len(versions) == 1
+        version = versions[0]
+        bucket, key, _ = fs.parse_path(path)
+        assert version.bucket == bucket
+        assert version.key == key
+        assert version.name == f"{bucket}/{key}"
+        assert version.is_latest
+        assert not version.is_delete_marker
+        assert version.size == 4
+        # An unversioned bucket reports the "null" version.
+        assert version.version_id
+
+    @pytest.mark.parametrize("fs", [{"version_aware": True}], indirect=True)
+    def test_version_aware_read(self, fs):
+        # On an unversioned bucket, the version-aware mode is a no-op for
+        # reads: HeadObject returns no version to pin.
+        path = f"s3://{ENV.s3_staging_bucket}/{ENV.s3_filesystem_test_file_key}"
+        with fs.open(path, "rb") as f:
+            assert f.read() == b"0123456789"
+
     def test_file_url_metadata_getxattr_setxattr(self, fs):
         path = (
             f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
@@ -1278,6 +1569,10 @@ class TestS3File:
             (42, 1337, 2, 1295, [(42, 1337)]),  # single block
             (42, 1337, 2, 1296, [(42, 1337)]),  # single block
             (42, 1337, 2, 1294, [(42, 1336), (1336, 1337)]),  # single block too small
+            # The size is an exact multiple of the block size:
+            # no empty trailing range is generated.
+            (0, 10, 2, 5, [(0, 5), (5, 10)]),
+            (42, 2632, 2, 1295, [(42, 1337), (1337, 2632)]),
         ],
     )
     def test_get_ranges(self, start, end, max_workers, worker_block_size, ranges):
@@ -1358,7 +1653,7 @@ class TestS3File:
         assert file._upload_chunk(final=True) is False  # final -> buffer kept
         if not autocommit:
             # Deferred: the multipart upload is completed by commit().
-            file.fs._complete_multipart_upload.assert_not_called()
+            file.fs._finish_multipart_upload.assert_not_called()
             file.commit()
-        file.fs._complete_multipart_upload.assert_called_once()
+        file.fs._finish_multipart_upload.assert_called_once()
         file.fs._put_object.assert_not_called()

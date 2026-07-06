@@ -318,6 +318,80 @@ class S3Metadata(Mapping[str, str]):
         return dict(self._user_metadata)
 
 
+class S3ObjectVersion:
+    """Represents a version of an S3 object as returned by ListObjectVersions.
+
+    Attributes:
+        bucket: S3 bucket name.
+        key: Object key.
+        version_id: The version ID of the object.
+        is_latest: Whether the version is the latest version of the object.
+        is_delete_marker: Whether the version is a delete marker.
+        last_modified: Date and time when the version was last modified.
+        etag: Entity tag of the version. None for delete markers.
+        size: Size in bytes of the version. None for delete markers.
+        storage_class: Storage class of the version. None for delete markers.
+        owner: Owner of the version.
+    """
+
+    def __init__(self, bucket: str, is_delete_marker: bool, response: dict[str, Any]) -> None:
+        self._bucket = bucket
+        self._is_delete_marker = is_delete_marker
+        self._key: str = response["Key"]
+        self._version_id: str | None = response.get("VersionId")
+        self._is_latest: bool = response.get("IsLatest", False)
+        self._last_modified: datetime | None = response.get("LastModified")
+        self._etag: str | None = response.get("ETag")
+        self._size: int | None = response.get("Size")
+        self._storage_class: str | None = response.get("StorageClass")
+        owner = response.get("Owner")
+        self._owner: S3Owner | None = S3Owner(owner) if owner else None
+
+    @property
+    def bucket(self) -> str:
+        return self._bucket
+
+    @property
+    def key(self) -> str:
+        return self._key
+
+    @property
+    def name(self) -> str:
+        return f"{self._bucket}/{self._key}"
+
+    @property
+    def version_id(self) -> str | None:
+        return self._version_id
+
+    @property
+    def is_latest(self) -> bool:
+        return self._is_latest
+
+    @property
+    def is_delete_marker(self) -> bool:
+        return self._is_delete_marker
+
+    @property
+    def last_modified(self) -> datetime | None:
+        return self._last_modified
+
+    @property
+    def etag(self) -> str | None:
+        return self._etag
+
+    @property
+    def size(self) -> int | None:
+        return self._size
+
+    @property
+    def storage_class(self) -> str | None:
+        return self._storage_class
+
+    @property
+    def owner(self) -> S3Owner | None:
+        return self._owner
+
+
 class S3PutObject:
     """Represents the response from an S3 PUT object operation.
 

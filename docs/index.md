@@ -74,6 +74,7 @@ sqlalchemy
 :maxdepth: 2
 :caption: Advanced Topics
 
+filesystem
 null_handling
 testing
 ```

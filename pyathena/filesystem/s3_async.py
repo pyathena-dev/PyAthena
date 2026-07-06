@@ -10,7 +10,12 @@ from fsspec.callbacks import _DEFAULT_CALLBACK
 
 from pyathena.filesystem.s3 import S3File, S3FileSystem
 from pyathena.filesystem.s3_executor import S3AioExecutor
-from pyathena.filesystem.s3_object import S3Metadata, S3MultipartUpload, S3Object
+from pyathena.filesystem.s3_object import (
+    S3Metadata,
+    S3MultipartUpload,
+    S3Object,
+    S3ObjectVersion,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -66,6 +71,7 @@ class AioS3FileSystem(AsyncFileSystem):
         s3_additional_kwargs: dict[str, Any] | None = None,
         allow_bucket_creation: bool = False,
         allow_bucket_deletion: bool = False,
+        version_aware: bool = False,
         asynchronous: bool = False,
         loop: Any | None = None,
         batch_size: int | None = None,
@@ -85,6 +91,7 @@ class AioS3FileSystem(AsyncFileSystem):
             s3_additional_kwargs=s3_additional_kwargs,
             allow_bucket_creation=allow_bucket_creation,
             allow_bucket_deletion=allow_bucket_deletion,
+            version_aware=version_aware,
             **kwargs,
         )
         # Share dircache for cache coherence between async and sync instances
@@ -111,8 +118,10 @@ class AioS3FileSystem(AsyncFileSystem):
     async def _rm_file(self, path: str, **kwargs) -> None:
         await asyncio.to_thread(self._sync_fs.rm_file, path, **kwargs)
 
-    async def _pipe_file(self, path: str, value: bytes, **kwargs) -> None:
-        await asyncio.to_thread(self._sync_fs.pipe_file, path, value, **kwargs)
+    async def _pipe_file(
+        self, path: str, value: bytes | bytearray | memoryview, mode: str = "overwrite", **kwargs
+    ) -> None:
+        await asyncio.to_thread(self._sync_fs.pipe_file, path, value, mode=mode, **kwargs)
 
     async def _put_file(self, lpath: str, rpath: str, callback=_DEFAULT_CALLBACK, **kwargs) -> None:
         await asyncio.to_thread(self._sync_fs.put_file, lpath, rpath, callback=callback, **kwargs)
@@ -182,6 +191,8 @@ class AioS3FileSystem(AsyncFileSystem):
 
     async def _cp_file(self, path1: str, path2: str, **kwargs) -> None:
         """Copy an S3 object, using async parallel multipart upload for large files."""
+        # fsspec < 2026.6.0 leaks the typo'd "onerror" keyword from mv();
+        # see S3FileSystem.cp_file.
         kwargs.pop("onerror", None)
         bucket1, key1, version_id1 = self.parse_path(path1)
         bucket2, key2, version_id2 = self.parse_path(path2)
@@ -352,6 +363,11 @@ class AioS3FileSystem(AsyncFileSystem):
 
     def chmod(self, path: str, acl: str, recursive: bool = False, **kwargs) -> None:
         self._sync_fs.chmod(path, acl, recursive=recursive, **kwargs)
+
+    def object_version_info(
+        self, path: str, delete_markers: bool = False, **kwargs
+    ) -> list[S3ObjectVersion]:
+        return self._sync_fs.object_version_info(path, delete_markers=delete_markers, **kwargs)
 
     def list_multipart_uploads(self, path: str) -> list[S3MultipartUpload]:
         return self._sync_fs.list_multipart_uploads(path)
