@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any, cast
 
 from pyathena.aio.common import WithAsyncFetch
@@ -80,6 +81,7 @@ class AioCursor(WithAsyncFetch):
         result_reuse_enable: bool | None = None,
         result_reuse_minutes: int | None = None,
         paramstyle: str | None = None,
+        on_start_query_execution: Callable[[str], None] | None = None,
         result_set_type_hints: dict[str | int, str] | None = None,
         *,
         options: ExecuteOptions | None = None,
@@ -97,6 +99,7 @@ class AioCursor(WithAsyncFetch):
             result_reuse_enable: Enable result reuse (optional).
             result_reuse_minutes: Result reuse duration in minutes (optional).
             paramstyle: Parameter style to use (optional).
+            on_start_query_execution: Callback called when query starts.
             result_set_type_hints: Optional dictionary mapping column names to
                 Athena DDL type signatures for precise type conversion within
                 complex types.
@@ -109,7 +112,8 @@ class AioCursor(WithAsyncFetch):
             Self reference for method chaining.
         """
         self._reset_state()
-        options = (options if options is not None else ExecuteOptions()).merge(
+        options = ExecuteOptions.resolve(
+            options,
             work_group=work_group,
             s3_staging_dir=s3_staging_dir,
             cache_size=cache_size,
@@ -117,6 +121,7 @@ class AioCursor(WithAsyncFetch):
             result_reuse_enable=result_reuse_enable,
             result_reuse_minutes=result_reuse_minutes,
             paramstyle=paramstyle,
+            on_start_query_execution=on_start_query_execution,
             result_set_type_hints=result_set_type_hints,
         )
         self.query_id = await self._execute(
@@ -124,6 +129,13 @@ class AioCursor(WithAsyncFetch):
             parameters=parameters,
             options=options,
         )
+
+        # Call user callbacks immediately after start_query_execution
+        # Both connection-level and execute-level callbacks are invoked if set
+        if self._on_start_query_execution:
+            self._on_start_query_execution(self.query_id)
+        if options.on_start_query_execution:
+            options.on_start_query_execution(self.query_id)
 
         query_execution = await self._poll(self.query_id)
         if query_execution.state == AthenaQueryExecution.STATE_SUCCEEDED:

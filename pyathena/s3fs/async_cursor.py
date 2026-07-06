@@ -219,7 +219,8 @@ class AsyncS3FSCursor(AsyncCursor):
             >>> result_set = future.result()
             >>> rows = result_set.fetchall()
         """
-        options = (options if options is not None else ExecuteOptions()).merge(
+        options = ExecuteOptions.resolve(
+            options,
             work_group=work_group,
             s3_staging_dir=s3_staging_dir,
             cache_size=cache_size,

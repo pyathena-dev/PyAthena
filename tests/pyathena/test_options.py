@@ -58,10 +58,21 @@ def test_merge_does_not_mutate_original():
     assert merged is not options
 
 
-def test_merge_without_applied_overrides_returns_self():
+def test_merge_without_applied_overrides_is_equal():
     options = ExecuteOptions(work_group="primary")
-    assert options.merge() is options
-    assert options.merge(work_group=None) is options
+    assert options.merge() == options
+    assert options.merge(work_group=None) == options
+
+
+def test_resolve_with_none_returns_defaults_with_overrides():
+    resolved = ExecuteOptions.resolve(None, work_group="wg")
+    assert resolved == ExecuteOptions(work_group="wg")
+
+
+def test_resolve_applies_overrides_to_given_options():
+    options = ExecuteOptions(work_group="primary", cache_size=100)
+    resolved = ExecuteOptions.resolve(options, work_group="adhoc", cache_size=None)
+    assert resolved == ExecuteOptions(work_group="adhoc", cache_size=100)
 
 
 def test_merge_raises_on_unknown_field():

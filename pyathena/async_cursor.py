@@ -211,7 +211,8 @@ class AsyncCursor(BaseCursor):
             >>> # Do other work while query runs...
             >>> result_set = future.result()  # Wait for completion
         """
-        options = (options if options is not None else ExecuteOptions()).merge(
+        options = ExecuteOptions.resolve(
+            options,
             work_group=work_group,
             s3_staging_dir=s3_staging_dir,
             cache_size=cache_size,

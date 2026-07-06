@@ -193,9 +193,9 @@ class BaseCursor(metaclass=ABCMeta):
         self._kill_on_interrupt = kill_on_interrupt
         self._result_reuse_enable = result_reuse_enable
         self._result_reuse_minutes = result_reuse_minutes
-        # ``on_start_query_execution`` is invoked only by cursors whose ``execute()``
-        # supports it (the synchronous cursors). Async/aio/Spark cursors return the
-        # query id immediately through their execution model and do not invoke it.
+        # ``on_start_query_execution`` is invoked by cursors whose ``execute()``
+        # supports it (the synchronous and aio cursors). Async/Spark cursors return
+        # the query id immediately through their execution model and do not invoke it.
         self._on_start_query_execution = on_start_query_execution
         self._on_poll = on_poll
 
@@ -718,10 +718,8 @@ class BaseCursor(metaclass=ABCMeta):
         query_id = self._find_previous_query_id(
             query,
             options.work_group,
-            cache_size=options.cache_size if options.cache_size else 0,
-            cache_expiration_time=options.cache_expiration_time
-            if options.cache_expiration_time
-            else 0,
+            cache_size=options.cache_size,
+            cache_expiration_time=options.cache_expiration_time,
         )
         if query_id is None:
             try:

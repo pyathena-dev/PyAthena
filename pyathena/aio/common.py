@@ -44,10 +44,8 @@ class AioBaseCursor(BaseCursor):
         query_id = await self._find_previous_query_id(
             query,
             options.work_group,
-            cache_size=options.cache_size if options.cache_size else 0,
-            cache_expiration_time=options.cache_expiration_time
-            if options.cache_expiration_time
-            else 0,
+            cache_size=options.cache_size,
+            cache_expiration_time=options.cache_expiration_time,
         )
         if query_id is None:
             try:

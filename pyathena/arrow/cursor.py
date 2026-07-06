@@ -173,7 +173,8 @@ class ArrowCursor(WithFetch):
             >>> table = cursor.as_arrow()  # Returns Apache Arrow Table
         """
         self._reset_state()
-        options = (options if options is not None else ExecuteOptions()).merge(
+        options = ExecuteOptions.resolve(
+            options,
             work_group=work_group,
             s3_staging_dir=s3_staging_dir,
             cache_size=cache_size,

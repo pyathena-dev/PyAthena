@@ -3,6 +3,7 @@ from datetime import datetime
 
 import pytest
 
+from pyathena import ExecuteOptions
 from pyathena.error import DatabaseError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet
@@ -64,6 +65,19 @@ class TestAioCursor:
     async def test_execute_returns_self(self, aio_cursor):
         result = await aio_cursor.execute("SELECT * FROM one_row")
         assert result is aio_cursor
+
+    async def test_execute_with_callback(self, aio_cursor):
+        callback_results = []
+        await aio_cursor.execute("SELECT 1", on_start_query_execution=callback_results.append)
+        assert callback_results == [aio_cursor.query_id]
+        assert await aio_cursor.fetchone() == (1,)
+
+    async def test_execute_with_options(self, aio_cursor):
+        callback_results = []
+        options = ExecuteOptions(on_start_query_execution=callback_results.append)
+        await aio_cursor.execute("SELECT 1", options=options)
+        assert callback_results == [aio_cursor.query_id]
+        assert await aio_cursor.fetchone() == (1,)
 
     async def test_no_result_set_raises(self, aio_cursor):
         with pytest.raises(ProgrammingError):

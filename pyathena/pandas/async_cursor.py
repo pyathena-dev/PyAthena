@@ -165,7 +165,34 @@ class AsyncPandasCursor(AsyncCursor):
         options: ExecuteOptions | None = None,
         **kwargs,
     ) -> tuple[str, Future[AthenaPandasResultSet | Any]]:
-        options = (options if options is not None else ExecuteOptions()).merge(
+        """Execute a SQL query asynchronously and return results as pandas DataFrames.
+
+        Args:
+            operation: SQL query string to execute.
+            parameters: Query parameters for parameterized queries.
+            work_group: Athena workgroup to use for this query.
+            s3_staging_dir: S3 location for query results.
+            cache_size: Number of queries to check for result caching.
+            cache_expiration_time: Cache expiration time in seconds.
+            result_reuse_enable: Enable Athena result reuse for this query.
+            result_reuse_minutes: Minutes to reuse cached results.
+            paramstyle: Parameter style ('qmark' or 'pyformat').
+            result_set_type_hints: Optional dictionary mapping column names to
+                Athena DDL type signatures for precise type conversion within
+                complex types.
+            keep_default_na: Whether to keep default pandas NA values.
+            na_values: Additional values to treat as NA.
+            quoting: CSV quoting behavior (pandas csv.QUOTE_* constants).
+            options: Shared execution options as an
+                :class:`~pyathena.options.ExecuteOptions` instance. Individual
+                keyword arguments take precedence over ``options`` fields.
+            **kwargs: Additional pandas read_csv/read_parquet parameters.
+
+        Returns:
+            Tuple of (query_id, future) where future resolves to AthenaPandasResultSet.
+        """
+        options = ExecuteOptions.resolve(
+            options,
             work_group=work_group,
             s3_staging_dir=s3_staging_dir,
             cache_size=cache_size,
