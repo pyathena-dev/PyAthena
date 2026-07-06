@@ -191,6 +191,8 @@ class AioS3FileSystem(AsyncFileSystem):
 
     async def _cp_file(self, path1: str, path2: str, **kwargs) -> None:
         """Copy an S3 object, using async parallel multipart upload for large files."""
+        # fsspec < 2026.6.0 leaks the typo'd "onerror" keyword from mv();
+        # see S3FileSystem.cp_file.
         kwargs.pop("onerror", None)
         bucket1, key1, version_id1 = self.parse_path(path1)
         bucket2, key2, version_id2 = self.parse_path(path2)

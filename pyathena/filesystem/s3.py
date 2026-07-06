@@ -1011,10 +1011,12 @@ class S3FileSystem(AbstractFileSystem):
             to optimize performance for large files. The copy operation is
             performed entirely on the S3 service without data transfer.
         """
-        # TODO: Delete the value that seems to be a typo, onerror=false.
+        # fsspec < 2026.6.0: AbstractFileSystem.mv() passed the typo'd
+        # "onerror" keyword (instead of "on_error", which copy() consumes),
+        # so it leaked through copy(**kwargs) into cp_file and must not
+        # reach the S3 API. Remove this once the fsspec requirement is
+        # >= 2026.6.0, where mv() passes on_error correctly.
         # https://github.com/fsspec/filesystem_spec/commit/346a589fef9308550ffa3d0d510f2db67281bb05
-        # https://github.com/fsspec/filesystem_spec/blob/2024.10.0/fsspec/spec.py#L1185
-        # https://github.com/fsspec/filesystem_spec/blob/2024.10.0/fsspec/spec.py#L1077
         kwargs.pop("onerror", None)
         bucket1, key1, version_id1 = self.parse_path(path1)
         bucket2, key2, version_id2 = self.parse_path(path2)
