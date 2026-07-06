@@ -153,7 +153,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
                 isinstance(e, botocore.exceptions.ClientError)
                 and e.response["Error"]["Code"] == "InvalidRequestException"
             ):
-                _logger.exception("Session: %s not found.", session_id)
+                _logger.exception(f"Session: {session_id} not found.")
                 return False
             raise OperationalError(*e.args) from e
         else:

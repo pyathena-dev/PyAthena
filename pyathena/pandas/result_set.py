@@ -575,7 +575,7 @@ class AthenaPandasResultSet(AthenaResultSet):
             return result
 
         except Exception as e:
-            _logger.exception("Failed to read %s.", self.output_location)
+            _logger.exception(f"Failed to read {self.output_location}.")
             raise OperationalError(*e.args) from e
 
     def _read_parquet(self, engine) -> DataFrame:
@@ -609,7 +609,7 @@ class AthenaPandasResultSet(AthenaResultSet):
                 **kwargs,
             )
         except Exception as e:
-            _logger.exception("Failed to read %s.", self.output_location)
+            _logger.exception(f"Failed to read {self.output_location}.")
             raise OperationalError(*e.args) from e
 
     def _read_parquet_schema(self, engine) -> tuple[dict[str, Any], ...]:
@@ -625,7 +625,7 @@ class AthenaPandasResultSet(AthenaResultSet):
                 dataset = parquet.ParquetDataset(f"{bucket}/{key}", filesystem=self._fs)
                 return to_column_info(dataset.schema)
             except Exception as e:
-                _logger.exception("Failed to read schema %s/%s.", bucket, key)
+                _logger.exception(f"Failed to read schema {bucket}/{key}.")
                 raise OperationalError(*e.args) from e
         else:
             raise ProgrammingError("Engine must be `pyarrow`.")

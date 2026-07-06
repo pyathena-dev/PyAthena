@@ -663,7 +663,7 @@ class AthenaResultSet(CursorIterator):
                 Key=key,
             )
         except Exception as e:
-            _logger.exception("Failed to read %s/%s.", bucket, key)
+            _logger.exception(f"Failed to read {bucket}/{key}.")
             raise OperationalError(*e.args) from e
         else:
             manifest: str = response["Body"].read().decode("utf-8").strip()

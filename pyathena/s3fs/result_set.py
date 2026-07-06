@@ -141,7 +141,7 @@ class AthenaS3FSResultSet(AthenaResultSet):
                 next(self._csv_reader)
 
         except Exception as e:
-            _logger.exception("Failed to open %s.", path)
+            _logger.exception(f"Failed to open {path}.")
             raise OperationalError(*e.args) from e
 
     def _fetch(self) -> None:
