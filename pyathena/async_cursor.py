@@ -9,6 +9,7 @@ from typing import Any, cast
 from pyathena.common import BaseCursor, CursorIterator
 from pyathena.error import NotSupportedError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
+from pyathena.options import ExecuteOptions
 from pyathena.result_set import AthenaDictResultSet, AthenaResultSet
 
 _logger = logging.getLogger(__name__)
@@ -165,12 +166,14 @@ class AsyncCursor(BaseCursor):
         parameters: dict[str, Any] | list[str] | None = None,
         work_group: str | None = None,
         s3_staging_dir: str | None = None,
-        cache_size: int | None = 0,
-        cache_expiration_time: int | None = 0,
+        cache_size: int | None = None,
+        cache_expiration_time: int | None = None,
         result_reuse_enable: bool | None = None,
         result_reuse_minutes: int | None = None,
         paramstyle: str | None = None,
         result_set_type_hints: dict[str | int, str] | None = None,
+        *,
+        options: ExecuteOptions | None = None,
         **kwargs,
     ) -> tuple[str, Future[AthenaResultSet | Any]]:
         """Execute a SQL query asynchronously.
@@ -192,6 +195,9 @@ class AsyncCursor(BaseCursor):
             result_set_type_hints: Optional dictionary mapping column names to
                 Athena DDL type signatures for precise type conversion within
                 complex types.
+            options: Shared execution options as an
+                :class:`~pyathena.options.ExecuteOptions` instance. Individual
+                keyword arguments take precedence over ``options`` fields.
             **kwargs: Additional execution parameters.
 
         Returns:
@@ -205,9 +211,7 @@ class AsyncCursor(BaseCursor):
             >>> # Do other work while query runs...
             >>> result_set = future.result()  # Wait for completion
         """
-        query_id = self._execute(
-            operation,
-            parameters=parameters,
+        options = (options if options is not None else ExecuteOptions()).merge(
             work_group=work_group,
             s3_staging_dir=s3_staging_dir,
             cache_size=cache_size,
@@ -215,9 +219,15 @@ class AsyncCursor(BaseCursor):
             result_reuse_enable=result_reuse_enable,
             result_reuse_minutes=result_reuse_minutes,
             paramstyle=paramstyle,
+            result_set_type_hints=result_set_type_hints,
+        )
+        query_id = self._execute(
+            operation,
+            parameters=parameters,
+            options=options,
         )
         return query_id, self._executor.submit(
-            self._collect_result_set, query_id, result_set_type_hints
+            self._collect_result_set, query_id, options.result_set_type_hints
         )
 
     def executemany(

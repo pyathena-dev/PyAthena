@@ -7,6 +7,7 @@ from typing import Any, cast
 from pyathena.common import CursorIterator
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
+from pyathena.options import ExecuteOptions
 from pyathena.result_set import AthenaDictResultSet, AthenaResultSet, WithFetch
 
 _logger = logging.getLogger(__name__)
@@ -87,13 +88,15 @@ class Cursor(WithFetch):
         parameters: dict[str, Any] | list[str] | None = None,
         work_group: str | None = None,
         s3_staging_dir: str | None = None,
-        cache_size: int = 0,
-        cache_expiration_time: int = 0,
+        cache_size: int | None = None,
+        cache_expiration_time: int | None = None,
         result_reuse_enable: bool | None = None,
         result_reuse_minutes: int | None = None,
         paramstyle: str | None = None,
         on_start_query_execution: Callable[[str], None] | None = None,
         result_set_type_hints: dict[str | int, str] | None = None,
+        *,
+        options: ExecuteOptions | None = None,
         **kwargs,
     ) -> Cursor:
         """Execute a SQL query.
@@ -110,6 +113,9 @@ class Cursor(WithFetch):
                 Athena DDL type signatures for precise type conversion within
                 complex types. For example:
                 ``{"tags": "array(varchar)", "metadata": "map(varchar, integer)"}``
+            options: Shared execution options as an
+                :class:`~pyathena.options.ExecuteOptions` instance. Individual
+                keyword arguments take precedence over ``options`` fields.
             **kwargs: Additional execution parameters.
 
         Returns:
@@ -125,9 +131,7 @@ class Cursor(WithFetch):
             ... )
         """
         self._reset_state()
-        self.query_id = self._execute(
-            operation,
-            parameters=parameters,
+        options = (options if options is not None else ExecuteOptions()).merge(
             work_group=work_group,
             s3_staging_dir=s3_staging_dir,
             cache_size=cache_size,
@@ -135,14 +139,21 @@ class Cursor(WithFetch):
             result_reuse_enable=result_reuse_enable,
             result_reuse_minutes=result_reuse_minutes,
             paramstyle=paramstyle,
+            on_start_query_execution=on_start_query_execution,
+            result_set_type_hints=result_set_type_hints,
+        )
+        self.query_id = self._execute(
+            operation,
+            parameters=parameters,
+            options=options,
         )
 
         # Call user callbacks immediately after start_query_execution
         # Both connection-level and execute-level callbacks are invoked if set
         if self._on_start_query_execution:
             self._on_start_query_execution(self.query_id)
-        if on_start_query_execution:
-            on_start_query_execution(self.query_id)
+        if options.on_start_query_execution:
+            options.on_start_query_execution(self.query_id)
 
         query_execution = cast(AthenaQueryExecution, self._poll(self.query_id))
         if query_execution.state == AthenaQueryExecution.STATE_SUCCEEDED:
@@ -152,7 +163,7 @@ class Cursor(WithFetch):
                 query_execution,
                 self.arraysize,
                 self._retry_config,
-                result_set_type_hints=result_set_type_hints,
+                result_set_type_hints=options.result_set_type_hints,
             )
         else:
             raise OperationalError(query_execution.state_change_reason)

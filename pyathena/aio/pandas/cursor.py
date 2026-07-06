@@ -14,6 +14,7 @@ from pyathena.aio.common import WithAsyncFetch
 from pyathena.common import CursorIterator
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
+from pyathena.options import ExecuteOptions
 from pyathena.pandas.converter import (
     DefaultPandasTypeConverter,
     DefaultPandasUnloadTypeConverter,
@@ -97,14 +98,17 @@ class AioPandasCursor(WithAsyncFetch):
         parameters: dict[str, Any] | list[str] | None = None,
         work_group: str | None = None,
         s3_staging_dir: str | None = None,
-        cache_size: int | None = 0,
-        cache_expiration_time: int | None = 0,
+        cache_size: int | None = None,
+        cache_expiration_time: int | None = None,
         result_reuse_enable: bool | None = None,
         result_reuse_minutes: int | None = None,
         paramstyle: str | None = None,
         keep_default_na: bool = False,
         na_values: Iterable[str] | None = ("",),
         quoting: int = 1,
+        result_set_type_hints: dict[str | int, str] | None = None,
+        *,
+        options: ExecuteOptions | None = None,
         **kwargs,
     ) -> AioPandasCursor:
         """Execute a SQL query asynchronously and return results as pandas DataFrames.
@@ -122,16 +126,19 @@ class AioPandasCursor(WithAsyncFetch):
             keep_default_na: Whether to keep default pandas NA values.
             na_values: Additional values to treat as NA.
             quoting: CSV quoting behavior (pandas csv.QUOTE_* constants).
+            result_set_type_hints: Optional dictionary mapping column names to
+                Athena DDL type signatures for precise type conversion within
+                complex types.
+            options: Shared execution options as an
+                :class:`~pyathena.options.ExecuteOptions` instance. Individual
+                keyword arguments take precedence over ``options`` fields.
             **kwargs: Additional pandas read_csv/read_parquet parameters.
 
         Returns:
             Self reference for method chaining.
         """
         self._reset_state()
-        operation, unload_location = self._prepare_unload(operation, s3_staging_dir)
-        self.query_id = await self._execute(
-            operation,
-            parameters=parameters,
+        options = (options if options is not None else ExecuteOptions()).merge(
             work_group=work_group,
             s3_staging_dir=s3_staging_dir,
             cache_size=cache_size,
@@ -139,6 +146,13 @@ class AioPandasCursor(WithAsyncFetch):
             result_reuse_enable=result_reuse_enable,
             result_reuse_minutes=result_reuse_minutes,
             paramstyle=paramstyle,
+            result_set_type_hints=result_set_type_hints,
+        )
+        operation, unload_location = self._prepare_unload(operation, options.s3_staging_dir)
+        self.query_id = await self._execute(
+            operation,
+            parameters=parameters,
+            options=options,
         )
 
         query_execution = await self._poll(self.query_id)
@@ -161,6 +175,7 @@ class AioPandasCursor(WithAsyncFetch):
                 cache_type=kwargs.pop("cache_type", self._cache_type),
                 max_workers=kwargs.pop("max_workers", self._max_workers),
                 auto_optimize_chunksize=self._auto_optimize_chunksize,
+                result_set_type_hints=options.result_set_type_hints,
                 **kwargs,
             )
         else:

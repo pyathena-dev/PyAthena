@@ -14,6 +14,7 @@ from pyathena.arrow.result_set import AthenaArrowResultSet
 from pyathena.async_cursor import AsyncCursor
 from pyathena.common import CursorIterator
 from pyathena.model import AthenaQueryExecution
+from pyathena.options import ExecuteOptions
 
 _logger = logging.getLogger(__name__)
 
@@ -176,18 +177,17 @@ class AsyncArrowCursor(AsyncCursor):
         parameters: dict[str, Any] | list[str] | None = None,
         work_group: str | None = None,
         s3_staging_dir: str | None = None,
-        cache_size: int | None = 0,
-        cache_expiration_time: int | None = 0,
+        cache_size: int | None = None,
+        cache_expiration_time: int | None = None,
         result_reuse_enable: bool | None = None,
         result_reuse_minutes: int | None = None,
         paramstyle: str | None = None,
         result_set_type_hints: dict[str | int, str] | None = None,
+        *,
+        options: ExecuteOptions | None = None,
         **kwargs,
     ) -> tuple[str, Future[AthenaArrowResultSet | Any]]:
-        operation, unload_location = self._prepare_unload(operation, s3_staging_dir)
-        query_id = self._execute(
-            operation,
-            parameters=parameters,
+        options = (options if options is not None else ExecuteOptions()).merge(
             work_group=work_group,
             s3_staging_dir=s3_staging_dir,
             cache_size=cache_size,
@@ -195,13 +195,20 @@ class AsyncArrowCursor(AsyncCursor):
             result_reuse_enable=result_reuse_enable,
             result_reuse_minutes=result_reuse_minutes,
             paramstyle=paramstyle,
+            result_set_type_hints=result_set_type_hints,
+        )
+        operation, unload_location = self._prepare_unload(operation, options.s3_staging_dir)
+        query_id = self._execute(
+            operation,
+            parameters=parameters,
+            options=options,
         )
         return (
             query_id,
             self._executor.submit(
                 self._collect_result_set,
                 query_id,
-                result_set_type_hints,
+                options.result_set_type_hints,
                 unload_location,
                 kwargs,
             ),
