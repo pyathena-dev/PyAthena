@@ -3,10 +3,8 @@
 # S3 filesystem
 
 PyAthena ships its own [fsspec](https://filesystem-spec.readthedocs.io/en/latest/)-compatible
-filesystem implementation for Amazon S3 (`S3FileSystem`), instead of depending on
-[s3fs](https://github.com/fsspec/s3fs). This avoids the dependency and version-conflict
-problems between s3fs/aiobotocore and boto3/botocore, while providing an API surface
-compatible with s3fs for users migrating from it.
+filesystem implementation for Amazon S3 (`S3FileSystem`), built on boto3, with an API
+surface compatible with [s3fs](https://github.com/fsspec/s3fs) for users migrating from it.
 
 The filesystem is used internally by the pandas/polars result sets to read query results
 from S3, and can also be used independently for S3 file operations.
