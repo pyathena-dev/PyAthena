@@ -524,9 +524,8 @@ class AthenaPandasResultSet(AthenaResultSet):
             effective_chunksize = self._auto_determine_chunksize(length)
             if effective_chunksize:
                 _logger.debug(
-                    "Auto-determined chunksize: %s for file size: %s bytes",
-                    effective_chunksize,
-                    length,
+                    f"Auto-determined chunksize: {effective_chunksize} "
+                    f"for file size: {length} bytes"
                 )
 
         csv_engine = self._get_csv_engine(length, effective_chunksize)
@@ -565,12 +564,11 @@ class AthenaPandasResultSet(AthenaResultSet):
             # Log performance information for large files
             if length > self.LARGE_FILE_THRESHOLD_BYTES:
                 mode = "chunked" if effective_chunksize else "full"
-                msg = "Reading %s bytes from S3 in %s mode using %s engine"
-                args: tuple[object, ...] = (length, mode, csv_engine)
-                if effective_chunksize:
-                    msg += " with chunksize=%s"
-                    args = (*args, effective_chunksize)
-                _logger.info(msg, *args)
+                chunksize = f" with chunksize={effective_chunksize}" if effective_chunksize else ""
+                _logger.info(
+                    f"Reading {length} bytes from S3 in {mode} mode "
+                    f"using {csv_engine} engine{chunksize}"
+                )
 
             return result
 
