@@ -10,6 +10,7 @@ from pyathena import ProgrammingError
 from pyathena.async_cursor import AsyncCursor
 from pyathena.common import CursorIterator
 from pyathena.model import AthenaQueryExecution
+from pyathena.options import ExecuteOptions
 from pyathena.pandas.converter import (
     DefaultPandasTypeConverter,
     DefaultPandasUnloadTypeConverter,
@@ -151,8 +152,8 @@ class AsyncPandasCursor(AsyncCursor):
         parameters: dict[str, Any] | list[str] | None = None,
         work_group: str | None = None,
         s3_staging_dir: str | None = None,
-        cache_size: int | None = 0,
-        cache_expiration_time: int | None = 0,
+        cache_size: int | None = None,
+        cache_expiration_time: int | None = None,
         result_reuse_enable: bool | None = None,
         result_reuse_minutes: int | None = None,
         paramstyle: str | None = None,
@@ -160,12 +161,38 @@ class AsyncPandasCursor(AsyncCursor):
         keep_default_na: bool = False,
         na_values: Iterable[str] | None = ("",),
         quoting: int = 1,
+        *,
+        options: ExecuteOptions | None = None,
         **kwargs,
     ) -> tuple[str, Future[AthenaPandasResultSet | Any]]:
-        operation, unload_location = self._prepare_unload(operation, s3_staging_dir)
-        query_id = self._execute(
-            operation,
-            parameters=parameters,
+        """Execute a SQL query asynchronously and return results as pandas DataFrames.
+
+        Args:
+            operation: SQL query string to execute.
+            parameters: Query parameters for parameterized queries.
+            work_group: Athena workgroup to use for this query.
+            s3_staging_dir: S3 location for query results.
+            cache_size: Number of queries to check for result caching.
+            cache_expiration_time: Cache expiration time in seconds.
+            result_reuse_enable: Enable Athena result reuse for this query.
+            result_reuse_minutes: Minutes to reuse cached results.
+            paramstyle: Parameter style ('qmark' or 'pyformat').
+            result_set_type_hints: Optional dictionary mapping column names to
+                Athena DDL type signatures for precise type conversion within
+                complex types.
+            keep_default_na: Whether to keep default pandas NA values.
+            na_values: Additional values to treat as NA.
+            quoting: CSV quoting behavior (pandas csv.QUOTE_* constants).
+            options: Shared execution options as an
+                :class:`~pyathena.options.ExecuteOptions` instance. Individual
+                keyword arguments take precedence over ``options`` fields.
+            **kwargs: Additional pandas read_csv/read_parquet parameters.
+
+        Returns:
+            Tuple of (query_id, future) where future resolves to AthenaPandasResultSet.
+        """
+        options = ExecuteOptions.resolve(
+            options,
             work_group=work_group,
             s3_staging_dir=s3_staging_dir,
             cache_size=cache_size,
@@ -173,13 +200,20 @@ class AsyncPandasCursor(AsyncCursor):
             result_reuse_enable=result_reuse_enable,
             result_reuse_minutes=result_reuse_minutes,
             paramstyle=paramstyle,
+            result_set_type_hints=result_set_type_hints,
+        )
+        operation, unload_location = self._prepare_unload(operation, options.s3_staging_dir)
+        query_id = self._execute(
+            operation,
+            parameters=parameters,
+            options=options,
         )
         return (
             query_id,
             self._executor.submit(
                 self._collect_result_set,
                 query_id,
-                result_set_type_hints,
+                options.result_set_type_hints,
                 keep_default_na,
                 na_values,
                 quoting,

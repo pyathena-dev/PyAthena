@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any, cast
 
 from pyathena.aio.common import WithAsyncFetch
@@ -8,6 +9,7 @@ from pyathena.aio.result_set import AthenaAioDictResultSet, AthenaAioResultSet
 from pyathena.common import CursorIterator
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
+from pyathena.options import ExecuteOptions
 
 _logger = logging.getLogger(__name__)
 
@@ -74,12 +76,15 @@ class AioCursor(WithAsyncFetch):
         parameters: dict[str, Any] | list[str] | None = None,
         work_group: str | None = None,
         s3_staging_dir: str | None = None,
-        cache_size: int = 0,
-        cache_expiration_time: int = 0,
+        cache_size: int | None = None,
+        cache_expiration_time: int | None = None,
         result_reuse_enable: bool | None = None,
         result_reuse_minutes: int | None = None,
         paramstyle: str | None = None,
+        on_start_query_execution: Callable[[str], None] | None = None,
         result_set_type_hints: dict[str | int, str] | None = None,
+        *,
+        options: ExecuteOptions | None = None,
         **kwargs,
     ) -> AioCursor:
         """Execute a SQL query asynchronously.
@@ -94,18 +99,21 @@ class AioCursor(WithAsyncFetch):
             result_reuse_enable: Enable result reuse (optional).
             result_reuse_minutes: Result reuse duration in minutes (optional).
             paramstyle: Parameter style to use (optional).
+            on_start_query_execution: Callback called when query starts.
             result_set_type_hints: Optional dictionary mapping column names to
                 Athena DDL type signatures for precise type conversion within
                 complex types.
+            options: Shared execution options as an
+                :class:`~pyathena.options.ExecuteOptions` instance. Individual
+                keyword arguments take precedence over ``options`` fields.
             **kwargs: Additional execution parameters.
 
         Returns:
             Self reference for method chaining.
         """
         self._reset_state()
-        self.query_id = await self._execute(
-            operation,
-            parameters=parameters,
+        options = ExecuteOptions.resolve(
+            options,
             work_group=work_group,
             s3_staging_dir=s3_staging_dir,
             cache_size=cache_size,
@@ -113,7 +121,17 @@ class AioCursor(WithAsyncFetch):
             result_reuse_enable=result_reuse_enable,
             result_reuse_minutes=result_reuse_minutes,
             paramstyle=paramstyle,
+            on_start_query_execution=on_start_query_execution,
+            result_set_type_hints=result_set_type_hints,
         )
+        self.query_id = await self._execute(
+            operation,
+            parameters=parameters,
+            options=options,
+        )
+
+        # Call user callbacks immediately after start_query_execution
+        self._call_on_start_query_execution(self.query_id, options)
 
         query_execution = await self._poll(self.query_id)
         if query_execution.state == AthenaQueryExecution.STATE_SUCCEEDED:
@@ -123,7 +141,7 @@ class AioCursor(WithAsyncFetch):
                 query_execution,
                 self.arraysize,
                 self._retry_config,
-                result_set_type_hints=result_set_type_hints,
+                result_set_type_hints=options.result_set_type_hints,
             )
         else:
             raise OperationalError(query_execution.state_change_reason)

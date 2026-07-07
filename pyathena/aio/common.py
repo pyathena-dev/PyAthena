@@ -10,6 +10,7 @@ from pyathena.aio.util import async_retry_api_call
 from pyathena.common import BaseCursor, CursorIterator
 from pyathena.error import DatabaseError, OperationalError, ProgrammingError
 from pyathena.model import AthenaDatabase, AthenaQueryExecution, AthenaTableMetadata
+from pyathena.options import ExecuteOptions
 from pyathena.result_set import AthenaResultSet, WithResultSet
 
 _logger = logging.getLogger(__name__)
@@ -27,29 +28,24 @@ class AioBaseCursor(BaseCursor):
         self,
         operation: str,
         parameters: dict[str, Any] | list[str] | None = None,
-        work_group: str | None = None,
-        s3_staging_dir: str | None = None,
-        cache_size: int | None = 0,
-        cache_expiration_time: int | None = 0,
-        result_reuse_enable: bool | None = None,
-        result_reuse_minutes: int | None = None,
-        paramstyle: str | None = None,
+        options: ExecuteOptions | None = None,
     ) -> str:
-        query, execution_parameters = self._prepare_query(operation, parameters, paramstyle)
+        options = ExecuteOptions.resolve(options)
+        query, execution_parameters = self._prepare_query(operation, parameters, options.paramstyle)
 
         request = self._build_start_query_execution_request(
             query=query,
-            work_group=work_group,
-            s3_staging_dir=s3_staging_dir,
-            result_reuse_enable=result_reuse_enable,
-            result_reuse_minutes=result_reuse_minutes,
+            work_group=options.work_group,
+            s3_staging_dir=options.s3_staging_dir,
+            result_reuse_enable=options.result_reuse_enable,
+            result_reuse_minutes=options.result_reuse_minutes,
             execution_parameters=execution_parameters,
         )
         query_id = await self._find_previous_query_id(
             query,
-            work_group,
-            cache_size=cache_size if cache_size else 0,
-            cache_expiration_time=cache_expiration_time if cache_expiration_time else 0,
+            options.work_group,
+            cache_size=options.cache_size,
+            cache_expiration_time=options.cache_expiration_time,
         )
         if query_id is None:
             try:

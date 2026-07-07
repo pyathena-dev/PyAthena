@@ -4,6 +4,7 @@ import datetime
 from typing import TYPE_CHECKING, Any, overload
 
 from pyathena.error import *  # noqa: F403
+from pyathena.options import ExecuteOptions as ExecuteOptions
 
 if TYPE_CHECKING:
     from pyathena.aio.connection import AioConnection

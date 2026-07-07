@@ -117,6 +117,53 @@ print(cursor.fetchall())
 
 You can find more information about the [considerations and limitations of parameterized queries](https://docs.aws.amazon.com/athena/latest/ug/querying-with-prepared-statements.html) in the official documentation.
 
+## Execution options
+
+The `execute()` method of every SQL cursor (`Cursor`, `AsyncCursor`, the aio cursors, and their
+pandas/arrow/polars/s3fs variants) accepts the same set of shared keyword arguments, such as
+`work_group`, `s3_staging_dir`, `cache_size`, `cache_expiration_time`, `result_reuse_enable`,
+`result_reuse_minutes`, `paramstyle`, `on_start_query_execution`, and `result_set_type_hints`.
+The Spark cursors execute calculations instead of SQL queries and do not accept these arguments.
+
+These arguments can also be passed together as an `ExecuteOptions` instance using the `options`
+keyword argument.
+
+```python
+from pyathena import ExecuteOptions, connect
+
+cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                 region_name="us-west-2").cursor()
+options = ExecuteOptions(work_group="YOUR_WORK_GROUP",
+                         result_reuse_enable=True,
+                         result_reuse_minutes=60)
+cursor.execute("SELECT * FROM one_row", options=options)
+```
+
+When both `options` and individual keyword arguments are specified, the individual keyword
+arguments take precedence.
+
+```python
+# Executes with work_group="ANOTHER_WORK_GROUP"; the other fields of options still apply.
+cursor.execute("SELECT * FROM one_row",
+               options=options,
+               work_group="ANOTHER_WORK_GROUP")
+```
+
+Passing `None` for an individual keyword argument is treated as "not specified" and does not
+reset the corresponding `options` field. To run a single query without a field set on `options`,
+construct a new instance without that field.
+
+`ExecuteOptions` is immutable. To create a variation of an existing instance, use the `merge()`
+method, which returns a new instance with the specified fields applied.
+
+```python
+adhoc_options = options.merge(work_group="ANOTHER_WORK_GROUP")
+```
+
+The `on_start_query_execution` field is invoked by the synchronous and aio cursors;
+`AsyncCursor`-based cursors return the query ID directly through their execution model and do
+not invoke it.
+
 ## Quickly re-run queries
 
 ### Result reuse configuration
@@ -423,6 +470,7 @@ The `on_start_query_execution` callback is supported by the following cursor typ
 - `PandasCursor`
 - `PolarsCursor`
 - `S3FSCursor`
+- `AioCursor`, `AioDictCursor`, `AioArrowCursor`, `AioPandasCursor`, `AioPolarsCursor`, `AioS3FSCursor`
 
 Note: `AsyncCursor` and its variants do not support this callback as they already
 return the query ID immediately through their different execution model.

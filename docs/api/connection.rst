@@ -15,6 +15,12 @@ Connection
    :members:
    :inherited-members:
 
+Execution Options
+-----------------
+
+.. autoclass:: pyathena.options.ExecuteOptions
+   :members:
+
 Standard Cursors
 ----------------
 

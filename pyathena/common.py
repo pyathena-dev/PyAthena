@@ -21,6 +21,7 @@ from pyathena.model import (
     AthenaQueryExecution,
     AthenaTableMetadata,
 )
+from pyathena.options import ExecuteOptions
 from pyathena.util import RetryConfig, retry_api_call
 
 if TYPE_CHECKING:
@@ -192,9 +193,9 @@ class BaseCursor(metaclass=ABCMeta):
         self._kill_on_interrupt = kill_on_interrupt
         self._result_reuse_enable = result_reuse_enable
         self._result_reuse_minutes = result_reuse_minutes
-        # ``on_start_query_execution`` is invoked only by cursors whose ``execute()``
-        # supports it (the synchronous cursors). Async/aio/Spark cursors return the
-        # query id immediately through their execution model and do not invoke it.
+        # ``on_start_query_execution`` is invoked by cursors whose ``execute()``
+        # supports it (the synchronous and aio cursors). Async/Spark cursors return
+        # the query id immediately through their execution model and do not invoke it.
         self._on_start_query_execution = on_start_query_execution
         self._on_poll = on_poll
 
@@ -697,33 +698,40 @@ class BaseCursor(metaclass=ABCMeta):
             compression=AthenaCompression.COMPRESSION_SNAPPY,
         )
 
+    def _call_on_start_query_execution(self, query_id: str, options: ExecuteOptions) -> None:
+        """Invoke the connection-level and execute-level query-start callbacks.
+
+        Both callbacks are invoked if set. Called by cursors whose execution
+        model supports early access to the query ID (the synchronous and aio
+        cursors) immediately after the StartQueryExecution API call.
+        """
+        if self._on_start_query_execution:
+            self._on_start_query_execution(query_id)
+        if options.on_start_query_execution:
+            options.on_start_query_execution(query_id)
+
     def _execute(
         self,
         operation: str,
         parameters: dict[str, Any] | list[str] | None = None,
-        work_group: str | None = None,
-        s3_staging_dir: str | None = None,
-        cache_size: int | None = 0,
-        cache_expiration_time: int | None = 0,
-        result_reuse_enable: bool | None = None,
-        result_reuse_minutes: int | None = None,
-        paramstyle: str | None = None,
+        options: ExecuteOptions | None = None,
     ) -> str:
-        query, execution_parameters = self._prepare_query(operation, parameters, paramstyle)
+        options = ExecuteOptions.resolve(options)
+        query, execution_parameters = self._prepare_query(operation, parameters, options.paramstyle)
 
         request = self._build_start_query_execution_request(
             query=query,
-            work_group=work_group,
-            s3_staging_dir=s3_staging_dir,
-            result_reuse_enable=result_reuse_enable,
-            result_reuse_minutes=result_reuse_minutes,
+            work_group=options.work_group,
+            s3_staging_dir=options.s3_staging_dir,
+            result_reuse_enable=options.result_reuse_enable,
+            result_reuse_minutes=options.result_reuse_minutes,
             execution_parameters=execution_parameters,
         )
         query_id = self._find_previous_query_id(
             query,
-            work_group,
-            cache_size=cache_size if cache_size else 0,
-            cache_expiration_time=cache_expiration_time if cache_expiration_time else 0,
+            options.work_group,
+            cache_size=options.cache_size,
+            cache_expiration_time=options.cache_expiration_time,
         )
         if query_id is None:
             try:

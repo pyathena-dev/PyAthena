@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pyathena import BINARY, BOOLEAN, DATE, DATETIME, JSON, NUMBER, STRING, TIME
+from pyathena import BINARY, BOOLEAN, DATE, DATETIME, JSON, NUMBER, STRING, TIME, ExecuteOptions
 from pyathena.converter import _to_array, _to_map, _to_struct
 from pyathena.cursor import Cursor
 from pyathena.error import DatabaseError, NotSupportedError, ProgrammingError
@@ -852,6 +852,32 @@ class TestCursor:
         # Verify the query completed successfully
         row = cursor.fetchone()
         assert row == (1,)
+
+    def test_execute_with_options(self, cursor):
+        """Test execute with an ExecuteOptions instance instead of individual kwargs."""
+        callback_results = []
+        options = ExecuteOptions(
+            on_start_query_execution=callback_results.append,
+            result_reuse_enable=False,
+        )
+        result = cursor.execute("SELECT 1", options=options)
+        assert callback_results == [cursor.query_id]
+        assert result is cursor
+        assert cursor.fetchone() == (1,)
+
+    def test_execute_kwargs_override_options(self, cursor):
+        """Test that individual execute() kwargs take precedence over options fields."""
+        from_options = []
+        from_kwargs = []
+        options = ExecuteOptions(on_start_query_execution=from_options.append)
+        cursor.execute(
+            "SELECT 1",
+            options=options,
+            on_start_query_execution=from_kwargs.append,
+        )
+        assert from_options == []
+        assert from_kwargs == [cursor.query_id]
+        assert cursor.fetchone() == (1,)
 
     def test_connection_level_callback(self):
         """Test connection-level default callback."""
