@@ -79,6 +79,23 @@ class TestAioCursor:
         assert callback_results == [aio_cursor.query_id]
         assert await aio_cursor.fetchone() == (1,)
 
+    async def test_execute_internal_legacy_kwargs(self, aio_cursor):
+        """The private _execute() accepts the pre-3.35 individual keyword arguments.
+
+        Regression test for #734, mirroring the synchronous cursor test for
+        external callers that invoke _execute() directly with individual keywords.
+        """
+        query_id = await aio_cursor._execute(
+            "SELECT 1",
+            parameters=None,
+            work_group=ENV.default_work_group,
+            s3_staging_dir=None,
+            cache_size=0,
+            cache_expiration_time=0,
+        )
+        query_execution = await aio_cursor._poll(query_id)
+        assert query_execution.state == AthenaQueryExecution.STATE_SUCCEEDED
+
     async def test_no_result_set_raises(self, aio_cursor):
         with pytest.raises(ProgrammingError):
             await aio_cursor.fetchone()
