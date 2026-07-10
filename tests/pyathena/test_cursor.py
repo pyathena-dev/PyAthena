@@ -20,6 +20,7 @@ from pyathena.converter import _to_array, _to_map, _to_struct
 from pyathena.cursor import Cursor
 from pyathena.error import DatabaseError, NotSupportedError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
+from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
 
@@ -878,6 +879,70 @@ class TestCursor:
         assert from_options == []
         assert from_kwargs == [cursor.query_id]
         assert cursor.fetchone() == (1,)
+
+    def test_execute_internal_legacy_kwargs(self, cursor):
+        """The private _execute() accepts the pre-3.35 individual keyword arguments.
+
+        Regression test for #734: external callers such as dbt-athena <= 1.10.x
+        invoke _execute() directly with individual keywords instead of options.
+        """
+        query_id = cursor._execute(
+            "SELECT 1",
+            parameters=None,
+            work_group=ENV.default_work_group,
+            s3_staging_dir=None,
+            cache_size=0,
+            cache_expiration_time=0,
+        )
+        query_execution = cursor._poll(query_id)
+        assert query_execution.state == AthenaQueryExecution.STATE_SUCCEEDED
+
+    def test_execute_internal_legacy_kwargs_passthrough(self):
+        """The pre-3.35 _execute() keywords are forwarded to the request (no AWS).
+
+        Regression test for #734: on 3.35.0 this call raised
+        ``TypeError: _execute() got an unexpected keyword argument 'work_group'``.
+        """
+        cursor = Cursor.__new__(Cursor)  # bypass __init__ to avoid AWS calls
+        cursor._connection = MagicMock()
+        cursor._connection.client.start_query_execution.return_value = {
+            "QueryExecutionId": "test_query_id"
+        }
+        cursor._retry_config = RetryConfig()
+
+        with (
+            patch.object(
+                Cursor, "_build_start_query_execution_request", return_value={}
+            ) as request_mock,
+            patch.object(Cursor, "_find_previous_query_id", return_value=None) as cache_mock,
+        ):
+            query_id = cursor._execute(
+                "SELECT 1",
+                parameters=None,
+                work_group="test_work_group",
+                s3_staging_dir="s3://test-bucket/path/",
+                cache_size=10,
+                cache_expiration_time=100,
+                result_reuse_enable=True,
+                result_reuse_minutes=5,
+                paramstyle="qmark",
+            )
+
+        assert query_id == "test_query_id"
+        request_mock.assert_called_once_with(
+            query="SELECT 1",
+            work_group="test_work_group",
+            s3_staging_dir="s3://test-bucket/path/",
+            result_reuse_enable=True,
+            result_reuse_minutes=5,
+            execution_parameters=None,
+        )
+        cache_mock.assert_called_once_with(
+            "SELECT 1",
+            "test_work_group",
+            cache_size=10,
+            cache_expiration_time=100,
+        )
 
     def test_connection_level_callback(self):
         """Test connection-level default callback."""

@@ -714,9 +714,28 @@ class BaseCursor(metaclass=ABCMeta):
         self,
         operation: str,
         parameters: dict[str, Any] | list[str] | None = None,
+        work_group: str | None = None,
+        s3_staging_dir: str | None = None,
+        cache_size: int | None = None,
+        cache_expiration_time: int | None = None,
+        result_reuse_enable: bool | None = None,
+        result_reuse_minutes: int | None = None,
+        paramstyle: str | None = None,
         options: ExecuteOptions | None = None,
     ) -> str:
-        options = ExecuteOptions.resolve(options)
+        # The individual keyword arguments are retained for backward compatibility
+        # with external callers that predate ExecuteOptions (e.g. dbt-athena <= 1.10.x
+        # calls _execute() with work_group/s3_staging_dir/cache_* keywords).
+        options = ExecuteOptions.resolve(
+            options,
+            work_group=work_group,
+            s3_staging_dir=s3_staging_dir,
+            cache_size=cache_size,
+            cache_expiration_time=cache_expiration_time,
+            result_reuse_enable=result_reuse_enable,
+            result_reuse_minutes=result_reuse_minutes,
+            paramstyle=paramstyle,
+        )
         query, execution_parameters = self._prepare_query(operation, parameters, options.paramstyle)
 
         request = self._build_start_query_execution_request(
