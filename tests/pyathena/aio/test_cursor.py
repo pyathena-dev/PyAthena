@@ -130,6 +130,48 @@ class TestAioCursor:
             cache_expiration_time=100,
         )
 
+    async def test_cache_size_different_schema(self):
+        """A cached result is only reused when it ran against the same schema (#739).
+
+        Mirrors the synchronous cursor test: identical SQL can resolve to different
+        tables depending on the database it runs against, so a prior execution from
+        another schema must not be a cache hit.
+        """
+        query = "SELECT * FROM one_row"
+
+        def execution(schema):
+            return AthenaQueryExecution(
+                {
+                    "QueryExecution": {
+                        "QueryExecutionId": f"query_id_{schema}",
+                        "Query": query,
+                        "StatementType": AthenaQueryExecution.STATEMENT_TYPE_DML,
+                        "QueryExecutionContext": {"Database": schema},
+                        "Status": {
+                            "State": AthenaQueryExecution.STATE_SUCCEEDED,
+                            "CompletionDateTime": datetime.now(),
+                        },
+                    }
+                }
+            )
+
+        cursor = AioCursor.__new__(AioCursor)  # bypass __init__ to avoid AWS calls
+        cursor._catalog_name = None
+
+        with patch.object(
+            AioCursor,
+            "_list_query_executions",
+            new_callable=AsyncMock,
+            return_value=(None, [execution("other_schema")]),
+        ):
+            cursor._schema_name = "this_schema"
+            assert await cursor._find_previous_query_id(query, None, cache_size=100) is None
+            cursor._schema_name = "other_schema"
+            assert (
+                await cursor._find_previous_query_id(query, None, cache_size=100)
+                == "query_id_other_schema"
+            )
+
     async def test_no_result_set_raises(self, aio_cursor):
         with pytest.raises(ProgrammingError):
             await aio_cursor.fetchone()

@@ -638,7 +638,11 @@ class BaseCursor(metaclass=ABCMeta):
                     ):
                         next_token = None
                         break
-                    if execution.query == query:
+                    if (
+                        execution.query == query
+                        and (self._schema_name is None or execution.database == self._schema_name)
+                        and (self._catalog_name is None or execution.catalog == self._catalog_name)
+                    ):
                         query_id = execution.query_id
                         break
                 if query_id or next_token is None:
