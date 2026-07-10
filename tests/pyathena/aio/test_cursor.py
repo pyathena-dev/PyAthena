@@ -1,12 +1,15 @@
 import re
 from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from pyathena import ExecuteOptions
+from pyathena.aio.cursor import AioCursor
 from pyathena.error import DatabaseError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet
+from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.aio.conftest import _aio_connect
 
@@ -79,22 +82,53 @@ class TestAioCursor:
         assert callback_results == [aio_cursor.query_id]
         assert await aio_cursor.fetchone() == (1,)
 
-    async def test_execute_internal_legacy_kwargs(self, aio_cursor):
-        """The private _execute() accepts the pre-3.35 individual keyword arguments.
+    async def test_execute_internal_legacy_kwargs_passthrough(self):
+        """The pre-3.35 _execute() keywords are forwarded to the request (no AWS).
 
-        Regression test for #734, mirroring the synchronous cursor test for
-        external callers that invoke _execute() directly with individual keywords.
+        Mirrors the synchronous cursor test (regression test for #734).
         """
-        query_id = await aio_cursor._execute(
-            "SELECT 1",
-            parameters=None,
-            work_group=ENV.default_work_group,
-            s3_staging_dir=None,
-            cache_size=0,
-            cache_expiration_time=0,
+        cursor = AioCursor.__new__(AioCursor)  # bypass __init__ to avoid AWS calls
+        cursor._connection = MagicMock()
+        cursor._connection.client.start_query_execution.return_value = {
+            "QueryExecutionId": "test_query_id"
+        }
+        cursor._retry_config = RetryConfig()
+
+        with (
+            patch.object(
+                AioCursor, "_build_start_query_execution_request", return_value={}
+            ) as request_mock,
+            patch.object(
+                AioCursor, "_find_previous_query_id", new_callable=AsyncMock, return_value=None
+            ) as cache_mock,
+        ):
+            query_id = await cursor._execute(
+                "SELECT 1",
+                parameters=None,
+                work_group="test_work_group",
+                s3_staging_dir="s3://test-bucket/path/",
+                cache_size=10,
+                cache_expiration_time=100,
+                result_reuse_enable=True,
+                result_reuse_minutes=5,
+                paramstyle="qmark",
+            )
+
+        assert query_id == "test_query_id"
+        request_mock.assert_called_once_with(
+            query="SELECT 1",
+            work_group="test_work_group",
+            s3_staging_dir="s3://test-bucket/path/",
+            result_reuse_enable=True,
+            result_reuse_minutes=5,
+            execution_parameters=None,
         )
-        query_execution = await aio_cursor._poll(query_id)
-        assert query_execution.state == AthenaQueryExecution.STATE_SUCCEEDED
+        cache_mock.assert_awaited_once_with(
+            "SELECT 1",
+            "test_work_group",
+            cache_size=10,
+            cache_expiration_time=100,
+        )
 
     async def test_no_result_set_raises(self, aio_cursor):
         with pytest.raises(ProgrammingError):
