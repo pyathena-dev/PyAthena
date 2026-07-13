@@ -641,7 +641,7 @@ class BaseCursor(metaclass=ABCMeta):
                     if (
                         execution.query == query
                         and execution.database == self._schema_name
-                        and execution.catalog == self._catalog_name
+                        and (execution.catalog or "").lower() == (self._catalog_name or "").lower()
                     ):
                         query_id = execution.query_id
                         break

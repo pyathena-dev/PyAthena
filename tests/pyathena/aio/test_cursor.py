@@ -1,5 +1,5 @@
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -149,7 +149,7 @@ class TestAioCursor:
                         "QueryExecutionContext": {"Database": schema},
                         "Status": {
                             "State": AthenaQueryExecution.STATE_SUCCEEDED,
-                            "CompletionDateTime": datetime.now(),
+                            "CompletionDateTime": datetime.now(timezone.utc),
                         },
                     }
                 }
@@ -170,6 +170,45 @@ class TestAioCursor:
             assert (
                 await cursor._find_previous_query_id(query, None, cache_size=100)
                 == "query_id_other_schema"
+            )
+
+    async def test_cache_size_different_catalog(self):
+        query = "SELECT * FROM one_row"
+        schema = "this_schema"
+
+        def execution(catalog):
+            return AthenaQueryExecution(
+                {
+                    "QueryExecution": {
+                        "QueryExecutionId": f"query_id_{catalog}",
+                        "Query": query,
+                        "StatementType": AthenaQueryExecution.STATEMENT_TYPE_DML,
+                        "QueryExecutionContext": {"Database": schema, "Catalog": catalog},
+                        "Status": {
+                            "State": AthenaQueryExecution.STATE_SUCCEEDED,
+                            "CompletionDateTime": datetime.now(timezone.utc),
+                        },
+                    }
+                }
+            )
+
+        cursor = AioCursor.__new__(AioCursor)
+        cursor._schema_name = schema
+
+        with patch.object(
+            AioCursor,
+            "_list_query_executions",
+            new_callable=AsyncMock,
+            return_value=(None, [execution("awsdatacatalog")]),
+        ):
+            # A different catalog must not be a cache hit.
+            cursor._catalog_name = "other_catalog"
+            assert await cursor._find_previous_query_id(query, None, cache_size=100) is None
+            # The same catalog, differing only in case, must still be a cache hit.
+            cursor._catalog_name = "AwsDataCatalog"
+            assert (
+                await cursor._find_previous_query_id(query, None, cache_size=100)
+                == "query_id_awsdatacatalog"
             )
 
     async def test_no_result_set_raises(self, aio_cursor):

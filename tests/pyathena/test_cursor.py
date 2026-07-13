@@ -223,6 +223,42 @@ class TestCursor:
                 == "query_id_other_schema"
             )
 
+    def test_cache_size_different_catalog(self):
+        query = "SELECT * FROM one_row"
+        schema = "this_schema"
+
+        def execution(catalog):
+            return AthenaQueryExecution(
+                {
+                    "QueryExecution": {
+                        "QueryExecutionId": f"query_id_{catalog}",
+                        "Query": query,
+                        "StatementType": AthenaQueryExecution.STATEMENT_TYPE_DML,
+                        "QueryExecutionContext": {"Database": schema, "Catalog": catalog},
+                        "Status": {
+                            "State": AthenaQueryExecution.STATE_SUCCEEDED,
+                            "CompletionDateTime": datetime.now(timezone.utc),
+                        },
+                    }
+                }
+            )
+
+        cursor = Cursor.__new__(Cursor)
+        cursor._schema_name = schema
+
+        with patch.object(
+            Cursor, "_list_query_executions", return_value=(None, [execution("awsdatacatalog")])
+        ):
+            # A different catalog must not be a cache hit.
+            cursor._catalog_name = "other_catalog"
+            assert cursor._find_previous_query_id(query, None, cache_size=100) is None
+            # The same catalog, differing only in case, must still be a cache hit
+            cursor._catalog_name = "AwsDataCatalog"
+            assert (
+                cursor._find_previous_query_id(query, None, cache_size=100)
+                == "query_id_awsdatacatalog"
+            )
+
     @pytest.mark.parametrize(
         "cursor",
         [{"work_group": ENV.work_group, "result_reuse_enable": True, "result_reuse_minutes": 5}],
