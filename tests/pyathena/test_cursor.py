@@ -185,6 +185,80 @@ class TestCursor:
         assert query_id_7 != query_id_8
         assert query_id_9 in [query_id_7, query_id_8]
 
+    def test_cache_size_different_schema(self):
+        """A cached result is only reused when it ran against the same schema (#739).
+
+        Identical SQL can resolve to different tables depending on the database it
+        runs against, so a prior execution from another schema must not be a cache hit.
+        """
+        query = "SELECT * FROM one_row"
+
+        def execution(schema):
+            return AthenaQueryExecution(
+                {
+                    "QueryExecution": {
+                        "QueryExecutionId": f"query_id_{schema}",
+                        "Query": query,
+                        "StatementType": AthenaQueryExecution.STATEMENT_TYPE_DML,
+                        "QueryExecutionContext": {"Database": schema},
+                        "Status": {
+                            "State": AthenaQueryExecution.STATE_SUCCEEDED,
+                            "CompletionDateTime": datetime.now(timezone.utc),
+                        },
+                    }
+                }
+            )
+
+        cursor = Cursor.__new__(Cursor)  # bypass __init__ to avoid AWS calls
+        cursor._catalog_name = None
+
+        with patch.object(
+            Cursor, "_list_query_executions", return_value=(None, [execution("other_schema")])
+        ):
+            cursor._schema_name = "this_schema"
+            assert cursor._find_previous_query_id(query, None, cache_size=100) is None
+            cursor._schema_name = "other_schema"
+            assert (
+                cursor._find_previous_query_id(query, None, cache_size=100)
+                == "query_id_other_schema"
+            )
+
+    def test_cache_size_different_catalog(self):
+        query = "SELECT * FROM one_row"
+        schema = "this_schema"
+
+        def execution(catalog):
+            return AthenaQueryExecution(
+                {
+                    "QueryExecution": {
+                        "QueryExecutionId": f"query_id_{catalog}",
+                        "Query": query,
+                        "StatementType": AthenaQueryExecution.STATEMENT_TYPE_DML,
+                        "QueryExecutionContext": {"Database": schema, "Catalog": catalog},
+                        "Status": {
+                            "State": AthenaQueryExecution.STATE_SUCCEEDED,
+                            "CompletionDateTime": datetime.now(timezone.utc),
+                        },
+                    }
+                }
+            )
+
+        cursor = Cursor.__new__(Cursor)
+        cursor._schema_name = schema
+
+        with patch.object(
+            Cursor, "_list_query_executions", return_value=(None, [execution("awsdatacatalog")])
+        ):
+            # A different catalog must not be a cache hit.
+            cursor._catalog_name = "other_catalog"
+            assert cursor._find_previous_query_id(query, None, cache_size=100) is None
+            # The same catalog, differing only in case, must still be a cache hit
+            cursor._catalog_name = "AwsDataCatalog"
+            assert (
+                cursor._find_previous_query_id(query, None, cache_size=100)
+                == "query_id_awsdatacatalog"
+            )
+
     @pytest.mark.parametrize(
         "cursor",
         [{"work_group": ENV.work_group, "result_reuse_enable": True, "result_reuse_minutes": 5}],

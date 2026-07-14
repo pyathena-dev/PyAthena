@@ -218,7 +218,11 @@ class AioBaseCursor(BaseCursor):
                     ):
                         next_token = None
                         break
-                    if execution.query == query:
+                    if (
+                        execution.query == query
+                        and execution.database == self._schema_name
+                        and (execution.catalog or "").lower() == (self._catalog_name or "").lower()
+                    ):
                         query_id = execution.query_id
                         break
                 if query_id or next_token is None:
