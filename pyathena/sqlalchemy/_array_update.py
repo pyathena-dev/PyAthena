@@ -186,7 +186,7 @@ def compile_array_update(compiler, expression, **kw):
                 f"greatest(cardinality({array}) - {tail_start} + 1, 0))"
             )
             return compiler._array_slice_step(
-                f"concat({prefix}, {padding}, {rhs}, {suffix})", bound.step, **kw
+                f"concat({prefix}, {padding}, {rhs}, {suffix})", bound.step, array_type, **kw
             )
         index = _index_sql(compiler, bound, **kw)
         variable = compiler._array_lambda_name()
