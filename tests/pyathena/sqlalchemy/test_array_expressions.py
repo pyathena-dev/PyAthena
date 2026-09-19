@@ -80,6 +80,11 @@ def test_array_lambda_does_not_capture_column_names():
     assert "_pyathena_element_1 -> _pyathena_element_0 = _pyathena_element_1" in sql
 
 
+def test_multidimensional_array_quantifier_bind_type():
+    items = column("items", AthenaArray(Integer, dimensions=2))
+    assert "CAST(ARRAY[1, 2] AS ARRAY(INTEGER)) =" in compile_sql(items.any([1, 2]))
+
+
 def test_subquery_any_remains_unchanged():
     sql = compile_sql(any_(select(column("item", Integer)).scalar_subquery()) == 2)
     assert "ANY (SELECT item)" in sql

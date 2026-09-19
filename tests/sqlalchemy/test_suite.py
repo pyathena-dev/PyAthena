@@ -210,6 +210,9 @@ class ArrayExpressionTest(fixtures.TestBase):
         statement = select(array[bindparam("index")], array[:0], array[0][1], array[1:])
         eq_(tuple(connection.execute(statement, {"index": 0}).one()), ([1, 2], [[1, 2]], 2, [[3]]))
         eq_(tuple(connection.execute(statement, {"index": 1}).one()), ([3], [[1, 2]], 2, [[3]]))
+        eq_(connection.execute(select(array.any([1, 2]))).scalar_one(), True)
+        plain = literal([1, 2], types.ARRAY(Integer))
+        eq_(connection.execute(select(plain[bindparam("index")]), {"index": 2}).scalar_one(), 2)
 
     def test_quantified_comparisons(self, connection):
         cases = [

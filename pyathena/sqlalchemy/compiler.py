@@ -295,7 +295,10 @@ class AthenaStatementCompiler(SQLCompiler):
         ):
             variable = self._array_lambda_name()
             predicate = binary._clone()
-            predicate.right = Column(variable, _ArrayTypeInspector.item_type(aggregate.element.type))
+            item_type = _ArrayTypeInspector.item_type(aggregate.element.type)
+            predicate.right = Column(variable, item_type)
+            if isinstance(predicate.left, BindParameter) and isinstance(item_type, types.ARRAY):
+                predicate.left = predicate.left._with_binary_element_type(item_type)
             sql = super().visit_binary(predicate, override_operator=override_operator, **kw)
             function = "any_match" if aggregate.operator is operators.any_op else "all_match"
             array = self.process(aggregate.element, **kw)
