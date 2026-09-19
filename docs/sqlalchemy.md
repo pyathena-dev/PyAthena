@@ -1118,6 +1118,38 @@ For example, `~(any_(flags) == True)` can become an element-wise `!= True` compa
 To negate the whole match, always explicitly group the comparison first: `~(any_(flags) == True).self_group()`.
 Quantifiers over subqueries retain their usual SQL compilation.
 
+#### Partial ARRAY updates
+
+Use indexed or sliced columns as UPDATE assignment keys on Iceberg tables.
+PyAthena compiles each assignment into a single server-side UPDATE of the whole array.
+Other columns can be assigned in the same statement.
+
+```python
+numbers = table.c.numbers
+with engine.begin() as conn:
+    conn.execute(table.update().values({numbers[2]: 10}))
+    conn.execute(table.update().values({numbers[2:3]: [20, 30, 40]}))
+```
+
+Element assignment beyond the end extends the array and fills intervening positions with NULL.
+A NULL destination array is treated as empty for partial updates.
+Assigning `None` to an element stores NULL.
+Nested indices rebuild the corresponding inner arrays, including missing inner arrays.
+The same one-based default and `zero_indexes=True` translation apply to reads and writes.
+
+Slice assignment replaces an inclusive range with any number of elements.
+An empty replacement array deletes the range; a longer or shorter replacement resizes the array.
+A reversed range inserts before its start position.
+A start beyond the end pads with NULL before inserting, and a stop beyond the end only removes existing elements.
+Omitted boundaries mean the beginning or end.
+These resize rules are PyAthena-specific and do not promise full PostgreSQL array-assignment compatibility.
+
+Write indices and explicit slice boundaries must be non-NULL positive integers after normalization.
+A slice replacement must be a non-NULL array; use `[]` to delete elements.
+Only `step=None` and `step=1` are supported, and only the final component of a nested update path may be a slice.
+PyAthena rejects multiple partial assignments to the same array column, or a partial assignment combined with a whole-column assignment to that column.
+Use one whole-array expression when an update needs several changes to the same array.
+
 #### Querying ARRAY data
 
 Use `select()` with `ARRAY` or `AthenaArray` columns whose element types are known, either declared explicitly or reflected from Athena, to receive typed Python collections.

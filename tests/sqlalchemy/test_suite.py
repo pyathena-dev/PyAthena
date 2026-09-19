@@ -161,6 +161,110 @@ class _ArrayTuple(types.TypeDecorator):
         return tuple(value) if value is not None else None
 
 
+class ArrayUpdateTest(fixtures.TestBase):
+    __backend__ = True
+    __requires__ = ("array_type",)
+
+    def test_element_resize_and_null(self, connection, metadata):
+        table = Table(
+            "array_element_updates",
+            metadata,
+            Column("id", Integer),
+            Column("items", AthenaArray(Integer)),
+            Column("marker", Integer),
+        )
+        table.create(connection)
+        connection.execute(
+            table.insert(),
+            [
+                {"id": 1, "items": [1, 2, 3]},
+                {"id": 2, "items": []},
+                {"id": 3, "items": None},
+            ],
+        )
+        items = table.c["items"]
+        connection.execute(
+            table.update().where(table.c.id == 1).values({items[5]: 9, table.c.marker: 42})
+        )
+        connection.execute(table.update().where(table.c.id == 1).values({items[2]: None}))
+        connection.execute(table.update().where(table.c.id > 1).values({items[2]: 7}))
+        eq_(
+            connection.execute(select(items, table.c.marker).order_by(table.c.id)).all(),
+            [([1, None, 3, None, 9], 42), ([None, 7], None), ([None, 7], None)],
+        )
+
+    def test_slice_resize(self, connection, metadata):
+        cases = [
+            ([1, 2, 3], slice(2, 2), [8, 9], [1, 8, 9, 3]),
+            ([1, 2, 3], slice(2, 3), [8], [1, 8]),
+            ([1, 2, 3], slice(2, 3), [], [1]),
+            ([1, 2, 3], slice(3, 1), [8], [1, 2, 8, 3]),
+            ([1, 2, 3], slice(5, 9), [8], [1, 2, 3, None, 8]),
+            ([1, 2, 3], slice(2, 9), [8], [1, 8]),
+            ([1, 2, 3], slice(None), [8, 9], [8, 9]),
+            ([], slice(1, 2), [], []),
+            (None, slice(2, 2), [8], [None, 8]),
+        ]
+        table = Table(
+            "array_slice_updates",
+            metadata,
+            Column("id", Integer),
+            Column("items", AthenaArray(Integer)),
+        )
+        table.create(connection)
+        connection.execute(
+            table.insert(),
+            [{"id": i, "items": before} for i, (before, _, _, _) in enumerate(cases)],
+        )
+        for i, (_, bounds, replacement, _) in enumerate(cases):
+            connection.execute(
+                table.update()
+                .where(table.c.id == i)
+                .values({table.c["items"][bounds]: replacement})
+            )
+        eq_(
+            connection.execute(select(table.c["items"]).order_by(table.c.id)).scalars().all(),
+            [expected for _, _, _, expected in cases],
+        )
+
+    def test_nested_zero_indexed_and_cached_bindings(self, connection, metadata):
+        table = Table(
+            "array_nested_updates",
+            metadata,
+            Column("id", Integer),
+            Column("items", AthenaArray(Integer, dimensions=2, zero_indexes=True)),
+        )
+        table.create(connection)
+        connection.execute(
+            table.insert(), [{"id": 1, "items": [[1], None]}, {"id": 2, "items": None}]
+        )
+        items = table.c["items"]
+        statement = (
+            table.update()
+            .where(table.c.id == bindparam("row_id"))
+            .values({items[bindparam("outer")][bindparam("inner")]: bindparam("value")})
+        )
+        connection.execute(statement, {"row_id": 1, "outer": 1, "inner": 1, "value": 7})
+        connection.execute(statement, {"row_id": 2, "outer": 0, "inner": 0, "value": 8})
+        connection.execute(table.update().where(table.c.id == 1).values({items[0][:0]: [4, 5]}))
+        eq_(
+            connection.execute(select(items).order_by(table.c.id)).scalars().all(),
+            [[[4, 5], [None, 7]], [[8]]],
+        )
+        with pytest.raises(sa_exc.DBAPIError):
+            connection.execute(statement, {"row_id": 1, "outer": -1, "inner": 0, "value": 9})
+
+    def test_null_slice_binding_rejected(self, connection, metadata):
+        table = Table("array_null_slice", metadata, Column("items", types.ARRAY(Integer)))
+        table.create(connection)
+        connection.execute(table.insert().values(items=[1, 2]))
+        statement = table.update().values({table.c["items"][1:2]: bindparam("replacement")})
+        connection.execute(statement, {"replacement": [3]})
+        with pytest.raises(sa_exc.DBAPIError):
+            connection.execute(statement, {"replacement": None})
+        eq_(connection.execute(select(table.c["items"])).scalar_one(), [3])
+
+
 class ArrayExpressionTest(fixtures.TestBase):
     __backend__ = True
     __requires__ = ("array_type",)
