@@ -3,11 +3,12 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy import exc, types, util
-from sqlalchemy.sql import operators, visitors
+from sqlalchemy.sql import operators
 from sqlalchemy.sql.elements import BinaryExpression, BindParameter, ColumnElement, Null, Slice
 from sqlalchemy.sql.schema import Column
 from sqlalchemy.sql.visitors import InternalTraversal
 
+from pyathena.formatter import _ComplexParameter
 from pyathena.sqlalchemy.types import _array_item_type, _bind_complex, _literal_complex
 
 
@@ -20,7 +21,13 @@ class _AssignmentType(types.TypeDecorator[Any]):
         self.item_type = item_type
 
     def bind_processor(self, dialect):
-        return lambda value: _bind_complex(value, self.item_type, dialect)
+        def process(value):
+            value = _bind_complex(value, self.item_type, dialect)
+            if isinstance(value, (bytes, bytearray)):
+                return _ComplexParameter("FROM_HEX", (value.hex(),))
+            return value
+
+        return process
 
     def literal_processor(self, dialect):
         return lambda value: _literal_complex(value, self.item_type, dialect)
@@ -118,12 +125,8 @@ def _index_sql(compiler, index: ColumnElement[Any], **kw):
     if not isinstance(index.type, (types.Integer, types.NullType, types.ARRAY)):
         raise exc.CompileError("ARRAY write indices must be integers")
 
-    def type_bind(element: Any, **kwargs: Any) -> Any:
-        if isinstance(element, BindParameter):
-            return element._with_binary_element_type(_IndexType())
-        return None
-
-    index = visitors.replacement_traverse(index, {}, type_bind)
+    if isinstance(index, BindParameter):
+        index = index._with_binary_element_type(_IndexType())
     sql = compiler.process(index, **kw)
     failure = (
         f"CAST(concat('Invalid ARRAY index: ', coalesce(CAST({sql} AS VARCHAR), 'NULL')) AS BIGINT)"

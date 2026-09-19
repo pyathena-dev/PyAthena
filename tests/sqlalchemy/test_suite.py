@@ -254,6 +254,27 @@ class ArrayUpdateTest(fixtures.TestBase):
         with pytest.raises(sa_exc.DBAPIError):
             connection.execute(statement, {"row_id": 1, "outer": -1, "inner": 0, "value": 9})
 
+    def test_expression_values_and_indices(self, connection, metadata):
+        table = Table(
+            "array_expression_updates",
+            metadata,
+            Column("id", Integer),
+            Column("items", AthenaArray(Integer)),
+            Column("binary_items", AthenaArray(types.BINARY)),
+        )
+        table.create(connection)
+        connection.execute(table.insert().values(id=1, items=[1, 2, 3], binary_items=[b"abc"]))
+        items = table.c["items"]
+        connection.execute(
+            table.update().ordered_values(
+                (items[func.length("abc")], items[1] + 8),
+                (table.c.binary_items[1], b"\x00\xff"),
+                (table.c.id, 2),
+            )
+        )
+        connection.execute(table.update().values({items[1:2]: items[2:3].concat([4])}))
+        eq_(connection.execute(select(table)).one(), (2, [2, 9, 4, 9], [b"\x00\xff"]))
+
     def test_null_slice_binding_rejected(self, connection, metadata):
         table = Table("array_null_slice", metadata, Column("items", types.ARRAY(Integer)))
         table.create(connection)

@@ -1,5 +1,5 @@
 import pytest
-from sqlalchemy import Column, Integer, MetaData, Table, bindparam, types
+from sqlalchemy import Column, Integer, MetaData, Table, bindparam, func, types
 from sqlalchemy import exc as sa_exc
 
 from pyathena.formatter import DefaultParameterFormatter
@@ -88,3 +88,36 @@ def test_generic_array_partial_update():
     table = array_table(types.ARRAY(Integer))
     sql = str(table.update().values({table.c["items"][1]: 2}).compile(dialect=AthenaDialect()))
     assert "SET items=transform(" in sql
+
+
+def test_write_index_expression_keeps_its_argument_types():
+    table = array_table()
+    index = func.length("abc")
+    statement = table.update().values({table.c["items"][index]: 9})
+    compiled = statement.compile(dialect=AthenaDialect())
+    params = {
+        name: compiled._bind_processors.get(name, lambda value: value)(value)
+        for name, value in compiled.params.items()
+    }
+    assert "length('abc')" in DefaultParameterFormatter().format(str(compiled), params)
+
+
+def test_ordered_partial_update_with_sql_expression():
+    table = array_table()
+    items = table.c["items"]
+    statement = table.update().ordered_values((items[2], items[1] + 1), (table.c.id, 2))
+    compiled = str(statement.compile(dialect=AthenaDialect()))
+    assert compiled.index("SET items=") < compiled.index(", id=")
+    assert "element_at(arrays.items" in compiled
+
+
+def test_binary_element_assignment_uses_native_hex_parameter():
+    table = array_table(AthenaArray(types.BINARY))
+    compiled = (
+        table.update().values({table.c["items"][1]: b"\x00\xff"}).compile(dialect=AthenaDialect())
+    )
+    params = {
+        name: compiled._bind_processors.get(name, lambda value: value)(value)
+        for name, value in compiled.params.items()
+    }
+    assert "FROM_HEX('00ff')" in DefaultParameterFormatter().format(str(compiled), params)
