@@ -47,7 +47,7 @@ def test_array_slice(bounds):
     assert "greatest(least(" in sql
 
 
-@pytest.mark.parametrize("step", [0, 2, -1, bindparam("step", 1)])
+@pytest.mark.parametrize("step", [0, 2, -1, True, 1.0, bindparam("step", 1)])
 def test_array_slice_rejects_steps(step):
     with pytest.raises(sa_exc.CompileError, match="step"):
         compile_sql(column("items", AthenaArray(Integer))[1:3:step])
@@ -84,6 +84,10 @@ def test_subquery_any_remains_unchanged():
     sql = compile_sql(any_(select(column("item", Integer)).scalar_subquery()) == 2)
     assert "ANY (SELECT item)" in sql
     assert "any_match" not in sql
+    items = column("items", AthenaArray(Integer))
+    array_subquery = compile_sql(select(items == any_(select(items).scalar_subquery())))
+    assert "ANY (SELECT items" in array_subquery
+    assert "any_match" not in array_subquery
 
 
 def test_array_concat_and_cache_bind_values():
