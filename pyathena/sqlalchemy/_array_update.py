@@ -175,7 +175,7 @@ def compile_array_update(compiler, expression, **kw):
             element_type = compiler._complex_dml_type(_array_item_type(array_type))
             padding = (
                 f"repeat(CAST(NULL AS {element_type}), "
-                f"greatest({start} - 1 - cardinality({array}), 0))"
+                f"CAST(greatest({start} - 1 - cardinality({array}), 0) AS INTEGER))"
             )
             tail_start = f"greatest({start}, {stop} + 1)"
             suffix = (
