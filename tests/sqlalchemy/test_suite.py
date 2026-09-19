@@ -23,10 +23,12 @@ from sqlalchemy import (
     select,
     text,
     types,
+    update,
 )
 from sqlalchemy import Table as SATable
 from sqlalchemy import exc as sa_exc
 from sqlalchemy import testing as sa_testing
+from sqlalchemy.orm import Session, registry
 from sqlalchemy.sql.elements import quoted_name
 from sqlalchemy.testing import eq_, fixtures
 from sqlalchemy.testing.schema import Column, Table
@@ -274,6 +276,39 @@ class ArrayUpdateTest(fixtures.TestBase):
         )
         connection.execute(table.update().values({items[1:2]: items[2:3].concat([4])}))
         eq_(connection.execute(select(table)).one(), (2, [2, 9, 4, 9], [b"\x00\xff"]))
+
+    def test_orm_and_long_array_update(self, connection, metadata):
+        table = Table(
+            "array_orm_updates",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("items", AthenaArray(Integer)),
+        )
+        table.create(connection)
+        connection.execute(
+            table.insert().values(
+                id=1,
+                items=func.concat(func.sequence(1, 10000), literal([10001], AthenaArray(Integer))),
+            )
+        )
+        mapping = registry()
+
+        class Record:
+            pass
+
+        mapping.map_imperatively(Record, table)
+        try:
+            with Session(bind=connection) as session:
+                session.execute(update(Record).where(Record.id == 1).values({Record.items[1]: 99}))
+                session.flush()
+            row = connection.execute(select(table.c["items"])).scalar_one()
+            eq_((len(row), row[0], row[-1]), (10001, 99, 10001))
+            connection.execute(
+                table.update().values({table.c["items"][2]: select(literal(77)).scalar_subquery()})
+            )
+            eq_(connection.execute(select(table.c["items"])).scalar_one()[:3], [99, 77, 3])
+        finally:
+            mapping.dispose()
 
     def test_null_slice_binding_rejected(self, connection, metadata):
         table = Table("array_null_slice", metadata, Column("items", types.ARRAY(Integer)))

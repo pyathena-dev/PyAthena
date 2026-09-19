@@ -32,6 +32,10 @@ class _AssignmentType(types.TypeDecorator[Any]):
     def literal_processor(self, dialect):
         return lambda value: _literal_complex(value, self.item_type, dialect)
 
+    def bind_expression(self, bindvalue):
+        expression = self.item_type.bind_expression(bindvalue)
+        return bindvalue if expression is None else expression
+
 
 class _IndexType(types.TypeDecorator[int]):
     impl = types.Integer
@@ -62,7 +66,9 @@ class _ArrayUpdate(ColumnElement[Any]):
         self.type = column.type
         self.value_type = value_type
         self.value = (
-            value._with_binary_element_type(_AssignmentType(value_type))
+            value._with_binary_element_type(
+                _AssignmentType(value_type if value.type._isnull else value.type)
+            )
             if isinstance(value, BindParameter)
             else value
         )
@@ -89,7 +95,10 @@ def rewrite_array_update(statement):
             base = base.left
         name = base if isinstance(base, str) else getattr(base, "key", None)
         if path:
-            if not isinstance(base, Column) or base.table is not statement.table:
+            if (
+                not isinstance(base, Column)
+                or base.table._deannotate() is not statement.table._deannotate()
+            ):
                 raise exc.CompileError("ARRAY updates require a column of the target table")
             if name in seen:
                 raise exc.CompileError("Only one assignment per ARRAY column is supported")
@@ -119,6 +128,7 @@ def _index_sql(compiler, index: ColumnElement[Any], **kw):
     if (
         isinstance(index, BindParameter)
         and not index.required
+        and index.callable is None
         and (type(index.value) is not int or index.value <= 0)
     ):
         raise exc.CompileError("ARRAY write indices must be positive integers after normalization")
@@ -139,7 +149,12 @@ def compile_array_update(compiler, expression, **kw):
     final_slice = isinstance(expression.path[-1], Slice)
     if final_slice and (
         isinstance(value, Null)
-        or (isinstance(value, BindParameter) and not value.required and value.value is None)
+        or (
+            isinstance(value, BindParameter)
+            and not value.required
+            and value.callable is None
+            and value.value is None
+        )
     ):
         raise exc.CompileError("An ARRAY slice assignment requires a non-NULL array")
     rhs = compiler.process(value, **kw)
@@ -189,15 +204,17 @@ def compile_array_update(compiler, expression, **kw):
                 f"concat({prefix}, {padding}, {rhs}, {suffix})", bound.step, array_type, **kw
             )
         index = _index_sql(compiler, bound, **kw)
-        variable = compiler._array_lambda_name()
         previous = f"element_at({array}, {index})"
         replacement = (
             rebuild(previous, _array_item_type(array_type), path[1:]) if len(path) > 1 else rhs
         )
-        return (
-            f"transform(sequence(1, greatest(cardinality({array}), {index})), "
-            f"{variable} -> IF({variable} = {index}, {replacement}, "
-            f"element_at({array}, {variable})))"
+        prefix = f"slice({array}, 1, least({index} - 1, cardinality({array})))"
+        element_type = compiler._complex_dml_type(_array_item_type(array_type))
+        padding = (
+            f"repeat(CAST(NULL AS {element_type}), "
+            f"CAST(greatest({index} - 1 - cardinality({array}), 0) AS INTEGER))"
         )
+        suffix = f"slice({array}, {index} + 1, greatest(cardinality({array}) - {index}, 0))"
+        return f"concat({prefix}, {padding}, ARRAY[{replacement}], {suffix})"
 
     return rebuild(compiler.process(expression.column, **kw), expression.type, expression.path)

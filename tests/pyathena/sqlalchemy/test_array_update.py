@@ -1,6 +1,7 @@
 import pytest
-from sqlalchemy import Column, Integer, MetaData, Table, bindparam, func, types
+from sqlalchemy import Column, Integer, MetaData, Table, bindparam, func, types, update
 from sqlalchemy import exc as sa_exc
+from sqlalchemy.orm import declarative_base
 
 from pyathena.formatter import DefaultParameterFormatter
 from pyathena.sqlalchemy.base import AthenaDialect
@@ -79,7 +80,8 @@ def test_nested_and_zero_indexed_update():
     table = array_table(AthenaArray(Integer, dimensions=2, zero_indexes=True))
     statement = table.update().values({table.c["items"][0][2]: 7})
     sql = str(statement.compile(dialect=AthenaDialect(), compile_kwargs={"literal_binds": True}))
-    assert sql.count("transform(sequence(") == 2
+    assert "ARRAY[concat(" in sql
+    assert "sequence(" not in sql
     assert "IF(1 > 0, 1," in sql
     assert "IF(3 > 0, 3," in sql
 
@@ -87,7 +89,7 @@ def test_nested_and_zero_indexed_update():
 def test_generic_array_partial_update():
     table = array_table(types.ARRAY(Integer))
     sql = str(table.update().values({table.c["items"][1]: 2}).compile(dialect=AthenaDialect()))
-    assert "SET items=transform(" in sql
+    assert "SET items=concat(" in sql
 
 
 def test_write_index_expression_keeps_its_argument_types():
@@ -121,3 +123,48 @@ def test_binary_element_assignment_uses_native_hex_parameter():
         for name, value in compiled.params.items()
     }
     assert "FROM_HEX('00ff')" in DefaultParameterFormatter().format(str(compiled), params)
+
+
+class PrefixString(types.TypeDecorator):
+    impl = types.String
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        return f"prefix:{value}"
+
+    def bind_expression(self, bindvalue):
+        return func.upper(bindvalue)
+
+
+def test_explicit_assignment_type_and_callable_bindings():
+    table = array_table(AthenaArray(types.String))
+    stmt = table.update().values(
+        {
+            table.c["items"][bindparam("index", callable_=lambda: 1)]: bindparam(
+                "value", type_=PrefixString(), callable_=lambda: "a"
+            )
+        }
+    )
+    compiled = stmt.compile(dialect=AthenaDialect())
+    assert compiled._bind_processors["value"]("a") == "prefix:a"
+    assert "upper(%(value)s)" in str(compiled)
+    assert compiled.params["index"] == 1
+    assert compiled.params["value"] == "a"
+    table.update().values(
+        {table.c["items"][1:2]: bindparam("values", callable_=lambda: ["a"])}
+    ).compile(dialect=AthenaDialect())
+
+
+def test_orm_partial_update_and_renamed_attribute_conflicts():
+    base = declarative_base()
+
+    class Model(base):
+        __tablename__ = "arrays"
+        id = Column(Integer, primary_key=True)
+        values = Column("stored", AthenaArray(Integer), key="db_key")
+
+    sql = str(update(Model).values({Model.values[1]: 2}).compile(dialect=AthenaDialect()))
+    assert "UPDATE arrays SET stored=concat(" in sql
+    for whole in (Model.values, "values"):
+        with pytest.raises(sa_exc.CompileError, match="one assignment"):
+            update(Model).values({Model.values[1]: 2, whole: []}).compile(dialect=AthenaDialect())

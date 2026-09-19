@@ -1132,6 +1132,7 @@ with engine.begin() as conn:
 ```
 
 Element assignment beyond the end extends the array and fills intervening positions with NULL.
+NULL padding uses Athena's `repeat()` function and follows its size limits.
 A NULL destination array is treated as empty for partial updates.
 Assigning `None` to an element stores NULL.
 Nested indices rebuild the corresponding inner arrays, including missing inner arrays.
