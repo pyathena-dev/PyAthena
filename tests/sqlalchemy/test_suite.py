@@ -165,6 +165,17 @@ class ArrayExpressionTest(fixtures.TestBase):
     __backend__ = True
     __requires__ = ("array_type",)
 
+    def test_cached_steps_and_boolean_quantifiers(self, connection):
+        array = literal([1, 2, 3], types.ARRAY(Integer))
+        eq_(connection.execute(select(array[1:2:1])).scalar_one(), [1, 2])
+        with pytest.raises(sa_exc.DBAPIError):
+            connection.execute(select(array[1:2:2])).all()
+        flags = literal([True, False], AthenaArray(types.Boolean))
+        eq_(
+            tuple(connection.execute(select(any_(flags) == True, all_(flags) == True)).one()),  # noqa: E712
+            (True, False),
+        )
+
     def test_index_slice_and_concat(self, connection):
         array = literal([1, None, 3], AthenaArray(Integer))
         empty = literal([], AthenaArray(Integer))

@@ -1,7 +1,10 @@
+import warnings
+
 import pytest
-from sqlalchemy import Integer, String, all_, any_, bindparam, column, select, types
+from sqlalchemy import Integer, String, all_, any_, bindparam, column, select, table, types
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.sql import operators
+from sqlalchemy.sql.compiler import FROM_LINTING
 
 from pyathena.sqlalchemy.base import AthenaDialect
 from pyathena.sqlalchemy.types import AthenaArray
@@ -102,3 +105,34 @@ def test_array_concat_and_cache_bind_values():
     second = select(items[bindparam("index")]).where(any_(items) == 3)
     assert first._generate_cache_key().key == second._generate_cache_key().key
     assert compile_sql(first.params(index=1)) != compile_sql(first.params(index=2))
+
+
+def test_quantifier_boolean_left_operand():
+    flags = column("flags", AthenaArray(types.Boolean))
+    assert "any_match" in compile_sql(any_(flags) == True)  # noqa: E712
+    assert "all_match" in compile_sql(all_(flags) != False)  # noqa: E712
+    assert "IS DISTINCT FROM" in compile_sql(any_(flags).is_distinct_from(True))
+
+
+def test_quantifier_join_linter_tracks_original_tables():
+    left = table("left_table", column("value", Integer))
+    right = table("right_table", column("items", AthenaArray(Integer)))
+    query = select(left, right).where(left.c.value == any_(right.c["items"]))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", sa_exc.SAWarning)
+        query.compile(dialect=AthenaDialect(), linting=FROM_LINTING)
+
+
+def test_generic_array_slice_step_is_rendered_for_cache_validation():
+    items = column("items", types.ARRAY(Integer))
+    query = select(items[1:3:1])
+    compiled = query.compile(dialect=AthenaDialect())
+    assert "Unsupported ARRAY slice step" in str(compiled)
+    assert 1 in compiled.params.values()
+    native = column("items", AthenaArray(Integer))
+    assert (
+        select(native[1:3:1])._generate_cache_key().key
+        == select(native[1:3])._generate_cache_key().key
+    )
+    with pytest.raises(sa_exc.CompileError, match="step"):
+        native[1:3:2]

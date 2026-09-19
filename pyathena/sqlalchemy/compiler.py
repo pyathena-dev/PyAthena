@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from itertools import product
 from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import exc, select, types, util
 from sqlalchemy.sql import operators, visitors
 from sqlalchemy.sql import util as sql_util
+from sqlalchemy.sql.base import _de_clone
 from sqlalchemy.sql.compiler import (
     DDLCompiler,
     GenericTypeCompiler,
@@ -288,6 +290,9 @@ class AthenaStatementCompiler(SQLCompiler):
             lateral_from_linter=lateral_from_linter,
         )
         aggregate = binary.right
+        aggregate_on_left = isinstance(binary.left, CollectionAggregate)
+        if aggregate_on_left:
+            aggregate = binary.left
         if (
             isinstance(aggregate, CollectionAggregate)
             and not isinstance(aggregate.element, ScalarSelect)
@@ -296,9 +301,28 @@ class AthenaStatementCompiler(SQLCompiler):
             variable = self._array_lambda_name()
             predicate = binary._clone()
             item_type = _ArrayTypeInspector.item_type(aggregate.element.type)
-            predicate.right = Column(variable, item_type)
-            if isinstance(predicate.left, BindParameter) and isinstance(item_type, types.ARRAY):
-                predicate.left = predicate.left._with_binary_element_type(item_type)
+            if aggregate_on_left:
+                predicate.left = Column(variable, item_type)
+            else:
+                predicate.right = Column(variable, item_type)
+                if isinstance(predicate.left, BindParameter) and isinstance(item_type, types.ARRAY):
+                    predicate.left = predicate.left._with_binary_element_type(item_type)
+            if from_linter is not None and operators.is_comparison(binary.operator):
+                if lateral_from_linter is not None:
+                    enclosing = [kw["enclosing_lateral"]]
+                    lateral_from_linter.edges.update(
+                        product(
+                            _de_clone(binary.left._from_objects + enclosing),
+                            _de_clone(binary.right._from_objects + enclosing),
+                        )
+                    )
+                else:
+                    from_linter.edges.update(
+                        product(
+                            _de_clone(binary.left._from_objects),
+                            _de_clone(binary.right._from_objects),
+                        )
+                    )
             sql = super().visit_binary(predicate, override_operator=override_operator, **kw)
             function = "any_match" if aggregate.operator is operators.any_op else "all_match"
             array = self.process(aggregate.element, **kw)
@@ -326,7 +350,8 @@ class AthenaStatementCompiler(SQLCompiler):
             )
             start = f"greatest({start}, 1)"
             length = f"greatest(least({stop}, cardinality({array})) - {start} + 1, 0)"
-            return f"slice({array}, {start}, {length})"
+            sql = f"slice({array}, {start}, {length})"
+            return self._array_slice_step(sql, bounds.step, **kw)
         index_expression = binary.right
         if isinstance(index_expression, BindParameter) and isinstance(
             index_expression.type, types.ARRAY
@@ -334,6 +359,16 @@ class AthenaStatementCompiler(SQLCompiler):
             index_expression = index_expression._with_binary_element_type(types.Integer())
         index = self.process(index_expression, **kw)
         return f"element_at({array}, IF({index} > 0, {index}, NULL))"
+
+    def _array_slice_step(self, sql, step, **kw):
+        if isinstance(step, Null):
+            return sql
+        step_sql = self.process(step, **kw)
+        failure = (
+            "CAST(concat('Unsupported ARRAY slice step: ', "
+            f"coalesce(CAST({step_sql} AS VARCHAR), 'NULL')) AS BIGINT)"
+        )
+        return f"IF({step_sql} = 1, {sql}, slice({sql}, {failure}, 0))"
 
     def translate_select_structure(self, select_stmt, **kw):
         """Keep DISTINCT and ordering on native arrays before result serialization."""

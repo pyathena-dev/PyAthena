@@ -51,11 +51,13 @@ class AthenaArray(sqltypes.ARRAY[Any]):
 
         def _setup_getitem(self, index):
             if isinstance(index, slice):
+                if index.step is not None and (type(index.step) is not int or index.step != 1):
+                    raise exc.CompileError("Athena ARRAY slices support only step=None or step=1")
                 start, stop = index.start, index.stop
                 if self.type.zero_indexes:
                     start = start + 1 if start is not None else None
                     stop = stop + 1 if stop is not None else None
-                return operators.getitem, Slice(start, stop, index.step), self.type
+                return operators.getitem, Slice(start, stop, None), self.type
             if self.type.zero_indexes:
                 index = index + 1
             return operators.getitem, index, _ArrayTypeInspector.item_type(self.type)
