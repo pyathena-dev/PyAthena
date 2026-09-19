@@ -9,8 +9,8 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import cast, exc, types
-from sqlalchemy.sql import sqltypes
-from sqlalchemy.sql.elements import ColumnElement
+from sqlalchemy.sql import operators, sqltypes
+from sqlalchemy.sql.elements import ColumnElement, Slice
 from sqlalchemy.sql.type_api import TypeEngine
 from sqlalchemy.sql.visitors import InternalTraversal
 
@@ -45,6 +45,22 @@ class AthenaArray(sqltypes.ARRAY[Any]):
     """
 
     __visit_name__ = "array"
+
+    class Comparator(sqltypes.ARRAY.Comparator[Any]):
+        """Build array indexing expressions with inclusive SQL slice bounds."""
+
+        def _setup_getitem(self, index):
+            if isinstance(index, slice):
+                start, stop = index.start, index.stop
+                if self.type.zero_indexes:
+                    start = start + 1 if start is not None else None
+                    stop = stop + 1 if stop is not None else None
+                return operators.getitem, Slice(start, stop, index.step), self.type
+            if self.type.zero_indexes:
+                index = index + 1
+            return operators.getitem, index, _ArrayTypeInspector.item_type(self.type)
+
+    comparator_factory = Comparator
 
     def __init__(
         self,

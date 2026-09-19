@@ -13,6 +13,10 @@ from sqlalchemy import (
     MetaData,
     String,
     cast,
+
+    all_,
+    any_,
+    bindparam,
     func,
     inspect,
     literal,
@@ -156,6 +160,106 @@ class _ArrayTuple(types.TypeDecorator):
 
     def process_result_value(self, value, dialect):
         return tuple(value) if value is not None else None
+
+class ArrayExpressionTest(fixtures.TestBase):
+    __backend__ = True
+    __requires__ = ("array_type",)
+
+    def test_index_slice_and_concat(self, connection):
+        array = literal([1, None, 3], AthenaArray(Integer))
+        empty = literal([], AthenaArray(Integer))
+        missing = literal(None, AthenaArray(Integer))
+        expressions = [
+            array[1],
+            array[2],
+            array[0],
+            array[-1],
+            array[10],
+            array[:],
+            array[:2],
+            array[2:],
+            array[-2:100],
+            array[3:1],
+            empty[1:3],
+            missing[1:3],
+            array.concat([4]),
+            array[1:2].concat(array[3:]),
+        ]
+        eq_(
+            tuple(connection.execute(select(*expressions)).one()),
+            (
+                1,
+                None,
+                None,
+                None,
+                None,
+                [1, None, 3],
+                [1, None],
+                [None, 3],
+                [1, None, 3],
+                [],
+                [],
+                None,
+                [1, None, 3, 4],
+                [1, None, 3],
+            ),
+        )
+
+    def test_dimensions_zero_indexes_and_bound_index(self, connection):
+        array = literal([[1, 2], [3]], AthenaArray(Integer, dimensions=2, zero_indexes=True))
+        statement = select(array[bindparam("index")], array[:0], array[0][1], array[1:])
+        eq_(tuple(connection.execute(statement, {"index": 0}).one()), ([1, 2], [[1, 2]], 2, [[3]]))
+        eq_(tuple(connection.execute(statement, {"index": 1}).one()), ([3], [[1, 2]], 2, [[3]]))
+
+    def test_quantified_comparisons(self, connection):
+        cases = [
+            ([1, 2, None], True, False, False, False),
+            ([1, 3], False, False, False, True),
+            ([], False, True, True, True),
+            (None, None, None, None, None),
+        ]
+        for values, eq_any, eq_all, lt_all, neg_any in cases:
+            array = literal(values, AthenaArray(Integer))
+            row = connection.execute(
+                select(
+                    any_(array) == 2,
+                    all_(array) == 2,
+                    all_(array) > 2,
+                    ~array.any(2),
+                    any_(array) == None,  # noqa: E711
+                )
+            ).one()
+            eq_(
+                tuple(row),
+                (
+                    eq_any,
+                    eq_all,
+                    lt_all,
+                    neg_any if eq_any is not None else None,
+                    False if values == [] else None,
+                ),
+            )
+
+    def test_where_and_lambda_names(self, connection, metadata):
+        table = Table(
+            "array_expressions",
+            metadata,
+            Column("id", Integer),
+            Column("items", AthenaArray(Integer)),
+            Column("_pyathena_element_0", Integer),
+        )
+        table.create(connection)
+        connection.execute(
+            table.insert(),
+            [
+                {"id": 1, "items": [1, 3], "_pyathena_element_0": 3},
+                {"id": 2, "items": [2, 4], "_pyathena_element_0": 1},
+            ],
+        )
+        predicate = (table.c._pyathena_element_0 == any_(table.c["items"])) & (
+            table.c["items"][1] == 1
+        )
+        eq_(connection.execute(select(table.c.id).where(predicate)).scalars().all(), [1])
 
 
 class NativeArrayTest(fixtures.TestBase):

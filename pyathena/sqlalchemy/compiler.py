@@ -16,6 +16,9 @@ from sqlalchemy.sql.compiler import (
 from sqlalchemy.sql.elements import (
     BindParameter,
     Cast,
+    CollectionAggregate,
+    Null,
+    Slice,
     TextClause,
     UnaryExpression,
     _label_reference,
@@ -258,6 +261,73 @@ class AthenaStatementCompiler(SQLCompiler):
 
     def visit_char_length_func(self, fn: Function[Any], **kw: Any) -> str:
         return f"length{self.function_argspec(fn, **kw)}"
+
+    def _array_lambda_name(self):
+        names = {
+            str(getattr(element, "name", "")).lower()
+            for element in visitors.iterate(self.statement)
+        }
+        index = getattr(self, "_array_lambda_index", 0)
+        while f"_pyathena_element_{index}" in names:
+            index += 1
+        self._array_lambda_index = index + 1
+        return f"_pyathena_element_{index}"
+
+    def visit_binary(
+        self,
+        binary,
+        override_operator=None,
+        eager_grouping=False,
+        from_linter=None,
+        lateral_from_linter=None,
+        **kw,
+    ):
+        kw.update(
+            eager_grouping=eager_grouping,
+            from_linter=from_linter,
+            lateral_from_linter=lateral_from_linter,
+        )
+        aggregate = binary.right
+        if isinstance(aggregate, CollectionAggregate) and isinstance(
+            aggregate.element.type, types.ARRAY
+        ):
+            variable = self._array_lambda_name()
+            predicate = binary._clone()
+            predicate.right = Column(variable, _ArrayTypeInspector.item_type(aggregate.element.type))
+            sql = super().visit_binary(predicate, override_operator=override_operator, **kw)
+            function = "any_match" if aggregate.operator is operators.any_op else "all_match"
+            array = self.process(aggregate.element, **kw)
+            return f"{function}({array}, {variable} -> {sql})"
+        return super().visit_binary(binary, override_operator=override_operator, **kw)
+
+    def visit_getitem_binary(self, binary, operator, **kw):
+        if not isinstance(binary.left.type, types.ARRAY):
+            raise exc.CompileError("Athena indexing requires an ARRAY expression")
+        array = self.process(binary.left, **kw)
+        if isinstance(binary.right, Slice):
+            bounds = binary.right
+            if not isinstance(bounds.step, Null) and not (
+                isinstance(bounds.step, BindParameter)
+                and bounds.step.unique
+                and bounds.step.value == 1
+            ):
+                raise exc.CompileError("Athena ARRAY slices support only step=None or step=1")
+            start = "1" if isinstance(bounds.start, Null) else self.process(bounds.start, **kw)
+            stop = (
+                f"cardinality({array})"
+                if isinstance(bounds.stop, Null)
+                else self.process(bounds.stop, **kw)
+            )
+            start = f"greatest({start}, 1)"
+            length = f"greatest(least({stop}, cardinality({array})) - {start} + 1, 0)"
+            return f"slice({array}, {start}, {length})"
+        index_expression = binary.right
+        if isinstance(index_expression, BindParameter) and isinstance(
+            index_expression.type, types.ARRAY
+        ):
+            index_expression = index_expression._with_binary_element_type(types.Integer())
+        index = self.process(index_expression, **kw)
+        return f"element_at({array}, IF({index} > 0, {index}, NULL))"
 
     def translate_select_structure(self, select_stmt, **kw):
         """Keep DISTINCT and ordering on native arrays before result serialization."""
