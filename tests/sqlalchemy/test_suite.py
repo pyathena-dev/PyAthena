@@ -166,6 +166,8 @@ class ArrayExpressionTest(fixtures.TestBase):
     __requires__ = ("array_type",)
 
     def test_cached_steps_and_boolean_quantifiers(self, connection):
+        inferred = func.array_agg(func.length(literal("abc")))
+        eq_(connection.execute(select(inferred[1:2:1])).scalar_one(), [3])
         array = literal([1, 2, 3], types.ARRAY(Integer))
         eq_(connection.execute(select(array[1:2:1])).scalar_one(), [1, 2])
         with pytest.raises(sa_exc.StatementError):

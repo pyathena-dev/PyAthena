@@ -376,7 +376,11 @@ class AthenaStatementCompiler(SQLCompiler):
             "CAST(concat('Unsupported ARRAY slice step: ', "
             f"coalesce(CAST({step_sql} AS VARCHAR), 'NULL')) AS BIGINT)"
         )
-        empty = f"CAST(ARRAY[] AS {self._complex_dml_type(array_type)})"
+        empty = (
+            f"slice({sql}, 1, 0)"
+            if _has_unknown_array_element(array_type)
+            else f"CAST(ARRAY[] AS {self._complex_dml_type(array_type)})"
+        )
         return f"IF({step_sql} = 1, {sql}, slice({empty}, {failure}, 0))"
 
     def translate_select_structure(self, select_stmt, **kw):

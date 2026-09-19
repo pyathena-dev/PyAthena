@@ -1,7 +1,7 @@
 import warnings
 
 import pytest
-from sqlalchemy import Integer, String, all_, any_, bindparam, column, select, table, types
+from sqlalchemy import Integer, String, all_, any_, bindparam, column, func, select, table, types
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.sql import operators
 from sqlalchemy.sql.compiler import FROM_LINTING
@@ -142,3 +142,11 @@ def test_generic_array_slice_step_is_rendered_for_cache_validation():
     )
     with pytest.raises(sa_exc.CompileError, match="step"):
         native[1:3:2]
+
+
+def test_stepped_array_aggregate_with_inferred_element_type():
+    expression = func.array_agg(func.length("abc"))[1:2:1]
+    sql = compile_sql(select(expression))
+    assert "array_agg(length('abc'))" in sql
+    assert "Unsupported ARRAY slice step" in sql
+    assert "ARRAY(NULL)" not in sql
