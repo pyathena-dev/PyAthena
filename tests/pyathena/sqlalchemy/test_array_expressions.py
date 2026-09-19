@@ -125,10 +125,16 @@ def test_quantifier_join_linter_tracks_original_tables():
 
 def test_generic_array_slice_step_is_rendered_for_cache_validation():
     items = column("items", types.ARRAY(Integer))
-    query = select(items[1:3:1])
+    query = select(items[2:3:1])
     compiled = query.compile(dialect=AthenaDialect())
     assert "Unsupported ARRAY slice step" in str(compiled)
-    assert 1 in compiled.params.values()
+    assert list(compiled.params.values()).count(1) == 1
+    assert query._generate_cache_key().key == select(items[2:3:2])._generate_cache_key().key
+    step_name = next(name for name, value in compiled.params.items() if value == 1)
+    assert f"IF(%({step_name})s = 1" in str(compiled)
+    for invalid in (2, 1.0, None):
+        with pytest.raises(ValueError, match="step"):
+            compiled._bind_processors[step_name](invalid)
     native = column("items", AthenaArray(Integer))
     assert (
         select(native[1:3:1])._generate_cache_key().key

@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, cast
 from sqlalchemy import exc, select, types, util
 from sqlalchemy.sql import operators, visitors
 from sqlalchemy.sql import util as sql_util
-from sqlalchemy.sql.base import _de_clone
 from sqlalchemy.sql.compiler import (
     DDLCompiler,
     GenericTypeCompiler,
@@ -34,7 +33,7 @@ from pyathena.model import (
     AthenaPartitionTransform,
     AthenaRowFormatSerde,
 )
-from pyathena.sqlalchemy.array import _ArrayTypeInspector
+from pyathena.sqlalchemy.array import _ArraySliceStepType, _ArrayTypeInspector
 from pyathena.sqlalchemy.preparer import AthenaDDLIdentifierPreparer
 from pyathena.sqlalchemy.types import (
     AthenaMap,
@@ -66,6 +65,13 @@ if TYPE_CHECKING:
 # storage, so their CREATE TABLE statements must not include a LOCATION clause.
 # https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-integrations-query-athena.html
 S3_TABLES_CATALOG_PREFIX = "s3tablescatalog/"
+
+
+def _original_froms(elements):
+    for element in elements:
+        while element._is_clone_of is not None:
+            element = element._is_clone_of
+        yield element
 
 
 class AthenaTypeCompiler(GenericTypeCompiler):
@@ -312,15 +318,15 @@ class AthenaStatementCompiler(SQLCompiler):
                     enclosing = [kw["enclosing_lateral"]]
                     lateral_from_linter.edges.update(
                         product(
-                            _de_clone(binary.left._from_objects + enclosing),
-                            _de_clone(binary.right._from_objects + enclosing),
+                            _original_froms(binary.left._from_objects + enclosing),
+                            _original_froms(binary.right._from_objects + enclosing),
                         )
                     )
                 else:
                     from_linter.edges.update(
                         product(
-                            _de_clone(binary.left._from_objects),
-                            _de_clone(binary.right._from_objects),
+                            _original_froms(binary.left._from_objects),
+                            _original_froms(binary.right._from_objects),
                         )
                     )
             sql = super().visit_binary(predicate, override_operator=override_operator, **kw)
@@ -351,7 +357,7 @@ class AthenaStatementCompiler(SQLCompiler):
             start = f"greatest({start}, 1)"
             length = f"greatest(least({stop}, cardinality({array})) - {start} + 1, 0)"
             sql = f"slice({array}, {start}, {length})"
-            return self._array_slice_step(sql, bounds.step, **kw)
+            return self._array_slice_step(sql, bounds.step, binary.left.type, **kw)
         index_expression = binary.right
         if isinstance(index_expression, BindParameter) and isinstance(
             index_expression.type, types.ARRAY
@@ -360,15 +366,18 @@ class AthenaStatementCompiler(SQLCompiler):
         index = self.process(index_expression, **kw)
         return f"element_at({array}, IF({index} > 0, {index}, NULL))"
 
-    def _array_slice_step(self, sql, step, **kw):
+    def _array_slice_step(self, sql, step, array_type, **kw):
         if isinstance(step, Null):
             return sql
+        if isinstance(step, BindParameter):
+            step = step._with_binary_element_type(_ArraySliceStepType())
         step_sql = self.process(step, **kw)
         failure = (
             "CAST(concat('Unsupported ARRAY slice step: ', "
             f"coalesce(CAST({step_sql} AS VARCHAR), 'NULL')) AS BIGINT)"
         )
-        return f"IF({step_sql} = 1, {sql}, slice({sql}, {failure}, 0))"
+        empty = f"CAST(ARRAY[] AS {self._complex_dml_type(array_type)})"
+        return f"IF({step_sql} = 1, {sql}, slice({empty}, {failure}, 0))"
 
     def translate_select_structure(self, select_stmt, **kw):
         """Keep DISTINCT and ordering on native arrays before result serialization."""
