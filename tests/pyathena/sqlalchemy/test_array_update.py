@@ -1,0 +1,90 @@
+import pytest
+from sqlalchemy import Column, Integer, MetaData, Table, bindparam, types
+from sqlalchemy import exc as sa_exc
+
+from pyathena.formatter import DefaultParameterFormatter
+from pyathena.sqlalchemy.base import AthenaDialect
+from pyathena.sqlalchemy.types import AthenaArray
+
+
+def array_table(type_=None):
+    return Table(
+        "arrays", MetaData(), Column("id", Integer), Column("items", type_ or AthenaArray(Integer))
+    )
+
+
+@pytest.mark.parametrize(
+    ("target", "value"),
+    [(1, 2), (4, None), (slice(2, 3), [4]), (slice(2, 2), []), (slice(None), [])],
+)
+def test_partial_update_compiles_to_one_whole_column_assignment(target, value):
+    table = array_table()
+    statement = table.update().values({table.c["items"][target]: value}).where(table.c.id == 1)
+    original_key = statement._generate_cache_key().key
+    compiled = statement.compile(dialect=AthenaDialect())
+    sql = str(compiled)
+    assert sql.startswith("UPDATE arrays SET items=")
+    assert "SET element_at" not in sql
+    assert "SELECT" not in sql
+    assert "WHERE arrays.id =" in sql
+    assert statement._generate_cache_key().key == original_key
+    parameters = {
+        name: compiled._bind_processors.get(name, lambda v: v)(value)
+        for name, value in compiled.params.items()
+    }
+    formatted = DefaultParameterFormatter().format(sql, parameters)
+    assert "ARRAY[" in formatted
+
+
+@pytest.mark.parametrize("index", [0, -1, None, 1.5, True])
+def test_invalid_partial_update_index(index):
+    table = array_table()
+    with pytest.raises(sa_exc.CompileError, match="indices"):
+        table.update().values({table.c["items"][index]: 1}).compile(dialect=AthenaDialect())
+
+
+def test_multiple_updates_to_one_array_are_rejected():
+    table = array_table()
+    values = table.c["items"]
+    for assignments in (
+        {values[1]: 2, values[2]: 3},
+        {values: [], values[1]: 2},
+        {values[1]: 2, "items": []},
+    ):
+        with pytest.raises(sa_exc.CompileError, match="one assignment"):
+            table.update().values(assignments).compile(dialect=AthenaDialect())
+
+
+def test_slice_null_and_nested_slice_rejected():
+    table = array_table(AthenaArray(Integer, dimensions=2))
+    with pytest.raises(sa_exc.CompileError, match="non-NULL array"):
+        table.update().values({table.c["items"][1:2]: None}).compile(dialect=AthenaDialect())
+    with pytest.raises(sa_exc.CompileError, match="final"):
+        table.update().values({table.c["items"][1:2][1]: [2]}).compile(dialect=AthenaDialect())
+
+
+def test_bound_indices_and_values_are_reused_without_mutation():
+    table = array_table()
+    expression = table.c["items"][bindparam("index")]
+    statement = table.update().values({expression: bindparam("value"), table.c.id: 2})
+    compiled = statement.compile(dialect=AthenaDialect())
+    assert set(compiled.params) == {"index", "value", "id"}
+    assert compiled._bind_processors["index"](2) == 2
+    with pytest.raises(ValueError, match="integers"):
+        compiled._bind_processors["index"](1.5)
+    assert str(statement.compile(dialect=AthenaDialect())) == str(compiled)
+
+
+def test_nested_and_zero_indexed_update():
+    table = array_table(AthenaArray(Integer, dimensions=2, zero_indexes=True))
+    statement = table.update().values({table.c["items"][0][2]: 7})
+    sql = str(statement.compile(dialect=AthenaDialect(), compile_kwargs={"literal_binds": True}))
+    assert sql.count("transform(sequence(") == 2
+    assert "IF(1 > 0, 1," in sql
+    assert "IF(3 > 0, 3," in sql
+
+
+def test_generic_array_partial_update():
+    table = array_table(types.ARRAY(Integer))
+    sql = str(table.update().values({table.c["items"][1]: 2}).compile(dialect=AthenaDialect()))
+    assert "SET items=transform(" in sql

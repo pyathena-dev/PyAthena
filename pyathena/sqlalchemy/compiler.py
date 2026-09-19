@@ -34,6 +34,7 @@ from pyathena.model import (
     AthenaRowFormatSerde,
 )
 from pyathena.sqlalchemy.array import _ArraySliceStepType, _ArrayTypeInspector
+from pyathena.sqlalchemy._array_update import compile_array_update, rewrite_array_update
 from pyathena.sqlalchemy.preparer import AthenaDDLIdentifierPreparer
 from pyathena.sqlalchemy.types import (
     AthenaMap,
@@ -269,6 +270,14 @@ class AthenaStatementCompiler(SQLCompiler):
             while element._is_clone_of is not None:
                 element = element._is_clone_of
             yield element
+    def visit_update(self, update_stmt, visiting_cte=None, **kw):
+        """Rewrite partial array assignments into one native Athena UPDATE."""
+        return super().visit_update(
+            rewrite_array_update(update_stmt), visiting_cte=visiting_cte, **kw
+        )
+
+    def visit_athena_array_update(self, expression, **kw):
+        return compile_array_update(self, expression, **kw)
 
     def _array_lambda_name(self):
         names = {
