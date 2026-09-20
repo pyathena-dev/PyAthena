@@ -10,6 +10,8 @@ from sqlalchemy.util.concurrency import await_only
 
 import pyathena
 from pyathena.aio.connection import AioConnection
+from pyathena.aio.cursor import AioCursor
+from pyathena.cursor import Cursor
 from pyathena.error import (
     DatabaseError,
     DataError,
@@ -27,6 +29,9 @@ if TYPE_CHECKING:
     from types import ModuleType
 
     from sqlalchemy import URL
+
+
+_ASYNC_CURSOR_CLASSES: dict[Any, Any] = {Cursor: AioCursor}
 
 
 class AsyncAdapt_pyathena_cursor:
@@ -139,8 +144,10 @@ class AsyncAdapt_pyathena_connection(AdaptedConnection):
     def schema_name(self) -> str | None:
         return self._connection.schema_name  # type: ignore[no-any-return]
 
-    def cursor(self) -> AsyncAdapt_pyathena_cursor:
-        raw_cursor = self._connection.cursor()
+    def cursor(self, cursor: Any = None) -> AsyncAdapt_pyathena_cursor:
+        # The shared dialect names a cursor class in its synchronous form; this
+        # connection can only drive the async counterpart.
+        raw_cursor = self._connection.cursor(_ASYNC_CURSOR_CLASSES.get(cursor, cursor))
         return AsyncAdapt_pyathena_cursor(raw_cursor)
 
     def close(self) -> None:
