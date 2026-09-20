@@ -685,6 +685,45 @@ class TestArrayJSONProjection:
         assert sql.startswith("SELECT anon_1.value, json_format(")
 
 
+class TestArrayAssignmentType:
+    def test_binary_element_assignment_uses_native_hex_parameter(self):
+        table = _array_update_table(AthenaArray(types.BINARY))
+        compiled = (
+            table.update()
+            .values({table.c["items"][1]: b"\x00\xff"})
+            .compile(dialect=AthenaDialect())
+        )
+        params = {
+            name: compiled._bind_processors.get(name, lambda value: value)(value)
+            for name, value in compiled.params.items()
+        }
+        assert "FROM_HEX('00ff')" in DefaultParameterFormatter().format(str(compiled), params)
+
+    def test_explicit_assignment_type_and_callable_value(self):
+        table = _array_update_table(AthenaArray(types.String))
+        stmt = table.update().values(
+            {table.c["items"][1]: bindparam("value", type_=PrefixString(), callable_=lambda: "a")}
+        )
+        compiled = stmt.compile(dialect=AthenaDialect())
+        assert compiled._bind_processors["value"]("a") == "prefix:a"
+        assert "upper(%(value)s)" in str(compiled)
+        assert compiled.params["value"] == "a"
+
+
+class TestArrayWriteIndexType:
+    @pytest.mark.parametrize("processor_name", ["bind_processor", "literal_processor"])
+    @pytest.mark.parametrize("value", [None, True, 1.5, "1"])
+    def test_rejects_non_integer_values(self, processor_name, value):
+        processor = getattr(_ArrayWriteIndexType(), processor_name)(AthenaDialect())
+        with pytest.raises(ValueError, match="non-NULL integers"):
+            processor(value)
+
+    def test_bind_and_literal_processors(self):
+        type_ = _ArrayWriteIndexType()
+        assert type_.bind_processor(AthenaDialect())(2) == 2
+        assert type_.literal_processor(AthenaDialect())(2) == "2"
+
+
 class TestArrayUpdate:
     def test_multiple_updates_to_one_array_are_rejected(self):
         table = _array_update_table()
@@ -741,54 +780,31 @@ class TestArrayUpdate:
                 )
 
 
-class TestArrayAssignmentType:
-    def test_binary_element_assignment_uses_native_hex_parameter(self):
-        table = _array_update_table(AthenaArray(types.BINARY))
+class TestArrayUpdateCompiler:
+    def test_bound_index_uses_write_index_processor(self):
+        table = _array_update_table()
         compiled = (
             table.update()
-            .values({table.c["items"][1]: b"\x00\xff"})
+            .values({table.c["items"][bindparam("index")]: 9})
             .compile(dialect=AthenaDialect())
         )
-        params = {
-            name: compiled._bind_processors.get(name, lambda value: value)(value)
-            for name, value in compiled.params.items()
-        }
-        assert "FROM_HEX('00ff')" in DefaultParameterFormatter().format(str(compiled), params)
+        assert compiled._bind_processors["index"](2) == 2
+        for value in (1.5, True, None):
+            with pytest.raises(ValueError, match="non-NULL integers"):
+                compiled._bind_processors["index"](value)
 
-    def test_explicit_assignment_type_and_callable_bindings(self):
+    def test_callable_index_and_slice_value(self):
         table = _array_update_table(AthenaArray(types.String))
-        stmt = table.update().values(
-            {
-                table.c["items"][bindparam("index", callable_=lambda: 1)]: bindparam(
-                    "value", type_=PrefixString(), callable_=lambda: "a"
-                )
-            }
+        compiled = (
+            table.update()
+            .values({table.c["items"][bindparam("index", callable_=lambda: 1)]: "a"})
+            .compile(dialect=AthenaDialect())
         )
-        compiled = stmt.compile(dialect=AthenaDialect())
-        assert compiled._bind_processors["value"]("a") == "prefix:a"
-        assert "upper(%(value)s)" in str(compiled)
         assert compiled.params["index"] == 1
-        assert compiled.params["value"] == "a"
         table.update().values(
             {table.c["items"][1:2]: bindparam("values", callable_=lambda: ["a"])}
         ).compile(dialect=AthenaDialect())
 
-
-class TestArrayWriteIndexType:
-    @pytest.mark.parametrize("processor_name", ["bind_processor", "literal_processor"])
-    @pytest.mark.parametrize("value", [None, True, 1.5, "1"])
-    def test_rejects_non_integer_values(self, processor_name, value):
-        processor = getattr(_ArrayWriteIndexType(), processor_name)(AthenaDialect())
-        with pytest.raises(ValueError, match="non-NULL integers"):
-            processor(value)
-
-    def test_bind_and_literal_processors(self):
-        type_ = _ArrayWriteIndexType()
-        assert type_.bind_processor(AthenaDialect())(2) == 2
-        assert type_.literal_processor(AthenaDialect())(2) == "2"
-
-
-class TestArrayUpdateCompiler:
     @pytest.mark.parametrize(
         ("target", "value"),
         [(1, 2), (4, None), (slice(2, 3), [4]), (slice(2, 2), []), (slice(None), [])],
@@ -877,6 +893,6 @@ class TestArrayUpdateCompiler:
         assert "length('abc')" in DefaultParameterFormatter().format(str(compiled), params)
 
     def test_null_slice_assignment_rejected(self):
-        table = _array_update_table(AthenaArray(Integer, dimensions=2))
+        table = _array_update_table()
         with pytest.raises(sa_exc.CompileError, match="non-NULL array"):
             table.update().values({table.c["items"][1:2]: None}).compile(dialect=AthenaDialect())

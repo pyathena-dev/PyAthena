@@ -634,7 +634,7 @@ class AthenaStatementCompiler(SQLCompiler):
     def visit_cast(self, cast: Cast[Any], **kwargs):
         if isinstance(cast.type, (types.ARRAY, AthenaMap, AthenaStruct)):
             type_clause = self._complex_dml_type(
-                cast.type, implicit_bind=cast._annotations.get("_pyathena_array_bind", False)
+                cast.type, require_precision=cast._annotations.get("_pyathena_array_bind", False)
             )
             return f"CAST({self.process(cast.clause, **kwargs)} AS {type_clause})"
         if (isinstance(cast.type, types.VARCHAR) and cast.type.length is None) or isinstance(
@@ -656,27 +656,29 @@ class AthenaStatementCompiler(SQLCompiler):
             type_clause = cast.typeclause._compiler_dispatch(self, **kwargs)
         return f"CAST({cast.clause._compiler_dispatch(self, **kwargs)} AS {type_clause})"
 
-    def _complex_dml_type(self, type_, *, implicit_bind=False):
+    def _complex_dml_type(self, type_, *, require_precision=False):
         if isinstance(type_, types.TypeDecorator):
             return self._complex_dml_type(
-                self._array_type_inspector.decorator_impl(type_), implicit_bind=implicit_bind
+                self._array_type_inspector.decorator_impl(type_),
+                require_precision=require_precision,
             )
         if isinstance(type_, types.NullType):
             raise exc.CompileError("Bound ARRAY values require an explicit element type")
         if isinstance(type_, types.ARRAY):
             item = self._complex_dml_type(
-                _ArrayTypeInspector.item_type(type_), implicit_bind=implicit_bind
+                _ArrayTypeInspector.item_type(type_), require_precision=require_precision
             )
             return f"ARRAY({item})"
         if isinstance(type_, AthenaMap):
-            return (
-                f"MAP({self._complex_dml_type(type_.key_type, implicit_bind=implicit_bind)}, "
-                f"{self._complex_dml_type(type_.value_type, implicit_bind=implicit_bind)})"
+            key_type = self._complex_dml_type(type_.key_type, require_precision=require_precision)
+            value_type = self._complex_dml_type(
+                type_.value_type, require_precision=require_precision
             )
+            return f"MAP({key_type}, {value_type})"
         if isinstance(type_, AthenaStruct):
             fields = ", ".join(
                 f"{self.preparer.quote(name)} "
-                f"{self._complex_dml_type(field_type, implicit_bind=implicit_bind)}"
+                f"{self._complex_dml_type(field_type, require_precision=require_precision)}"
                 for name, field_type in type_.fields.items()
             )
             return f"ROW({fields})"
@@ -688,9 +690,9 @@ class AthenaStatementCompiler(SQLCompiler):
             return "DOUBLE"
         if isinstance(type_, types.Float):
             return "REAL"
-        if implicit_bind and isinstance(type_, types.Numeric) and type_.precision is None:
+        if require_precision and isinstance(type_, types.Numeric) and type_.precision is None:
             raise exc.CompileError(
-                "ARRAY decimal binds require explicit Numeric precision; "
+                "ARRAY decimal values require explicit Numeric precision; "
                 "specify precision and scale to avoid implicit rounding"
             )
         return self.dialect.type_compiler_instance.process(type_)

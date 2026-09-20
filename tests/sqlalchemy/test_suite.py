@@ -274,7 +274,7 @@ class ArrayUpdateTest(fixtures.TestBase):
                 items=[1, 2, 3],
                 binary_items=[b"abc"],
                 tuple_items=[1, 2],
-                decimal_items=[Decimal("1.23")],
+                decimal_items=[Decimal("0.00")],
                 timestamp_items=[
                     _datetime(2024, 1, 1, microsecond=123000),
                     _datetime(2024, 1, 2, microsecond=456000),
@@ -282,6 +282,8 @@ class ArrayUpdateTest(fixtures.TestBase):
             )
         )
         items = table.c["items"]
+        connection.execute(table.update().values({table.c.decimal_items[1]: Decimal("1.23")}))
+        eq_(connection.execute(select(table.c.decimal_items)).scalar_one(), [Decimal("1.23")])
         connection.execute(
             table.update().ordered_values(
                 (items[func.length("abc")], items[1] + 8),
