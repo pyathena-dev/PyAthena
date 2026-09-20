@@ -33,9 +33,7 @@ from pyathena.sqlalchemy.preparer import AthenaDDLIdentifierPreparer
 from pyathena.sqlalchemy.types import (
     AthenaMap,
     AthenaStruct,
-    _array_item_type,
-    _decorator_impl,
-    _has_unknown_array_element,
+    _ArrayTypeInspector,
     get_double_type,
 )
 from pyathena.sqlalchemy.util import _split_type_arguments
@@ -226,7 +224,7 @@ class AthenaTypeCompiler(GenericTypeCompiler):
     def visit_array(self, type_, **kw):
         if isinstance(type_, types.ARRAY):
             kw["_athena_array_ddl"] = True
-            item_type_str = self.process(_array_item_type(type_), **kw)
+            item_type_str = self.process(_ArrayTypeInspector.item_type(type_), **kw)
             return f"ARRAY<{item_type_str}>"
         return "ARRAY<STRING>"
 
@@ -253,6 +251,10 @@ class AthenaStatementCompiler(SQLCompiler):
         AWS Athena SQL Reference:
         https://docs.aws.amazon.com/athena/latest/ug/ddl-sql-reference.html
     """
+
+    @util.memoized_property
+    def _array_type_inspector(self):
+        return _ArrayTypeInspector(self.dialect)
 
     def visit_char_length_func(self, fn: Function[Any], **kw: Any) -> str:
         return f"length{self.function_argspec(fn, **kw)}"
@@ -287,8 +289,8 @@ class AthenaStatementCompiler(SQLCompiler):
     def _has_array_result(self, column):
         type_ = column.type.dialect_impl(self.dialect)
         while isinstance(type_, types.TypeDecorator):
-            type_ = _decorator_impl(type_, self.dialect)
-        return isinstance(type_, types.ARRAY) and not _has_unknown_array_element(type_)
+            type_ = self._array_type_inspector.decorator_impl(type_)
+        return isinstance(type_, types.ARRAY) and not _ArrayTypeInspector.has_unknown_element(type_)
 
     def _array_result_select(self, statement):
         if any(
@@ -508,12 +510,14 @@ class AthenaStatementCompiler(SQLCompiler):
     def _complex_dml_type(self, type_, *, implicit_bind=False):
         if isinstance(type_, types.TypeDecorator):
             return self._complex_dml_type(
-                _decorator_impl(type_, self.dialect), implicit_bind=implicit_bind
+                self._array_type_inspector.decorator_impl(type_), implicit_bind=implicit_bind
             )
         if isinstance(type_, types.NullType):
             raise exc.CompileError("Bound ARRAY values require an explicit element type")
         if isinstance(type_, types.ARRAY):
-            item = self._complex_dml_type(_array_item_type(type_), implicit_bind=implicit_bind)
+            item = self._complex_dml_type(
+                _ArrayTypeInspector.item_type(type_), implicit_bind=implicit_bind
+            )
             return f"ARRAY({item})"
         if isinstance(type_, AthenaMap):
             return (
@@ -542,7 +546,7 @@ class AthenaStatementCompiler(SQLCompiler):
             )
         return self.dialect.type_compiler_instance.process(type_)
 
-    def visit_athena_array_result(self, expression, **kw):
+    def visit_athena_array_json_projection(self, expression, **kw):
         value = self.process(expression.element, **kw)
         encoded = self._array_json(value, expression.array_type)
         # An object envelope keeps SQL NULL and CSV null markers out of the transport.
@@ -550,11 +554,11 @@ class AthenaStatementCompiler(SQLCompiler):
 
     def _array_json(self, value, type_, depth=0):
         if isinstance(type_, types.TypeDecorator):
-            return self._array_json(value, _decorator_impl(type_, self.dialect), depth)
+            return self._array_json(value, self._array_type_inspector.decorator_impl(type_), depth)
         # Each recursive value becomes JSON, including map keys and typed scalar leaves.
         variable = f"_pyathena_array_{depth}"
         if isinstance(type_, types.ARRAY):
-            child = self._array_json(variable, _array_item_type(type_), depth + 1)
+            child = self._array_json(variable, _ArrayTypeInspector.item_type(type_), depth + 1)
             return f"CAST(transform({value}, {variable} -> {child}) AS JSON)"
         if isinstance(type_, AthenaMap):
             key = self._array_json(f"{variable}[1]", type_.key_type, depth + 1)

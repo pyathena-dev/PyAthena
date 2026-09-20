@@ -305,42 +305,23 @@ class AthenaArray(sqltypes.ARRAY[Any]):
 
     def bind_processor(self, dialect):
         """Return a processor that marks native ARRAY, MAP, and ROW parameters."""
-
-        def process(value):
-            return _bind_complex(value, self, dialect)
-
-        return process
+        return _ArrayValueProcessor(self, dialect).bind
 
     def literal_processor(self, dialect):
         """Return a processor that renders typed Athena array literals."""
-
-        def process(value):
-            return _literal_complex(value, self, dialect)
-
-        return process
+        return _ArrayValueProcessor(self, dialect).literal
 
     def column_expression(self, colexpr):
-        """Serialize an outer result column without changing its native SQL type."""
-        return colexpr if _has_unknown_array_element(self) else _ArrayResult(colexpr, self)
+        """Project the outer ARRAY result as JSON while retaining its Python type."""
+        return (
+            colexpr
+            if _ArrayTypeInspector.has_unknown_element(self)
+            else _ArrayJSONProjection(colexpr, self)
+        )
 
     def result_processor(self, dialect, coltype):
         """Return a processor that restores the declared Python element types."""
-
-        def process(value):
-            if value is None:
-                return None
-            if isinstance(value, str):
-                try:
-                    value = json.loads(value)
-                except json.JSONDecodeError:
-                    # Textual SQL does not receive column_expression. Preserve the
-                    # DBAPI's raw fallback when native nested data is ambiguous.
-                    return value
-            if isinstance(value, dict) and "_pyathena_array" in value:
-                value = value["_pyathena_array"]
-            return _decode_complex(value, self, self.as_tuple, dialect)
-
-        return process
+        return _ArrayValueProcessor(self, dialect).result
 
 
 class ARRAY(AthenaArray):
@@ -349,10 +330,20 @@ class ARRAY(AthenaArray):
     __visit_name__ = "ARRAY"
 
 
-class _ArrayResult(ColumnElement[Any]):
-    """Apply lossless transport only to the outermost typed result column."""
+class _ArrayJSONProjection(ColumnElement[Any]):
+    """SQL expression that serializes an outer SELECT's ARRAY column as JSON.
 
-    __visit_name__ = "athena_array_result"
+    SQLAlchemy calls ``AthenaArray.column_expression`` for result columns, so
+    predicates and intermediate SELECTs keep using native ARRAY values. The
+    Athena statement compiler renders this wrapper as a JSON envelope; the
+    ARRAY result processor then restores its declared Python element types.
+
+    ``type`` keeps the original column type, including an outer TypeDecorator's
+    result processor. ``array_type`` describes the native ARRAY value that the
+    compiler must serialize. This object represents SQL, not fetched row data.
+    """
+
+    __visit_name__ = "athena_array_json_projection"
     inherit_cache = True
     _traverse_internals = [  # noqa: RUF012
         ("element", InternalTraversal.dp_clauseelement),
@@ -366,190 +357,230 @@ class _ArrayResult(ColumnElement[Any]):
         self.array_type = type_
 
 
-def _array_item_type(type_: sqltypes.ARRAY[Any]) -> TypeEngine[Any]:
-    if type_.dimensions is not None and type_.dimensions > 1:
-        return AthenaArray(
-            type_.item_type,
-            as_tuple=type_.as_tuple,
-            dimensions=type_.dimensions - 1,
-            zero_indexes=type_.zero_indexes,
-        )
-    return type_.item_type
+class _ArrayTypeInspector:
+    """Interpret nested ARRAY element types for SQL compilation and value conversion.
 
+    Type inspection is shared by the compiler and value processors. Resolving
+    a TypeDecorator uses the current dialect; dimensions and unknown elements
+    can be inspected without one.
+    """
 
-def _complex_values(value: Any, type_: TypeEngine[Any]):
-    if isinstance(type_, sqltypes.ARRAY):
-        if not isinstance(value, (list, tuple)):
-            raise TypeError("ARRAY values must be lists or tuples.")
-        item_type = _array_item_type(type_)
-        return "ARRAY", [(item, item_type) for item in value]
-    if isinstance(type_, AthenaMap):
-        if not isinstance(value, Mapping):
-            raise TypeError("MAP values must be mappings.")
-        return "MAP", [
-            (list(value), AthenaArray(type_.key_type)),
-            (list(value.values()), AthenaArray(type_.value_type)),
-        ]
-    if isinstance(type_, AthenaStruct):
-        if isinstance(value, Mapping):
-            if set(value) != set(type_.fields):
-                raise ValueError("ROW value fields must match the declared fields.")
-            values = [value[name] for name in type_.fields]
-        elif isinstance(value, (list, tuple)) and len(value) == len(type_.fields):
-            values = list(value)
-        else:
-            raise TypeError("ROW values must match the declared fields.")
-        return "ROW", list(zip(values, type_.fields.values(), strict=True))
-    return None
+    def __init__(self, dialect: Any) -> None:
+        self.dialect = dialect
 
-
-def _decorator_impl(type_: types.TypeDecorator[Any], dialect: Any) -> TypeEngine[Any]:
-    if dialect.name in type_._variant_mapping:
-        return type_._variant_mapping[dialect.name]
-    implementation = type_.load_dialect_impl(dialect)
-    if isinstance(implementation, AthenaTimestamp):
-        return types.TIMESTAMP()
-    if isinstance(implementation, AthenaDate):
-        return types.DATE()
-    return implementation
-
-
-def _has_unknown_array_element(type_: TypeEngine[Any]) -> bool:
-    if isinstance(type_, sqltypes.ARRAY):
-        return _has_unknown_array_element(type_.item_type)
-    if isinstance(type_, AthenaMap):
-        return _has_unknown_array_element(type_.key_type) or _has_unknown_array_element(
-            type_.value_type
-        )
-    if isinstance(type_, AthenaStruct):
-        return any(_has_unknown_array_element(field) for field in type_.fields.values())
-    return isinstance(type_, types.NullType)
-
-
-def _bind_complex(value: Any, type_: TypeEngine[Any], dialect: Any) -> Any:
-    if isinstance(type_, types.TypeDecorator):
-        if (
-            dialect.name not in type_._variant_mapping
-            and type(type_).bind_processor is not types.TypeDecorator.bind_processor
-        ):
-            processor = type_.bind_processor(dialect)
-            return processor(value) if processor else value
-        if dialect.name not in type_._variant_mapping and type_._has_bind_processor:
-            value = type_.process_bind_param(value, dialect)
-        return _bind_complex(value, _decorator_impl(type_, dialect), dialect)
-    if value is None:
-        return None
-    complex_values = _complex_values(value, type_)
-    if complex_values is not None:
-        constructor, items = complex_values
-        return _ComplexParameter(
-            constructor, tuple(_bind_complex(item, item_type, dialect) for item, item_type in items)
-        )
-    if isinstance(type_, types.JSON):
-        serializer = dialect._json_serializer or json.dumps
-        return _ComplexParameter("JSON_PARSE", (serializer(value),))
-    if isinstance(value, (list, tuple, Mapping)):
-        raise TypeError("ARRAY element shape does not match its declared type.")
-    if isinstance(type_, (types.LargeBinary, types.BINARY, types.VARBINARY)):
-        return bytes(value)
-    if isinstance(type_, (types.Date, types.DateTime)):
-        return value
-    processor = type_.dialect_impl(dialect).bind_processor(dialect)
-    return processor(value) if processor else value
-
-
-def _literal_complex(value: Any, type_: TypeEngine[Any], dialect: Any) -> str:
-    if isinstance(type_, types.TypeDecorator):
-        if (
-            dialect.name not in type_._variant_mapping
-            and type(type_).literal_processor is not types.TypeDecorator.literal_processor
-        ):
-            literal_override = type_.literal_processor(dialect)
-            if literal_override is not None:
-                return literal_override(value)
-        if dialect.name not in type_._variant_mapping:
-            if type_._has_literal_processor:
-                value = type_.process_literal_param(value, dialect)
-            elif type_._has_bind_processor:
-                value = type_.process_bind_param(value, dialect)
-        return _literal_complex(value, _decorator_impl(type_, dialect), dialect)
-    if value is None:
-        return "NULL"
-    complex_values = _complex_values(value, type_)
-    if complex_values is not None:
-        constructor, items = complex_values
-        opening, closing = ("[", "]") if constructor == "ARRAY" else ("(", ")")
-        values = ", ".join(_literal_complex(item, item_type, dialect) for item, item_type in items)
-        return f"{constructor}{opening}{values}{closing}"
-    if isinstance(type_, types.JSON):
-        serializer = dialect._json_serializer or json.dumps
-        processor = types.String().literal_processor(dialect)
-        return f"JSON_PARSE({processor(serializer(value))})"
-    if isinstance(value, (list, tuple, Mapping)):
-        raise TypeError("ARRAY element shape does not match its declared type.")
-    if isinstance(type_, (types.LargeBinary, types.BINARY, types.VARBINARY)):
-        return f"X'{bytes(value).hex()}'"
-    if isinstance(type_, types.DateTime) and isinstance(value, datetime):
-        return AthenaTimestamp.process(value)
-    if isinstance(type_, types.Date) and isinstance(value, date):
-        return AthenaDate.process(value)
-    processor = type_.dialect_impl(dialect).literal_processor(dialect)
-    if processor is None:
-        raise exc.CompileError(f"No ARRAY element literal processor for {type_!r}.")
-    return str(processor(value))
-
-
-def _decode_complex(
-    value: Any, type_: TypeEngine[Any], as_tuple: bool = False, dialect: Any = None
-) -> Any:
-    if isinstance(type_, types.TypeDecorator):
-        value = _decode_complex(value, _decorator_impl(type_, dialect), as_tuple, dialect)
-        if (
-            dialect.name not in type_._variant_mapping
-            and type(type_).result_processor is not types.TypeDecorator.result_processor
-        ):
-            processor = type_.result_processor(dialect, None)
-            return processor(value) if processor else value
-        if dialect.name not in type_._variant_mapping and type_._has_result_processor:
-            return type_.process_result_value(value, dialect)
-        return value
-    if value is None:
-        return None
-    if isinstance(type_, sqltypes.ARRAY):
-        item_type = _array_item_type(type_)
-        items = [_decode_complex(item, item_type, as_tuple, dialect) for item in value]
-        return tuple(items) if as_tuple else items
-    if isinstance(type_, AthenaMap):
-        map_items = value.items() if isinstance(value, dict) else value
-        return {
-            _decode_complex(key, type_.key_type, dialect=dialect): _decode_complex(
-                item, type_.value_type, as_tuple, dialect
+    @staticmethod
+    def item_type(type_: sqltypes.ARRAY[Any]) -> TypeEngine[Any]:
+        if type_.dimensions is not None and type_.dimensions > 1:
+            return AthenaArray(
+                type_.item_type,
+                as_tuple=type_.as_tuple,
+                dimensions=type_.dimensions - 1,
+                zero_indexes=type_.zero_indexes,
             )
-            for key, item in map_items
-        }
-    if isinstance(type_, AthenaStruct):
-        if not type_.fields:
+        return type_.item_type
+
+    def decorator_impl(self, type_: types.TypeDecorator[Any]) -> TypeEngine[Any]:
+        if self.dialect.name in type_._variant_mapping:
+            return type_._variant_mapping[self.dialect.name]
+        implementation = type_.load_dialect_impl(self.dialect)
+        if isinstance(implementation, AthenaTimestamp):
+            return types.TIMESTAMP()
+        if isinstance(implementation, AthenaDate):
+            return types.DATE()
+        return implementation
+
+    @staticmethod
+    def has_unknown_element(type_: TypeEngine[Any]) -> bool:
+        if isinstance(type_, sqltypes.ARRAY):
+            return _ArrayTypeInspector.has_unknown_element(type_.item_type)
+        if isinstance(type_, AthenaMap):
+            return _ArrayTypeInspector.has_unknown_element(
+                type_.key_type
+            ) or _ArrayTypeInspector.has_unknown_element(type_.value_type)
+        if isinstance(type_, AthenaStruct):
+            return any(
+                _ArrayTypeInspector.has_unknown_element(field) for field in type_.fields.values()
+            )
+        return isinstance(type_, types.NullType)
+
+
+class _ArrayValueProcessor:
+    """Convert one declared ARRAY type between Python values and Athena transport.
+
+    SQLAlchemy constructs processors per type and dialect. Keep that context
+    here and share the recursive ARRAY/MAP/ROW traversal across bind parameters,
+    SQL literals, and fetched JSON results.
+    """
+
+    def __init__(self, array_type: AthenaArray, dialect: Any) -> None:
+        self.array_type = array_type
+        self.dialect = dialect
+        self._type_inspector = _ArrayTypeInspector(dialect)
+
+    def bind(self, value: Any) -> Any:
+        return self._bind(value, self.array_type)
+
+    def literal(self, value: Any) -> str:
+        return self._literal(value, self.array_type)
+
+    def result(self, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                # Textual SQL does not receive column_expression. Preserve the
+                # DBAPI's raw fallback when native nested data is ambiguous.
+                return value
+        if isinstance(value, dict) and "_pyathena_array" in value:
+            value = value["_pyathena_array"]
+        return self._decode(value, self.array_type, self.array_type.as_tuple)
+
+    @staticmethod
+    def _complex_values(value: Any, type_: TypeEngine[Any]):
+        if isinstance(type_, sqltypes.ARRAY):
+            if not isinstance(value, (list, tuple)):
+                raise TypeError("ARRAY values must be lists or tuples.")
+            item_type = _ArrayTypeInspector.item_type(type_)
+            return "ARRAY", [(item, item_type) for item in value]
+        if isinstance(type_, AthenaMap):
+            if not isinstance(value, Mapping):
+                raise TypeError("MAP values must be mappings.")
+            return "MAP", [
+                (list(value), AthenaArray(type_.key_type)),
+                (list(value.values()), AthenaArray(type_.value_type)),
+            ]
+        if isinstance(type_, AthenaStruct):
+            if isinstance(value, Mapping):
+                if set(value) != set(type_.fields):
+                    raise ValueError("ROW value fields must match the declared fields.")
+                values = [value[name] for name in type_.fields]
+            elif isinstance(value, (list, tuple)) and len(value) == len(type_.fields):
+                values = list(value)
+            else:
+                raise TypeError("ROW values must match the declared fields.")
+            return "ROW", list(zip(values, type_.fields.values(), strict=True))
+        return None
+
+    def _bind(self, value: Any, type_: TypeEngine[Any]) -> Any:
+        if isinstance(type_, types.TypeDecorator):
+            if (
+                self.dialect.name not in type_._variant_mapping
+                and type(type_).bind_processor is not types.TypeDecorator.bind_processor
+            ):
+                processor = type_.bind_processor(self.dialect)
+                return processor(value) if processor else value
+            if self.dialect.name not in type_._variant_mapping and type_._has_bind_processor:
+                value = type_.process_bind_param(value, self.dialect)
+            return self._bind(value, self._type_inspector.decorator_impl(type_))
+        if value is None:
+            return None
+        complex_values = self._complex_values(value, type_)
+        if complex_values is not None:
+            constructor, items = complex_values
+            return _ComplexParameter(
+                constructor, tuple(self._bind(item, item_type) for item, item_type in items)
+            )
+        if isinstance(type_, types.JSON):
+            serializer = self.dialect._json_serializer or json.dumps
+            return _ComplexParameter("JSON_PARSE", (serializer(value),))
+        if isinstance(value, (list, tuple, Mapping)):
+            raise TypeError("ARRAY element shape does not match its declared type.")
+        if isinstance(type_, (types.LargeBinary, types.BINARY, types.VARBINARY)):
+            return bytes(value)
+        if isinstance(type_, (types.Date, types.DateTime)):
             return value
-        return {
-            name: _decode_complex(value[name], field_type, as_tuple, dialect)
-            for name, field_type in type_.fields.items()
-        }
-    if isinstance(type_, types.JSON):
-        return value
-    if isinstance(type_, types.Boolean):
-        return value if isinstance(value, bool) else value.lower() == "true"
-    if isinstance(type_, types.Integer):
-        return int(value)
-    if isinstance(type_, types.Numeric):
-        return Decimal(value) if type_.asdecimal else float(value)
-    if isinstance(type_, (types.DateTime, AthenaTimestamp)):
-        return value if isinstance(value, datetime) else datetime.fromisoformat(value)
-    if isinstance(type_, (types.Date, AthenaDate)):
-        return value if isinstance(value, date) else date.fromisoformat(value)
-    if isinstance(type_, (types.LargeBinary, types.BINARY, types.VARBINARY)):
-        return value if isinstance(value, bytes) else bytes.fromhex(value)
-    if isinstance(type_, types.String):
-        value = str(value)
-        processor = type_.dialect_impl(dialect).result_processor(dialect, None)
+        processor = type_.dialect_impl(self.dialect).bind_processor(self.dialect)
         return processor(value) if processor else value
-    return value
+
+    def _literal(self, value: Any, type_: TypeEngine[Any]) -> str:
+        if isinstance(type_, types.TypeDecorator):
+            if (
+                self.dialect.name not in type_._variant_mapping
+                and type(type_).literal_processor is not types.TypeDecorator.literal_processor
+            ):
+                literal_override = type_.literal_processor(self.dialect)
+                if literal_override is not None:
+                    return literal_override(value)
+            if self.dialect.name not in type_._variant_mapping:
+                if type_._has_literal_processor:
+                    value = type_.process_literal_param(value, self.dialect)
+                elif type_._has_bind_processor:
+                    value = type_.process_bind_param(value, self.dialect)
+            return self._literal(value, self._type_inspector.decorator_impl(type_))
+        if value is None:
+            return "NULL"
+        complex_values = self._complex_values(value, type_)
+        if complex_values is not None:
+            constructor, items = complex_values
+            opening, closing = ("[", "]") if constructor == "ARRAY" else ("(", ")")
+            values = ", ".join(self._literal(item, item_type) for item, item_type in items)
+            return f"{constructor}{opening}{values}{closing}"
+        if isinstance(type_, types.JSON):
+            serializer = self.dialect._json_serializer or json.dumps
+            processor = types.String().literal_processor(self.dialect)
+            return f"JSON_PARSE({processor(serializer(value))})"
+        if isinstance(value, (list, tuple, Mapping)):
+            raise TypeError("ARRAY element shape does not match its declared type.")
+        if isinstance(type_, (types.LargeBinary, types.BINARY, types.VARBINARY)):
+            return f"X'{bytes(value).hex()}'"
+        if isinstance(type_, types.DateTime) and isinstance(value, datetime):
+            return AthenaTimestamp.process(value)
+        if isinstance(type_, types.Date) and isinstance(value, date):
+            return AthenaDate.process(value)
+        processor = type_.dialect_impl(self.dialect).literal_processor(self.dialect)
+        if processor is None:
+            raise exc.CompileError(f"No ARRAY element literal processor for {type_!r}.")
+        return str(processor(value))
+
+    def _decode(self, value: Any, type_: TypeEngine[Any], as_tuple: bool = False) -> Any:
+        if isinstance(type_, types.TypeDecorator):
+            value = self._decode(value, self._type_inspector.decorator_impl(type_), as_tuple)
+            if (
+                self.dialect.name not in type_._variant_mapping
+                and type(type_).result_processor is not types.TypeDecorator.result_processor
+            ):
+                processor = type_.result_processor(self.dialect, None)
+                return processor(value) if processor else value
+            if self.dialect.name not in type_._variant_mapping and type_._has_result_processor:
+                return type_.process_result_value(value, self.dialect)
+            return value
+        if value is None:
+            return None
+        if isinstance(type_, sqltypes.ARRAY):
+            item_type = _ArrayTypeInspector.item_type(type_)
+            items = [self._decode(item, item_type, as_tuple) for item in value]
+            return tuple(items) if as_tuple else items
+        if isinstance(type_, AthenaMap):
+            map_items = value.items() if isinstance(value, dict) else value
+            return {
+                self._decode(key, type_.key_type): self._decode(item, type_.value_type, as_tuple)
+                for key, item in map_items
+            }
+        if isinstance(type_, AthenaStruct):
+            if not type_.fields:
+                return value
+            return {
+                name: self._decode(value[name], field_type, as_tuple)
+                for name, field_type in type_.fields.items()
+            }
+        if isinstance(type_, types.JSON):
+            return value
+        if isinstance(type_, types.Boolean):
+            return value if isinstance(value, bool) else value.lower() == "true"
+        if isinstance(type_, types.Integer):
+            return int(value)
+        if isinstance(type_, types.Numeric):
+            return Decimal(value) if type_.asdecimal else float(value)
+        if isinstance(type_, (types.DateTime, AthenaTimestamp)):
+            return value if isinstance(value, datetime) else datetime.fromisoformat(value)
+        if isinstance(type_, (types.Date, AthenaDate)):
+            return value if isinstance(value, date) else date.fromisoformat(value)
+        if isinstance(type_, (types.LargeBinary, types.BINARY, types.VARBINARY)):
+            return value if isinstance(value, bytes) else bytes.fromhex(value)
+        if isinstance(type_, types.String):
+            value = str(value)
+            processor = type_.dialect_impl(self.dialect).result_processor(self.dialect, None)
+            return processor(value) if processor else value
+        return value
