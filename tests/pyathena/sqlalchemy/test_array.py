@@ -13,7 +13,11 @@ from sqlalchemy import (
     MetaData,
     String,
     Table,
+    all_,
+    any_,
+    bindparam,
     cast,
+    column,
     literal,
     literal_column,
     select,
@@ -208,7 +212,82 @@ class TestAthenaArray:
         assert isinstance(type_, types.NullType)
 
 
+class TestAthenaArrayComparator:
+    @staticmethod
+    def _compile_sql(expression):
+        return str(
+            expression.compile(dialect=AthenaDialect(), compile_kwargs={"literal_binds": True})
+        )
+
+    @pytest.mark.parametrize("array_type", [AthenaArray(Integer), types.ARRAY(Integer)])
+    @pytest.mark.parametrize("index", [-2, 0, 1, 100])
+    def test_array_index(self, array_type, index):
+        value = column("items", array_type)
+        assert (
+            self._compile_sql(value[index]) == f"element_at(items, IF({index} > 0, {index}, NULL))"
+        )
+        assert isinstance(value[index].type, Integer)
+
+    def test_array_dimensions_and_zero_indexes(self):
+        value = column(
+            "items", AthenaArray(Integer, dimensions=3, zero_indexes=True, as_tuple=True)
+        )
+        assert value[0].type.dimensions == 2
+        assert value[0][0].type.dimensions == 1
+        assert isinstance(value[0][0][0].type, Integer)
+        assert value[0].type.as_tuple
+        assert value[0].type.zero_indexes
+        assert "IF(1 > 0, 1, NULL)" in self._compile_sql(value[0])
+        assert "greatest(1, 1)" in self._compile_sql(value[:0])
+        assert "least(1, cardinality(items))" in self._compile_sql(value[:0])
+        assert "cardinality(items)" in self._compile_sql(value[0:])
+        nested = column("nested", AthenaArray(AthenaArray(String)))
+        assert isinstance(nested[1].type, AthenaArray)
+        assert isinstance(nested[1][1].type, String)
+
+    @pytest.mark.parametrize(
+        "bounds", [slice(None), slice(1, 2), slice(-2, 100), slice(3, 1), slice(1, 3, 1)]
+    )
+    def test_array_slice(self, bounds):
+        value = column("items", AthenaArray(Integer))
+        result = value[bounds]
+        assert result.type is value.type
+        sql = self._compile_sql(result)
+        assert sql.startswith("slice(items, greatest(")
+        assert "greatest(least(" in sql
+
+    @pytest.mark.parametrize("step", [0, 2, -1, True, 1.0, bindparam("step", 1)])
+    def test_array_slice_rejects_steps(self, step):
+        with pytest.raises(sa_exc.CompileError, match="step"):
+            self._compile_sql(column("items", AthenaArray(Integer))[1:3:step])
+
+    def test_decorated_array_index_and_slice(self):
+        items = column("items", TupleArray())
+        assert self._compile_sql(items[1]) == "element_at(items, IF(1 > 0, 1, NULL))"
+        assert isinstance(items[1].type, Integer)
+        compiled = select(items[1:2]).compile(dialect=AthenaDialect())
+        assert "transform(slice(items," in str(compiled)
+        processor = (
+            compiled._result_columns[0]
+            .type.dialect_impl(AthenaDialect())
+            .result_processor(AthenaDialect(), None)
+        )
+        assert processor('{"_pyathena_array":["1","2"]}') == (1, 2)
+
+
 class TestArrayTypeInspector:
+    @pytest.mark.parametrize(
+        "type_", [TupleArray(), String().with_variant(TupleArray(), "awsathena")]
+    )
+    def test_decorated_and_variant_array_quantifiers(self, type_):
+        items = column("items", type_)
+        statement = select(any_(items) == 2, all_(items) > 0)
+        sql = str(
+            statement.compile(dialect=AthenaDialect(), compile_kwargs={"literal_binds": True})
+        )
+        assert "any_match((items), _pyathena_element_0 -> 2 = _pyathena_element_0)" in sql
+        assert "all_match((items), _pyathena_element_1 -> 0 < _pyathena_element_1)" in sql
+
     @pytest.mark.parametrize(
         ("type_", "ddl", "dml"),
         [

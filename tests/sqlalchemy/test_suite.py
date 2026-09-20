@@ -12,11 +12,10 @@ from sqlalchemy import (
     Integer,
     MetaData,
     String,
-    cast,
-
     all_,
     any_,
     bindparam,
+    cast,
     func,
     inspect,
     literal,
@@ -161,9 +160,27 @@ class _ArrayTuple(types.TypeDecorator):
     def process_result_value(self, value, dialect):
         return tuple(value) if value is not None else None
 
+
 class ArrayExpressionTest(fixtures.TestBase):
     __backend__ = True
     __requires__ = ("array_type",)
+
+    def test_decorated_and_variant_arrays(self, connection):
+        array = literal([1, 2, 3], _ArrayTuple())
+        variant = literal([1, 2], String().with_variant(_ArrayTuple(), "awsathena"))
+        statement = select(
+            array[1],
+            array[1:2],
+            any_(array) == 2,
+            all_(array) > 0,
+            array.concat([4]),
+            any_(variant) == 2,
+            variant,
+        )
+        eq_(
+            tuple(connection.execute(statement).one()),
+            (1, (1, 2), True, True, (1, 2, 3, 4), True, (1, 2)),
+        )
 
     def test_cached_steps_and_boolean_quantifiers(self, connection):
         inferred = func.array_agg(func.length(literal("abc")))

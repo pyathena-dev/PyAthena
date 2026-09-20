@@ -67,13 +67,6 @@ if TYPE_CHECKING:
 S3_TABLES_CATALOG_PREFIX = "s3tablescatalog/"
 
 
-def _original_froms(elements):
-    for element in elements:
-        while element._is_clone_of is not None:
-            element = element._is_clone_of
-        yield element
-
-
 class AthenaTypeCompiler(GenericTypeCompiler):
     """Type compiler for Amazon Athena SQL types.
 
@@ -270,6 +263,13 @@ class AthenaStatementCompiler(SQLCompiler):
     def visit_char_length_func(self, fn: Function[Any], **kw: Any) -> str:
         return f"length{self.function_argspec(fn, **kw)}"
 
+    @staticmethod
+    def _original_froms(elements):
+        for element in elements:
+            while element._is_clone_of is not None:
+                element = element._is_clone_of
+            yield element
+
     def _array_lambda_name(self):
         names = {
             str(getattr(element, "name", "")).lower()
@@ -299,14 +299,16 @@ class AthenaStatementCompiler(SQLCompiler):
         aggregate_on_left = isinstance(binary.left, CollectionAggregate)
         if aggregate_on_left:
             aggregate = binary.left
-        if (
-            isinstance(aggregate, CollectionAggregate)
+        array_type = (
+            self._array_type_inspector.array_type(aggregate.element.type)
+            if isinstance(aggregate, CollectionAggregate)
             and not isinstance(aggregate.element, ScalarSelect)
-            and isinstance(aggregate.element.type, types.ARRAY)
-        ):
+            else None
+        )
+        if array_type is not None:
             variable = self._array_lambda_name()
             predicate = binary._clone()
-            item_type = _ArrayTypeInspector.item_type(aggregate.element.type)
+            item_type = _ArrayTypeInspector.item_type(array_type)
             if aggregate_on_left:
                 predicate.left = Column(variable, item_type)
             else:
@@ -318,15 +320,15 @@ class AthenaStatementCompiler(SQLCompiler):
                     enclosing = [kw["enclosing_lateral"]]
                     lateral_from_linter.edges.update(
                         product(
-                            _original_froms(binary.left._from_objects + enclosing),
-                            _original_froms(binary.right._from_objects + enclosing),
+                            self._original_froms(binary.left._from_objects + enclosing),
+                            self._original_froms(binary.right._from_objects + enclosing),
                         )
                     )
                 else:
                     from_linter.edges.update(
                         product(
-                            _original_froms(binary.left._from_objects),
-                            _original_froms(binary.right._from_objects),
+                            self._original_froms(binary.left._from_objects),
+                            self._original_froms(binary.right._from_objects),
                         )
                     )
             sql = super().visit_binary(predicate, override_operator=override_operator, **kw)
@@ -336,7 +338,8 @@ class AthenaStatementCompiler(SQLCompiler):
         return super().visit_binary(binary, override_operator=override_operator, **kw)
 
     def visit_getitem_binary(self, binary, operator, **kw):
-        if not isinstance(binary.left.type, types.ARRAY):
+        array_type = self._array_type_inspector.array_type(binary.left.type)
+        if array_type is None:
             raise exc.CompileError("Athena indexing requires an ARRAY expression")
         array = self.process(binary.left, **kw)
         if isinstance(binary.right, Slice):
@@ -357,10 +360,11 @@ class AthenaStatementCompiler(SQLCompiler):
             start = f"greatest({start}, 1)"
             length = f"greatest(least({stop}, cardinality({array})) - {start} + 1, 0)"
             sql = f"slice({array}, {start}, {length})"
-            return self._array_slice_step(sql, bounds.step, binary.left.type, **kw)
+            return self._array_slice_step(sql, bounds.step, array_type, **kw)
         index_expression = binary.right
-        if isinstance(index_expression, BindParameter) and isinstance(
-            index_expression.type, types.ARRAY
+        if (
+            isinstance(index_expression, BindParameter)
+            and self._array_type_inspector.array_type(index_expression.type) is not None
         ):
             index_expression = index_expression._with_binary_element_type(types.Integer())
         index = self.process(index_expression, **kw)
@@ -378,7 +382,7 @@ class AthenaStatementCompiler(SQLCompiler):
         )
         empty = (
             f"slice({sql}, 1, 0)"
-            if _has_unknown_array_element(array_type)
+            if _ArrayTypeInspector.has_unknown_element(array_type)
             else f"CAST(ARRAY[] AS {self._complex_dml_type(array_type)})"
         )
         return f"IF({step_sql} = 1, {sql}, slice({empty}, {failure}, 0))"
@@ -411,10 +415,8 @@ class AthenaStatementCompiler(SQLCompiler):
         return super().visit_compound_select(cs, asfrom=asfrom, compound_index=compound_index, **kw)
 
     def _has_array_result(self, column):
-        type_ = column.type.dialect_impl(self.dialect)
-        while isinstance(type_, types.TypeDecorator):
-            type_ = self._array_type_inspector.decorator_impl(type_)
-        return isinstance(type_, types.ARRAY) and not _ArrayTypeInspector.has_unknown_element(type_)
+        type_ = self._array_type_inspector.array_type(column.type)
+        return type_ is not None and not _ArrayTypeInspector.has_unknown_element(type_)
 
     def _array_result_select(self, statement):
         if any(
