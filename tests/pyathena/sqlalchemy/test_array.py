@@ -277,16 +277,22 @@ class TestAthenaArrayComparator:
 
 class TestArrayTypeInspector:
     @pytest.mark.parametrize(
-        "type_", [TupleArray(), String().with_variant(TupleArray(), "awsathena")]
+        ("type_", "value", "expected"),
+        [
+            (TupleArray(), 2, "2"),
+            (String().with_variant(TupleArray(), "awsathena"), 2, "2"),
+            (Integer().with_variant(TupleArray(), "awsathena"), 2, "2"),
+            (String().with_variant(AthenaArray(String), "awsathena"), "a", "'a'"),
+        ],
     )
-    def test_decorated_and_variant_array_quantifiers(self, type_):
+    def test_decorated_and_variant_array_quantifiers(self, type_, value, expected):
         items = column("items", type_)
-        statement = select(any_(items) == 2, all_(items) > 0)
+        statement = select(any_(items) == value, all_(items) > value)
         sql = str(
             statement.compile(dialect=AthenaDialect(), compile_kwargs={"literal_binds": True})
         )
-        assert "any_match((items), _pyathena_element_0 -> 2 = _pyathena_element_0)" in sql
-        assert "all_match((items), _pyathena_element_1 -> 0 < _pyathena_element_1)" in sql
+        assert f"any_match((items), _pyathena_element_0 -> {expected} = _pyathena_element_0)" in sql
+        assert f"all_match((items), _pyathena_element_1 -> {expected} < _pyathena_element_1)" in sql
 
     @pytest.mark.parametrize(
         ("type_", "ddl", "dml"),

@@ -362,6 +362,13 @@ class TestAthenaStatementCompiler:
         assert "any_match" in self._compile_sql(any_(flags) == True)  # noqa: E712
         assert "all_match" in self._compile_sql(all_(flags) != False)  # noqa: E712
         assert "IS DISTINCT FROM" in self._compile_sql(any_(flags).is_distinct_from(True))
+        comparison = any_(flags) == True  # noqa: E712
+        assert self._compile_sql(~comparison) == (
+            "any_match((flags), _pyathena_element_0 -> _pyathena_element_0 != true)"
+        )
+        assert self._compile_sql(~comparison.self_group()) == (
+            "NOT (any_match((flags), _pyathena_element_0 -> _pyathena_element_0 = true))"
+        )
 
     def test_quantifier_join_linter_tracks_original_tables(self):
         left = table("left_table", column("value", Integer))

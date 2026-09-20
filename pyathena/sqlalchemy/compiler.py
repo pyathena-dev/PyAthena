@@ -316,7 +316,10 @@ class AthenaStatementCompiler(SQLCompiler):
                 predicate.left = Column(variable, item_type)
             else:
                 predicate.right = Column(variable, item_type)
-                if isinstance(predicate.left, BindParameter) and isinstance(item_type, types.ARRAY):
+                if isinstance(predicate.left, BindParameter) and (
+                    isinstance(item_type, types.ARRAY)
+                    or self._array_type_inspector.array_type(predicate.left.type) is not None
+                ):
                     predicate.left = predicate.left._with_binary_element_type(item_type)
             if from_linter is not None and operators.is_comparison(binary.operator):
                 if lateral_from_linter is not None:

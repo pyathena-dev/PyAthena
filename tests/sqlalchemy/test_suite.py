@@ -182,6 +182,18 @@ class ArrayExpressionTest(fixtures.TestBase):
             (1, (1, 2), True, True, (1, 2, 3, 4), True, (1, 2)),
         )
 
+    @pytest.mark.parametrize(
+        ("base_type", "item_type", "values", "needle"),
+        [(String(), String, ["a", "b"], "a"), (Integer(), Integer, [1, 2], 1)],
+    )
+    def test_variant_array_quantifier_scalar_bind(
+        self, connection, base_type, item_type, values, needle
+    ):
+        array = literal(values, base_type.with_variant(AthenaArray(item_type), "awsathena"))
+        statement = select(any_(array) == needle, all_(array) == needle)
+        eq_(tuple(connection.execute(statement).one()), (True, False))
+        eq_(tuple(connection.execute(statement).one()), (True, False))
+
     def test_cached_steps_and_boolean_quantifiers(self, connection):
         inferred = func.array_agg(func.length(literal("abc")))
         eq_(connection.execute(select(inferred[1:2:1])).scalar_one(), [3])
@@ -191,9 +203,14 @@ class ArrayExpressionTest(fixtures.TestBase):
             connection.execute(select(array[1:2:2])).all()
         assert isinstance(error.value.orig, ValueError)
         flags = literal([True, False], AthenaArray(types.Boolean))
+        comparison = any_(flags) == True  # noqa: E712
         eq_(
-            tuple(connection.execute(select(any_(flags) == True, all_(flags) == True)).one()),  # noqa: E712
-            (True, False),
+            tuple(
+                connection.execute(
+                    select(comparison, all_(flags) == True, ~comparison, ~comparison.self_group())  # noqa: E712
+                ).one()
+            ),
+            (True, False, True, False),
         )
 
     def test_index_slice_and_concat(self, connection):
