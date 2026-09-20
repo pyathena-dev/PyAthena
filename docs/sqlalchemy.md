@@ -1047,7 +1047,9 @@ Arrays with unknown (`NullType`) elements keep the cursor's native conversion in
 For ordered typed ARRAY results, use SQLAlchemy column expressions.
 Textual ORDER BY clauses may name selected columns (including comma-separated names and direction/null placement); other textual expressions raise a compilation error to prevent ordering serialized values or referring to columns outside their scope.
 String label references such as `.order_by("id")` also resolve FROM-table columns using SQLAlchemy's normal rules.
+For DISTINCT and compound queries, ordering expressions must refer to selected columns.
 Ordered, DISTINCT, and compound ARRAY queries require explicit SELECT columns: use SQLAlchemy column expressions or `literal_column()` instead of `text()` projections, and `select(table)` instead of a wildcard.
+Literal SQL expressions need an explicit label, for example `literal_column("cardinality(items)").label("size")`.
 This avoids dropping unnamed columns or exposing internal ordering columns when the result is wrapped.
 An outer `TypeDecorator` retains its result processor as well as native ARRAY ordering.
 Raw `text()` queries and direct DB API queries retain the cursor's existing conversion behavior described below; they do not receive this projection automatically.

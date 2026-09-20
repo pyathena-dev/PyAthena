@@ -63,6 +63,8 @@ class AthenaTimestamp(TypeEngine[datetime]):
         ... )
     """
 
+    __visit_name__ = "TIMESTAMP"
+
     render_literal_cast = True
     render_bind_cast = True
 
@@ -91,6 +93,8 @@ class AthenaDate(TypeEngine[date]):
         ...     Column('order_date', AthenaDate)
         ... )
     """
+
+    __visit_name__ = "DATE"
 
     render_literal_cast = True
     render_bind_cast = True
@@ -538,9 +542,9 @@ def _decode_complex(
         return int(value)
     if isinstance(type_, types.Numeric):
         return Decimal(value) if type_.asdecimal else float(value)
-    if isinstance(type_, types.DateTime):
+    if isinstance(type_, (types.DateTime, AthenaTimestamp)):
         return value if isinstance(value, datetime) else datetime.fromisoformat(value)
-    if isinstance(type_, types.Date):
+    if isinstance(type_, (types.Date, AthenaDate)):
         return value if isinstance(value, date) else date.fromisoformat(value)
     if isinstance(type_, (types.LargeBinary, types.BINARY, types.VARBINARY)):
         return value if isinstance(value, bytes) else bytes.fromhex(value)

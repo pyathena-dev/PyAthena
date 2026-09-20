@@ -262,6 +262,7 @@ class AthenaStatementCompiler(SQLCompiler):
         if (
             not self.stack
             and not kw.get("asfrom")
+            and not select_stmt._annotations.get("_pyathena_array_result")
             and (select_stmt._distinct or select_stmt._order_by_clauses)
             and any(self._has_array_result(column) for column in select_stmt.selected_columns)
         ):
@@ -299,6 +300,15 @@ class AthenaStatementCompiler(SQLCompiler):
                 "Ordered, DISTINCT, and compound ARRAY results require explicit SELECT columns; "
                 "use SQLAlchemy column expressions or literal_column() instead of text(), "
                 "and select(table) instead of a wildcard"
+            )
+        if any(
+            getattr(column, "is_literal", False)
+            and not re.fullmatch(r'(?:[^\W\d]\w*|"(?:[^"]|"")+")', column.name)
+            for column in statement._all_selected_columns
+        ):
+            raise exc.CompileError(
+                "Literal SQL expressions in ordered, DISTINCT, and compound ARRAY results "
+                "require an explicit label; use literal_column(...).label(...)"
             )
         columns = list(statement.selected_columns)
         inner = statement.order_by(None).limit(None).offset(None)
@@ -396,13 +406,20 @@ class AthenaStatementCompiler(SQLCompiler):
         adapter = sql_util.ClauseAdapter(source)
         for clause, index, modifiers in ordering:
             expression = source.c[index] if index is not None else adapter.traverse(clause)
+            if any(from_ is not source for from_ in expression._from_objects):
+                raise exc.CompileError(
+                    "DISTINCT and compound ARRAY ORDER BY expressions "
+                    "must refer to selected columns"
+                )
             for modifier in reversed(modifiers):
                 expression = UnaryExpression(expression, modifier=modifier)
             outer = outer.order_by(expression)
         outer = outer.offset(statement._offset_clause)
         if statement._fetch_clause is not None:
-            return outer.fetch(statement._fetch_clause, **statement._fetch_clause_options)
-        return outer.limit(statement._limit_clause)
+            outer = outer.fetch(statement._fetch_clause, **statement._fetch_clause_options)
+        else:
+            outer = outer.limit(statement._limit_clause)
+        return outer._annotate({"_pyathena_array_result": True})
 
     def visit_filter_func(self, fn: Function[Any], **kw: Any) -> str:
         """Compile Athena filter() function with lambda expressions.

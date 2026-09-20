@@ -259,6 +259,12 @@ def test_array_rejects_ambiguous_dimensions():
             "ARRAY[ARRAY['one'], ARRAY[], NULL]",
         ),
         (AthenaArray(types.Date), [date(2025, 1, 2)], "ARRAY[DATE '2025-01-02']"),
+        (AthenaArray(AthenaDate), [date(2025, 1, 2)], "ARRAY[DATE '2025-01-02']"),
+        (
+            AthenaArray(AthenaTimestamp),
+            [datetime(2025, 1, 2, 3, 4, 5)],
+            "ARRAY[TIMESTAMP '2025-01-02 03:04:05.000']",
+        ),
         (AthenaArray(types.BINARY), [b"\x00\xff"], "ARRAY[X'00ff']"),
         (AthenaArray(Integer), [], "ARRAY[]"),
         (AthenaArray(Integer), None, "NULL"),
@@ -325,6 +331,12 @@ def test_array_insert_uses_typed_parameter():
             [Decimal("0.12345678901234567890")],
         ),
         (AthenaArray(types.Date), '["2025-01-02"]', [date(2025, 1, 2)]),
+        (AthenaArray(AthenaDate), '["2025-01-02"]', [date(2025, 1, 2)]),
+        (
+            AthenaArray(AthenaTimestamp),
+            '["2025-01-02 03:04:05"]',
+            [datetime(2025, 1, 2, 3, 4, 5)],
+        ),
         (AthenaArray(types.BINARY), '["00FF",""]', [b"\x00\xff", b""]),
         (AthenaArray(types.JSON), '[{"fraction":0.1}]', [{"fraction": 0.1}]),
         (
@@ -689,3 +701,39 @@ def test_array_reflection_warns_for_unrecognized_nested_type(signature):
     with pytest.warns(sa_exc.SAWarning, match="Did not recognize type"):
         type_ = AthenaDialect()._get_column_type(signature)
     assert isinstance(type_, types.NullType)
+
+
+@pytest.mark.parametrize("compound", [False, True])
+def test_array_ordering_rejects_columns_outside_distinct_or_union(compound):
+    table = Table(
+        "arrays", MetaData(), Column("id", Integer), Column("items", AthenaArray(Integer))
+    )
+    statement = select(table.c["items"])
+    statement = statement.union_all(statement) if compound else statement.distinct()
+    with pytest.raises(sa_exc.CompileError, match="must refer to selected columns"):
+        statement.order_by(table.c.id).compile(dialect=AthenaDialect())
+    sql = str(statement.order_by(table.c["items"]).compile(dialect=AthenaDialect()))
+    assert sql.count("FROM (") == 1
+    assert "ORDER BY anon_1.items" in sql
+
+
+@pytest.mark.parametrize("expression", ["cardinality(items)", "arrays.id", "1"])
+def test_array_rewrite_requires_labels_for_literal_expressions(expression):
+    table = Table("arrays", MetaData(), Column("items", AthenaArray(Integer)))
+    value = literal_column(expression)
+    with pytest.raises(sa_exc.CompileError, match="require an explicit label"):
+        select(value, table.c["items"]).distinct().compile(dialect=AthenaDialect())
+    sql = str(
+        select(value.label("value"), table.c["items"]).distinct().compile(dialect=AthenaDialect())
+    )
+    assert sql.startswith("SELECT anon_1.value, json_format(")
+
+
+@pytest.mark.parametrize(
+    ("item_type", "expected"), [(AthenaDate(), "DATE"), (AthenaTimestamp(), "TIMESTAMP")]
+)
+def test_array_athena_temporal_element_type_compilation(item_type, expected):
+    dialect = AthenaDialect()
+    array = AthenaArray(item_type)
+    assert dialect.type_compiler_instance.process(array) == f"ARRAY<{expected}>"
+    assert f"AS ARRAY({expected})" in str(select(literal([], array)).compile(dialect=dialect))

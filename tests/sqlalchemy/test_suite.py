@@ -16,6 +16,7 @@ from sqlalchemy import (
     func,
     inspect,
     literal,
+    literal_column,
     select,
     text,
     types,
@@ -41,7 +42,13 @@ from sqlalchemy.testing.suite import SimpleUpdateDeleteTest as _SimpleUpdateDele
 from sqlalchemy.testing.suite import StringTest as _StringTest
 
 from pyathena.error import OperationalError
-from pyathena.sqlalchemy.types import AthenaArray, AthenaMap, AthenaStruct
+from pyathena.sqlalchemy.types import (
+    AthenaArray,
+    AthenaDate,
+    AthenaMap,
+    AthenaStruct,
+    AthenaTimestamp,
+)
 
 
 def _raw_connection(connection):
@@ -197,6 +204,15 @@ class NativeArrayTest(fixtures.TestBase):
             [[2], [2], [10]],
         )
 
+        eq_(
+            connection.execute(
+                select(literal_column("cardinality(value)").label("size"), value).order_by(
+                    table.c.id
+                )
+            ).all(),
+            [(1, [10]), (1, [2]), (1, [2])],
+        )
+
     def test_decorated_array_ordering(self, connection):
         values = select(literal([10], _ArrayTuple()).label("items")).union_all(
             select(literal([2], _ArrayTuple()).label("items"))
@@ -205,6 +221,17 @@ class NativeArrayTest(fixtures.TestBase):
         source = values.subquery()
         statement = select(source.c["items"]).distinct().order_by("items")
         eq_(connection.execute(statement).scalars().all(), [(2,), (10,)])
+
+    def test_athena_temporal_elements(self, connection):
+        for item_type, value in (
+            (AthenaDate(), date(2025, 1, 2)),
+            (AthenaTimestamp(), _datetime(2025, 1, 2, 3, 4, 5)),
+        ):
+            for literal_execute in (False, True):
+                statement = select(
+                    literal([value], AthenaArray(item_type), literal_execute=literal_execute)
+                )
+                eq_(connection.execute(statement).scalar_one(), [value])
 
     def test_review_regressions(self, connection):
         decimal_value = literal([Decimal("1.50")], AthenaArray(types.Numeric(10, 2)))
