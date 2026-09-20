@@ -94,7 +94,7 @@ Submit original contributions under that license and identify any third-party ma
 
 ### New original files
 
-New, original, hand-written files must carry a copyright and license header.
+New original files added to the repository, including AI-assisted contributions, must carry a copyright and license header.
 Use the year the file is first published and the collective attribution `The PyAthena authors`.
 For a new Python file first published in 2026, use:
 
@@ -105,7 +105,7 @@ For a new Python file first published in 2026, use:
 
 Place the header before imports and module documentation, after any required shebang or encoding declaration.
 Use the equivalent comment syntax for other formats, such as an HTML comment in Markdown.
-For files that cannot contain comments, and for generated files or third-party assets, agree on an appropriate attribution location in the issue rather than inserting an invalid header.
+For files that cannot contain comments, and for generated build artifacts or third-party assets, agree on an appropriate attribution location in the issue rather than inserting an invalid header.
 
 `The PyAthena authors` is a collective project attribution, not a requirement to assign copyright to the maintainer.
 Contributors may retain or add their own applicable copyright notices alongside it.
