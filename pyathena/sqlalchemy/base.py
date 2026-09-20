@@ -11,7 +11,7 @@ from typing import (
     cast,
 )
 
-from sqlalchemy import exc, schema, text, types, util
+from sqlalchemy import exc, schema, types, util
 from sqlalchemy.engine import Engine, reflection
 from sqlalchemy.engine.default import DefaultDialect
 from sqlalchemy.engine.interfaces import ExecutionContext
@@ -23,6 +23,7 @@ from sqlalchemy.sql.compiler import (
 )
 
 import pyathena
+from pyathena.cursor import Cursor
 from pyathena.sqlalchemy.compiler import (
     AthenaDDLCompiler,
     AthenaStatementCompiler,
@@ -195,6 +196,12 @@ class AthenaDialect(DefaultDialect):
 
     _connect_options: dict[str, Any] = {}  # type: ignore[override]  # noqa: RUF012
     _pattern_column_type: Pattern[str] = re.compile(r"^([a-zA-Z]+)(?:$|[\(|<](.+)[\)|>]$)")
+    # Metadata failures that information_schema answers better than a retry.
+    # Throttling, because one query costs less than the retry ladder, and a
+    # MetadataException that survived unwrapping, because a federated catalog
+    # reports a missing table in its connector's words rather than in Glue's
+    # EntityNotFoundException envelope.
+    _FALLBACK_ERROR_CODES: tuple[str, ...] = (*THROTTLING_ERROR_CODES, "MetadataException")
 
     def __init__(self, json_deserializer=None, json_serializer=None, **kwargs):
         DefaultDialect.__init__(self, **kwargs)
@@ -347,13 +354,13 @@ class AthenaDialect(DefaultDialect):
         metadata = info_cache.get(metadata_key)
         if metadata is not None:
             return self._columns_from_metadata(metadata)
-        # A throttled metadata request switches to information_schema at once
-        # instead of waiting out the retry policy; the query answers existence
-        # and columns, while table comments and options still need the API.
-        # Other retryable codes keep the connection's policy. Connection.cursor()
-        # applies cursor_kwargs last, so a retry_config given there still runs
-        # its own throttling retries before the fallback.
-        retry_config = self._without_throttling_retries(
+        # A metadata request the fallback can answer switches to
+        # information_schema at once instead of waiting out the retry policy; the
+        # query answers existence and columns, while table comments and options
+        # still need the API. Other retryable codes keep the connection's policy.
+        # Connection.cursor() applies cursor_kwargs last, so a retry_config given
+        # there still runs its own retries before the fallback.
+        retry_config = self._without_fallback_retries(
             raw_connection.retry_config  # type: ignore[union-attr]
         )
         with raw_connection.driver_connection.cursor(  # type: ignore[union-attr]
@@ -362,13 +369,11 @@ class AthenaDialect(DefaultDialect):
             try:
                 metadata = self._lookup_table(cursor, schema, name, table_name)
             except pyathena.error.OperationalError as e:
-                if (
-                    _get_error_code(e.__cause__ or e, unwrap_metadata=True)
-                    not in THROTTLING_ERROR_CODES
-                ):
+                code = _get_error_code(e.__cause__ or e, unwrap_metadata=True)
+                if code not in self._FALLBACK_ERROR_CODES:
                     raise
                 _logger.warning(
-                    f"Table metadata request for {table_name} was throttled; "
+                    f"Table metadata request for {table_name} failed with {code}; "
                     "reflecting columns from information_schema."
                 )
                 columns = self._columns_from_information_schema(raw_connection, schema, name)
@@ -379,20 +384,33 @@ class AthenaDialect(DefaultDialect):
         info_cache[metadata_key] = metadata
         return self._columns_from_metadata(metadata)
 
-    @staticmethod
-    def _without_throttling_retries(retry_config: RetryConfig) -> RetryConfig:
-        """Copy a policy without the codes that carry throttling.
+    @classmethod
+    def _without_fallback_retries(cls, retry_config: RetryConfig) -> RetryConfig:
+        """Copy a policy without the codes the information_schema fallback answers.
 
-        Athena wraps Glue throttling in ``MetadataException``, so that code is
-        dropped as well; specific wrapped codes stay retryable.
+        Retrying those spends the policy's whole budget on a question one query
+        settles; specific wrapped Glue codes stay retryable.
         """
-        excluded = (*THROTTLING_ERROR_CODES, "MetadataException")
         return RetryConfig(
-            exceptions=[c for c in retry_config.exceptions if c not in excluded],
+            exceptions=[c for c in retry_config.exceptions if c not in cls._FALLBACK_ERROR_CODES],
             attempt=retry_config.attempt,
             multiplier=retry_config.multiplier,
             max_delay=retry_config.max_delay,
             exponential_base=retry_config.exponential_base,
+        )
+
+    @staticmethod
+    def _internal_cursor(raw_connection: PoolProxiedConnection) -> Cursor:
+        """Open an API cursor for the queries this dialect parses itself.
+
+        Reflection reads these rows directly, so they must not arrive in the
+        result format chosen for user queries: a DataFrame cursor reports a NULL
+        or blank value as NaN, as an empty string, or as a dropped row depending
+        on its backend and on UNLOAD.
+        """
+        return cast(
+            Cursor,
+            raw_connection.driver_connection.cursor(Cursor),  # type: ignore[union-attr]
         )
 
     def _column(self, name: str | None, type_: str, comment: str | None, partition: bool | None):
@@ -420,7 +438,7 @@ class AthenaDialect(DefaultDialect):
         # The answer must reflect the catalog now, so query result reuse is off.
         schema = str(schema).lower().replace("'", "''")
         table_name = table_name.lower().replace("'", "''")
-        with raw_connection.driver_connection.cursor() as cursor:  # type: ignore[union-attr]
+        with self._internal_cursor(raw_connection) as cursor:
             cursor.execute(
                 "SELECT ordinal_position, column_name, data_type, comment, extra_info "
                 "FROM information_schema.columns "
@@ -428,15 +446,13 @@ class AthenaDialect(DefaultDialect):
                 result_reuse_enable=False,
             )
             rows = cursor.fetchall()
-        # Sort here: the query has no ORDER BY and UNLOAD-backed cursors do not
-        # preserve result order. A CSV-backed pandas cursor reads a missing
-        # comment as NaN, which _column() cannot recognize as empty.
+        # Sort here: the query has no ORDER BY, so its result order is Athena's.
         return [
             self._column(
                 column_name,
                 # Athena exposes Hive STRING as unbounded VARCHAR in information_schema.
                 "string" if data_type == "varchar" else data_type,
-                comment if isinstance(comment, str) else None,
+                comment,
                 extra_info == "partition key" or None,
             )
             for _, column_name, data_type, comment, extra_info in sorted(
@@ -524,11 +540,14 @@ class AthenaDialect(DefaultDialect):
         schema = schema if schema else self._cursor_option(raw_connection, "schema_name")
         query = f"""SHOW CREATE VIEW "{schema}"."{view_name}";"""
         try:
-            res = connection.scalars(text(query))
-        except exc.OperationalError as e:
+            with self._internal_cursor(raw_connection) as cursor:
+                cursor.execute(query)
+                rows = cursor.fetchall()
+        except pyathena.error.OperationalError as e:
             raise exc.NoSuchTableError(f"{schema}.{view_name}") from e
-        else:
-            return "\n".join(res)
+        # Athena returns the definition one line per row and blank lines as
+        # empty values, which are part of the definition.
+        return "\n".join(row[0] or "" for row in rows)
 
     @reflection.cache
     def get_columns(self, connection: Connection, table_name: str, schema: str | None = None, **kw):
