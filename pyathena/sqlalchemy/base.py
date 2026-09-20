@@ -400,18 +400,19 @@ class AthenaDialect(DefaultDialect):
         )
 
     @staticmethod
-    def _internal_cursor(raw_connection: PoolProxiedConnection) -> Cursor:
+    def _internal_cursor(raw_connection: PoolProxiedConnection) -> Any:
         """Open an API cursor for the queries this dialect parses itself.
 
         Reflection reads these rows directly, so they must not arrive in the
         result format chosen for user queries: a DataFrame cursor reports a NULL
         or blank value as NaN, as an empty string, or as a dropped row depending
         on its backend and on UNLOAD.
+
+        The async connection adapter maps ``Cursor`` to its own counterpart and
+        returns its wrapper, so this is typed by the interface used here rather
+        than by the class requested.
         """
-        return cast(
-            Cursor,
-            raw_connection.driver_connection.cursor(Cursor),  # type: ignore[union-attr]
-        )
+        return raw_connection.driver_connection.cursor(Cursor)  # type: ignore[union-attr]
 
     def _column(self, name: str | None, type_: str, comment: str | None, partition: bool | None):
         return {
