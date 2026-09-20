@@ -1089,14 +1089,14 @@ CREATE TABLE orders (
 Use SQLAlchemy expressions to index, slice, concatenate, or compare array values in SELECT and WHERE clauses.
 Indices are one-based by default.
 `AthenaArray(Integer, zero_indexes=True)` translates explicit indices and slice boundaries by adding one.
-A missing, nonpositive, or out-of-range read index returns NULL; negative indices do not count from the end.
+Reads return NULL when the resulting SQL index is NULL, below one, or out of range; negative indices do not count from the end.
 
 ```python
 from sqlalchemy import any_, select
 
-numbers = table.c.numbers
-statement = select(numbers[1], numbers[2:4], numbers.concat([5])).where(
-    any_(numbers) == 3
+item_ids = orders.c.item_ids
+statement = select(item_ids[1], item_ids[2:4], item_ids.concat([5])).where(
+    any_(item_ids) == 3
 )
 ```
 

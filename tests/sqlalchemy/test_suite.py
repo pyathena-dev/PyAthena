@@ -187,8 +187,9 @@ class ArrayExpressionTest(fixtures.TestBase):
         eq_(connection.execute(select(inferred[1:2:1])).scalar_one(), [3])
         array = literal([1, 2, 3], types.ARRAY(Integer))
         eq_(connection.execute(select(array[1:2:1])).scalar_one(), [1, 2])
-        with pytest.raises(sa_exc.StatementError):
+        with pytest.raises(sa_exc.StatementError, match="step") as error:
             connection.execute(select(array[1:2:2])).all()
+        assert isinstance(error.value.orig, ValueError)
         flags = literal([True, False], AthenaArray(types.Boolean))
         eq_(
             tuple(connection.execute(select(any_(flags) == True, all_(flags) == True)).one()),  # noqa: E712
@@ -247,6 +248,9 @@ class ArrayExpressionTest(fixtures.TestBase):
     def test_quantified_comparisons(self, connection):
         cases = [
             ([1, 2, None], True, False, False, False),
+            ([1, None], None, False, False, None),
+            ([2, None], True, None, False, False),
+            ([3, None], None, False, None, None),
             ([1, 3], False, False, False, True),
             ([], False, True, True, True),
             (None, None, None, None, None),
