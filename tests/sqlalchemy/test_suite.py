@@ -182,9 +182,10 @@ class ArrayExpressionTest(fixtures.TestBase):
             (1, (1, 2), True, True, (1, 2, 3, 4), True, (1, 2)),
         )
 
-    @pytest.mark.parametrize(
-        ("base_type", "item_type", "values", "needle"),
-        [(String(), String, ["a", "b"], "a"), (Integer(), Integer, [1, 2], 1)],
+    @sa_testing.combinations(
+        (String(), String, ["a", "b"], "a"),
+        (Integer(), Integer, [1, 2], 1),
+        argnames="base_type,item_type,values,needle",
     )
     def test_variant_array_quantifier_scalar_bind(
         self, connection, base_type, item_type, values, needle
@@ -263,6 +264,12 @@ class ArrayExpressionTest(fixtures.TestBase):
         eq_(connection.execute(select(array.any([1, 2]))).scalar_one(), True)
         plain = literal([1, 2], types.ARRAY(Integer))
         eq_(connection.execute(select(plain[bindparam("index")]), {"index": 2}).scalar_one(), 2)
+        eq_(
+            connection.execute(
+                select(literal([1, 2], AthenaArray(Integer)) == any_(func.array_agg(plain)))
+            ).scalar_one(),
+            True,
+        )
 
     def test_quantified_comparisons(self, connection):
         cases = [

@@ -1113,8 +1113,9 @@ Comparisons use SQL three-valued logic: NULL elements can produce NULL when no d
 For an empty array, ANY is false and ALL is true.
 A NULL array produces NULL for both.
 SQLAlchemy comparison flipping is preserved.
-For boolean comparisons, SQLAlchemy can turn `~(any_(flags) == True)` into an element-wise `!= True` comparison before dialect compilation.
-To negate the whole match, explicitly group the comparison first: `~(any_(flags) == True).self_group()`.
+SQLAlchemy can rewrite negation into an element-wise comparison before dialect compilation, depending on the version and operand types.
+For example, `~(any_(flags) == True)` can become an element-wise `!= True` comparison; older SQLAlchemy 2.0 releases also rewrite non-boolean comparisons this way.
+To negate the whole match, always explicitly group the comparison first: `~(any_(flags) == True).self_group()`.
 Quantifiers over subqueries retain their usual SQL compilation.
 
 #### Querying ARRAY data

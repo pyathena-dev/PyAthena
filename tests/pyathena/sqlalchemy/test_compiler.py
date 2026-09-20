@@ -340,6 +340,15 @@ class TestAthenaStatementCompiler:
         items = column("items", AthenaArray(Integer, dimensions=2))
         assert "CAST(ARRAY[1, 2] AS ARRAY(INTEGER)) =" in self._compile_sql(items.any([1, 2]))
 
+    def test_quantifier_preserves_explicit_array_bind(self):
+        items = column("items", AthenaArray(Integer))
+        needle = literal([1, 2], items.type)
+        sql = self._compile_sql(needle == any_(func.array_agg(items)))
+        assert "CAST(ARRAY[1, 2] AS ARRAY(INTEGER)) = _pyathena_element_0" in sql
+        unknown = column("unknown", AthenaArray(types.NullType()))
+        sql = self._compile_sql(needle == any_(unknown))
+        assert "CAST(ARRAY[1, 2] AS ARRAY(INTEGER)) = _pyathena_element_0" in sql
+
     def test_subquery_any_remains_unchanged(self):
         sql = self._compile_sql(any_(select(column("item", Integer)).scalar_subquery()) == 2)
         assert "ANY (SELECT item)" in sql
