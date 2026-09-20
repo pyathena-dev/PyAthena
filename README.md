@@ -72,7 +72,7 @@ asyncio.run(main())
 ## Contributing
 
 Contributions, including AI-assisted contributions, are welcome.
-Please read [CONTRIBUTING.md](CONTRIBUTING.md) before starting a change.
+Please read [CONTRIBUTING.md](https://github.com/pyathena-dev/PyAthena/blob/master/CONTRIBUTING.md) before starting a change.
 
 ## License
 

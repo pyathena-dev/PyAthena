@@ -14,7 +14,7 @@ and actual results (including test pass/fail/skip counts).
 Distinguish real AWS integration runs, mocks, local checks, and CI.
 Describe any unrun coverage or failures and why. Remove credentials/private data.
 AWS behavior changes need integration results from your own AWS environment;
-the project does not run AWS integration CI for external fork PRs.
+project AWS integration CI must not be used for external fork PRs.
 AI-generated reviews and planned CI runs do not replace test results. -->
 
 ## Licensing and attribution

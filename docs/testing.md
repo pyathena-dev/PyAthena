@@ -84,6 +84,7 @@ AWS_ATHENA_S3_TABLES_CATALOG=s3tablescatalog/your-table-bucket
 AWS_ATHENA_S3_TABLES_NAMESPACE=your_namespace
 ```
 
+These tests live in `tests/pyathena/sqlalchemy/test_base.py` and run under `just test pyathena`, not the SQLAlchemy compliance-suite commands.
 Managed storage and S3 Tables tests skip when their respective optional configuration is absent.
 If a change affects one of these features, configure and run its tests; a skip does not validate that change.
 
@@ -111,9 +112,15 @@ uv run --env-file .env pytest -n 1 tests/pyathena/test_cursor.py -v
 ```
 
 A targeted run helps during development but does not replace other coverage required by the affected callers or features.
-The SQLAlchemy suites run with different configurations: use `sqla` for synchronous dialects and `sqla-async` for native asyncio dialects.
+The SQLAlchemy compliance suites under `tests/sqlalchemy/` run with different configurations: use `sqla` for synchronous dialects and `sqla-async` for native asyncio dialects.
+They do not run PyAthena's own dialect regression tests under `tests/pyathena/sqlalchemy/` and `tests/pyathena/aio/sqlalchemy/`.
+Run the relevant PyAthena tests too, either through `just test pyathena` or a focused selection during development:
 
-To run the configured Python/environment matrix locally:
+```bash
+uv run --env-file .env pytest -n 1 tests/pyathena/sqlalchemy/ tests/pyathena/aio/sqlalchemy/ -v
+```
+
+To invoke the configured tox environments locally:
 
 ```bash
 uv run --env-file .env just tox
@@ -131,14 +138,20 @@ Maintainers do not approve those jobs as a substitute for contributor testing.
 Checks without AWS access may still run on a fork pull request.
 
 For maintainers, the reusable test workflow uses OIDC to access the project's AWS environment.
-Workflow approval and AWS IAM trust restrictions remain separate controls; a job condition alone does not make arbitrary pull-request code safe to execute with AWS permissions.
+Do not treat workflow gating as a substitute for approval controls and AWS IAM trust restrictions.
 Do not bypass the fork policy by checking out external pull-request code in a privileged workflow or copying it to an internal branch just to run AWS CI.
 
 Contributors can run tests locally with their own AWS credentials without configuring GitHub OIDC.
 If setting up CI in your own fork, replace the project-specific role ARN and resource settings in `.github/workflows/test-suite.yaml` with your own values.
 The [GitHub OIDC documentation](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws) explains the authentication setup.
-The [CloudFormation template](https://github.com/pyathena-dev/PyAthena/blob/master/cloudformation/github_actions_oidc.yaml) is an optional starting point; review its IAM permissions and resources before deploying it in your account.
-For example, after replacing every placeholder and checking resource names:
+You can configure tests against suitable existing resources, or provision new resources with the optional [CloudFormation template](https://github.com/pyathena-dev/PyAthena/blob/master/cloudformation/github_actions_oidc.yaml).
+Review its IAM permissions and resources first.
+The following `create-stack` example is for new resources: it creates the staging bucket, table bucket, roles, and workgroups and does not adopt resources already created during manual setup.
+Choose unused names for all of them.
+The template also creates the fixed regional Glue catalog `s3tablescatalog`; do not use this creation example in an account/region where that catalog already exists.
+Use existing-resource configuration or plan an explicit infrastructure import/adaptation separately.
+
+For a new stack, after replacing every placeholder and checking the names and regional catalog:
 
 ```bash
 aws --region us-west-2 cloudformation create-stack \
@@ -150,9 +163,13 @@ aws --region us-west-2 cloudformation create-stack \
     ParameterKey=BucketName,ParameterValue=YOUR_UNIQUE_TEST_BUCKET \
     ParameterKey=S3TablesBucketName,ParameterValue=YOUR_UNIQUE_TABLE_BUCKET \
     ParameterKey=RoleName,ParameterValue=pyathena-test-ci \
-    ParameterKey=WorkGroupName,ParameterValue=pyathena-test
+    ParameterKey=SparkRoleName,ParameterValue=pyathena-test-spark \
+    ParameterKey=WorkGroupName,ParameterValue=pyathena-test \
+    ParameterKey=SparkWorkGroupName,ParameterValue=pyathena-test-spark \
+    ParameterKey=ManagedWorkGroupName,ParameterValue=pyathena-test-managed
 ```
 
 If the account already has the GitHub OIDC provider, supply its ARN as the `OIDCProviderArn` parameter.
 The stack does not grant your local identity access automatically, and additional account-level service configuration may be needed for the features you test.
+The staging bucket has a retention policy, so deleting the stack does not remove it; account for that in cleanup and before reusing its name in a new stack.
 See the [infrastructure guide](https://github.com/pyathena-dev/PyAthena/blob/master/cloudformation/README.md) for updates to an existing stack.

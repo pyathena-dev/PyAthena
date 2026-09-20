@@ -45,7 +45,7 @@ just lint   # Python lint, format check, mypy, and CloudFormation validation
 
 ```bash
 # ALWAYS run `just lint` first — tests will fail if lint doesn't pass
-just test pyathena    # Unit tests (runs lint first)
+just test pyathena    # PyAthena tests, including AWS integration (runs lint first)
 just test sqla        # SQLAlchemy dialect tests
 just test sqla-async  # SQLAlchemy async dialect tests
 ```
@@ -63,7 +63,7 @@ In a git worktree, run `just worktree-env` once to link the main checkout's
 gitignored `.env` into the worktree.
 
 ```bash
-export $(cat .env | xargs) && uv run pytest tests/pyathena/test_file.py -v
+uv run --env-file .env pytest -n 1 tests/pyathena/test_cursor.py -v
 ```
 
 - Tests mirror source structure under `tests/pyathena/`

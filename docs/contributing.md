@@ -53,12 +53,14 @@ Provision your own test resources and credentials, cover their costs, and clean 
 Maintainers do not provide AWS access or undertake the contributor's initial validation.
 
 Choose coverage based on the affected behavior, including synchronous and asynchronous callers and relevant cursor backends.
-SQLAlchemy dialect changes require the dialect suite; changes affecting async dialects also require the async suite.
+SQLAlchemy dialect changes require the relevant PyAthena dialect tests under `tests/pyathena/sqlalchemy/` as well as the SQLAlchemy compliance suite (`just test sqla`).
+Changes affecting async dialects also require the relevant tests under `tests/pyathena/aio/sqlalchemy/` and `just test sqla-async`.
+The PyAthena dialect tests are included in `just test pyathena`; they are not run by the two compliance-suite commands.
 Exercise the regression on the version before the fix where practical, and record the before/after result.
 Documentation-only changes need documentation checks; changes limited to logic independent of AWS need appropriate tests for that logic.
 Check the testing guide before assuming that selecting a unit test avoids AWS setup.
 
-The project's AWS integration CI does not run for pull requests from external forks.
+External-fork pull requests must not be run in the project's AWS integration CI.
 Do not submit an untested change expecting a maintainer to approve an AWS CI run to validate it.
 Checks that need no AWS access may still run, but their success does not establish integration coverage.
 
