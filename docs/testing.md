@@ -84,7 +84,7 @@ AWS_ATHENA_S3_TABLES_CATALOG=s3tablescatalog/your-table-bucket
 AWS_ATHENA_S3_TABLES_NAMESPACE=your_namespace
 ```
 
-These tests live in `tests/pyathena/sqlalchemy/test_base.py` and run under `just test pyathena`, not the SQLAlchemy compliance-suite commands.
+The S3 Tables tests live in `tests/pyathena/sqlalchemy/test_base.py` and run under `just test pyathena`, not the SQLAlchemy compliance-suite commands.
 Managed storage and S3 Tables tests skip when their respective optional configuration is absent.
 If a change affects one of these features, configure and run its tests; a skip does not validate that change.
 
@@ -171,5 +171,5 @@ aws --region us-west-2 cloudformation create-stack \
 
 If the account already has the GitHub OIDC provider, supply its ARN as the `OIDCProviderArn` parameter.
 The stack does not grant your local identity access automatically, and additional account-level service configuration may be needed for the features you test.
-The staging bucket has a retention policy, so deleting the stack does not remove it; account for that in cleanup and before reusing its name in a new stack.
+The staging bucket uses CloudFormation `DeletionPolicy: Retain`, so deleting the stack does not remove it; account for that in cleanup and before reusing its name in a new stack.
 See the [infrastructure guide](https://github.com/pyathena-dev/PyAthena/blob/master/cloudformation/README.md) for updates to an existing stack.

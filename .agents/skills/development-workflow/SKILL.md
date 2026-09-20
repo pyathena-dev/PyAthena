@@ -39,7 +39,7 @@ Prefer existing fixtures and integration classes; do not build a parallel mock f
 | Changed surface | Validation to consider |
 |---|---|
 | Cursor, result set, converter, or shared utility | Affected `tests/pyathena/` tests and relevant synchronous, asynchronous, and optional dependency backends |
-| SQLAlchemy dialect | `just test sqla`; also `just test sqla-async` for shared reflection or async paths |
+| SQLAlchemy dialect | Relevant PyAthena tests in `tests/pyathena/sqlalchemy/` plus `just test sqla`; also `tests/pyathena/aio/sqlalchemy/` and `just test sqla-async` for shared reflection or async paths. Both PyAthena directories are included in `just test pyathena`. |
 | Filesystem | Affected S3 filesystem tests, including listing and path boundaries |
 | Documentation | `just docs lint`; `just docs build` for rendered documentation changes |
 | Agent skills | `just docs lint` and `mise exec -- markdownlint-cli2 '.agents/skills/**/*.md'`; inspect links and walk through realistic workflow scenarios |

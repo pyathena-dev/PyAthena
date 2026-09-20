@@ -46,8 +46,8 @@ just lint   # Python lint, format check, mypy, and CloudFormation validation
 ```bash
 # ALWAYS run `just lint` first — tests will fail if lint doesn't pass
 just test pyathena    # PyAthena tests, including AWS integration (runs lint first)
-just test sqla        # SQLAlchemy dialect tests
-just test sqla-async  # SQLAlchemy async dialect tests
+just test sqla        # SQLAlchemy compliance suite
+just test sqla-async  # SQLAlchemy async compliance suite
 ```
 
 Tests require AWS environment variables. Use a `.env` file (gitignored):
@@ -68,7 +68,7 @@ uv run --env-file .env pytest -n 1 tests/pyathena/test_cursor.py -v
 
 - Tests mirror source structure under `tests/pyathena/`
 - Use pytest fixtures from `conftest.py`
-- New features require tests; changes to SQLAlchemy dialects must pass `just test sqla`
+- New features require tests. SQLAlchemy dialect changes must pass the relevant PyAthena tests under `tests/pyathena/sqlalchemy/` as well as `just test sqla`; async changes also need `tests/pyathena/aio/sqlalchemy/` and `just test sqla-async`. Both PyAthena test directories are included in `just test pyathena`.
 
 #### Test Conventions
 
