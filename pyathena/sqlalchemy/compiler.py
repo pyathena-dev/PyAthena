@@ -29,11 +29,11 @@ from pyathena.model import (
     AthenaPartitionTransform,
     AthenaRowFormatSerde,
 )
+from pyathena.sqlalchemy.array import _ArrayTypeInspector
 from pyathena.sqlalchemy.preparer import AthenaDDLIdentifierPreparer
 from pyathena.sqlalchemy.types import (
     AthenaMap,
     AthenaStruct,
-    _ArrayTypeInspector,
     get_double_type,
 )
 from pyathena.sqlalchemy.util import _split_type_arguments
