@@ -272,11 +272,14 @@ class AthenaStatementCompiler(SQLCompiler):
 
     def _array_lambda_name(self):
         names = {
-            str(getattr(element, "name", "")).lower()
+            str(
+                element.text if isinstance(element, TextClause) else getattr(element, "name", "")
+            ).lower()
             for element in visitors.iterate(self.statement)
         }
         index = getattr(self, "_array_lambda_index", 0)
-        while f"_pyathena_element_{index}" in names:
+        # Textual SQL can embed a column name inside a larger expression.
+        while any(f"_pyathena_element_{index}" in name for name in names):
             index += 1
         self._array_lambda_index = index + 1
         return f"_pyathena_element_{index}"
@@ -368,7 +371,7 @@ class AthenaStatementCompiler(SQLCompiler):
         ):
             index_expression = index_expression._with_binary_element_type(types.Integer())
         index = self.process(index_expression, **kw)
-        return f"element_at({array}, IF({index} > 0, {index}, NULL))"
+        return f"element_at({array}, NULLIF(greatest({index}, 0), 0))"
 
     def _array_slice_step(self, sql, step, array_type, **kw):
         if isinstance(step, Null):

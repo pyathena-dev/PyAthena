@@ -206,6 +206,7 @@ class ArrayExpressionTest(fixtures.TestBase):
             array[0],
             array[-1],
             array[10],
+            array[literal(None, Integer)],
             array[:],
             array[:2],
             array[2:],
@@ -220,6 +221,7 @@ class ArrayExpressionTest(fixtures.TestBase):
             tuple(connection.execute(select(*expressions)).one()),
             (
                 1,
+                None,
                 None,
                 None,
                 None,
@@ -297,6 +299,8 @@ class ArrayExpressionTest(fixtures.TestBase):
             table.c["items"][1] == 1
         )
         eq_(connection.execute(select(table.c.id).where(predicate)).scalars().all(), [1])
+        textual_predicate = literal_column("_pyathena_element_0 + 1") == any_(table.c["items"])
+        eq_(connection.execute(select(table.c.id).where(textual_predicate)).scalars().all(), [2])
 
 
 class NativeArrayTest(fixtures.TestBase):

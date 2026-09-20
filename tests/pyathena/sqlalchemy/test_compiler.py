@@ -13,11 +13,13 @@ from sqlalchemy import (
     all_,
     any_,
     bindparam,
+    cast,
     column,
     exc,
     func,
     select,
     table,
+    text,
     types,
 )
 from sqlalchemy.engine.url import make_url
@@ -313,11 +315,26 @@ class TestAthenaStatementCompiler:
         assert self._compile_sql(~items.any(2)).startswith("NOT (any_match(")
         assert "2 > _pyathena_element_0" in self._compile_sql(any_(items) < 2)
 
-    def test_array_lambda_does_not_capture_column_names(self):
+    @pytest.mark.parametrize(
+        ("scalar", "expected"),
+        [
+            (column("_pyathena_element_0", Integer), "_pyathena_element_0"),
+            (literal_column("_pyathena_element_0 + 1"), "_pyathena_element_0 + 1"),
+            (literal_column('"_pyathena_element_0" + 1'), '"_pyathena_element_0" + 1'),
+            (text("_pyathena_element_0 + 1"), "_pyathena_element_0 + 1"),
+        ],
+    )
+    def test_array_lambda_does_not_capture_column_names(self, scalar, expected):
         items = column("items", AthenaArray(Integer))
-        scalar = column("_pyathena_element_0", Integer)
         sql = self._compile_sql(scalar == any_(items))
-        assert "_pyathena_element_1 -> _pyathena_element_0 = _pyathena_element_1" in sql
+        assert f"_pyathena_element_1 -> {expected} = _pyathena_element_1" in sql
+
+    def test_array_index_does_not_repeat_expression(self):
+        items = column("items", AthenaArray(Integer))
+        index = cast(func.floor(func.random() * 3), Integer) - 1
+        sql = self._compile_sql(items[index])
+        assert sql.count("random()") == 1
+        assert "NULLIF(greatest(" in sql
 
     def test_multidimensional_array_quantifier_bind_type(self):
         items = column("items", AthenaArray(Integer, dimensions=2))

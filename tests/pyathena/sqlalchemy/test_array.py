@@ -224,7 +224,7 @@ class TestAthenaArrayComparator:
     def test_array_index(self, array_type, index):
         value = column("items", array_type)
         assert (
-            self._compile_sql(value[index]) == f"element_at(items, IF({index} > 0, {index}, NULL))"
+            self._compile_sql(value[index]) == f"element_at(items, NULLIF(greatest({index}, 0), 0))"
         )
         assert isinstance(value[index].type, Integer)
 
@@ -237,7 +237,7 @@ class TestAthenaArrayComparator:
         assert isinstance(value[0][0][0].type, Integer)
         assert value[0].type.as_tuple
         assert value[0].type.zero_indexes
-        assert "IF(1 > 0, 1, NULL)" in self._compile_sql(value[0])
+        assert "NULLIF(greatest(1, 0), 0)" in self._compile_sql(value[0])
         assert "greatest(1, 1)" in self._compile_sql(value[:0])
         assert "least(1, cardinality(items))" in self._compile_sql(value[:0])
         assert "cardinality(items)" in self._compile_sql(value[0:])
@@ -263,7 +263,7 @@ class TestAthenaArrayComparator:
 
     def test_decorated_array_index_and_slice(self):
         items = column("items", TupleArray())
-        assert self._compile_sql(items[1]) == "element_at(items, IF(1 > 0, 1, NULL))"
+        assert self._compile_sql(items[1]) == "element_at(items, NULLIF(greatest(1, 0), 0))"
         assert isinstance(items[1].type, Integer)
         compiled = select(items[1:2]).compile(dialect=AthenaDialect())
         assert "transform(slice(items," in str(compiled)
