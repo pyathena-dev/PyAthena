@@ -263,19 +263,40 @@ class ArrayUpdateTest(fixtures.TestBase):
             Column("id", Integer),
             Column("items", AthenaArray(Integer)),
             Column("binary_items", AthenaArray(types.BINARY)),
+            Column("tuple_items", _ArrayTuple()),
+            Column("decimal_items", AthenaArray(types.Numeric(8, 2))),
         )
         table.create(connection)
-        connection.execute(table.insert().values(id=1, items=[1, 2, 3], binary_items=[b"abc"]))
+        connection.execute(
+            table.insert().values(
+                id=1,
+                items=[1, 2, 3],
+                binary_items=[b"abc"],
+                tuple_items=[1, 2],
+                decimal_items=[Decimal("1.23")],
+            )
+        )
         items = table.c["items"]
         connection.execute(
             table.update().ordered_values(
                 (items[func.length("abc")], items[1] + 8),
                 (table.c.binary_items[1], b"\x00\xff"),
+                (table.c.tuple_items[bindparam("tuple_index")], bindparam("tuple_value")),
+                (table.c.decimal_items[1], Decimal("4.56")),
                 (table.c.id, 2),
+            ),
+            {"tuple_index": 1, "tuple_value": 5},
+        )
+        eq_(connection.execute(select(table.c.tuple_items)).scalar_one(), (5, 2))
+        connection.execute(
+            table.update().values(
+                {items[1:2]: items[2:3].concat([4]), table.c.tuple_items[1:1]: [6, 7]}
             )
         )
-        connection.execute(table.update().values({items[1:2]: items[2:3].concat([4])}))
-        eq_(connection.execute(select(table)).one(), (2, [2, 9, 4, 9], [b"\x00\xff"]))
+        eq_(
+            connection.execute(select(table)).one(),
+            (2, [2, 9, 4, 9], [b"\x00\xff"], (6, 7, 2), [Decimal("4.56")]),
+        )
 
     def test_orm_and_long_array_update(self, connection, metadata):
         table = Table(

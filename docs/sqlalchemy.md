@@ -1124,11 +1124,16 @@ Use indexed or sliced columns as UPDATE assignment keys on Iceberg tables.
 PyAthena compiles each assignment into a single server-side UPDATE of the whole array.
 Other columns can be assigned in the same statement.
 
+For an existing Iceberg table named `orders` with an ARRAY column `item_ids`:
+
 ```python
-numbers = table.c.numbers
+from sqlalchemy import MetaData, Table
+
+orders = Table("orders", MetaData(), autoload_with=engine)
+item_ids = orders.c.item_ids
 with engine.begin() as conn:
-    conn.execute(table.update().values({numbers[2]: 10}))
-    conn.execute(table.update().values({numbers[2:3]: [20, 30, 40]}))
+    conn.execute(orders.update().values({item_ids[2]: 10}))
+    conn.execute(orders.update().values({item_ids[2:3]: [20, 30, 40]}))
 ```
 
 Element assignment beyond the end extends the array and fills intervening positions with NULL.
@@ -1150,6 +1155,7 @@ A slice replacement must be a non-NULL array; use `[]` to delete elements.
 Only `step=None` and `step=1` are supported, and only the final component of a nested update path may be a slice.
 PyAthena rejects multiple partial assignments to the same array column, or a partial assignment combined with a whole-column assignment to that column.
 Use one whole-array expression when an update needs several changes to the same array.
+Partial updates can evaluate indices, boundaries, and replacement SQL expressions more than once; use deterministic expressions.
 
 #### Querying ARRAY data
 

@@ -8,9 +8,10 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import cast, exc, types
+from sqlalchemy import cast, exc, types, util
 from sqlalchemy.sql import operators, sqltypes
-from sqlalchemy.sql.elements import ColumnElement, Slice
+from sqlalchemy.sql.elements import BinaryExpression, BindParameter, ColumnElement, Null, Slice
+from sqlalchemy.sql.schema import Column
 from sqlalchemy.sql.type_api import TypeEngine
 from sqlalchemy.sql.visitors import InternalTraversal
 
@@ -220,23 +221,23 @@ class _ArrayTypeInspector:
 
 
 class _ArrayValueProcessor:
-    """Convert one declared ARRAY type between Python values and Athena transport.
+    """Convert ARRAY values and their typed elements to and from Athena transport.
 
     SQLAlchemy constructs processors per type and dialect. Keep that context
     here and share the recursive ARRAY/MAP/ROW traversal across bind parameters,
     SQL literals, and fetched JSON results.
     """
 
-    def __init__(self, array_type: AthenaArray, dialect: Any) -> None:
-        self.array_type = array_type
+    def __init__(self, type_: TypeEngine[Any], dialect: Any) -> None:
+        self.type_ = type_
         self.dialect = dialect
         self._type_inspector = _ArrayTypeInspector(dialect)
 
     def bind(self, value: Any) -> Any:
-        return self._bind(value, self.array_type)
+        return self._bind(value, self.type_)
 
     def literal(self, value: Any) -> str:
-        return self._literal(value, self.array_type)
+        return self._literal(value, self.type_)
 
     def result(self, value: Any) -> Any:
         if value is None:
@@ -250,7 +251,11 @@ class _ArrayValueProcessor:
                 return value
         if isinstance(value, dict) and "_pyathena_array" in value:
             value = value["_pyathena_array"]
-        return self._decode(value, self.array_type, self.array_type.as_tuple)
+        return self._decode(
+            value,
+            self.type_,
+            self.type_.as_tuple if isinstance(self.type_, sqltypes.ARRAY) else False,
+        )
 
     @staticmethod
     def _complex_values(value: Any, type_: TypeEngine[Any]):
@@ -399,3 +404,242 @@ class _ArrayValueProcessor:
             processor = type_.dialect_impl(self.dialect).result_processor(self.dialect, None)
             return processor(value) if processor else value
         return value
+
+
+class _ArrayAssignmentType(types.TypeDecorator[Any]):
+    """Preserve declared element processors for ARRAY assignment values."""
+
+    impl = types.NullType
+    cache_ok = True
+
+    def __init__(self, item_type):
+        super().__init__()
+        self.item_type = item_type
+
+    def bind_processor(self, dialect):
+        processor = _ArrayValueProcessor(self.item_type, dialect)
+
+        def process(value):
+            value = processor.bind(value)
+            if isinstance(value, (bytes, bytearray)):
+                return _ComplexParameter("FROM_HEX", (value.hex(),))
+            return value
+
+        return process
+
+    def literal_processor(self, dialect):
+        return _ArrayValueProcessor(self.item_type, dialect).literal
+
+    def bind_expression(self, bindvalue):
+        expression = self.item_type.bind_expression(bindvalue)
+        return bindvalue if expression is None else expression
+
+
+class _ArrayWriteIndexType(types.TypeDecorator[int]):
+    """Reject non-integer and NULL bound ARRAY write indices."""
+
+    impl = types.Integer
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if type(value) is not int:
+            raise ValueError("ARRAY write indices must be non-NULL integers")
+        return value
+
+    def process_literal_param(self, value, dialect):
+        return self.process_bind_param(value, dialect)
+
+
+class _ArrayUpdate(ColumnElement[Any]):
+    """Whole-column expression generated from one partial ARRAY assignment."""
+
+    __visit_name__ = "athena_array_update"
+    inherit_cache = True
+    _traverse_internals = [  # noqa: RUF012
+        ("column", InternalTraversal.dp_clauseelement),
+        ("path", InternalTraversal.dp_clauseelement_list),
+        ("value", InternalTraversal.dp_clauseelement),
+        ("type", InternalTraversal.dp_type),
+    ]
+
+    def __init__(self, column, path, value, value_type):
+        self.column = column
+        self.path = path
+        self.type = column.type
+        self.value_type = value_type
+        self.value = (
+            value._with_binary_element_type(
+                _ArrayAssignmentType(value_type if value.type._isnull else value.type)
+            )
+            if isinstance(value, BindParameter)
+            else value
+        )
+
+    @property
+    def _from_objects(self):
+        return self.column._from_objects + self.value._from_objects
+
+    @classmethod
+    def rewrite(cls, statement, dialect):
+        inspector = _ArrayTypeInspector(dialect)
+        values = statement._ordered_values
+        if values is None:
+            values = list((statement._values or {}).items())
+        rewritten = []
+        seen = set()
+        partial = set()
+        for key, value in values:
+            base = key
+            path: list[Any] = []
+            while isinstance(base, BinaryExpression) and base.operator is operators.getitem:
+                if inspector.array_type(base.left.type) is None:
+                    break
+                path.insert(0, base.right)
+                base = base.left
+            name = base if isinstance(base, str) else getattr(base, "key", None)
+            if path:
+                if (
+                    not isinstance(base, Column)
+                    or base.table is None
+                    or base.table._deannotate() is not statement.table._deannotate()
+                ):
+                    raise exc.CompileError("ARRAY updates require a column of the target table")
+                if name in seen:
+                    raise exc.CompileError("Only one assignment per ARRAY column is supported")
+                if any(isinstance(index, Slice) for index in path[:-1]):
+                    raise exc.CompileError("Only the final ARRAY update index can be a slice")
+                partial.add(name)
+                value_type = key.type
+                value = cls(base, path, value, value_type)
+                key = base
+            elif name in partial:
+                raise exc.CompileError("Only one assignment per ARRAY column is supported")
+            seen.add(name)
+            rewritten.append((key, value))
+        if not partial:
+            return statement
+        result = statement._clone()
+        if statement._ordered_values is not None:
+            result._ordered_values = rewritten
+        else:
+            result._values = util.immutabledict(rewritten)
+        return result
+
+
+class _ArrayUpdateCompiler:
+    """Render an ARRAY assignment by rebuilding its affected nested arrays."""
+
+    def __init__(self, compiler):
+        self.compiler = compiler
+        self._type_inspector = _ArrayTypeInspector(compiler.dialect)
+
+    def process(self, expression, **kw):
+        compiler = self.compiler
+        value = expression.value
+        final_slice = isinstance(expression.path[-1], Slice)
+        if final_slice and (
+            isinstance(value, Null)
+            or (
+                isinstance(value, BindParameter)
+                and not value.required
+                and value.callable is None
+                and value.value is None
+            )
+        ):
+            raise exc.CompileError("An ARRAY slice assignment requires a non-NULL array")
+        rhs = compiler.process(value, **kw)
+        rhs_type = compiler._complex_dml_type(
+            expression.value_type, implicit_bind=isinstance(value, BindParameter)
+        )
+        rhs = f"CAST({rhs} AS {rhs_type})"
+        if final_slice:
+            # Reject SQL expressions that evaluate to NULL without issuing a second statement.
+            failure = (
+                f"slice(CAST(ARRAY[] AS {rhs_type}), "
+                "CAST(concat('NULL ARRAY slice assignment', coalesce(CAST(cardinality("
+                f"{rhs}) AS VARCHAR), '')) AS BIGINT), 0)"
+            )
+            rhs = f"IF({rhs} IS NULL, {failure}, {rhs})"
+        return self._rebuild(
+            compiler.process(expression.column, **kw), expression.type, expression.path, rhs, **kw
+        )
+
+    def _index_sql(self, index: ColumnElement[Any], **kw):
+        compiler = self.compiler
+        if isinstance(index, Null):
+            raise exc.CompileError("ARRAY write indices must be non-NULL positive integers")
+        if (
+            isinstance(index, BindParameter)
+            and not index.required
+            and index.callable is None
+            and (type(index.value) is not int or index.value <= 0)
+        ):
+            raise exc.CompileError(
+                "ARRAY write indices must be positive integers after normalization"
+            )
+        if not isinstance(index.type, (types.Integer, types.NullType)) and not (
+            isinstance(index, BindParameter)
+            and self._type_inspector.array_type(index.type) is not None
+        ):
+            raise exc.CompileError("ARRAY write indices must be integers")
+
+        if isinstance(index, BindParameter):
+            index = index._with_binary_element_type(_ArrayWriteIndexType())
+        sql = compiler.process(index, **kw)
+        failure = (
+            "CAST(concat('Invalid ARRAY index: ', "
+            f"coalesce(CAST({sql} AS VARCHAR), 'NULL')) AS BIGINT)"
+        )
+        return f"IF({sql} > 0, {sql}, {failure})"
+
+    def _rebuild(self, array, array_type, path, rhs, **kw):
+        compiler = self.compiler
+        array_type = self._type_inspector.array_type(array_type)
+        if array_type is None:
+            raise exc.CompileError("Partial ARRAY updates require an ARRAY column type")
+        array_sql_type = compiler._complex_dml_type(array_type)
+        array = f"coalesce({array}, CAST(ARRAY[] AS {array_sql_type}))"
+        bound = path[0]
+        if isinstance(bound, Slice):
+            if not isinstance(bound.step, Null) and not (
+                isinstance(bound.step, BindParameter)
+                and bound.step.unique
+                and type(bound.step.value) is int
+                and bound.step.value == 1
+            ):
+                raise exc.CompileError("Athena ARRAY slices support only step=None or step=1")
+            start = "1" if isinstance(bound.start, Null) else self._index_sql(bound.start, **kw)
+            stop = (
+                f"cardinality({array})"
+                if isinstance(bound.stop, Null)
+                else self._index_sql(bound.stop, **kw)
+            )
+            prefix = f"slice({array}, 1, least({start} - 1, cardinality({array})))"
+            element_type = compiler._complex_dml_type(_ArrayTypeInspector.item_type(array_type))
+            padding = (
+                f"repeat(CAST(NULL AS {element_type}), "
+                f"CAST(greatest({start} - 1 - cardinality({array}), 0) AS INTEGER))"
+            )
+            tail_start = f"greatest({start}, {stop} + 1)"
+            suffix = (
+                f"slice({array}, {tail_start}, "
+                f"greatest(cardinality({array}) - {tail_start} + 1, 0))"
+            )
+            return compiler._array_slice_step(
+                f"concat({prefix}, {padding}, {rhs}, {suffix})", bound.step, array_type, **kw
+            )
+        index = self._index_sql(bound, **kw)
+        previous = f"element_at({array}, {index})"
+        replacement = (
+            self._rebuild(previous, _ArrayTypeInspector.item_type(array_type), path[1:], rhs, **kw)
+            if len(path) > 1
+            else rhs
+        )
+        prefix = f"slice({array}, 1, least({index} - 1, cardinality({array})))"
+        element_type = compiler._complex_dml_type(_ArrayTypeInspector.item_type(array_type))
+        padding = (
+            f"repeat(CAST(NULL AS {element_type}), "
+            f"CAST(greatest({index} - 1 - cardinality({array}), 0) AS INTEGER))"
+        )
+        suffix = f"slice({array}, {index} + 1, greatest(cardinality({array}) - {index}, 0))"
+        return f"concat({prefix}, {padding}, ARRAY[{replacement}], {suffix})"
