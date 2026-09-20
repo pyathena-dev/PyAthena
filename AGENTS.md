@@ -4,6 +4,9 @@
 
 PyAthena is a Python DB API 2.0 (PEP 249) compliant client for Amazon Athena. See `pyproject.toml` for Python version support and dependencies.
 
+Follow [CONTRIBUTING.md](CONTRIBUTING.md) and the [contribution guide](docs/contributing.md) for issue-first discussion, contributor validation, AI-assisted work, and new-file license headers.
+Preserve existing and upstream copyright notices; do not apply the new original-file header to adapted code without checking provenance.
+
 ## Rules and Constraints
 
 ### Git Workflow

@@ -69,6 +69,11 @@ async def main():
 asyncio.run(main())
 ```
 
+## Contributing
+
+Contributions, including AI-assisted contributions, are welcome.
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) before starting a change.
+
 ## License
 
 [MIT license](LICENSE)
