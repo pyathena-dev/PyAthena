@@ -286,13 +286,22 @@ class TestAthenaStatementCompiler:
 
     @pytest.mark.parametrize(("aggregate", "function"), [(any_, "any_match"), (all_, "all_match")])
     @pytest.mark.parametrize(
-        "op", [operators.eq, operators.ne, operators.lt, operators.le, operators.gt, operators.ge]
+        ("op", "sql_operator"),
+        [
+            (operators.eq, "="),
+            (operators.ne, "!="),
+            (operators.lt, "<"),
+            (operators.le, "<="),
+            (operators.gt, ">"),
+            (operators.ge, ">="),
+        ],
     )
-    def test_array_quantified_comparison(self, aggregate, function, op):
+    def test_array_quantified_comparison(self, aggregate, function, op, sql_operator):
         items = column("items", AthenaArray(Integer))
         sql = self._compile_sql(op(2, aggregate(items)))
-        assert sql.startswith(f"{function}((items), _pyathena_element_0 -> 2 ")
-        assert "_pyathena_element_0)" in sql
+        assert sql == (
+            f"{function}((items), _pyathena_element_0 -> 2 {sql_operator} _pyathena_element_0)"
+        )
 
     def test_array_quantifier_null_negation_and_legacy_methods(self):
         items = column("items", AthenaArray(Integer))
