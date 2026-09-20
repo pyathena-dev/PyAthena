@@ -101,7 +101,9 @@ Table-metadata lookups propagate throttling and permission errors rather than re
 `has_table()` propagates permission failures, including access denied by Lake Formation, instead of returning or caching `False`.
 For failed metadata requests, only recognized `EntityNotFoundException` responses establish absence; unrecognized errors are propagated rather than guessed to mean a missing table.
 Column reflection and `has_table()` do not retry a table-metadata request that `information_schema` can answer; they read `information_schema.columns` instead, executed without query result reuse, and log a warning.
-That covers a throttled request, and a `MetadataException` carrying no recognized Glue error envelope, which is how a federated catalog reports a missing table: absence is then decided by the query against the same catalog rather than by an unrecognized message.
+That covers a throttled request in any catalog.
+It also covers a `MetadataException` carrying no recognized Glue error envelope, but only outside `AwsDataCatalog`: a federated catalog reports a missing table in its connector's own words, so absence is decided by the query against that catalog rather than by an unrecognized message.
+In `AwsDataCatalog` an unrecognized `MetadataException` still propagates, because Glue does state missing tables and permission failures in a recognized envelope, and `information_schema` filters by Lake Formation instead of failing, so reading it there would report a table the caller cannot see as absent.
 Other error codes listed in the connection's `RetryConfig.exceptions` are still retried on that path, except those; list the wrapped Glue codes instead of `MetadataException`.
 A `retry_config` in `cursor_kwargs` replaces that policy entirely, including those retries, which then run before the fallback.
 The fallback maps unbounded `varchar` to SQLAlchemy `String`, matching Hive `STRING` reflection from the metadata API, and preserves explicit `VARCHAR(n)` and `CHAR(n)` lengths.
