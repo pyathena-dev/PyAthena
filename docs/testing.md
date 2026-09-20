@@ -126,7 +126,7 @@ Sanitize logs before sharing them.
 
 ## GitHub Actions
 
-The project's AWS integration jobs skip pull requests from external forks.
+Project policy excludes external-fork pull requests from AWS integration CI.
 Maintainers do not approve those jobs as a substitute for contributor testing.
 Checks without AWS access may still run on a fork pull request.
 
