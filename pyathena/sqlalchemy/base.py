@@ -370,7 +370,7 @@ class AthenaDialect(DefaultDialect):
                 metadata = self._lookup_table(cursor, schema, name, table_name)
             except pyathena.error.OperationalError as e:
                 code = _get_error_code(e.__cause__ or e, unwrap_metadata=True)
-                if code not in self._FALLBACK_ERROR_CODES:
+                if not self._answerable_from_information_schema(code, catalog):
                     raise
                 _logger.warning(
                     f"Table metadata request for {table_name} failed with {code}; "
@@ -383,6 +383,24 @@ class AthenaDialect(DefaultDialect):
                 return columns
         info_cache[metadata_key] = metadata
         return self._columns_from_metadata(metadata)
+
+    @staticmethod
+    def _answerable_from_information_schema(code: str | None, catalog: str | None) -> bool:
+        """Whether a failed metadata request should be re-asked of the catalog.
+
+        Throttling always: one query costs less than the retry ladder.
+
+        A ``MetadataException`` that survived unwrapping only outside the Glue
+        Data Catalog. Glue states missing tables and permission failures in an
+        envelope this client recognizes, so an unrecognized one there has an
+        unknown cause, and answering it from ``information_schema`` would report
+        a table the caller merely cannot see as absent. A federated catalog has
+        no such envelope: it reports a missing table in its connector's own
+        words, which cannot be recognized at all.
+        """
+        if code in THROTTLING_ERROR_CODES:
+            return True
+        return code == "MetadataException" and (catalog or "").lower() != "awsdatacatalog"
 
     @classmethod
     def _without_fallback_retries(cls, retry_config: RetryConfig) -> RetryConfig:
@@ -408,11 +426,16 @@ class AthenaDialect(DefaultDialect):
         or blank value as NaN, as an empty string, or as a dropped row depending
         on its backend and on UNLOAD.
 
+        The converter is pinned too: a connection-level one chosen for a
+        DataFrame cursor would otherwise be applied to this one.
+
         The async connection adapter maps ``Cursor`` to its own counterpart and
         returns its wrapper, so this is typed by the interface used here rather
         than by the class requested.
         """
-        return raw_connection.driver_connection.cursor(Cursor)  # type: ignore[union-attr]
+        return raw_connection.driver_connection.cursor(  # type: ignore[union-attr]
+            Cursor, converter=Cursor.get_default_converter()
+        )
 
     def _column(self, name: str | None, type_: str, comment: str | None, partition: bool | None):
         return {
