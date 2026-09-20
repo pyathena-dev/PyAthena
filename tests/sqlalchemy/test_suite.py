@@ -265,6 +265,7 @@ class ArrayUpdateTest(fixtures.TestBase):
             Column("binary_items", AthenaArray(types.BINARY)),
             Column("tuple_items", _ArrayTuple()),
             Column("decimal_items", AthenaArray(types.Numeric(8, 2))),
+            Column("timestamp_items", AthenaArray(types.TIMESTAMP)),
         )
         table.create(connection)
         connection.execute(
@@ -274,6 +275,10 @@ class ArrayUpdateTest(fixtures.TestBase):
                 binary_items=[b"abc"],
                 tuple_items=[1, 2],
                 decimal_items=[Decimal("1.23")],
+                timestamp_items=[
+                    _datetime(2024, 1, 1, microsecond=123000),
+                    _datetime(2024, 1, 2, microsecond=456000),
+                ],
             )
         )
         items = table.c["items"]
@@ -282,7 +287,8 @@ class ArrayUpdateTest(fixtures.TestBase):
                 (items[func.length("abc")], items[1] + 8),
                 (table.c.binary_items[1], b"\x00\xff"),
                 (table.c.tuple_items[bindparam("tuple_index")], bindparam("tuple_value")),
-                (table.c.decimal_items[1], Decimal("4.56")),
+                (table.c.decimal_items[1], table.c.decimal_items[1] + Decimal("3.33")),
+                (table.c.timestamp_items[1], table.c.timestamp_items[2]),
                 (table.c.id, 2),
             ),
             {"tuple_index": 1, "tuple_value": 5},
@@ -295,7 +301,14 @@ class ArrayUpdateTest(fixtures.TestBase):
         )
         eq_(
             connection.execute(select(table)).one(),
-            (2, [2, 9, 4, 9], [b"\x00\xff"], (6, 7, 2), [Decimal("4.56")]),
+            (
+                2,
+                [2, 9, 4, 9],
+                [b"\x00\xff"],
+                (6, 7, 2),
+                [Decimal("4.56")],
+                [_datetime(2024, 1, 2, microsecond=456000)] * 2,
+            ),
         )
 
     def test_orm_and_long_array_update(self, connection, metadata):
@@ -330,6 +343,23 @@ class ArrayUpdateTest(fixtures.TestBase):
             eq_(connection.execute(select(table.c["items"])).scalar_one()[:3], [99, 77, 3])
         finally:
             mapping.dispose()
+
+    def test_cached_literal_assignment_failures(self, connection, metadata):
+        table = Table(
+            "array_cached_invalid_updates", metadata, Column("items", AthenaArray(Integer))
+        )
+        table.create(connection)
+        connection.execute(table.insert().values(items=[1, 2]))
+        connection = connection.execution_options(compiled_cache={})
+        items = table.c["items"]
+        connection.execute(table.update().values({items[1]: 3}))
+        with pytest.raises(sa_exc.DBAPIError, match="Invalid ARRAY index"):
+            connection.execute(table.update().values({items[0]: 4}))
+        eq_(connection.execute(select(items)).scalar_one(), [3, 2])
+        connection.execute(table.update().values({items[1:2]: [7]}))
+        with pytest.raises(sa_exc.DBAPIError, match="NULL ARRAY slice assignment"):
+            connection.execute(table.update().values({items[1:2]: None}))
+        eq_(connection.execute(select(items)).scalar_one(), [7])
 
     def test_null_slice_binding_rejected(self, connection, metadata):
         table = Table("array_null_slice", metadata, Column("items", types.ARRAY(Integer)))

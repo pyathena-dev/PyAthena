@@ -1152,6 +1152,8 @@ These resize rules are PyAthena-specific and do not promise full PostgreSQL arra
 
 Write indices and explicit slice boundaries must be non-NULL positive integers after normalization.
 A slice replacement must be a non-NULL array; use `[]` to delete elements.
+Decimal partial updates require `Numeric(precision, scale)`, including when assigning SQL expressions.
+Validation can occur during compilation, binding, or Athena execution, so the exception class can differ when a compiled statement is reused.
 Only `step=None` and `step=1` are supported, and only the final component of a nested update path may be a slice.
 PyAthena rejects multiple partial assignments to the same array column, or a partial assignment combined with a whole-column assignment to that column.
 Use one whole-array expression when an update needs several changes to the same array.

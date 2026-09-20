@@ -548,9 +548,7 @@ class _ArrayUpdateCompiler:
         ):
             raise exc.CompileError("An ARRAY slice assignment requires a non-NULL array")
         rhs = compiler.process(value, **kw)
-        rhs_type = compiler._complex_dml_type(
-            expression.value_type, implicit_bind=isinstance(value, BindParameter)
-        )
+        rhs_type = compiler._complex_dml_type(expression.value_type, implicit_bind=True)
         rhs = f"CAST({rhs} AS {rhs_type})"
         if final_slice:
             # Reject SQL expressions that evaluate to NULL without issuing a second statement.
