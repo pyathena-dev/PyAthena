@@ -471,12 +471,15 @@ class AthenaDialect(DefaultDialect):
             )
             rows = cursor.fetchall()
         # Sort here: the query has no ORDER BY, so its result order is Athena's.
+        # The comment is still normalized at this boundary: a converter given in
+        # cursor_kwargs is applied after the one _internal_cursor() pins, and one
+        # written for a DataFrame cursor reports a missing value as NaN.
         return [
             self._column(
                 column_name,
                 # Athena exposes Hive STRING as unbounded VARCHAR in information_schema.
                 "string" if data_type == "varchar" else data_type,
-                comment,
+                comment if isinstance(comment, str) else None,
                 extra_info == "partition key" or None,
             )
             for _, column_name, data_type, comment, extra_info in sorted(
@@ -563,12 +566,14 @@ class AthenaDialect(DefaultDialect):
         raw_connection = self._raw_connection(connection)
         schema = schema if schema else self._cursor_option(raw_connection, "schema_name")
         query = f"""SHOW CREATE VIEW "{schema}"."{view_name}";"""
-        try:
-            with self._internal_cursor(raw_connection) as cursor:
+        with self._internal_cursor(raw_connection) as cursor:
+            try:
                 cursor.execute(query)
-                rows = cursor.fetchall()
-        except pyathena.error.OperationalError as e:
-            raise exc.NoSuchTableError(f"{schema}.{view_name}") from e
+            except pyathena.error.OperationalError as e:
+                # Only a rejected query says the view is absent. A failure while
+                # paging the results is a failed read of a view that does exist.
+                raise exc.NoSuchTableError(f"{schema}.{view_name}") from e
+            rows = cursor.fetchall()
         # Athena returns the definition one line per row and blank lines as
         # empty values, which are part of the definition.
         return "\n".join(row[0] or "" for row in rows)

@@ -56,10 +56,12 @@ def unique_s3tables_table_name(base: str) -> str:
 
 class TestAthenaDialect:
     def test_columns_from_information_schema(self):
-        # Rows arrive unordered, and Athena reports a missing comment as NULL,
-        # which an API cursor hands over as None or as an empty string.
+        # Rows arrive unordered, and Athena reports a missing comment as NULL.
+        # An API cursor hands that over as None or as an empty string; a
+        # converter supplied in cursor_kwargs is applied after the one this path
+        # pins, and one written for a DataFrame cursor reports it as NaN.
         rows = [
-            ("4", "dt", "varchar", None, "partition key"),
+            ("4", "dt", "varchar", float("nan"), "partition key"),
             ("1", "id", "integer", "identifier", None),
             ("2", "payload", "row(a integer, b array(varchar))", None, None),
             ("3", "label", "varchar", "", ""),
@@ -929,18 +931,22 @@ class TestSQLAlchemyAthena:
                 "SELECT a, b FROM t UNION ALL SELECT 2, 'y'"
             )
         )
+        raw_connection = conn.connection.driver_connection
         try:
             definition = sqlalchemy.inspect(conn).get_view_definition(view_name, schema=ENV.schema)
+            # What Athena actually returned, row by row, independent of the
+            # dialect. Comparing against this catches a partial loss too.
+            with raw_connection.cursor(Cursor) as cursor:
+                cursor.execute(f'SHOW CREATE VIEW "{ENV.schema}"."{view_name}";')
+                rows = [row[0] for row in cursor.fetchall()]
         finally:
             conn.execute(text(f"DROP VIEW IF EXISTS {ENV.schema}.{view_name}"))
 
-        lines = definition.splitlines()
-        assert lines[0].startswith("CREATE VIEW")
-        assert "UNION ALL" in definition
-        if not any(not line.strip() for line in lines):
+        if not any(row is None or not row.strip() for row in rows):
             # The blank line is Athena's formatting, not the dialect's, so its
             # absence means this case can no longer reach the defect.
-            pytest.skip(f"Athena formatted this view without a blank line: {definition!r}")
+            pytest.skip(f"Athena formatted this view without a blank line: {rows!r}")
+        assert definition == "\n".join(row or "" for row in rows)
 
     def test_char_length(self, engine):
         engine, conn = engine
