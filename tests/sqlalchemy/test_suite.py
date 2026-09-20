@@ -1038,8 +1038,18 @@ class HasTableTest(_HasTableTest):
             inspector.get_table_options(name)
         assert caught.value.__cause__ is error
 
-    @sa_testing.combinations("AccessDeniedException", "InternalServerException", argnames="code")
+    @sa_testing.combinations(
+        "AccessDeniedException", "InternalServerException", None, argnames="code"
+    )
     def test_metadata_errors_do_not_establish_absence(self, connection, monkeypatch, code):
+        # This suite runs against the Glue Data Catalog, which states missing
+        # tables and permission failures in an envelope this client recognizes.
+        # An unrecognized message there (code None) has an unknown cause, so it
+        # propagates rather than being re-asked of information_schema, which
+        # filters by Lake Formation instead of erroring and would report a table
+        # the caller cannot see as absent. Outside Glue the fallback does answer
+        # it; that case has no catalog here and is covered by
+        # TestAthenaDialect::test_unrecognized_metadata_error_asks_information_schema.
         raw_connection = _raw_connection(connection)
         retried = code == "InternalServerException"
         if retried:
@@ -1052,6 +1062,8 @@ class HasTableTest(_HasTableTest):
         message = (
             "Catalog error (Service: AmazonDataCatalog; Status Code: 400; "
             f"Error Code: {code}; Request ID: example; Proxy: null)"
+            if code
+            else "is not authorized to perform: glue:GetTable"
         )
         error = _metadata_error("MetadataException", message)
         calls = _fail_get_table_metadata(
@@ -1063,38 +1075,6 @@ class HasTableTest(_HasTableTest):
                 inspector.has_table("unavailable_metadata")
             assert caught.value.__cause__ is error
         assert len(calls) == (4 if retried else 2)
-
-    @sa_testing.combinations(True, False, argnames="exists")
-    def test_unrecognized_metadata_error_asks_information_schema(
-        self, connection, metadata, monkeypatch, exists
-    ):
-        # A federated catalog reports a missing table in its connector's own
-        # words, with no Glue error envelope to unwrap. Guessing absence from an
-        # unrecognized message is what turned throttling into false absence, so
-        # the question goes to information_schema in the same catalog instead.
-        name = "unrecognized_present" if exists else "unrecognized_absent"
-        if exists:
-            Table(name, metadata, Column("id", Integer)).create(connection)
-        raw_connection = _raw_connection(connection)
-        error = _metadata_error(
-            "MetadataException",
-            "Failed to invoke lambda function due to "
-            "com.amazonaws.services.lambda.invoke.LambdaFunctionException: "
-            "Requested resource not found "
-            "(Service: DynamoDb, Status Code: 400, Request ID: example)",
-        )
-        # Retries are not shortened: an unrecognized code must not wait for them.
-        _fail_get_table_metadata(monkeypatch, raw_connection, error, attempt=None)
-
-        inspector = inspect(connection)
-        assert inspector.has_table(name) is exists
-        if exists:
-            assert [column["name"] for column in inspector.get_columns(name)] == ["id"]
-        # Table options still need the metadata API and still report the failure.
-        monkeypatch.setattr(raw_connection.retry_config, "attempt", 1)
-        with pytest.raises(OperationalError) as caught:
-            inspector.get_table_options(name)
-        assert caught.value.__cause__ is error
 
     @sa_testing.combinations((True, sa_testing.requires.schemas), False, argnames="use_schema")
     def test_has_table_cache_drop(self, connection, metadata, use_schema):
