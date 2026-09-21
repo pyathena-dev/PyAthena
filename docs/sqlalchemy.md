@@ -1084,78 +1084,65 @@ CREATE TABLE orders (
 )
 ```
 
-#### Querying ARRAY data
+#### Querying ARRAY data with typed SQLAlchemy expressions
 
-PyAthena automatically converts ARRAY data between different formats:
+Use `select()` with `ARRAY` or `AthenaArray` columns whose element types are known, either declared explicitly or reflected from Athena, to receive typed Python collections.
+For example, the `events` table above returns `numbers` as a list of integers and `labels` as nested lists of strings.
+SQLAlchemy serializes these result columns as JSON in Athena and converts the returned values according to the column types.
+You do not need to call `json.loads()` on these results.
+This preserves strings such as `"a,b"`, `"001"`, and `"null"` as strings, including within nested arrays.
+
+#### Direct cursor and textual SQL results
+
+Direct `cursor.execute()` calls and untyped SQLAlchemy `text()` queries use the cursor's existing conversion behavior.
+The examples in this section use the standard REST cursor with its default converter and no result type hints or custom converters.
+Other cursor implementations have their own conversion behavior.
+
+The standard converter already converts simple ARRAY values to Python lists:
 
 ```python
-from sqlalchemy import text
+result = cursor.execute("SELECT ARRAY[1, 2, 3] AS numbers").fetchone()
+numbers = result[0]  # [1, 2, 3]
+```
 
-# Query ARRAY data using ARRAY constructor
-result = connection.execute(
-    text("SELECT ARRAY[1, 2, 3, 4, 5] as item_ids")
+This conversion predates the typed SQLAlchemy ARRAY support described above.
+Typed SQLAlchemy ARRAY support does not change the behavior of direct cursor queries or untyped `text()` queries.
+
+The standard ARRAY converter first tries JSON parsing, then a limited parser for Athena's native text representation.
+The following examples show its behavior for strings received as ARRAY values:
+
+| ARRAY text | Python result |
+|---|---|
+| `[1, 2, 3]` | `[1, 2, 3]` (`list`) |
+| `[[1, 2], [3, 4]]` | `[[1, 2], [3, 4]]` (nested `list`) |
+| `[[one, two], [three]]` | `"[[one, two], [three]]"` (`str`) |
+| `[a, b=1]` | `"[a, b=1]"` (`str`) |
+
+The numeric examples are valid JSON.
+The unquoted nested string array is not valid JSON, and the native parser does not support nested arrays.
+The last example contains an equals sign that the native parser rejects.
+For these unsupported representations, the converter returns the original string rather than dropping unparsed elements.
+A string result therefore does not necessarily mean the stored ARRAY is invalid.
+Calling `json.loads()` on that native text will not resolve these cases because it is not JSON.
+
+Use typed SQLAlchemy SELECT expressions when element types and nested string values must be preserved.
+When writing SQL directly, explicitly request JSON as shown below.
+
+#### Requesting JSON in direct SQL
+
+Use `CAST(... AS JSON)` to have Athena return JSON instead of its native ARRAY text representation.
+With the standard REST cursor and default converter, JSON results are already decoded into Python values:
+
+```python
+result = cursor.execute(
+    "SELECT CAST(ARRAY[ARRAY['one', 'two'], ARRAY['three']] AS JSON) AS labels"
 ).fetchone()
-
-# Access ARRAY data as Python list
-item_ids = result.item_ids  # [1, 2, 3, 4, 5]
+labels = result[0]  # [["one", "two"], ["three"]]
 ```
 
-#### Complex ARRAY operations
-
-For arrays containing complex data types:
-
-```python
-# Arrays with STRUCT elements
-result = connection.execute(
-    text("SELECT ARRAY[ROW('Alice', 25), ROW('Bob', 30)] as users")
-).fetchone()
-
-users = result.users
-# Use typed SQLAlchemy expressions when you need declared ROW field types.
-
-# Using CAST AS JSON for complex ARRAY operations
-result = connection.execute(
-    text("SELECT CAST(ARRAY[1, 2, 3] AS JSON) as data")
-).fetchone()
-
-# Parse JSON result
-import json
-if isinstance(result.data, str):
-    array_data = json.loads(result.data)  # [1, 2, 3]
-else:
-    array_data = result.data  # Already converted to list
-```
-
-#### Data format support
-
-PyAthena supports multiple ARRAY data formats:
-
-**Athena Native Format:**
-
-```python
-# Input: '[1, 2, 3]'
-# Output: [1, 2, 3]
-
-# Input: '[apple, banana, cherry]'
-# Output: ["apple", "banana", "cherry"]
-```
-
-**JSON Format:**
-
-```python
-# Input: '[1, 2, 3]'
-# Output: [1, 2, 3]
-
-# Input: '["apple", "banana", "cherry"]'
-# Output: ["apple", "banana", "cherry"]
-```
-
-**Complex Nested Arrays:**
-
-```python
-# Input: '[{name=John, age=30}, {name=Jane, age=25}]'
-# Output: [{"name": "John", "age": 30}, {"name": "Jane", "age": 25}]
-```
+The same applies to an untyped SQLAlchemy `text()` query using `awsathena+rest` with the default converter.
+No additional `json.loads()` call is needed in these examples.
+This path returns JSON-derived Python values; use typed SQLAlchemy ARRAY columns when you need conversion according to declared element types such as `Numeric` or `Date`.
 
 #### Type definitions
 
@@ -1178,46 +1165,14 @@ AthenaArray(AthenaArray(Integer))  # ARRAY<ARRAY<INT>>
 
 #### Best practices
 
-1. **Use appropriate item types** in AthenaArray definitions:
+1. Declare the ARRAY element type and use typed SQLAlchemy SELECT expressions to preserve nested values and scalar types.
+2. For direct cursor or untyped `text()` queries, request `CAST(... AS JSON)` when the native text parser cannot represent the result reliably.
+3. Handle SQL NULL and empty arrays before accessing an element:
 
    ```python
-   AthenaArray(Integer)  # For numeric arrays
-   AthenaArray(String)   # For string arrays
-   AthenaArray(AthenaStruct(...))  # For arrays of structs
+   # A result from a typed ARRAY SELECT or the JSON query above
+   first_label = labels[0] if labels else None
    ```
-
-2. **Use CAST AS JSON** for complex array operations:
-
-   ```sql
-   SELECT CAST(complex_array AS JSON) FROM table_name
-   ```
-
-3. **Handle NULL values** appropriately in your application logic:
-
-   ```python
-   if result.array_column is not None:
-       # Process array data
-       first_item = result.array_column[0] if result.array_column else None
-   ```
-
-#### Migration from RAW strings
-
-**Before (raw string handling):**
-
-```python
-result = cursor.execute("SELECT array_column FROM table").fetchone()
-raw_data = result[0]  # "[1, 2, 3]"
-import json
-parsed_data = json.loads(raw_data)
-```
-
-**After (automatic conversion):**
-
-```python
-result = cursor.execute("SELECT array_column FROM table").fetchone()
-array_data = result[0]  # [1, 2, 3] - automatically converted
-first_item = array_data[0]  # Direct access
-```
 
 ### JSON type support
 
