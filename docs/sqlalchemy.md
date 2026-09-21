@@ -1095,7 +1095,7 @@ This preserves strings such as `"a,b"`, `"001"`, and `"null"` as strings, includ
 #### Direct cursor and textual SQL results
 
 Direct `cursor.execute()` calls and untyped SQLAlchemy `text()` queries use the cursor's existing conversion behavior.
-The examples in this section use a standard REST `cursor` created as in [Basic usage](usage.md#basic-usage), with its default converter and no result type hints or custom converters.
+The examples in this section use a standard REST `cursor` created as in [Usage](usage.md), with its default converter and no result type hints or custom converters.
 Other cursor implementations have their own conversion behavior.
 
 The standard converter already converts simple ARRAY values to Python lists:
