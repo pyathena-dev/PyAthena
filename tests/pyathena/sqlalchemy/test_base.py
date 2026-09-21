@@ -237,6 +237,35 @@ class TestAthenaDialect:
 class TestSQLAlchemyAthena:
     @pytest.mark.parametrize(
         "engine",
+        [{"driver": driver} for driver in ("rest", "pandas", "arrow", "polars", "s3fs")],
+        indirect=True,
+    )
+    def test_native_array_results_across_cursors(self, engine):
+        engine, _ = engine
+        modes = (
+            (False, True) if engine.dialect.driver in ("pandas", "arrow", "polars") else (False,)
+        )
+        for unload in modes:
+            url = engine.url.update_query_dict({"unload": str(unload).lower()})
+            array_engine = sqlalchemy.create_engine(url)
+            try:
+                with array_engine.connect() as conn:
+                    result = conn.execute(
+                        select(
+                            sqlalchemy.literal(
+                                [["001", "a,b", "null", ""], [], None],
+                                AthenaArray(types.String, dimensions=2),
+                            ).label("nested"),
+                            sqlalchemy.literal([], AthenaArray(types.Integer)).label("empty"),
+                            sqlalchemy.literal(None, AthenaArray(types.Integer)).label("missing"),
+                        )
+                    ).one()
+                    assert tuple(result) == ([["001", "a,b", "null", ""], [], None], [], None)
+            finally:
+                array_engine.dispose()
+
+    @pytest.mark.parametrize(
+        "engine",
         [
             {"driver": "rest"},
             {"driver": "pandas"},
@@ -821,7 +850,8 @@ class TestSQLAlchemyAthena:
         assert isinstance(one_row_complex.c.col_timestamp.type, types.TIMESTAMP)
         assert isinstance(one_row_complex.c.col_date.type, types.DATE)
         assert isinstance(one_row_complex.c.col_binary.type, types.BINARY)
-        assert isinstance(one_row_complex.c.col_array.type, types.String)
+        assert isinstance(one_row_complex.c.col_array.type, AthenaArray)
+        assert isinstance(one_row_complex.c.col_array.type.item_type, types.INTEGER)
         assert isinstance(one_row_complex.c.col_map.type, types.String)
         # With struct support, col_struct should now be recognized as AthenaStruct
 
@@ -874,7 +904,7 @@ class TestSQLAlchemyAthena:
         assert isinstance(dialect._get_column_type("timestamp"), types.TIMESTAMP)
         assert isinstance(dialect._get_column_type("date"), types.DATE)
         assert isinstance(dialect._get_column_type("binary"), types.BINARY)
-        assert isinstance(dialect._get_column_type("array<integer>"), types.String)
+        assert isinstance(dialect._get_column_type("array<integer>"), AthenaArray)
         assert isinstance(dialect._get_column_type("map<int, int>"), types.String)
         # With struct support, struct types should be recognized as AthenaStruct
 
@@ -2721,9 +2751,9 @@ SELECT {ENV.schema}.{table_name}.id, {ENV.schema}.{table_name}.name \n\
 
         # Verify ARRAY types are correctly compiled
         assert "tags ARRAY<STRING>" in ddl_string
-        assert "scores ARRAY<INTEGER>" in ddl_string
+        assert "scores ARRAY<INT>" in ddl_string
         assert "nested_arrays ARRAY<ARRAY<STRING>>" in ddl_string
-        assert "struct_array ARRAY<ROW(name STRING, age INTEGER)>" in ddl_string
+        assert "struct_array ARRAY<STRUCT<name:STRING, age:INT>>" in ddl_string
 
     def test_create_table_with_map_types(self, engine):
         """Test DDL compilation for MAP types."""
@@ -2800,7 +2830,7 @@ SELECT {ENV.schema}.{table_name}.id, {ENV.schema}.{table_name}.name \n\
             "nested_struct ROW(personal ROW(first_name STRING, last_name STRING), "
             "preferences MAP<STRING, STRING>)" in ddl_string
         )
-        assert "struct_with_array ROW(tags ARRAY<STRING>, scores ARRAY<INTEGER>)" in ddl_string
+        assert "struct_with_array ROW(tags ARRAY<STRING>, scores ARRAY<INT>)" in ddl_string
 
     def test_create_table_with_complex_nested_types(self, engine):
         """Test DDL compilation for complex nested combinations of ARRAY, MAP, and STRUCT."""
@@ -2833,8 +2863,8 @@ SELECT {ENV.schema}.{table_name}.id, {ENV.schema}.{table_name}.name \n\
 
         # Verify complex nested type is correctly compiled
         expected_type = (
-            "data ARRAY<MAP<STRING, ROW(value STRING, metadata MAP<STRING, STRING>, "
-            "tags ARRAY<STRING>)>>"
+            "data ARRAY<MAP<STRING, STRUCT<value:STRING, metadata:MAP<STRING, STRING>, "
+            "tags:ARRAY<STRING>>>>"
         )
         assert expected_type in ddl_string
 

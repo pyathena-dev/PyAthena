@@ -7,14 +7,23 @@ import uuid
 from abc import ABCMeta, abstractmethod
 from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pyathena.error import ProgrammingError
 from pyathena.model import AthenaCompression, AthenaFileFormat
 
 _logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _ComplexParameter:
+    """Typed complex value supplied by the SQLAlchemy dialect."""
+
+    constructor: Literal["ARRAY", "MAP", "ROW", "JSON_PARSE"]
+    values: tuple[Any, ...]
 
 
 class Formatter(metaclass=ABCMeta):
@@ -288,7 +297,24 @@ def _format_decimal(formatter: Formatter, escaper: Callable[[str], str], val: An
     return f"DECIMAL {escaped}"
 
 
+def _format_complex(
+    formatter: Formatter, escaper: Callable[[str], str], val: _ComplexParameter
+) -> str:
+    items = []
+    for value in val.values:
+        if isinstance(value, (bytes, bytearray)):
+            items.append(f"X'{value.hex()}'")
+            continue
+        processor = formatter.get(value)
+        if processor is None:
+            raise TypeError(f"{type(value)} is not defined formatter.")
+        items.append(str(processor(formatter, escaper, value)))
+    opening, closing = ("[", "]") if val.constructor == "ARRAY" else ("(", ")")
+    return f"{val.constructor}{opening}{', '.join(items)}{closing}"
+
+
 _DEFAULT_FORMATTERS: dict[type[Any], Callable[[Formatter, Callable[[str], str], Any], Any]] = {
+    _ComplexParameter: _format_complex,
     type(None): _format_none,
     date: _format_date,
     datetime: _format_datetime,

@@ -1,25 +1,42 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import exc, types, util
+from sqlalchemy import exc, select, types, util
+from sqlalchemy.sql import operators, visitors
+from sqlalchemy.sql import util as sql_util
 from sqlalchemy.sql.compiler import (
     DDLCompiler,
     GenericTypeCompiler,
     IdentifierPreparer,
     SQLCompiler,
 )
-from sqlalchemy.sql.elements import BindParameter, Cast
+from sqlalchemy.sql.elements import (
+    BindParameter,
+    Cast,
+    TextClause,
+    UnaryExpression,
+    _label_reference,
+    _textual_label_reference,
+)
 from sqlalchemy.sql.schema import Column
+from sqlalchemy.sql.selectable import CompoundSelect
 
 from pyathena.model import (
     AthenaFileFormat,
     AthenaPartitionTransform,
     AthenaRowFormatSerde,
 )
+from pyathena.sqlalchemy.array import _ArrayTypeInspector
 from pyathena.sqlalchemy.preparer import AthenaDDLIdentifierPreparer
-from pyathena.sqlalchemy.types import AthenaArray, AthenaMap, AthenaStruct, get_double_type
+from pyathena.sqlalchemy.types import (
+    AthenaMap,
+    AthenaStruct,
+    get_double_type,
+)
+from pyathena.sqlalchemy.util import _split_type_arguments
 
 if TYPE_CHECKING:
     from sqlalchemy import (
@@ -93,7 +110,7 @@ class AthenaTypeCompiler(GenericTypeCompiler):
         return "TINYINT"
 
     def visit_INTEGER(self, type_: types.Integer, **kw: Any) -> str:
-        return "INTEGER"
+        return "INT" if kw.get("_athena_array_ddl") else "INTEGER"
 
     def visit_SMALLINT(self, type_: types.SmallInteger, **kw: Any) -> str:
         return "SMALLINT"
@@ -177,7 +194,16 @@ class AthenaTypeCompiler(GenericTypeCompiler):
                 field_specs = []
                 for field_name, field_type in type_.fields.items():
                     field_type_str = self.process(field_type, **kw)
-                    field_specs.append(f"{field_name} {field_type_str}")
+                    preparer = (
+                        AthenaDDLIdentifierPreparer(self.dialect)
+                        if kw.get("_athena_array_ddl")
+                        else self.dialect.identifier_preparer
+                    )
+                    name = preparer.quote(field_name)
+                    separator = ":" if kw.get("_athena_array_ddl") else " "
+                    field_specs.append(f"{name}{separator}{field_type_str}")
+                if kw.get("_athena_array_ddl"):
+                    return f"STRUCT<{', '.join(field_specs)}>"
                 return f"ROW({', '.join(field_specs)})"
             return "ROW()"
         return "ROW()"
@@ -196,8 +222,9 @@ class AthenaTypeCompiler(GenericTypeCompiler):
         return self.visit_map(type_, **kw)
 
     def visit_array(self, type_, **kw):
-        if isinstance(type_, AthenaArray):
-            item_type_str = self.process(type_.item_type, **kw)
+        if isinstance(type_, types.ARRAY):
+            kw["_athena_array_ddl"] = True
+            item_type_str = self.process(_ArrayTypeInspector.item_type(type_), **kw)
             return f"ARRAY<{item_type_str}>"
         return "ARRAY<STRING>"
 
@@ -225,8 +252,176 @@ class AthenaStatementCompiler(SQLCompiler):
         https://docs.aws.amazon.com/athena/latest/ug/ddl-sql-reference.html
     """
 
+    @util.memoized_property
+    def _array_type_inspector(self):
+        return _ArrayTypeInspector(self.dialect)
+
     def visit_char_length_func(self, fn: Function[Any], **kw: Any) -> str:
         return f"length{self.function_argspec(fn, **kw)}"
+
+    def translate_select_structure(self, select_stmt, **kw):
+        """Keep DISTINCT and ordering on native arrays before result serialization."""
+        if (
+            not self.stack
+            and not kw.get("asfrom")
+            and not select_stmt._annotations.get("_pyathena_array_result")
+            and (select_stmt._distinct or select_stmt._order_by_clauses)
+            and any(self._has_array_result(column) for column in select_stmt.selected_columns)
+        ):
+            return self._array_result_select(select_stmt)
+        return select_stmt
+
+    def visit_compound_select(self, cs, asfrom=False, compound_index=None, **kw):
+        if (
+            not self.stack
+            and not asfrom
+            and any(self._has_array_result(column) for column in cs.selected_columns)
+        ):
+            original_columns = list(cs.selected_columns)
+            rendered = self.process(self._array_result_select(cs), **kw)
+            self._result_columns = [
+                entry._replace(objects=(*entry.objects, original))
+                for entry, original in zip(self._result_columns, original_columns, strict=True)
+            ]
+            return rendered
+        return super().visit_compound_select(cs, asfrom=asfrom, compound_index=compound_index, **kw)
+
+    def _has_array_result(self, column):
+        type_ = column.type.dialect_impl(self.dialect)
+        while isinstance(type_, types.TypeDecorator):
+            type_ = self._array_type_inspector.decorator_impl(type_)
+        return isinstance(type_, types.ARRAY) and not _ArrayTypeInspector.has_unknown_element(type_)
+
+    def _array_result_select(self, statement):
+        if any(
+            isinstance(column, TextClause)
+            or (getattr(column, "is_literal", False) and column.name.rstrip().endswith("*"))
+            for column in statement._all_selected_columns
+        ):
+            raise exc.CompileError(
+                "Ordered, DISTINCT, and compound ARRAY results require explicit SELECT columns; "
+                "use SQLAlchemy column expressions or literal_column() instead of text(), "
+                "and select(table) instead of a wildcard"
+            )
+        if any(
+            getattr(column, "is_literal", False)
+            and not re.fullmatch(r'(?:[^\W\d]\w*|"(?:[^"]|"")+")', column.name)
+            for column in statement._all_selected_columns
+        ):
+            raise exc.CompileError(
+                "Literal SQL expressions in ordered, DISTINCT, and compound ARRAY results "
+                "require an explicit label; use literal_column(...).label(...)"
+            )
+        columns = list(statement.selected_columns)
+        inner = statement.order_by(None).limit(None).offset(None)
+        ordering = []
+        hidden: list[Any] = []
+        label_resolve = (
+            dict(statement.selected_columns.items())
+            if isinstance(statement, CompoundSelect)
+            else statement._compile_state_factory(statement, self)._label_resolve_dict[0]
+        )
+
+        def resolve_label(element: Any, **kw: Any) -> Any:
+            if isinstance(element, _textual_label_reference):
+                try:
+                    return label_resolve[element.element]
+                except KeyError as error:
+                    raise exc.CompileError(
+                        f"Can't resolve ARRAY ORDER BY label {element.element!r}"
+                    ) from error
+            if isinstance(element, _label_reference):
+                return element.element
+            return None
+
+        clauses: list[Any] = []
+        for clause in statement._order_by_clauses:
+            if isinstance(clause, TextClause):
+                try:
+                    clauses.extend(TextClause(part) for part in _split_type_arguments(clause.text))
+                except ValueError as error:
+                    raise exc.CompileError(
+                        "Textual ARRAY ordering must name selected columns; "
+                        "use SQLAlchemy column expressions for other ordering"
+                    ) from error
+            else:
+                clauses.append(clause)
+        for clause in clauses:
+            if isinstance(clause, TextClause):
+                match = re.fullmatch(
+                    r'\s*("(?:[^"]|"")+"|[\w]+)(?:\s+(ASC|DESC))?(?:\s+NULLS\s+(FIRST|LAST))?\s*',
+                    clause.text,
+                    re.IGNORECASE,
+                )
+                if match:
+                    name, direction, nulls = match.groups()
+                    quoted = name.startswith('"')
+                    name = name[1:-1].replace('""', '"') if quoted else name
+                    target = None
+                    if not quoted and name.isdigit() and 1 <= int(name) <= len(columns):
+                        target = columns[int(name) - 1]
+                    elif name in statement.selected_columns:
+                        target = statement.selected_columns[name]
+                    if target is not None:
+                        clause = target
+                        if direction:
+                            clause = clause.desc() if direction.upper() == "DESC" else clause.asc()
+                        if nulls:
+                            clause = (
+                                clause.nulls_first()
+                                if nulls.upper() == "FIRST"
+                                else clause.nulls_last()
+                            )
+                if isinstance(clause, TextClause):
+                    raise exc.CompileError(
+                        "Textual ARRAY ordering must name selected columns; "
+                        "use SQLAlchemy column expressions for other ordering"
+                    )
+            clause = visitors.replacement_traverse(clause, {}, resolve_label)
+            modifiers = []
+            while isinstance(clause, UnaryExpression) and clause.modifier in (
+                operators.asc_op,
+                operators.desc_op,
+                operators.nulls_first_op,
+                operators.nulls_last_op,
+            ):
+                modifiers.append(clause.modifier)
+                clause = clause.element
+            index = next((i for i, column in enumerate(columns) if column.compare(clause)), None)
+            if (
+                index is None
+                and hasattr(inner, "add_columns")
+                and not inner._distinct
+                and not isinstance(clause, TextClause)
+            ):
+                name = f"_pyathena_order_{len(hidden)}"
+                while name in statement.selected_columns:
+                    name += "_"
+                hidden.append(clause.label(name))
+                index = len(columns) + len(hidden) - 1
+            ordering.append((clause, index, modifiers))
+
+        if hidden:
+            inner = inner.add_columns(*hidden)
+        source = inner.subquery()
+        outer = select(*list(source.c)[: len(columns)])
+        adapter = sql_util.ClauseAdapter(source)
+        for clause, index, modifiers in ordering:
+            expression = source.c[index] if index is not None else adapter.traverse(clause)
+            if any(from_ is not source for from_ in expression._from_objects):
+                raise exc.CompileError(
+                    "DISTINCT and compound ARRAY ORDER BY expressions "
+                    "must refer to selected columns"
+                )
+            for modifier in reversed(modifiers):
+                expression = UnaryExpression(expression, modifier=modifier)
+            outer = outer.order_by(expression)
+        outer = outer.offset(statement._offset_clause)
+        if statement._fetch_clause is not None:
+            outer = outer.fetch(statement._fetch_clause, **statement._fetch_clause_options)
+        else:
+            outer = outer.limit(statement._limit_clause)
+        return outer._annotate({"_pyathena_array_result": True})
 
     def visit_filter_func(self, fn: Function[Any], **kw: Any) -> str:
         """Compile Athena filter() function with lambda expressions.
@@ -288,6 +483,11 @@ class AthenaStatementCompiler(SQLCompiler):
         return super().visit_truediv_binary(binary, operator, **kw)
 
     def visit_cast(self, cast: Cast[Any], **kwargs):
+        if isinstance(cast.type, (types.ARRAY, AthenaMap, AthenaStruct)):
+            type_clause = self._complex_dml_type(
+                cast.type, implicit_bind=cast._annotations.get("_pyathena_array_bind", False)
+            )
+            return f"CAST({self.process(cast.clause, **kwargs)} AS {type_clause})"
         if (isinstance(cast.type, types.VARCHAR) and cast.type.length is None) or isinstance(
             cast.type, types.String
         ):
@@ -306,6 +506,83 @@ class AthenaStatementCompiler(SQLCompiler):
         else:
             type_clause = cast.typeclause._compiler_dispatch(self, **kwargs)
         return f"CAST({cast.clause._compiler_dispatch(self, **kwargs)} AS {type_clause})"
+
+    def _complex_dml_type(self, type_, *, implicit_bind=False):
+        if isinstance(type_, types.TypeDecorator):
+            return self._complex_dml_type(
+                self._array_type_inspector.decorator_impl(type_), implicit_bind=implicit_bind
+            )
+        if isinstance(type_, types.NullType):
+            raise exc.CompileError("Bound ARRAY values require an explicit element type")
+        if isinstance(type_, types.ARRAY):
+            item = self._complex_dml_type(
+                _ArrayTypeInspector.item_type(type_), implicit_bind=implicit_bind
+            )
+            return f"ARRAY({item})"
+        if isinstance(type_, AthenaMap):
+            return (
+                f"MAP({self._complex_dml_type(type_.key_type, implicit_bind=implicit_bind)}, "
+                f"{self._complex_dml_type(type_.value_type, implicit_bind=implicit_bind)})"
+            )
+        if isinstance(type_, AthenaStruct):
+            fields = ", ".join(
+                f"{self.preparer.quote(name)} "
+                f"{self._complex_dml_type(field_type, implicit_bind=implicit_bind)}"
+                for name, field_type in type_.fields.items()
+            )
+            return f"ROW({fields})"
+        if isinstance(type_, types.String):
+            return "VARCHAR"
+        if isinstance(type_, (types.LargeBinary, types.BINARY, types.VARBINARY)):
+            return "VARBINARY"
+        if isinstance(type_, getattr(types, "Double", get_double_type())):
+            return "DOUBLE"
+        if isinstance(type_, types.Float):
+            return "REAL"
+        if implicit_bind and isinstance(type_, types.Numeric) and type_.precision is None:
+            raise exc.CompileError(
+                "ARRAY decimal binds require explicit Numeric precision; "
+                "specify precision and scale to avoid implicit rounding"
+            )
+        return self.dialect.type_compiler_instance.process(type_)
+
+    def visit_athena_array_json_projection(self, expression, **kw):
+        value = self.process(expression.element, **kw)
+        encoded = self._array_json(value, expression.array_type)
+        # An object envelope keeps SQL NULL and CSV null markers out of the transport.
+        return f"json_format(CAST(MAP(ARRAY['_pyathena_array'], ARRAY[{encoded}]) AS JSON))"
+
+    def _array_json(self, value, type_, depth=0):
+        if isinstance(type_, types.TypeDecorator):
+            return self._array_json(value, self._array_type_inspector.decorator_impl(type_), depth)
+        # Each recursive value becomes JSON, including map keys and typed scalar leaves.
+        variable = f"_pyathena_array_{depth}"
+        if isinstance(type_, types.ARRAY):
+            child = self._array_json(variable, _ArrayTypeInspector.item_type(type_), depth + 1)
+            return f"CAST(transform({value}, {variable} -> {child}) AS JSON)"
+        if isinstance(type_, AthenaMap):
+            key = self._array_json(f"{variable}[1]", type_.key_type, depth + 1)
+            item = self._array_json(f"{variable}[2]", type_.value_type, depth + 1)
+            return (
+                f"CAST(transform(map_entries({value}), {variable} -> ARRAY[{key}, {item}]) AS JSON)"
+            )
+        if isinstance(type_, AthenaStruct) and type_.fields:
+            names = ", ".join(
+                self.render_literal_value(name, types.String()) for name in type_.fields
+            )
+            fields = ", ".join(
+                self._array_json(f"({value}).{self.preparer.quote(name)}", field_type, depth + 1)
+                for name, field_type in type_.fields.items()
+            )
+            return (
+                f"IF({value} IS NULL, CAST(NULL AS JSON), "
+                f"CAST(MAP(ARRAY[{names}], ARRAY[{fields}]) AS JSON))"
+            )
+        if isinstance(type_, (types.JSON, types.NullType, AthenaStruct)):
+            return f"CAST({value} AS JSON)"
+        if isinstance(type_, (types.LargeBinary, types.BINARY, types.VARBINARY)):
+            return f"CAST(to_hex({value}) AS JSON)"
+        return f"CAST(CAST({value} AS VARCHAR) AS JSON)"
 
     def limit_clause(self, select: GenerativeSelect, **kw):
         text = []

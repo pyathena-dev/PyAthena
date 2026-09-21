@@ -31,13 +31,15 @@ from pyathena.sqlalchemy.compiler import (
 from pyathena.sqlalchemy.preparer import AthenaDMLIdentifierPreparer
 from pyathena.sqlalchemy.types import (
     TINYINT,
+    AthenaArray,
     AthenaBinary,
     AthenaDate,
+    AthenaMap,
     AthenaStruct,
     AthenaTimestamp,
     get_double_type,
 )
-from pyathena.sqlalchemy.util import _HashableDict
+from pyathena.sqlalchemy.util import _HashableDict, _split_type_arguments
 from pyathena.util import THROTTLING_ERROR_CODES, RetryConfig, _get_error_code, strtobool
 
 if TYPE_CHECKING:
@@ -77,7 +79,7 @@ ischema_names: dict[str, type[Any]] = {
     "timestamp": types.TIMESTAMP,
     "binary": types.BINARY,
     "varbinary": types.BINARY,
-    "array": types.String,
+    "array": AthenaArray,
     "map": types.String,
     "struct": AthenaStruct,
     "row": AthenaStruct,
@@ -183,6 +185,7 @@ class AthenaDialect(DefaultDialect):
         types.LargeBinary: AthenaBinary,
         types.BINARY: AthenaBinary,
         types.VARBINARY: AthenaBinary,
+        types.ARRAY: AthenaArray,
         types.DATE: AthenaDate,
         types.DATETIME: AthenaTimestamp,
         types.TIMESTAMP: AthenaTimestamp,
@@ -531,7 +534,8 @@ class AthenaDialect(DefaultDialect):
     def get_columns(self, connection: Connection, table_name: str, schema: str | None = None, **kw):
         return self._get_columns(connection, table_name, schema=schema, **kw)
 
-    def _get_column_type(self, type_: str):
+    def _get_column_type(self, type_: str, _nested: bool = False):
+        type_ = type_.strip()
         match = self._pattern_column_type.match(type_)
         if match:
             name = match.group(1).lower()
@@ -539,6 +543,40 @@ class AthenaDialect(DefaultDialect):
         else:
             name = type_.lower()
             length = None
+
+        if name == "array":
+            try:
+                return AthenaArray(self._get_column_type(length, _nested=True) if length else None)
+            except (TypeError, ValueError):
+                util.warn(f"Did not recognize type '{type_}'")
+                return types.NullType()
+        if _nested and name == "map" and length:
+            key, value = _split_type_arguments(length)
+            return AthenaMap(
+                self._get_column_type(key, _nested=True),
+                self._get_column_type(value, _nested=True),
+            )
+        if _nested and name in ("row", "struct") and length:
+            fields = []
+            for field in _split_type_arguments(length):
+                pattern = (
+                    r'\s*("(?:[^"]|"")*"|`(?:[^`]|``)*`|[^:]+)\s*:\s*(.+)'
+                    if name == "struct"
+                    else r'\s*("(?:[^"]|"")*"|`(?:[^`]|``)*`|[^\s:]+)(?:\s*:\s*|\s+)(.+)'
+                )
+                match = re.fullmatch(
+                    pattern,
+                    field,
+                )
+                if match is None:
+                    raise ValueError(f"Invalid ROW field: {field!r}")
+                field_name, field_type = match.groups()
+                field_name = field_name.strip()
+                if field_name[0] in ('"', "`"):
+                    quote = field_name[0]
+                    field_name = field_name[1:-1].replace(quote * 2, quote)
+                fields.append((field_name, self._get_column_type(field_type, _nested=True)))
+            return AthenaStruct(*fields)
 
         if name in self.ischema_names:
             col_type = self.ischema_names[name]
@@ -549,8 +587,7 @@ class AthenaDialect(DefaultDialect):
         args = []
         if length:
             if col_type is types.DECIMAL:
-                precision, scale = length.split(",")
-                args = [int(precision), int(scale)]
+                args = [int(arg) for arg in length.split(",")]
             elif col_type is types.CHAR or col_type is types.VARCHAR:
                 args = [int(length)]
 
