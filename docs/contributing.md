@@ -1,5 +1,9 @@
 <!--
-SPDX-FileCopyrightText: 2026 The PyAthena authors
+Copyright 2026 The PyAthena authors
+
+Licensed under the MIT License.
+See LICENSE or https://opensource.org/licenses/MIT.
+
 SPDX-License-Identifier: MIT
 -->
 
@@ -16,9 +20,12 @@ Before implementing a nontrivial change, open an issue or join an existing one a
 A typo or similarly trivial correction can go directly to a pull request.
 Changes to behavior, public APIs, resource ownership, or existing design decisions need discussion first.
 
+Use the [bug report](https://github.com/pyathena-dev/PyAthena/issues/new?template=bug_report.md) or [feature and change proposal](https://github.com/pyathena-dev/PyAthena/issues/new?template=feature_request.md) template to start the discussion.
+Reporting a problem or requesting a feature does not require implementing it or running the test suite.
+
 For a bug, include a minimal reproduction, the PyAthena and Python versions, and the observed and expected behavior.
 For a feature, explain the use case and why the existing API does not meet it.
-Describe compatibility implications and the proposed validation, including any AWS resources needed.
+If you intend to implement a change, describe compatibility implications and the proposed validation, including any AWS resources needed.
 If you cannot run that validation, raise the limitation before starting implementation.
 An issue or an agreed approach does not guarantee that a pull request will be accepted.
 
@@ -67,6 +74,7 @@ Checks that need no AWS access may still run, but their success does not establi
 ## Open a pull request
 
 Open a draft pull request with the repository's template completed.
+Keep WHAT and WHY focused on the change and its agreed issue, and put executed validation in TEST.
 Reference the issue and agreed approach, keep the change focused, and update documentation when behavior or public APIs change.
 Write commit messages, pull-request text, and code comments in English.
 
@@ -101,17 +109,22 @@ Use the year the file is first published and the collective attribution `The PyA
 For a new Python file first published in 2026, use:
 
 ```python
-# SPDX-FileCopyrightText: 2026 The PyAthena authors
+# Copyright 2026 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
 # SPDX-License-Identifier: MIT
 ```
 
-Place the header before imports and module documentation, after any required shebang or encoding declaration.
+Place the header before imports and module documentation, after any required shebang, encoding declaration, or front matter.
 Use the equivalent comment syntax for other formats, such as an HTML comment in Markdown.
 For files that cannot contain comments, and for generated build artifacts or third-party assets, agree on an appropriate attribution location in the issue rather than inserting an invalid header.
 
 `The PyAthena authors` is a collective project attribution, not a requirement to assign copyright to the maintainer.
 Contributors may retain or add their own applicable copyright notices alongside it.
 Do not replace another copyright holder's notice with the collective name.
+The short notice and license reference follow the approach in [Google's MIT header example](https://opensource.google/documentation/reference/releasing/licenses#mit-header), with an SPDX identifier added.
 These headers identify the license; distributions must still include the required license text and notices.
 The [REUSE FAQ](https://reuse.software/faq/) explains collective attribution and preservation of existing notices, and [SPDX](https://spdx.org/licenses/MIT.html) provides the MIT identifier and license text.
 

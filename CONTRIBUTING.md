@@ -1,12 +1,16 @@
 <!--
-SPDX-FileCopyrightText: 2026 The PyAthena authors
+Copyright 2026 The PyAthena authors
+
+Licensed under the MIT License.
+See LICENSE or https://opensource.org/licenses/MIT.
+
 SPDX-License-Identifier: MIT
 -->
 
 # Contributing
 
 Contributions, including AI-assisted contributions, are welcome.
-Except for trivial fixes such as typos, start with an issue and agree on the problem and approach before implementing a change.
+Except for trivial fixes such as typos, [start with an issue](https://github.com/pyathena-dev/PyAthena/issues/new/choose) and agree on the problem and approach before implementing a change.
 
 Contributors are responsible for understanding, testing, and maintaining their proposed changes through review.
 Changes to AWS behavior require relevant integration tests in the contributor's own AWS environment; external-fork pull requests must not be run against the project's AWS environment.
