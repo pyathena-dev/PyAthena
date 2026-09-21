@@ -100,7 +100,8 @@ Maintainers may defer or close changes that lack prior discussion, sufficient va
 ## Licensing and attribution
 
 PyAthena is distributed under the [MIT license](https://github.com/pyathena-dev/PyAthena/blob/master/LICENSE).
-Submit original contributions under that license and identify any third-party material in the pull request.
+By submitting new original code or files, you agree to license those contributions under the MIT license and to use the collective copyright attribution `The PyAthena authors`.
+This attribution does not transfer copyright to the maintainer.
 
 ### New original files
 
@@ -123,28 +124,12 @@ For files with YAML front matter, the header may be written as YAML comments ins
 Use this placement for GitHub issue templates so the notice belongs to the template metadata rather than the issue body.
 For files that cannot contain comments, and for generated build artifacts or third-party assets, agree on an appropriate attribution location in the issue rather than inserting an invalid header.
 
-`The PyAthena authors` is a collective project attribution, not a requirement to assign copyright to the maintainer.
-Contributors may retain or add their own applicable copyright notices alongside it.
-Do not replace another copyright holder's notice with the collective name.
-The short notice and license reference follow the approach in [Google's MIT header example](https://opensource.google/documentation/reference/releasing/licenses#mit-header), with an SPDX identifier added.
-These headers identify the license; distributions must still include the required license text and notices.
-The [REUSE FAQ](https://reuse.software/faq/) explains collective attribution and preservation of existing notices, and [SPDX](https://spdx.org/licenses/MIT.html) provides the MIT identifier and license text.
+The short notice and license reference follow [Google's MIT header example](https://opensource.google/documentation/reference/releasing/licenses#mit-header), with an [SPDX identifier](https://spdx.org/licenses/MIT.html) added.
 
-### Existing and adapted code
+### Third-party material and existing code
 
-Preserve existing copyright and license notices, including the notice in the root `LICENSE`.
-The new-file rule does not require unrelated edits to add headers throughout the existing codebase.
-Audit provenance before adding or changing attribution in an existing file; mixed authorship and code adapted from other projects need separate consideration.
-Determine and document any required consent from the affected rights holders before changing existing attribution or licensing.
-Do not treat a maintainer's consent as consent from past contributors or upstream rights holders.
-Preserving existing notices and identifying applicable licenses does not itself transfer copyright or change license terms.
-Header automation, changes to the root `LICENSE` or PyPI license metadata, and a repository-wide provenance audit are separate maintainer work.
-This guide does not change existing notices or claim a completed provenance audit.
+Identify any third-party material included in a new contribution and preserve its applicable copyright and license notices.
+Do not replace upstream notices with the original-file template above.
 
-The [README](https://github.com/pyathena-dev/PyAthena/blob/master/README.md#license) acknowledges that implementations in PyAthena are based on PyHive.
-That acknowledgment is not a file-by-file provenance record.
-Before importing or adapting code, identify the source project, source revision, affected files, license, and what was reused.
-Record that information in the pull request and durably alongside the affected code or in accompanying attribution documentation, and preserve the upstream notices and license text required for redistribution.
-Do not label adapted code as wholly original PyAthena work or replace its upstream license header with the original-file template above.
-For existing PyHive-related code, establish its origin from history and source comparison before changing notices.
-The same obligations apply to AI-assisted work; disclose known sources and investigate suspected copying instead of assuming generated code is original.
+This policy does not require adding headers to existing files or changing existing notices, including the root `LICENSE`.
+The treatment of existing code, including code based on PyHive, will be considered separately.
