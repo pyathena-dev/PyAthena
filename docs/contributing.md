@@ -117,9 +117,10 @@ For a new Python file first published in 2026, use:
 # SPDX-License-Identifier: MIT
 ```
 
-For Python files, place the header before imports and module documentation, after any required shebang or encoding declaration.
+Place the header near the start of the file, before imports or module documentation, while keeping required shebangs, encoding declarations, and front matter in their required positions.
 Use the equivalent comment syntax for other formats, such as an HTML comment in Markdown.
-For GitHub issue templates, put the header in YAML comments inside the front matter so the notice belongs to the template metadata rather than the issue body.
+For files with YAML front matter, the header may be written as YAML comments inside that front matter.
+Use this placement for GitHub issue templates so the notice belongs to the template metadata rather than the issue body.
 For files that cannot contain comments, and for generated build artifacts or third-party assets, agree on an appropriate attribution location in the issue rather than inserting an invalid header.
 
 `The PyAthena authors` is a collective project attribution, not a requirement to assign copyright to the maintainer.
@@ -134,6 +135,9 @@ The [REUSE FAQ](https://reuse.software/faq/) explains collective attribution and
 Preserve existing copyright and license notices, including the notice in the root `LICENSE`.
 The new-file rule does not require unrelated edits to add headers throughout the existing codebase.
 Audit provenance before adding or changing attribution in an existing file; mixed authorship and code adapted from other projects need separate consideration.
+Determine and document any required consent from the affected rights holders before changing existing attribution or licensing.
+Do not treat a maintainer's consent as consent from past contributors or upstream rights holders.
+Preserving existing notices and identifying applicable licenses does not itself transfer copyright or change license terms.
 Header automation and a repository-wide provenance audit are separate work, not claims made by this guide.
 
 The [README](https://github.com/pyathena-dev/PyAthena/blob/master/README.md#license) acknowledges that implementations in PyAthena are based on PyHive.
@@ -143,3 +147,19 @@ Record that information in the pull request and durably alongside the affected c
 Do not label adapted code as wholly original PyAthena work or replace its upstream license header with the original-file template above.
 For existing PyHive-related code, establish its origin from history and source comparison before changing notices.
 The same obligations apply to AI-assisted work; disclose known sources and investigate suspected copying instead of assuming generated code is original.
+
+### Distribution metadata and license files
+
+Keep the repository's `LICENSE`, file notices, and distribution metadata consistent.
+Source-file headers do not set PyPI's license metadata, and package author or maintainer fields are not a record of copyright ownership.
+Changes to packaging, licensing, or attribution require checking the built source distribution and wheel with `uv build` before publication.
+Inspect the source distribution's `PKG-INFO`, the wheel's `METADATA`, and the bundled license files; verify that the required license text and notices are present in both archives.
+
+When adding third-party license or attribution files, update the build configuration as needed and check the resulting archives.
+The source distribution has an explicit inclusion list in `pyproject.toml`; adding a notice to the repository alone does not establish that it ships in a release.
+The [PyPA licensing guidance](https://packaging.python.org/en/latest/guides/writing-pyproject-toml/#license-and-license-files) describes SPDX license expressions and `license-files` metadata.
+Any metadata migration must reflect the contents of each distribution, including applicable third-party licenses established by the provenance review.
+Do not infer that every shipped file is MIT-licensed from the project-level license alone.
+
+Repository edits do not alter distribution files already published to PyPI.
+Existing-notice changes and packaging metadata migration are follow-up work; this guide does not change the root `LICENSE` or claim a completed provenance audit.
