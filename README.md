@@ -69,9 +69,14 @@ async def main():
 asyncio.run(main())
 ```
 
+## Contributing
+
+Contributions, including AI-assisted contributions, are welcome.
+Please read [CONTRIBUTING.md](https://github.com/pyathena-dev/PyAthena/blob/master/CONTRIBUTING.md) before starting a change.
+
 ## License
 
-[MIT license](LICENSE)
+[MIT license](https://github.com/pyathena-dev/PyAthena/blob/master/LICENSE)
 
 Many of the implementations in this library are based on [PyHive](https://github.com/dropbox/PyHive), thanks for [PyHive](https://github.com/dropbox/PyHive).
 

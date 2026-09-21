@@ -1,5 +1,8 @@
 ## WHAT
-<!-- (Write the change being made with this pull request) -->
+<!-- Summarize the change. See CONTRIBUTING.md for contribution requirements. -->
 
 ## WHY
-<!-- (Write the motivation why you submit this pull request) -->
+<!-- Link the agreed issue, or explain a trivial fix. -->
+
+## TEST
+<!-- Record the tested commit, commands, results, and any unrun coverage. -->
