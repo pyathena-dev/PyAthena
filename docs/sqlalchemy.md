@@ -1084,18 +1084,18 @@ CREATE TABLE orders (
 )
 ```
 
-#### Querying ARRAY data with typed SQLAlchemy expressions
+#### Querying ARRAY data
 
 Use `select()` with `ARRAY` or `AthenaArray` columns whose element types are known, either declared explicitly or reflected from Athena, to receive typed Python collections.
 For example, the `events` table above returns `numbers` as a list of integers and `labels` as nested lists of strings.
-SQLAlchemy serializes these result columns as JSON in Athena and converts the returned values according to the column types.
+PyAthena projects these result columns as JSON in the generated SQL and converts the returned values according to the column types.
 You do not need to call `json.loads()` on these results.
 This preserves strings such as `"a,b"`, `"001"`, and `"null"` as strings, including within nested arrays.
 
 #### Direct cursor and textual SQL results
 
 Direct `cursor.execute()` calls and untyped SQLAlchemy `text()` queries use the cursor's existing conversion behavior.
-The examples in this section use the standard REST cursor with its default converter and no result type hints or custom converters.
+The examples in this section use a standard REST `cursor` created as in [Basic usage](usage.md#basic-usage), with its default converter and no result type hints or custom converters.
 Other cursor implementations have their own conversion behavior.
 
 The standard converter already converts simple ARRAY values to Python lists:
@@ -1114,19 +1114,22 @@ The following examples show its behavior for strings received as ARRAY values:
 | ARRAY text | Python result |
 |---|---|
 | `[1, 2, 3]` | `[1, 2, 3]` (`list`) |
+| `[one, two]` | `["one", "two"]` (`list`) |
 | `[[1, 2], [3, 4]]` | `[[1, 2], [3, 4]]` (nested `list`) |
 | `[[one, two], [three]]` | `"[[one, two], [three]]"` (`str`) |
 | `[a, b=1]` | `"[a, b=1]"` (`str`) |
 
 The numeric examples are valid JSON.
 The unquoted nested string array is not valid JSON, and the native parser does not support nested arrays.
-The last example contains an equals sign that the native parser rejects.
+In the last example, `b=1` is outside a `{...}` ROW element, so the native parser rejects it.
 For these unsupported representations, the converter returns the original string rather than dropping unparsed elements.
 A string result therefore does not necessarily mean the stored ARRAY is invalid.
 Calling `json.loads()` on that native text will not resolve these cases because it is not JSON.
 
-Use typed SQLAlchemy SELECT expressions when element types and nested string values must be preserved.
-When writing SQL directly, explicitly request JSON as shown below.
+A list result alone does not guarantee that the original elements were preserved.
+For example, the native text `[a,b, null]` becomes `["a", "b", None]`, which would be incorrect for an original array of two strings, `["a,b", "null"]`.
+The native representation does not distinguish commas within strings from element separators, or the string `"null"` from a NULL element.
+Use typed SQLAlchemy SELECT expressions for string elements or nested arrays, or explicitly request JSON when writing SQL directly, as shown below.
 
 #### Requesting JSON in direct SQL
 
@@ -1166,7 +1169,7 @@ AthenaArray(AthenaArray(Integer))  # ARRAY<ARRAY<INT>>
 #### Best practices
 
 1. Declare the ARRAY element type and use typed SQLAlchemy SELECT expressions to preserve nested values and scalar types.
-2. For direct cursor or untyped `text()` queries, request `CAST(... AS JSON)` when the native text parser cannot represent the result reliably.
+2. For direct cursor or untyped `text()` queries, request `CAST(... AS JSON)` to preserve string elements and nested arrays.
 3. Handle SQL NULL and empty arrays before accessing an element:
 
    ```python
