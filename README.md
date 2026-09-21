@@ -76,7 +76,7 @@ Please read [CONTRIBUTING.md](https://github.com/pyathena-dev/PyAthena/blob/mast
 
 ## License
 
-[MIT license](LICENSE)
+[MIT license](https://github.com/pyathena-dev/PyAthena/blob/master/LICENSE)
 
 Many of the implementations in this library are based on [PyHive](https://github.com/dropbox/PyHive), thanks for [PyHive](https://github.com/dropbox/PyHive).
 
