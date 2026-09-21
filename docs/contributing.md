@@ -152,13 +152,13 @@ The same obligations apply to AI-assisted work; disclose known sources and inves
 
 Keep the repository's `LICENSE`, file notices, and distribution metadata consistent.
 Source-file headers do not set PyPI's license metadata, and package author or maintainer fields are not a record of copyright ownership.
-Changes to packaging, licensing, or attribution require checking the built source distribution and wheel with `uv build` before publication.
+For packaging changes or changes to the licensing or attribution of shipped files, run `uv build` and record the inspected archive contents and metadata in the pull request's validation record.
 Inspect the source distribution's `PKG-INFO`, the wheel's `METADATA`, and the bundled license files; verify that the required license text and notices are present in both archives.
 
 When adding third-party license or attribution files, update the build configuration as needed and check the resulting archives.
 The source distribution has an explicit inclusion list in `pyproject.toml`; adding a notice to the repository alone does not establish that it ships in a release.
 The [PyPA licensing guidance](https://packaging.python.org/en/latest/guides/writing-pyproject-toml/#license-and-license-files) describes SPDX license expressions and `license-files` metadata.
-Any metadata migration must reflect the contents of each distribution, including applicable third-party licenses established by the provenance review.
+Any metadata migration must reflect the contents of each distribution, including applicable third-party licenses established by a provenance review.
 Do not infer that every shipped file is MIT-licensed from the project-level license alone.
 
 Repository edits do not alter distribution files already published to PyPI.
