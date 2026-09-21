@@ -1,16 +1,13 @@
 ---
+# Copyright 2026 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
+# SPDX-License-Identifier: MIT
 name: Feature or change proposal
 about: Discuss a use case and approach before implementation.
 ---
-
-<!--
-Copyright 2026 The PyAthena authors
-
-Licensed under the MIT License.
-See LICENSE or https://opensource.org/licenses/MIT.
-
-SPDX-License-Identifier: MIT
--->
 
 ## Use case
 

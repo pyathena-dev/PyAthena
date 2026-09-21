@@ -117,8 +117,9 @@ For a new Python file first published in 2026, use:
 # SPDX-License-Identifier: MIT
 ```
 
-Place the header before imports and module documentation, after any required shebang, encoding declaration, or front matter.
+For Python files, place the header before imports and module documentation, after any required shebang or encoding declaration.
 Use the equivalent comment syntax for other formats, such as an HTML comment in Markdown.
+For GitHub issue templates, put the header in YAML comments inside the front matter so the notice belongs to the template metadata rather than the issue body.
 For files that cannot contain comments, and for generated build artifacts or third-party assets, agree on an appropriate attribution location in the issue rather than inserting an invalid header.
 
 `The PyAthena authors` is a collective project attribution, not a requirement to assign copyright to the maintainer.

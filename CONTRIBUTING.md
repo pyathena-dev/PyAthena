@@ -16,4 +16,4 @@ Contributors are responsible for understanding, testing, and maintaining their p
 Changes to AWS behavior require relevant integration tests in the contributor's own AWS environment; external-fork pull requests must not be run against the project's AWS environment.
 If you cannot perform the required validation, discuss that in the issue before starting implementation.
 
-Read the [contribution guide](docs/contributing.md) for the review and validation requirements, and the [testing guide](docs/testing.md) for environment setup and commands.
+Read the [contribution guide](docs/contributing.md) for the review, validation, licensing, and new-file header requirements, and the [testing guide](docs/testing.md) for environment setup and commands.
