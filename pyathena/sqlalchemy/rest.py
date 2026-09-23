@@ -1,3 +1,10 @@
+# Copyright 2023 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
+# SPDX-License-Identifier: MIT
+
 from typing import TYPE_CHECKING
 
 from pyathena.sqlalchemy.base import AthenaDialect

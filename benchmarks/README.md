@@ -1,3 +1,12 @@
+<!--
+Copyright 2026 The PyAthena authors
+
+Licensed under the MIT License.
+See LICENSE or https://opensource.org/licenses/MIT.
+
+SPDX-License-Identifier: MIT
+-->
+
 # Cursor benchmarks
 
 This project measures result retrieval, memory use, and concurrent query behavior for PyAthena and AWS SDK for pandas (AWS Wrangler).

@@ -1,3 +1,10 @@
+# Copyright 2026 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
+# SPDX-License-Identifier: MIT
+
 """Validated configuration and SQL shared by every adapter."""
 
 from __future__ import annotations

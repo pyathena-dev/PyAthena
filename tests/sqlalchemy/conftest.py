@@ -1,3 +1,10 @@
+# Copyright 2022 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
+# SPDX-License-Identifier: MIT
+
 import contextlib
 from urllib.parse import quote_plus
 

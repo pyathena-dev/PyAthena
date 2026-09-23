@@ -1,3 +1,10 @@
+# Copyright 2024 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
+# SPDX-License-Identifier: MIT
+
 RUFF_VERSION := "0.14.14"
 TOX_VERSION := "4.34.1"
 

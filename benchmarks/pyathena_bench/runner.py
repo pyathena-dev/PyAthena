@@ -1,3 +1,10 @@
+# Copyright 2026 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
+# SPDX-License-Identifier: MIT
+
 """Fresh-process trials, external resource sampling, and incremental evidence."""
 
 from __future__ import annotations

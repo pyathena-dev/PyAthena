@@ -1,3 +1,10 @@
+# Copyright 2017 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
+# SPDX-License-Identifier: MIT
+
 """Adapters measure public cursor paths without changing library behavior."""
 
 from __future__ import annotations

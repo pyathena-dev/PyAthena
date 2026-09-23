@@ -1,3 +1,10 @@
+# Copyright 2017 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
+# SPDX-License-Identifier: MIT
+
 import textwrap
 from datetime import date, datetime
 from decimal import Decimal

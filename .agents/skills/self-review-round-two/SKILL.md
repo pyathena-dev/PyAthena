@@ -1,4 +1,10 @@
 ---
+# Copyright 2026 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
+# SPDX-License-Identifier: MIT
 name: self-review-round-two
 description: Run the second PyAthena self-review after round one, auditing factual claims, caller compatibility, AWS operational effects, and evidence from a user's perspective before Ready.
 ---

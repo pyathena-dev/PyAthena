@@ -1,3 +1,10 @@
+# Copyright 2020 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
+# SPDX-License-Identifier: MIT
+
 """Remove expired test database metadata from the caller's default Glue catalog."""
 
 # Usage (from the repository root, with Boto3 credentials and region configured):

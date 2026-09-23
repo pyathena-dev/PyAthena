@@ -1,3 +1,10 @@
+# Copyright 2022 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
+# SPDX-License-Identifier: MIT
+
 import pyarrow as pa
 
 from pyathena.arrow.util import to_column_info

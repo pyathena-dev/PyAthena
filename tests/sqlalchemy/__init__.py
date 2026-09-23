@@ -1,3 +1,10 @@
+# Copyright 2023 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
+# SPDX-License-Identifier: MIT
+
 from sqlalchemy.dialects import registry
 
 registry.register("awsathena", "pyathena.sqlalchemy.base", "AthenaDialect")

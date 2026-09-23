@@ -1,3 +1,12 @@
+<!--
+Copyright 2025 The PyAthena authors
+
+Licensed under the MIT License.
+See LICENSE or https://opensource.org/licenses/MIT.
+
+SPDX-License-Identifier: MIT
+-->
+
 # PyAthena Development Guide for AI Assistants
 
 ## Project Overview

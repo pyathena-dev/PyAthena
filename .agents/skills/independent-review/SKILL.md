@@ -1,4 +1,10 @@
 ---
+# Copyright 2026 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
+# SPDX-License-Identifier: MIT
 name: independent-review
 description: Obtain and collect an independent read-only review of a PyAthena PR after both self-review rounds, with a frozen diff and recorded findings before Ready.
 ---

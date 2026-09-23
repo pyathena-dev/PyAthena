@@ -132,4 +132,5 @@ Identify any third-party material included in a new contribution and preserve it
 Do not replace upstream notices with the original-file template above.
 
 This policy does not require adding headers to existing files or changing existing notices, including the root `LICENSE`.
-The treatment of existing code, including code based on PyHive, will be considered separately.
+Existing files written solely by the maintainer carry the header above, dated with the year of their earliest surviving content; other existing files keep their current notices.
+[NOTICE](https://github.com/pyathena-dev/PyAthena/blob/master/NOTICE) acknowledges PyHive's influence on PyAthena.

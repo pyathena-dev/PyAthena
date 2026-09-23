@@ -1,3 +1,10 @@
+# Copyright 2024 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
+# SPDX-License-Identifier: MIT
+
 import textwrap
 import time
 from random import randint
