@@ -494,11 +494,10 @@ class TestAthenaDialect:
         ]
 
     @staticmethod
-    def _throttled_metadata_connection(catalog_name, opened):
-        error = ClientError(
-            {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
-            "GetTableMetadata",
-        )
+    def _throttled_metadata_connection(
+        catalog_name, opened, code="ThrottlingException", message="Rate exceeded"
+    ):
+        error = ClientError({"Error": {"Code": code, "Message": message}}, "GetTableMetadata")
 
         def fail(*args, **kwargs):
             raise OperationalError(*error.args) from error
@@ -563,6 +562,31 @@ class TestAthenaDialect:
         assert "ThrottlingException" not in opened[0].exceptions
         # Only a failed Glue request returns to Athena, with the connection's policy.
         assert opened[1:] == ([None] if glue_error == "AccessDeniedException" else [])
+
+    def test_wrapped_glue_throttling_reads_glue(self, monkeypatch):
+        # Athena reports Glue's own throttling inside a MetadataException. The
+        # first attempt no longer retries it, so it must reach Glue as well.
+        opened = []
+        connection, _ = self._throttled_metadata_connection(
+            "AwsDataCatalog",
+            opened,
+            code="MetadataException",
+            message=(
+                "Rate exceeded (Service: AmazonDataCatalog; Status Code: 400; "
+                "Error Code: ThrottlingException; Request ID: example; Proxy: null)"
+            ),
+        )
+        table = {"Name": "events", "StorageDescriptor": {}}
+        monkeypatch.setattr(
+            AthenaDialect,
+            "_glue_client",
+            staticmethod(
+                lambda connection: SimpleNamespace(get_table=lambda **kwargs: {"Table": table})
+            ),
+        )
+
+        assert AthenaDialect()._get_table(connection, "events").name == "events"
+        assert len(opened) == 1
 
     def test_throttled_lookup_outside_glue_keeps_retries(self, monkeypatch):
         opened = []

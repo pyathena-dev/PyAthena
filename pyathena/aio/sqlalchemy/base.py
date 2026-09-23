@@ -249,7 +249,8 @@ class AthenaAioDialect(AthenaDialect):
         return connection
 
     def _glue_call(self, raw_connection: PoolProxiedConnection, request: Callable[[Any], _T]) -> _T:
-        # The Glue client is synchronous, so building it and sending the request
-        # run in a worker thread, as the adapted cursor's metadata calls do.
+        # The request runs in a worker thread, as the adapted cursor's metadata
+        # calls do. The client is built here: a boto3 session is not thread-safe.
         connection = raw_connection.driver_connection.driver_connection  # type: ignore[union-attr]
-        return await_only(asyncio.to_thread(lambda: request(self._glue_client(connection))))
+        client = self._glue_client(connection)
+        return await_only(asyncio.to_thread(request, client))

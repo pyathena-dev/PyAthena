@@ -129,7 +129,7 @@ The fallback calls these Glue APIs with the connection's credentials:
 | Table and view names | `GetTables` | `glue:GetTables` |
 | Schema names | `GetDatabases` | `glue:GetDatabases` |
 
-Without these permissions, reflection behaves as it does without the Glue fallback.
+Without these permissions, the Glue request fails, a second warning is logged, and the Athena request runs again with the configured retries.
 
 Athena applies its metadata API rate limits per account, and they are not listed in Service Quotas.
 PyAthena's API retries use exponential backoff with uniform jitter; `RetryConfig` documents the default attempt count and waits.

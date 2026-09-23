@@ -336,7 +336,9 @@ class AthenaDialect(DefaultDialect):
                 with driver_connection.cursor(retry_config=retry_config) as cursor:  # type: ignore[union-attr]
                     return athena_request(cursor)
             except pyathena.error.OperationalError as e:
-                code = _get_error_code(e.__cause__ or e)
+                # Athena wraps Glue's own throttling in a MetadataException, and
+                # the policy above no longer retries that either.
+                code = _get_error_code(e.__cause__ or e, unwrap_metadata=True)
                 if code not in THROTTLING_ERROR_CODES:
                     raise
             _logger.warning(f"{description} failed with {code}; reading it from Glue.")
