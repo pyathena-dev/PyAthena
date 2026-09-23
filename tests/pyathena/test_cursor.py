@@ -1570,18 +1570,13 @@ class TestCursor:
             api_version="2017-05-18",
         )
 
-        # Built once, even when cursors in several threads need it together.
-        # Creation waits for every thread to arrive there too: without the
-        # lock all eight do and the wait ends; with it only one does, and its
-        # wait times out before it builds the only client.
+        # Built once, under the connection's lock, even when cursors in several
+        # threads need it together.
         created = []
         session_client = conn.session.client
-        inside_creation = threading.Barrier(8)
 
         def contended_client(*args, **kwargs):
-            created.append(args)
-            with contextlib.suppress(threading.BrokenBarrierError):
-                inside_creation.wait(timeout=1)
+            created.append((args, conn._glue_client_lock.locked()))
             return session_client(*args, **kwargs)
 
         conn._session.client = contended_client
@@ -1594,7 +1589,7 @@ class TestCursor:
         with ThreadPoolExecutor(max_workers=8) as executor:
             clients = list(executor.map(get_glue_client, range(8)))
 
-        assert created == [("glue",)]
+        assert created == [(("glue",), True)]
         assert all(client is clients[0] for client in clients)
         assert clients[0].meta.service_model.service_name == "glue"
         assert clients[0].meta.endpoint_url == f"https://glue.{ENV.region_name}.amazonaws.com"
