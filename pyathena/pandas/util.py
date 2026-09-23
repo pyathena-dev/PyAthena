@@ -261,15 +261,21 @@ def to_sql(
     ).Bucket(bucket_name)
     cursor = conn.cursor()
 
+    # Athena stores identifiers in lowercase and information_schema reports them
+    # that way, so compare lowercase literals. The answer must reflect the
+    # catalog now, so query result reuse is off.
+    schema_literal = schema.lower().replace("'", "''")
+    name_literal = name.lower().replace("'", "''")
     table = cursor.execute(
         textwrap.dedent(
             f"""
             SELECT table_name
             FROM information_schema.tables
-            WHERE table_schema = '{schema}'
-            AND table_name = '{name}'
+            WHERE table_schema = '{schema_literal}'
+            AND table_name = '{name_literal}'
             """
-        )
+        ),
+        result_reuse_enable=False,
     ).fetchall()
     if if_exists == "fail":
         if table:

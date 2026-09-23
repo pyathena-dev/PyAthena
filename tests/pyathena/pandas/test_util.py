@@ -438,6 +438,29 @@ def test_to_sql(cursor):
     ]
 
 
+@pytest.mark.parametrize(
+    ("cursor", "prefix"),
+    [
+        # Athena stores and reports names in lowercase, so the existence check
+        # has to match a name given with uppercase letters.
+        ({}, "To_Sql_Case_"),
+        # A reused result from before the table existed would answer "absent".
+        ({"result_reuse_enable": True}, "to_sql_reuse_"),
+    ],
+    indirect=["cursor"],
+)
+def test_to_sql_finds_an_existing_table(cursor, prefix):
+    df = pd.DataFrame({"col_int": np.int32([1])})
+    table_name = f"{prefix}{uuid.uuid4().hex}"
+    location = f"{ENV.s3_staging_dir}{ENV.schema}/{table_name.lower()}/"
+    to_sql(df, table_name, cursor._connection, location, schema=ENV.schema, if_exists="fail")
+    with pytest.raises(OperationalError):
+        to_sql(df, table_name, cursor._connection, location, schema=ENV.schema, if_exists="fail")
+    to_sql(df, table_name, cursor._connection, location, schema=ENV.schema, if_exists="replace")
+    cursor.execute(f"SELECT col_int FROM {table_name}", result_reuse_enable=False)
+    assert cursor.fetchall() == [(1,)]
+
+
 def test_to_sql_with_index(cursor):
     df = pd.DataFrame({"col_int": np.int32([1])})
     table_name = f"""to_sql_{str(uuid.uuid4()).replace("-", "")}"""
