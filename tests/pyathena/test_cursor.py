@@ -1570,17 +1570,21 @@ class TestCursor:
             api_version="2017-05-18",
         )
 
-        # Built once, even when cursors in several threads need it together:
-        # the threads ask at the same moment and creation takes a while.
+        # Built once, even when cursors in several threads need it together.
+        # Creation waits for every thread to arrive there too: without the
+        # lock all eight do and the wait ends; with it only one does, and its
+        # wait times out before it builds the only client.
         created = []
         session_client = conn.session.client
+        inside_creation = threading.Barrier(8)
 
-        def slow_client(*args, **kwargs):
+        def contended_client(*args, **kwargs):
             created.append(args)
-            time.sleep(0.2)
+            with contextlib.suppress(threading.BrokenBarrierError):
+                inside_creation.wait(timeout=1)
             return session_client(*args, **kwargs)
 
-        conn._session.client = slow_client
+        conn._session.client = contended_client
         barrier = threading.Barrier(8)
 
         def get_glue_client(_):
