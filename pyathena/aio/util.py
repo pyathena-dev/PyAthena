@@ -12,7 +12,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from pyathena.util import RetryConfig, retry_api_call
+from pyathena.util import RetryConfig, _retry_api_call, retry_api_call
 
 
 async def async_retry_api_call(
@@ -38,3 +38,15 @@ async def async_retry_api_call(
         The result of the successful function call.
     """
     return await asyncio.to_thread(retry_api_call, func, config, logger, *args, **kwargs)
+
+
+async def _async_retry_api_call(
+    func: Callable[..., Any],
+    config: RetryConfig,
+    logger: logging.Logger | None,
+    stop_on: Callable[[BaseException], bool] | None,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """``async_retry_api_call`` that raises an exception ``stop_on`` accepts at once."""
+    return await asyncio.to_thread(_retry_api_call, func, config, logger, stop_on, *args, **kwargs)

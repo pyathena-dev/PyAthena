@@ -33,6 +33,7 @@ from pyathena.sqlalchemy.types import (
 )
 from pyathena.util import RetryConfig
 from tests.pyathena.conftest import ENV
+from tests.pyathena.util import throttle_metadata_api
 
 # Amazon S3 Tables tests need a pre-provisioned table-bucket catalog and namespace.
 # Skip them unless AWS_ATHENA_S3_TABLES_CATALOG / AWS_ATHENA_S3_TABLES_NAMESPACE are set.
@@ -912,25 +913,6 @@ class TestSQLAlchemyAthena:
         assert not actual["autoincrement"]
         assert actual["comment"] == "some comment"
 
-    @staticmethod
-    def _throttle_metadata_api(raw_connection, monkeypatch):
-        """Make every Athena metadata request on this connection throttled."""
-        calls = []
-
-        def throttled(operation):
-            def fail(**kwargs):
-                calls.append(operation)
-                raise ClientError(
-                    {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
-                    operation,
-                )
-
-            return fail
-
-        for operation in ("get_table_metadata", "list_table_metadata", "list_databases"):
-            monkeypatch.setattr(raw_connection.client, operation, throttled(operation))
-        return calls
-
     def test_throttled_reflection_reads_glue(self, engine, monkeypatch):
         engine, conn = engine
         # Existing tables with a comment, compression and partitions, so the
@@ -957,7 +939,7 @@ class TestSQLAlchemyAthena:
             )
 
         expected = reflect()
-        calls = self._throttle_metadata_api(conn.connection.driver_connection, monkeypatch)
+        calls = throttle_metadata_api(conn.connection.driver_connection.client, monkeypatch)
 
         assert reflect() == expected
         # Each request was refused once and answered by Glue without retrying.
@@ -987,7 +969,7 @@ class TestSQLAlchemyAthena:
                 )
 
             expected = reflect()
-            calls = self._throttle_metadata_api(conn.connection.driver_connection, monkeypatch)
+            calls = throttle_metadata_api(conn.connection.driver_connection.client, monkeypatch)
 
             # Glue addresses the table-bucket catalog by its Athena name.
             assert reflect() == expected

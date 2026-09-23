@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from botocore.exceptions import ClientError
 
 from pyathena import BINARY, Binary, ExecuteOptions
 from pyathena.aio.cursor import AioCursor
@@ -14,6 +13,7 @@ from pyathena.result_set import AthenaResultSet
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.aio.conftest import _aio_connect
+from tests.pyathena.util import throttle_metadata_api
 
 
 class TestAioCursor:
@@ -503,21 +503,7 @@ class TestAioCursor:
             )
 
         expected = await read()
-        calls = []
-
-        def throttled(operation):
-            def fail(**kwargs):
-                calls.append(operation)
-                raise ClientError(
-                    {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
-                    operation,
-                )
-
-            return fail
-
-        client = aio_cursor.connection.client
-        for operation in ("get_table_metadata", "list_table_metadata", "list_databases"):
-            monkeypatch.setattr(client, operation, throttled(operation))
+        calls = throttle_metadata_api(aio_cursor.connection.client, monkeypatch)
 
         # The Glue request runs in a worker thread, as the Athena calls do.
         assert await read() == expected

@@ -29,8 +29,7 @@ from pyathena.util import (
     THROTTLING_ERROR_CODES,
     RetryConfig,
     _get_error_code,
-    _without_retries,
-    is_retryable_error,
+    _retry_api_call,
     retry_api_call,
 )
 
@@ -340,28 +339,10 @@ class BaseCursor(metaclass=ABCMeta):
             return catalog
         return None
 
-    def _glue_first_attempt_retry_config(self) -> RetryConfig:
-        # Throttling goes to Glue at once, including Glue's own throttling that
-        # Athena wraps in a MetadataException, so neither is retried here.
-        return _without_retries(self._retry_config, (*THROTTLING_ERROR_CODES, "MetadataException"))
-
-    def _route_after_athena_failure(
-        self, e: OperationalError, description: str, logging_: bool
-    ) -> bool | None:
-        """Whether a failed first attempt goes to Glue (True), is retried (False), or is raised."""
-        cause = e.__cause__ or e
-        if _get_error_code(cause, unwrap_metadata=True) in THROTTLING_ERROR_CODES:
-            _logger.warning(f"Request to {description} was throttled; reading it from Glue.")
-            return True
-        # The first attempt left out MetadataException, which the policy may retry;
-        # a code it did retry has already had its retries.
-        if is_retryable_error(cause, self._retry_config) and not is_retryable_error(
-            cause, self._glue_first_attempt_retry_config()
-        ):
-            return False
-        if logging_:
-            _logger.exception(f"Failed to {description}.")
-        return None
+    @staticmethod
+    def _is_throttled(e: BaseException) -> bool:
+        # Athena wraps Glue's own throttling in a MetadataException.
+        return _get_error_code(e.__cause__ or e, unwrap_metadata=True) in THROTTLING_ERROR_CODES
 
     def _glue_request_failed(
         self, e: BotoCoreError | ClientError, description: str, absence_is_final: bool
@@ -377,21 +358,18 @@ class BaseCursor(metaclass=ABCMeta):
             and _get_error_code(e) == "EntityNotFoundException"
         ):
             raise OperationalError(*e.args) from e
-        if isinstance(e, BotoCoreError):
+        unreachable = isinstance(e, BotoCoreError)
+        if unreachable:
             self._connection._glue_unreachable = True
-            _logger.warning(
-                f"Glue request to {description} failed: {e}; retrying the Athena request "
-                "and not using Glue again on this connection."
-            )
-        else:
-            _logger.warning(
-                f"Glue request to {description} failed: {e}; retrying the Athena request."
-            )
+        suffix = " and not using Glue again on this connection" if unreachable else ""
+        _logger.warning(
+            f"Glue request to {description} failed: {e}; retrying the Athena request{suffix}."
+        )
 
     def _with_glue_fallback(
         self,
         catalog_name: str | None,
-        athena_request: Callable[[RetryConfig, bool], _T],
+        athena_request: Callable[[Callable[[BaseException], bool] | None, bool], _T],
         glue_request: Callable[[GlueMetadataCatalog], _T],
         description: str,
         logging_: bool = True,
@@ -400,27 +378,31 @@ class BaseCursor(metaclass=ABCMeta):
         """Run a metadata request, answering its throttling from Glue.
 
         Athena rate-limits its metadata API per account, separately from Glue.
-        In a Glue-backed catalog a throttled request goes to Glue at once
-        instead of through the retry policy. When the Glue request fails, the
-        Athena request runs again with the retry policy. With
-        ``absence_is_final``, Glue's answer that the table does not exist is
-        raised instead.
+        In a Glue-backed catalog the first attempt stops at a throttled
+        response and the request goes to Glue instead of through the retry
+        policy; other errors keep the policy. When the Glue request fails, the
+        Athena request continues with the policy. With ``absence_is_final``,
+        Glue's answer that the table does not exist is raised instead.
+
+        ``athena_request`` receives the predicate that stops its retries and
+        whether to log a failure.
         """
         glue_catalog = self._glue_catalog_name(catalog_name)
         if glue_catalog is None:
-            return athena_request(self._retry_config, logging_)
+            return athena_request(None, logging_)
         try:
-            return athena_request(self._glue_first_attempt_retry_config(), False)
+            return athena_request(self._is_throttled, False)
         except OperationalError as e:
-            route = self._route_after_athena_failure(e, description, logging_)
-            if route is None:
+            if not self._is_throttled(e):
+                if logging_:
+                    _logger.exception(f"Failed to {description}.")
                 raise
-        if route:
-            try:
-                return glue_request(GlueMetadataCatalog(self._connection.glue_client, glue_catalog))
-            except (BotoCoreError, ClientError) as e:
-                self._glue_request_failed(e, description, absence_is_final)
-        return athena_request(self._retry_config, logging_)
+        _logger.warning(f"Request to {description} was throttled; reading it from Glue.")
+        try:
+            return glue_request(GlueMetadataCatalog(self._connection.glue_client, glue_catalog))
+        except (BotoCoreError, ClientError) as e:
+            self._glue_request_failed(e, description, absence_is_final)
+        return athena_request(None, logging_)
 
     def _build_list_databases_request(
         self,
@@ -444,7 +426,7 @@ class BaseCursor(metaclass=ABCMeta):
         next_token: str | None = None,
         max_results: int | None = None,
         logging_: bool = True,
-        retry_config: RetryConfig | None = None,
+        stop_on: Callable[[BaseException], bool] | None = None,
     ) -> tuple[str | None, list[AthenaDatabase]]:
         request = self._build_list_databases_request(
             catalog_name=catalog_name,
@@ -452,10 +434,11 @@ class BaseCursor(metaclass=ABCMeta):
             max_results=max_results,
         )
         try:
-            response = retry_api_call(
+            response = _retry_api_call(
                 self.connection._client.list_databases,
-                config=retry_config if retry_config is not None else self._retry_config,
-                logger=_logger,
+                self._retry_config,
+                _logger,
+                stop_on,
                 **request,
             )
         except Exception as e:
@@ -472,21 +455,25 @@ class BaseCursor(metaclass=ABCMeta):
         catalog_name: str | None,
         max_results: int | None = None,
     ) -> list[AthenaDatabase]:
-        def athena_request(retry_config: RetryConfig, logging_: bool) -> list[AthenaDatabase]:
-            databases = []
-            next_token = None
+        # Pages already read are kept, so a retried request resumes after them.
+        databases: list[AthenaDatabase] = []
+        next_token = None
+
+        def athena_request(
+            stop_on: Callable[[BaseException], bool] | None, logging_: bool
+        ) -> list[AthenaDatabase]:
+            nonlocal next_token
             while True:
                 next_token, response = self._list_databases(
                     catalog_name=catalog_name,
                     next_token=next_token,
                     max_results=max_results,
                     logging_=logging_,
-                    retry_config=retry_config,
+                    stop_on=stop_on,
                 )
                 databases.extend(response)
                 if not next_token:
-                    break
-            return databases
+                    return databases
 
         return self._with_glue_fallback(
             catalog_name, athena_request, GlueMetadataCatalog.list_databases, "list databases"
@@ -513,7 +500,7 @@ class BaseCursor(metaclass=ABCMeta):
         catalog_name: str | None = None,
         schema_name: str | None = None,
         logging_: bool = True,
-        retry_config: RetryConfig | None = None,
+        stop_on: Callable[[BaseException], bool] | None = None,
     ) -> AthenaTableMetadata:
         request = self._build_get_table_metadata_request(
             table_name=table_name,
@@ -521,10 +508,11 @@ class BaseCursor(metaclass=ABCMeta):
             schema_name=schema_name,
         )
         try:
-            response = retry_api_call(
+            response = _retry_api_call(
                 self._connection.client.get_table_metadata,
-                config=retry_config if retry_config is not None else self._retry_config,
-                logger=_logger,
+                self._retry_config,
+                _logger,
+                stop_on,
                 **request,
             )
         except Exception as e:
@@ -541,18 +529,17 @@ class BaseCursor(metaclass=ABCMeta):
         schema_name: str | None = None,
         logging_: bool = True,
     ) -> AthenaTableMetadata:
+        schema_name = schema_name if schema_name else self._schema_name
         return self._with_glue_fallback(
             catalog_name,
-            lambda retry_config, logging_: self._get_table_metadata(
+            lambda stop_on, logging_: self._get_table_metadata(
                 table_name=table_name,
                 catalog_name=catalog_name,
                 schema_name=schema_name,
                 logging_=logging_,
-                retry_config=retry_config,
+                stop_on=stop_on,
             ),
-            lambda glue: glue.get_table(
-                schema_name if schema_name else self._schema_name, table_name
-            ),
+            lambda glue: glue.get_table(schema_name, table_name),
             "get table metadata",
             logging_=logging_,
             absence_is_final=True,
@@ -566,7 +553,7 @@ class BaseCursor(metaclass=ABCMeta):
         next_token: str | None = None,
         max_results: int | None = None,
         logging_: bool = True,
-        retry_config: RetryConfig | None = None,
+        stop_on: Callable[[BaseException], bool] | None = None,
     ) -> tuple[str | None, list[AthenaTableMetadata]]:
         request = self._build_list_table_metadata_request(
             catalog_name=catalog_name,
@@ -576,10 +563,11 @@ class BaseCursor(metaclass=ABCMeta):
             max_results=max_results,
         )
         try:
-            response = retry_api_call(
+            response = _retry_api_call(
                 self.connection._client.list_table_metadata,
-                config=retry_config if retry_config is not None else self._retry_config,
-                logger=_logger,
+                self._retry_config,
+                _logger,
+                stop_on,
                 **request,
             )
         except Exception as e:
@@ -600,9 +588,15 @@ class BaseCursor(metaclass=ABCMeta):
         max_results: int | None = None,
         logging_: bool = True,
     ) -> list[AthenaTableMetadata]:
-        def athena_request(retry_config: RetryConfig, logging_: bool) -> list[AthenaTableMetadata]:
-            metadata = []
-            next_token = None
+        schema_name = schema_name if schema_name else self._schema_name
+        # Pages already read are kept, so a retried request resumes after them.
+        metadata: list[AthenaTableMetadata] = []
+        next_token = None
+
+        def athena_request(
+            stop_on: Callable[[BaseException], bool] | None, logging_: bool
+        ) -> list[AthenaTableMetadata]:
+            nonlocal next_token
             while True:
                 next_token, response = self._list_table_metadata(
                     catalog_name=catalog_name,
@@ -611,19 +605,16 @@ class BaseCursor(metaclass=ABCMeta):
                     next_token=next_token,
                     max_results=max_results,
                     logging_=logging_,
-                    retry_config=retry_config,
+                    stop_on=stop_on,
                 )
                 metadata.extend(response)
                 if not next_token:
-                    break
-            return metadata
+                    return metadata
 
         return self._with_glue_fallback(
             catalog_name,
             athena_request,
-            lambda glue: glue.list_tables(
-                schema_name if schema_name else self._schema_name, expression
-            ),
+            lambda glue: glue.list_tables(schema_name, expression),
             "list table metadata",
             logging_=logging_,
         )

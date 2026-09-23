@@ -1,10 +1,10 @@
 import pytest
 import sqlalchemy
-from botocore.exceptions import ClientError
 from sqlalchemy import cast, literal, select, text, types
 from sqlalchemy.sql.schema import MetaData, Table
 
 from tests import ENV
+from tests.pyathena.util import throttle_metadata_api
 
 
 class TestAsyncSQLAlchemyAthena:
@@ -142,20 +142,9 @@ class TestAsyncSQLAlchemyAthena:
         expected = await conn.run_sync(reflect)
         # The adapter wraps an AioConnection, whose client serves the metadata API.
         client = (await conn.get_raw_connection()).driver_connection.driver_connection.client
-        calls = []
-
-        def throttled(operation):
-            def fail(**kwargs):
-                calls.append(operation)
-                raise ClientError(
-                    {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
-                    operation,
-                )
-
-            return fail
-
-        for operation in ("get_table_metadata", "list_table_metadata"):
-            monkeypatch.setattr(client, operation, throttled(operation))
+        calls = throttle_metadata_api(
+            client, monkeypatch, operations=("get_table_metadata", "list_table_metadata")
+        )
 
         # Glue runs in a worker thread here, as the adapted cursor's calls do.
         assert await conn.run_sync(reflect) == expected

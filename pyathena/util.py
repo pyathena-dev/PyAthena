@@ -242,9 +242,22 @@ def retry_api_call(
         This includes recognized Glue error codes wrapped in MetadataException.
         Other errors are propagated without retrying.
     """
+    return _retry_api_call(func, config, logger, None, *args, **kwargs)
 
+
+def _retry_api_call(
+    func: Callable[..., Any],
+    config: RetryConfig,
+    logger: logging.Logger | None,
+    stop_on: Callable[[BaseException], bool] | None,
+    *args,
+    **kwargs,
+) -> Any:
+    """``retry_api_call`` that raises an exception ``stop_on`` accepts at once."""
     retry = tenacity.Retrying(
-        retry=retry_if_exception(lambda ex: is_retryable_error(ex, config)),
+        retry=retry_if_exception(
+            lambda ex: is_retryable_error(ex, config) and not (stop_on and stop_on(ex))
+        ),
         stop=stop_after_attempt(config.attempt),
         # Uniform jitter of up to one multiplier keeps concurrent clients from
         # retrying in lockstep after a shared throttling response.
