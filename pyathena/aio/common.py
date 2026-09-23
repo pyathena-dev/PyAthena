@@ -3,17 +3,29 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
-from typing import Any, cast
+from typing import Any, TypeVar, cast
+
+from botocore.exceptions import BotoCoreError, ClientError
 
 from pyathena.aio.util import async_retry_api_call
-from pyathena.common import BaseCursor, CursorIterator
+from pyathena.common import (
+    BaseCursor,
+    CursorIterator,
+    _glue_get_table,
+    _glue_list_databases,
+    _glue_list_tables,
+)
 from pyathena.error import DatabaseError, OperationalError, ProgrammingError
 from pyathena.model import AthenaDatabase, AthenaQueryExecution, AthenaTableMetadata
 from pyathena.options import ExecuteOptions
 from pyathena.result_set import AthenaResultSet, WithResultSet
+from pyathena.util import THROTTLING_ERROR_CODES, RetryConfig, _without_retries
 
 _logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 
 class AioBaseCursor(BaseCursor):
@@ -231,11 +243,46 @@ class AioBaseCursor(BaseCursor):
             _logger.warning("Failed to check the cache. Moving on without cache.", exc_info=True)
         return query_id
 
+    async def _async_with_glue_fallback(
+        self,
+        catalog_name: str | None,
+        athena_request: Callable[[RetryConfig, bool], Awaitable[_T]],
+        glue_request: Callable[[Any, dict[str, str]], _T],
+        description: str,
+        logging_: bool = True,
+    ) -> _T:
+        """Async counterpart of ``BaseCursor._with_glue_fallback``.
+
+        The Glue client is taken on the event loop, where every connection
+        builds it, and the Glue request runs in a worker thread.
+        """
+        glue_kwargs = self._glue_request_kwargs(catalog_name)
+        if glue_kwargs is None:
+            return await athena_request(self._retry_config, logging_)
+        try:
+            return await athena_request(
+                _without_retries(self._retry_config, THROTTLING_ERROR_CODES), False
+            )
+        except OperationalError as e:
+            if not self._is_throttled(e):
+                if logging_:
+                    _logger.exception(f"Failed to {description}.")
+                raise
+        _logger.warning(f"Request to {description} was throttled; reading it from Glue.")
+        client = self._connection.glue_client
+        try:
+            return await asyncio.to_thread(glue_request, client, glue_kwargs)
+        except (BotoCoreError, ClientError) as e:
+            self._glue_request_failed(e, description)
+        return await athena_request(self._retry_config, logging_)
+
     async def _list_databases(  # type: ignore[override]
         self,
         catalog_name: str | None,
         next_token: str | None = None,
         max_results: int | None = None,
+        logging_: bool = True,
+        retry_config: RetryConfig | None = None,
     ) -> tuple[str | None, list[AthenaDatabase]]:
         request = self._build_list_databases_request(
             catalog_name=catalog_name,
@@ -245,12 +292,13 @@ class AioBaseCursor(BaseCursor):
         try:
             response = await async_retry_api_call(
                 self.connection._client.list_databases,
-                config=self._retry_config,
+                config=retry_config if retry_config is not None else self._retry_config,
                 logger=_logger,
                 **request,
             )
         except Exception as e:
-            _logger.exception("Failed to list databases.")
+            if logging_:
+                _logger.exception("Failed to list databases.")
             raise OperationalError(*e.args) from e
         else:
             return response.get("NextToken"), [
@@ -262,18 +310,25 @@ class AioBaseCursor(BaseCursor):
         catalog_name: str | None,
         max_results: int | None = None,
     ) -> list[AthenaDatabase]:
-        databases: list[AthenaDatabase] = []
-        next_token = None
-        while True:
-            next_token, response = await self._list_databases(
-                catalog_name=catalog_name,
-                next_token=next_token,
-                max_results=max_results,
-            )
-            databases.extend(response)
-            if not next_token:
-                break
-        return databases
+        async def athena_request(retry_config: RetryConfig, logging_: bool) -> list[AthenaDatabase]:
+            databases: list[AthenaDatabase] = []
+            next_token = None
+            while True:
+                next_token, response = await self._list_databases(
+                    catalog_name=catalog_name,
+                    next_token=next_token,
+                    max_results=max_results,
+                    logging_=logging_,
+                    retry_config=retry_config,
+                )
+                databases.extend(response)
+                if not next_token:
+                    break
+            return databases
+
+        return await self._async_with_glue_fallback(
+            catalog_name, athena_request, _glue_list_databases, "list databases"
+        )
 
     async def _get_table_metadata(  # type: ignore[override]
         self,
@@ -281,6 +336,7 @@ class AioBaseCursor(BaseCursor):
         catalog_name: str | None = None,
         schema_name: str | None = None,
         logging_: bool = True,
+        retry_config: RetryConfig | None = None,
     ) -> AthenaTableMetadata:
         request = self._build_get_table_metadata_request(
             table_name=table_name,
@@ -290,7 +346,7 @@ class AioBaseCursor(BaseCursor):
         try:
             response = await async_retry_api_call(
                 self._connection.client.get_table_metadata,
-                config=self._retry_config,
+                config=retry_config if retry_config is not None else self._retry_config,
                 logger=_logger,
                 **request,
             )
@@ -308,10 +364,19 @@ class AioBaseCursor(BaseCursor):
         schema_name: str | None = None,
         logging_: bool = True,
     ) -> AthenaTableMetadata:
-        return await self._get_table_metadata(
-            table_name=table_name,
-            catalog_name=catalog_name,
-            schema_name=schema_name,
+        return await self._async_with_glue_fallback(
+            catalog_name,
+            lambda retry_config, logging_: self._get_table_metadata(
+                table_name=table_name,
+                catalog_name=catalog_name,
+                schema_name=schema_name,
+                logging_=logging_,
+                retry_config=retry_config,
+            ),
+            lambda client, glue_kwargs: _glue_get_table(
+                client, glue_kwargs, schema_name if schema_name else self._schema_name, table_name
+            ),
+            "get table metadata",
             logging_=logging_,
         )
 
@@ -323,6 +388,7 @@ class AioBaseCursor(BaseCursor):
         next_token: str | None = None,
         max_results: int | None = None,
         logging_: bool = True,
+        retry_config: RetryConfig | None = None,
     ) -> tuple[str | None, list[AthenaTableMetadata]]:
         request = self._build_list_table_metadata_request(
             catalog_name=catalog_name,
@@ -334,7 +400,7 @@ class AioBaseCursor(BaseCursor):
         try:
             response = await async_retry_api_call(
                 self.connection._client.list_table_metadata,
-                config=self._retry_config,
+                config=retry_config if retry_config is not None else self._retry_config,
                 logger=_logger,
                 **request,
             )
@@ -356,21 +422,35 @@ class AioBaseCursor(BaseCursor):
         max_results: int | None = None,
         logging_: bool = True,
     ) -> list[AthenaTableMetadata]:
-        metadata: list[AthenaTableMetadata] = []
-        next_token = None
-        while True:
-            next_token, response = await self._list_table_metadata(
-                catalog_name=catalog_name,
-                schema_name=schema_name,
-                expression=expression,
-                next_token=next_token,
-                max_results=max_results,
-                logging_=logging_,
-            )
-            metadata.extend(response)
-            if not next_token:
-                break
-        return metadata
+        async def athena_request(
+            retry_config: RetryConfig, logging_: bool
+        ) -> list[AthenaTableMetadata]:
+            metadata: list[AthenaTableMetadata] = []
+            next_token = None
+            while True:
+                next_token, response = await self._list_table_metadata(
+                    catalog_name=catalog_name,
+                    schema_name=schema_name,
+                    expression=expression,
+                    next_token=next_token,
+                    max_results=max_results,
+                    logging_=logging_,
+                    retry_config=retry_config,
+                )
+                metadata.extend(response)
+                if not next_token:
+                    break
+            return metadata
+
+        return await self._async_with_glue_fallback(
+            catalog_name,
+            athena_request,
+            lambda client, glue_kwargs: _glue_list_tables(
+                client, glue_kwargs, schema_name if schema_name else self._schema_name, expression
+            ),
+            "list table metadata",
+            logging_=logging_,
+        )
 
 
 class WithAsyncFetch(AioBaseCursor, CursorIterator, WithResultSet):

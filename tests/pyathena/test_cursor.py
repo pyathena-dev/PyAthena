@@ -11,9 +11,11 @@ from concurrent.futures.thread import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from random import randint
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from botocore.exceptions import ClientError
 
 from pyathena import (
     BINARY,
@@ -27,6 +29,7 @@ from pyathena import (
     Binary,
     ExecuteOptions,
 )
+from pyathena.common import _table_metadata_from_glue
 from pyathena.converter import _to_array, _to_map, _to_struct
 from pyathena.cursor import Cursor
 from pyathena.error import DatabaseError, NotSupportedError, OperationalError, ProgrammingError
@@ -1342,6 +1345,129 @@ class TestCursor:
         cursor.execute("SELECT 1 AS col")
         assert cursor.fetchall() == [(1,)]
 
+    @staticmethod
+    def _throttle_metadata_api(connection, monkeypatch, code="ThrottlingException", message=""):
+        """Make every Athena metadata request on this connection fail with ``code``."""
+        calls = []
+
+        def throttled(operation):
+            def fail(**kwargs):
+                calls.append(operation)
+                raise ClientError({"Error": {"Code": code, "Message": message}}, operation)
+
+            return fail
+
+        for operation in ("get_table_metadata", "list_table_metadata", "list_databases"):
+            monkeypatch.setattr(connection.client, operation, throttled(operation))
+        return calls
+
+    @staticmethod
+    def _metadata_view(metadata):
+        return (
+            metadata.name,
+            metadata.table_type,
+            metadata.create_time,
+            [(c.name, c.type, c.comment) for c in metadata.columns],
+            [(c.name, c.type, c.comment) for c in metadata.partition_keys],
+            metadata.parameters,
+        )
+
+    def test_throttled_metadata_reads_glue(self, cursor, monkeypatch):
+        def read():
+            return (
+                [
+                    self._metadata_view(cursor.get_table_metadata(t))
+                    for t in ("one_row", "parquet_with_compression", "partition_table")
+                ],
+                sorted(self._metadata_view(m) for m in cursor.list_table_metadata()),
+                ENV.schema in [d.name for d in cursor.list_databases("AwsDataCatalog")],
+            )
+
+        expected = read()
+        calls = self._throttle_metadata_api(cursor.connection, monkeypatch)
+
+        # Glue reports each table as Athena does, and nothing is retried first.
+        assert read() == expected
+        assert sorted(calls) == sorted(
+            ["get_table_metadata"] * 3 + ["list_table_metadata", "list_databases"]
+        )
+
+    def test_wrapped_glue_throttling_reads_glue(self, cursor, monkeypatch):
+        # Athena reports Glue's own throttling inside a MetadataException, and
+        # the first attempt does not retry it either.
+        calls = self._throttle_metadata_api(
+            cursor.connection,
+            monkeypatch,
+            code="MetadataException",
+            message=(
+                "Rate exceeded (Service: AmazonDataCatalog; Status Code: 400; "
+                "Error Code: ThrottlingException; Request ID: example; Proxy: null)"
+            ),
+        )
+
+        assert cursor.get_table_metadata("one_row").name == "one_row"
+        assert calls == ["get_table_metadata"]
+
+    @pytest.mark.parametrize(
+        "cursor", [{"retry_config": RetryConfig(attempt=1)}], indirect=["cursor"]
+    )
+    @pytest.mark.parametrize(
+        ("glue_error", "expected_calls"),
+        [
+            # Glue's answer about absence is raised as Athena's would be.
+            ("EntityNotFoundException", 1),
+            # No Glue permission: the Athena request runs again with its policy.
+            ("AccessDeniedException", 2),
+        ],
+    )
+    def test_failed_glue_request(self, cursor, monkeypatch, glue_error, expected_calls):
+        calls = self._throttle_metadata_api(cursor.connection, monkeypatch)
+        error = ClientError({"Error": {"Code": glue_error, "Message": ""}}, "GetTable")
+
+        def get_table(**kwargs):
+            raise error
+
+        monkeypatch.setattr(cursor.connection, "_glue_client", SimpleNamespace(get_table=get_table))
+
+        with pytest.raises(OperationalError) as caught:
+            cursor.get_table_metadata("one_row")
+
+        if glue_error == "EntityNotFoundException":
+            assert caught.value.__cause__ is error
+        else:
+            assert caught.value.__cause__.response["Error"]["Code"] == "ThrottlingException"
+        assert len(calls) == expected_calls
+
+    @pytest.mark.parametrize(
+        ("cursor", "catalog_name"),
+        [
+            ({"retry_config": RetryConfig(attempt=1), "glue_metadata_fallback": False}, None),
+            ({"retry_config": RetryConfig(attempt=1)}, "federated_catalog"),
+        ],
+        indirect=["cursor"],
+        ids=["disabled", "outside-glue"],
+    )
+    def test_throttled_metadata_without_glue(self, cursor, monkeypatch, catalog_name):
+        calls = self._throttle_metadata_api(cursor.connection, monkeypatch)
+        monkeypatch.setattr(cursor.connection, "_glue_client", None)
+        monkeypatch.setattr(type(cursor.connection), "glue_client", property(pytest.fail))
+
+        with pytest.raises(OperationalError):
+            cursor.get_table_metadata("one_row", catalog_name=catalog_name)
+
+        assert calls == ["get_table_metadata"]
+
+    def test_glue_client_leaves_out_athena_endpoint(self):
+        conn = connect(
+            region_name=ENV.region_name,
+            endpoint_url=f"https://athena.{ENV.region_name}.amazonaws.com",
+        )
+
+        assert conn.glue_client.meta.service_model.service_name == "glue"
+        assert conn.glue_client.meta.endpoint_url == f"https://glue.{ENV.region_name}.amazonaws.com"
+        # Built once and shared by the connection's cursors.
+        assert conn.glue_client is conn.glue_client
+
 
 class TestDictCursor:
     def test_fetchone(self, dict_cursor):
@@ -1787,3 +1913,90 @@ class TestComplexDataTypes:
             assert result == expected, (
                 f"Converter failed for {test_input}: expected {expected}, got {result}"
             )
+
+
+@pytest.mark.parametrize(
+    ("table", "expected_parameters"),
+    [
+        (
+            {
+                "Parameters": {"EXTERNAL": "TRUE", "comment": "table comment"},
+                "StorageDescriptor": {
+                    "Location": "s3://bucket/hive_text",
+                    "InputFormat": "org.apache.hadoop.mapred.TextInputFormat",
+                    "OutputFormat": "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+                    "SerdeInfo": {
+                        "SerializationLibrary": (
+                            "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe"
+                        ),
+                        "Parameters": {"field.delim": "\t"},
+                    },
+                },
+            },
+            {
+                "EXTERNAL": "TRUE",
+                "comment": "table comment",
+                "location": "s3://bucket/hive_text",
+                "inputformat": "org.apache.hadoop.mapred.TextInputFormat",
+                "outputformat": "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+                "serde.serialization.lib": "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe",
+                "serde.param.field.delim": "\t",
+            },
+        ),
+        # A view has empty SerDe information, which Athena still reports.
+        (
+            {
+                "Parameters": {"comment": "Presto View", "presto_view": "true"},
+                "StorageDescriptor": {"Location": "", "SerdeInfo": {}},
+            },
+            {
+                "comment": "Presto View",
+                "presto_view": "true",
+                "location": "",
+                "inputformat": None,
+                "outputformat": None,
+                "serde.serialization.lib": None,
+            },
+        ),
+        # An Iceberg table has none, and Athena reports no SerDe library.
+        (
+            {
+                "Parameters": {"table_type": "ICEBERG", "metadata_location": "s3://m"},
+                "StorageDescriptor": {"Location": "s3://bucket/iceberg"},
+            },
+            {
+                "table_type": "ICEBERG",
+                "metadata_location": "s3://m",
+                "location": "s3://bucket/iceberg",
+                "inputformat": None,
+                "outputformat": None,
+            },
+        ),
+    ],
+    ids=["hive", "view", "iceberg"],
+)
+def test_table_metadata_from_glue(table, expected_parameters):
+    # Glue responses measured against GetTableMetadata for the same tables in
+    # #786; Athena flattens them this way.
+    table = {
+        "Name": "t",
+        "TableType": "EXTERNAL_TABLE",
+        # Athena does not report the Glue description as the comment.
+        "Description": "glue description",
+        "PartitionKeys": [{"Name": "dt", "Type": "string", "Comment": "day"}],
+        **table,
+    }
+    table["StorageDescriptor"]["Columns"] = [{"Name": "a", "Type": "int"}]
+
+    metadata = _table_metadata_from_glue(table)
+
+    assert metadata.parameters == expected_parameters
+    assert (metadata.name, metadata.table_type, metadata.comment) == (
+        "t",
+        "EXTERNAL_TABLE",
+        expected_parameters.get("comment"),
+    )
+    assert [(c.name, c.type, c.comment) for c in metadata.columns] == [("a", "int", None)]
+    assert [(c.name, c.type, c.comment) for c in metadata.partition_keys] == [
+        ("dt", "string", "day")
+    ]

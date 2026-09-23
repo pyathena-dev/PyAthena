@@ -3,16 +3,14 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
-from collections.abc import Callable, Mapping, MutableMapping
+from collections.abc import Mapping, MutableMapping
 from re import Pattern
 from typing import (
     TYPE_CHECKING,
     Any,
-    TypeVar,
     cast,
 )
 
-from botocore.exceptions import BotoCoreError, ClientError
 from sqlalchemy import exc, schema, types, util
 from sqlalchemy.engine import Engine, reflection
 from sqlalchemy.engine.default import DefaultDialect
@@ -26,7 +24,6 @@ from sqlalchemy.sql.compiler import (
 
 import pyathena
 from pyathena.cursor import Cursor
-from pyathena.model import AthenaDatabase, AthenaTableMetadata
 from pyathena.sqlalchemy.compiler import (
     AthenaDDLCompiler,
     AthenaStatementCompiler,
@@ -63,8 +60,6 @@ if TYPE_CHECKING:
     from sqlalchemy.sql.schema import SchemaItem
 
 _logger = logging.getLogger(__name__)
-
-_T = TypeVar("_T")
 
 
 ischema_names: dict[str, type[Any]] = {
@@ -259,6 +254,8 @@ class AthenaDialect(DefaultDialect):
             opts.update({"kill_on_interrupt": bool(strtobool(opts["kill_on_interrupt"]))})
         if "result_reuse_enable" in opts:
             opts.update({"result_reuse_enable": bool(strtobool(opts["result_reuse_enable"]))})
+        if "glue_metadata_fallback" in opts:
+            opts.update({"glue_metadata_fallback": bool(strtobool(opts["glue_metadata_fallback"]))})
         if "result_reuse_minutes" in opts:
             opts.update({"result_reuse_minutes": int(opts["result_reuse_minutes"])})
         # Store on the dialect so compilers can consult connection options
@@ -279,139 +276,17 @@ class AthenaDialect(DefaultDialect):
         """Glue lowercases table names, so ``AwsDataCatalog`` lookups fold case."""
         return name.lower() if (catalog or "").lower() == "awsdatacatalog" else name
 
-    @staticmethod
-    def _glue_request_kwargs(catalog: str | None) -> dict[str, str] | None:
-        """Glue request arguments that address this catalog, or None outside Glue.
-
-        ``AwsDataCatalog`` is the caller's default Glue catalog. An S3 Tables
-        catalog is a Glue federated catalog addressed by its Athena name.
-        """
-        lowered = (catalog or "").lower()
-        if lowered == "awsdatacatalog":
-            return {}
-        if lowered.startswith("s3tablescatalog/"):
-            return {"CatalogId": cast(str, catalog)}
-        return None
-
-    @staticmethod
-    def _glue_client(connection: Any) -> Any:
-        # Athena's endpoint and API version do not apply to Glue.
-        kwargs = {
-            k: v
-            for k, v in connection._client_kwargs.items()
-            if k not in ("endpoint_url", "api_version")
-        }
-        return connection.session.client(
-            "glue", region_name=connection.region_name, config=connection.config, **kwargs
-        )
-
-    def _glue_call(self, raw_connection: PoolProxiedConnection, request: Callable[[Any], _T]) -> _T:
-        """Run ``request`` with a Glue client built from the connection's session."""
-        return request(self._glue_client(raw_connection.driver_connection))
-
-    def _with_glue_fallback(
-        self,
-        raw_connection: PoolProxiedConnection,
-        catalog: str | None,
-        athena_request: Callable[[Any], _T],
-        glue_request: Callable[[Any, dict[str, str]], _T],
-        description: str,
-    ) -> _T:
-        """Run a metadata request, answering its throttling from Glue.
-
-        Athena rate-limits its metadata API separately from Glue, so in a
-        Glue-backed catalog a throttled request is sent to Glue at once instead
-        of waiting out the retry policy. A failed Glue request, such as one the
-        caller has no Glue permission for, falls back to the Athena request with
-        the connection's retries.
-        """
-        glue_kwargs = self._glue_request_kwargs(catalog)
-        driver_connection = raw_connection.driver_connection
-        if glue_kwargs is not None:
-            retry_config = self._without_retries(
-                raw_connection.retry_config,  # type: ignore[union-attr]
-                THROTTLING_ERROR_CODES,
-            )
-            try:
-                with driver_connection.cursor(retry_config=retry_config) as cursor:  # type: ignore[union-attr]
-                    return athena_request(cursor)
-            except pyathena.error.OperationalError as e:
-                # Athena wraps Glue's own throttling in a MetadataException, and
-                # the policy above no longer retries that either.
-                code = _get_error_code(e.__cause__ or e, unwrap_metadata=True)
-                if code not in THROTTLING_ERROR_CODES:
-                    raise
-            _logger.warning(f"{description} failed with {code}; reading it from Glue.")
-            try:
-                return self._glue_call(
-                    raw_connection, lambda client: glue_request(client, glue_kwargs)
-                )
-            except (BotoCoreError, ClientError) as e:
-                _logger.warning(
-                    f"Glue request for {description} failed: {e}; retrying the Athena request."
-                )
-        with driver_connection.cursor() as cursor:  # type: ignore[union-attr]
-            return athena_request(cursor)
-
-    @staticmethod
-    def _table_metadata_from_glue(table: Mapping[str, Any]) -> AthenaTableMetadata:
-        """Build the metadata Athena reports for a Glue table.
-
-        Athena flattens the storage descriptor into the table parameters: the
-        location and formats are always present, the SerDe library whenever the
-        descriptor has SerDe information, and SerDe parameters with a
-        ``serde.param.`` prefix. The Glue description is not the table comment.
-        """
-        descriptor = table.get("StorageDescriptor") or {}
-        parameters = dict(table.get("Parameters") or {})
-        parameters["location"] = descriptor.get("Location")
-        parameters["inputformat"] = descriptor.get("InputFormat")
-        parameters["outputformat"] = descriptor.get("OutputFormat")
-        if "SerdeInfo" in descriptor:
-            serde = descriptor["SerdeInfo"]
-            parameters["serde.serialization.lib"] = serde.get("SerializationLibrary")
-            parameters.update(
-                {f"serde.param.{k}": v for k, v in (serde.get("Parameters") or {}).items()}
-            )
-
-        def column(c: Mapping[str, Any]) -> dict[str, Any]:
-            return {k: c[k] for k in ("Name", "Type", "Comment") if k in c}
-
-        return AthenaTableMetadata(
-            {
-                "TableMetadata": {
-                    "Name": table.get("Name"),
-                    "CreateTime": table.get("CreateTime"),
-                    "LastAccessTime": table.get("LastAccessTime"),
-                    "TableType": table.get("TableType"),
-                    "Columns": [column(c) for c in descriptor.get("Columns") or []],
-                    "PartitionKeys": [column(c) for c in table.get("PartitionKeys") or []],
-                    "Parameters": parameters,
-                }
-            }
-        )
-
     @reflection.cache
     def _get_schemas(self, connection, **kw):
         raw_connection = self._raw_connection(connection)
         catalog = self._cursor_option(raw_connection, "catalog_name")
-
-        def glue_request(client: Any, glue_kwargs: dict[str, str]) -> list[AthenaDatabase]:
-            pages = client.get_paginator("get_databases").paginate(**glue_kwargs)
-            return [AthenaDatabase({"Database": d}) for page in pages for d in page["DatabaseList"]]
-
-        try:
-            return self._with_glue_fallback(
-                raw_connection,
-                catalog,
-                lambda cursor: cursor.list_databases(catalog),
-                glue_request,
-                f"Database listing for {catalog}",
-            )
-        except pyathena.error.OperationalError as e:
-            if _get_error_code(e.__cause__ or e) == "InvalidRequestException":
-                return []
-            raise
+        with raw_connection.driver_connection.cursor() as cursor:  # type: ignore[union-attr]
+            try:
+                return cursor.list_databases(catalog)
+            except pyathena.error.OperationalError as e:
+                if _get_error_code(e.__cause__ or e) == "InvalidRequestException":
+                    return []
+                raise
 
     def _get_table(self, connection, table_name: str, schema: str | None = None, **kw):
         raw_connection = self._raw_connection(connection)
@@ -427,25 +302,9 @@ class AthenaDialect(DefaultDialect):
         metadata = info_cache.get(cache_key)
         if metadata is not None:
             return metadata
-
-        def glue_request(client: Any, glue_kwargs: dict[str, str]) -> AthenaTableMetadata:
-            try:
-                response = client.get_table(DatabaseName=schema, Name=name, **glue_kwargs)
-            except ClientError as e:
-                # A Glue-backed catalog states absence directly.
-                if _get_error_code(e) == "EntityNotFoundException":
-                    raise exc.NoSuchTableError(table_name) from e
-                raise
-            return self._table_metadata_from_glue(response["Table"])
-
         try:
-            metadata = self._with_glue_fallback(
-                raw_connection,
-                catalog,
-                lambda cursor: self._lookup_table(cursor, schema, name, table_name),
-                glue_request,
-                f"Table metadata request for {table_name}",
-            )
+            with raw_connection.driver_connection.cursor() as cursor:  # type: ignore[union-attr]
+                metadata = self._lookup_table(cursor, schema, name, table_name)
         except pyathena.error.OperationalError as e:
             # A federated catalog reports a missing table in its connector's own
             # words, so ask information_schema whether it exists, as column
@@ -574,13 +433,8 @@ class AthenaDialect(DefaultDialect):
         Retrying those spends the policy's whole budget on a question one query
         settles; specific wrapped Glue codes stay retryable.
         """
-        return cls._without_retries(retry_config, cls._FALLBACK_ERROR_CODES)
-
-    @staticmethod
-    def _without_retries(retry_config: RetryConfig, codes: tuple[str, ...]) -> RetryConfig:
-        """Copy a policy without retrying ``codes``."""
         return RetryConfig(
-            exceptions=[c for c in retry_config.exceptions if c not in codes],
+            exceptions=[c for c in retry_config.exceptions if c not in cls._FALLBACK_ERROR_CODES],
             attempt=retry_config.attempt,
             multiplier=retry_config.multiplier,
             max_delay=retry_config.max_delay,
@@ -668,18 +522,8 @@ class AthenaDialect(DefaultDialect):
         tables = info_cache.get(cache_key)
         if tables is not None:
             return tables
-
-        def glue_request(client: Any, glue_kwargs: dict[str, str]) -> list[AthenaTableMetadata]:
-            pages = client.get_paginator("get_tables").paginate(DatabaseName=schema, **glue_kwargs)
-            return [self._table_metadata_from_glue(t) for page in pages for t in page["TableList"]]
-
-        tables = self._with_glue_fallback(
-            raw_connection,
-            catalog,
-            lambda cursor: cursor.list_table_metadata(schema_name=schema),
-            glue_request,
-            f"Table listing for {schema}",
-        )
+        with raw_connection.driver_connection.cursor() as cursor:  # type: ignore[union-attr]
+            tables = cursor.list_table_metadata(schema_name=schema)
         info_cache[cache_key] = tables
         for metadata in tables:
             if metadata.name is None:

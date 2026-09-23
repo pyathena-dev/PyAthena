@@ -4,9 +4,11 @@ import logging
 import sys
 import time
 from abc import ABCMeta, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
+
+from botocore.exceptions import BotoCoreError, ClientError
 
 import pyathena
 from pyathena.converter import Converter, DefaultTypeConverter
@@ -22,12 +24,20 @@ from pyathena.model import (
     AthenaTableMetadata,
 )
 from pyathena.options import ExecuteOptions
-from pyathena.util import RetryConfig, retry_api_call
+from pyathena.util import (
+    THROTTLING_ERROR_CODES,
+    RetryConfig,
+    _get_error_code,
+    _without_retries,
+    retry_api_call,
+)
 
 if TYPE_CHECKING:
     from pyathena.connection import Connection
 
 _logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 OnPollCallback = Callable[[AthenaQueryExecution | AthenaCalculationExecutionStatus], None]
 """Type of the optional ``on_poll`` callback.
@@ -109,6 +119,66 @@ class CursorIterator(metaclass=ABCMeta):
 
     def __iter__(self):
         return self
+
+
+def _table_metadata_from_glue(table: Mapping[str, Any]) -> AthenaTableMetadata:
+    """Build the metadata Athena reports for a Glue table.
+
+    Athena flattens the storage descriptor into the table parameters: the
+    location and formats are always present, the SerDe library whenever the
+    descriptor has SerDe information, and SerDe parameters with a
+    ``serde.param.`` prefix. The Glue description is not the table comment.
+    """
+    descriptor = table.get("StorageDescriptor") or {}
+    parameters = dict(table.get("Parameters") or {})
+    parameters["location"] = descriptor.get("Location")
+    parameters["inputformat"] = descriptor.get("InputFormat")
+    parameters["outputformat"] = descriptor.get("OutputFormat")
+    if "SerdeInfo" in descriptor:
+        serde = descriptor["SerdeInfo"]
+        parameters["serde.serialization.lib"] = serde.get("SerializationLibrary")
+        parameters.update(
+            {f"serde.param.{k}": v for k, v in (serde.get("Parameters") or {}).items()}
+        )
+
+    def column(c: Mapping[str, Any]) -> dict[str, Any]:
+        return {k: c[k] for k in ("Name", "Type", "Comment") if k in c}
+
+    return AthenaTableMetadata(
+        {
+            "TableMetadata": {
+                "Name": table.get("Name"),
+                "CreateTime": table.get("CreateTime"),
+                "LastAccessTime": table.get("LastAccessTime"),
+                "TableType": table.get("TableType"),
+                "Columns": [column(c) for c in descriptor.get("Columns") or []],
+                "PartitionKeys": [column(c) for c in table.get("PartitionKeys") or []],
+                "Parameters": parameters,
+            }
+        }
+    )
+
+
+def _glue_get_table(
+    client: Any, glue_kwargs: dict[str, str], schema_name: str | None, table_name: str
+) -> AthenaTableMetadata:
+    response = client.get_table(DatabaseName=schema_name, Name=table_name, **glue_kwargs)
+    return _table_metadata_from_glue(response["Table"])
+
+
+def _glue_list_tables(
+    client: Any, glue_kwargs: dict[str, str], schema_name: str | None, expression: str | None
+) -> list[AthenaTableMetadata]:
+    request: dict[str, Any] = {"DatabaseName": schema_name, **glue_kwargs}
+    if expression:
+        request["Expression"] = expression
+    pages = client.get_paginator("get_tables").paginate(**request)
+    return [_table_metadata_from_glue(t) for page in pages for t in page["TableList"]]
+
+
+def _glue_list_databases(client: Any, glue_kwargs: dict[str, str]) -> list[AthenaDatabase]:
+    pages = client.get_paginator("get_databases").paginate(**glue_kwargs)
+    return [AthenaDatabase({"Database": d}) for page in pages for d in page["DatabaseList"]]
 
 
 class BaseCursor(metaclass=ABCMeta):
@@ -316,6 +386,69 @@ class BaseCursor(metaclass=ABCMeta):
             request.update({"WorkGroup": self._work_group})
         return request
 
+    def _glue_request_kwargs(self, catalog_name: str | None) -> dict[str, str] | None:
+        """Glue request arguments for this catalog, or None when Glue does not apply.
+
+        ``AwsDataCatalog`` is the caller's default Glue catalog. An S3 Tables
+        catalog is a Glue federated catalog addressed by its Athena name.
+        """
+        if not self._connection.glue_metadata_fallback:
+            return None
+        catalog = catalog_name if catalog_name else self._catalog_name
+        lowered = (catalog or "").lower()
+        if lowered == "awsdatacatalog":
+            return {}
+        if lowered.startswith("s3tablescatalog/"):
+            return {"CatalogId": cast(str, catalog)}
+        return None
+
+    @staticmethod
+    def _is_throttled(e: BaseException) -> bool:
+        # Athena wraps Glue's own throttling in a MetadataException.
+        return _get_error_code(e.__cause__ or e, unwrap_metadata=True) in THROTTLING_ERROR_CODES
+
+    @staticmethod
+    def _glue_request_failed(e: BotoCoreError | ClientError, description: str) -> None:
+        """Raise a Glue answer about absence; log any other Glue failure."""
+        if isinstance(e, ClientError) and _get_error_code(e) == "EntityNotFoundException":
+            raise OperationalError(*e.args) from e
+        _logger.warning(f"Glue request to {description} failed: {e}; retrying the Athena request.")
+
+    def _with_glue_fallback(
+        self,
+        catalog_name: str | None,
+        athena_request: Callable[[RetryConfig, bool], _T],
+        glue_request: Callable[[Any, dict[str, str]], _T],
+        description: str,
+        logging_: bool = True,
+    ) -> _T:
+        """Run a metadata request, answering its throttling from Glue.
+
+        Athena rate-limits its metadata API per account, separately from Glue.
+        In a Glue-backed catalog a throttled request goes to Glue at once
+        instead of through the retry policy. When the Glue request fails, the
+        Athena request runs again with the retry policy; Glue's answer that
+        the table or database does not exist is raised instead.
+        """
+        glue_kwargs = self._glue_request_kwargs(catalog_name)
+        if glue_kwargs is None:
+            return athena_request(self._retry_config, logging_)
+        try:
+            return athena_request(
+                _without_retries(self._retry_config, THROTTLING_ERROR_CODES), False
+            )
+        except OperationalError as e:
+            if not self._is_throttled(e):
+                if logging_:
+                    _logger.exception(f"Failed to {description}.")
+                raise
+        _logger.warning(f"Request to {description} was throttled; reading it from Glue.")
+        try:
+            return glue_request(self._connection.glue_client, glue_kwargs)
+        except (BotoCoreError, ClientError) as e:
+            self._glue_request_failed(e, description)
+        return athena_request(self._retry_config, logging_)
+
     def _build_list_databases_request(
         self,
         catalog_name: str | None,
@@ -337,6 +470,8 @@ class BaseCursor(metaclass=ABCMeta):
         catalog_name: str | None,
         next_token: str | None = None,
         max_results: int | None = None,
+        logging_: bool = True,
+        retry_config: RetryConfig | None = None,
     ) -> tuple[str | None, list[AthenaDatabase]]:
         request = self._build_list_databases_request(
             catalog_name=catalog_name,
@@ -346,12 +481,13 @@ class BaseCursor(metaclass=ABCMeta):
         try:
             response = retry_api_call(
                 self.connection._client.list_databases,
-                config=self._retry_config,
+                config=retry_config if retry_config is not None else self._retry_config,
                 logger=_logger,
                 **request,
             )
         except Exception as e:
-            _logger.exception("Failed to list databases.")
+            if logging_:
+                _logger.exception("Failed to list databases.")
             raise OperationalError(*e.args) from e
         else:
             return response.get("NextToken"), [
@@ -363,18 +499,25 @@ class BaseCursor(metaclass=ABCMeta):
         catalog_name: str | None,
         max_results: int | None = None,
     ) -> list[AthenaDatabase]:
-        databases = []
-        next_token = None
-        while True:
-            next_token, response = self._list_databases(
-                catalog_name=catalog_name,
-                next_token=next_token,
-                max_results=max_results,
-            )
-            databases.extend(response)
-            if not next_token:
-                break
-        return databases
+        def athena_request(retry_config: RetryConfig, logging_: bool) -> list[AthenaDatabase]:
+            databases = []
+            next_token = None
+            while True:
+                next_token, response = self._list_databases(
+                    catalog_name=catalog_name,
+                    next_token=next_token,
+                    max_results=max_results,
+                    logging_=logging_,
+                    retry_config=retry_config,
+                )
+                databases.extend(response)
+                if not next_token:
+                    break
+            return databases
+
+        return self._with_glue_fallback(
+            catalog_name, athena_request, _glue_list_databases, "list databases"
+        )
 
     def _build_get_table_metadata_request(
         self,
@@ -397,6 +540,7 @@ class BaseCursor(metaclass=ABCMeta):
         catalog_name: str | None = None,
         schema_name: str | None = None,
         logging_: bool = True,
+        retry_config: RetryConfig | None = None,
     ) -> AthenaTableMetadata:
         request = self._build_get_table_metadata_request(
             table_name=table_name,
@@ -406,7 +550,7 @@ class BaseCursor(metaclass=ABCMeta):
         try:
             response = retry_api_call(
                 self._connection.client.get_table_metadata,
-                config=self._retry_config,
+                config=retry_config if retry_config is not None else self._retry_config,
                 logger=_logger,
                 **request,
             )
@@ -424,10 +568,19 @@ class BaseCursor(metaclass=ABCMeta):
         schema_name: str | None = None,
         logging_: bool = True,
     ) -> AthenaTableMetadata:
-        return self._get_table_metadata(
-            table_name=table_name,
-            catalog_name=catalog_name,
-            schema_name=schema_name,
+        return self._with_glue_fallback(
+            catalog_name,
+            lambda retry_config, logging_: self._get_table_metadata(
+                table_name=table_name,
+                catalog_name=catalog_name,
+                schema_name=schema_name,
+                logging_=logging_,
+                retry_config=retry_config,
+            ),
+            lambda client, glue_kwargs: _glue_get_table(
+                client, glue_kwargs, schema_name if schema_name else self._schema_name, table_name
+            ),
+            "get table metadata",
             logging_=logging_,
         )
 
@@ -439,6 +592,7 @@ class BaseCursor(metaclass=ABCMeta):
         next_token: str | None = None,
         max_results: int | None = None,
         logging_: bool = True,
+        retry_config: RetryConfig | None = None,
     ) -> tuple[str | None, list[AthenaTableMetadata]]:
         request = self._build_list_table_metadata_request(
             catalog_name=catalog_name,
@@ -450,7 +604,7 @@ class BaseCursor(metaclass=ABCMeta):
         try:
             response = retry_api_call(
                 self.connection._client.list_table_metadata,
-                config=self._retry_config,
+                config=retry_config if retry_config is not None else self._retry_config,
                 logger=_logger,
                 **request,
             )
@@ -472,21 +626,33 @@ class BaseCursor(metaclass=ABCMeta):
         max_results: int | None = None,
         logging_: bool = True,
     ) -> list[AthenaTableMetadata]:
-        metadata = []
-        next_token = None
-        while True:
-            next_token, response = self._list_table_metadata(
-                catalog_name=catalog_name,
-                schema_name=schema_name,
-                expression=expression,
-                next_token=next_token,
-                max_results=max_results,
-                logging_=logging_,
-            )
-            metadata.extend(response)
-            if not next_token:
-                break
-        return metadata
+        def athena_request(retry_config: RetryConfig, logging_: bool) -> list[AthenaTableMetadata]:
+            metadata = []
+            next_token = None
+            while True:
+                next_token, response = self._list_table_metadata(
+                    catalog_name=catalog_name,
+                    schema_name=schema_name,
+                    expression=expression,
+                    next_token=next_token,
+                    max_results=max_results,
+                    logging_=logging_,
+                    retry_config=retry_config,
+                )
+                metadata.extend(response)
+                if not next_token:
+                    break
+            return metadata
+
+        return self._with_glue_fallback(
+            catalog_name,
+            athena_request,
+            lambda client, glue_kwargs: _glue_list_tables(
+                client, glue_kwargs, schema_name if schema_name else self._schema_name, expression
+            ),
+            "list table metadata",
+            logging_=logging_,
+        )
 
     def _get_query_execution(self, query_id: str) -> AthenaQueryExecution:
         request = {"QueryExecutionId": query_id}

@@ -154,6 +154,18 @@ class RetryConfig:
         self.exponential_base = exponential_base
 
 
+def _without_retries(config: RetryConfig, codes: Iterable[str]) -> RetryConfig:
+    """Copy a retry policy without retrying ``codes``."""
+    excluded = set(codes)
+    return RetryConfig(
+        exceptions=[c for c in config.exceptions if c not in excluded],
+        attempt=config.attempt,
+        multiplier=config.multiplier,
+        max_delay=config.max_delay,
+        exponential_base=config.exponential_base,
+    )
+
+
 def _get_error_code(ex: BaseException, unwrap_metadata: bool = False) -> str | None:
     response = getattr(ex, "response", None)
     error = response.get("Error") if isinstance(response, dict) else None

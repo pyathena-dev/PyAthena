@@ -7,10 +7,9 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections import deque
-from collections.abc import Callable, MutableMapping
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from collections.abc import MutableMapping
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import pool
 from sqlalchemy.engine import AdaptedConnection
@@ -37,10 +36,7 @@ from pyathena.util import RetryConfig
 if TYPE_CHECKING:
     from types import ModuleType
 
-    from sqlalchemy import URL, PoolProxiedConnection
-
-
-_T = TypeVar("_T")
+    from sqlalchemy import URL
 
 
 _ASYNC_CURSOR_CLASSES: dict[Any, Any] = {Cursor: AioCursor}
@@ -247,10 +243,3 @@ class AthenaAioDialect(AthenaDialect):
 
     def get_driver_connection(self, connection: Any) -> Any:
         return connection
-
-    def _glue_call(self, raw_connection: PoolProxiedConnection, request: Callable[[Any], _T]) -> _T:
-        # The request runs in a worker thread, as the adapted cursor's metadata
-        # calls do. The client is built here: a boto3 session is not thread-safe.
-        connection = raw_connection.driver_connection.driver_connection  # type: ignore[union-attr]
-        client = self._glue_client(connection)
-        return await_only(asyncio.to_thread(request, client))

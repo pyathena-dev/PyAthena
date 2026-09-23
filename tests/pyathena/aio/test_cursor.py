@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from botocore.exceptions import ClientError
 
 from pyathena import BINARY, Binary, ExecuteOptions
 from pyathena.aio.cursor import AioCursor
@@ -489,6 +490,38 @@ class TestAioCursor:
         assert len(metadata_list) > 0
         table_names = [m.name for m in metadata_list]
         assert "one_row" in table_names
+
+    async def test_throttled_metadata_reads_glue(self, aio_cursor, monkeypatch):
+        def view(metadata):
+            return (metadata.name, metadata.table_type, metadata.parameters)
+
+        async def read():
+            return (
+                view(await aio_cursor.get_table_metadata("one_row")),
+                sorted(view(m) for m in await aio_cursor.list_table_metadata()),
+                ENV.schema in [d.name for d in await aio_cursor.list_databases("AwsDataCatalog")],
+            )
+
+        expected = await read()
+        calls = []
+
+        def throttled(operation):
+            def fail(**kwargs):
+                calls.append(operation)
+                raise ClientError(
+                    {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
+                    operation,
+                )
+
+            return fail
+
+        client = aio_cursor.connection.client
+        for operation in ("get_table_metadata", "list_table_metadata", "list_databases"):
+            monkeypatch.setattr(client, operation, throttled(operation))
+
+        # The Glue request runs in a worker thread, as the Athena calls do.
+        assert await read() == expected
+        assert sorted(calls) == ["get_table_metadata", "list_databases", "list_table_metadata"]
 
 
 class TestAioDictCursor:
