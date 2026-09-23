@@ -370,7 +370,7 @@ class AthenaDialect(DefaultDialect):
                 metadata = self._lookup_table(cursor, schema, name, table_name)
             except pyathena.error.OperationalError as e:
                 code = _get_error_code(e.__cause__ or e, unwrap_metadata=True)
-                if not self._answerable_from_information_schema(code, catalog):
+                if not self._is_fallback_error(code, catalog):
                     raise
                 _logger.warning(
                     f"Table metadata request for {table_name} failed with {code}; "
@@ -385,8 +385,11 @@ class AthenaDialect(DefaultDialect):
         return self._columns_from_metadata(metadata)
 
     @staticmethod
-    def _answerable_from_information_schema(code: str | None, catalog: str | None) -> bool:
-        """Whether a failed metadata request should be re-asked of the catalog.
+    def _is_fallback_error(code: str | None, catalog: str | None) -> bool:
+        """Whether the information_schema fallback answers this failed request.
+
+        The codes are those in ``_FALLBACK_ERROR_CODES``; the catalog decides
+        whether an unrecognized ``MetadataException`` qualifies.
 
         Throttling always: one query costs less than the retry ladder.
 
