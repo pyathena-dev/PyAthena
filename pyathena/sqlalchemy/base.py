@@ -574,7 +574,10 @@ class AthenaDialect(DefaultDialect):
                 # query, which the cursor reports without an underlying API
                 # error. execute() also fetches the first result page, and a
                 # failed API call there carries its error as the cause: that is
-                # a failed read of a view that exists, not a missing one.
+                # a failed read of a view that exists, not a missing one. Any
+                # query that ends without success is still read as absence, as
+                # before; its state is not kept and its error codes do not
+                # single out a missing view.
                 if e.__cause__ is not None:
                     raise
                 raise exc.NoSuchTableError(f"{schema}.{view_name}") from e
