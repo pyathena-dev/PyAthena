@@ -296,51 +296,51 @@ class TestAthenaDialect:
         )
         return SimpleNamespace(connection=raw_connection), error, executed
 
+    # The Lambda connector's words for a missing table, measured in #798.
+    _CONNECTOR_MISSING_TABLE = (
+        "Failed to invoke lambda function due to "
+        "com.amazonaws.services.lambda.invoke.LambdaFunctionException: "
+        "Requested resource not found "
+        "(Service: DynamoDb, Status Code: 400, Request ID: example)"
+    )
+
     @pytest.mark.parametrize("method", ["get_table_comment", "get_table_options"])
     @pytest.mark.parametrize(
-        ("catalog_name", "rows", "expected"),
+        ("code", "catalog_name", "rows", "expected", "expected_queries"),
         [
-            ("federated_catalog", [], NoSuchTableError),
-            ("federated_catalog", [("1", "id", "integer", None, None)], OperationalError),
+            ("MetadataException", "federated_catalog", [], NoSuchTableError, 1),
+            (
+                "MetadataException",
+                "federated_catalog",
+                [("1", "id", "integer", None, None)],
+                OperationalError,
+                1,
+            ),
             # information_schema filters by Lake Formation in the Glue Data
             # Catalog, so it is not asked there.
-            ("AwsDataCatalog", [], OperationalError),
+            ("MetadataException", "AwsDataCatalog", [], OperationalError, 0),
+            # information_schema has no comment or options, so a throttled
+            # lookup of an existing table could only fail after the query.
+            ("ThrottlingException", "federated_catalog", [], OperationalError, 0),
         ],
-        ids=["federated-absent", "federated-present", "glue"],
+        ids=["federated-absent", "federated-present", "glue", "throttled"],
     )
-    def test_table_level_reflection_of_unrecognized_metadata_error(
-        self, method, catalog_name, rows, expected
+    def test_table_level_reflection_of_failed_lookup(
+        self, method, code, catalog_name, rows, expected, expected_queries
     ):
-        # The Lambda connector's words for a missing table, measured in #798.
         connection, error, executed = self._failing_lookup_connection(
-            "MetadataException",
-            "Failed to invoke lambda function due to "
-            "com.amazonaws.services.lambda.invoke.LambdaFunctionException: "
-            "Requested resource not found "
-            "(Service: DynamoDb, Status Code: 400, Request ID: example)",
-            catalog_name,
-            rows,
+            code, self._CONNECTOR_MISSING_TABLE, catalog_name, rows
         )
+        info_cache = {}
 
         with pytest.raises(expected) as caught:
-            getattr(AthenaDialect(), method)(connection, "events")
-
-        if expected is OperationalError:
-            assert caught.value.__cause__ is error
-        assert len(executed) == (0 if catalog_name == "AwsDataCatalog" else 1)
-
-    def test_table_level_reflection_propagates_throttling(self):
-        # information_schema has no comment or options, so a throttled lookup
-        # of an existing table could only fail after the query anyway.
-        connection, error, executed = self._failing_lookup_connection(
-            "ThrottlingException", "Rate exceeded", "federated_catalog", []
-        )
-
-        with pytest.raises(OperationalError) as caught:
-            AthenaDialect().get_table_comment(connection, "events")
+            getattr(AthenaDialect(), method)(connection, "events", info_cache=info_cache)
 
         assert caught.value.__cause__ is error
-        assert executed == []
+        assert len(executed) == expected_queries
+        # A failed call caches nothing, not even the columns it found, so later
+        # column reflection still asks the metadata API first.
+        assert info_cache == {}
 
     def test_table_level_reflection_reuses_reflected_columns(self):
         # Table(autoload_with=...) reflects columns first; columns read from

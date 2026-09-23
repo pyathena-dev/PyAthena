@@ -108,8 +108,10 @@ Other error codes listed in the connection's `RetryConfig.exceptions` are still 
 A `retry_config` in `cursor_kwargs` replaces that policy entirely, including those retries, which then run before the fallback.
 The fallback maps unbounded `varchar` to SQLAlchemy `String`, matching Hive `STRING` reflection from the metadata API, and preserves explicit `VARCHAR(n)` and `CHAR(n)` lengths.
 Partition columns are marked from the `extra_info` column.
-This fallback does not populate the table-metadata cache, and table comments and table options still come from the metadata API with the configured retries, so they propagate the error.
-For that same unrecognized `MetadataException` outside `AwsDataCatalog`, table comments and table options raise `NoSuchTableError` when `information_schema.columns` has no row for the table, and propagate the error otherwise.
+This fallback does not populate the table-metadata cache.
+Table comments and table options still come from the metadata API with the configured retries.
+When that request fails, they propagate the error, with one exception: for an unrecognized `MetadataException` outside `AwsDataCatalog`, they query `information_schema.columns` and raise `NoSuchTableError` if it has no row for the table.
+The query is skipped when column reflection in the same Inspector has already read the table's columns from `information_schema`.
 The dialect runs its own queries — this fallback and `get_view_definition()` — through the API cursor, whatever `cursor_class` or `unload` setting the connection carries, because it parses those result rows itself.
 Athena applies its metadata API rate limits per account, and they are not listed in Service Quotas.
 PyAthena's API retries use exponential backoff with uniform jitter; `RetryConfig` documents the default attempt count and waits.
