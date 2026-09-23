@@ -1,0 +1,61 @@
+PyAthena
+https://github.com/pyathena-dev/PyAthena
+
+PyAthena is licensed under the MIT License. See LICENSE.
+
+
+Acknowledgements
+================
+
+PyAthena's early development was informed by PyHive, including its DB-API
+tests and implementation patterns. PyAthena has since evolved with substantial
+Athena-specific functionality and additional backends.
+
+PyHive: https://github.com/dropbox/PyHive
+
+The initial PyAthena commit (35a221629783ac8e7997cddce0599ec84e39963d) linked
+to PyHive sources from its formatter, SQLAlchemy dialect, and tests. Those
+parts were compared with the contemporaneous PyHive revision
+ae3c9a9645ebd3dc962060d498df73e96498d615.
+Parts that remain recognizable in PyAthena:
+
+- pyathena/formatter.py: the string escape rules of `_escape_trino` (and its
+  `_escape_presto` alias) follow PyHive's `ParamEscaper.escape_string`
+  (pyhive/common.py), and `_escape_hive` follows PyHive's `HiveParamEscaper`
+  (pyhive/hive.py).
+- pyathena/sqlalchemy/compiler.py: `visit_char_length_func`, which renders
+  `char_length` as `length`, follows PyHive's `PrestoCompiler`
+  (pyhive/sqlalchemy_presto.py).
+- tests/pyathena/test_cursor.py: test cases including the escaping input of
+  `test_escape`, the Unicode input of `test_unicode`, and the NULL patterns of
+  `test_null` follow PyHive's pyhive/tests/dbapi_test_case.py.
+- tests/pyathena/sqlalchemy/test_base.py: test cases including
+  `test_unicode`, `test_char_length`, and `test_reflect_no_such_table` follow
+  PyHive's pyhive/tests/sqlalchemy_test_case.py.
+  tests/pyathena/aio/sqlalchemy/test_base.py ports `test_unicode` to the
+  asynchronous dialect.
+
+Parts that have since been replaced:
+
+- The `UniversalSet` helper and its use as the SQLAlchemy identifier
+  preparer's reserved words, removed in
+  d29c9ef97efb2168998eccdfa67d7706d381d655.
+
+DB-API names, the exception hierarchy, and type objects shared with PyHive
+follow PEP 249 (https://peps.python.org/pep-0249/).
+
+PyHive is distributed under the following notice:
+
+  Copyright (c) 2014 Dropbox, Inc.
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
