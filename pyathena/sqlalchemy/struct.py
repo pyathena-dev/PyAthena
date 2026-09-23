@@ -1,4 +1,4 @@
-# Copyright 2023 The PyAthena authors
+# Copyright 2025 The PyAthena authors
 #
 # Licensed under the MIT License.
 # See LICENSE or https://opensource.org/licenses/MIT.

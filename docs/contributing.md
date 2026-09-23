@@ -132,5 +132,7 @@ Identify any third-party material included in a new contribution and preserve it
 Do not replace upstream notices with the original-file template above.
 
 This policy does not require adding headers to existing files or changing existing notices, including the root `LICENSE`.
-Existing files written solely by the maintainer carry the header above, dated with the year of their earliest surviving content; other existing files keep their current notices.
+Existing non-empty files that contain only the maintainer's original work carry the header above, dated with the year of their earliest surviving content other than import statements.
+The pull request template is an exception because its content is copied into each pull request.
+Other existing files keep their current notices.
 [NOTICE](https://github.com/pyathena-dev/PyAthena/blob/master/NOTICE) acknowledges PyHive's influence on PyAthena.
