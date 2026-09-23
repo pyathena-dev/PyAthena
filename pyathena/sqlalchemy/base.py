@@ -11,7 +11,7 @@ from typing import (
     cast,
 )
 
-from sqlalchemy import exc, schema, text, types, util
+from sqlalchemy import exc, schema, types, util
 from sqlalchemy.engine import Engine, reflection
 from sqlalchemy.engine.default import DefaultDialect
 from sqlalchemy.engine.interfaces import ExecutionContext
@@ -23,6 +23,7 @@ from sqlalchemy.sql.compiler import (
 )
 
 import pyathena
+from pyathena.cursor import Cursor
 from pyathena.sqlalchemy.compiler import (
     AthenaDDLCompiler,
     AthenaStatementCompiler,
@@ -195,6 +196,12 @@ class AthenaDialect(DefaultDialect):
 
     _connect_options: dict[str, Any] = {}  # type: ignore[override]  # noqa: RUF012
     _pattern_column_type: Pattern[str] = re.compile(r"^([a-zA-Z]+)(?:$|[\(|<](.+)[\)|>]$)")
+    # Metadata failures that information_schema answers better than a retry.
+    # Throttling, because one query costs less than the retry ladder, and a
+    # MetadataException that survived unwrapping, because a federated catalog
+    # reports a missing table in its connector's words rather than in Glue's
+    # EntityNotFoundException envelope.
+    _FALLBACK_ERROR_CODES: tuple[str, ...] = (*THROTTLING_ERROR_CODES, "MetadataException")
 
     def __init__(self, json_deserializer=None, json_serializer=None, **kwargs):
         DefaultDialect.__init__(self, **kwargs)
@@ -347,13 +354,13 @@ class AthenaDialect(DefaultDialect):
         metadata = info_cache.get(metadata_key)
         if metadata is not None:
             return self._columns_from_metadata(metadata)
-        # A throttled metadata request switches to information_schema at once
-        # instead of waiting out the retry policy; the query answers existence
-        # and columns, while table comments and options still need the API.
-        # Other retryable codes keep the connection's policy. Connection.cursor()
-        # applies cursor_kwargs last, so a retry_config given there still runs
-        # its own throttling retries before the fallback.
-        retry_config = self._without_throttling_retries(
+        # A metadata request the fallback can answer switches to
+        # information_schema at once instead of waiting out the retry policy; the
+        # query answers existence and columns, while table comments and options
+        # still need the API. Other retryable codes keep the connection's policy.
+        # Connection.cursor() applies cursor_kwargs last, so a retry_config given
+        # there still runs its own retries before the fallback.
+        retry_config = self._without_fallback_retries(
             raw_connection.retry_config  # type: ignore[union-attr]
         )
         with raw_connection.driver_connection.cursor(  # type: ignore[union-attr]
@@ -362,13 +369,11 @@ class AthenaDialect(DefaultDialect):
             try:
                 metadata = self._lookup_table(cursor, schema, name, table_name)
             except pyathena.error.OperationalError as e:
-                if (
-                    _get_error_code(e.__cause__ or e, unwrap_metadata=True)
-                    not in THROTTLING_ERROR_CODES
-                ):
+                code = _get_error_code(e.__cause__ or e, unwrap_metadata=True)
+                if not self._is_fallback_error(code, catalog):
                     raise
                 _logger.warning(
-                    f"Table metadata request for {table_name} was throttled; "
+                    f"Table metadata request for {table_name} failed with {code}; "
                     "reflecting columns from information_schema."
                 )
                 columns = self._columns_from_information_schema(raw_connection, schema, name)
@@ -380,19 +385,59 @@ class AthenaDialect(DefaultDialect):
         return self._columns_from_metadata(metadata)
 
     @staticmethod
-    def _without_throttling_retries(retry_config: RetryConfig) -> RetryConfig:
-        """Copy a policy without the codes that carry throttling.
+    def _is_fallback_error(code: str | None, catalog: str | None) -> bool:
+        """Whether the information_schema fallback answers this failed request.
 
-        Athena wraps Glue throttling in ``MetadataException``, so that code is
-        dropped as well; specific wrapped codes stay retryable.
+        The codes are those in ``_FALLBACK_ERROR_CODES``; the catalog decides
+        whether an unrecognized ``MetadataException`` qualifies.
+
+        Throttling always: one query costs less than the retry ladder.
+
+        A ``MetadataException`` that survived unwrapping only outside the Glue
+        Data Catalog. Glue states missing tables and permission failures in an
+        envelope this client recognizes, so an unrecognized one there has an
+        unknown cause, and answering it from ``information_schema`` would report
+        a table the caller merely cannot see as absent. A federated catalog has
+        no such envelope: it reports a missing table in its connector's own
+        words, which cannot be recognized at all.
         """
-        excluded = (*THROTTLING_ERROR_CODES, "MetadataException")
+        if code in THROTTLING_ERROR_CODES:
+            return True
+        return code == "MetadataException" and (catalog or "").lower() != "awsdatacatalog"
+
+    @classmethod
+    def _without_fallback_retries(cls, retry_config: RetryConfig) -> RetryConfig:
+        """Copy a policy without the codes the information_schema fallback answers.
+
+        Retrying those spends the policy's whole budget on a question one query
+        settles; specific wrapped Glue codes stay retryable.
+        """
         return RetryConfig(
-            exceptions=[c for c in retry_config.exceptions if c not in excluded],
+            exceptions=[c for c in retry_config.exceptions if c not in cls._FALLBACK_ERROR_CODES],
             attempt=retry_config.attempt,
             multiplier=retry_config.multiplier,
             max_delay=retry_config.max_delay,
             exponential_base=retry_config.exponential_base,
+        )
+
+    @staticmethod
+    def _internal_cursor(raw_connection: PoolProxiedConnection) -> Any:
+        """Open an API cursor for the queries this dialect parses itself.
+
+        Reflection reads these rows directly, so they must not arrive in the
+        result format chosen for user queries: a DataFrame cursor reports a NULL
+        or blank value as NaN, as an empty string, or as a dropped row depending
+        on its backend and on UNLOAD.
+
+        The converter is pinned too: a connection-level one chosen for a
+        DataFrame cursor would otherwise be applied to this one.
+
+        The async connection adapter maps ``Cursor`` to its own counterpart and
+        returns its wrapper, so this is typed by the interface used here rather
+        than by the class requested.
+        """
+        return raw_connection.driver_connection.cursor(  # type: ignore[union-attr]
+            Cursor, converter=Cursor.get_default_converter()
         )
 
     def _column(self, name: str | None, type_: str, comment: str | None, partition: bool | None):
@@ -420,7 +465,7 @@ class AthenaDialect(DefaultDialect):
         # The answer must reflect the catalog now, so query result reuse is off.
         schema = str(schema).lower().replace("'", "''")
         table_name = table_name.lower().replace("'", "''")
-        with raw_connection.driver_connection.cursor() as cursor:  # type: ignore[union-attr]
+        with self._internal_cursor(raw_connection) as cursor:
             cursor.execute(
                 "SELECT ordinal_position, column_name, data_type, comment, extra_info "
                 "FROM information_schema.columns "
@@ -428,9 +473,10 @@ class AthenaDialect(DefaultDialect):
                 result_reuse_enable=False,
             )
             rows = cursor.fetchall()
-        # Sort here: the query has no ORDER BY and UNLOAD-backed cursors do not
-        # preserve result order. A CSV-backed pandas cursor reads a missing
-        # comment as NaN, which _column() cannot recognize as empty.
+        # Sort here: the query has no ORDER BY, so its result order is Athena's.
+        # The comment is still normalized at this boundary: a converter given in
+        # cursor_kwargs is applied after the one _internal_cursor() pins, and one
+        # written for a DataFrame cursor reports a missing value as NaN.
         return [
             self._column(
                 column_name,
@@ -523,12 +569,25 @@ class AthenaDialect(DefaultDialect):
         raw_connection = self._raw_connection(connection)
         schema = schema if schema else self._cursor_option(raw_connection, "schema_name")
         query = f"""SHOW CREATE VIEW "{schema}"."{view_name}";"""
-        try:
-            res = connection.scalars(text(query))
-        except exc.OperationalError as e:
-            raise exc.NoSuchTableError(f"{schema}.{view_name}") from e
-        else:
-            return "\n".join(res)
+        with self._internal_cursor(raw_connection) as cursor:
+            try:
+                cursor.execute(query)
+            except pyathena.error.OperationalError as e:
+                # Athena runs SHOW CREATE VIEW for a missing view and fails the
+                # query, which the cursor reports without an underlying API
+                # error. execute() also fetches the first result page, and a
+                # failed API call there carries its error as the cause: that is
+                # a failed read of a view that exists, not a missing one. Any
+                # query that ends without success is still read as absence, as
+                # before; its state is not kept and its error codes do not
+                # single out a missing view.
+                if e.__cause__ is not None:
+                    raise
+                raise exc.NoSuchTableError(f"{schema}.{view_name}") from e
+            rows = cursor.fetchall()
+        # Athena returns the definition one line per row and blank lines as
+        # empty values, which are part of the definition.
+        return "\n".join(row[0] or "" for row in rows)
 
     @reflection.cache
     def get_columns(self, connection: Connection, table_name: str, schema: str | None = None, **kw):

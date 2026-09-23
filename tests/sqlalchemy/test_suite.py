@@ -1042,6 +1042,14 @@ class HasTableTest(_HasTableTest):
         "AccessDeniedException", "InternalServerException", None, argnames="code"
     )
     def test_metadata_errors_do_not_establish_absence(self, connection, monkeypatch, code):
+        # This suite runs against the Glue Data Catalog, which states missing
+        # tables and permission failures in an envelope this client recognizes.
+        # An unrecognized message there (code None) has an unknown cause, so it
+        # propagates rather than being re-asked of information_schema, which
+        # filters by Lake Formation instead of erroring and would report a table
+        # the caller cannot see as absent. Outside Glue the fallback does answer
+        # it; that case has no catalog here and is covered by
+        # TestAthenaDialect::test_unrecognized_metadata_error_asks_information_schema.
         raw_connection = _raw_connection(connection)
         retried = code == "InternalServerException"
         if retried:
@@ -1055,7 +1063,7 @@ class HasTableTest(_HasTableTest):
             "Catalog error (Service: AmazonDataCatalog; Status Code: 400; "
             f"Error Code: {code}; Request ID: example; Proxy: null)"
             if code
-            else "Table not found"
+            else "is not authorized to perform: glue:GetTable"
         )
         error = _metadata_error("MetadataException", message)
         calls = _fail_get_table_metadata(

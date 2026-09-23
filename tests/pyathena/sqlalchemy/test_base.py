@@ -19,7 +19,9 @@ from sqlalchemy.sql.ddl import CreateTable
 from sqlalchemy.sql.schema import Column, MetaData, Table
 from sqlalchemy.sql.selectable import TextualSelect
 
-from pyathena.error import OperationalError
+from pyathena.converter import DefaultTypeConverter
+from pyathena.cursor import Cursor
+from pyathena.error import DatabaseError, OperationalError
 from pyathena.sqlalchemy.base import AthenaDialect
 from pyathena.sqlalchemy.types import (
     TINYINT,
@@ -54,8 +56,10 @@ def unique_s3tables_table_name(base: str) -> str:
 
 class TestAthenaDialect:
     def test_columns_from_information_schema(self):
-        # Rows arrive unordered, and a cursor may read a NULL comment as NaN
-        # (pandas), as an empty string (arrow), or as None (polars).
+        # Rows arrive unordered, and Athena reports a missing comment as NULL.
+        # An API cursor hands that over as None or as an empty string; a
+        # converter supplied in cursor_kwargs is applied after the one this path
+        # pins, and one written for a DataFrame cursor reports it as NaN.
         rows = [
             ("4", "dt", "varchar", float("nan"), "partition key"),
             ("1", "id", "integer", "identifier", None),
@@ -63,18 +67,26 @@ class TestAthenaDialect:
             ("3", "label", "varchar", "", ""),
         ]
         executed = []
+        opened = []
 
         def execute(operation, **kwargs):
             executed.append((operation, kwargs))
 
         cursor = SimpleNamespace(execute=execute, fetchall=lambda: rows)
-        raw_connection = SimpleNamespace(
-            driver_connection=SimpleNamespace(cursor=lambda: contextlib.nullcontext(cursor))
-        )
+
+        def open_cursor(cursor_class, converter=None):
+            opened.append((cursor_class, type(converter)))
+            return contextlib.nullcontext(cursor)
+
+        raw_connection = SimpleNamespace(driver_connection=SimpleNamespace(cursor=open_cursor))
 
         columns = AthenaDialect()._columns_from_information_schema(
             raw_connection, "My_Schema", "O'Neil"
         )
+
+        # The dialect parses these rows itself, so it asks for an API cursor
+        # rather than whatever result format the user configured.
+        assert opened == [(Cursor, DefaultTypeConverter)]
 
         assert [column["name"] for column in columns] == ["id", "payload", "label", "dt"]
         assert isinstance(columns[0]["type"], types.INTEGER)
@@ -104,7 +116,7 @@ class TestAthenaDialect:
 
         assert [column["comment"] for column in columns] == [None, None]
 
-    def test_without_throttling_retries_keeps_other_codes(self):
+    def test_without_fallback_retries_keeps_other_codes(self):
         policy = RetryConfig(
             exceptions=(
                 "ThrottlingException",
@@ -117,8 +129,8 @@ class TestAthenaDialect:
             max_delay=30,
             exponential_base=3,
         )
-        derived = AthenaDialect._without_throttling_retries(policy)
-        # MetadataException carries wrapped throttling, so it is dropped as well.
+        derived = AthenaDialect._without_fallback_retries(policy)
+        # The fallback answers these, so retrying them only spends the budget.
         assert derived.exceptions == ("InternalServerException",)
         assert (derived.attempt, derived.multiplier, derived.max_delay) == (10, 2, 30)
         assert derived.exponential_base == 3
@@ -149,7 +161,7 @@ class TestAthenaDialect:
             schema_name=None,
             retry_config=RetryConfig(),
             driver_connection=SimpleNamespace(
-                cursor=lambda **kwargs: contextlib.nullcontext(cursor)
+                cursor=lambda *args, **kwargs: contextlib.nullcontext(cursor)
             ),
         )
         connection = SimpleNamespace(connection=raw_connection)
@@ -186,7 +198,7 @@ class TestAthenaDialect:
             schema_name="default",
             retry_config=RetryConfig(),
             driver_connection=SimpleNamespace(
-                cursor=lambda **kwargs: contextlib.nullcontext(cursor)
+                cursor=lambda *args, **kwargs: contextlib.nullcontext(cursor)
             ),
         )
         connection = SimpleNamespace(connection=raw_connection)
@@ -196,6 +208,155 @@ class TestAthenaDialect:
             AthenaDialect()._get_columns(connection, "events", info_cache=info_cache)
         # Absence is not cached as reflected columns.
         assert info_cache == {}
+
+    @pytest.mark.parametrize(
+        ("rows", "expected"),
+        [
+            ([], None),
+            ([("1", "id", "integer", None, None)], ["id"]),
+        ],
+        ids=["absent", "present"],
+    )
+    def test_unrecognized_metadata_error_asks_information_schema(self, rows, expected):
+        # A federated catalog reports a missing table in its connector's own
+        # words, with no Glue error envelope to unwrap, so the code stays
+        # MetadataException. Guessing "missing" from that is what turned
+        # throttling into false absence; ask information_schema instead.
+        error = ClientError(
+            {
+                "Error": {
+                    "Code": "MetadataException",
+                    "Message": (
+                        "Failed to invoke lambda function due to "
+                        "com.amazonaws.services.lambda.invoke.LambdaFunctionException: "
+                        "Requested resource not found "
+                        "(Service: DynamoDb, Status Code: 400, Request ID: example)"
+                    ),
+                }
+            },
+            "GetTableMetadata",
+        )
+
+        def get_table_metadata(table_name, **kwargs):
+            raise OperationalError(*error.args) from error
+
+        cursor = SimpleNamespace(
+            get_table_metadata=get_table_metadata,
+            execute=lambda operation, **kwargs: None,
+            fetchall=lambda: rows,
+        )
+        raw_connection = SimpleNamespace(
+            cursor_kwargs={},
+            catalog_name="federated_catalog",
+            schema_name="default",
+            retry_config=RetryConfig(),
+            driver_connection=SimpleNamespace(
+                cursor=lambda *args, **kwargs: contextlib.nullcontext(cursor)
+            ),
+        )
+        connection = SimpleNamespace(connection=raw_connection)
+
+        # In the Glue Data Catalog the same error propagates instead: Glue does
+        # state a missing table and a permission failure in a recognized
+        # envelope, so an unrecognized one there has an unknown cause, and
+        # information_schema hides a table the caller cannot see rather than
+        # erroring on it.
+        raw_connection.catalog_name = "AwsDataCatalog"
+        with pytest.raises(OperationalError):
+            AthenaDialect()._get_columns(connection, "events")
+        raw_connection.catalog_name = "federated_catalog"
+
+        if expected is None:
+            with pytest.raises(NoSuchTableError):
+                AthenaDialect()._get_columns(connection, "events")
+        else:
+            columns = AthenaDialect()._get_columns(connection, "events")
+            assert [column["name"] for column in columns] == expected
+
+    def test_get_view_definition_keeps_blank_lines(self):
+        # Athena returns the definition one row per line, blank lines included.
+        # Reading them through the user's cursor loses or corrupts those rows,
+        # so this path asks for an API cursor.
+        rows = [("CREATE VIEW v AS",), ("",), ("SELECT 1",)]
+        executed = []
+        opened = []
+
+        def open_cursor(cursor_class, converter=None):
+            opened.append((cursor_class, type(converter)))
+            return contextlib.nullcontext(
+                SimpleNamespace(
+                    execute=lambda operation, **kwargs: executed.append(operation),
+                    fetchall=lambda: rows,
+                )
+            )
+
+        raw_connection = SimpleNamespace(
+            cursor_kwargs={},
+            schema_name="default",
+            driver_connection=SimpleNamespace(cursor=open_cursor),
+        )
+        connection = SimpleNamespace(connection=raw_connection)
+
+        definition = AthenaDialect().get_view_definition(connection, "v")
+
+        assert definition == "CREATE VIEW v AS\n\nSELECT 1"
+        assert opened == [(Cursor, DefaultTypeConverter)]
+        assert executed == ['SHOW CREATE VIEW "default"."v";']
+
+    def test_get_view_definition_propagates_a_failed_request(self):
+        # A request that never ran is not a missing view. BaseCursor raises
+        # DatabaseError for a failed StartQueryExecution, and DatabaseError is
+        # the parent of OperationalError, so it is not caught and not reported
+        # as absence.
+        error = ClientError(
+            {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
+            "StartQueryExecution",
+        )
+
+        def execute(operation, **kwargs):
+            raise DatabaseError(*error.args) from error
+
+        with pytest.raises(DatabaseError):
+            AthenaDialect().get_view_definition(self._view_connection(execute), "v")
+
+    @staticmethod
+    def _view_connection(execute):
+        raw_connection = SimpleNamespace(
+            cursor_kwargs={},
+            schema_name="default",
+            driver_connection=SimpleNamespace(
+                cursor=lambda *args, **kwargs: contextlib.nullcontext(
+                    SimpleNamespace(execute=execute, fetchall=list)
+                )
+            ),
+        )
+        return SimpleNamespace(connection=raw_connection)
+
+    def test_get_view_definition_reports_a_missing_view(self):
+        # Athena accepts SHOW CREATE VIEW for a view that does not exist and
+        # fails the query; the cursor reports the failure reason with no
+        # underlying API error. Measured live for the rest and pandas dialects.
+        def execute(operation, **kwargs):
+            raise OperationalError("View not found or not a valid presto view: v")
+
+        with pytest.raises(NoSuchTableError):
+            AthenaDialect().get_view_definition(self._view_connection(execute), "v")
+
+    def test_get_view_definition_propagates_a_failed_result_page(self):
+        # execute() also fetches the first result page. A GetQueryResults call
+        # that exhausts its retries there is a failed read of an existing view,
+        # and must not be reported as absence.
+        error = ClientError(
+            {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
+            "GetQueryResults",
+        )
+
+        def execute(operation, **kwargs):
+            raise OperationalError(*error.args) from error
+
+        with pytest.raises(OperationalError) as caught:
+            AthenaDialect().get_view_definition(self._view_connection(execute), "v")
+        assert caught.value.__cause__ is error
 
     def test_get_table_matches_long_names_case_insensitively(self):
         # GetTableMetadata rejects names over 128 characters, so the lookup lists
@@ -661,8 +822,9 @@ class TestSQLAlchemyAthena:
         assert not actual["autoincrement"]
         assert actual["comment"] == "some comment"
 
-    # `unload` states what each case intends, independently of the URL the
-    # fixture builds, so the executed mode is compared against the intent.
+    # `unload` states what each case configures, independently of the URL the
+    # fixture builds, so the engine's setting can be checked before asserting
+    # that the dialect's own query ignores it.
     @pytest.mark.parametrize(
         ("engine", "unload"),
         [
@@ -692,6 +854,9 @@ class TestSQLAlchemyAthena:
         ).create(bind=conn)
 
         raw_connection = conn.connection.driver_connection
+        # The engine really is configured the way this case says; the assertion
+        # below then means the dialect ignored it, not that it never arrived.
+        assert raw_connection.cursor_kwargs.get("unload", False) is unload
         error = ClientError(
             {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
             "GetTableMetadata",
@@ -717,19 +882,18 @@ class TestSQLAlchemyAthena:
         finally:
             raw_connection.client.meta.events.unregister(event, record_query)
 
-        # Reflection issued the fallback and nothing else, in the mode this case
-        # asked for. Without the mode check, an unload option that stopped
-        # reaching the cursor would leave every case green while three of them
-        # silently tested CSV twice. The count is not pinned: a throttled
-        # StartQueryExecution is retried through the same client hook.
+        # Reflection issued the fallback and nothing else, and it ran as a plain
+        # query even where the engine asked for UNLOAD: the dialect parses these
+        # rows itself, so it uses an API cursor. The count is not pinned, since a
+        # throttled StartQueryExecution is retried through the same client hook.
         assert queries
         for query in queries:
             assert "FROM information_schema.columns" in query
-            assert query.strip().startswith("UNLOAD (") is unload
+            assert not query.strip().startswith("UNLOAD (")
 
         # The fallback query has no ORDER BY, so this order comes from the
-        # client-side ordinal_position sort, and every missing-comment shape a
-        # cursor can report has to arrive as None.
+        # client-side ordinal_position sort, and a column with no comment has to
+        # arrive as None for every cursor class.
         assert [column["name"] for column in columns] == ["col_int", "col_string", "dt"]
         assert [column["comment"] for column in columns] == ["identifier", None, None]
         assert [column["dialect_options"]["awsathena_partition"] for column in columns] == [
@@ -744,6 +908,51 @@ class TestSQLAlchemyAthena:
             types.String,
             types.String,
         ]
+
+    @pytest.mark.parametrize(
+        "engine",
+        [
+            {"driver": "rest"},
+            {"driver": "pandas"},
+            {"driver": "pandas", "unload": "true"},
+            {"driver": "arrow"},
+            {"driver": "polars"},
+        ],
+        indirect=True,
+    )
+    def test_get_view_definition_across_cursor_types(self, engine):
+        engine, conn = engine
+        # Athena formats this definition with a blank line. Read through a
+        # DataFrame cursor those rows arrive as NaN, as an empty string, or not
+        # at all, so the definition came back corrupted or raised TypeError.
+        view_name = f"test_view_definition_{uuid.uuid4().hex[:8]}"
+        conn.execute(
+            text(
+                f"CREATE OR REPLACE VIEW {ENV.schema}.{view_name} AS "
+                "WITH t AS (SELECT 1 AS a, 'x' AS b) "
+                "SELECT a, b FROM t UNION ALL SELECT 2, 'y'"
+            )
+        )
+        raw_connection = conn.connection.driver_connection
+        try:
+            definition = sqlalchemy.inspect(conn).get_view_definition(view_name, schema=ENV.schema)
+            # What Athena actually returned, row by row, independent of the
+            # dialect. Comparing against this catches a partial loss too.
+            with raw_connection.cursor(Cursor) as cursor:
+                cursor.execute(f'SHOW CREATE VIEW "{ENV.schema}"."{view_name}";')
+                rows = [row[0] for row in cursor.fetchall()]
+        finally:
+            conn.execute(text(f"DROP VIEW IF EXISTS {ENV.schema}.{view_name}"))
+
+        # Content the baseline cannot vouch for itself, since it is read through
+        # the same API cursor path the dialect now uses.
+        assert definition.startswith("CREATE VIEW")
+        assert "UNION ALL" in definition
+        if not any(row is None or not row.strip() for row in rows):
+            # The blank line is Athena's formatting, not the dialect's, so its
+            # absence means this case can no longer reach the defect.
+            pytest.skip(f"Athena formatted this view without a blank line: {rows!r}")
+        assert definition == "\n".join(row or "" for row in rows)
 
     def test_char_length(self, engine):
         engine, conn = engine
