@@ -300,8 +300,24 @@ class AthenaDialect(DefaultDialect):
         metadata = info_cache.get(cache_key)
         if metadata is not None:
             return metadata
-        with raw_connection.driver_connection.cursor() as cursor:  # type: ignore[union-attr]
-            metadata = self._lookup_table(cursor, schema, name, table_name)
+        try:
+            with raw_connection.driver_connection.cursor() as cursor:  # type: ignore[union-attr]
+                metadata = self._lookup_table(cursor, schema, name, table_name)
+        except pyathena.error.OperationalError as e:
+            # A federated catalog reports a missing table in its connector's own
+            # words, so ask information_schema whether it exists, as column
+            # reflection does. Throttling still propagates: the query cannot
+            # supply a comment or options, only absence.
+            code = _get_error_code(e.__cause__ or e, unwrap_metadata=True)
+            if not self._is_connector_error(code, catalog):
+                raise
+            # Columns already reflected from information_schema show the table exists.
+            columns_key = ("pyathena_information_schema_columns", catalog, schema, name)
+            if info_cache.get(columns_key) is not None or (
+                self._columns_from_information_schema(raw_connection, schema, name)
+            ):
+                raise
+            raise exc.NoSuchTableError(table_name) from e
         info_cache[cache_key] = metadata
         return metadata
 
@@ -388,10 +404,15 @@ class AthenaDialect(DefaultDialect):
     def _is_fallback_error(code: str | None, catalog: str | None) -> bool:
         """Whether the information_schema fallback answers this failed request.
 
-        The codes are those in ``_FALLBACK_ERROR_CODES``; the catalog decides
-        whether an unrecognized ``MetadataException`` qualifies.
+        The codes are those in ``_FALLBACK_ERROR_CODES``: throttling always, as
+        one query costs less than the retry ladder, and a ``MetadataException``
+        where ``_is_connector_error`` accepts it.
+        """
+        return code in THROTTLING_ERROR_CODES or AthenaDialect._is_connector_error(code, catalog)
 
-        Throttling always: one query costs less than the retry ladder.
+    @staticmethod
+    def _is_connector_error(code: str | None, catalog: str | None) -> bool:
+        """Whether ``information_schema`` may decide absence for this error.
 
         A ``MetadataException`` that survived unwrapping only outside the Glue
         Data Catalog. Glue states missing tables and permission failures in an
@@ -401,8 +422,6 @@ class AthenaDialect(DefaultDialect):
         no such envelope: it reports a missing table in its connector's own
         words, which cannot be recognized at all.
         """
-        if code in THROTTLING_ERROR_CODES:
-            return True
         return code == "MetadataException" and (catalog or "").lower() != "awsdatacatalog"
 
     @classmethod

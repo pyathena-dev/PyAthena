@@ -97,9 +97,10 @@ Table-name case variants share metadata in `AwsDataCatalog`; other catalogs reta
 A later listing preserves metadata already fetched for a table.
 `clear_cache()` also discards this metadata; an absent entry in a listing is not cached as proof that a table does not exist.
 
-Table-metadata lookups propagate throttling and permission errors rather than reporting missing tables.
-`has_table()` propagates permission failures, including access denied by Lake Formation, instead of returning or caching `False`.
-For failed metadata requests, only recognized `EntityNotFoundException` responses establish absence; unrecognized errors are propagated rather than guessed to mean a missing table.
+A throttling or permission error from a table-metadata lookup never by itself establishes that a table is missing.
+`has_table()` propagates recognized permission failures, including access denied by Lake Formation, instead of returning or caching `False`.
+For failed metadata requests, the error response establishes absence only when it is a recognized `EntityNotFoundException`; an unrecognized error is never guessed to mean a missing table.
+The `information_schema` queries described below can still establish absence after a failed request, from the query's result rather than from the error.
 Column reflection and `has_table()` do not retry a table-metadata request that `information_schema` can answer; they read `information_schema.columns` instead, executed without query result reuse, and log a warning.
 That covers a throttled request in any catalog.
 It also covers a `MetadataException` carrying no recognized Glue error envelope, but only outside `AwsDataCatalog`: a federated catalog reports a missing table in its connector's own words, so absence is decided by the query against that catalog rather than by an unrecognized message.
@@ -108,7 +109,10 @@ Other error codes listed in the connection's `RetryConfig.exceptions` are still 
 A `retry_config` in `cursor_kwargs` replaces that policy entirely, including those retries, which then run before the fallback.
 The fallback maps unbounded `varchar` to SQLAlchemy `String`, matching Hive `STRING` reflection from the metadata API, and preserves explicit `VARCHAR(n)` and `CHAR(n)` lengths.
 Partition columns are marked from the `extra_info` column.
-This fallback does not populate the table-metadata cache, and table comments and table options still come from the metadata API with the configured retries, so they propagate the error.
+This fallback does not populate the table-metadata cache.
+Table comments and table options still come from the metadata API with the configured retries.
+When that request fails, they raise `NoSuchTableError` for a recognized `EntityNotFoundException` and propagate any other error, except that for an unrecognized `MetadataException` outside `AwsDataCatalog` they query `information_schema.columns` and raise `NoSuchTableError` if it has no row for the table.
+The query is skipped when column reflection in the same Inspector has already read the table's columns from `information_schema`.
 The dialect runs its own queries — this fallback and `get_view_definition()` — through the API cursor, whatever `cursor_class` or `unload` setting the connection carries, because it parses those result rows itself.
 Athena applies its metadata API rate limits per account, and they are not listed in Service Quotas.
 PyAthena's API retries use exponential backoff with uniform jitter; `RetryConfig` documents the default attempt count and waits.

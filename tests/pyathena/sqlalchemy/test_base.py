@@ -273,6 +273,96 @@ class TestAthenaDialect:
             columns = AthenaDialect()._get_columns(connection, "events")
             assert [column["name"] for column in columns] == expected
 
+    @staticmethod
+    def _failing_lookup_connection(code, message, catalog_name, rows):
+        error = ClientError({"Error": {"Code": code, "Message": message}}, "GetTableMetadata")
+        executed = []
+
+        def get_table_metadata(table_name, **kwargs):
+            raise OperationalError(*error.args) from error
+
+        cursor = SimpleNamespace(
+            get_table_metadata=get_table_metadata,
+            execute=lambda operation, **kwargs: executed.append(operation),
+            fetchall=lambda: rows,
+        )
+        raw_connection = SimpleNamespace(
+            cursor_kwargs={},
+            catalog_name=catalog_name,
+            schema_name="default",
+            driver_connection=SimpleNamespace(
+                cursor=lambda *args, **kwargs: contextlib.nullcontext(cursor)
+            ),
+        )
+        return SimpleNamespace(connection=raw_connection), error, executed
+
+    @pytest.mark.parametrize("method", ["get_table_comment", "get_table_options"])
+    @pytest.mark.parametrize(
+        ("code", "catalog_name", "rows", "expected", "expected_queries"),
+        [
+            ("MetadataException", "federated_catalog", [], NoSuchTableError, 1),
+            (
+                "MetadataException",
+                "federated_catalog",
+                [("1", "id", "integer", None, None)],
+                OperationalError,
+                1,
+            ),
+            # information_schema filters by Lake Formation in the Glue Data
+            # Catalog, so it is not asked there.
+            ("MetadataException", "AwsDataCatalog", [], OperationalError, 0),
+            # information_schema has no comment or options, so a throttled
+            # lookup of an existing table could only fail after the query.
+            ("ThrottlingException", "federated_catalog", [], OperationalError, 0),
+        ],
+        ids=["federated-absent", "federated-present", "glue", "throttled"],
+    )
+    def test_table_level_reflection_of_failed_lookup(
+        self, method, code, catalog_name, rows, expected, expected_queries
+    ):
+        connection, error, executed = self._failing_lookup_connection(
+            code,
+            # The Lambda connector's words for a missing table, measured in #798.
+            "Failed to invoke lambda function due to "
+            "com.amazonaws.services.lambda.invoke.LambdaFunctionException: "
+            "Requested resource not found "
+            "(Service: DynamoDb, Status Code: 400, Request ID: example)",
+            catalog_name,
+            rows,
+        )
+        info_cache = {}
+
+        with pytest.raises(expected) as caught:
+            getattr(AthenaDialect(), method)(connection, "events", info_cache=info_cache)
+
+        # NoSuchTableError chains the OperationalError that carries the API error.
+        cause = caught.value.__cause__
+        if expected is NoSuchTableError:
+            cause = cause.__cause__
+        assert cause is error
+        assert len(executed) == expected_queries
+        # A failed call caches nothing, not even the columns it found, so later
+        # column reflection still asks the metadata API first.
+        assert info_cache == {}
+
+    def test_table_level_reflection_reuses_reflected_columns(self):
+        # Table(autoload_with=...) reflects columns first; columns read from
+        # information_schema already show the table exists.
+        connection, error, executed = self._failing_lookup_connection(
+            "MetadataException", "Unrecognized connector error", "federated_catalog", []
+        )
+        info_cache = {
+            ("pyathena_information_schema_columns", "federated_catalog", "default", "events"): [
+                {"name": "id"}
+            ]
+        }
+
+        with pytest.raises(OperationalError) as caught:
+            AthenaDialect().get_table_options(connection, "events", info_cache=info_cache)
+
+        assert caught.value.__cause__ is error
+        assert executed == []
+
     def test_get_view_definition_keeps_blank_lines(self):
         # Athena returns the definition one row per line, blank lines included.
         # Reading them through the user's cursor loses or corrupts those rows,
