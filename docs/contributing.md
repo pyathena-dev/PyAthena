@@ -135,4 +135,4 @@ This policy does not require adding headers to existing files or changing existi
 Existing non-empty files that contain only the maintainer's original work carry the header above, dated with the year of their earliest surviving content other than import statements.
 The pull request template is an exception because its content is copied into each pull request.
 Other existing files keep their current notices.
-[NOTICE](https://github.com/pyathena-dev/PyAthena/blob/master/NOTICE) acknowledges PyHive's influence on PyAthena.
+[NOTICE](https://github.com/pyathena-dev/PyAthena/blob/master/NOTICE) acknowledges PyHive's influence on PyAthena, lists other third-party material, and describes files without the header.
