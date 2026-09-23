@@ -78,7 +78,9 @@ Please read [CONTRIBUTING.md](https://github.com/pyathena-dev/PyAthena/blob/mast
 
 [MIT license](https://github.com/pyathena-dev/PyAthena/blob/master/LICENSE)
 
-Many of the implementations in this library are based on [PyHive](https://github.com/dropbox/PyHive), thanks for [PyHive](https://github.com/dropbox/PyHive).
+PyAthena's early development was informed by [PyHive](https://github.com/dropbox/PyHive), including its DB-API tests and implementation patterns.
+PyAthena has since evolved with substantial Athena-specific functionality and additional backends.
+See [NOTICE](https://github.com/pyathena-dev/PyAthena/blob/master/NOTICE) for acknowledgements.
 
 ## Links
 

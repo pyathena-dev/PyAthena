@@ -104,6 +104,7 @@ ignore-vcs = true
 only-include = [
     "pyathena/",
     "LICENSE",
+    "NOTICE",
     "pyproject.toml",
     "README.md"
 ]
