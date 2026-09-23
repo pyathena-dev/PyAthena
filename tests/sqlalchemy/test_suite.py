@@ -12,6 +12,9 @@ from sqlalchemy import (
     Integer,
     MetaData,
     String,
+    all_,
+    any_,
+    bindparam,
     cast,
     func,
     inspect,
@@ -156,6 +159,172 @@ class _ArrayTuple(types.TypeDecorator):
 
     def process_result_value(self, value, dialect):
         return tuple(value) if value is not None else None
+
+
+class ArrayExpressionTest(fixtures.TestBase):
+    __backend__ = True
+    __requires__ = ("array_type",)
+
+    def test_decorated_and_variant_arrays(self, connection):
+        array = literal([1, 2, 3], _ArrayTuple())
+        variant = literal([1, 2], String().with_variant(_ArrayTuple(), "awsathena"))
+        statement = select(
+            array[1],
+            array[1:2],
+            any_(array) == 2,
+            all_(array) > 0,
+            array.concat([4]),
+            any_(variant) == 2,
+            variant,
+        )
+        eq_(
+            tuple(connection.execute(statement).one()),
+            (1, (1, 2), True, True, (1, 2, 3, 4), True, (1, 2)),
+        )
+
+    @sa_testing.combinations(
+        (String(), String, ["a", "b"], "a"),
+        (Integer(), Integer, [1, 2], 1),
+        argnames="base_type,item_type,values,needle",
+    )
+    def test_variant_array_quantifier_scalar_bind(
+        self, connection, base_type, item_type, values, needle
+    ):
+        array = literal(values, base_type.with_variant(AthenaArray(item_type), "awsathena"))
+        statement = select(any_(array) == needle, all_(array) == needle)
+        eq_(tuple(connection.execute(statement).one()), (True, False))
+        eq_(tuple(connection.execute(statement).one()), (True, False))
+
+    def test_cached_steps_and_boolean_quantifiers(self, connection):
+        inferred = func.array_agg(func.length(literal("abc")))
+        eq_(connection.execute(select(inferred[1:2:1])).scalar_one(), [3])
+        array = literal([1, 2, 3], types.ARRAY(Integer))
+        eq_(connection.execute(select(array[1:2:1])).scalar_one(), [1, 2])
+        with pytest.raises(sa_exc.StatementError, match="step") as error:
+            connection.execute(select(array[1:2:2])).all()
+        assert isinstance(error.value.orig, ValueError)
+        flags = literal([True, False], AthenaArray(types.Boolean))
+        comparison = any_(flags) == True  # noqa: E712
+        eq_(
+            tuple(
+                connection.execute(
+                    select(comparison, all_(flags) == True, ~comparison, ~comparison.self_group())  # noqa: E712
+                ).one()
+            ),
+            (True, False, True, False),
+        )
+
+    def test_index_slice_and_concat(self, connection):
+        array = literal([1, None, 3], AthenaArray(Integer))
+        empty = literal([], AthenaArray(Integer))
+        missing = literal(None, AthenaArray(Integer))
+        expressions = [
+            array[1],
+            array[2],
+            array[0],
+            array[-1],
+            array[10],
+            array[literal(None, Integer)],
+            array[:],
+            array[:2],
+            array[2:],
+            array[-2:100],
+            array[3:1],
+            empty[1:3],
+            missing[1:3],
+            array.concat([4]),
+            array[1:2].concat(array[3:]),
+        ]
+        eq_(
+            tuple(connection.execute(select(*expressions)).one()),
+            (
+                1,
+                None,
+                None,
+                None,
+                None,
+                None,
+                [1, None, 3],
+                [1, None],
+                [None, 3],
+                [1, None, 3],
+                [],
+                [],
+                None,
+                [1, None, 3, 4],
+                [1, None, 3],
+            ),
+        )
+
+    def test_dimensions_zero_indexes_and_bound_index(self, connection):
+        array = literal([[1, 2], [3]], AthenaArray(Integer, dimensions=2, zero_indexes=True))
+        statement = select(array[bindparam("index")], array[:0], array[0][1], array[1:])
+        eq_(tuple(connection.execute(statement, {"index": 0}).one()), ([1, 2], [[1, 2]], 2, [[3]]))
+        eq_(tuple(connection.execute(statement, {"index": 1}).one()), ([3], [[1, 2]], 2, [[3]]))
+        eq_(connection.execute(select(array.any([1, 2]))).scalar_one(), True)
+        plain = literal([1, 2], types.ARRAY(Integer))
+        eq_(connection.execute(select(plain[bindparam("index")]), {"index": 2}).scalar_one(), 2)
+        eq_(
+            connection.execute(
+                select(literal([1, 2], AthenaArray(Integer)) == any_(func.array_agg(plain)))
+            ).scalar_one(),
+            True,
+        )
+
+    def test_quantified_comparisons(self, connection):
+        cases = [
+            ([1, 2, None], True, False, False, False),
+            ([1, None], None, False, False, None),
+            ([2, None], True, None, False, False),
+            ([3, None], None, False, None, None),
+            ([1, 3], False, False, False, True),
+            ([], False, True, True, True),
+            (None, None, None, None, None),
+        ]
+        for values, eq_any, eq_all, lt_all, neg_any in cases:
+            array = literal(values, AthenaArray(Integer))
+            row = connection.execute(
+                select(
+                    any_(array) == 2,
+                    all_(array) == 2,
+                    all_(array) > 2,
+                    ~array.any(2),
+                    any_(array) == None,  # noqa: E711
+                )
+            ).one()
+            eq_(
+                tuple(row),
+                (
+                    eq_any,
+                    eq_all,
+                    lt_all,
+                    neg_any if eq_any is not None else None,
+                    False if values == [] else None,
+                ),
+            )
+
+    def test_where_and_lambda_names(self, connection, metadata):
+        table = Table(
+            "array_expressions",
+            metadata,
+            Column("id", Integer),
+            Column("items", AthenaArray(Integer)),
+            Column("_pyathena_element_0", Integer),
+        )
+        table.create(connection)
+        connection.execute(
+            table.insert(),
+            [
+                {"id": 1, "items": [1, 3], "_pyathena_element_0": 3},
+                {"id": 2, "items": [2, 4], "_pyathena_element_0": 1},
+            ],
+        )
+        predicate = (table.c._pyathena_element_0 == any_(table.c["items"])) & (
+            table.c["items"][1] == 1
+        )
+        eq_(connection.execute(select(table.c.id).where(predicate)).scalars().all(), [1])
+        textual_predicate = literal_column("_pyathena_element_0 + 1") == any_(table.c["items"])
+        eq_(connection.execute(select(table.c.id).where(textual_predicate)).scalars().all(), [2])
 
 
 class NativeArrayTest(fixtures.TestBase):

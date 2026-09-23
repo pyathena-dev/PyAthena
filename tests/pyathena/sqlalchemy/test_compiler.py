@@ -1,3 +1,5 @@
+import warnings
+
 import pytest
 from sqlalchemy import (
     Column,
@@ -8,12 +10,21 @@ from sqlalchemy import (
     Numeric,
     String,
     Table,
+    all_,
+    any_,
+    bindparam,
+    cast,
+    column,
     exc,
     func,
     select,
+    table,
+    text,
+    types,
 )
 from sqlalchemy.engine.url import make_url
-from sqlalchemy.sql import literal, literal_column
+from sqlalchemy.sql import literal, literal_column, operators
+from sqlalchemy.sql.compiler import FROM_LINTING
 from sqlalchemy.sql.ddl import CreateTable
 
 from pyathena.sqlalchemy.base import AthenaDialect
@@ -271,6 +282,137 @@ class TestAthenaStatementCompiler:
         )
 
         assert str(compiled) == expected
+
+    def _compile_sql(self, expression):
+        return str(expression.compile(dialect=self.dialect, compile_kwargs={"literal_binds": True}))
+
+    @pytest.mark.parametrize(("aggregate", "function"), [(any_, "any_match"), (all_, "all_match")])
+    @pytest.mark.parametrize(
+        ("op", "sql_operator"),
+        [
+            (operators.eq, "="),
+            (operators.ne, "!="),
+            (operators.lt, "<"),
+            (operators.le, "<="),
+            (operators.gt, ">"),
+            (operators.ge, ">="),
+        ],
+    )
+    def test_array_quantified_comparison(self, aggregate, function, op, sql_operator):
+        items = column("items", AthenaArray(Integer))
+        sql = self._compile_sql(op(2, aggregate(items)))
+        assert sql == (
+            f"{function}((items), _pyathena_element_0 -> 2 {sql_operator} _pyathena_element_0)"
+        )
+
+    def test_array_quantifier_null_negation_and_legacy_methods(self):
+        items = column("items", AthenaArray(Integer))
+        assert "NULL = _pyathena_element_0" in self._compile_sql(any_(items) == None)  # noqa: E711
+        assert self._compile_sql(items.any(2)) == self._compile_sql(any_(items) == 2)
+        assert self._compile_sql(items.all(2, operator=operators.lt)) == self._compile_sql(
+            all_(items) > 2
+        )
+        assert self._compile_sql(~items.any(2)).startswith("NOT (any_match(")
+        assert "2 > _pyathena_element_0" in self._compile_sql(any_(items) < 2)
+
+    @pytest.mark.parametrize(
+        ("scalar", "expected"),
+        [
+            (column("_pyathena_element_0", Integer), "_pyathena_element_0"),
+            (literal_column("_pyathena_element_0 + 1"), "_pyathena_element_0 + 1"),
+            (literal_column('"_pyathena_element_0" + 1'), '"_pyathena_element_0" + 1'),
+            (text("_pyathena_element_0 + 1"), "_pyathena_element_0 + 1"),
+        ],
+    )
+    def test_array_lambda_does_not_capture_column_names(self, scalar, expected):
+        items = column("items", AthenaArray(Integer))
+        sql = self._compile_sql(scalar == any_(items))
+        assert f"_pyathena_element_1 -> {expected} = _pyathena_element_1" in sql
+
+    def test_array_index_does_not_repeat_expression(self):
+        items = column("items", AthenaArray(Integer))
+        index = cast(func.floor(func.random() * 3), Integer) - 1
+        sql = self._compile_sql(items[index])
+        assert sql.count("random()") == 1
+        assert "NULLIF(greatest(" in sql
+
+    def test_multidimensional_array_quantifier_bind_type(self):
+        items = column("items", AthenaArray(Integer, dimensions=2))
+        assert "CAST(ARRAY[1, 2] AS ARRAY(INTEGER)) =" in self._compile_sql(items.any([1, 2]))
+
+    def test_quantifier_preserves_explicit_array_bind(self):
+        items = column("items", AthenaArray(Integer))
+        needle = literal([1, 2], items.type)
+        sql = self._compile_sql(needle == any_(func.array_agg(items)))
+        assert "CAST(ARRAY[1, 2] AS ARRAY(INTEGER)) = _pyathena_element_0" in sql
+        unknown = column("unknown", AthenaArray(types.NullType()))
+        sql = self._compile_sql(needle == any_(unknown))
+        assert "CAST(ARRAY[1, 2] AS ARRAY(INTEGER)) = _pyathena_element_0" in sql
+
+    def test_subquery_any_remains_unchanged(self):
+        sql = self._compile_sql(any_(select(column("item", Integer)).scalar_subquery()) == 2)
+        assert "ANY (SELECT item)" in sql
+        assert "any_match" not in sql
+        items = column("items", AthenaArray(Integer))
+        array_subquery = self._compile_sql(select(items == any_(select(items).scalar_subquery())))
+        assert "ANY (SELECT items" in array_subquery
+        assert "any_match" not in array_subquery
+
+    def test_array_concat_and_cache_bind_values(self):
+        items = column("items", AthenaArray(Integer))
+        assert self._compile_sql(items.concat([2])) == "items || CAST(ARRAY[2] AS ARRAY(INTEGER))"
+        first = select(items[bindparam("index")]).where(any_(items) == 2)
+        second = select(items[bindparam("index")]).where(any_(items) == 3)
+        assert first._generate_cache_key().key == second._generate_cache_key().key
+        assert self._compile_sql(first.params(index=1)) != self._compile_sql(first.params(index=2))
+
+    def test_quantifier_boolean_left_operand(self):
+        flags = column("flags", AthenaArray(types.Boolean))
+        assert "any_match" in self._compile_sql(any_(flags) == True)  # noqa: E712
+        assert "all_match" in self._compile_sql(all_(flags) != False)  # noqa: E712
+        assert "IS DISTINCT FROM" in self._compile_sql(any_(flags).is_distinct_from(True))
+        comparison = any_(flags) == True  # noqa: E712
+        assert self._compile_sql(~comparison) == (
+            "any_match((flags), _pyathena_element_0 -> _pyathena_element_0 != true)"
+        )
+        assert self._compile_sql(~comparison.self_group()) == (
+            "NOT (any_match((flags), _pyathena_element_0 -> _pyathena_element_0 = true))"
+        )
+
+    def test_quantifier_join_linter_tracks_original_tables(self):
+        left = table("left_table", column("value", Integer))
+        right = table("right_table", column("items", AthenaArray(Integer)))
+        query = select(left, right).where(left.c.value == any_(right.c["items"]))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", exc.SAWarning)
+            query.compile(dialect=AthenaDialect(), linting=FROM_LINTING)
+
+    def test_generic_array_slice_step_is_rendered_for_cache_validation(self):
+        items = column("items", types.ARRAY(Integer))
+        query = select(items[2:3:1])
+        compiled = query.compile(dialect=AthenaDialect())
+        assert "Unsupported ARRAY slice step" in str(compiled)
+        assert list(compiled.params.values()).count(1) == 1
+        assert query._generate_cache_key().key == select(items[2:3:2])._generate_cache_key().key
+        step_name = next(name for name, value in compiled.params.items() if value == 1)
+        assert f"IF(%({step_name})s = 1" in str(compiled)
+        for invalid in (2, 1.0, None):
+            with pytest.raises(ValueError, match="step"):
+                compiled._bind_processors[step_name](invalid)
+        native = column("items", AthenaArray(Integer))
+        assert (
+            select(native[1:3:1])._generate_cache_key().key
+            == select(native[1:3])._generate_cache_key().key
+        )
+        with pytest.raises(exc.CompileError, match="step"):
+            native[1:3:2]
+
+    def test_stepped_array_aggregate_with_inferred_element_type(self):
+        expression = func.array_agg(func.length("abc"))[1:2:1]
+        sql = self._compile_sql(select(expression))
+        assert "array_agg(length('abc'))" in sql
+        assert "Unsupported ARRAY slice step" in sql
+        assert "ARRAY(NULL)" not in sql
 
 
 class TestAthenaDDLCompiler:

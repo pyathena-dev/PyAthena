@@ -1084,6 +1084,40 @@ CREATE TABLE orders (
 )
 ```
 
+#### ARRAY expressions
+
+Use SQLAlchemy expressions to index, slice, concatenate, or compare array values in SELECT and WHERE clauses.
+Indices are one-based by default.
+`AthenaArray(Integer, zero_indexes=True)` translates explicit indices and slice boundaries by adding one.
+Reads return NULL when the resulting SQL index is NULL, below one, or out of range; negative indices do not count from the end.
+
+```python
+from sqlalchemy import any_, select
+
+item_ids = orders.c.item_ids
+statement = select(item_ids[1], item_ids[2:4], item_ids.concat([5])).where(
+    any_(item_ids) == 3
+)
+```
+
+Slice stops are inclusive, following SQLAlchemy's SQL array convention.
+Omitted boundaries mean the beginning or end of the array; explicit boundaries are clipped to the array.
+A reversed slice returns an empty array, and slicing a NULL array returns NULL.
+Only `step=None` and `step=1` are supported.
+Slice SQL can evaluate the array and boundary expressions more than once; use deterministic expressions rather than volatile functions such as `random()` in slices.
+Use `AthenaArray` for open-ended slices with `zero_indexes=True`; SQLAlchemy's generic `ARRAY` comparator requires explicit bounds in that mode.
+Indexing a multidimensional array retains the remaining dimensions, while slicing retains its array type.
+
+`any_(array)` and `all_(array)`, and the legacy `array.any(value)` and `array.all(value)` methods, compile to Athena's `any_match` and `all_match` functions.
+Comparisons use SQL three-valued logic: NULL elements can produce NULL when no decisive true or false result exists.
+For an empty array, ANY is false and ALL is true.
+A NULL array produces NULL for both.
+SQLAlchemy comparison flipping is preserved.
+SQLAlchemy can rewrite negation into an element-wise comparison before dialect compilation, depending on the version and operand types.
+For example, `~(any_(flags) == True)` can become an element-wise `!= True` comparison; older SQLAlchemy 2.0 releases also rewrite non-boolean comparisons this way.
+To negate the whole match, always explicitly group the comparison first: `~(any_(flags) == True).self_group()`.
+Quantifiers over subqueries retain their usual SQL compilation.
+
 #### Querying ARRAY data
 
 Use `select()` with `ARRAY` or `AthenaArray` columns whose element types are known, either declared explicitly or reflected from Athena, to receive typed Python collections.
