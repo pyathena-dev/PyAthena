@@ -261,13 +261,17 @@ def to_sql(
     ).Bucket(bucket_name)
     cursor = conn.cursor()
 
+    # Athena stores identifiers in lowercase and information_schema reports them
+    # that way, so compare lowercase literals.
+    schema_literal = schema.lower().replace("'", "''")
+    name_literal = name.lower().replace("'", "''")
     table = cursor.execute(
         textwrap.dedent(
             f"""
             SELECT table_name
             FROM information_schema.tables
-            WHERE table_schema = '{schema}'
-            AND table_name = '{name}'
+            WHERE table_schema = '{schema_literal}'
+            AND table_name = '{name_literal}'
             """
         )
     ).fetchall()

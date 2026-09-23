@@ -342,7 +342,9 @@ def test_to_sql(cursor):
             "col_binary",
         ]
     ]
-    table_name = f"""to_sql_{str(uuid.uuid4()).replace("-", "")}"""
+    # Uppercase letters: Athena reports names in lowercase, and the existence
+    # check behind if_exists has to find the table anyway.
+    table_name = f"To_Sql_{uuid.uuid4().hex}"
     location = f"{ENV.s3_staging_dir}{ENV.schema}/{table_name}/"
     to_sql(
         df,
