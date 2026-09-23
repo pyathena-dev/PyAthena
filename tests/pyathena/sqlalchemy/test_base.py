@@ -296,14 +296,6 @@ class TestAthenaDialect:
         )
         return SimpleNamespace(connection=raw_connection), error, executed
 
-    # The Lambda connector's words for a missing table, measured in #798.
-    _CONNECTOR_MISSING_TABLE = (
-        "Failed to invoke lambda function due to "
-        "com.amazonaws.services.lambda.invoke.LambdaFunctionException: "
-        "Requested resource not found "
-        "(Service: DynamoDb, Status Code: 400, Request ID: example)"
-    )
-
     @pytest.mark.parametrize("method", ["get_table_comment", "get_table_options"])
     @pytest.mark.parametrize(
         ("code", "catalog_name", "rows", "expected", "expected_queries"),
@@ -329,7 +321,14 @@ class TestAthenaDialect:
         self, method, code, catalog_name, rows, expected, expected_queries
     ):
         connection, error, executed = self._failing_lookup_connection(
-            code, self._CONNECTOR_MISSING_TABLE, catalog_name, rows
+            code,
+            # The Lambda connector's words for a missing table, measured in #798.
+            "Failed to invoke lambda function due to "
+            "com.amazonaws.services.lambda.invoke.LambdaFunctionException: "
+            "Requested resource not found "
+            "(Service: DynamoDb, Status Code: 400, Request ID: example)",
+            catalog_name,
+            rows,
         )
         info_cache = {}
 
