@@ -353,8 +353,11 @@ class BaseCursor(metaclass=ABCMeta):
         if _get_error_code(cause, unwrap_metadata=True) in THROTTLING_ERROR_CODES:
             _logger.warning(f"Request to {description} was throttled; reading it from Glue.")
             return True
-        # The first attempt left out MetadataException, which the policy may retry.
-        if is_retryable_error(cause, self._retry_config):
+        # The first attempt left out MetadataException, which the policy may retry;
+        # a code it did retry has already had its retries.
+        if is_retryable_error(cause, self._retry_config) and not is_retryable_error(
+            cause, self._glue_first_attempt_retry_config()
+        ):
             return False
         if logging_:
             _logger.exception(f"Failed to {description}.")

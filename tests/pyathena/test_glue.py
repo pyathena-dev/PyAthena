@@ -72,6 +72,34 @@ class TestGlueMetadataCatalog:
             ("get_databases", catalog_kwargs),
         ]
 
+    def test_table_metadata_leaves_out_columns_iceberg_no_longer_has(self):
+        # Glue's columns after DROP COLUMN b and CHANGE COLUMN a a2, as measured
+        # for #786; Athena reports a2, c and d.
+        def column(name, current):
+            return {
+                "Name": name,
+                "Type": "int",
+                "Parameters": {"iceberg.field.current": current, "iceberg.field.id": "1"},
+            }
+
+        table = {
+            "Name": "t",
+            "Parameters": {"table_type": "ICEBERG"},
+            "StorageDescriptor": {
+                "Columns": [
+                    column("a2", "true"),
+                    column("c", "true"),
+                    column("d", "true"),
+                    column("a", "false"),
+                    column("b", "false"),
+                ]
+            },
+        }
+
+        metadata = GlueMetadataCatalog.table_metadata(table)
+
+        assert [c.name for c in metadata.columns] == ["a2", "c", "d"]
+
     @pytest.mark.parametrize(
         ("table", "expected_parameters"),
         [

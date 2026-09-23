@@ -90,6 +90,8 @@ class GlueMetadataCatalog:
         location and formats are always present, the SerDe library whenever
         the descriptor has SerDe information, and SerDe parameters with a
         ``serde.param.`` prefix. The Glue description is not the table comment.
+        Glue keeps an Iceberg table's dropped and renamed columns, marked as
+        not current, which Athena leaves out.
 
         Args:
             table: A ``Table`` from a Glue ``GetTable`` or ``GetTables`` response.
@@ -119,7 +121,11 @@ class GlueMetadataCatalog:
                     "CreateTime": table.get("CreateTime"),
                     "LastAccessTime": table.get("LastAccessTime"),
                     "TableType": table.get("TableType"),
-                    "Columns": [column(c) for c in descriptor.get("Columns") or []],
+                    "Columns": [
+                        column(c)
+                        for c in descriptor.get("Columns") or []
+                        if (c.get("Parameters") or {}).get("iceberg.field.current") != "false"
+                    ],
                     "PartitionKeys": [column(c) for c in table.get("PartitionKeys") or []],
                     "Parameters": parameters,
                 }
