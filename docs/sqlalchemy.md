@@ -97,7 +97,7 @@ Table-name case variants share metadata in `AwsDataCatalog`; other catalogs reta
 A later listing preserves metadata already fetched for a table.
 `clear_cache()` also discards this metadata; an absent entry in a listing is not cached as proof that a table does not exist.
 
-Table-metadata lookups never treat a throttling or permission error as a missing table.
+A throttling or permission error from a table-metadata lookup never by itself establishes that a table is missing.
 `has_table()` propagates permission failures, including access denied by Lake Formation, instead of returning or caching `False`.
 For failed metadata requests, the error response establishes absence only when it is a recognized `EntityNotFoundException`; an unrecognized error is never guessed to mean a missing table.
 The `information_schema` queries described below can still establish absence after a failed request, from the query's result rather than from the error.
