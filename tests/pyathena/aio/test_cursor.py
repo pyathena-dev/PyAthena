@@ -1,6 +1,8 @@
 import asyncio
 import re
+import threading
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -473,6 +475,29 @@ class TestAioCursor:
             aio_cursor.arraysize = 10000
         with pytest.raises(ProgrammingError):
             aio_cursor.arraysize = -1
+
+    async def test_glue_request_runs_off_the_event_loop(self, aio_cursor, monkeypatch):
+        connection = aio_cursor.connection
+        throttle_metadata_api(connection.client, monkeypatch)
+        loop_thread = threading.get_ident()
+        threads = []
+        client = SimpleNamespace(
+            get_table=lambda **kwargs: (
+                threads.append(("request", threading.get_ident()))
+                or {"Table": {"Name": kwargs["Name"], "StorageDescriptor": {}}}
+            )
+        )
+
+        def glue_client(self):
+            threads.append(("client", threading.get_ident()))
+            return client
+
+        monkeypatch.setattr(type(connection), "glue_client", property(glue_client))
+
+        assert (await aio_cursor.get_table_metadata("one_row")).name == "one_row"
+        # Building the client and sending the request would block the loop.
+        assert [step for step, _ in threads] == ["client", "request"]
+        assert all(thread != loop_thread for _, thread in threads)
 
     async def test_list_databases(self, aio_cursor):
         databases = await aio_cursor.list_databases(catalog_name="AwsDataCatalog")

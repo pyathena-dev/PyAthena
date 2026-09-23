@@ -1566,12 +1566,17 @@ class TestCursor:
         conn = connect(
             region_name=ENV.region_name,
             endpoint_url=f"https://athena.{ENV.region_name}.amazonaws.com",
+            # Athena's API version, which Glue does not have.
+            api_version="2017-05-18",
         )
 
-        assert conn.glue_client.meta.service_model.service_name == "glue"
-        assert conn.glue_client.meta.endpoint_url == f"https://glue.{ENV.region_name}.amazonaws.com"
-        # Built once and shared by the connection's cursors.
-        assert conn.glue_client is conn.glue_client
+        # Built once, even when cursors in several threads need it together.
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            clients = list(executor.map(lambda _: conn.glue_client, range(8)))
+
+        assert all(client is clients[0] for client in clients)
+        assert clients[0].meta.service_model.service_name == "glue"
+        assert clients[0].meta.endpoint_url == f"https://glue.{ENV.region_name}.amazonaws.com"
 
 
 class TestDictCursor:
