@@ -342,7 +342,9 @@ def test_to_sql(cursor):
             "col_binary",
         ]
     ]
-    table_name = f"""to_sql_{str(uuid.uuid4()).replace("-", "")}"""
+    # Uppercase letters: Athena reports names in lowercase, and the existence
+    # check behind if_exists has to find the table anyway.
+    table_name = f"To_Sql_{uuid.uuid4().hex}"
     location = f"{ENV.s3_staging_dir}{ENV.schema}/{table_name}/"
     to_sql(
         df,
@@ -436,20 +438,6 @@ def test_to_sql(cursor):
             b"foobar",
         ),
     ]
-
-
-def test_to_sql_finds_an_existing_table_by_mixed_case_name(cursor):
-    # Athena stores and reports names in lowercase, so the existence check has
-    # to match a name given with uppercase letters.
-    df = pd.DataFrame({"col_int": np.int32([1])})
-    table_name = f"To_Sql_Case_{uuid.uuid4().hex}"
-    location = f"{ENV.s3_staging_dir}{ENV.schema}/{table_name.lower()}/"
-    to_sql(df, table_name, cursor._connection, location, schema=ENV.schema, if_exists="fail")
-    with pytest.raises(OperationalError):
-        to_sql(df, table_name, cursor._connection, location, schema=ENV.schema, if_exists="fail")
-    to_sql(df, table_name, cursor._connection, location, schema=ENV.schema, if_exists="replace")
-    cursor.execute(f"SELECT col_int FROM {table_name}")
-    assert cursor.fetchall() == [(1,)]
 
 
 def test_to_sql_with_index(cursor):
