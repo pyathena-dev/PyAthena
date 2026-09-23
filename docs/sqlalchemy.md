@@ -100,7 +100,7 @@ A later listing preserves metadata already fetched for a table.
 Table-metadata lookups propagate throttling and permission errors rather than reporting missing tables.
 `has_table()` propagates permission failures, including access denied by Lake Formation, instead of returning or caching `False`.
 For failed metadata requests, the error response establishes absence only when it is a recognized `EntityNotFoundException`; an unrecognized error is never guessed to mean a missing table.
-Outside `AwsDataCatalog`, the `information_schema` query described below can still establish absence after such an error.
+The `information_schema` queries described below can still establish absence after a failed request, from the query's result rather than from the error.
 Column reflection and `has_table()` do not retry a table-metadata request that `information_schema` can answer; they read `information_schema.columns` instead, executed without query result reuse, and log a warning.
 That covers a throttled request in any catalog.
 It also covers a `MetadataException` carrying no recognized Glue error envelope, but only outside `AwsDataCatalog`: a federated catalog reports a missing table in its connector's own words, so absence is decided by the query against that catalog rather than by an unrecognized message.
