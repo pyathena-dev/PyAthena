@@ -23,10 +23,12 @@ from sqlalchemy import (
     select,
     text,
     types,
+    update,
 )
 from sqlalchemy import Table as SATable
 from sqlalchemy import exc as sa_exc
 from sqlalchemy import testing as sa_testing
+from sqlalchemy.orm import Session, registry
 from sqlalchemy.sql.elements import quoted_name
 from sqlalchemy.testing import eq_, fixtures
 from sqlalchemy.testing.schema import Column, Table
@@ -159,6 +161,217 @@ class _ArrayTuple(types.TypeDecorator):
 
     def process_result_value(self, value, dialect):
         return tuple(value) if value is not None else None
+
+
+class ArrayUpdateTest(fixtures.TestBase):
+    __backend__ = True
+    __requires__ = ("array_type",)
+
+    def test_element_resize_and_null(self, connection, metadata):
+        table = Table(
+            "array_element_updates",
+            metadata,
+            Column("id", Integer),
+            Column("items", AthenaArray(Integer)),
+            Column("marker", Integer),
+        )
+        table.create(connection)
+        connection.execute(
+            table.insert(),
+            [
+                {"id": 1, "items": [1, 2, 3]},
+                {"id": 2, "items": []},
+                {"id": 3, "items": None},
+            ],
+        )
+        items = table.c["items"]
+        connection.execute(
+            table.update().where(table.c.id == 1).values({items[5]: 9, table.c.marker: 42})
+        )
+        connection.execute(table.update().where(table.c.id == 1).values({items[2]: None}))
+        connection.execute(table.update().where(table.c.id > 1).values({items[2]: 7}))
+        eq_(
+            connection.execute(select(items, table.c.marker).order_by(table.c.id)).all(),
+            [([1, None, 3, None, 9], 42), ([None, 7], None), ([None, 7], None)],
+        )
+
+    def test_slice_resize(self, connection, metadata):
+        cases = [
+            ([1, 2, 3], slice(2, 2), [8, 9], [1, 8, 9, 3]),
+            ([1, 2, 3], slice(2, 3), [8], [1, 8]),
+            ([1, 2, 3], slice(2, 3), [], [1]),
+            ([1, 2, 3], slice(3, 1), [8], [1, 2, 8, 3]),
+            ([1, 2, 3], slice(5, 9), [8], [1, 2, 3, None, 8]),
+            ([1, 2, 3], slice(2, 9), [8], [1, 8]),
+            ([1, 2, 3], slice(None), [8, 9], [8, 9]),
+            ([], slice(1, 2), [], []),
+            (None, slice(2, 2), [8], [None, 8]),
+        ]
+        table = Table(
+            "array_slice_updates",
+            metadata,
+            Column("id", Integer),
+            Column("items", AthenaArray(Integer)),
+        )
+        table.create(connection)
+        connection.execute(
+            table.insert(),
+            [{"id": i, "items": before} for i, (before, _, _, _) in enumerate(cases)],
+        )
+        for i, (_, bounds, replacement, _) in enumerate(cases):
+            connection.execute(
+                table.update()
+                .where(table.c.id == i)
+                .values({table.c["items"][bounds]: replacement})
+            )
+        eq_(
+            connection.execute(select(table.c["items"]).order_by(table.c.id)).scalars().all(),
+            [expected for _, _, _, expected in cases],
+        )
+
+    def test_nested_zero_indexed_and_cached_bindings(self, connection, metadata):
+        table = Table(
+            "array_nested_updates",
+            metadata,
+            Column("id", Integer),
+            Column("items", AthenaArray(Integer, dimensions=2, zero_indexes=True)),
+        )
+        table.create(connection)
+        connection.execute(
+            table.insert(), [{"id": 1, "items": [[1], None]}, {"id": 2, "items": None}]
+        )
+        items = table.c["items"]
+        statement = (
+            table.update()
+            .where(table.c.id == bindparam("row_id"))
+            .values({items[bindparam("outer")][bindparam("inner")]: bindparam("value")})
+        )
+        connection.execute(statement, {"row_id": 1, "outer": 1, "inner": 1, "value": 7})
+        connection.execute(statement, {"row_id": 2, "outer": 0, "inner": 0, "value": 8})
+        connection.execute(table.update().where(table.c.id == 1).values({items[0][:0]: [4, 5]}))
+        eq_(
+            connection.execute(select(items).order_by(table.c.id)).scalars().all(),
+            [[[4, 5], [None, 7]], [[8]]],
+        )
+        with pytest.raises(sa_exc.DBAPIError):
+            connection.execute(statement, {"row_id": 1, "outer": -1, "inner": 0, "value": 9})
+
+    def test_expression_values_and_indices(self, connection, metadata):
+        table = Table(
+            "array_expression_updates",
+            metadata,
+            Column("id", Integer),
+            Column("items", AthenaArray(Integer)),
+            Column("binary_items", AthenaArray(types.BINARY)),
+            Column("tuple_items", _ArrayTuple()),
+            Column("decimal_items", AthenaArray(types.Numeric(8, 2))),
+            Column("timestamp_items", AthenaArray(types.TIMESTAMP)),
+        )
+        table.create(connection)
+        connection.execute(
+            table.insert().values(
+                id=1,
+                items=[1, 2, 3],
+                binary_items=[b"abc"],
+                tuple_items=[1, 2],
+                decimal_items=[Decimal("0.00")],
+                timestamp_items=[
+                    _datetime(2024, 1, 1, microsecond=123000),
+                    _datetime(2024, 1, 2, microsecond=456000),
+                ],
+            )
+        )
+        items = table.c["items"]
+        connection.execute(table.update().values({table.c.decimal_items[1]: Decimal("1.23")}))
+        eq_(connection.execute(select(table.c.decimal_items)).scalar_one(), [Decimal("1.23")])
+        connection.execute(
+            table.update().ordered_values(
+                (items[func.length("abc")], items[1] + 8),
+                (table.c.binary_items[1], b"\x00\xff"),
+                (table.c.tuple_items[bindparam("tuple_index")], bindparam("tuple_value")),
+                (table.c.decimal_items[1], table.c.decimal_items[1] + Decimal("3.33")),
+                (table.c.timestamp_items[1], table.c.timestamp_items[2]),
+                (table.c.id, 2),
+            ),
+            {"tuple_index": 1, "tuple_value": 5},
+        )
+        eq_(connection.execute(select(table.c.tuple_items)).scalar_one(), (5, 2))
+        connection.execute(
+            table.update().values(
+                {items[1:2]: items[2:3].concat([4]), table.c.tuple_items[1:1]: [6, 7]}
+            )
+        )
+        eq_(
+            connection.execute(select(table)).one(),
+            (
+                2,
+                [2, 9, 4, 9],
+                [b"\x00\xff"],
+                (6, 7, 2),
+                [Decimal("4.56")],
+                [_datetime(2024, 1, 2, microsecond=456000)] * 2,
+            ),
+        )
+
+    def test_orm_and_long_array_update(self, connection, metadata):
+        table = Table(
+            "array_orm_updates",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("items", AthenaArray(Integer)),
+        )
+        table.create(connection)
+        connection.execute(
+            table.insert().values(
+                id=1,
+                items=func.concat(func.sequence(1, 10000), literal([10001], AthenaArray(Integer))),
+            )
+        )
+        mapping = registry()
+
+        class Record:
+            pass
+
+        mapping.map_imperatively(Record, table)
+        try:
+            with Session(bind=connection) as session:
+                session.execute(update(Record).where(Record.id == 1).values({Record.items[1]: 99}))
+                session.flush()
+            row = connection.execute(select(table.c["items"])).scalar_one()
+            eq_((len(row), row[0], row[-1]), (10001, 99, 10001))
+            connection.execute(
+                table.update().values({table.c["items"][2]: select(literal(77)).scalar_subquery()})
+            )
+            eq_(connection.execute(select(table.c["items"])).scalar_one()[:3], [99, 77, 3])
+        finally:
+            mapping.dispose()
+
+    def test_cached_literal_assignment_failures(self, connection, metadata):
+        table = Table(
+            "array_cached_invalid_updates", metadata, Column("items", AthenaArray(Integer))
+        )
+        table.create(connection)
+        connection.execute(table.insert().values(items=[1, 2]))
+        connection = connection.execution_options(compiled_cache={})
+        items = table.c["items"]
+        connection.execute(table.update().values({items[1]: 3}))
+        with pytest.raises(sa_exc.DBAPIError, match="Invalid ARRAY index"):
+            connection.execute(table.update().values({items[0]: 4}))
+        eq_(connection.execute(select(items)).scalar_one(), [3, 2])
+        connection.execute(table.update().values({items[1:2]: [7]}))
+        with pytest.raises(sa_exc.DBAPIError, match="NULL ARRAY slice assignment"):
+            connection.execute(table.update().values({items[1:2]: None}))
+        eq_(connection.execute(select(items)).scalar_one(), [7])
+
+    def test_null_slice_binding_rejected(self, connection, metadata):
+        table = Table("array_null_slice", metadata, Column("items", types.ARRAY(Integer)))
+        table.create(connection)
+        connection.execute(table.insert().values(items=[1, 2]))
+        statement = table.update().values({table.c["items"][1:2]: bindparam("replacement")})
+        connection.execute(statement, {"replacement": [3]})
+        with pytest.raises(sa_exc.DBAPIError):
+            connection.execute(statement, {"replacement": None})
+        eq_(connection.execute(select(table.c["items"])).scalar_one(), [3])
 
 
 class ArrayExpressionTest(fixtures.TestBase):
