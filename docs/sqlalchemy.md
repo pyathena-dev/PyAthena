@@ -102,7 +102,7 @@ A throttling or permission error from a table-metadata lookup never by itself es
 For failed metadata requests, the error response establishes absence only when it is a recognized `EntityNotFoundException`; an unrecognized error is never guessed to mean a missing table.
 The `information_schema` queries described below can still establish absence after a failed request, from the query's result rather than from the error.
 Column reflection and `has_table()` do not retry a table-metadata request that `information_schema` can answer; they read `information_schema.columns` instead, executed without query result reuse, and log a warning.
-That covers a throttled request in any catalog.
+That covers a throttled request in any catalog that the cursor's Glue fallback, described below, does not answer.
 It also covers a `MetadataException` carrying no recognized Glue error envelope, but only outside `AwsDataCatalog`: a federated catalog reports a missing table in its connector's own words, so absence is decided by the query against that catalog rather than by an unrecognized message.
 In `AwsDataCatalog` an unrecognized `MetadataException` still propagates, because Glue does state missing tables and permission failures in a recognized envelope, and `information_schema` filters by Lake Formation instead of failing, so reading it there would report a table the caller cannot see as absent.
 Other error codes listed in the connection's `RetryConfig.exceptions` are still retried on that path, except those; list the wrapped Glue codes instead of `MetadataException`.
@@ -110,26 +110,16 @@ A `retry_config` in `cursor_kwargs` replaces that policy entirely, including tho
 The fallback maps unbounded `varchar` to SQLAlchemy `String`, matching Hive `STRING` reflection from the metadata API, and preserves explicit `VARCHAR(n)` and `CHAR(n)` lengths.
 Partition columns are marked from the `extra_info` column.
 This fallback does not populate the table-metadata cache.
-Table comments and table options still come from the metadata API with the configured retries, apart from the Glue fallback described below.
+Table comments and table options still come from the metadata API with the configured retries.
 When that request fails, they raise `NoSuchTableError` for a recognized `EntityNotFoundException` and propagate any other error, except that for an unrecognized `MetadataException` outside `AwsDataCatalog` they query `information_schema.columns` and raise `NoSuchTableError` if it has no row for the table.
 The query is skipped when column reflection in the same Inspector has already read the table's columns from `information_schema`.
 The dialect runs its own queries — this fallback and `get_view_definition()` — through the API cursor, whatever `cursor_class` or `unload` setting the connection carries, because it parses those result rows itself.
 
-In `AwsDataCatalog` and S3 Tables catalogs (`s3tablescatalog/<table-bucket>`), a throttled request for table comments, table options, table and view names, or schema names is answered from the AWS Glue Data Catalog instead, and a warning is logged.
-The request goes to Glue on the first throttled response, without waiting for the retry policy; a `retry_config` in `cursor_kwargs` still runs its retries first.
-The Glue client uses the connection's session, region, and botocore `config`, but not its `endpoint_url`.
+In `AwsDataCatalog` and S3 Tables catalogs, the cursor answers a throttled metadata request from the AWS Glue Data Catalog, as described in {ref}`usage-table-metadata`.
+Reflection of columns, `has_table()`, table comments, table options, and table, view, and schema names uses it, so these need the Glue permissions listed there.
 A table that Glue reports as missing raises `NoSuchTableError`.
-If the Glue request fails, for example for lack of permission or because the Glue endpoint cannot be reached, the Athena request runs again with the configured retries.
-Column reflection and `has_table()` keep the `information_schema` fallback.
-The fallback calls these Glue APIs with the connection's credentials:
-
-| Reflection | Glue API | IAM action |
-|---|---|---|
-| Table comments and table options | `GetTable` | `glue:GetTable` |
-| Table and view names | `GetTables` | `glue:GetTables` |
-| Schema names | `GetDatabases` | `glue:GetDatabases` |
-
-Without these permissions, the Glue request fails, a second warning is logged, and the Athena request runs again with the configured retries.
+When the Glue request fails, the metadata request runs again with the configured retries, and the paths above apply to its result.
+Set `glue_metadata_fallback=false` in the connection URL to turn the Glue fallback off.
 
 Athena applies its metadata API rate limits per account, and they are not listed in Service Quotas.
 PyAthena's API retries use exponential backoff with uniform jitter; `RetryConfig` documents the default attempt count and waits.

@@ -661,6 +661,30 @@ heuristic behavior may see string values where it previously saw integers or flo
 To restore typed conversion, pass `result_set_type_hints` with the appropriate type
 signatures for the affected columns.
 
+(usage-table-metadata)=
+
+## Table and database metadata
+
+`get_table_metadata()`, `list_table_metadata()`, and `list_databases()` call the Athena metadata API.
+Athena applies its metadata API rate limits per account, and they are not listed in Service Quotas.
+In `AwsDataCatalog` and S3 Tables catalogs (`s3tablescatalog/<table-bucket>`), a throttled request is answered from the AWS Glue Data Catalog instead, and a warning is logged.
+The request goes to Glue on the first throttled response, without waiting for the retry policy.
+Glue throttling that Athena reports inside a `MetadataException` counts as throttled.
+The fallback calls these Glue APIs with the connection's credentials:
+
+| Cursor method | Glue API | IAM action |
+|---|---|---|
+| `get_table_metadata()` | `GetTable` | `glue:GetTable` |
+| `list_table_metadata()` | `GetTables` | `glue:GetTables` |
+| `list_databases()` | `GetDatabases` | `glue:GetDatabases` |
+
+Glue's report that a table or database does not exist raises `OperationalError`, as Athena's does.
+If the Glue request fails for any other reason, for example for lack of permission or because the Glue endpoint cannot be reached, a second warning is logged and the Athena request runs again with the retry policy.
+Requests in other catalogs use the Athena API with the retry policy only.
+
+The connection builds one Glue client on first use from its session, region, and botocore `config`, but not its `endpoint_url`, and exposes it as `Connection.glue_client`.
+Pass `glue_metadata_fallback=False` to `connect()` to turn the fallback off.
+
 ## Environment variables
 
 Support [Boto3 environment variables](https://boto3.amazonaws.com/v1/documentation/api/latest/guide/configuration.html#using-environment-variables).
