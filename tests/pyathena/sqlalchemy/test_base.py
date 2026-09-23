@@ -316,6 +316,11 @@ class TestAthenaDialect:
         def execute(operation, **kwargs):
             raise DatabaseError(*error.args) from error
 
+        with pytest.raises(DatabaseError):
+            AthenaDialect().get_view_definition(self._view_connection(execute), "v")
+
+    @staticmethod
+    def _view_connection(execute):
         raw_connection = SimpleNamespace(
             cursor_kwargs={},
             schema_name="default",
@@ -325,36 +330,33 @@ class TestAthenaDialect:
                 )
             ),
         )
-        connection = SimpleNamespace(connection=raw_connection)
-
-        with pytest.raises(DatabaseError):
-            AthenaDialect().get_view_definition(connection, "v")
+        return SimpleNamespace(connection=raw_connection)
 
     def test_get_view_definition_reports_a_missing_view(self):
-        # Athena rejects SHOW CREATE VIEW for a view that does not exist, which
-        # reaches the dialect as OperationalError; verified live for the rest
-        # and pandas dialects.
+        # Athena accepts SHOW CREATE VIEW for a view that does not exist and
+        # fails the query; the cursor reports the failure reason with no
+        # underlying API error. Measured live for the rest and pandas dialects.
+        def execute(operation, **kwargs):
+            raise OperationalError("View not found or not a valid presto view: v")
+
+        with pytest.raises(NoSuchTableError):
+            AthenaDialect().get_view_definition(self._view_connection(execute), "v")
+
+    def test_get_view_definition_propagates_a_failed_result_page(self):
+        # execute() also fetches the first result page. A GetQueryResults call
+        # that exhausts its retries there is a failed read of an existing view,
+        # and must not be reported as absence.
         error = ClientError(
-            {"Error": {"Code": "InvalidRequestException", "Message": "does not exist"}},
-            "StartQueryExecution",
+            {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
+            "GetQueryResults",
         )
 
         def execute(operation, **kwargs):
             raise OperationalError(*error.args) from error
 
-        raw_connection = SimpleNamespace(
-            cursor_kwargs={},
-            schema_name="default",
-            driver_connection=SimpleNamespace(
-                cursor=lambda *args, **kwargs: contextlib.nullcontext(
-                    SimpleNamespace(execute=execute, fetchall=list)
-                )
-            ),
-        )
-        connection = SimpleNamespace(connection=raw_connection)
-
-        with pytest.raises(NoSuchTableError):
-            AthenaDialect().get_view_definition(connection, "v")
+        with pytest.raises(OperationalError) as caught:
+            AthenaDialect().get_view_definition(self._view_connection(execute), "v")
+        assert caught.value.__cause__ is error
 
     def test_get_table_matches_long_names_case_insensitively(self):
         # GetTableMetadata rejects names over 128 characters, so the lookup lists
@@ -942,6 +944,10 @@ class TestSQLAlchemyAthena:
         finally:
             conn.execute(text(f"DROP VIEW IF EXISTS {ENV.schema}.{view_name}"))
 
+        # Content the baseline cannot vouch for itself, since it is read through
+        # the same API cursor path the dialect now uses.
+        assert definition.startswith("CREATE VIEW")
+        assert "UNION ALL" in definition
         if not any(row is None or not row.strip() for row in rows):
             # The blank line is Athena's formatting, not the dialect's, so its
             # absence means this case can no longer reach the defect.
