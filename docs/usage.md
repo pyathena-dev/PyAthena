@@ -680,7 +680,7 @@ The fallback calls these Glue APIs with the connection's credentials:
 
 Glue's report that the table does not exist, for `get_table_metadata()`, raises `OperationalError`, as Athena's does.
 If the Glue request fails for any other reason, for example for lack of permission or because the Glue endpoint cannot be reached, a second warning is logged and the Athena request runs again with the retry policy.
-A request that cannot reach Glue at all, such as from a network with an Athena VPC endpoint but no route to Glue, also turns the fallback off for the rest of that connection.
+A request that cannot reach Glue at all, such as from a network with an Athena VPC endpoint but no route to Glue, also turns the fallback off for the rest of that connection; that first request waits out the botocore connect timeout and retries of the connection's `config`.
 For `list_table_metadata()` and `list_databases()`, Glue's report that the database or catalog does not exist also returns to the Athena request.
 Requests in other catalogs use the Athena API with the retry policy only.
 
