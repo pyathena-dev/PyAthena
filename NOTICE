@@ -13,8 +13,10 @@ Athena-specific functionality and additional backends.
 
 PyHive: https://github.com/dropbox/PyHive
 
-The initial PyAthena commit (35a221629783ac8e7997cddce0599ec84e39963d) referenced
-PyHive revision ae3c9a9645ebd3dc962060d498df73e96498d615 in the following places.
+The initial PyAthena commit (35a221629783ac8e7997cddce0599ec84e39963d) linked
+to PyHive sources from its formatter, SQLAlchemy dialect, and tests. Those
+parts were compared with the contemporaneous PyHive revision
+ae3c9a9645ebd3dc962060d498df73e96498d615.
 Parts that remain recognizable in PyAthena:
 
 - pyathena/formatter.py: the string escape rules of `_escape_trino` (and its
