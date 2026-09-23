@@ -1570,10 +1570,27 @@ class TestCursor:
             api_version="2017-05-18",
         )
 
-        # Built once, even when cursors in several threads need it together.
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            clients = list(executor.map(lambda _: conn.glue_client, range(8)))
+        # Built once, even when cursors in several threads need it together:
+        # the threads ask at the same moment and creation takes a while.
+        created = []
+        session_client = conn.session.client
 
+        def slow_client(*args, **kwargs):
+            created.append(args)
+            time.sleep(0.2)
+            return session_client(*args, **kwargs)
+
+        conn._session.client = slow_client
+        barrier = threading.Barrier(8)
+
+        def get_glue_client(_):
+            barrier.wait()
+            return conn.glue_client
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            clients = list(executor.map(get_glue_client, range(8)))
+
+        assert created == [("glue",)]
         assert all(client is clients[0] for client in clients)
         assert clients[0].meta.service_model.service_name == "glue"
         assert clients[0].meta.endpoint_url == f"https://glue.{ENV.region_name}.amazonaws.com"
