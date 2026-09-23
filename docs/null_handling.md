@@ -1,5 +1,5 @@
 <!--
-Copyright 2017 The PyAthena authors
+Copyright 2018 The PyAthena authors
 
 Licensed under the MIT License.
 See LICENSE or https://opensource.org/licenses/MIT.
