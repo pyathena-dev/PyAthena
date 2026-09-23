@@ -273,6 +273,93 @@ class TestAthenaDialect:
             columns = AthenaDialect()._get_columns(connection, "events")
             assert [column["name"] for column in columns] == expected
 
+    @staticmethod
+    def _failing_lookup_connection(code, message, catalog_name, rows):
+        error = ClientError({"Error": {"Code": code, "Message": message}}, "GetTableMetadata")
+        executed = []
+
+        def get_table_metadata(table_name, **kwargs):
+            raise OperationalError(*error.args) from error
+
+        cursor = SimpleNamespace(
+            get_table_metadata=get_table_metadata,
+            execute=lambda operation, **kwargs: executed.append(operation),
+            fetchall=lambda: rows,
+        )
+        raw_connection = SimpleNamespace(
+            cursor_kwargs={},
+            catalog_name=catalog_name,
+            schema_name="default",
+            driver_connection=SimpleNamespace(
+                cursor=lambda *args, **kwargs: contextlib.nullcontext(cursor)
+            ),
+        )
+        return SimpleNamespace(connection=raw_connection), error, executed
+
+    @pytest.mark.parametrize("method", ["get_table_comment", "get_table_options"])
+    @pytest.mark.parametrize(
+        ("catalog_name", "rows", "expected"),
+        [
+            ("federated_catalog", [], NoSuchTableError),
+            ("federated_catalog", [("1", "id", "integer", None, None)], OperationalError),
+            # information_schema filters by Lake Formation in the Glue Data
+            # Catalog, so it is not asked there.
+            ("AwsDataCatalog", [], OperationalError),
+        ],
+        ids=["federated-absent", "federated-present", "glue"],
+    )
+    def test_table_level_reflection_of_unrecognized_metadata_error(
+        self, method, catalog_name, rows, expected
+    ):
+        # The Lambda connector's words for a missing table, measured in #798.
+        connection, error, executed = self._failing_lookup_connection(
+            "MetadataException",
+            "Failed to invoke lambda function due to "
+            "com.amazonaws.services.lambda.invoke.LambdaFunctionException: "
+            "Requested resource not found "
+            "(Service: DynamoDb, Status Code: 400, Request ID: example)",
+            catalog_name,
+            rows,
+        )
+
+        with pytest.raises(expected) as caught:
+            getattr(AthenaDialect(), method)(connection, "events")
+
+        if expected is OperationalError:
+            assert caught.value.__cause__ is error
+        assert len(executed) == (0 if catalog_name == "AwsDataCatalog" else 1)
+
+    def test_table_level_reflection_propagates_throttling(self):
+        # information_schema has no comment or options, so a throttled lookup
+        # of an existing table could only fail after the query anyway.
+        connection, error, executed = self._failing_lookup_connection(
+            "ThrottlingException", "Rate exceeded", "federated_catalog", []
+        )
+
+        with pytest.raises(OperationalError) as caught:
+            AthenaDialect().get_table_comment(connection, "events")
+
+        assert caught.value.__cause__ is error
+        assert executed == []
+
+    def test_table_level_reflection_reuses_reflected_columns(self):
+        # Table(autoload_with=...) reflects columns first; columns read from
+        # information_schema already show the table exists.
+        connection, error, executed = self._failing_lookup_connection(
+            "MetadataException", "Unrecognized connector error", "federated_catalog", []
+        )
+        info_cache = {
+            ("pyathena_information_schema_columns", "federated_catalog", "default", "events"): [
+                {"name": "id"}
+            ]
+        }
+
+        with pytest.raises(OperationalError) as caught:
+            AthenaDialect().get_table_options(connection, "events", info_cache=info_cache)
+
+        assert caught.value.__cause__ is error
+        assert executed == []
+
     def test_get_view_definition_keeps_blank_lines(self):
         # Athena returns the definition one row per line, blank lines included.
         # Reading them through the user's cursor loses or corrupts those rows,
