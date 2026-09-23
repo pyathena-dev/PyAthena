@@ -290,6 +290,7 @@ class TestAthenaDialect:
             cursor_kwargs={},
             catalog_name=catalog_name,
             schema_name="default",
+            retry_config=RetryConfig(),
             driver_connection=SimpleNamespace(
                 cursor=lambda *args, **kwargs: contextlib.nullcontext(cursor)
             ),
@@ -362,6 +363,260 @@ class TestAthenaDialect:
 
         assert caught.value.__cause__ is error
         assert executed == []
+
+    @pytest.mark.parametrize(
+        ("catalog", "expected"),
+        [
+            ("awsdatacatalog", {}),
+            ("AwsDataCatalog", {}),
+            ("s3tablescatalog/bucket", {"CatalogId": "s3tablescatalog/bucket"}),
+            ("federated_catalog", None),
+            (None, None),
+        ],
+    )
+    def test_glue_request_kwargs(self, catalog, expected):
+        # S3 Tables are addressed by the Athena catalog name; Glue rejects the
+        # bucket name alone. Measured live for #786.
+        assert AthenaDialect._glue_request_kwargs(catalog) == expected
+
+    def test_glue_client_leaves_out_athena_endpoint(self):
+        created = []
+        connection = SimpleNamespace(
+            _client_kwargs={
+                "endpoint_url": "https://athena.example",
+                "api_version": "2017-05-18",
+                "verify": False,
+                "aws_access_key_id": "key",
+            },
+            region_name="us-west-2",
+            config="config",
+            session=SimpleNamespace(
+                client=lambda service, **kwargs: created.append((service, kwargs))
+            ),
+        )
+
+        AthenaDialect._glue_client(connection)
+
+        assert created == [
+            (
+                "glue",
+                {
+                    "region_name": "us-west-2",
+                    "config": "config",
+                    "verify": False,
+                    "aws_access_key_id": "key",
+                },
+            )
+        ]
+
+    @pytest.mark.parametrize(
+        ("table", "expected_parameters"),
+        [
+            (
+                {
+                    "Parameters": {"EXTERNAL": "TRUE", "comment": "table comment"},
+                    "StorageDescriptor": {
+                        "Location": "s3://bucket/hive_text",
+                        "InputFormat": "org.apache.hadoop.mapred.TextInputFormat",
+                        "OutputFormat": (
+                            "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+                        ),
+                        "SerdeInfo": {
+                            "SerializationLibrary": (
+                                "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe"
+                            ),
+                            "Parameters": {"field.delim": "\t"},
+                        },
+                    },
+                },
+                {
+                    "EXTERNAL": "TRUE",
+                    "comment": "table comment",
+                    "location": "s3://bucket/hive_text",
+                    "inputformat": "org.apache.hadoop.mapred.TextInputFormat",
+                    "outputformat": "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+                    "serde.serialization.lib": "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe",
+                    "serde.param.field.delim": "\t",
+                },
+            ),
+            # A view has empty SerDe information, which Athena still reports.
+            (
+                {
+                    "Parameters": {"comment": "Presto View", "presto_view": "true"},
+                    "StorageDescriptor": {"Location": "", "SerdeInfo": {}},
+                },
+                {
+                    "comment": "Presto View",
+                    "presto_view": "true",
+                    "location": "",
+                    "inputformat": None,
+                    "outputformat": None,
+                    "serde.serialization.lib": None,
+                },
+            ),
+            # An Iceberg table has none, and Athena reports no SerDe library.
+            (
+                {
+                    "Parameters": {"table_type": "ICEBERG", "metadata_location": "s3://m"},
+                    "StorageDescriptor": {"Location": "s3://bucket/iceberg"},
+                },
+                {
+                    "table_type": "ICEBERG",
+                    "metadata_location": "s3://m",
+                    "location": "s3://bucket/iceberg",
+                    "inputformat": None,
+                    "outputformat": None,
+                },
+            ),
+        ],
+        ids=["hive", "view", "iceberg"],
+    )
+    def test_table_metadata_from_glue(self, table, expected_parameters):
+        # These are the Glue responses measured against GetTableMetadata for
+        # the same tables in #786; Athena flattens them this way.
+        table = {
+            "Name": "t",
+            "TableType": "EXTERNAL_TABLE",
+            # Athena does not report the Glue description as the comment.
+            "Description": "glue description",
+            "PartitionKeys": [{"Name": "dt", "Type": "string", "Comment": "day"}],
+            **table,
+        }
+        table["StorageDescriptor"]["Columns"] = [{"Name": "a", "Type": "int"}]
+
+        metadata = AthenaDialect._table_metadata_from_glue(table)
+
+        assert metadata.parameters == expected_parameters
+        assert (metadata.name, metadata.table_type) == ("t", "EXTERNAL_TABLE")
+        assert [(c.name, c.type, c.comment) for c in metadata.columns] == [("a", "int", None)]
+        assert [(c.name, c.type, c.comment) for c in metadata.partition_keys] == [
+            ("dt", "string", "day")
+        ]
+
+    @staticmethod
+    def _throttled_metadata_connection(catalog_name, opened):
+        error = ClientError(
+            {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
+            "GetTableMetadata",
+        )
+
+        def fail(*args, **kwargs):
+            raise OperationalError(*error.args) from error
+
+        cursor = SimpleNamespace(
+            get_table_metadata=fail, list_table_metadata=fail, list_databases=fail
+        )
+
+        def open_cursor(*args, **kwargs):
+            opened.append(kwargs.get("retry_config"))
+            return contextlib.nullcontext(cursor)
+
+        raw_connection = SimpleNamespace(
+            cursor_kwargs={},
+            catalog_name=catalog_name,
+            schema_name="default",
+            retry_config=RetryConfig(),
+            driver_connection=SimpleNamespace(cursor=open_cursor),
+        )
+        return SimpleNamespace(connection=raw_connection), error
+
+    @pytest.mark.parametrize(
+        ("glue_error", "expected"),
+        [
+            (None, None),
+            ("EntityNotFoundException", NoSuchTableError),
+            # No Glue permission: the Athena request runs again with its retries.
+            ("AccessDeniedException", OperationalError),
+        ],
+        ids=["found", "absent", "denied"],
+    )
+    def test_throttled_table_lookup_reads_glue(self, monkeypatch, glue_error, expected):
+        opened = []
+        requests = []
+        connection, error = self._throttled_metadata_connection("s3tablescatalog/bucket", opened)
+
+        def get_table(**kwargs):
+            requests.append(kwargs)
+            if glue_error:
+                raise ClientError({"Error": {"Code": glue_error, "Message": ""}}, "GetTable")
+            return {"Table": {"Name": "events", "StorageDescriptor": {}}}
+
+        monkeypatch.setattr(
+            AthenaDialect,
+            "_glue_client",
+            staticmethod(lambda connection: SimpleNamespace(get_table=get_table)),
+        )
+
+        if expected is None:
+            metadata = AthenaDialect()._get_table(connection, "events")
+            assert metadata.name == "events"
+        else:
+            with pytest.raises(expected) as caught:
+                AthenaDialect()._get_table(connection, "events")
+            if expected is OperationalError:
+                assert caught.value.__cause__ is error
+
+        assert requests == [
+            {"DatabaseName": "default", "Name": "events", "CatalogId": "s3tablescatalog/bucket"}
+        ]
+        # Throttling goes to Glue at once rather than through the retry policy.
+        assert "ThrottlingException" not in opened[0].exceptions
+        # Only a failed Glue request returns to Athena, with the connection's policy.
+        assert opened[1:] == ([None] if glue_error == "AccessDeniedException" else [])
+
+    def test_throttled_lookup_outside_glue_keeps_retries(self, monkeypatch):
+        opened = []
+        connection, error = self._throttled_metadata_connection("federated_catalog", opened)
+        monkeypatch.setattr(AthenaDialect, "_glue_client", staticmethod(pytest.fail))
+
+        with pytest.raises(OperationalError) as caught:
+            AthenaDialect().get_table_options(connection, "events")
+
+        assert caught.value.__cause__ is error
+        assert opened == [None]
+
+    def test_throttled_listings_read_glue(self, monkeypatch):
+        opened = []
+        requests = []
+        connection, _ = self._throttled_metadata_connection("AwsDataCatalog", opened)
+        pages = {
+            "get_tables": [
+                {"TableList": [{"Name": "Events", "TableType": "EXTERNAL_TABLE"}]},
+                {"TableList": [{"Name": "v", "TableType": "VIRTUAL_VIEW"}]},
+            ],
+            "get_databases": [{"DatabaseList": [{"Name": "default"}, {"Name": "sales"}]}],
+        }
+
+        def get_paginator(operation):
+            def paginate(**kwargs):
+                requests.append((operation, kwargs))
+                return pages[operation]
+
+            return SimpleNamespace(paginate=paginate)
+
+        monkeypatch.setattr(
+            AthenaDialect,
+            "_glue_client",
+            staticmethod(lambda connection: SimpleNamespace(get_paginator=get_paginator)),
+        )
+        dialect = AthenaDialect()
+        info_cache = {}
+
+        assert dialect.get_table_names(connection, info_cache=info_cache) == ["Events"]
+        assert dialect.get_view_names(connection, info_cache=info_cache) == ["v"]
+        assert dialect.get_schema_names(connection, info_cache=info_cache) == [
+            "default",
+            "sales",
+        ]
+        assert requests == [
+            ("get_tables", {"DatabaseName": "default"}),
+            ("get_databases", {}),
+        ]
+        # Listed tables seed the metadata cache as an Athena listing does.
+        assert (
+            info_cache[("pyathena_table_metadata", "AwsDataCatalog", "default", "events")].name
+            == "Events"
+        )
 
     def test_get_view_definition_keeps_blank_lines(self):
         # Athena returns the definition one row per line, blank lines included.
@@ -911,6 +1166,91 @@ class TestSQLAlchemyAthena:
         assert actual["default"] is None
         assert not actual["autoincrement"]
         assert actual["comment"] == "some comment"
+
+    @staticmethod
+    def _throttle_metadata_api(raw_connection, monkeypatch):
+        """Make every Athena metadata request on this connection throttled."""
+        calls = []
+
+        def throttled(operation):
+            def fail(**kwargs):
+                calls.append(operation)
+                raise ClientError(
+                    {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
+                    operation,
+                )
+
+            return fail
+
+        for operation in ("get_table_metadata", "list_table_metadata", "list_databases"):
+            monkeypatch.setattr(raw_connection.client, operation, throttled(operation))
+        return calls
+
+    def test_throttled_reflection_reads_glue(self, engine, monkeypatch):
+        engine, conn = engine
+        # Existing tables with a comment, compression and partitions, so the
+        # comparison covers each derived option without extra DDL.
+        tables = ["one_row", "parquet_with_compression", "partition_table"]
+
+        def reflect():
+            # A fresh Inspector each time, so nothing is served from its cache;
+            # table-level reflection runs before listings would seed it.
+            insp = sqlalchemy.inspect(conn)
+            return (
+                {
+                    t: (
+                        insp.get_table_comment(t, schema=ENV.schema),
+                        insp.get_table_options(t, schema=ENV.schema),
+                    )
+                    for t in tables
+                },
+                insp.get_table_names(schema=ENV.schema),
+                insp.get_view_names(schema=ENV.schema),
+                # Other runs create and drop schemas concurrently, so only this
+                # run's schema is compared.
+                ENV.schema in insp.get_schema_names(),
+            )
+
+        expected = reflect()
+        calls = self._throttle_metadata_api(conn.connection.driver_connection, monkeypatch)
+
+        assert reflect() == expected
+        # Each request was refused once and answered by Glue without retrying.
+        assert sorted(calls) == sorted(
+            ["get_table_metadata"] * len(tables) + ["list_table_metadata", "list_databases"]
+        )
+
+    @requires_s3_tables
+    @pytest.mark.parametrize("engine", [{"catalog_name": ENV.s3tables_catalog}], indirect=True)
+    def test_throttled_s3tables_reflection_reads_glue(self, engine, monkeypatch):
+        engine, conn = engine
+        schema = ENV.s3tables_namespace
+        table_name = unique_s3tables_table_name("test_throttled_s3tables_reflection")
+        conn.execute(
+            text(
+                f"CREATE TABLE {schema}.{table_name} (a INT, b STRING) "
+                "PARTITIONED BY (b) TBLPROPERTIES ('table_type'='ICEBERG')"
+            )
+        )
+        try:
+
+            def reflect():
+                insp = sqlalchemy.inspect(conn)
+                return (
+                    insp.get_table_options(table_name, schema=schema),
+                    table_name in insp.get_table_names(schema=schema),
+                )
+
+            expected = reflect()
+            calls = self._throttle_metadata_api(conn.connection.driver_connection, monkeypatch)
+
+            # Glue addresses the table-bucket catalog by its Athena name.
+            assert reflect() == expected
+            assert expected[1]
+            assert sorted(calls) == ["get_table_metadata", "list_table_metadata"]
+        finally:
+            monkeypatch.undo()
+            conn.execute(text(f"DROP TABLE IF EXISTS {schema}.{table_name}"))
 
     # `unload` states what each case configures, independently of the URL the
     # fixture builds, so the engine's setting can be checked before asserting
