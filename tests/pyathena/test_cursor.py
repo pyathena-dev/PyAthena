@@ -29,7 +29,6 @@ from pyathena import (
     Binary,
     ExecuteOptions,
 )
-from pyathena.common import _table_metadata_from_glue
 from pyathena.converter import _to_array, _to_map, _to_struct
 from pyathena.cursor import Cursor
 from pyathena.error import DatabaseError, NotSupportedError, OperationalError, ProgrammingError
@@ -1913,90 +1912,3 @@ class TestComplexDataTypes:
             assert result == expected, (
                 f"Converter failed for {test_input}: expected {expected}, got {result}"
             )
-
-
-@pytest.mark.parametrize(
-    ("table", "expected_parameters"),
-    [
-        (
-            {
-                "Parameters": {"EXTERNAL": "TRUE", "comment": "table comment"},
-                "StorageDescriptor": {
-                    "Location": "s3://bucket/hive_text",
-                    "InputFormat": "org.apache.hadoop.mapred.TextInputFormat",
-                    "OutputFormat": "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
-                    "SerdeInfo": {
-                        "SerializationLibrary": (
-                            "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe"
-                        ),
-                        "Parameters": {"field.delim": "\t"},
-                    },
-                },
-            },
-            {
-                "EXTERNAL": "TRUE",
-                "comment": "table comment",
-                "location": "s3://bucket/hive_text",
-                "inputformat": "org.apache.hadoop.mapred.TextInputFormat",
-                "outputformat": "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
-                "serde.serialization.lib": "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe",
-                "serde.param.field.delim": "\t",
-            },
-        ),
-        # A view has empty SerDe information, which Athena still reports.
-        (
-            {
-                "Parameters": {"comment": "Presto View", "presto_view": "true"},
-                "StorageDescriptor": {"Location": "", "SerdeInfo": {}},
-            },
-            {
-                "comment": "Presto View",
-                "presto_view": "true",
-                "location": "",
-                "inputformat": None,
-                "outputformat": None,
-                "serde.serialization.lib": None,
-            },
-        ),
-        # An Iceberg table has none, and Athena reports no SerDe library.
-        (
-            {
-                "Parameters": {"table_type": "ICEBERG", "metadata_location": "s3://m"},
-                "StorageDescriptor": {"Location": "s3://bucket/iceberg"},
-            },
-            {
-                "table_type": "ICEBERG",
-                "metadata_location": "s3://m",
-                "location": "s3://bucket/iceberg",
-                "inputformat": None,
-                "outputformat": None,
-            },
-        ),
-    ],
-    ids=["hive", "view", "iceberg"],
-)
-def test_table_metadata_from_glue(table, expected_parameters):
-    # Glue responses measured against GetTableMetadata for the same tables in
-    # #786; Athena flattens them this way.
-    table = {
-        "Name": "t",
-        "TableType": "EXTERNAL_TABLE",
-        # Athena does not report the Glue description as the comment.
-        "Description": "glue description",
-        "PartitionKeys": [{"Name": "dt", "Type": "string", "Comment": "day"}],
-        **table,
-    }
-    table["StorageDescriptor"]["Columns"] = [{"Name": "a", "Type": "int"}]
-
-    metadata = _table_metadata_from_glue(table)
-
-    assert metadata.parameters == expected_parameters
-    assert (metadata.name, metadata.table_type, metadata.comment) == (
-        "t",
-        "EXTERNAL_TABLE",
-        expected_parameters.get("comment"),
-    )
-    assert [(c.name, c.type, c.comment) for c in metadata.columns] == [("a", "int", None)]
-    assert [(c.name, c.type, c.comment) for c in metadata.partition_keys] == [
-        ("dt", "string", "day")
-    ]
