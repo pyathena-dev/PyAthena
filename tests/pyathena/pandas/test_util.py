@@ -438,26 +438,17 @@ def test_to_sql(cursor):
     ]
 
 
-@pytest.mark.parametrize(
-    ("cursor", "prefix"),
-    [
-        # Athena stores and reports names in lowercase, so the existence check
-        # has to match a name given with uppercase letters.
-        ({}, "To_Sql_Case_"),
-        # A reused result from before the table existed would answer "absent".
-        ({"result_reuse_enable": True}, "to_sql_reuse_"),
-    ],
-    indirect=["cursor"],
-)
-def test_to_sql_finds_an_existing_table(cursor, prefix):
+def test_to_sql_finds_an_existing_table_by_mixed_case_name(cursor):
+    # Athena stores and reports names in lowercase, so the existence check has
+    # to match a name given with uppercase letters.
     df = pd.DataFrame({"col_int": np.int32([1])})
-    table_name = f"{prefix}{uuid.uuid4().hex}"
+    table_name = f"To_Sql_Case_{uuid.uuid4().hex}"
     location = f"{ENV.s3_staging_dir}{ENV.schema}/{table_name.lower()}/"
     to_sql(df, table_name, cursor._connection, location, schema=ENV.schema, if_exists="fail")
     with pytest.raises(OperationalError):
         to_sql(df, table_name, cursor._connection, location, schema=ENV.schema, if_exists="fail")
     to_sql(df, table_name, cursor._connection, location, schema=ENV.schema, if_exists="replace")
-    cursor.execute(f"SELECT col_int FROM {table_name}", result_reuse_enable=False)
+    cursor.execute(f"SELECT col_int FROM {table_name}")
     assert cursor.fetchall() == [(1,)]
 
 

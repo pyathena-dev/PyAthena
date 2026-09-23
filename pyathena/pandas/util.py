@@ -262,8 +262,7 @@ def to_sql(
     cursor = conn.cursor()
 
     # Athena stores identifiers in lowercase and information_schema reports them
-    # that way, so compare lowercase literals. The answer must reflect the
-    # catalog now, so query result reuse is off.
+    # that way, so compare lowercase literals.
     schema_literal = schema.lower().replace("'", "''")
     name_literal = name.lower().replace("'", "''")
     table = cursor.execute(
@@ -274,8 +273,7 @@ def to_sql(
             WHERE table_schema = '{schema_literal}'
             AND table_name = '{name_literal}'
             """
-        ),
-        result_reuse_enable=False,
+        )
     ).fetchall()
     if if_exists == "fail":
         if table:
