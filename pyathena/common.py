@@ -30,6 +30,7 @@ from pyathena.util import (
     RetryConfig,
     _get_error_code,
     _without_retries,
+    is_retryable_error,
     retry_api_call,
 )
 
@@ -330,21 +331,59 @@ class BaseCursor(metaclass=ABCMeta):
     def _glue_catalog_name(self, catalog_name: str | None) -> str | None:
         """The catalog to read from Glue when Athena throttles, or None."""
         catalog = catalog_name if catalog_name else self._catalog_name
-        if self._connection.glue_metadata_fallback and GlueMetadataCatalog.supports(catalog):
+        connection = self._connection
+        if (
+            connection.glue_metadata_fallback
+            and not connection._glue_unreachable
+            and GlueMetadataCatalog.supports(catalog)
+        ):
             return catalog
         return None
 
-    @staticmethod
-    def _is_throttled(e: BaseException) -> bool:
-        # Athena wraps Glue's own throttling in a MetadataException.
-        return _get_error_code(e.__cause__ or e, unwrap_metadata=True) in THROTTLING_ERROR_CODES
+    def _glue_first_attempt_retry_config(self) -> RetryConfig:
+        # Throttling goes to Glue at once, including Glue's own throttling that
+        # Athena wraps in a MetadataException, so neither is retried here.
+        return _without_retries(self._retry_config, (*THROTTLING_ERROR_CODES, "MetadataException"))
 
-    @staticmethod
-    def _glue_request_failed(e: BotoCoreError | ClientError, description: str) -> None:
-        """Raise a Glue answer about absence; log any other Glue failure."""
-        if isinstance(e, ClientError) and _get_error_code(e) == "EntityNotFoundException":
+    def _route_after_athena_failure(
+        self, e: OperationalError, description: str, logging_: bool
+    ) -> bool | None:
+        """Whether a failed first attempt goes to Glue (True), is retried (False), or is raised."""
+        cause = e.__cause__ or e
+        if _get_error_code(cause, unwrap_metadata=True) in THROTTLING_ERROR_CODES:
+            _logger.warning(f"Request to {description} was throttled; reading it from Glue.")
+            return True
+        # The first attempt left out MetadataException, which the policy may retry.
+        if is_retryable_error(cause, self._retry_config):
+            return False
+        if logging_:
+            _logger.exception(f"Failed to {description}.")
+        return None
+
+    def _glue_request_failed(
+        self, e: BotoCoreError | ClientError, description: str, absence_is_final: bool
+    ) -> None:
+        """Raise Glue's answer that a table is absent; otherwise log the failure.
+
+        A request that could not reach Glue at all turns the fallback off for
+        this connection, so later throttled requests do not wait for it again.
+        """
+        if (
+            absence_is_final
+            and isinstance(e, ClientError)
+            and _get_error_code(e) == "EntityNotFoundException"
+        ):
             raise OperationalError(*e.args) from e
-        _logger.warning(f"Glue request to {description} failed: {e}; retrying the Athena request.")
+        if isinstance(e, BotoCoreError):
+            self._connection._glue_unreachable = True
+            _logger.warning(
+                f"Glue request to {description} failed: {e}; retrying the Athena request "
+                "and not using Glue again on this connection."
+            )
+        else:
+            _logger.warning(
+                f"Glue request to {description} failed: {e}; retrying the Athena request."
+            )
 
     def _with_glue_fallback(
         self,
@@ -353,32 +392,31 @@ class BaseCursor(metaclass=ABCMeta):
         glue_request: Callable[[GlueMetadataCatalog], _T],
         description: str,
         logging_: bool = True,
+        absence_is_final: bool = False,
     ) -> _T:
         """Run a metadata request, answering its throttling from Glue.
 
         Athena rate-limits its metadata API per account, separately from Glue.
         In a Glue-backed catalog a throttled request goes to Glue at once
         instead of through the retry policy. When the Glue request fails, the
-        Athena request runs again with the retry policy; Glue's answer that
-        the table or database does not exist is raised instead.
+        Athena request runs again with the retry policy. With
+        ``absence_is_final``, Glue's answer that the table does not exist is
+        raised instead.
         """
         glue_catalog = self._glue_catalog_name(catalog_name)
         if glue_catalog is None:
             return athena_request(self._retry_config, logging_)
         try:
-            return athena_request(
-                _without_retries(self._retry_config, THROTTLING_ERROR_CODES), False
-            )
+            return athena_request(self._glue_first_attempt_retry_config(), False)
         except OperationalError as e:
-            if not self._is_throttled(e):
-                if logging_:
-                    _logger.exception(f"Failed to {description}.")
+            route = self._route_after_athena_failure(e, description, logging_)
+            if route is None:
                 raise
-        _logger.warning(f"Request to {description} was throttled; reading it from Glue.")
-        try:
-            return glue_request(GlueMetadataCatalog(self._connection.glue_client, glue_catalog))
-        except (BotoCoreError, ClientError) as e:
-            self._glue_request_failed(e, description)
+        if route:
+            try:
+                return glue_request(GlueMetadataCatalog(self._connection.glue_client, glue_catalog))
+            except (BotoCoreError, ClientError) as e:
+                self._glue_request_failed(e, description, absence_is_final)
         return athena_request(self._retry_config, logging_)
 
     def _build_list_databases_request(
@@ -514,6 +552,7 @@ class BaseCursor(metaclass=ABCMeta):
             ),
             "get table metadata",
             logging_=logging_,
+            absence_is_final=True,
         )
 
     def _list_table_metadata(

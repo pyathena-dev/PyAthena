@@ -678,12 +678,15 @@ The fallback calls these Glue APIs with the connection's credentials:
 | `list_table_metadata()` | `GetTables` | `glue:GetTables` |
 | `list_databases()` | `GetDatabases` | `glue:GetDatabases` |
 
-Glue's report that a table or database does not exist raises `OperationalError`, as Athena's does.
+Glue's report that the table does not exist, for `get_table_metadata()`, raises `OperationalError`, as Athena's does.
 If the Glue request fails for any other reason, for example for lack of permission or because the Glue endpoint cannot be reached, a second warning is logged and the Athena request runs again with the retry policy.
+A request that cannot reach Glue at all, such as from a network with an Athena VPC endpoint but no route to Glue, also turns the fallback off for the rest of that connection.
+For `list_table_metadata()` and `list_databases()`, Glue's report that the database or catalog does not exist also returns to the Athena request.
 Requests in other catalogs use the Athena API with the retry policy only.
 
 The connection builds one Glue client on first use from its session, region, and botocore `config`, but not its `endpoint_url`, and exposes it as `Connection.glue_client`.
 Pass `glue_metadata_fallback=False` to `connect()` to turn the fallback off.
+The Glue request does not carry the connection's workgroup; turn the fallback off where access depends on the workgroup, such as a workgroup enabled for IAM Identity Center.
 
 ## Environment variables
 

@@ -350,6 +350,8 @@ class Connection(Generic[ConnectionCursor]):
         self.glue_metadata_fallback = glue_metadata_fallback
         self._glue_client_lock = threading.Lock()
         self._glue_client: BaseClient | None = None
+        # Set when a Glue request cannot reach Glue; the fallback then stays off.
+        self._glue_unreachable = False
 
     @property
     def glue_client(self) -> BaseClient:

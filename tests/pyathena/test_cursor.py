@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, EndpointConnectionError
 
 from pyathena import (
     BINARY,
@@ -1436,6 +1436,91 @@ class TestCursor:
         else:
             assert caught.value.__cause__.response["Error"]["Code"] == "ThrottlingException"
         assert len(calls) == expected_calls
+
+    @pytest.mark.parametrize(
+        "cursor", [{"retry_config": RetryConfig(attempt=1)}], indirect=["cursor"]
+    )
+    def test_unreachable_glue_is_not_tried_again(self, cursor, monkeypatch):
+        calls = self._throttle_metadata_api(cursor.connection, monkeypatch)
+        glue_calls = []
+
+        def get_table(**kwargs):
+            glue_calls.append(kwargs)
+            raise EndpointConnectionError(endpoint_url="https://glue.example")
+
+        monkeypatch.setattr(cursor.connection, "_glue_client", SimpleNamespace(get_table=get_table))
+
+        for _ in range(2):
+            with pytest.raises(OperationalError):
+                cursor.get_table_metadata("one_row")
+
+        # One wait for an endpoint that cannot be reached, not one per request.
+        assert len(glue_calls) == 1
+        assert calls == ["get_table_metadata"] * 3
+
+    @pytest.mark.parametrize(
+        "cursor",
+        [
+            {
+                "retry_config": RetryConfig(
+                    exceptions=("ThrottlingException", "MetadataException"), attempt=2, multiplier=0
+                )
+            }
+        ],
+        indirect=["cursor"],
+    )
+    @pytest.mark.parametrize(
+        ("message", "expected_calls"),
+        [
+            # Glue's throttling inside a MetadataException goes to Glue at once.
+            (
+                "Rate exceeded (Service: AmazonDataCatalog; Status Code: 400; "
+                "Error Code: ThrottlingException; Request ID: example; Proxy: null)",
+                1,
+            ),
+            # Another MetadataException keeps the retries the policy asks for.
+            ("Unrecognized connector error", 3),
+        ],
+        ids=["wrapped-throttling", "other"],
+    )
+    def test_metadata_exception_in_retry_policy(self, cursor, monkeypatch, message, expected_calls):
+        calls = self._throttle_metadata_api(
+            cursor.connection, monkeypatch, code="MetadataException", message=message
+        )
+
+        if expected_calls == 1:
+            assert cursor.get_table_metadata("one_row").name == "one_row"
+        else:
+            with pytest.raises(OperationalError):
+                cursor.get_table_metadata("one_row")
+        assert len(calls) == expected_calls
+
+    @pytest.mark.parametrize(
+        "cursor", [{"retry_config": RetryConfig(attempt=1)}], indirect=["cursor"]
+    )
+    def test_missing_database_in_glue_listing_asks_athena(self, cursor, monkeypatch):
+        # Only a table lookup takes Glue's answer about absence as final; a
+        # listing asks Athena again, whose error for a missing catalog or
+        # database callers may already handle.
+        calls = self._throttle_metadata_api(cursor.connection, monkeypatch)
+        error = ClientError(
+            {"Error": {"Code": "EntityNotFoundException", "Message": ""}}, "GetTables"
+        )
+
+        def paginate(**kwargs):
+            raise error
+
+        monkeypatch.setattr(
+            cursor.connection,
+            "_glue_client",
+            SimpleNamespace(get_paginator=lambda operation: SimpleNamespace(paginate=paginate)),
+        )
+
+        with pytest.raises(OperationalError) as caught:
+            cursor.list_table_metadata()
+
+        assert caught.value.__cause__.response["Error"]["Code"] == "ThrottlingException"
+        assert calls == ["list_table_metadata"] * 2
 
     @pytest.mark.parametrize(
         ("cursor", "catalog_name"),
