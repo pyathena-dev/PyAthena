@@ -599,45 +599,51 @@ class _ArrayUpdateCompiler:
         array = f"coalesce({array}, CAST(ARRAY[] AS {array_sql_type}))"
         bound = path[0]
         if isinstance(bound, Slice):
-            if not isinstance(bound.step, Null) and not (
-                isinstance(bound.step, BindParameter)
-                and bound.step.unique
-                and type(bound.step.value) is int
-                and bound.step.value == 1
-            ):
-                raise exc.CompileError("Athena ARRAY slices support only step=None or step=1")
-            start = "1" if isinstance(bound.start, Null) else self._index_sql(bound.start, **kw)
-            stop = (
-                f"cardinality({array})"
-                if isinstance(bound.stop, Null)
-                else self._index_sql(bound.stop, **kw)
-            )
-            prefix = f"slice({array}, 1, least({start} - 1, cardinality({array})))"
-            element_type = compiler._complex_dml_type(_ArrayTypeInspector.item_type(array_type))
-            padding = (
-                f"repeat(CAST(NULL AS {element_type}), "
-                f"CAST(greatest({start} - 1 - cardinality({array}), 0) AS INTEGER))"
-            )
-            tail_start = f"greatest({start}, {stop} + 1)"
-            suffix = (
-                f"slice({array}, {tail_start}, "
-                f"greatest(cardinality({array}) - {tail_start} + 1, 0))"
-            )
-            return compiler._array_slice_step(
-                f"concat({prefix}, {padding}, {rhs}, {suffix})", bound.step, array_type, **kw
-            )
+            return self._rebuild_slice(array, array_type, bound, rhs, **kw)
+        return self._rebuild_element(array, array_type, bound, path[1:], rhs, **kw)
+
+    def _prefix_and_padding(self, array, start, array_type):
+        prefix = f"slice({array}, 1, least({start} - 1, cardinality({array})))"
+        element_type = self.compiler._complex_dml_type(_ArrayTypeInspector.item_type(array_type))
+        padding = (
+            f"repeat(CAST(NULL AS {element_type}), "
+            f"CAST(greatest({start} - 1 - cardinality({array}), 0) AS INTEGER))"
+        )
+        return prefix, padding
+
+    def _rebuild_slice(self, array, array_type, bound, rhs, **kw):
+        if not isinstance(bound.step, Null) and not (
+            isinstance(bound.step, BindParameter)
+            and bound.step.unique
+            and type(bound.step.value) is int
+            and bound.step.value == 1
+        ):
+            raise exc.CompileError("Athena ARRAY slices support only step=None or step=1")
+        start = "1" if isinstance(bound.start, Null) else self._index_sql(bound.start, **kw)
+        stop = (
+            f"cardinality({array})"
+            if isinstance(bound.stop, Null)
+            else self._index_sql(bound.stop, **kw)
+        )
+        prefix, padding = self._prefix_and_padding(array, start, array_type)
+        tail_start = f"greatest({start}, {stop} + 1)"
+        suffix = (
+            f"slice({array}, {tail_start}, greatest(cardinality({array}) - {tail_start} + 1, 0))"
+        )
+        return self.compiler._array_slice_step(
+            f"concat({prefix}, {padding}, {rhs}, {suffix})", bound.step, array_type, **kw
+        )
+
+    def _rebuild_element(self, array, array_type, bound, remaining_path, rhs, **kw):
         index = self._index_sql(bound, **kw)
         previous = f"element_at({array}, {index})"
         replacement = (
-            self._rebuild(previous, _ArrayTypeInspector.item_type(array_type), path[1:], rhs, **kw)
-            if len(path) > 1
+            self._rebuild(
+                previous, _ArrayTypeInspector.item_type(array_type), remaining_path, rhs, **kw
+            )
+            if remaining_path
             else rhs
         )
-        prefix = f"slice({array}, 1, least({index} - 1, cardinality({array})))"
-        element_type = compiler._complex_dml_type(_ArrayTypeInspector.item_type(array_type))
-        padding = (
-            f"repeat(CAST(NULL AS {element_type}), "
-            f"CAST(greatest({index} - 1 - cardinality({array}), 0) AS INTEGER))"
-        )
+        prefix, padding = self._prefix_and_padding(array, index, array_type)
         suffix = f"slice({array}, {index} + 1, greatest(cardinality({array}) - {index}, 0))"
         return f"concat({prefix}, {padding}, ARRAY[{replacement}], {suffix})"
