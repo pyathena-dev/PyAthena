@@ -336,7 +336,11 @@ class TestAthenaDialect:
         with pytest.raises(expected) as caught:
             getattr(AthenaDialect(), method)(connection, "events", info_cache=info_cache)
 
-        assert caught.value.__cause__ is error
+        # NoSuchTableError chains the OperationalError that carries the API error.
+        cause = caught.value.__cause__
+        if expected is NoSuchTableError:
+            cause = cause.__cause__
+        assert cause is error
         assert len(executed) == expected_queries
         # A failed call caches nothing, not even the columns it found, so later
         # column reflection still asks the metadata API first.
