@@ -98,7 +98,7 @@ A later listing preserves metadata already fetched for a table.
 `clear_cache()` also discards this metadata; an absent entry in a listing is not cached as proof that a table does not exist.
 
 A throttling or permission error from a table-metadata lookup never by itself establishes that a table is missing.
-`has_table()` propagates permission failures, including access denied by Lake Formation, instead of returning or caching `False`.
+`has_table()` propagates recognized permission failures, including access denied by Lake Formation, instead of returning or caching `False`.
 For failed metadata requests, the error response establishes absence only when it is a recognized `EntityNotFoundException`; an unrecognized error is never guessed to mean a missing table.
 The `information_schema` queries described below can still establish absence after a failed request, from the query's result rather than from the error.
 Column reflection and `has_table()` do not retry a table-metadata request that `information_schema` can answer; they read `information_schema.columns` instead, executed without query result reuse, and log a warning.
