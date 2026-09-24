@@ -59,3 +59,69 @@ PyHive is distributed under the following notice:
   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
   See the License for the specific language governing permissions and
   limitations under the License.
+
+
+Other third-party material
+==========================
+
+cloudformation/github_actions_oidc.yaml is adapted from the sample template
+in the aws-actions/configure-aws-credentials README
+(https://github.com/aws-actions/configure-aws-credentials/blob/2f8dfd0ed43d880f85b57f0c8727b497af2037de/README.md).
+Its parameters, OIDC provider condition, role trust policy, and OIDC provider
+resource remain. aws-actions/configure-aws-credentials is distributed under
+the following notice:
+
+  MIT License
+
+  Copyright 2019 Amazon.com, Inc. or its affiliates.
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+pyathena/util.py: `strtobool` was ported in
+31bea9fc73f4cf9246330bdf21a1511c7616683d from `distutils.util.strtobool`,
+which was removed from the Python standard library by PEP 632
+(https://peps.python.org/pep-0632/). It originates in CPython's distutils,
+distributed under the Python Software Foundation License
+(https://docs.python.org/3/license.html), and is maintained in pypa/distutils
+(https://github.com/pypa/distutils), distributed under the MIT License.
+
+
+Files without a license header
+==============================
+
+Files that carry the header "Copyright <year> The PyAthena authors" with
+"SPDX-License-Identifier: MIT" contain only original work by the PyAthena
+authors. The year is the file's first publication year, or for files that
+existed before the header was introduced, the year of their earliest
+surviving content.
+
+Other files do not carry that header. They are distributed under the MIT
+License in LICENSE, together with any notice above that applies to them.
+They include:
+
+- files containing contributions from other contributors, whose authorship
+  is recorded in the Git history;
+- files containing the third-party material described above;
+- files of generated origin, such as docs/conf.py, which started as
+  sphinx-quickstart output, and lock files;
+- empty files, symbolic links, binary and data files, and the pull request
+  template.
+
+The classification of each file is recorded in
+https://github.com/pyathena-dev/PyAthena/issues/790.

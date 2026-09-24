@@ -1,4 +1,10 @@
 ---
+# Copyright 2026 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
+# SPDX-License-Identifier: MIT
 name: self-review
 description: Run the first PyAthena self-review after creating a Draft PR, checking implementation behavior, public contracts, simplicity, and regression coverage. Also use for the affected scope after a reviewed repair.
 ---

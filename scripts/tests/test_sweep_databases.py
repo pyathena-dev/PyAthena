@@ -1,3 +1,10 @@
+# Copyright 2026 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
+# SPDX-License-Identifier: MIT
+
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 

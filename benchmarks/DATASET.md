@@ -1,3 +1,12 @@
+<!--
+Copyright 2026 The PyAthena authors
+
+Licensed under the MIT License.
+See LICENSE or https://opensource.org/licenses/MIT.
+
+SPDX-License-Identifier: MIT
+-->
+
 # PyPI benchmark dataset
 
 The benchmarks use an existing copy of the public PyPI download dataset in S3.

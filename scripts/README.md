@@ -1,3 +1,12 @@
+<!--
+Copyright 2026 The PyAthena authors
+
+Licensed under the MIT License.
+See LICENSE or https://opensource.org/licenses/MIT.
+
+SPDX-License-Identifier: MIT
+-->
+
 # Repository scripts
 
 This directory contains scripts used by development and CI, with regression tests in [tests/](tests/).

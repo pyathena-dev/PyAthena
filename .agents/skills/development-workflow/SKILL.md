@@ -1,4 +1,10 @@
 ---
+# Copyright 2026 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
+# SPDX-License-Identifier: MIT
 name: development-workflow
 description: Deliver a PyAthena change through a dedicated worktree, Draft PR, two distinct self-reviews, independent review, and current CI before Ready. Use when implementing or updating a PR, not for a bounded review-only request.
 ---

@@ -1,3 +1,10 @@
+# Copyright 2026 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
+# SPDX-License-Identifier: MIT
+
 import os
 import tarfile
 import zipfile
@@ -32,6 +39,14 @@ def test_main_distributions_exclude_benchmark_code_and_dependencies():
         assert all(
             name.startswith("pyathena/")
             or name
-            in {"pyathena", ".gitignore", "LICENSE", "README.md", "pyproject.toml", "PKG-INFO"}
+            in {
+                "pyathena",
+                ".gitignore",
+                "LICENSE",
+                "NOTICE",
+                "README.md",
+                "pyproject.toml",
+                "PKG-INFO",
+            }
             for name in names
         )

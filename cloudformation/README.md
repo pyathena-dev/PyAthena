@@ -1,3 +1,12 @@
+<!--
+Copyright 2026 The PyAthena authors
+
+Licensed under the MIT License.
+See LICENSE or https://opensource.org/licenses/MIT.
+
+SPDX-License-Identifier: MIT
+-->
+
 # Test infrastructure
 
 [github_actions_oidc.yaml](github_actions_oidc.yaml) defines the AWS infrastructure used by PyAthena's integration tests and GitHub Actions.

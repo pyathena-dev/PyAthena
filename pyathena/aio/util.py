@@ -1,3 +1,10 @@
+# Copyright 2025 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
+# SPDX-License-Identifier: MIT
+
 from __future__ import annotations
 
 import asyncio

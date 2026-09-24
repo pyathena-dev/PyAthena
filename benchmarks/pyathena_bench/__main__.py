@@ -1,3 +1,10 @@
+# Copyright 2026 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
+# SPDX-License-Identifier: MIT
+
 """Command line entry point for explicit preparation and measurement."""
 
 from __future__ import annotations
