@@ -39,6 +39,7 @@ def _block(opening: str | None, prefix: str, closing: str | None) -> re.Pattern[
     return re.compile("\n".join(lines) + "(\n|$)")
 
 
+# Comment syntaxes used in the repository; add one for a new file format.
 HEADER_BLOCKS = (
     _block(None, "# ", None),
     _block(None, "// ", None),

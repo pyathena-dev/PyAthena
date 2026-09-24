@@ -15,7 +15,7 @@ AWS test infrastructure templates are in [cloudformation/](../cloudformation/).
 
 ## Validation
 
-Run the Python and CloudFormation checks, ShellCheck, actionlint, and offline script tests from the repository root:
+Run the Python and CloudFormation checks, the license header check, ShellCheck, actionlint, and offline script tests from the repository root:
 
 ```bash
 mise install shellcheck actionlint
@@ -24,4 +24,4 @@ just scripts
 
 ShellCheck is pinned in `.mise.toml` and checks `scripts/*.sh`.
 The pinned actionlint checks GitHub Actions workflows, including embedded shell commands.
-The script tests under `scripts/tests/` use botocore stubs and require no AWS credentials.
+The script tests under `scripts/tests/` require no AWS credentials; the database sweep tests use botocore stubs.
