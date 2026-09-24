@@ -1395,11 +1395,15 @@ class TestCursor:
 
     @staticmethod
     def _unreachable_glue(connection, monkeypatch):
-        """Point the connection's Glue requests at a region that does not exist."""
+        """Send the connection's Glue requests through a proxy port nothing listens on."""
         glue = GlueMetadataClient(
             connection.session,
-            "xx-invalid-1",
-            Config(connect_timeout=1, read_timeout=1, retries={"max_attempts": 1}),
+            connection.region_name,
+            Config(
+                proxies={"https": "http://127.0.0.1:9"},
+                connect_timeout=1,
+                retries={"mode": "standard", "max_attempts": 1},
+            ),
             {},
         )
         monkeypatch.setattr(connection, "_glue", glue)

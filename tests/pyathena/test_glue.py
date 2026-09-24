@@ -9,7 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from botocore.config import Config
-from botocore.exceptions import ClientError, EndpointConnectionError, ParamValidationError
+from botocore.exceptions import ClientError, ParamValidationError
+from botocore.exceptions import ConnectionError as BotoConnectionError
 
 from pyathena.glue import GlueMetadataClient
 from tests import ENV
@@ -85,14 +86,19 @@ class TestGlueMetadataClient:
             cursor.connection._glue.get_table("federated_catalog", ENV.schema, "one_row")
 
     def test_stops_after_it_cannot_reach_glue(self, cursor):
+        # A proxy port nothing listens on refuses the connection.
         glue = GlueMetadataClient(
             cursor.connection.session,
-            "xx-invalid-1",
-            Config(connect_timeout=1, read_timeout=1, retries={"max_attempts": 1}),
+            cursor.connection.region_name,
+            Config(
+                proxies={"https": "http://127.0.0.1:9"},
+                connect_timeout=1,
+                retries={"mode": "standard", "max_attempts": 1},
+            ),
             {},
         )
 
-        with pytest.raises(EndpointConnectionError):
+        with pytest.raises(BotoConnectionError):
             glue.get_table("AwsDataCatalog", ENV.schema, "one_row")
 
         assert not glue.reachable

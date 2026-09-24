@@ -9,15 +9,12 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
-from botocore.exceptions import (
-    ConnectionError,
-    HTTPClientError,
-    NoCredentialsError,
-    NoRegionError,
-)
+from botocore.exceptions import BaseEndpointResolverError
+from botocore.exceptions import ConnectionError as BotoConnectionError
 
 from pyathena.model import AthenaDatabase, AthenaTableMetadata
 
@@ -56,14 +53,18 @@ class GlueMetadataClient:
         self._client_kwargs = {
             k: v for k, v in client_kwargs.items() if k not in ("endpoint_url", "api_version")
         }
-        # A boto3 session is not thread-safe, so the client is built once.
+        # Build the client once per connection, even when several threads need
+        # it at the same time.
         self._lock = threading.Lock()
         self._client: BaseClient | None = None
         self._reachable = True
 
-    # Failures that every later request would repeat: no route to Glue, a
-    # timeout, or no credentials or region for it.
-    _UNREACHABLE_ERRORS = (ConnectionError, HTTPClientError, NoCredentialsError, NoRegionError)
+    # Failures every later request would repeat: no connection to Glue, or no
+    # Glue endpoint for the region or the endpoint variant the config asks for.
+    UNREACHABLE_ERRORS: tuple[type[Exception], ...] = (
+        BotoConnectionError,
+        BaseEndpointResolverError,
+    )
 
     @property
     def reachable(self) -> bool:
@@ -112,47 +113,108 @@ class GlueMetadataClient:
     def usable_for(self, catalog_name: str | None) -> bool:
         """Whether to ask Glue about the catalog.
 
-        False once a request could not reach Glue, so later requests do not
-        wait for it again.
+        Args:
+            catalog_name: An Athena catalog name.
+
+        Returns:
+            True if :meth:`supports` accepts the catalog and no request has
+            failed to reach Glue, so later requests do not wait for it again.
         """
         return self._reachable and self.supports(catalog_name)
 
-    def _request(self, operation: str, catalog_name: str | None, **kwargs: Any) -> Any:
+    def _catalog_kwargs(self, catalog_name: str | None) -> dict[str, str]:
         request_kwargs = self._catalog_request_kwargs(catalog_name)
         if request_kwargs is None:
             raise ValueError(f"Glue cannot answer for the catalog {catalog_name!r}.")
+        return request_kwargs
+
+    @contextmanager
+    def _tracking_reachability(self) -> Iterator[None]:
         try:
-            if operation == "get_table":
-                return self.client.get_table(**kwargs, **request_kwargs)
-            pages = self.client.get_paginator(operation).paginate(**kwargs, **request_kwargs)
-            return list(pages)
-        except self._UNREACHABLE_ERRORS:
+            yield
+        except self.UNREACHABLE_ERRORS:
             self._reachable = False
             raise
 
     def get_table(
         self, catalog_name: str | None, schema_name: str | None, table_name: str
     ) -> AthenaTableMetadata:
-        """Get one table's metadata with ``GetTable``."""
-        response = self._request(
-            "get_table", catalog_name, DatabaseName=schema_name, Name=table_name
-        )
+        """Get one table's metadata with ``GetTable``.
+
+        Args:
+            catalog_name: An Athena catalog name that :meth:`supports` accepts.
+            schema_name: The database name.
+            table_name: The table name.
+
+        Returns:
+            The table's metadata as Athena reports it.
+
+        Raises:
+            ValueError: If Glue cannot answer for the catalog.
+            botocore.exceptions.ClientError: If Glue rejects the request, for
+                example with ``EntityNotFoundException``.
+            botocore.exceptions.BotoCoreError: If the request fails before a
+                response.
+        """
+        request_kwargs = self._catalog_kwargs(catalog_name)
+        with self._tracking_reachability():
+            response = self.client.get_table(
+                DatabaseName=schema_name, Name=table_name, **request_kwargs
+            )
         return self.table_metadata(response["Table"])
 
     def list_tables(
         self, catalog_name: str | None, schema_name: str | None, expression: str | None = None
     ) -> list[AthenaTableMetadata]:
-        """List a database's table metadata with ``GetTables``."""
-        kwargs: dict[str, Any] = {"DatabaseName": schema_name}
+        """List a database's table metadata with ``GetTables``.
+
+        Args:
+            catalog_name: An Athena catalog name that :meth:`supports` accepts.
+            schema_name: The database name.
+            expression: A table name pattern, as for ``ListTableMetadata``.
+
+        Returns:
+            The metadata of every table in the database, as Athena reports it.
+
+        Raises:
+            ValueError: If Glue cannot answer for the catalog.
+            botocore.exceptions.ClientError: If Glue rejects the request.
+            botocore.exceptions.BotoCoreError: If a request fails before a
+                response.
+        """
+        request: dict[str, Any] = {
+            "DatabaseName": schema_name,
+            **self._catalog_kwargs(catalog_name),
+        }
         if expression:
-            kwargs["Expression"] = expression
-        pages = self._request("get_tables", catalog_name, **kwargs)
-        return [self.table_metadata(t) for page in pages for t in page["TableList"]]
+            request["Expression"] = expression
+        tables: list[AthenaTableMetadata] = []
+        with self._tracking_reachability():
+            for page in self.client.get_paginator("get_tables").paginate(**request):
+                tables.extend(self.table_metadata(t) for t in page["TableList"])
+        return tables
 
     def list_databases(self, catalog_name: str | None) -> list[AthenaDatabase]:
-        """List the catalog's databases with ``GetDatabases``."""
-        pages = self._request("get_databases", catalog_name)
-        return [AthenaDatabase({"Database": d}) for page in pages for d in page["DatabaseList"]]
+        """List the catalog's databases with ``GetDatabases``.
+
+        Args:
+            catalog_name: An Athena catalog name that :meth:`supports` accepts.
+
+        Returns:
+            The catalog's databases.
+
+        Raises:
+            ValueError: If Glue cannot answer for the catalog.
+            botocore.exceptions.ClientError: If Glue rejects the request.
+            botocore.exceptions.BotoCoreError: If a request fails before a
+                response.
+        """
+        request_kwargs = self._catalog_kwargs(catalog_name)
+        databases: list[AthenaDatabase] = []
+        with self._tracking_reachability():
+            for page in self.client.get_paginator("get_databases").paginate(**request_kwargs):
+                databases.extend(AthenaDatabase({"Database": d}) for d in page["DatabaseList"])
+        return databases
 
     @staticmethod
     def table_metadata(table: Mapping[str, Any]) -> AthenaTableMetadata:

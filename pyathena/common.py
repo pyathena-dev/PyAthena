@@ -351,7 +351,7 @@ class BaseCursor(metaclass=ABCMeta):
         ):
             raise OperationalError(*e.args) from e
         # GlueMetadataClient stops using Glue after a request that cannot reach it.
-        unreachable = not self._connection._glue.reachable
+        unreachable = isinstance(e, GlueMetadataClient.UNREACHABLE_ERRORS)
         suffix = " and not using Glue again on this connection" if unreachable else ""
         _logger.warning(
             f"Glue request to {description} failed: {e}; retrying the Athena request{suffix}."
