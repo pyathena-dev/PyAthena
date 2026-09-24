@@ -2,6 +2,9 @@
 name = "PyAthena"
 description = "Python DB API 2.0 (PEP 249) client for Amazon Athena"
 authors = [
+    {name = "The PyAthena authors"},
+]
+maintainers = [
     {name = "laughingman7743", email = "laughingman7743@gmail.com"},
 ]
 dependencies = [
