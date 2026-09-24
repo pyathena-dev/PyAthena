@@ -13,6 +13,7 @@ on:
       - 'benchmarks/**'
       - 'pyathena/**'
       - 'pyproject.toml'
+      - 'uv.lock'
       - 'justfile'
       - '.github/workflows/benchmarks.yaml'
 
@@ -24,6 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       AWS_EC2_METADATA_DISABLED: 'true'
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/benchmarks/.venv
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -36,7 +38,7 @@ jobs:
       - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
         with:
           tool: just
-      - run: uv sync --project benchmarks --locked
+      - run: uv sync --package pyathena-benchmarks --locked
       - run: just benchmark test
       - name: Build only the main distribution
         run: uv build -v

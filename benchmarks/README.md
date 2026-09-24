@@ -34,30 +34,32 @@ Neither workload converts every library's output into a common Python object rep
 
 ## Dependencies and local checks
 
-The benchmark is an independent, non-packaged uv project for Python 3.12.
-Its lockfile and virtual environment are separate from the parent project; PyAthena is an editable path dependency on the parent checkout.
+The benchmark is a non-packaged member of the repository's uv workspace and runs on Python 3.12.
+It shares the root `uv.lock` with PyAthena, which it uses from the workspace checkout.
+Its virtual environment is `benchmarks/.venv`, separate from the root `.venv`.
 The root `uv build -v` still builds only PyAthena, including a wheel built from its sdist.
-Benchmark dependencies do not become PyAthena runtime dependencies.
+Benchmark dependencies do not become PyAthena runtime dependencies, and `uv sync --group dev` at the root does not install them.
 
 From the repository root:
 
 ```bash
-uv sync --project benchmarks --locked
 just benchmark lint
 just benchmark test
 ```
 
+The recipes select `benchmarks/.venv` and Python 3.12, and sync that environment from the locked workspace.
 The tests use local data, fake AWS clients, and child processes.
 They do not execute Athena queries or create AWS resources.
 `just benchmark format` formats the benchmark separately from the parent project.
-After changing dependencies, extras, or dependency groups in either `pyproject.toml`, run `just benchmark lock` and commit `benchmarks/uv.lock`.
-The benchmark lock includes metadata for its editable parent dependency; CI intentionally rejects a stale lock.
+After changing dependencies, extras, or dependency groups in either `pyproject.toml`, run `uv lock` at the repository root and commit `uv.lock`.
 
 Commands below run from `benchmarks/`.
+Set the environment variables first; without them, uv uses the root `.venv`.
 `plan` and `report` do not contact AWS or require `.env`.
 
 ```bash
 cd benchmarks
+export UV_PROJECT_ENVIRONMENT="$PWD/.venv" UV_PYTHON=3.12
 uv run --locked python -m pyathena_bench plan --suite single --scale small
 ```
 
@@ -95,7 +97,7 @@ The instance can write only to its scratch bucket and database, and can query th
 The supplied template assumes ordinary IAM access and SSE-S3 source objects; Lake Formation restrictions or a customer-managed KMS key require corresponding grants before execution.
 
 The deployment identity needs permission to create these resources and pass the instance role.
-Use an immutable, remotely accessible commit that contains this directory and its lockfile.
+Use an immutable, remotely accessible commit that contains this directory and the root `uv.lock`.
 Bootstrap checks out that commit, installs pinned uv and Python versions, and runs `uv sync --locked --no-dev`.
 It signals setup completion to CloudFormation but does not prepare data or start measurements.
 The EC2 commands use `--no-sync` to reuse this verified environment; they do not revalidate the lockfile on every invocation.
