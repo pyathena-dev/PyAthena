@@ -113,7 +113,8 @@ uv run --env-file .env just test sqla-async
 
 Despite the recipe's "unit tests" label, `just test pyathena` includes AWS integration tests.
 The recipes use eight pytest workers, so check your account's Athena concurrency quotas.
-They also rerun a failed test once when the failure message is an Athena internal error or `Invalid S3 request`; a direct `pytest` invocation does not.
+They also rerun a failed test once when its failure message is an Athena internal error or `Invalid S3 request`, and report the first attempt's traceback.
+Failures in the session setup hooks are not rerun, and a direct `pytest` invocation does not rerun.
 Do not overlap test runs that share AWS resources or quota.
 For a focused run with a single worker, for example:
 

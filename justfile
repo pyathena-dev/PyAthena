@@ -8,7 +8,7 @@
 RUFF_VERSION := "0.14.14"
 TOX_VERSION := "4.34.1"
 # Rerun a test once when Athena fails a query with a service-side error (#804).
-PYTEST_RERUN := "--reruns 1 --only-rerun 'Amazon Athena experienced an internal error' --only-rerun 'Invalid S3 request'"
+PYTEST_RERUN := "--reruns 1 --rerun-show-tracebacks --only-rerun 'Amazon Athena experienced an internal error' --only-rerun 'Invalid S3 request'"
 
 # List available recipes
 default:
