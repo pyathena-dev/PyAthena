@@ -7,18 +7,24 @@
 
 """Check that repository files carry the PyAthena license header."""
 
-# Usage (from the repository root):
-#   uv run python scripts/check_license_headers.py
+# Usage: just license-headers (also run by just lint)
 #
 # Checks tracked and untracked, non-ignored files in the working tree against
-# the header described in docs/contributing.md. Reports missing headers and
-# stale UNHEADED_FILES entries; never modifies files.
+# the header described in docs/contributing.md, with the exemptions in
+# scripts/config/license_headers.toml. Reports missing headers and stale
+# unheaded-files entries; never modifies files.
 
 import os
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 HEADER_LINES = (
     r"Copyright \d{4} The PyAthena authors",
@@ -61,95 +67,33 @@ ENCODING = re.compile(r"#.*coding[:=][ \t]*[-\w.]+.*\n")
 FRONT_MATTER = "---\n"
 FRONT_MATTER_END = re.compile(r"\n---[ \t]*(\n|$)")
 
-# Formats without comment syntax or with generated content.
-EXEMPT_SUFFIXES = frozenset({".csv", ".gz", ".json", ".lock", ".png", ".tsv"})
+CONFIG = "scripts/config/license_headers.toml"
 
-# Existing files without the header, classified in
-# https://github.com/pyathena-dev/PyAthena/issues/790 and described in NOTICE.
-# New files carry the header; add an entry only as agreed in the issue that
-# proposes the file, and remove entries whose files gain the header or are
-# deleted.
-UNHEADED_FILES = frozenset(
-    {
-        ".github/PULL_REQUEST_TEMPLATE.md",
-        "LICENSE",
-        "NOTICE",
-        "cloudformation/github_actions_oidc.yaml",
-        "docs/aio.md",
-        "docs/arrow.md",
-        "docs/conf.py",
-        "docs/cursor.md",
-        "docs/pandas.md",
-        "docs/polars.md",
-        "docs/s3fs.md",
-        "docs/sqlalchemy.md",
-        "docs/usage.md",
-        "pyathena/__init__.py",
-        "pyathena/aio/arrow/cursor.py",
-        "pyathena/aio/common.py",
-        "pyathena/aio/pandas/cursor.py",
-        "pyathena/aio/polars/cursor.py",
-        "pyathena/aio/result_set.py",
-        "pyathena/arrow/async_cursor.py",
-        "pyathena/arrow/converter.py",
-        "pyathena/arrow/cursor.py",
-        "pyathena/arrow/result_set.py",
-        "pyathena/arrow/util.py",
-        "pyathena/async_cursor.py",
-        "pyathena/common.py",
-        "pyathena/connection.py",
-        "pyathena/converter.py",
-        "pyathena/cursor.py",
-        "pyathena/filesystem/s3.py",
-        "pyathena/filesystem/s3_object.py",
-        "pyathena/formatter.py",
-        "pyathena/model.py",
-        "pyathena/pandas/__init__.py",
-        "pyathena/pandas/async_cursor.py",
-        "pyathena/pandas/converter.py",
-        "pyathena/pandas/cursor.py",
-        "pyathena/pandas/result_set.py",
-        "pyathena/pandas/util.py",
-        "pyathena/parser.py",
-        "pyathena/polars/__init__.py",
-        "pyathena/polars/async_cursor.py",
-        "pyathena/polars/cursor.py",
-        "pyathena/result_set.py",
-        "pyathena/s3fs/async_cursor.py",
-        "pyathena/s3fs/cursor.py",
-        "pyathena/sqlalchemy/array.py",
-        "pyathena/sqlalchemy/base.py",
-        "pyathena/sqlalchemy/compiler.py",
-        "pyathena/sqlalchemy/constants.py",
-        "pyathena/sqlalchemy/temporal.py",
-        "pyathena/sqlalchemy/types.py",
-        "pyathena/util.py",
-        "pyproject.toml",
-        "tests/__init__.py",
-        "tests/pyathena/aio/sqlalchemy/test_base.py",
-        "tests/pyathena/aio/test_cursor.py",
-        "tests/pyathena/arrow/test_async_cursor.py",
-        "tests/pyathena/conftest.py",
-        "tests/pyathena/filesystem/test_s3.py",
-        "tests/pyathena/filesystem/test_s3_async.py",
-        "tests/pyathena/pandas/test_async_cursor.py",
-        "tests/pyathena/pandas/test_cursor.py",
-        "tests/pyathena/pandas/test_util.py",
-        "tests/pyathena/polars/test_async_cursor.py",
-        "tests/pyathena/s3fs/test_cursor.py",
-        "tests/pyathena/sqlalchemy/test_array.py",
-        "tests/pyathena/sqlalchemy/test_base.py",
-        "tests/pyathena/sqlalchemy/test_temporal.py",
-        "tests/pyathena/sqlalchemy/test_types.py",
-        "tests/pyathena/test_async_cursor.py",
-        "tests/pyathena/test_converter.py",
-        "tests/pyathena/test_cursor.py",
-        "tests/pyathena/test_model.py",
-        "tests/pyathena/test_util.py",
-        "tests/resources/queries/create_table.sql.jinja2",
-        "tests/sqlalchemy/test_suite.py",
-    }
-)
+
+@dataclass(frozen=True)
+class Config:
+    """Exemptions read from CONFIG."""
+
+    exempt_suffixes: frozenset[str]
+    unheaded_files: frozenset[str]
+
+
+def load_config(file: Path) -> Config:
+    """Read the exemptions, rejecting unknown keys and duplicate entries."""
+    with file.open("rb") as f:
+        data = tomllib.load(f)
+    keys = {"exempt-suffixes", "unheaded-files"}
+    if set(data) != keys:
+        raise ValueError(f"{file}: expected keys {sorted(keys)}, found {sorted(data)}")
+    values = {}
+    for key in sorted(keys):
+        items = data[key]
+        if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
+            raise ValueError(f"{file}: {key} must be a list of strings")
+        if len(set(items)) != len(items):
+            raise ValueError(f"{file}: {key} has duplicate entries")
+        values[key] = frozenset(items)
+    return Config(values["exempt-suffixes"], values["unheaded-files"])
 
 
 def _matches(blocks: tuple[re.Pattern[str], ...], text: str, pos: int, end: int) -> bool:
@@ -187,12 +131,12 @@ def has_license_header(text: str, suffix: str) -> bool:
     return _matches(blocks, text, pos, len(text)) or _front_matter_header(text, suffix, blocks)
 
 
-def exemption_reason(root: Path, path: str) -> str | None:
+def exemption_reason(root: Path, path: str, exempt_suffixes: frozenset[str]) -> str | None:
     """Return why a file needs no header, or None when it needs one."""
     file = root / path
     if file.is_symlink():
         return "symbolic link"
-    if Path(path).suffix in EXEMPT_SUFFIXES:
+    if Path(path).suffix in exempt_suffixes:
         return "data or generated file"
     data = file.read_bytes()
     if b"\0" in data:
@@ -206,26 +150,26 @@ def exemption_reason(root: Path, path: str) -> str | None:
     return None
 
 
-def check(root: Path, paths: list[str]) -> list[str]:
+def check(root: Path, paths: list[str], config: Config) -> list[str]:
     """Return problems for the given repository-relative paths."""
     problems = []
     existing = {path for path in paths if (root / path).is_symlink() or (root / path).is_file()}
     for path in sorted(existing):
         file = root / path
-        reason = exemption_reason(root, path)
+        reason = exemption_reason(root, path, config.exempt_suffixes)
         headed = reason is None and has_license_header(
             file.read_text(encoding="utf-8"), Path(path).suffix
         )
-        if path in UNHEADED_FILES:
+        if path in config.unheaded_files:
             if reason is not None:
-                problems.append(f"{path}: listed in UNHEADED_FILES but exempt as {reason}")
+                problems.append(f"{path}: listed as unheaded in {CONFIG} but exempt as {reason}")
             elif headed:
-                problems.append(f"{path}: listed in UNHEADED_FILES but has the header")
+                problems.append(f"{path}: listed as unheaded in {CONFIG} but has the header")
         elif reason is None and not headed:
             problems.append(f"{path}: missing license header")
     problems.extend(
-        f"{path}: listed in UNHEADED_FILES but not found"
-        for path in sorted(UNHEADED_FILES - existing)
+        f"{path}: listed as unheaded in {CONFIG} but not found"
+        for path in sorted(config.unheaded_files - existing)
     )
     return problems
 
@@ -246,7 +190,7 @@ def main() -> int:
         ["git", "rev-parse", "--show-toplevel"], check=True, capture_output=True
     ).stdout
     root = Path(os.fsdecode(output.removesuffix(b"\n")))
-    problems = check(root, repository_files(root))
+    problems = check(root, repository_files(root), load_config(root / CONFIG))
     if not problems:
         return 0
     sys.stderr.write("".join(f"{problem}\n" for problem in problems))

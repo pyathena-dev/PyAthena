@@ -91,6 +91,7 @@ dev = [
     "sphinx-design",
     "types-python-dateutil",
     "cfn-lint>=1",
+    "tomli>=2.0.0; python_version<'3.11'",
 ]
 
 [build-system]

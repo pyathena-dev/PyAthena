@@ -6,16 +6,21 @@
 # SPDX-License-Identifier: MIT
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
 from scripts.check_license_headers import (
-    UNHEADED_FILES,
+    CONFIG,
+    Config,
     check,
     exemption_reason,
     has_license_header,
+    load_config,
     repository_files,
 )
+
+SUFFIXES = frozenset({".csv", ".json", ".lock", ".tsv"})
 
 LINES = [
     "Copyright 2026 The PyAthena authors",
@@ -111,48 +116,69 @@ class TestExemptionReason:
     )
     def test_file(self, tmp_path, name, content, expected):
         (tmp_path / name).write_bytes(content)
-        assert exemption_reason(tmp_path, name) == expected
+        assert exemption_reason(tmp_path, name, SUFFIXES) == expected
 
     def test_symlink(self, tmp_path):
         (tmp_path / "target.md").write_text("text\n")
         (tmp_path / "link.md").symlink_to("target.md")
-        assert exemption_reason(tmp_path, "link.md") == "symbolic link"
+        assert exemption_reason(tmp_path, "link.md", SUFFIXES) == "symbolic link"
+
+
+class TestLoadConfig:
+    def test_repository_config(self):
+        config = load_config(Path(__file__).parents[2] / CONFIG)
+        assert ".lock" in config.exempt_suffixes
+        assert "LICENSE" in config.unheaded_files
+
+    @pytest.mark.parametrize(
+        ("content", "message"),
+        [
+            ("exempt-suffixes = []\n", "expected keys"),
+            ("exempt-suffixes = []\nunheaded-files = []\nextra = 1\n", "expected keys"),
+            ('exempt-suffixes = ".lock"\nunheaded-files = []\n', "list of strings"),
+            ('exempt-suffixes = []\nunheaded-files = ["a", "a"]\n', "duplicate entries"),
+        ],
+    )
+    def test_invalid(self, tmp_path, content, message):
+        file = tmp_path / "config.toml"
+        file.write_text(content)
+        with pytest.raises(ValueError, match=message):
+            load_config(file)
 
 
 class TestCheck:
+    CONFIG = Config(exempt_suffixes=SUFFIXES, unheaded_files=frozenset({"LICENSE"}))
+
     @pytest.fixture
     def root(self, tmp_path):
-        for path in UNHEADED_FILES:
-            file = tmp_path / path
-            file.parent.mkdir(parents=True, exist_ok=True)
-            file.write_text("content\n")
+        (tmp_path / "LICENSE").write_text("content\n")
         return tmp_path
 
     def test_clean(self, root):
         (root / "new.py").write_text(HASH)
         (root / "empty.py").write_text("")
-        assert check(root, [*UNHEADED_FILES, "new.py", "empty.py"]) == []
+        assert check(root, ["LICENSE", "new.py", "empty.py"], self.CONFIG) == []
 
     def test_missing_header(self, root):
         (root / "new.py").write_text("x = 1\n")
-        assert check(root, [*UNHEADED_FILES, "new.py"]) == ["new.py: missing license header"]
+        assert check(root, ["LICENSE", "new.py"], self.CONFIG) == ["new.py: missing license header"]
 
     def test_listed_file_with_header(self, root):
         (root / "LICENSE").write_text(HASH)
-        assert check(root, list(UNHEADED_FILES)) == [
-            "LICENSE: listed in UNHEADED_FILES but has the header"
+        assert check(root, ["LICENSE"], self.CONFIG) == [
+            f"LICENSE: listed as unheaded in {CONFIG} but has the header"
         ]
 
     def test_listed_file_exempt(self, root):
         (root / "LICENSE").write_text("")
-        assert check(root, list(UNHEADED_FILES)) == [
-            "LICENSE: listed in UNHEADED_FILES but exempt as empty file"
+        assert check(root, ["LICENSE"], self.CONFIG) == [
+            f"LICENSE: listed as unheaded in {CONFIG} but exempt as empty file"
         ]
 
     def test_listed_file_not_found(self, root):
         (root / "LICENSE").unlink()
-        assert check(root, list(UNHEADED_FILES)) == [
-            "LICENSE: listed in UNHEADED_FILES but not found"
+        assert check(root, ["LICENSE"], self.CONFIG) == [
+            f"LICENSE: listed as unheaded in {CONFIG} but not found"
         ]
 
 

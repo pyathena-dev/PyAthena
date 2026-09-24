@@ -25,11 +25,14 @@ format:
     uvx ruff@{{RUFF_VERSION}} format .
 
 # Lint, format check, mypy, CloudFormation validation, and license headers
-lint:
+lint: license-headers
     uvx ruff@{{RUFF_VERSION}} check .
     uvx ruff@{{RUFF_VERSION}} format --check .
     uv run mypy .
     uv run cfn-lint cloudformation/*.yaml
+
+# Check license headers
+license-headers:
     uv run python scripts/check_license_headers.py
 
 # Run tests: just test (pyathena|sqla|sqla-async)
