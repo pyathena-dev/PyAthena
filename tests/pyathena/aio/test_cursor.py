@@ -2,7 +2,6 @@ import asyncio
 import re
 import threading
 from datetime import datetime, timezone
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -10,6 +9,7 @@ import pytest
 from pyathena import BINARY, Binary, ExecuteOptions
 from pyathena.aio.cursor import AioCursor
 from pyathena.error import DatabaseError, OperationalError, ProgrammingError
+from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet
 from pyathena.util import RetryConfig
@@ -477,26 +477,27 @@ class TestAioCursor:
             aio_cursor.arraysize = -1
 
     async def test_glue_request_runs_off_the_event_loop(self, aio_cursor, monkeypatch):
-        connection = aio_cursor.connection
-        throttle_metadata_api(connection.client, monkeypatch)
+        throttle_metadata_api(aio_cursor.connection.client, monkeypatch)
         loop_thread = threading.get_ident()
         threads = []
-        client = SimpleNamespace(
-            get_table=lambda **kwargs: (
-                threads.append(("request", threading.get_ident()))
-                or {"Table": {"Name": kwargs["Name"], "StorageDescriptor": {}}}
-            )
-        )
+        # Record where the real client is built and the real request is sent.
+        client = GlueMetadataClient.client
+        get_table = GlueMetadataClient.get_table
 
-        def glue_client(self):
+        def recorded_client(self):
             threads.append(("client", threading.get_ident()))
-            return client
+            return client.fget(self)
 
-        monkeypatch.setattr(type(connection), "glue_client", property(glue_client))
+        def recorded_get_table(self, *args, **kwargs):
+            threads.append(("request", threading.get_ident()))
+            return get_table(self, *args, **kwargs)
+
+        monkeypatch.setattr(GlueMetadataClient, "client", property(recorded_client))
+        monkeypatch.setattr(GlueMetadataClient, "get_table", recorded_get_table)
 
         assert (await aio_cursor.get_table_metadata("one_row")).name == "one_row"
         # Building the client and sending the request would block the loop.
-        assert [step for step, _ in threads] == ["client", "request"]
+        assert [step for step, _ in threads] == ["request", "client"]
         assert all(thread != loop_thread for _, thread in threads)
 
     async def test_list_databases(self, aio_cursor):

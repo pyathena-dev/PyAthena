@@ -11,11 +11,11 @@ from concurrent.futures.thread import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from random import randint
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from botocore.exceptions import ClientError, EndpointConnectionError
+from botocore.config import Config
+from botocore.exceptions import ClientError
 
 from pyathena import (
     BINARY,
@@ -32,6 +32,7 @@ from pyathena import (
 from pyathena.converter import _to_array, _to_map, _to_struct
 from pyathena.cursor import Cursor
 from pyathena.error import DatabaseError, NotSupportedError, OperationalError, ProgrammingError
+from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
 from tests import ENV
@@ -1392,54 +1393,64 @@ class TestCursor:
         assert cursor.get_table_metadata("one_row").name == "one_row"
         assert calls == ["get_table_metadata"]
 
+    @staticmethod
+    def _unreachable_glue(connection, monkeypatch):
+        """Point the connection's Glue requests at a region that does not exist."""
+        glue = GlueMetadataClient(
+            connection.session,
+            "xx-invalid-1",
+            Config(connect_timeout=1, read_timeout=1, retries={"max_attempts": 1}),
+            {},
+        )
+        monkeypatch.setattr(connection, "_glue", glue)
+        return glue
+
     @pytest.mark.parametrize(
         "cursor", [{"retry_config": RetryConfig(attempt=1)}], indirect=["cursor"]
     )
-    @pytest.mark.parametrize(
-        ("glue_error", "expected_cause", "expected_calls"),
-        [
-            # Glue's answer about absence is raised as Athena's would be.
-            ("EntityNotFoundException", "EntityNotFoundException", 1),
-            # No Glue permission: the Athena request runs again with its policy.
-            ("AccessDeniedException", "ThrottlingException", 2),
-        ],
-    )
-    def test_failed_glue_request(
-        self, cursor, monkeypatch, glue_error, expected_cause, expected_calls
-    ):
+    def test_glue_answer_that_the_table_is_missing(self, cursor, monkeypatch):
+        # Glue's answer about absence is raised as Athena's would be.
         calls = throttle_metadata_api(cursor.connection.client, monkeypatch)
-        error = ClientError({"Error": {"Code": glue_error, "Message": ""}}, "GetTable")
-
-        def get_table(**kwargs):
-            raise error
-
-        monkeypatch.setattr(cursor.connection, "_glue_client", SimpleNamespace(get_table=get_table))
 
         with pytest.raises(OperationalError) as caught:
-            cursor.get_table_metadata("one_row")
+            cursor.get_table_metadata("no_such_table_786")
 
-        assert caught.value.__cause__.response["Error"]["Code"] == expected_cause
-        assert len(calls) == expected_calls
+        assert caught.value.__cause__.response["Error"]["Code"] == "EntityNotFoundException"
+        assert calls == ["get_table_metadata"]
+
+    @pytest.mark.parametrize(
+        "cursor", [{"retry_config": RetryConfig(attempt=1)}], indirect=["cursor"]
+    )
+    def test_missing_database_in_glue_listing_asks_athena(self, cursor, monkeypatch):
+        # Only a table lookup takes Glue's answer about absence as final; a
+        # listing asks Athena again, whose error for a missing catalog or
+        # database callers may already handle.
+        calls = throttle_metadata_api(cursor.connection.client, monkeypatch)
+
+        with pytest.raises(OperationalError) as caught:
+            cursor.list_table_metadata(schema_name="no_such_database_786")
+
+        assert caught.value.__cause__.response["Error"]["Code"] == "ThrottlingException"
+        assert calls == ["list_table_metadata"] * 2
+        assert cursor.connection._glue.reachable
 
     @pytest.mark.parametrize(
         "cursor", [{"retry_config": RetryConfig(attempt=1)}], indirect=["cursor"]
     )
     def test_unreachable_glue_is_not_tried_again(self, cursor, monkeypatch):
         calls = throttle_metadata_api(cursor.connection.client, monkeypatch)
-        glue_calls = []
+        glue = self._unreachable_glue(cursor.connection, monkeypatch)
 
-        def get_table(**kwargs):
-            glue_calls.append(kwargs)
-            raise EndpointConnectionError(endpoint_url="https://glue.example")
+        # The Athena request runs again with its policy after Glue fails.
+        with pytest.raises(OperationalError) as caught:
+            cursor.get_table_metadata("one_row")
+        assert caught.value.__cause__.response["Error"]["Code"] == "ThrottlingException"
+        assert calls == ["get_table_metadata"] * 2
+        assert not glue.reachable
 
-        monkeypatch.setattr(cursor.connection, "_glue_client", SimpleNamespace(get_table=get_table))
-
-        for _ in range(2):
-            with pytest.raises(OperationalError):
-                cursor.get_table_metadata("one_row")
-
-        # One wait for an endpoint that cannot be reached, not one per request.
-        assert len(glue_calls) == 1
+        # A later request does not wait for Glue again.
+        with pytest.raises(OperationalError):
+            cursor.get_table_metadata("one_row")
         assert calls == ["get_table_metadata"] * 3
 
     # A policy that retries every MetadataException.
@@ -1498,17 +1509,8 @@ class TestCursor:
                 )
             return list_table_metadata(**kwargs)
 
-        def paginate(**kwargs):
-            raise ClientError(
-                {"Error": {"Code": "AccessDeniedException", "Message": ""}}, "GetTables"
-            )
-
         monkeypatch.setattr(client, "list_table_metadata", throttle_second_page_once)
-        monkeypatch.setattr(
-            cursor.connection,
-            "_glue_client",
-            SimpleNamespace(get_paginator=lambda operation: SimpleNamespace(paginate=paginate)),
-        )
+        self._unreachable_glue(cursor.connection, monkeypatch)
 
         assert sorted(m.name for m in cursor.list_table_metadata(max_results=2)) == expected
         # Every page once, and the throttled second page a second time.
@@ -1516,33 +1518,6 @@ class TestCursor:
         assert requests[0] is None
         assert requests[1] == requests[2]
         assert len(requests) == len(set(requests)) + 1
-
-    @pytest.mark.parametrize(
-        "cursor", [{"retry_config": RetryConfig(attempt=1)}], indirect=["cursor"]
-    )
-    def test_missing_database_in_glue_listing_asks_athena(self, cursor, monkeypatch):
-        # Only a table lookup takes Glue's answer about absence as final; a
-        # listing asks Athena again, whose error for a missing catalog or
-        # database callers may already handle.
-        calls = throttle_metadata_api(cursor.connection.client, monkeypatch)
-        error = ClientError(
-            {"Error": {"Code": "EntityNotFoundException", "Message": ""}}, "GetTables"
-        )
-
-        def paginate(**kwargs):
-            raise error
-
-        monkeypatch.setattr(
-            cursor.connection,
-            "_glue_client",
-            SimpleNamespace(get_paginator=lambda operation: SimpleNamespace(paginate=paginate)),
-        )
-
-        with pytest.raises(OperationalError) as caught:
-            cursor.list_table_metadata()
-
-        assert caught.value.__cause__.response["Error"]["Code"] == "ThrottlingException"
-        assert calls == ["list_table_metadata"] * 2
 
     @pytest.mark.parametrize(
         ("cursor", "catalog_name"),
@@ -1555,44 +1530,14 @@ class TestCursor:
     )
     def test_throttled_metadata_without_glue(self, cursor, monkeypatch, catalog_name):
         calls = throttle_metadata_api(cursor.connection.client, monkeypatch)
-        monkeypatch.setattr(type(cursor.connection), "glue_client", property(pytest.fail))
+        # A request to this Glue would fail and mark it unreachable.
+        glue = self._unreachable_glue(cursor.connection, monkeypatch)
 
         with pytest.raises(OperationalError):
             cursor.get_table_metadata("one_row", catalog_name=catalog_name)
 
         assert calls == ["get_table_metadata"]
-
-    def test_glue_client_leaves_out_athena_endpoint(self):
-        conn = connect(
-            region_name=ENV.region_name,
-            endpoint_url=f"https://athena.{ENV.region_name}.amazonaws.com",
-            # Athena's API version, which Glue does not have.
-            api_version="2017-05-18",
-        )
-
-        # Built once, under the connection's lock, even when cursors in several
-        # threads need it together.
-        created = []
-        session_client = conn.session.client
-
-        def contended_client(*args, **kwargs):
-            created.append((args, conn._glue_client_lock.locked()))
-            return session_client(*args, **kwargs)
-
-        conn._session.client = contended_client
-        barrier = threading.Barrier(8)
-
-        def get_glue_client(_):
-            barrier.wait()
-            return conn.glue_client
-
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            clients = list(executor.map(get_glue_client, range(8)))
-
-        assert created == [(("glue",), True)]
-        assert all(client is clients[0] for client in clients)
-        assert clients[0].meta.service_model.service_name == "glue"
-        assert clients[0].meta.endpoint_url == f"https://glue.{ENV.region_name}.amazonaws.com"
+        assert glue.reachable
 
 
 class TestDictCursor:

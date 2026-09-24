@@ -181,6 +181,15 @@ def _get_error_code(ex: BaseException, unwrap_metadata: bool = False) -> str | N
     return code if isinstance(code, str) else None
 
 
+def _is_throttling_error(ex: BaseException) -> bool:
+    """Whether an AWS error is throttling.
+
+    That includes Glue's own throttling, which Athena reports inside a
+    ``MetadataException``.
+    """
+    return _get_error_code(ex, unwrap_metadata=True) in THROTTLING_ERROR_CODES
+
+
 def is_retryable_error(ex: BaseException, config: RetryConfig) -> bool:
     """Return whether an exception matches the retry policy's AWS error codes.
 

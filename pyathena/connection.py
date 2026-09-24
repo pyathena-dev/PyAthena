@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import os
-import threading
 import time
 from collections.abc import Callable
 from typing import (
@@ -24,6 +23,7 @@ from pyathena.converter import Converter
 from pyathena.cursor import Cursor
 from pyathena.error import NotSupportedError, ProgrammingError
 from pyathena.formatter import DefaultParameterFormatter, Formatter
+from pyathena.glue import GlueMetadataClient
 from pyathena.util import RetryConfig
 
 if TYPE_CHECKING:
@@ -348,33 +348,9 @@ class Connection(Generic[ConnectionCursor]):
         self.on_start_query_execution = on_start_query_execution
         self.on_poll = on_poll
         self.glue_metadata_fallback = glue_metadata_fallback
-        self._glue_client_lock = threading.Lock()
-        self._glue_client: BaseClient | None = None
-        # Set when a Glue request cannot reach Glue; the fallback then stays off.
-        self._glue_unreachable = False
-
-    @property
-    def glue_client(self) -> BaseClient:
-        """Get the boto3 Glue client used by the metadata fallback.
-
-        Built on first use from the connection's session, region and config,
-        without the ``endpoint_url`` and ``api_version`` meant for Athena.
-
-        Returns:
-            The boto3 Glue client.
-        """
-        # A boto3 session is not thread-safe, so the client is built once.
-        with self._glue_client_lock:
-            if self._glue_client is None:
-                kwargs = {
-                    k: v
-                    for k, v in self._client_kwargs.items()
-                    if k not in ("endpoint_url", "api_version")
-                }
-                self._glue_client = self._session.client(
-                    "glue", region_name=self.region_name, config=self.config, **kwargs
-                )
-            return self._glue_client
+        self._glue = GlueMetadataClient(
+            self._session, self.region_name, self.config, self._client_kwargs
+        )
 
     def _assume_role(
         self,

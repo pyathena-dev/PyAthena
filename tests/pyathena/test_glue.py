@@ -4,14 +4,19 @@
 # See LICENSE or https://opensource.org/licenses/MIT.
 #
 # SPDX-License-Identifier: MIT
-from types import SimpleNamespace
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from botocore.config import Config
+from botocore.exceptions import ClientError, EndpointConnectionError
 
-from pyathena.glue import GlueMetadataCatalog
+from pyathena.glue import GlueMetadataClient
+from tests import ENV
+from tests.pyathena.conftest import connect
 
 
-class TestGlueMetadataCatalog:
+class TestGlueMetadataClient:
     @pytest.mark.parametrize(
         ("catalog_name", "expected"),
         [
@@ -23,54 +28,107 @@ class TestGlueMetadataCatalog:
         ],
     )
     def test_supports(self, catalog_name, expected):
-        assert GlueMetadataCatalog.supports(catalog_name) is expected
-
-    def test_rejects_an_unsupported_catalog(self):
-        with pytest.raises(ValueError, match="federated_catalog"):
-            GlueMetadataCatalog(SimpleNamespace(), "federated_catalog")
+        assert GlueMetadataClient.supports(catalog_name) is expected
 
     @staticmethod
-    def _client(requests, pages):
-        def get_paginator(operation):
-            def paginate(**kwargs):
-                requests.append((operation, kwargs))
-                return pages
+    def _view(metadata):
+        return (
+            metadata.name,
+            metadata.table_type,
+            metadata.create_time,
+            [(c.name, c.type, c.comment) for c in metadata.columns],
+            [(c.name, c.type, c.comment) for c in metadata.partition_keys],
+            metadata.parameters,
+        )
 
-            return SimpleNamespace(paginate=paginate)
+    def test_reads_what_athena_reports(self, cursor):
+        glue = cursor.connection._glue
+        catalog = cursor.connection.catalog_name
 
-        def get_table(**kwargs):
-            requests.append(("get_table", kwargs))
-            return {"Table": {"Name": kwargs["Name"], "StorageDescriptor": {}}}
+        for table in ("one_row", "parquet_with_compression", "partition_table", "view_one_row"):
+            assert self._view(glue.get_table(catalog, ENV.schema, table)) == self._view(
+                cursor.get_table_metadata(table)
+            )
+        assert sorted(self._view(m) for m in glue.list_tables(catalog, ENV.schema)) == sorted(
+            self._view(m) for m in cursor.list_table_metadata()
+        )
+        assert [m.name for m in glue.list_tables(catalog, ENV.schema, "one_row")] == ["one_row"]
+        assert ENV.schema in [d.name for d in glue.list_databases(catalog)]
 
-        return SimpleNamespace(get_paginator=get_paginator, get_table=get_table)
-
-    @pytest.mark.parametrize(
-        ("catalog_name", "catalog_kwargs"),
-        [
-            ("AwsDataCatalog", {}),
-            # Glue addresses a table-bucket catalog by its Athena name; the
-            # bucket name alone is rejected. Measured live for #786.
-            ("s3tablescatalog/bucket", {"CatalogId": "s3tablescatalog/bucket"}),
-        ],
+    @pytest.mark.skipif(
+        not ENV.s3tables_catalog or not ENV.s3tables_namespace,
+        reason="AWS_ATHENA_S3_TABLES_CATALOG / AWS_ATHENA_S3_TABLES_NAMESPACE are not configured",
     )
-    def test_requests_address_the_catalog(self, catalog_name, catalog_kwargs):
-        requests = []
-        pages = [
-            {"TableList": [{"Name": "a"}], "DatabaseList": [{"Name": "db1"}]},
-            {"TableList": [{"Name": "b"}], "DatabaseList": [{"Name": "db2"}]},
-        ]
-        glue = GlueMetadataCatalog(self._client(requests, pages), catalog_name)
+    def test_reads_s3_tables_catalog(self):
+        # Glue addresses a table-bucket catalog by its Athena name.
+        conn = connect(schema_name=ENV.s3tables_namespace, catalog_name=ENV.s3tables_catalog)
+        with conn.cursor() as cursor:
+            athena = {(m.name, m.table_type) for m in cursor.list_table_metadata()}
+        glue = conn._glue.list_tables(ENV.s3tables_catalog, ENV.s3tables_namespace)
 
-        assert glue.get_table("db", "t").name == "t"
-        assert [t.name for t in glue.list_tables("db")] == ["a", "b"]
-        assert [t.name for t in glue.list_tables("db", "a.*")] == ["a", "b"]
-        assert [d.name for d in glue.list_databases()] == ["db1", "db2"]
-        assert requests == [
-            ("get_table", {"DatabaseName": "db", "Name": "t", **catalog_kwargs}),
-            ("get_tables", {"DatabaseName": "db", **catalog_kwargs}),
-            ("get_tables", {"DatabaseName": "db", "Expression": "a.*", **catalog_kwargs}),
-            ("get_databases", catalog_kwargs),
+        assert {(m.name, m.table_type) for m in glue} == athena
+        assert ENV.s3tables_namespace in [
+            d.name for d in conn._glue.list_databases(ENV.s3tables_catalog)
         ]
+
+    def test_reports_a_missing_table(self, cursor):
+        with pytest.raises(ClientError) as caught:
+            cursor.connection._glue.get_table(
+                cursor.connection.catalog_name, ENV.schema, "no_such_table_786"
+            )
+
+        assert caught.value.response["Error"]["Code"] == "EntityNotFoundException"
+        assert cursor.connection._glue.reachable
+
+    def test_rejects_an_unsupported_catalog(self, cursor):
+        with pytest.raises(ValueError, match="federated_catalog"):
+            cursor.connection._glue.get_table("federated_catalog", ENV.schema, "one_row")
+
+    def test_stops_after_it_cannot_reach_glue(self, cursor):
+        glue = GlueMetadataClient(
+            cursor.connection.session,
+            "xx-invalid-1",
+            Config(connect_timeout=1, read_timeout=1, retries={"max_attempts": 1}),
+            {},
+        )
+
+        with pytest.raises(EndpointConnectionError):
+            glue.get_table("AwsDataCatalog", ENV.schema, "one_row")
+
+        assert not glue.reachable
+        assert not glue.usable_for("AwsDataCatalog")
+
+    def test_client_leaves_out_athena_endpoint(self):
+        conn = connect(
+            region_name=ENV.region_name,
+            endpoint_url=f"https://athena.{ENV.region_name}.amazonaws.com",
+            # Athena's API version, which Glue does not have.
+            api_version="2017-05-18",
+        )
+        glue = conn._glue
+        # Built once, under the lock, even when cursors in several threads
+        # need it together.
+        created = []
+        session_client = conn.session.client
+
+        def contended_client(*args, **kwargs):
+            created.append((args, glue._lock.locked()))
+            return session_client(*args, **kwargs)
+
+        conn._session.client = contended_client
+        barrier = threading.Barrier(8)
+
+        def get_client(_):
+            barrier.wait()
+            return glue.client
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            clients = list(executor.map(get_client, range(8)))
+
+        assert created == [(("glue",), True)]
+        assert all(client is clients[0] for client in clients)
+        assert clients[0].meta.service_model.service_name == "glue"
+        assert clients[0].meta.endpoint_url == f"https://glue.{ENV.region_name}.amazonaws.com"
 
     def test_table_metadata_leaves_out_columns_iceberg_no_longer_has(self):
         # Glue's columns after DROP COLUMN b and CHANGE COLUMN a a2, as measured
@@ -96,7 +154,7 @@ class TestGlueMetadataCatalog:
             },
         }
 
-        metadata = GlueMetadataCatalog.table_metadata(table)
+        metadata = GlueMetadataClient.table_metadata(table)
 
         assert [c.name for c in metadata.columns] == ["a2", "c", "d"]
 
@@ -175,7 +233,7 @@ class TestGlueMetadataCatalog:
         }
         table["StorageDescriptor"]["Columns"] = [{"Name": "a", "Type": "int"}]
 
-        metadata = GlueMetadataCatalog.table_metadata(table)
+        metadata = GlueMetadataClient.table_metadata(table)
 
         assert metadata.parameters == expected_parameters
         assert (metadata.name, metadata.table_type, metadata.comment) == (

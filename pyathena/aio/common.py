@@ -12,10 +12,11 @@ from botocore.exceptions import BotoCoreError, ClientError
 from pyathena.aio.util import _async_retry_api_call, async_retry_api_call
 from pyathena.common import BaseCursor, CursorIterator
 from pyathena.error import DatabaseError, OperationalError, ProgrammingError
-from pyathena.glue import GlueMetadataCatalog
+from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaDatabase, AthenaQueryExecution, AthenaTableMetadata
 from pyathena.options import ExecuteOptions
 from pyathena.result_set import AthenaResultSet, WithResultSet
+from pyathena.util import _is_throttling_error
 
 _logger = logging.getLogger(__name__)
 
@@ -241,7 +242,7 @@ class AioBaseCursor(BaseCursor):
         self,
         catalog_name: str | None,
         athena_request: Callable[[Callable[[BaseException], bool] | None, bool], Awaitable[_T]],
-        glue_request: Callable[[GlueMetadataCatalog], _T],
+        glue_request: Callable[[GlueMetadataClient, str], _T],
         description: str,
         logging_: bool = True,
         absence_is_final: bool = False,
@@ -255,19 +256,15 @@ class AioBaseCursor(BaseCursor):
         if glue_catalog is None:
             return await athena_request(None, logging_)
         try:
-            return await athena_request(self._is_throttled, False)
+            return await athena_request(_is_throttling_error, False)
         except OperationalError as e:
-            if not self._is_throttled(e):
+            if not _is_throttling_error(e.__cause__ or e):
                 if logging_:
                     _logger.exception(f"Failed to {description}.")
                 raise
         _logger.warning(f"Request to {description} was throttled; reading it from Glue.")
         try:
-            return await asyncio.to_thread(
-                lambda: glue_request(
-                    GlueMetadataCatalog(self._connection.glue_client, glue_catalog)
-                )
-            )
+            return await asyncio.to_thread(glue_request, self._connection._glue, glue_catalog)
         except (BotoCoreError, ClientError) as e:
             self._glue_request_failed(e, description, absence_is_final)
         return await athena_request(None, logging_)
@@ -328,7 +325,7 @@ class AioBaseCursor(BaseCursor):
                     return databases
 
         return await self._async_with_glue_fallback(
-            catalog_name, athena_request, GlueMetadataCatalog.list_databases, "list databases"
+            catalog_name, athena_request, GlueMetadataClient.list_databases, "list databases"
         )
 
     async def _get_table_metadata(  # type: ignore[override]
@@ -376,7 +373,7 @@ class AioBaseCursor(BaseCursor):
                 logging_=logging_,
                 stop_on=stop_on,
             ),
-            lambda glue: glue.get_table(schema_name, table_name),
+            lambda glue, catalog: glue.get_table(catalog, schema_name, table_name),
             "get table metadata",
             logging_=logging_,
             absence_is_final=True,
@@ -451,7 +448,7 @@ class AioBaseCursor(BaseCursor):
         return await self._async_with_glue_fallback(
             catalog_name,
             athena_request,
-            lambda glue: glue.list_tables(schema_name, expression),
+            lambda glue, catalog: glue.list_tables(catalog, schema_name, expression),
             "list table metadata",
             logging_=logging_,
         )

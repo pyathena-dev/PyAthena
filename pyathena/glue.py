@@ -8,43 +8,92 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from botocore.exceptions import (
+    ConnectionError,
+    HTTPClientError,
+    NoCredentialsError,
+    NoRegionError,
+)
 
 from pyathena.model import AthenaDatabase, AthenaTableMetadata
 
+if TYPE_CHECKING:
+    from boto3.session import Session
+    from botocore.client import BaseClient
+    from botocore.config import Config
 
-class GlueMetadataCatalog:
-    """A Glue-backed Athena data catalog, read through the Glue API.
+
+class GlueMetadataClient:
+    """Reads Athena metadata of Glue-backed catalogs through the Glue API.
 
     Reports the metadata Athena's ``GetTableMetadata``, ``ListTableMetadata``
     and ``ListDatabases`` would give for the same catalog, from ``GetTable``,
-    ``GetTables`` and ``GetDatabases``.
+    ``GetTables`` and ``GetDatabases``. A connection holds one, which builds
+    its Glue client on first use.
 
     Args:
-        client: A boto3 Glue client.
-        catalog_name: An Athena catalog name that :meth:`supports` accepts.
-
-    Raises:
-        ValueError: If Glue cannot answer for the catalog.
+        session: The connection's boto3 session.
+        region_name: The connection's region.
+        config: The connection's botocore config.
+        client_kwargs: The connection's client arguments. Athena's
+            ``endpoint_url`` and ``api_version`` are not passed to Glue.
     """
 
-    def __init__(self, client: Any, catalog_name: str | None) -> None:
-        request_kwargs = self._catalog_request_kwargs(catalog_name)
-        if request_kwargs is None:
-            raise ValueError(f"Glue cannot answer for the catalog {catalog_name!r}.")
-        self._client = client
-        self._request_kwargs = request_kwargs
+    def __init__(
+        self,
+        session: Session,
+        region_name: str | None,
+        config: Config | None,
+        client_kwargs: Mapping[str, Any],
+    ) -> None:
+        self._session = session
+        self._region_name = region_name
+        self._config = config
+        self._client_kwargs = {
+            k: v for k, v in client_kwargs.items() if k not in ("endpoint_url", "api_version")
+        }
+        # A boto3 session is not thread-safe, so the client is built once.
+        self._lock = threading.Lock()
+        self._client: BaseClient | None = None
+        self._reachable = True
+
+    # Failures that every later request would repeat: no route to Glue, a
+    # timeout, or no credentials or region for it.
+    _UNREACHABLE_ERRORS = (ConnectionError, HTTPClientError, NoCredentialsError, NoRegionError)
+
+    @property
+    def reachable(self) -> bool:
+        """False once a request could not reach Glue."""
+        return self._reachable
+
+    @property
+    def client(self) -> BaseClient:
+        """The Glue client, built on first use."""
+        with self._lock:
+            if self._client is None:
+                self._client = self._session.client(
+                    "glue",
+                    region_name=self._region_name,
+                    config=self._config,
+                    **self._client_kwargs,
+                )
+            return self._client
 
     @staticmethod
     def _catalog_request_kwargs(catalog_name: str | None) -> dict[str, str] | None:
         # AwsDataCatalog is the caller's default Glue catalog. An S3 Tables
         # catalog is a Glue federated catalog addressed by its Athena name.
-        lowered = (catalog_name or "").lower()
+        if not catalog_name:
+            return None
+        lowered = catalog_name.lower()
         if lowered == "awsdatacatalog":
             return {}
         if lowered.startswith("s3tablescatalog/"):
-            return {"CatalogId": catalog_name}  # type: ignore[dict-item]
+            return {"CatalogId": catalog_name}
         return None
 
     @classmethod
@@ -60,26 +109,49 @@ class GlueMetadataCatalog:
         """
         return cls._catalog_request_kwargs(catalog_name) is not None
 
-    def get_table(self, schema_name: str | None, table_name: str) -> AthenaTableMetadata:
+    def usable_for(self, catalog_name: str | None) -> bool:
+        """Whether to ask Glue about the catalog.
+
+        False once a request could not reach Glue, so later requests do not
+        wait for it again.
+        """
+        return self._reachable and self.supports(catalog_name)
+
+    def _request(self, operation: str, catalog_name: str | None, **kwargs: Any) -> Any:
+        request_kwargs = self._catalog_request_kwargs(catalog_name)
+        if request_kwargs is None:
+            raise ValueError(f"Glue cannot answer for the catalog {catalog_name!r}.")
+        try:
+            if operation == "get_table":
+                return self.client.get_table(**kwargs, **request_kwargs)
+            pages = self.client.get_paginator(operation).paginate(**kwargs, **request_kwargs)
+            return list(pages)
+        except self._UNREACHABLE_ERRORS:
+            self._reachable = False
+            raise
+
+    def get_table(
+        self, catalog_name: str | None, schema_name: str | None, table_name: str
+    ) -> AthenaTableMetadata:
         """Get one table's metadata with ``GetTable``."""
-        response = self._client.get_table(
-            DatabaseName=schema_name, Name=table_name, **self._request_kwargs
+        response = self._request(
+            "get_table", catalog_name, DatabaseName=schema_name, Name=table_name
         )
         return self.table_metadata(response["Table"])
 
     def list_tables(
-        self, schema_name: str | None, expression: str | None = None
+        self, catalog_name: str | None, schema_name: str | None, expression: str | None = None
     ) -> list[AthenaTableMetadata]:
         """List a database's table metadata with ``GetTables``."""
-        request: dict[str, Any] = {"DatabaseName": schema_name, **self._request_kwargs}
+        kwargs: dict[str, Any] = {"DatabaseName": schema_name}
         if expression:
-            request["Expression"] = expression
-        pages = self._client.get_paginator("get_tables").paginate(**request)
+            kwargs["Expression"] = expression
+        pages = self._request("get_tables", catalog_name, **kwargs)
         return [self.table_metadata(t) for page in pages for t in page["TableList"]]
 
-    def list_databases(self) -> list[AthenaDatabase]:
+    def list_databases(self, catalog_name: str | None) -> list[AthenaDatabase]:
         """List the catalog's databases with ``GetDatabases``."""
-        pages = self._client.get_paginator("get_databases").paginate(**self._request_kwargs)
+        pages = self._request("get_databases", catalog_name)
         return [AthenaDatabase({"Database": d}) for page in pages for d in page["DatabaseList"]]
 
     @staticmethod

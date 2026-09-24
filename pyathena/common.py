@@ -14,7 +14,7 @@ import pyathena
 from pyathena.converter import Converter, DefaultTypeConverter
 from pyathena.error import DatabaseError, OperationalError, ProgrammingError
 from pyathena.formatter import Formatter
-from pyathena.glue import GlueMetadataCatalog
+from pyathena.glue import GlueMetadataClient
 from pyathena.model import (
     AthenaCalculationExecution,
     AthenaCalculationExecutionStatus,
@@ -26,9 +26,9 @@ from pyathena.model import (
 )
 from pyathena.options import ExecuteOptions
 from pyathena.util import (
-    THROTTLING_ERROR_CODES,
     RetryConfig,
     _get_error_code,
+    _is_throttling_error,
     _retry_api_call,
     retry_api_call,
 )
@@ -331,26 +331,18 @@ class BaseCursor(metaclass=ABCMeta):
         """The catalog to read from Glue when Athena throttles, or None."""
         catalog = catalog_name if catalog_name else self._catalog_name
         connection = self._connection
-        if (
-            connection.glue_metadata_fallback
-            and not connection._glue_unreachable
-            and GlueMetadataCatalog.supports(catalog)
-        ):
+        if connection.glue_metadata_fallback and connection._glue.usable_for(catalog):
             return catalog
         return None
-
-    @staticmethod
-    def _is_throttled(e: BaseException) -> bool:
-        # Athena wraps Glue's own throttling in a MetadataException.
-        return _get_error_code(e.__cause__ or e, unwrap_metadata=True) in THROTTLING_ERROR_CODES
 
     def _glue_request_failed(
         self, e: BotoCoreError | ClientError, description: str, absence_is_final: bool
     ) -> None:
         """Raise Glue's answer that a table is absent; otherwise log the failure.
 
-        A request that could not reach Glue at all turns the fallback off for
-        this connection, so later throttled requests do not wait for it again.
+        After a request that could not reach Glue at all, the connection's
+        ``GlueMetadataClient`` stops using Glue, so later throttled requests
+        do not wait for it again.
         """
         if (
             absence_is_final
@@ -358,9 +350,8 @@ class BaseCursor(metaclass=ABCMeta):
             and _get_error_code(e) == "EntityNotFoundException"
         ):
             raise OperationalError(*e.args) from e
-        unreachable = isinstance(e, BotoCoreError)
-        if unreachable:
-            self._connection._glue_unreachable = True
+        # GlueMetadataClient stops using Glue after a request that cannot reach it.
+        unreachable = not self._connection._glue.reachable
         suffix = " and not using Glue again on this connection" if unreachable else ""
         _logger.warning(
             f"Glue request to {description} failed: {e}; retrying the Athena request{suffix}."
@@ -370,7 +361,7 @@ class BaseCursor(metaclass=ABCMeta):
         self,
         catalog_name: str | None,
         athena_request: Callable[[Callable[[BaseException], bool] | None, bool], _T],
-        glue_request: Callable[[GlueMetadataCatalog], _T],
+        glue_request: Callable[[GlueMetadataClient, str], _T],
         description: str,
         logging_: bool = True,
         absence_is_final: bool = False,
@@ -391,15 +382,15 @@ class BaseCursor(metaclass=ABCMeta):
         if glue_catalog is None:
             return athena_request(None, logging_)
         try:
-            return athena_request(self._is_throttled, False)
+            return athena_request(_is_throttling_error, False)
         except OperationalError as e:
-            if not self._is_throttled(e):
+            if not _is_throttling_error(e.__cause__ or e):
                 if logging_:
                     _logger.exception(f"Failed to {description}.")
                 raise
         _logger.warning(f"Request to {description} was throttled; reading it from Glue.")
         try:
-            return glue_request(GlueMetadataCatalog(self._connection.glue_client, glue_catalog))
+            return glue_request(self._connection._glue, glue_catalog)
         except (BotoCoreError, ClientError) as e:
             self._glue_request_failed(e, description, absence_is_final)
         return athena_request(None, logging_)
@@ -476,7 +467,7 @@ class BaseCursor(metaclass=ABCMeta):
                     return databases
 
         return self._with_glue_fallback(
-            catalog_name, athena_request, GlueMetadataCatalog.list_databases, "list databases"
+            catalog_name, athena_request, GlueMetadataClient.list_databases, "list databases"
         )
 
     def _build_get_table_metadata_request(
@@ -539,7 +530,7 @@ class BaseCursor(metaclass=ABCMeta):
                 logging_=logging_,
                 stop_on=stop_on,
             ),
-            lambda glue: glue.get_table(schema_name, table_name),
+            lambda glue, catalog: glue.get_table(catalog, schema_name, table_name),
             "get table metadata",
             logging_=logging_,
             absence_is_final=True,
@@ -614,7 +605,7 @@ class BaseCursor(metaclass=ABCMeta):
         return self._with_glue_fallback(
             catalog_name,
             athena_request,
-            lambda glue: glue.list_tables(schema_name, expression),
+            lambda glue, catalog: glue.list_tables(catalog, schema_name, expression),
             "list table metadata",
             logging_=logging_,
         )
