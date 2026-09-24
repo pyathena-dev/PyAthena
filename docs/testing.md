@@ -51,6 +51,7 @@ Do not commit credentials or include them in test output shared on a pull reques
 
 The tests need an S3 bucket and prefix for staging and data, an Athena SQL workgroup with an S3 query-result location, and an Athena Spark workgroup with a suitable execution role for Spark tests.
 The local test identity needs the corresponding Athena, S3, and Glue permissions; additional features require their own service permissions.
+The Glue metadata fallback tests call `glue:GetTable`, `glue:GetTables`, and `glue:GetDatabases` directly, including against the S3 Tables catalog; the template below grants them.
 The [test infrastructure template](https://github.com/pyathena-dev/PyAthena/blob/master/cloudformation/github_actions_oidc.yaml) describes the resources and permissions used by project CI.
 Its GitHub OIDC role is not a local credential setup: contributors must configure their own test identity.
 
