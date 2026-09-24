@@ -35,45 +35,58 @@ HASH = prefixed("# ")
 BODY = "".join(f"{line}\n" for line in LINES)
 
 
+HTML = "<!--\n" + BODY + "-->\n"
+
+
 class TestHasLicenseHeader:
     @pytest.mark.parametrize(
-        "text",
+        ("suffix", "text"),
         [
-            HASH + "\nimport os\n",
-            HASH,
-            "#!/usr/bin/env bash\n" + HASH + "\nset -eu\n",
-            "# -*- coding: utf-8 -*-\n" + HASH,
-            "#!/usr/bin/env python\n# -*- coding: utf-8 -*-\n" + HASH,
-            "---\n" + HASH + "name: Bug report\n---\n\nBody\n",
-            "<!--\n" + BODY + "-->\n\n# Title\n",
-            "..\n" + prefixed("   ") + "\n.. _label:\n",
-            "{#\n" + BODY + "-#}\n\nSELECT 1\n",
-            "/*\n" + prefixed(" * ") + " */\n",
-            prefixed("// ") + "\n{}\n",
-            HASH.replace("2026", "2017"),
+            (".py", HASH + "\nimport os\n"),
+            (".py", HASH),
+            ("", HASH),
+            (".toml", HASH.replace("2026", "2017")),
+            (".sh", "#!/usr/bin/env bash\n" + HASH + "\nset -eu\n"),
+            (".py", "# -*- coding: utf-8 -*-\n" + HASH),
+            (".py", "#!/usr/bin/env python\n# -*- coding: utf-8 -*-\n" + HASH),
+            (".yaml", "---\n" + HASH + "key: value\n"),
+            (".md", HTML + "\n# Title\n"),
+            (".md", "---\n" + HASH + "name: Bug report\n---\n\nBody\n"),
+            (".md", "---\nname: skill\n" + HASH + "description: x\n---\n"),
+            (".md", "---\nname: skill\n---\n" + HTML),
+            (".rst", "..\n" + prefixed("   ") + "\n.. _label:\n"),
+            (".jinja2", "{#\n" + BODY + "-#}\n\nSELECT 1\n"),
+            (".html", "{#\n" + BODY + "-#}\n"),
+            (".css", "/*\n" + prefixed(" * ") + " */\n"),
+            (".jsonc", prefixed("// ") + "\n{}\n"),
         ],
     )
-    def test_accepted(self, text):
-        assert has_license_header(text)
+    def test_accepted(self, suffix, text):
+        assert has_license_header(text, suffix)
 
     @pytest.mark.parametrize(
-        "text",
+        ("suffix", "text"),
         [
-            "import os\n",
-            "import os\n\n" + HASH,
-            HASH.replace("The PyAthena authors", "laughingman7743"),
-            HASH.replace("2026", "26"),
-            HASH.replace("SPDX-License-Identifier: MIT", "SPDX-License-Identifier: Apache-2.0"),
-            HASH.replace("#\n", "", 1),
-            "<!--\n" + BODY,
-            "{#\n" + BODY + "#}\n",
-            "\n" + HASH,
-            "---\ntitle: x\n" + HASH,
-            "# Copyright 2026 The PyAthena authors\n",
+            (".py", "import os\n"),
+            (".py", "import os\n\n" + HASH),
+            (".py", HASH.replace("The PyAthena authors", "laughingman7743")),
+            (".py", HASH.replace("2026", "26")),
+            (".py", HASH.replace("MIT\n", "Apache-2.0\n")),
+            (".py", HASH.replace("#\n", "", 1)),
+            (".py", "\n" + HASH),
+            (".py", "# Copyright 2026 The PyAthena authors\n"),
+            (".py", HTML),
+            (".md", HASH),
+            (".md", "<!--\n" + BODY),
+            (".md", "---\ntitle: x\n---\n" + HASH),
+            (".md", "---\ntitle: x\n" + HASH),
+            (".md", "---\ntitle: x\n---\n\nText\n\n" + HTML),
+            (".jinja2", "{#\n" + BODY + "#}\n"),
+            (".rst", HASH),
         ],
     )
-    def test_rejected(self, text):
-        assert not has_license_header(text)
+    def test_rejected(self, suffix, text):
+        assert not has_license_header(text, suffix)
 
 
 class TestExemptionReason:
@@ -144,5 +157,11 @@ def test_repository_files(tmp_path):
     (tmp_path / "tracked.py").write_text("")
     (tmp_path / "untracked.py").write_text("")
     (tmp_path / "ignored.py").write_text("")
+    (tmp_path / "caf\u00e9 ").write_text("")
     subprocess.run(["git", "add", "tracked.py"], cwd=tmp_path, check=True)
-    assert sorted(repository_files(tmp_path)) == [".gitignore", "tracked.py", "untracked.py"]
+    assert sorted(repository_files(tmp_path)) == [
+        ".gitignore",
+        "caf\u00e9 ",
+        "tracked.py",
+        "untracked.py",
+    ]

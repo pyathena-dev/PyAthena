@@ -123,7 +123,8 @@ Use the equivalent comment syntax for other formats, such as an HTML comment in 
 For files with YAML front matter, the header may be written as YAML comments inside that front matter.
 Use this placement for GitHub issue templates so the notice belongs to the template metadata rather than the issue body.
 For files that cannot contain comments, and for generated build artifacts or third-party assets, agree on an appropriate attribution location in the issue rather than inserting an invalid header.
-`just lint` and the License Headers workflow check the header with `scripts/check_license_headers.py`, which lists the existing files without it.
+`just lint` and the License Headers workflow check the header with `scripts/check_license_headers.py`, which lists the files without it.
+A new file without the header is added to that list as agreed in the issue.
 
 The short notice and license reference follow [Google's MIT header example](https://opensource.google/documentation/reference/releasing/licenses#mit-header), with an [SPDX identifier](https://spdx.org/licenses/MIT.html) added.
 

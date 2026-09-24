@@ -14,6 +14,7 @@
 # the header described in docs/contributing.md. Reports missing headers and
 # stale UNHEADED_FILES entries; never modifies files.
 
+import os
 import re
 import subprocess
 import sys
@@ -39,27 +40,33 @@ def _block(opening: str | None, prefix: str, closing: str | None) -> re.Pattern[
     return re.compile("\n".join(lines) + "(\n|$)")
 
 
-# Comment syntaxes used in the repository; add one for a new file format.
-HEADER_BLOCKS = (
-    _block(None, "# ", None),
-    _block(None, "// ", None),
-    _block("<!--", "", "-->"),
-    _block("..", "   ", None),
-    _block("{#", "", "-#}"),
-    _block("/*", " * ", " */"),
-)
+HASH = _block(None, "# ", None)
+JINJA = _block("{#", "", "-#}")
+
+# Comment syntax by file suffix; other files use HASH. Add an entry for a new
+# file format with another comment syntax.
+SUFFIX_BLOCKS = {
+    ".css": _block("/*", " * ", " */"),
+    ".html": JINJA,
+    ".jinja2": JINJA,
+    ".jsonc": _block(None, "// ", None),
+    ".md": _block("<!--", "", "-->"),
+    ".rst": _block("..", "   ", None),
+}
 
 SHEBANG = re.compile(r"#!.*\n")
 ENCODING = re.compile(r"#.*coding[:=][ \t]*[-\w.]+.*\n")
 FRONT_MATTER = "---\n"
+FRONT_MATTER_END = re.compile(r"\n---[ \t]*(\n|$)")
 
 # Formats without comment syntax or with generated content.
 EXEMPT_SUFFIXES = frozenset({".csv", ".gz", ".json", ".lock", ".png", ".tsv"})
 
 # Existing files without the header, classified in
 # https://github.com/pyathena-dev/PyAthena/issues/790 and described in NOTICE.
-# New files carry the header; remove entries whose files gain the header or
-# are deleted.
+# New files carry the header; add an entry only as agreed in the issue that
+# proposes the file, and remove entries whose files gain the header or are
+# deleted.
 UNHEADED_FILES = frozenset(
     {
         ".github/PULL_REQUEST_TEMPLATE.md",
@@ -143,20 +150,35 @@ UNHEADED_FILES = frozenset(
 )
 
 
-def has_license_header(text: str) -> bool:
-    """Return whether the header starts the file.
+def _front_matter_header(text: str, block: re.Pattern[str]) -> bool:
+    if not text.startswith(FRONT_MATTER):
+        return False
+    pos = len(FRONT_MATTER)
+    if HASH.match(text, pos):
+        return True
+    if not (end := FRONT_MATTER_END.search(text, pos - 1)):
+        return False
+    while pos <= end.start():
+        if (match := HASH.match(text, pos)) and match.end() <= end.start() + 1:
+            return True
+        pos = text.index("\n", pos) + 1
+    return bool(block.match(text, end.end()))
 
-    The header may follow a shebang and an encoding declaration, or open YAML
-    front matter as comments.
+
+def has_license_header(text: str, suffix: str) -> bool:
+    """Return whether the header starts a file with the given suffix.
+
+    The header may follow a shebang and an encoding declaration. In a file
+    with YAML front matter, it may be written as YAML comments inside the front
+    matter or follow it.
     """
     pos = 0
     if match := SHEBANG.match(text, pos):
         pos = match.end()
     if match := ENCODING.match(text, pos):
         pos = match.end()
-    if pos == 0 and text.startswith(FRONT_MATTER):
-        pos = len(FRONT_MATTER)
-    return any(block.match(text, pos) for block in HEADER_BLOCKS)
+    block = SUFFIX_BLOCKS.get(suffix, HASH)
+    return bool(block.match(text, pos)) or _front_matter_header(text, block)
 
 
 def exemption_reason(root: Path, path: str) -> str | None:
@@ -185,7 +207,9 @@ def check(root: Path, paths: list[str]) -> list[str]:
     for path in sorted(existing):
         file = root / path
         reason = exemption_reason(root, path)
-        headed = reason is None and has_license_header(file.read_text(encoding="utf-8"))
+        headed = reason is None and has_license_header(
+            file.read_text(encoding="utf-8"), Path(path).suffix
+        )
         if path in UNHEADED_FILES:
             if reason is not None:
                 problems.append(f"{path}: listed in UNHEADED_FILES but exempt as {reason}")
@@ -208,14 +232,14 @@ def repository_files(root: Path) -> list[str]:
         check=True,
         capture_output=True,
     ).stdout
-    return [path for path in output.decode("utf-8").split("\0") if path]
+    return [path for path in os.fsdecode(output).split("\0") if path]
 
 
 def main() -> int:
     root = Path(
         subprocess.run(
             ["git", "rev-parse", "--show-toplevel"], check=True, capture_output=True, text=True
-        ).stdout.strip()
+        ).stdout.rstrip("\n")
     )
     problems = check(root, repository_files(root))
     if not problems:
