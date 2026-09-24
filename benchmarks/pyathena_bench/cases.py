@@ -47,7 +47,9 @@ def matrix(settings: Settings, suite: str, shape: str) -> list[Case]:
             cases.extend(Case(family, api, arraysize=a, shape=shape) for a in arraysizes)
             if family in {"pandas", "arrow", "polars"}:
                 for transport in ("csv", "unload"):
-                    chunks = [None] if family == "arrow" else [None, *settings.chunksizes]
+                    chunks: list[int | None] = (
+                        [None] if family == "arrow" else [None, *settings.chunksizes]
+                    )
                     for chunk in chunks:
                         reason = None
                         if family == "pandas" and transport == "unload" and chunk:

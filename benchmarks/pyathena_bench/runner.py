@@ -269,7 +269,7 @@ def environment(settings: Settings) -> dict[str, Any]:
         "cpu_count": psutil.cpu_count(),
         "memory_bytes": psutil.virtual_memory().total,
         "dependencies": {d.metadata["Name"]: d.version for d in importlib.metadata.distributions()},
-        "lock_sha256": hashlib.sha256((root / "benchmarks/uv.lock").read_bytes()).hexdigest(),
+        "lock_sha256": hashlib.sha256((root / "uv.lock").read_bytes()).hexdigest(),
         "settings": asdict(settings),
     }
 

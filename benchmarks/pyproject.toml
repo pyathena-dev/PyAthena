@@ -9,12 +9,13 @@
 name = "pyathena-benchmarks"
 version = "0.1.0"
 description = "Reproducible Athena cursor measurements"
-requires-python = ">=3.12,<3.13"
+# The workspace lock covers the root's Python range; benchmark runs use Python 3.12.
+requires-python = ">=3.10"
 classifiers = ["Private :: Do Not Upload"]
 dependencies = [
     "PyAthena[pandas,arrow,polars]",
     "awswrangler>=3.17,<4",
-    "polars>=1.37",
+    "polars",
     "psutil>=7,<8",
 ]
 
@@ -22,10 +23,10 @@ dependencies = [
 package = false
 
 [tool.uv.sources]
-pyathena = { path = "..", editable = true }
+pyathena = { workspace = true }
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-asyncio>=1", "mypy>=1.19", "types-psutil", "cfn-lint>=1"]
+dev = ["pytest>=8", "pytest-asyncio>=1", "mypy", "types-psutil", "cfn-lint>=1"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

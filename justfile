@@ -80,6 +80,9 @@ _docs-lint:
 _docs-format:
     mise exec -- markdownlint-cli2 --fix
 
+# Benchmark workspace member with its own Python 3.12 environment
+BENCHMARK_UV := "UV_PROJECT_ENVIRONMENT='" + justfile_directory() + "/benchmarks/.venv' UV_PYTHON=3.12 uv run --directory benchmarks --locked"
+
 # Standalone benchmark checks; these do not execute Athena queries
 benchmark target="lint":
     @just _benchmark-{{ target }}
@@ -88,17 +91,14 @@ _benchmark-format:
     uvx ruff@{{RUFF_VERSION}} check --config benchmarks/pyproject.toml --select I --fix benchmarks
     uvx ruff@{{RUFF_VERSION}} format --config benchmarks/pyproject.toml benchmarks
 
-_benchmark-lock:
-    uv lock --project benchmarks
-
 _benchmark-lint:
     uvx ruff@{{RUFF_VERSION}} check --config benchmarks/pyproject.toml benchmarks
     uvx ruff@{{RUFF_VERSION}} format --check --config benchmarks/pyproject.toml benchmarks
-    uv run --directory benchmarks --locked mypy
-    uv run --directory benchmarks --locked cfn-lint cloudformation/benchmark.yaml
+    {{BENCHMARK_UV}} mypy
+    {{BENCHMARK_UV}} cfn-lint cloudformation/benchmark.yaml
 
 _benchmark-test: _benchmark-lint
-    uv run --directory benchmarks --locked pytest
+    {{BENCHMARK_UV}} pytest
 
 # Install development tools
 tool:
