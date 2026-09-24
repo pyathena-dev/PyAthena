@@ -36,7 +36,8 @@ Neither workload converts every library's output into a common Python object rep
 
 The benchmark is a non-packaged member of the repository's uv workspace and runs on Python 3.12.
 It shares the root `uv.lock` with PyAthena, which it uses from the workspace checkout.
-Its virtual environment is `benchmarks/.venv`, separate from the root `.venv`.
+Locally and in CI, its virtual environment is `benchmarks/.venv`, separate from the root `.venv`.
+On the EC2 instance, the dedicated checkout's root `/opt/pyathena/.venv` holds the benchmark environment.
 The root `uv build -v` still builds only PyAthena, including a wheel built from its sdist.
 Benchmark dependencies do not become PyAthena runtime dependencies, and `uv sync --group dev` at the root does not install them.
 
@@ -98,7 +99,7 @@ The supplied template assumes ordinary IAM access and SSE-S3 source objects; Lak
 
 The deployment identity needs permission to create these resources and pass the instance role.
 Use an immutable, remotely accessible commit that contains this directory and the root `uv.lock`.
-Bootstrap checks out that commit, installs pinned uv and Python versions, and runs `uv sync --locked --no-dev`.
+Bootstrap checks out that commit, installs pinned uv and Python versions, and runs `uv sync --locked --no-dev` for the benchmark into `/opt/pyathena/.venv`.
 It signals setup completion to CloudFormation but does not prepare data or start measurements.
 The EC2 commands use `--no-sync` to reuse this verified environment; they do not revalidate the lockfile on every invocation.
 
