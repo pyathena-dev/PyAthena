@@ -70,19 +70,23 @@ class TestGlueMetadataClient:
             connect(schema_name=schema, catalog_name=ENV.s3tables_catalog) as conn,
             conn.cursor() as cursor,
         ):
-            cursor.execute(
-                f"CREATE TABLE {schema}.{table} (a INT, b STRING) "
-                "PARTITIONED BY (b) TBLPROPERTIES ('table_type'='ICEBERG')"
-            )
             try:
+                # Inside try: a CREATE that fails after Athena made the table
+                # still gets it dropped.
+                cursor.execute(
+                    f"CREATE TABLE {schema}.{table} (a INT, b STRING) "
+                    "PARTITIONED BY (b) TBLPROPERTIES ('table_type'='ICEBERG')"
+                )
                 glue = conn._glue
                 # Glue addresses a table-bucket catalog by its Athena name.
                 assert self._view(
                     glue.get_table(ENV.s3tables_catalog, schema, table)
                 ) == self._view(cursor.get_table_metadata(table))
-                assert [
-                    self._view(m) for m in glue.list_tables(ENV.s3tables_catalog, schema, table)
-                ] == [self._view(m) for m in cursor.list_table_metadata(expression=table)]
+                listed = glue.list_tables(ENV.s3tables_catalog, schema, table)
+                assert [m.name for m in listed] == [table]
+                assert [self._view(m) for m in listed] == [
+                    self._view(m) for m in cursor.list_table_metadata(expression=table)
+                ]
                 assert schema in [d.name for d in glue.list_databases(ENV.s3tables_catalog)]
             finally:
                 cursor.execute(f"DROP TABLE IF EXISTS {schema}.{table}")
