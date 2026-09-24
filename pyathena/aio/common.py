@@ -9,7 +9,7 @@ from typing import Any, TypeVar, cast
 
 from botocore.exceptions import BotoCoreError, ClientError
 
-from pyathena.aio.util import _async_retry_api_call, async_retry_api_call
+from pyathena.aio.util import async_retry_api_call
 from pyathena.common import BaseCursor, CursorIterator
 from pyathena.error import DatabaseError, OperationalError, ProgrammingError
 from pyathena.glue import GlueMetadataClient
@@ -88,7 +88,7 @@ class AioBaseCursor(BaseCursor):
         return query_id
 
     async def _get_query_execution(self, query_id: str) -> AthenaQueryExecution:  # type: ignore[override]
-        request = {"QueryExecutionId": query_id}
+        request: dict[str, Any] = {"QueryExecutionId": query_id}
         try:
             response = await async_retry_api_call(
                 self._connection.client.get_query_execution,
@@ -128,7 +128,7 @@ class AioBaseCursor(BaseCursor):
         return query_execution
 
     async def _cancel(self, query_id: str) -> None:  # type: ignore[override]
-        request = {"QueryExecutionId": query_id}
+        request: dict[str, Any] = {"QueryExecutionId": query_id}
         try:
             await async_retry_api_call(
                 self._connection.client.stop_query_execution,
@@ -283,11 +283,11 @@ class AioBaseCursor(BaseCursor):
             max_results=max_results,
         )
         try:
-            response = await _async_retry_api_call(
+            response = await async_retry_api_call(
                 self.connection._client.list_databases,
-                self._retry_config,
-                _logger,
-                stop_on,
+                config=self._retry_config,
+                logger=_logger,
+                stop_on=stop_on,
                 **request,
             )
         except Exception as e:
@@ -342,11 +342,11 @@ class AioBaseCursor(BaseCursor):
             schema_name=schema_name,
         )
         try:
-            response = await _async_retry_api_call(
+            response = await async_retry_api_call(
                 self._connection.client.get_table_metadata,
-                self._retry_config,
-                _logger,
-                stop_on,
+                config=self._retry_config,
+                logger=_logger,
+                stop_on=stop_on,
                 **request,
             )
         except Exception as e:
@@ -397,11 +397,11 @@ class AioBaseCursor(BaseCursor):
             max_results=max_results,
         )
         try:
-            response = await _async_retry_api_call(
+            response = await async_retry_api_call(
                 self.connection._client.list_table_metadata,
-                self._retry_config,
-                _logger,
-                stop_on,
+                config=self._retry_config,
+                logger=_logger,
+                stop_on=stop_on,
                 **request,
             )
         except Exception as e:

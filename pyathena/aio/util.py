@@ -12,7 +12,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from pyathena.util import RetryConfig, _retry_api_call, retry_api_call
+from pyathena.util import RetryConfig, retry_api_call
 
 
 async def async_retry_api_call(
@@ -20,6 +20,7 @@ async def async_retry_api_call(
     config: RetryConfig,
     logger: logging.Logger | None = None,
     *args: Any,
+    stop_on: Callable[[BaseException], bool] | None = None,
     **kwargs: Any,
 ) -> Any:
     """Execute a function with retry logic in a thread to avoid blocking the event loop.
@@ -32,21 +33,12 @@ async def async_retry_api_call(
         config: RetryConfig instance specifying retry behavior.
         logger: Optional logger for retry attempt logging.
         *args: Positional arguments to pass to ``retry_api_call``.
+        stop_on: Passed to ``retry_api_call``.
         **kwargs: Keyword arguments to pass to the function.
 
     Returns:
         The result of the successful function call.
     """
-    return await asyncio.to_thread(retry_api_call, func, config, logger, *args, **kwargs)
-
-
-async def _async_retry_api_call(
-    func: Callable[..., Any],
-    config: RetryConfig,
-    logger: logging.Logger | None,
-    stop_on: Callable[[BaseException], bool] | None,
-    *args: Any,
-    **kwargs: Any,
-) -> Any:
-    """``async_retry_api_call`` that raises an exception ``stop_on`` accepts at once."""
-    return await asyncio.to_thread(_retry_api_call, func, config, logger, stop_on, *args, **kwargs)
+    return await asyncio.to_thread(
+        retry_api_call, func, config, logger, *args, stop_on=stop_on, **kwargs
+    )

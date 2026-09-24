@@ -29,7 +29,6 @@ from pyathena.util import (
     RetryConfig,
     _get_error_code,
     _is_throttling_error,
-    _retry_api_call,
     retry_api_call,
 )
 
@@ -424,11 +423,11 @@ class BaseCursor(metaclass=ABCMeta):
             max_results=max_results,
         )
         try:
-            response = _retry_api_call(
+            response = retry_api_call(
                 self.connection._client.list_databases,
-                self._retry_config,
-                _logger,
-                stop_on,
+                config=self._retry_config,
+                logger=_logger,
+                stop_on=stop_on,
                 **request,
             )
         except Exception as e:
@@ -498,11 +497,11 @@ class BaseCursor(metaclass=ABCMeta):
             schema_name=schema_name,
         )
         try:
-            response = _retry_api_call(
+            response = retry_api_call(
                 self._connection.client.get_table_metadata,
-                self._retry_config,
-                _logger,
-                stop_on,
+                config=self._retry_config,
+                logger=_logger,
+                stop_on=stop_on,
                 **request,
             )
         except Exception as e:
@@ -553,11 +552,11 @@ class BaseCursor(metaclass=ABCMeta):
             max_results=max_results,
         )
         try:
-            response = _retry_api_call(
+            response = retry_api_call(
                 self.connection._client.list_table_metadata,
-                self._retry_config,
-                _logger,
-                stop_on,
+                config=self._retry_config,
+                logger=_logger,
+                stop_on=stop_on,
                 **request,
             )
         except Exception as e:
@@ -610,7 +609,7 @@ class BaseCursor(metaclass=ABCMeta):
         )
 
     def _get_query_execution(self, query_id: str) -> AthenaQueryExecution:
-        request = {"QueryExecutionId": query_id}
+        request: dict[str, Any] = {"QueryExecutionId": query_id}
         try:
             response = retry_api_call(
                 self._connection.client.get_query_execution,
@@ -625,7 +624,7 @@ class BaseCursor(metaclass=ABCMeta):
             return AthenaQueryExecution(response)
 
     def _get_calculation_execution_status(self, query_id: str) -> AthenaCalculationExecutionStatus:
-        request = {"CalculationExecutionId": query_id}
+        request: dict[str, Any] = {"CalculationExecutionId": query_id}
         try:
             response = retry_api_call(
                 self._connection.client.get_calculation_execution_status,
@@ -640,7 +639,7 @@ class BaseCursor(metaclass=ABCMeta):
             return AthenaCalculationExecutionStatus(response)
 
     def _get_calculation_execution(self, query_id: str) -> AthenaCalculationExecution:
-        request = {"CalculationExecutionId": query_id}
+        request: dict[str, Any] = {"CalculationExecutionId": query_id}
         try:
             response = retry_api_call(
                 self._connection.client.get_calculation_execution,
@@ -942,7 +941,7 @@ class BaseCursor(metaclass=ABCMeta):
         raise NotImplementedError  # pragma: no cover
 
     def _cancel(self, query_id: str) -> None:
-        request = {"QueryExecutionId": query_id}
+        request: dict[str, Any] = {"QueryExecutionId": query_id}
         try:
             retry_api_call(
                 self._connection.client.stop_query_execution,

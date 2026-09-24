@@ -215,6 +215,7 @@ def retry_api_call(
     config: RetryConfig,
     logger: logging.Logger | None = None,
     *args,
+    stop_on: Callable[[BaseException], bool] | None = None,
     **kwargs,
 ) -> Any:
     """Execute a function with automatic retry logic for AWS API calls.
@@ -228,6 +229,8 @@ def retry_api_call(
         config: RetryConfig instance specifying retry behavior.
         logger: Optional logger for retry attempt logging.
         *args: Positional arguments to pass to the function.
+        stop_on: Optional predicate; an exception it accepts is raised at once
+            instead of being retried.
         **kwargs: Keyword arguments to pass to the function.
 
     Returns:
@@ -251,18 +254,6 @@ def retry_api_call(
         This includes recognized Glue error codes wrapped in MetadataException.
         Other errors are propagated without retrying.
     """
-    return _retry_api_call(func, config, logger, None, *args, **kwargs)
-
-
-def _retry_api_call(
-    func: Callable[..., Any],
-    config: RetryConfig,
-    logger: logging.Logger | None,
-    stop_on: Callable[[BaseException], bool] | None,
-    *args,
-    **kwargs,
-) -> Any:
-    """``retry_api_call`` that raises an exception ``stop_on`` accepts at once."""
     retry = tenacity.Retrying(
         retry=retry_if_exception(
             lambda ex: is_retryable_error(ex, config) and not (stop_on and stop_on(ex))

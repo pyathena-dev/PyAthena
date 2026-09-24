@@ -8,7 +8,6 @@ from pyathena import DataError
 from pyathena.util import (
     RetryConfig,
     _is_throttling_error,
-    _retry_api_call,
     _without_retries,
     is_retryable_error,
     parse_output_location,
@@ -338,7 +337,7 @@ def test_retry_api_call_stops_on_predicate(code, expected_calls):
     )
 
     with pytest.raises(ClientError) as caught:
-        _retry_api_call(call, config, None, _is_throttling_error)
+        retry_api_call(call, config, stop_on=_is_throttling_error)
 
     assert caught.value is error
     assert calls == expected_calls

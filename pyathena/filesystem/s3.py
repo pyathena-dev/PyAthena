@@ -168,7 +168,9 @@ class S3FileSystem(AbstractFileSystem):
         self.version_aware = version_aware
 
         requester_pays = kwargs.pop("requester_pays", False)
-        self.request_kwargs = {"RequestPayer": "requester"} if requester_pays else {}
+        self.request_kwargs: dict[str, Any] = (
+            {"RequestPayer": "requester"} if requester_pays else {}
+        )
 
     def _get_client_compatible_with_s3fs(self, **kwargs) -> BaseClient:
         """Build a boto3 S3 client from s3fs-compatible constructor arguments.

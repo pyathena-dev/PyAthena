@@ -147,7 +147,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             time.sleep(self._poll_interval)
 
     def _exists_session(self, session_id: str) -> bool:
-        request = {"SessionId": session_id}
+        request: dict[str, Any] = {"SessionId": session_id}
         try:
             retry_api_call(
                 self._connection.client.get_session,
@@ -193,7 +193,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             return session_id
 
     def _terminate_session(self) -> None:
-        request = {"SessionId": self._session_id}
+        request: dict[str, Any] = {"SessionId": self._session_id}
         try:
             retry_api_call(
                 self._connection.client.terminate_session,
@@ -231,7 +231,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         return query_execution
 
     def _cancel(self, query_id: str) -> None:
-        request = {"CalculationExecutionId": query_id}
+        request: dict[str, Any] = {"CalculationExecutionId": query_id}
         try:
             retry_api_call(
                 self._connection.client.stop_calculation_execution,
