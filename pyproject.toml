@@ -82,6 +82,7 @@ dev = [
     "pytest-asyncio",
     "pytest-xdist",
     "pytest-dependency",
+    "pytest-rerunfailures",
     "sphinx",
     "sphinx-multiversion",
     "sphinxext-opengraph",
