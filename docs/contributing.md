@@ -131,7 +131,7 @@ The short notice and license reference follow [Google's MIT header example](http
 Identify any third-party material included in a new contribution and preserve its applicable copyright and license notices.
 Do not replace upstream notices with the original-file template above.
 
-This policy does not require adding headers to existing files or changing existing notices, including the root `LICENSE`.
+This policy does not require adding headers to existing files or changing their existing notices.
 Existing non-empty files that contain only the maintainer's original work carry the header above, dated with the year of their earliest surviving content other than import statements.
 The pull request template is an exception because its content is copied into each pull request.
 Other existing files keep their current notices.
