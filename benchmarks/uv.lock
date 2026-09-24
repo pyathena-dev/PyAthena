@@ -428,6 +428,7 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "pytest-dependency" },
+    { name = "pytest-rerunfailures" },
     { name = "pytest-xdist" },
     { name = "sphinx" },
     { name = "sphinx-design" },
