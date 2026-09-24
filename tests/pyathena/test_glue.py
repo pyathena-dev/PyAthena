@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from botocore.config import Config
-from botocore.exceptions import ClientError, EndpointConnectionError
+from botocore.exceptions import ClientError, EndpointConnectionError, ParamValidationError
 
 from pyathena.glue import GlueMetadataClient
 from tests import ENV
@@ -97,6 +97,15 @@ class TestGlueMetadataClient:
 
         assert not glue.reachable
         assert not glue.usable_for("AwsDataCatalog")
+
+    def test_keeps_going_after_a_request_it_rejects(self, cursor):
+        # botocore rejects the request before sending it; Glue stays in use.
+        glue = cursor.connection._glue
+
+        with pytest.raises(ParamValidationError):
+            glue.get_table(cursor.connection.catalog_name, None, "one_row")
+
+        assert glue.reachable
 
     def test_client_leaves_out_athena_endpoint(self):
         conn = connect(
