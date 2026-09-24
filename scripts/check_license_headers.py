@@ -40,22 +40,24 @@ def _block(opening: str | None, prefix: str, closing: str | None) -> re.Pattern[
     return re.compile("\n".join(lines) + "(\n|$)")
 
 
-HASH = _block(None, "# ", None)
+HASH = (_block(None, "# ", None),)
+HTML = _block("<!--", "", "-->")
 JINJA = _block("{#", "", "-#}")
 
-# Comment syntax by file suffix; other files use HASH. Add an entry for a new
+# Comment syntaxes by file suffix; other files use HASH. Add an entry for a new
 # file format with another comment syntax.
 SUFFIX_BLOCKS = {
-    ".css": _block("/*", " * ", " */"),
-    ".html": JINJA,
-    ".jinja2": JINJA,
-    ".jsonc": _block(None, "// ", None),
-    ".md": _block("<!--", "", "-->"),
-    ".rst": _block("..", "   ", None),
+    ".css": (_block("/*", " * ", " */"),),
+    ".html": (JINJA, HTML),
+    ".jinja2": (JINJA,),
+    ".jsonc": (_block(None, "// ", None),),
+    ".md": (HTML,),
+    ".rst": (_block("..", "   ", None),),
 }
 
 SHEBANG = re.compile(r"#!.*\n")
 ENCODING = re.compile(r"#.*coding[:=][ \t]*[-\w.]+.*\n")
+# YAML front matter in Markdown files; elsewhere, a leading YAML document marker.
 FRONT_MATTER = "---\n"
 FRONT_MATTER_END = re.compile(r"\n---[ \t]*(\n|$)")
 
@@ -150,35 +152,39 @@ UNHEADED_FILES = frozenset(
 )
 
 
-def _front_matter_header(text: str, block: re.Pattern[str]) -> bool:
+def _matches(blocks: tuple[re.Pattern[str], ...], text: str, pos: int, end: int) -> bool:
+    return any((match := block.match(text, pos)) and match.end() <= end for block in blocks)
+
+
+def _front_matter_header(text: str, suffix: str, blocks: tuple[re.Pattern[str], ...]) -> bool:
     if not text.startswith(FRONT_MATTER):
         return False
     pos = len(FRONT_MATTER)
-    if HASH.match(text, pos):
-        return True
+    if suffix != ".md":
+        return _matches(HASH, text, pos, len(text))
     if not (end := FRONT_MATTER_END.search(text, pos - 1)):
         return False
     while pos <= end.start():
-        if (match := HASH.match(text, pos)) and match.end() <= end.start() + 1:
+        if _matches(HASH, text, pos, end.start() + 1):
             return True
         pos = text.index("\n", pos) + 1
-    return bool(block.match(text, end.end()))
+    return _matches(blocks, text, end.end(), len(text))
 
 
 def has_license_header(text: str, suffix: str) -> bool:
     """Return whether the header starts a file with the given suffix.
 
-    The header may follow a shebang and an encoding declaration. In a file
-    with YAML front matter, it may be written as YAML comments inside the front
-    matter or follow it.
+    The header may follow a shebang, an encoding declaration, or a leading YAML
+    document marker. In a Markdown file with YAML front matter, it may be
+    written as YAML comments inside the front matter or follow it.
     """
     pos = 0
     if match := SHEBANG.match(text, pos):
         pos = match.end()
     if match := ENCODING.match(text, pos):
         pos = match.end()
-    block = SUFFIX_BLOCKS.get(suffix, HASH)
-    return bool(block.match(text, pos)) or _front_matter_header(text, block)
+    blocks = SUFFIX_BLOCKS.get(suffix, HASH)
+    return _matches(blocks, text, pos, len(text)) or _front_matter_header(text, suffix, blocks)
 
 
 def exemption_reason(root: Path, path: str) -> str | None:
@@ -236,11 +242,10 @@ def repository_files(root: Path) -> list[str]:
 
 
 def main() -> int:
-    root = Path(
-        subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"], check=True, capture_output=True, text=True
-        ).stdout.rstrip("\n")
-    )
+    output = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"], check=True, capture_output=True
+    ).stdout
+    root = Path(os.fsdecode(output.removesuffix(b"\n")))
     problems = check(root, repository_files(root))
     if not problems:
         return 0

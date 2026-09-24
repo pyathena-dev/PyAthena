@@ -57,6 +57,8 @@ class TestHasLicenseHeader:
             (".rst", "..\n" + prefixed("   ") + "\n.. _label:\n"),
             (".jinja2", "{#\n" + BODY + "-#}\n\nSELECT 1\n"),
             (".html", "{#\n" + BODY + "-#}\n"),
+            (".html", HTML + "<p></p>\n"),
+            (".md", "---\n---\n" + HTML),
             (".css", "/*\n" + prefixed(" * ") + " */\n"),
             (".jsonc", prefixed("// ") + "\n{}\n"),
         ],
@@ -83,6 +85,9 @@ class TestHasLicenseHeader:
             (".md", "---\ntitle: x\n---\n\nText\n\n" + HTML),
             (".jinja2", "{#\n" + BODY + "#}\n"),
             (".rst", HASH),
+            (".yaml", "---\nkey: value\n---\n" + HASH),
+            (".yaml", "---\nkey: value\n" + HASH),
+            (".md", "---\n" + HASH),
         ],
     )
     def test_rejected(self, suffix, text):
