@@ -5,6 +5,7 @@
 #
 # SPDX-License-Identifier: MIT
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -61,15 +62,30 @@ class TestGlueMetadataClient:
         reason="AWS_ATHENA_S3_TABLES_CATALOG / AWS_ATHENA_S3_TABLES_NAMESPACE are not configured",
     )
     def test_reads_s3_tables_catalog(self):
-        # Glue addresses a table-bucket catalog by its Athena name.
-        with connect(schema_name=ENV.s3tables_namespace, catalog_name=ENV.s3tables_catalog) as conn:
-            with conn.cursor() as cursor:
-                athena = sorted(self._view(m) for m in cursor.list_table_metadata())
-            glue = conn._glue.list_tables(ENV.s3tables_catalog, ENV.s3tables_namespace)
-            databases = conn._glue.list_databases(ENV.s3tables_catalog)
-
-        assert sorted(self._view(m) for m in glue) == athena
-        assert ENV.s3tables_namespace in [d.name for d in databases]
+        # A table of its own: other runs create and drop tables in the shared
+        # namespace, so the whole namespace is not compared.
+        schema = ENV.s3tables_namespace
+        table = f"test_glue_reads_s3_tables_{uuid.uuid4().hex[:8]}"
+        with (
+            connect(schema_name=schema, catalog_name=ENV.s3tables_catalog) as conn,
+            conn.cursor() as cursor,
+        ):
+            cursor.execute(
+                f"CREATE TABLE {schema}.{table} (a INT, b STRING) "
+                "PARTITIONED BY (b) TBLPROPERTIES ('table_type'='ICEBERG')"
+            )
+            try:
+                glue = conn._glue
+                # Glue addresses a table-bucket catalog by its Athena name.
+                assert self._view(
+                    glue.get_table(ENV.s3tables_catalog, schema, table)
+                ) == self._view(cursor.get_table_metadata(table))
+                assert [
+                    self._view(m) for m in glue.list_tables(ENV.s3tables_catalog, schema, table)
+                ] == [self._view(m) for m in cursor.list_table_metadata(expression=table)]
+                assert schema in [d.name for d in glue.list_databases(ENV.s3tables_catalog)]
+            finally:
+                cursor.execute(f"DROP TABLE IF EXISTS {schema}.{table}")
 
     def test_reports_a_missing_table(self, cursor):
         with pytest.raises(ClientError) as caught:
