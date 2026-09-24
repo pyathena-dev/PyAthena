@@ -7,6 +7,8 @@
 
 RUFF_VERSION := "0.14.14"
 TOX_VERSION := "4.34.1"
+# Rerun a test once when Athena fails a query with a service-side error (#804).
+PYTEST_RERUN := "--reruns 1 --rerun-show-tracebacks --only-rerun 'Amazon Athena experienced an internal error' --only-rerun 'Invalid S3 request'"
 
 # List available recipes
 default:
@@ -42,13 +44,13 @@ _test-help:
     @echo "  sqla-async  Run SQLAlchemy async dialect tests"
 
 _test-pyathena: lint
-    uv run pytest -n 8 --cov pyathena --cov-report html --cov-report term tests/pyathena/
+    uv run pytest -n 8 {{PYTEST_RERUN}} --cov pyathena --cov-report html --cov-report term tests/pyathena/
 
 _test-sqla:
-    uv run pytest -n 8 --cov pyathena --cov-report html --cov-report term tests/sqlalchemy/
+    uv run pytest -n 8 {{PYTEST_RERUN}} --cov pyathena --cov-report html --cov-report term tests/sqlalchemy/
 
 _test-sqla-async:
-    uv run pytest -n 8 --cov pyathena --cov-report html --cov-report term tests/sqlalchemy/ --dburi async
+    uv run pytest -n 8 {{PYTEST_RERUN}} --cov pyathena --cov-report html --cov-report term tests/sqlalchemy/ --dburi async
 
 # Run tests across multiple Python versions with tox
 tox:
