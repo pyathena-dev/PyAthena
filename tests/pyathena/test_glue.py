@@ -8,13 +8,13 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from botocore.config import Config
 from botocore.exceptions import ClientError, ParamValidationError
 from botocore.exceptions import ConnectionError as BotoConnectionError
 
 from pyathena.glue import GlueMetadataClient
 from tests import ENV
 from tests.pyathena.conftest import connect
+from tests.pyathena.util import unreachable_glue
 
 
 class TestGlueMetadataClient:
@@ -62,15 +62,14 @@ class TestGlueMetadataClient:
     )
     def test_reads_s3_tables_catalog(self):
         # Glue addresses a table-bucket catalog by its Athena name.
-        conn = connect(schema_name=ENV.s3tables_namespace, catalog_name=ENV.s3tables_catalog)
-        with conn.cursor() as cursor:
-            athena = {(m.name, m.table_type) for m in cursor.list_table_metadata()}
-        glue = conn._glue.list_tables(ENV.s3tables_catalog, ENV.s3tables_namespace)
+        with connect(schema_name=ENV.s3tables_namespace, catalog_name=ENV.s3tables_catalog) as conn:
+            with conn.cursor() as cursor:
+                athena = sorted(self._view(m) for m in cursor.list_table_metadata())
+            glue = conn._glue.list_tables(ENV.s3tables_catalog, ENV.s3tables_namespace)
+            databases = conn._glue.list_databases(ENV.s3tables_catalog)
 
-        assert {(m.name, m.table_type) for m in glue} == athena
-        assert ENV.s3tables_namespace in [
-            d.name for d in conn._glue.list_databases(ENV.s3tables_catalog)
-        ]
+        assert sorted(self._view(m) for m in glue) == athena
+        assert ENV.s3tables_namespace in [d.name for d in databases]
 
     def test_reports_a_missing_table(self, cursor):
         with pytest.raises(ClientError) as caught:
@@ -86,17 +85,7 @@ class TestGlueMetadataClient:
             cursor.connection._glue.get_table("federated_catalog", ENV.schema, "one_row")
 
     def test_stops_after_it_cannot_reach_glue(self, cursor):
-        # A proxy port nothing listens on refuses the connection.
-        glue = GlueMetadataClient(
-            cursor.connection.session,
-            cursor.connection.region_name,
-            Config(
-                proxies={"https": "http://127.0.0.1:9"},
-                connect_timeout=1,
-                retries={"mode": "standard", "max_attempts": 1},
-            ),
-            {},
-        )
+        glue = unreachable_glue(cursor.connection)
 
         with pytest.raises(BotoConnectionError):
             glue.get_table("AwsDataCatalog", ENV.schema, "one_row")
@@ -114,36 +103,34 @@ class TestGlueMetadataClient:
         assert glue.reachable
 
     def test_client_leaves_out_athena_endpoint(self):
-        conn = connect(
+        with connect(
             region_name=ENV.region_name,
             endpoint_url=f"https://athena.{ENV.region_name}.amazonaws.com",
             # Athena's API version, which Glue does not have.
             api_version="2017-05-18",
-        )
-        glue = conn._glue
-        # Built once, under the lock, even when cursors in several threads
-        # need it together.
-        created = []
-        session_client = conn.session.client
+        ) as conn:
+            glue = conn._glue
+            created = []
+            session_client = conn.session.client
 
-        def contended_client(*args, **kwargs):
-            created.append((args, glue._lock.locked()))
-            return session_client(*args, **kwargs)
+            def contended_client(*args, **kwargs):
+                created.append((args, glue._lock.locked()))
+                return session_client(*args, **kwargs)
 
-        conn._session.client = contended_client
-        barrier = threading.Barrier(8)
+            conn._session.client = contended_client
+            barrier = threading.Barrier(8)
 
-        def get_client(_):
-            barrier.wait()
-            return glue.client
+            def get_client(_):
+                barrier.wait()
+                return glue.client
 
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            clients = list(executor.map(get_client, range(8)))
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                clients = list(executor.map(get_client, range(8)))
 
-        assert created == [(("glue",), True)]
-        assert all(client is clients[0] for client in clients)
-        assert clients[0].meta.service_model.service_name == "glue"
-        assert clients[0].meta.endpoint_url == f"https://glue.{ENV.region_name}.amazonaws.com"
+            assert created == [(("glue",), True)]
+            assert all(client is clients[0] for client in clients)
+            assert clients[0].meta.service_model.service_name == "glue"
+            assert clients[0].meta.endpoint_url == f"https://glue.{ENV.region_name}.amazonaws.com"
 
     def test_table_metadata_leaves_out_columns_iceberg_no_longer_has(self):
         # Glue's columns after DROP COLUMN b and CHANGE COLUMN a a2, as measured

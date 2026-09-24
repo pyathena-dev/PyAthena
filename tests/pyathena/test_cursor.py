@@ -14,7 +14,6 @@ from random import randint
 from unittest.mock import MagicMock, patch
 
 import pytest
-from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from pyathena import (
@@ -32,12 +31,11 @@ from pyathena import (
 from pyathena.converter import _to_array, _to_map, _to_struct
 from pyathena.cursor import Cursor
 from pyathena.error import DatabaseError, NotSupportedError, OperationalError, ProgrammingError
-from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
-from tests.pyathena.util import throttle_metadata_api
+from tests.pyathena.util import throttle_metadata_api, unreachable_glue
 
 _logger = logging.getLogger(__name__)
 
@@ -1395,17 +1393,7 @@ class TestCursor:
 
     @staticmethod
     def _unreachable_glue(connection, monkeypatch):
-        """Send the connection's Glue requests through a proxy port nothing listens on."""
-        glue = GlueMetadataClient(
-            connection.session,
-            connection.region_name,
-            Config(
-                proxies={"https": "http://127.0.0.1:9"},
-                connect_timeout=1,
-                retries={"mode": "standard", "max_attempts": 1},
-            ),
-            {},
-        )
+        glue = unreachable_glue(connection)
         monkeypatch.setattr(connection, "_glue", glue)
         return glue
 
@@ -1534,7 +1522,7 @@ class TestCursor:
     )
     def test_throttled_metadata_without_glue(self, cursor, monkeypatch, catalog_name):
         calls = throttle_metadata_api(cursor.connection.client, monkeypatch)
-        # A request to this Glue would fail and mark it unreachable.
+        # Still reachable afterwards means no request was sent to it.
         glue = self._unreachable_glue(cursor.connection, monkeypatch)
 
         with pytest.raises(OperationalError):

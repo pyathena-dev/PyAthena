@@ -40,6 +40,13 @@ class GlueMetadataClient:
             ``endpoint_url`` and ``api_version`` are not passed to Glue.
     """
 
+    # Failures every later request would repeat: no connection to Glue, or no
+    # Glue endpoint for the region or the endpoint variant the config asks for.
+    UNREACHABLE_ERRORS: tuple[type[Exception], ...] = (
+        BotoConnectionError,
+        BaseEndpointResolverError,
+    )
+
     def __init__(
         self,
         session: Session,
@@ -58,13 +65,6 @@ class GlueMetadataClient:
         self._lock = threading.Lock()
         self._client: BaseClient | None = None
         self._reachable = True
-
-    # Failures every later request would repeat: no connection to Glue, or no
-    # Glue endpoint for the region or the endpoint variant the config asks for.
-    UNREACHABLE_ERRORS: tuple[type[Exception], ...] = (
-        BotoConnectionError,
-        BaseEndpointResolverError,
-    )
 
     @property
     def reachable(self) -> bool:
@@ -98,6 +98,13 @@ class GlueMetadataClient:
         return None
 
     @classmethod
+    def _require_catalog(cls, catalog_name: str | None) -> dict[str, str]:
+        request_kwargs = cls._catalog_request_kwargs(catalog_name)
+        if request_kwargs is None:
+            raise ValueError(f"Glue cannot answer for the catalog {catalog_name!r}.")
+        return request_kwargs
+
+    @classmethod
     def supports(cls, catalog_name: str | None) -> bool:
         """Whether the Athena catalog is one Glue can answer for.
 
@@ -117,16 +124,9 @@ class GlueMetadataClient:
             catalog_name: An Athena catalog name.
 
         Returns:
-            True if :meth:`supports` accepts the catalog and no request has
-            failed to reach Glue, so later requests do not wait for it again.
+            True if :meth:`supports` accepts the catalog and Glue is still reachable.
         """
         return self._reachable and self.supports(catalog_name)
-
-    def _catalog_kwargs(self, catalog_name: str | None) -> dict[str, str]:
-        request_kwargs = self._catalog_request_kwargs(catalog_name)
-        if request_kwargs is None:
-            raise ValueError(f"Glue cannot answer for the catalog {catalog_name!r}.")
-        return request_kwargs
 
     @contextmanager
     def _tracking_reachability(self) -> Iterator[None]:
@@ -156,11 +156,10 @@ class GlueMetadataClient:
             botocore.exceptions.BotoCoreError: If the request fails before a
                 response.
         """
-        request_kwargs = self._catalog_kwargs(catalog_name)
+        request = {"DatabaseName": schema_name, "Name": table_name}
+        request.update(self._require_catalog(catalog_name))
         with self._tracking_reachability():
-            response = self.client.get_table(
-                DatabaseName=schema_name, Name=table_name, **request_kwargs
-            )
+            response = self.client.get_table(**request)
         return self.table_metadata(response["Table"])
 
     def list_tables(
@@ -182,17 +181,13 @@ class GlueMetadataClient:
             botocore.exceptions.BotoCoreError: If a request fails before a
                 response.
         """
-        request: dict[str, Any] = {
-            "DatabaseName": schema_name,
-            **self._catalog_kwargs(catalog_name),
-        }
+        request: dict[str, Any] = {"DatabaseName": schema_name}
+        request.update(self._require_catalog(catalog_name))
         if expression:
             request["Expression"] = expression
-        tables: list[AthenaTableMetadata] = []
         with self._tracking_reachability():
-            for page in self.client.get_paginator("get_tables").paginate(**request):
-                tables.extend(self.table_metadata(t) for t in page["TableList"])
-        return tables
+            pages = self.client.get_paginator("get_tables").paginate(**request)
+            return [self.table_metadata(t) for page in pages for t in page["TableList"]]
 
     def list_databases(self, catalog_name: str | None) -> list[AthenaDatabase]:
         """List the catalog's databases with ``GetDatabases``.
@@ -209,12 +204,10 @@ class GlueMetadataClient:
             botocore.exceptions.BotoCoreError: If a request fails before a
                 response.
         """
-        request_kwargs = self._catalog_kwargs(catalog_name)
-        databases: list[AthenaDatabase] = []
+        request = self._require_catalog(catalog_name)
         with self._tracking_reachability():
-            for page in self.client.get_paginator("get_databases").paginate(**request_kwargs):
-                databases.extend(AthenaDatabase({"Database": d}) for d in page["DatabaseList"])
-        return databases
+            pages = self.client.get_paginator("get_databases").paginate(**request)
+            return [AthenaDatabase({"Database": d}) for page in pages for d in page["DatabaseList"]]
 
     @staticmethod
     def table_metadata(table: Mapping[str, Any]) -> AthenaTableMetadata:

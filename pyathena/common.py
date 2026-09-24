@@ -350,7 +350,6 @@ class BaseCursor(metaclass=ABCMeta):
             and _get_error_code(e) == "EntityNotFoundException"
         ):
             raise OperationalError(*e.args) from e
-        # GlueMetadataClient stops using Glue after a request that cannot reach it.
         unreachable = isinstance(e, GlueMetadataClient.UNREACHABLE_ERRORS)
         suffix = " and not using Glue again on this connection" if unreachable else ""
         _logger.warning(
