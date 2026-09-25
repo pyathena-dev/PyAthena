@@ -221,6 +221,8 @@ See the [Athena documentation](https://docs.aws.amazon.com/athena/latest/ug/reus
 
 You can attempt to re-use the results from a previously executed query to help save time and money in the cases where your underlying data isn't changing.
 Set the `cache_size` or `cache_expiration_time` parameter of `cursor.execute()` to a number larger than 0 to enable caching.
+`cache_size` is the number of the most recent query executions in the work group to search, including executions by other clients of the same work group.
+In a busy work group, a previous execution may no longer be among them.
 
 ```python
 from pyathena import connect
