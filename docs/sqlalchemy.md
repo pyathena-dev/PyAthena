@@ -170,7 +170,7 @@ from sqlalchemy import cast, select
 from pyathena.sqlalchemy.types import AthenaTimestamp
 
 select(cast(events.c.created_at, AthenaTimestamp(precision=3)))
-# SELECT CAST(created_at AS TIMESTAMP(3)) ...
+# SELECT CAST(events.created_at AS TIMESTAMP(3)) AS created_at FROM events
 ```
 
 `CREATE TABLE` renders `TIMESTAMP` for `AthenaTimestamp` whatever its precision.
