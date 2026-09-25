@@ -1,4 +1,5 @@
 import contextlib
+import functools
 import uuid
 from io import BytesIO
 from pathlib import Path
@@ -13,16 +14,96 @@ from tests.pyathena.util import read_query
 
 
 def pytest_sessionstart(session):
-    _upload_rows()
-    with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
-        _create_database(cursor)
-        _create_table(cursor)
+    # pytest skips pytest_sessionfinish after a failed pytest_sessionstart, so
+    # a failure after the namespace is created deletes it here.
+    is_test_process = _is_test_process(session.config)
+    if is_test_process:
+        _create_s3tables_namespace()
+    try:
+        _upload_rows()
+        with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
+            _create_database(cursor)
+            _create_table(cursor)
+    except BaseException:
+        if is_test_process:
+            _delete_s3tables_namespace()
+        raise
 
 
 def pytest_sessionfinish(session):
-    with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
-        _drop_database(cursor)
-    _delete_rows()
+    # Each cleanup step runs even if an earlier one fails.
+    try:
+        with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
+            _drop_database(cursor)
+    finally:
+        try:
+            _delete_rows()
+        finally:
+            if _is_test_process(session.config):
+                _delete_s3tables_namespace()
+
+
+def _is_test_process(config):
+    """Whether this process runs tests, rather than only controlling xdist workers.
+
+    Args:
+        config: The pytest config.
+
+    Returns:
+        False for the pytest-xdist controller, True for a worker or a run without
+        workers.
+    """
+    return hasattr(config, "workerinput") or not getattr(config.option, "numprocesses", None)
+
+
+@functools.cache
+def _s3tables():
+    """Return an S3 Tables client and the ARN of ``ENV.s3tables_catalog``'s table bucket.
+
+    The ARN uses the client's region, so the two always agree.
+
+    Returns:
+        The client and the table bucket's ARN.
+
+    Raises:
+        ValueError: If ``AWS_ATHENA_S3_TABLES_CATALOG`` is not
+            ``s3tablescatalog/<table-bucket>``.
+    """
+    prefix, _, bucket = ENV.s3tables_catalog.partition("/")
+    if prefix != "s3tablescatalog" or not bucket:
+        raise ValueError(
+            "AWS_ATHENA_S3_TABLES_CATALOG must be s3tablescatalog/<table-bucket>, "
+            f"not {ENV.s3tables_catalog!r}."
+        )
+    client = boto3.client("s3tables")
+    account = boto3.client("sts").get_caller_identity()["Account"]
+    region = client.meta.region_name
+    return client, f"arn:aws:s3tables:{region}:{account}:bucket/{bucket}"
+
+
+def _create_s3tables_namespace():
+    """Create this process's S3 Tables namespace when S3 Tables are configured."""
+    if not ENV.s3tables_catalog:
+        return
+    client, arn = _s3tables()
+    client.create_namespace(tableBucketARN=arn, namespace=[ENV.s3tables_namespace])
+
+
+def _delete_s3tables_namespace():
+    """Delete this process's S3 Tables namespace and any table left in it."""
+    if not ENV.s3tables_catalog:
+        return
+    client, arn = _s3tables()
+    tables = [
+        table["name"]
+        for page in client.get_paginator("list_tables").paginate(
+            tableBucketARN=arn, namespace=ENV.s3tables_namespace
+        )
+        for table in page["tables"]
+    ]
+    for table in tables:
+        client.delete_table(tableBucketARN=arn, namespace=ENV.s3tables_namespace, name=table)
+    client.delete_namespace(tableBucketARN=arn, namespace=ENV.s3tables_namespace)
 
 
 def _upload_rows():

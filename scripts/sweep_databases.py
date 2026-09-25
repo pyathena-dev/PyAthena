@@ -5,7 +5,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Remove expired test database metadata from the caller's default Glue catalog."""
+"""Remove expired test databases and S3 Tables namespaces left by test sessions."""
 
 # Usage (from the repository root, with Boto3 credentials and region configured):
 #   uv run --locked --no-dev python scripts/sweep_databases.py
@@ -19,6 +19,16 @@
 # Only missing-database errors are ignored; other API failures stop the sweep.
 # Deletion removes Glue database and table metadata, not S3 objects.
 #
+# With AWS_ATHENA_S3_TABLES_CATALOG set (s3tablescatalog/<table-bucket>), the
+# script also sweeps that table bucket's namespaces named like PyAthena test
+# schemas and more than seven days old, deleting their tables first. Test
+# sessions create and delete such a namespace; a session that stops early
+# leaves it behind. The namespace ID is rechecked before its tables are deleted
+# and again before the namespace is deleted. Each table is deleted only if it
+# still belongs to that namespace, at the version just read; missing tables are
+# skipped. DeleteNamespace takes only a name, so an empty namespace recreated
+# under the same name right after the last recheck would still be deleted.
+#
 # .github/workflows/database-sweep.yaml runs this script after scheduled Test
 # runs complete on master, including failures and cancellations. It does not run
 # after PR tests or manually dispatched tests. Manual sweep dispatch on master
@@ -26,6 +36,7 @@
 # can leave eligible databases for a later run.
 
 import argparse
+import contextlib
 import logging
 import os
 import re
@@ -37,9 +48,12 @@ import boto3
 from botocore.config import Config
 
 _LOGGER = logging.getLogger(__name__)
+# PyAthena test sessions name their schema, and their S3 Tables namespace, this way.
+_PYATHENA_TEST_SCHEMA = r"pyathena_test_[a-z0-9]{10}"
 _TEST_DATABASE = re.compile(
-    r"(?:pyathena_test_[a-z0-9]{10}|test_[0-9a-f]{12}(?:_test_schema(?:_2)?)?)"
+    rf"(?:{_PYATHENA_TEST_SCHEMA}|test_[0-9a-f]{{12}}(?:_test_schema(?:_2)?)?)"
 )
+_TEST_NAMESPACE = re.compile(_PYATHENA_TEST_SCHEMA)
 
 
 def _eligible(database: dict[str, Any], cutoff: datetime) -> bool:
@@ -87,7 +101,111 @@ def sweep_databases(client: Any, catalog_id: str, *, dry_run: bool = True) -> di
     return {"eligible": len(candidates), "deleted": deleted, "skipped": skipped}
 
 
+def _eligible_namespace(namespace: dict[str, Any], cutoff: datetime) -> bool:
+    """Whether an S3 Tables namespace is an expired test session's.
+
+    Args:
+        namespace: A namespace from ``ListNamespaces`` or ``GetNamespace``.
+        cutoff: Namespaces created before this time are expired.
+
+    Returns:
+        True for a single-level namespace named like a PyAthena test schema,
+        with an ID, and created before ``cutoff``.
+    """
+    names = namespace.get("namespace") or []
+    created = namespace.get("createdAt")
+    return (
+        isinstance(namespace.get("namespaceId"), str)
+        and len(names) == 1
+        and _TEST_NAMESPACE.fullmatch(names[0]) is not None
+        and isinstance(created, datetime)
+        and created.tzinfo is not None
+        and created < cutoff
+    )
+
+
+def sweep_s3tables_namespaces(
+    client: Any, table_bucket_arn: str, *, dry_run: bool = True
+) -> dict[str, int]:
+    """Preview or delete test S3 Tables namespaces older than seven days.
+
+    Test sessions create a namespace named like their schema and delete it when
+    they finish; this removes the ones a session left behind. Namespaces younger
+    than seven days are retained, including those of running sessions.
+
+    Args:
+        client: A boto3 S3 Tables client.
+        table_bucket_arn: The ARN of the table bucket to sweep.
+        dry_run: Only count eligible namespaces.
+
+    Returns:
+        The numbers of eligible, deleted and skipped namespaces.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    # Finish pagination before deleting anything from the table bucket.
+    candidates = [
+        namespace
+        for page in client.get_paginator("list_namespaces").paginate(
+            tableBucketARN=table_bucket_arn, prefix="pyathena_test_"
+        )
+        for namespace in page["namespaces"]
+        if _eligible_namespace(namespace, cutoff)
+    ]
+    deleted = skipped = 0
+    for namespace in candidates:
+        if dry_run:
+            continue
+        name = namespace["namespace"][0]
+        namespace_id = namespace["namespaceId"]
+        try:
+            current = client.get_namespace(tableBucketARN=table_bucket_arn, namespace=name)
+            # Preserve namespaces recreated since listing.
+            if not _eligible_namespace(current, cutoff) or current["namespaceId"] != namespace_id:
+                skipped += 1
+                continue
+            tables = [
+                table["name"]
+                for page in client.get_paginator("list_tables").paginate(
+                    tableBucketARN=table_bucket_arn, namespace=name
+                )
+                for table in page["tables"]
+            ]
+            for table in tables:
+                # A table that is already gone does not stop the namespace.
+                with contextlib.suppress(client.exceptions.NotFoundException):
+                    current_table = client.get_table(
+                        tableBucketARN=table_bucket_arn, namespace=name, name=table
+                    )
+                    # ListTables omits the namespace ID; keep tables of a
+                    # namespace recreated since the recheck.
+                    if current_table.get("namespaceId") != namespace_id:
+                        continue
+                    client.delete_table(
+                        tableBucketARN=table_bucket_arn,
+                        namespace=name,
+                        name=table,
+                        versionToken=current_table["versionToken"],
+                    )
+            current = client.get_namespace(tableBucketARN=table_bucket_arn, namespace=name)
+            if current.get("namespaceId") != namespace_id:
+                skipped += 1
+                continue
+            client.delete_namespace(tableBucketARN=table_bucket_arn, namespace=name)
+            deleted += 1
+            time.sleep(0.25)
+        except client.exceptions.NotFoundException:
+            skipped += 1
+    return {"eligible": len(candidates), "deleted": deleted, "skipped": skipped}
+
+
 def main() -> None:
+    """Preview or sweep expired test databases and S3 Tables namespaces.
+
+    Pass ``--apply`` to delete; the default only counts. S3 Tables namespaces
+    are swept when ``AWS_ATHENA_S3_TABLES_CATALOG`` names a table-bucket
+    catalog. The counts are logged and, under GitHub Actions, appended to the
+    step summary.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--apply", action="store_true", help="Delete eligible metadata; default: preview"
@@ -101,12 +219,42 @@ def main() -> None:
     )
     session = boto3.Session()
     catalog_id = session.client("sts", config=config).get_caller_identity()["Account"]
-    result = sweep_databases(
-        session.client("glue", config=config), catalog_id, dry_run=not args.apply
-    )
     mode = "Sweep" if args.apply else "Preview"
+    s3tables_catalog = os.environ.get("AWS_ATHENA_S3_TABLES_CATALOG")
+    bucket = None
+    if s3tables_catalog:
+        prefix, _, bucket = s3tables_catalog.partition("/")
+        if prefix != "s3tablescatalog" or not bucket:
+            parser.error(
+                "AWS_ATHENA_S3_TABLES_CATALOG must be s3tablescatalog/<table-bucket>, "
+                f"not {s3tables_catalog!r}"
+            )
+    # Report each sweep as it finishes, so a later failure keeps earlier results.
+    _report(
+        mode,
+        "databases",
+        sweep_databases(session.client("glue", config=config), catalog_id, dry_run=not args.apply),
+    )
+    if bucket:
+        client = session.client("s3tables", config=config)
+        arn = f"arn:aws:s3tables:{client.meta.region_name}:{catalog_id}:bucket/{bucket}"
+        _report(
+            mode,
+            "S3 Tables namespaces",
+            sweep_s3tables_namespaces(client, arn, dry_run=not args.apply),
+        )
+
+
+def _report(mode: str, kind: str, result: dict[str, int]) -> None:
+    """Log a sweep's counts and append them to the GitHub Actions step summary.
+
+    Args:
+        mode: ``"Sweep"`` or ``"Preview"``.
+        kind: What was swept.
+        result: The counts the sweep returned.
+    """
     summary = (
-        f"{mode}: eligible={result['eligible']}, "
+        f"{mode} {kind}: eligible={result['eligible']}, "
         f"deleted={result['deleted']}, skipped={result['skipped']}"
     )
     _LOGGER.info(summary)

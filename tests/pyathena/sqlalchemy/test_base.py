@@ -35,22 +35,26 @@ from pyathena.util import RetryConfig
 from tests.pyathena.conftest import ENV
 from tests.pyathena.util import throttle_metadata_api
 
-# Amazon S3 Tables tests need a pre-provisioned table-bucket catalog and namespace.
-# Skip them unless AWS_ATHENA_S3_TABLES_CATALOG / AWS_ATHENA_S3_TABLES_NAMESPACE are set.
+# Amazon S3 Tables tests need a pre-provisioned table-bucket catalog; the session
+# creates its own namespace in it.
+# Skip them unless AWS_ATHENA_S3_TABLES_CATALOG is set.
 requires_s3_tables = pytest.mark.skipif(
-    not ENV.s3tables_catalog or not ENV.s3tables_namespace,
-    reason="AWS_ATHENA_S3_TABLES_CATALOG / AWS_ATHENA_S3_TABLES_NAMESPACE are not configured",
+    not ENV.s3tables_catalog,
+    reason="AWS_ATHENA_S3_TABLES_CATALOG is not configured",
 )
 
 
 def unique_s3tables_table_name(base: str) -> str:
-    """Return a per-run-unique S3 Tables table name.
+    """Return a unique S3 Tables table name.
 
-    Other integration tests isolate themselves with a random per-process
-    ``ENV.schema``, but the S3 Tables tests share one fixed namespace
-    (``ENV.s3tables_namespace``). The CI matrix runs ``tests/pyathena`` once per
-    Python version in parallel against the same account, so a fixed table name
-    would collide across those concurrent jobs; a random suffix keeps them apart.
+    The session's namespace (``ENV.s3tables_namespace``) is its own, but a
+    rerun of a failed test would find the table an earlier attempt left there.
+
+    Args:
+        base: The name to extend.
+
+    Returns:
+        ``base`` with a random suffix.
     """
     return f"{base}_{uuid.uuid4().hex[:8]}"
 
@@ -2808,8 +2812,8 @@ OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat'
             assert tblproperties["table_type"] == "ICEBERG"
         finally:
             # Idempotent unquoted drop: tolerates a table that was never created
-            # while still surfacing systematic DROP failures, which would
-            # otherwise leak tables into the shared fixed namespace.
+            # while still surfacing systematic DROP failures; the session's
+            # namespace cleanup removes anything left behind.
             conn.execute(text(f"DROP TABLE IF EXISTS {schema}.{table_name}"))
 
     @requires_s3_tables

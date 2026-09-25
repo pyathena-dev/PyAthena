@@ -87,14 +87,17 @@ AWS_ATHENA_MANAGED_WORKGROUP=your-managed-workgroup
 
 ### Amazon S3 Tables
 
-SQLAlchemy tests of Amazon S3 Tables need a table bucket integrated with the AWS analytics services, its registered catalog, and an existing namespace:
+SQLAlchemy tests of Amazon S3 Tables need a table bucket integrated with the AWS analytics services and its registered catalog:
 
 ```ini
 AWS_ATHENA_S3_TABLES_CATALOG=s3tablescatalog/your-table-bucket
-AWS_ATHENA_S3_TABLES_NAMESPACE=your_namespace
 ```
 
-The S3 Tables tests live in `tests/pyathena/sqlalchemy/test_base.py` and run under `just test pyathena`, not the SQLAlchemy compliance-suite commands.
+Each test process creates its own namespace in the table bucket, named like its schema, and deletes it with any remaining tables at the end; with pytest-xdist that is each worker, not the controller.
+The test identity needs `s3tables:CreateNamespace`, `s3tables:DeleteNamespace`, `s3tables:ListTables`, and `s3tables:DeleteTable` on the table bucket.
+A session that stops early leaves its namespace behind; `scripts/sweep_databases.py` removes such namespaces once they are more than seven days old.
+
+The S3 Tables tests live in `tests/pyathena/sqlalchemy/test_base.py` and `tests/pyathena/test_glue.py` and run under `just test pyathena`, not the SQLAlchemy compliance-suite commands.
 Managed storage and S3 Tables tests skip when their respective optional configuration is absent.
 If a change affects one of these features, configure and run its tests; a skip does not validate that change.
 

@@ -44,6 +44,8 @@ jobs:
       AWS_DEFAULT_REGION: us-west-2
       AWS_RETRY_MODE: standard
       AWS_MAX_ATTEMPTS: '3'
+      # Sweep the S3 Tables namespaces test sessions leave in this table bucket.
+      AWS_ATHENA_S3_TABLES_CATALOG: s3tablescatalog/laughingman7743-pyathena-s3-tables
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run && 'true' || 'false' }}
 
     steps:
