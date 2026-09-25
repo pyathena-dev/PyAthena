@@ -17,12 +17,50 @@ def pytest_sessionstart(session):
     with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
         _create_database(cursor)
         _create_table(cursor)
+    _create_s3tables_namespace()
 
 
 def pytest_sessionfinish(session):
     with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
         _drop_database(cursor)
     _delete_rows()
+    _delete_s3tables_namespace()
+
+
+def _s3tables_bucket_arn():
+    """Return the ARN of the table bucket behind ``ENV.s3tables_catalog``.
+
+    Returns:
+        The table bucket's ARN.
+    """
+    bucket = ENV.s3tables_catalog.split("/", 1)[1]
+    account = boto3.client("sts").get_caller_identity()["Account"]
+    return f"arn:aws:s3tables:{ENV.region_name}:{account}:bucket/{bucket}"
+
+
+def _create_s3tables_namespace():
+    """Create this session's S3 Tables namespace when S3 Tables are configured."""
+    if not ENV.s3tables_catalog:
+        return
+    boto3.client("s3tables").create_namespace(
+        tableBucketARN=_s3tables_bucket_arn(), namespace=[ENV.s3tables_namespace]
+    )
+
+
+def _delete_s3tables_namespace():
+    """Delete this session's S3 Tables namespace and any table left in it."""
+    if not ENV.s3tables_catalog:
+        return
+    client = boto3.client("s3tables")
+    arn = _s3tables_bucket_arn()
+    for page in client.get_paginator("list_tables").paginate(
+        tableBucketARN=arn, namespace=ENV.s3tables_namespace
+    ):
+        for table in page["tables"]:
+            client.delete_table(
+                tableBucketARN=arn, namespace=ENV.s3tables_namespace, name=table["name"]
+            )
+    client.delete_namespace(tableBucketARN=arn, namespace=ENV.s3tables_namespace)
 
 
 def _upload_rows():
