@@ -423,6 +423,14 @@ class TestCursor:
         assert cursor.fetchone() == (expected,)
         assert cursor.description[0][1] == BINARY
 
+    @pytest.mark.parametrize(
+        "value",
+        [datetime(2017, 1, 1, 12, 0, 0, 789012), datetime(2017, 1, 1, 12, 0, 0, 789000)],
+    )
+    def test_datetime_parameter(self, cursor, value):
+        cursor.execute("SELECT %(value)s", {"value": value})
+        assert cursor.fetchone() == (value,)
+
     def test_no_params(self, cursor):
         pytest.raises(DatabaseError, lambda: cursor.execute("SELECT %(param)s FROM one_row"))
         pytest.raises(KeyError, lambda: cursor.execute("SELECT %(param)s FROM one_row", {"a": 1}))

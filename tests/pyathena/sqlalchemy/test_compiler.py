@@ -453,6 +453,21 @@ class TestAthenaStatementCompiler:
         sql = str(stmt.compile(dialect=self.dialect, compile_kwargs=compile_kwargs))
         assert sql == f"SELECT {expected} AS anon_1"
 
+    def test_timestamp_cast_keeps_microseconds(self):
+        value = datetime(2012, 10, 15, 12, 57, 18, 396)
+        items = column("items", AthenaArray(types.DateTime))
+        cases = [
+            (select(cast(column("col", String), types.DateTime)), "CAST(col AS TIMESTAMP(6))"),
+            (
+                select(items.concat([value])),
+                "items || CAST(ARRAY[TIMESTAMP '2012-10-15 12:57:18.000396'] "
+                "AS ARRAY(TIMESTAMP(6)))",
+            ),
+        ]
+        for stmt, expected in cases:
+            sql = str(stmt.compile(dialect=self.dialect, compile_kwargs={"literal_binds": True}))
+            assert expected in sql
+
     @pytest.mark.parametrize(
         ("type_", "expected"),
         [(types.Date, "DATE '2012-10-15 10%%'"), (types.DateTime, "TIMESTAMP '2012-10-15 10%%'")],

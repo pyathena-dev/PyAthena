@@ -43,6 +43,7 @@ from pyathena.sqlalchemy.preparer import AthenaDDLIdentifierPreparer
 from pyathena.sqlalchemy.types import (
     AthenaMap,
     AthenaStruct,
+    AthenaTimestamp,
     get_double_type,
 )
 from pyathena.sqlalchemy.util import _split_type_arguments
@@ -652,6 +653,9 @@ class AthenaStatementCompiler(SQLCompiler):
             # In Athena, use float in DDL statements like CREATE TABLE
             # and real in SQL functions like SELECT CAST.
             type_clause = "REAL"
+        elif isinstance(cast.type, (types.DateTime, AthenaTimestamp)):
+            # A bare TIMESTAMP is timestamp(3) in Athena and truncates microseconds.
+            type_clause = "TIMESTAMP(6)"
         else:
             type_clause = cast.typeclause._compiler_dispatch(self, **kwargs)
         return f"CAST({cast.clause._compiler_dispatch(self, **kwargs)} AS {type_clause})"
@@ -690,6 +694,8 @@ class AthenaStatementCompiler(SQLCompiler):
             return "DOUBLE"
         if isinstance(type_, types.Float):
             return "REAL"
+        if isinstance(type_, (types.DateTime, AthenaTimestamp)):
+            return "TIMESTAMP(6)"
         if require_precision and isinstance(type_, types.Numeric) and type_.precision is None:
             raise exc.CompileError(
                 "ARRAY decimal values require explicit Numeric precision; "
