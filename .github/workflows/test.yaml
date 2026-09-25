@@ -29,6 +29,8 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# The three suites create their own schemas and tables, so they run in
+# parallel; each is still a separate job for "Re-run failed jobs".
 jobs:
   test:
     uses: ./.github/workflows/test-suite.yaml
@@ -36,13 +38,11 @@ jobs:
       test-type: pyathena
 
   test-sqla:
-    needs: [test]
     uses: ./.github/workflows/test-suite.yaml
     with:
       test-type: sqla
 
   test-sqla-async:
-    needs: [test-sqla]
     uses: ./.github/workflows/test-suite.yaml
     with:
       test-type: sqla_async
