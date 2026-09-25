@@ -20,6 +20,11 @@ from pyathena.pandas.result_set import AthenaPandasResultSet, PandasDataFrameIte
 from tests import ENV
 from tests.pyathena.conftest import connect
 
+# pandas 3 infers its "str" dtype for strings, which represents NULL as NaN; pandas 2 uses
+# object columns with None.
+STRING_TYPE = pd.Series(["a"]).dtype.type
+STRING_NULL = pd.Series(["a", None]).iloc[1]
+
 
 class TestPandasCursor:
     @pytest.mark.parametrize(
@@ -641,17 +646,17 @@ class TestPandasCursor:
             np.int64,
             np.float64,
             np.float64,
-            np.object_,
-            np.object_,
+            STRING_TYPE,
+            STRING_TYPE,
             np.datetime64,
             np.object_,
             np.datetime64,
             np.object_,
+            STRING_TYPE,
             np.object_,
+            STRING_TYPE,
             np.object_,
-            np.object_,
-            np.object_,
-            np.object_,
+            STRING_TYPE,
             np.object_,
         )
         rows = [
@@ -763,8 +768,8 @@ class TestPandasCursor:
             np.int64,
             np.float32,
             np.float64,
-            np.object_,
-            np.object_,
+            STRING_TYPE,
+            STRING_TYPE,
             np.datetime64,
             np.object_,
             np.object_,
@@ -1198,7 +1203,7 @@ class TestPandasCursor:
             # NULL and empty characters are correctly converted when the UNLOAD option is enabled.
             np.testing.assert_equal(
                 pandas_cursor.fetchall(),
-                [("", "a"), ("N/A", "a"), ("NULL", "a"), (None, "a")],
+                [("", "a"), ("N/A", "a"), ("NULL", "a"), (STRING_NULL, "a")],
             )
         else:
             np.testing.assert_equal(
@@ -1208,12 +1213,10 @@ class TestPandasCursor:
         pandas_cursor.execute(query, na_values=None, engine=parquet_engine)
         if pandas_cursor._unload:
             # NULL and empty characters are correctly converted when the UNLOAD option is enabled.
-            assert pandas_cursor.fetchall() == [
-                ("", "a"),
-                ("N/A", "a"),
-                ("NULL", "a"),
-                (None, "a"),
-            ]
+            np.testing.assert_equal(
+                pandas_cursor.fetchall(),
+                [("", "a"), ("N/A", "a"), ("NULL", "a"), (STRING_NULL, "a")],
+            )
         else:
             assert pandas_cursor.fetchall() == [
                 ("", "a"),
