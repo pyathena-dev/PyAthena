@@ -14,14 +14,20 @@ from tests.pyathena.util import read_query
 
 
 def pytest_sessionstart(session):
-    # The namespace goes first: a failure here then leaves nothing behind, as
-    # pytest skips pytest_sessionfinish after a failed pytest_sessionstart.
-    if _runs_tests(session.config):
+    # pytest skips pytest_sessionfinish after a failed pytest_sessionstart, so
+    # a failure after the namespace is created deletes it here.
+    runs_tests = _runs_tests(session.config)
+    if runs_tests:
         _create_s3tables_namespace()
-    _upload_rows()
-    with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
-        _create_database(cursor)
-        _create_table(cursor)
+    try:
+        _upload_rows()
+        with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
+            _create_database(cursor)
+            _create_table(cursor)
+    except BaseException:
+        if runs_tests:
+            _delete_s3tables_namespace()
+        raise
 
 
 def pytest_sessionfinish(session):

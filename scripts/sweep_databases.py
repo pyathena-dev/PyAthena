@@ -23,7 +23,9 @@
 # script also sweeps that table bucket's namespaces named like PyAthena test
 # schemas and more than seven days old, deleting their tables first. Test
 # sessions create and delete such a namespace; a session that stops early
-# leaves it behind.
+# leaves it behind. Eligibility and creation time are rechecked before a
+# namespace's tables are deleted; namespace names are random per session, so a
+# namespace is not recreated under the same name. Missing tables are skipped.
 #
 # .github/workflows/database-sweep.yaml runs this script after scheduled Test
 # runs complete on master, including failures and cancellations. It does not run
@@ -32,6 +34,7 @@
 # can leave eligible databases for a later run.
 
 import argparse
+import contextlib
 import logging
 import os
 import re
@@ -167,7 +170,9 @@ def sweep_s3tables_namespaces(
                 for table in page["tables"]
             ]
             for table in tables:
-                client.delete_table(tableBucketARN=table_bucket_arn, namespace=name, name=table)
+                # A table that is already gone does not stop the namespace.
+                with contextlib.suppress(client.exceptions.NotFoundException):
+                    client.delete_table(tableBucketARN=table_bucket_arn, namespace=name, name=table)
             client.delete_namespace(tableBucketARN=table_bucket_arn, namespace=name)
             deleted += 1
             time.sleep(0.25)

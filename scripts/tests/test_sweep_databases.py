@@ -335,3 +335,36 @@ def test_cli_reports_databases_before_a_failing_namespace_sweep(monkeypatch, tmp
     with pytest.raises(RuntimeError):
         main()
     assert summary.read_text().splitlines() == ["Sweep databases: eligible=2, deleted=2, skipped=0"]
+
+
+def test_a_table_already_gone_does_not_stop_the_namespace(s3tables):
+    client, stubber = s3tables
+    target = {"tableBucketARN": BUCKET_ARN, "namespace": NAMESPACE["namespace"][0]}
+
+    def table(name):
+        return {
+            "namespace": NAMESPACE["namespace"],
+            "name": name,
+            "type": "customer",
+            "tableARN": f"{BUCKET_ARN}/table/{name}",
+            "createdAt": OLD,
+            "modifiedAt": OLD,
+        }
+
+    stubber.add_response(
+        "list_namespaces",
+        {"namespaces": [NAMESPACE]},
+        {"tableBucketARN": BUCKET_ARN, "prefix": "pyathena_test_"},
+    )
+    stubber.add_response("get_namespace", NAMESPACE, target)
+    stubber.add_response("list_tables", {"tables": [table("gone"), table("left")]}, target)
+    stubber.add_client_error(
+        "delete_table", "NotFoundException", expected_params={**target, "name": "gone"}
+    )
+    stubber.add_response("delete_table", {}, {**target, "name": "left"})
+    stubber.add_response("delete_namespace", {}, target)
+    assert sweep_s3tables_namespaces(client, BUCKET_ARN, dry_run=False) == {
+        "eligible": 1,
+        "deleted": 1,
+        "skipped": 0,
+    }
