@@ -187,10 +187,44 @@ def test_cli_defaults_to_preview(monkeypatch, tmp_path, arguments, dry_run, s3ta
 BUCKET_ARN = f"arn:aws:s3tables:us-west-2:{CATALOG}:bucket/table-bucket"
 NAMESPACE = {
     "namespace": ["pyathena_test_abcdefghij"],
+    "namespaceId": "namespace-id",
     "createdAt": OLD,
     "createdBy": CATALOG,
     "ownerAccountId": CATALOG,
 }
+TARGET = {"tableBucketARN": BUCKET_ARN, "namespace": NAMESPACE["namespace"][0]}
+RECREATED = {**NAMESPACE, "namespaceId": "recreated-id"}
+
+
+def _listed_table(name):
+    return {
+        "namespace": NAMESPACE["namespace"],
+        "name": name,
+        "type": "customer",
+        "tableARN": f"{BUCKET_ARN}/table/{name}",
+        "createdAt": OLD,
+        "modifiedAt": OLD,
+    }
+
+
+def _table(name, namespace_id="namespace-id"):
+    return {
+        **_listed_table(name),
+        "namespaceId": namespace_id,
+        "versionToken": f"{name}-version",
+        "warehouseLocation": f"s3://warehouse/{name}",
+        "createdBy": CATALOG,
+        "modifiedBy": CATALOG,
+        "ownerAccountId": CATALOG,
+        "format": "ICEBERG",
+    }
+
+
+def _deletes_table(stubber, name):
+    stubber.add_response("get_table", _table(name), {**TARGET, "name": name})
+    stubber.add_response(
+        "delete_table", {}, {**TARGET, "name": name, "versionToken": f"{name}-version"}
+    )
 
 
 @pytest.fixture
@@ -216,6 +250,7 @@ def s3tables(monkeypatch):
         ({"namespace": ["pyathena_test_abcdefghij", "child"]}, False),
         ({"createdAt": OLD + timedelta(days=2)}, False),
         ({"createdAt": OLD.replace(tzinfo=None)}, False),
+        ({"namespaceId": None}, False),
     ],
 )
 def test_only_expired_session_namespaces_are_eligible(properties, expected):
@@ -225,15 +260,6 @@ def test_only_expired_session_namespaces_are_eligible(properties, expected):
 def test_namespace_sweep_deletes_tables_then_namespace(s3tables):
     client, stubber = s3tables
     listing = {"tableBucketARN": BUCKET_ARN, "prefix": "pyathena_test_"}
-    target = {"tableBucketARN": BUCKET_ARN, "namespace": NAMESPACE["namespace"][0]}
-    table = {
-        "namespace": NAMESPACE["namespace"],
-        "name": "leftover",
-        "type": "customer",
-        "tableARN": f"{BUCKET_ARN}/table/leftover",
-        "createdAt": OLD,
-        "modifiedAt": OLD,
-    }
     for dry_run in (True, False):
         stubber.add_response(
             "list_namespaces", {"namespaces": [NAMESPACE], "continuationToken": "next"}, listing
@@ -244,10 +270,11 @@ def test_namespace_sweep_deletes_tables_then_namespace(s3tables):
             {**listing, "continuationToken": "next"},
         )
         if not dry_run:
-            stubber.add_response("get_namespace", NAMESPACE, target)
-            stubber.add_response("list_tables", {"tables": [table]}, target)
-            stubber.add_response("delete_table", {}, {**target, "name": "leftover"})
-            stubber.add_response("delete_namespace", {}, target)
+            stubber.add_response("get_namespace", NAMESPACE, TARGET)
+            stubber.add_response("list_tables", {"tables": [_listed_table("leftover")]}, TARGET)
+            _deletes_table(stubber, "leftover")
+            stubber.add_response("get_namespace", NAMESPACE, TARGET)
+            stubber.add_response("delete_namespace", {}, TARGET)
         assert sweep_s3tables_namespaces(client, BUCKET_ARN, dry_run=dry_run) == {
             "eligible": 1,
             "deleted": int(not dry_run),
@@ -258,8 +285,8 @@ def test_namespace_sweep_deletes_tables_then_namespace(s3tables):
 @pytest.mark.parametrize(
     "current",
     [
-        {**NAMESPACE, "createdAt": OLD - timedelta(days=1)},
         {**NAMESPACE, "createdAt": datetime.now(timezone.utc)},
+        RECREATED,
     ],
 )
 def test_namespace_identity_is_rechecked(s3tables, current):
@@ -339,32 +366,45 @@ def test_cli_reports_databases_before_a_failing_namespace_sweep(monkeypatch, tmp
 
 def test_a_table_already_gone_does_not_stop_the_namespace(s3tables):
     client, stubber = s3tables
-    target = {"tableBucketARN": BUCKET_ARN, "namespace": NAMESPACE["namespace"][0]}
-
-    def table(name):
-        return {
-            "namespace": NAMESPACE["namespace"],
-            "name": name,
-            "type": "customer",
-            "tableARN": f"{BUCKET_ARN}/table/{name}",
-            "createdAt": OLD,
-            "modifiedAt": OLD,
-        }
-
     stubber.add_response(
         "list_namespaces",
         {"namespaces": [NAMESPACE]},
         {"tableBucketARN": BUCKET_ARN, "prefix": "pyathena_test_"},
     )
-    stubber.add_response("get_namespace", NAMESPACE, target)
-    stubber.add_response("list_tables", {"tables": [table("gone"), table("left")]}, target)
-    stubber.add_client_error(
-        "delete_table", "NotFoundException", expected_params={**target, "name": "gone"}
+    stubber.add_response("get_namespace", NAMESPACE, TARGET)
+    stubber.add_response(
+        "list_tables", {"tables": [_listed_table("gone"), _listed_table("left")]}, TARGET
     )
-    stubber.add_response("delete_table", {}, {**target, "name": "left"})
-    stubber.add_response("delete_namespace", {}, target)
+    stubber.add_client_error(
+        "get_table", "NotFoundException", expected_params={**TARGET, "name": "gone"}
+    )
+    _deletes_table(stubber, "left")
+    stubber.add_response("get_namespace", NAMESPACE, TARGET)
+    stubber.add_response("delete_namespace", {}, TARGET)
     assert sweep_s3tables_namespaces(client, BUCKET_ARN, dry_run=False) == {
         "eligible": 1,
         "deleted": 1,
         "skipped": 0,
+    }
+
+
+def test_a_namespace_recreated_during_the_sweep_is_kept(s3tables):
+    client, stubber = s3tables
+    stubber.add_response(
+        "list_namespaces",
+        {"namespaces": [NAMESPACE]},
+        {"tableBucketARN": BUCKET_ARN, "prefix": "pyathena_test_"},
+    )
+    stubber.add_response("get_namespace", NAMESPACE, TARGET)
+    stubber.add_response(
+        "list_tables", {"tables": [_listed_table("leftover"), _listed_table("new")]}, TARGET
+    )
+    _deletes_table(stubber, "leftover")
+    # Recreated after the recheck: its table and the namespace itself stay.
+    stubber.add_response("get_table", _table("new", "recreated-id"), {**TARGET, "name": "new"})
+    stubber.add_response("get_namespace", RECREATED, TARGET)
+    assert sweep_s3tables_namespaces(client, BUCKET_ARN, dry_run=False) == {
+        "eligible": 1,
+        "deleted": 0,
+        "skipped": 1,
     }

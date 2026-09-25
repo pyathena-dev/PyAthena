@@ -23,9 +23,11 @@
 # script also sweeps that table bucket's namespaces named like PyAthena test
 # schemas and more than seven days old, deleting their tables first. Test
 # sessions create and delete such a namespace; a session that stops early
-# leaves it behind. Eligibility and creation time are rechecked before a
-# namespace's tables are deleted; namespace names are random per session, so a
-# namespace is not recreated under the same name. Missing tables are skipped.
+# leaves it behind. The namespace ID is rechecked before its tables are deleted
+# and again before the namespace is deleted. Each table is deleted only if it
+# still belongs to that namespace, at the version just read; missing tables are
+# skipped. DeleteNamespace takes only a name, so an empty namespace recreated
+# under the same name right after the last recheck would still be deleted.
 #
 # .github/workflows/database-sweep.yaml runs this script after scheduled Test
 # runs complete on master, including failures and cancellations. It does not run
@@ -107,13 +109,14 @@ def _eligible_namespace(namespace: dict[str, Any], cutoff: datetime) -> bool:
         cutoff: Namespaces created before this time are expired.
 
     Returns:
-        True for a single-level namespace named like a PyAthena test schema and
-        created before ``cutoff``.
+        True for a single-level namespace named like a PyAthena test schema,
+        with an ID, and created before ``cutoff``.
     """
     names = namespace.get("namespace") or []
     created = namespace.get("createdAt")
     return (
-        len(names) == 1
+        isinstance(namespace.get("namespaceId"), str)
+        and len(names) == 1
         and _TEST_NAMESPACE.fullmatch(names[0]) is not None
         and isinstance(created, datetime)
         and created.tzinfo is not None
@@ -153,13 +156,11 @@ def sweep_s3tables_namespaces(
         if dry_run:
             continue
         name = namespace["namespace"][0]
+        namespace_id = namespace["namespaceId"]
         try:
             current = client.get_namespace(tableBucketARN=table_bucket_arn, namespace=name)
             # Preserve namespaces recreated since listing.
-            if (
-                not _eligible_namespace(current, cutoff)
-                or current["createdAt"] != namespace["createdAt"]
-            ):
+            if not _eligible_namespace(current, cutoff) or current["namespaceId"] != namespace_id:
                 skipped += 1
                 continue
             tables = [
@@ -172,7 +173,23 @@ def sweep_s3tables_namespaces(
             for table in tables:
                 # A table that is already gone does not stop the namespace.
                 with contextlib.suppress(client.exceptions.NotFoundException):
-                    client.delete_table(tableBucketARN=table_bucket_arn, namespace=name, name=table)
+                    current_table = client.get_table(
+                        tableBucketARN=table_bucket_arn, namespace=name, name=table
+                    )
+                    # ListTables omits the namespace ID; keep tables of a
+                    # namespace recreated since the recheck.
+                    if current_table.get("namespaceId") != namespace_id:
+                        continue
+                    client.delete_table(
+                        tableBucketARN=table_bucket_arn,
+                        namespace=name,
+                        name=table,
+                        versionToken=current_table["versionToken"],
+                    )
+            current = client.get_namespace(tableBucketARN=table_bucket_arn, namespace=name)
+            if current.get("namespaceId") != namespace_id:
+                skipped += 1
+                continue
             client.delete_namespace(tableBucketARN=table_bucket_arn, namespace=name)
             deleted += 1
             time.sleep(0.25)
