@@ -18,9 +18,10 @@ from pyathena_bench.fleet import (
     Filters,
     Queue,
     expand_jobs,
-    job_query_ids,
+    quiesce,
     status,
     submit,
+    trial_evidence,
     work,
 )
 
@@ -157,7 +158,7 @@ class TestExpandJobsArraysize:
 class TestQueue:
     def test_submit_refuses_an_existing_queue_and_duplicate_ids(self, tmp_path):
         s3, queue = queue_with([job("a")], tmp_path)
-        with pytest.raises(ValueError, match="already exists"):
+        with pytest.raises(ValueError, match="already reserved"):
             submit(queue, [job("b")], tmp_path / "config.toml", tmp_path / "manifest.json")
         with pytest.raises(ValueError, match="unique"):
             submit(
@@ -199,7 +200,7 @@ class TestQueue:
             == []
         )
         assert sorted(runs) == ["heavy", "light"]
-        assert settled == [set()]
+        assert [path.name for path in settled] == ["heavy"]
         assert queue.key("results", "light", "summary.csv") in s3.objects
         assert not queue.names("slots")
         summary = status(queue)
@@ -270,8 +271,8 @@ class TestQueueSafety:
             )
             return 1
 
-        def settle(ids):
-            assert ids == {"q1"}
+        def settle(output):
+            assert trial_evidence(output)[0] == {"q1"}
             return ["q1: still RUNNING"]
 
         assert work(queue, tmp_path / "w", api_slots=1, runner=runner, settle=settle) == ["first"]
@@ -301,15 +302,88 @@ class TestQueueSafety:
         assert attempts == [[]]
         assert order == ["wide", "narrow"]
 
-    def test_job_query_ids_reads_reported_queries(self, tmp_path):
+    def test_trial_evidence_reads_reported_queries_and_trial_prefixes(self, tmp_path):
         (tmp_path / "events.jsonl").write_text(
             "\n".join(
                 [
+                    json.dumps({"event": "trial_start", "output": "s3://b/runs/r/trials/t1/"}),
                     json.dumps({"event": "query", "query_id": "a"}),
                     json.dumps({"event": "athena", "query_id": "b"}),
                     "{incomplete",
                 ]
             )
         )
-        assert job_query_ids(tmp_path) == {"a"}
-        assert job_query_ids(tmp_path / "missing") == set()
+        assert trial_evidence(tmp_path) == ({"a"}, ("s3://b/runs/r/trials/t1/",))
+        assert trial_evidence(tmp_path / "missing") == (set(), ())
+
+    def test_jobs_wider_than_the_api_slots_stop_the_worker_before_claiming(self, tmp_path):
+        _, queue = queue_with([job("wide", heavy=True, api_weight=11)], tmp_path)
+        with pytest.raises(ValueError, match="more than 10 API slots"):
+            work(queue, tmp_path / "w", api_slots=10, runner=lambda *a: 0, settle=no_queries)
+        assert not queue.names("claims")
+
+    def test_slot_acquisition_errors_release_taken_slots(self, tmp_path):
+        s3, queue = queue_with([], tmp_path)
+        original = s3.put_object
+
+        def flaky(**kwargs):
+            if kwargs["Key"].endswith("slots/1"):
+                raise ClientError({"Error": {"Code": "InternalError"}}, "PutObject")
+            original(**kwargs)
+
+        s3.put_object = flaky
+        with pytest.raises(ClientError):
+            queue.acquire_slots(3, 2, {"host": "h"})
+        assert not queue.names("slots")
+
+    def test_overlapping_submissions_cannot_share_a_name(self, tmp_path):
+        s3, queue = queue_with([job("a")], tmp_path)
+        with pytest.raises(ValueError, match="reserved"):
+            submit(queue, [job("b")], tmp_path / "config.toml", tmp_path / "manifest.json")
+        assert json.loads(queue.read("jobs.json"))[0]["id"] == "a"
+
+
+class FakeAthena:
+    def __init__(self, states, stop_errors=()):
+        self.states = states
+        self.stop_errors = set(stop_errors)
+        self.stopped = []
+
+    def stop_query_execution(self, **kwargs):
+        query_id = kwargs["QueryExecutionId"]
+        self.stopped.append(query_id)
+        if query_id in self.stop_errors:
+            raise ClientError({"Error": {"Code": "InvalidRequestException"}}, "StopQueryExecution")
+        self.states[query_id] = "CANCELLED"
+
+    def get_query_execution(self, **kwargs):
+        return {"QueryExecution": {"Status": {"State": self.states[kwargs["QueryExecutionId"]]}}}
+
+
+class TestQuiesce:
+    def test_unreported_queries_under_trial_prefixes_are_stopped(self, tmp_path, monkeypatch):
+        (tmp_path / "events.jsonl").write_text(
+            json.dumps({"event": "trial_start", "output": "s3://b/runs/r/trials/t1/"}) + "\n"
+        )
+        athena = FakeAthena({"unreported": "RUNNING"})
+        found = {}
+
+        def active(client_, workgroup, prefixes):
+            found["prefixes"] = prefixes
+            return {"unreported"}
+
+        monkeypatch.setattr("pyathena_bench.fleet.session", lambda settings: None)
+        monkeypatch.setattr("pyathena_bench.fleet.client", lambda session_, name: athena)
+        monkeypatch.setattr("pyathena_bench.fleet.active_queries", active)
+        assert quiesce(Settings(poll_interval=0.01), tmp_path) == []
+        assert found["prefixes"] == ("s3://b/runs/r/trials/t1/",)
+        assert athena.stopped == ["unreported"]
+
+    def test_stop_errors_are_ignored_once_the_query_is_terminal(self, tmp_path, monkeypatch):
+        (tmp_path / "events.jsonl").write_text(
+            json.dumps({"event": "query", "query_id": "done"}) + "\n"
+        )
+        athena = FakeAthena({"done": "SUCCEEDED"}, stop_errors={"done"})
+        monkeypatch.setattr("pyathena_bench.fleet.session", lambda settings: None)
+        monkeypatch.setattr("pyathena_bench.fleet.client", lambda session_, name: athena)
+        assert quiesce(Settings(poll_interval=0.01), tmp_path) == []
