@@ -93,6 +93,9 @@ class TestCursor:
         assert list(cursor) == [(1,)]
         pytest.raises(StopIteration, cursor.__next__)
 
+    # Cache hits are asserted in ENV.work_group: the default work group runs most test
+    # queries, which can push earlier executions out of the cache_size window.
+    @pytest.mark.parametrize("cursor", [{"work_group": ENV.work_group}], indirect=["cursor"])
     def test_cache_size(self, cursor):
         # To test caching, we need to make sure the query is unique, otherwise
         # we might accidentally pick up the cache results from another CI run.
@@ -143,6 +146,7 @@ class TestCursor:
         assert query_id_1 != query_id_2
         assert query_id_3 in [query_id_1, query_id_2]
 
+    @pytest.mark.parametrize("cursor", [{"work_group": ENV.work_group}], indirect=["cursor"])
     def test_cache_expiration_time_with_cache_size(self, cursor):
         # Cache miss
         query = f"SELECT * FROM one_row -- {datetime.now(timezone.utc)!s}"
