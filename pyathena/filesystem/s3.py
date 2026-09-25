@@ -156,7 +156,9 @@ class S3FileSystem(AbstractFileSystem):
             default_cache_type: The fsspec cache type for reads; defaults to
                 ``"bytes"``.
             max_workers: The number of threads for parallel transfers.
-            s3_additional_kwargs: Extra arguments for S3 requests.
+            s3_additional_kwargs: Extra arguments for the object requests of
+                ``open()`` and ``pipe_file()``; listings and other requests do
+                not use them.
             allow_bucket_creation: Whether ``mkdir``/``makedirs`` may create a
                 bucket.
             allow_bucket_deletion: Whether ``rmdir`` may delete a bucket.
