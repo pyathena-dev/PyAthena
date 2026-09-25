@@ -396,6 +396,19 @@ class TestFollowUpSafety:
         with pytest.raises(ValueError, match="already exists"):
             submit(queue, [job("b")], tmp_path / "config.toml", tmp_path / "manifest.json")
         assert json.loads(queue.read("jobs.json"))[0]["id"] == "a"
+        assert not queue.exists("reservation.json")
+
+    def test_a_failed_existence_check_releases_the_reservation(self, tmp_path):
+        s3 = FakeS3()
+        queue = Queue(s3, "bucket", "run1")
+
+        def failing(**kwargs):
+            raise ClientError({"Error": {"Code": "InternalError"}}, "ListObjectsV2")
+
+        s3.list_objects_v2 = failing
+        with pytest.raises(ClientError):
+            submit(queue, [job("a")], tmp_path / "config.toml", tmp_path / "manifest.json")
+        assert queue.key("reservation.json") not in s3.objects
 
     def test_quiesce_errors_are_recorded_before_the_worker_stops(self, tmp_path):
         _, queue = queue_with([job("first"), job("second")], tmp_path)

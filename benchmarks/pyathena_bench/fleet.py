@@ -337,10 +337,10 @@ def submit(queue: Queue, jobs: list[dict[str, Any]], config: Path, manifest: Pat
     reservation = queue.key("reservation.json")
     if not queue.put_if_absent(reservation, {"host": socket.gethostname(), "at": now()}):
         raise ValueError("Queue name is already reserved; choose a new name")
-    if queue.exists("queue.json"):
-        # A queue published without a reservation still owns the name.
-        raise ValueError("Queue already exists; choose a new name")
     try:
+        if queue.exists("queue.json"):
+            # A published queue owns its name even without a reservation object.
+            raise ValueError("Queue already exists; choose a new name")
         for name, path in (("config.toml", config), ("manifest.json", manifest)):
             queue.s3.upload_file(str(path), queue.bucket, queue.key(name))
         queue.s3.put_object(
