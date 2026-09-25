@@ -47,7 +47,7 @@ Edit the canonical files when maintaining these skills so both agents use the sa
 
 ```bash
 just format   # Auto-fix formatting and imports
-just lint   # Python lint, format check, mypy, and CloudFormation validation
+just lint   # Python lint, format check, mypy, CloudFormation validation, and license headers
 ```
 
 ### Testing

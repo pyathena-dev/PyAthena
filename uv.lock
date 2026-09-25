@@ -1125,6 +1125,7 @@ dev = [
     { name = "sphinx-multiversion" },
     { name = "sphinxext-opengraph" },
     { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
     { name = "types-python-dateutil" },
 ]
 
@@ -1170,6 +1171,7 @@ dev = [
     { name = "sphinx-multiversion" },
     { name = "sphinxext-opengraph" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=1.0.0" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0.0" },
     { name = "types-python-dateutil" },
 ]
 

@@ -1,0 +1,96 @@
+# Copyright 2026 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
+# SPDX-License-Identifier: MIT
+
+# Configuration for scripts/check_license_headers.py.
+
+# Formats without comment syntax or with generated content.
+exempt-suffixes = [".csv", ".gz", ".json", ".lock", ".png", ".tsv"]
+
+# Existing files without the header, classified in
+# https://github.com/pyathena-dev/PyAthena/issues/790 and described in NOTICE.
+# New files carry the header; add an entry only as agreed in the issue that
+# proposes the file, and remove entries whose files gain the header or are
+# deleted.
+unheaded-files = [
+    ".github/PULL_REQUEST_TEMPLATE.md",
+    "LICENSE",
+    "NOTICE",
+    "cloudformation/github_actions_oidc.yaml",
+    "docs/aio.md",
+    "docs/arrow.md",
+    "docs/conf.py",
+    "docs/cursor.md",
+    "docs/pandas.md",
+    "docs/polars.md",
+    "docs/s3fs.md",
+    "docs/sqlalchemy.md",
+    "docs/usage.md",
+    "pyathena/__init__.py",
+    "pyathena/aio/arrow/cursor.py",
+    "pyathena/aio/common.py",
+    "pyathena/aio/pandas/cursor.py",
+    "pyathena/aio/polars/cursor.py",
+    "pyathena/aio/result_set.py",
+    "pyathena/arrow/async_cursor.py",
+    "pyathena/arrow/converter.py",
+    "pyathena/arrow/cursor.py",
+    "pyathena/arrow/result_set.py",
+    "pyathena/arrow/util.py",
+    "pyathena/async_cursor.py",
+    "pyathena/common.py",
+    "pyathena/connection.py",
+    "pyathena/converter.py",
+    "pyathena/cursor.py",
+    "pyathena/filesystem/s3.py",
+    "pyathena/filesystem/s3_object.py",
+    "pyathena/formatter.py",
+    "pyathena/model.py",
+    "pyathena/pandas/__init__.py",
+    "pyathena/pandas/async_cursor.py",
+    "pyathena/pandas/converter.py",
+    "pyathena/pandas/cursor.py",
+    "pyathena/pandas/result_set.py",
+    "pyathena/pandas/util.py",
+    "pyathena/parser.py",
+    "pyathena/polars/__init__.py",
+    "pyathena/polars/async_cursor.py",
+    "pyathena/polars/cursor.py",
+    "pyathena/result_set.py",
+    "pyathena/s3fs/async_cursor.py",
+    "pyathena/s3fs/cursor.py",
+    "pyathena/sqlalchemy/array.py",
+    "pyathena/sqlalchemy/base.py",
+    "pyathena/sqlalchemy/compiler.py",
+    "pyathena/sqlalchemy/constants.py",
+    "pyathena/sqlalchemy/temporal.py",
+    "pyathena/sqlalchemy/types.py",
+    "pyathena/util.py",
+    "pyproject.toml",
+    "tests/__init__.py",
+    "tests/pyathena/aio/sqlalchemy/test_base.py",
+    "tests/pyathena/aio/test_cursor.py",
+    "tests/pyathena/arrow/test_async_cursor.py",
+    "tests/pyathena/conftest.py",
+    "tests/pyathena/filesystem/test_s3.py",
+    "tests/pyathena/filesystem/test_s3_async.py",
+    "tests/pyathena/pandas/test_async_cursor.py",
+    "tests/pyathena/pandas/test_cursor.py",
+    "tests/pyathena/pandas/test_util.py",
+    "tests/pyathena/polars/test_async_cursor.py",
+    "tests/pyathena/s3fs/test_cursor.py",
+    "tests/pyathena/sqlalchemy/test_array.py",
+    "tests/pyathena/sqlalchemy/test_base.py",
+    "tests/pyathena/sqlalchemy/test_temporal.py",
+    "tests/pyathena/sqlalchemy/test_types.py",
+    "tests/pyathena/test_async_cursor.py",
+    "tests/pyathena/test_converter.py",
+    "tests/pyathena/test_cursor.py",
+    "tests/pyathena/test_model.py",
+    "tests/pyathena/test_util.py",
+    "tests/resources/queries/create_table.sql.jinja2",
+    "tests/sqlalchemy/test_suite.py",
+]
