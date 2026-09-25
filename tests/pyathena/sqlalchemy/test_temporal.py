@@ -72,14 +72,30 @@ class TestAthenaTimestamp:
             (0, "TIMESTAMP '2017-01-01 12:34:56'"),
             (3, "TIMESTAMP '2017-01-01 12:34:56.789'"),
             (6, "TIMESTAMP '2017-01-01 12:34:56.789999'"),
-            (9, "TIMESTAMP '2017-01-01 12:34:56.789999000'"),
         ],
     )
     def test_literal_processor_precision(self, precision, expected):
         processor = AthenaTimestamp(precision=precision).literal_processor(AthenaDialect())
         assert processor(datetime(2017, 1, 1, 12, 34, 56, 789999)) == expected
 
-    @pytest.mark.parametrize("precision", [-1, 13])
+    @pytest.mark.parametrize(
+        ("precision", "expected"),
+        [
+            (0, datetime(2017, 1, 1, 12, 34, 56)),
+            (3, datetime(2017, 1, 1, 12, 34, 56, 789000)),
+            (5, datetime(2017, 1, 1, 12, 34, 56, 789990)),
+        ],
+    )
+    def test_bind_processor_truncates(self, precision, expected):
+        processor = AthenaTimestamp(precision=precision).bind_processor(AthenaDialect())
+        assert processor(datetime(2017, 1, 1, 12, 34, 56, 789999)) == expected
+        assert processor(None) is None
+
+    @pytest.mark.parametrize("precision", [None, 6])
+    def test_bind_processor_without_truncation(self, precision):
+        assert AthenaTimestamp(precision=precision).bind_processor(AthenaDialect()) is None
+
+    @pytest.mark.parametrize("precision", [-1, 7])
     def test_invalid_precision(self, precision):
         with pytest.raises(ValueError, match="precision"):
             AthenaTimestamp(precision=precision)

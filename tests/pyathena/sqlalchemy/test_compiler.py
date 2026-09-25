@@ -178,6 +178,11 @@ class _DecoratedMillisecondTimestamp(types.TypeDecorator):
     cache_ok = True
 
 
+class _NestedDecoratedDateTime(types.TypeDecorator):
+    impl = _DecoratedDateTime
+    cache_ok = True
+
+
 class TestAthenaStatementCompiler:
     """Test cases for Athena statement compiler functionality."""
 
@@ -488,6 +493,10 @@ class TestAthenaStatementCompiler:
                 "CAST(col AS TIMESTAMP(6))",
             ),
             (
+                cast(column("col", String), _NestedDecoratedDateTime()),
+                "CAST(col AS TIMESTAMP(6))",
+            ),
+            (
                 cast(column("col", String), AthenaTimestamp(precision=3)),
                 "CAST(col AS TIMESTAMP(3))",
             ),
@@ -513,6 +522,21 @@ class TestAthenaStatementCompiler:
     )
     def test_timestamp_cast_keeps_microseconds(self, expression, expected):
         assert expected in self._compile_sql(select(expression))
+
+    def test_timestamp_precision_applies_to_compared_values(self):
+        col = column("col", AthenaTimestamp(precision=3))
+        value = datetime(2012, 10, 15, 12, 57, 18, 789999)
+        assert self._compile_sql(select(col).where(col == value)) == (
+            "SELECT col \nWHERE col = TIMESTAMP '2012-10-15 12:57:18.789'"
+        )
+        bound = select(col).where(col == value).compile(dialect=self.dialect).binds["col_1"]
+        processor = bound.type.dialect_impl(self.dialect).bind_processor(self.dialect)
+        assert processor(bound.value) == datetime(2012, 10, 15, 12, 57, 18, 789000)
+
+    def test_array_slice_fallback_keeps_bare_timestamp(self):
+        items = column("items", types.ARRAY(types.DateTime))
+        sql = str(select(items[2:3:1]).compile(dialect=self.dialect))
+        assert "CAST(ARRAY[] AS ARRAY(TIMESTAMP))" in sql
 
     def test_timestamp_precision_in_cache_key(self):
         value = datetime(2012, 10, 15, 12, 57, 18, 789999)

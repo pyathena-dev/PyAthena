@@ -14,7 +14,8 @@ from pyathena.formatter import _date_literal, _escape_trino, _timestamp_literal
 
 if TYPE_CHECKING:
     from sqlalchemy import Dialect
-    from sqlalchemy.sql.type_api import _LiteralProcessorType
+    from sqlalchemy.sql.operators import OperatorType
+    from sqlalchemy.sql.type_api import _BindProcessorType, _LiteralProcessorType
 
 
 class AthenaTimestamp(TypeEngine[datetime]):
@@ -26,8 +27,9 @@ class AthenaTimestamp(TypeEngine[datetime]):
     fractional digits (``timestamp(6)``) when the value has a sub-millisecond
     part. Iceberg tables store microseconds; Hive tables store milliseconds.
 
-    With a ``precision``, literals render that many fractional digits and
-    casts render ``TIMESTAMP(precision)``; without one, casts render
+    With a ``precision``, bound values and literals, including values compared
+    with a column of this type, are truncated to that many fractional digits,
+    and casts render ``TIMESTAMP(precision)``. Without one, casts render
     ``TIMESTAMP(6)``. ``CREATE TABLE`` always renders ``TIMESTAMP``.
 
     Example:
@@ -46,14 +48,14 @@ class AthenaTimestamp(TypeEngine[datetime]):
         """Initialize the type.
 
         Args:
-            precision: The number of fractional-second digits, from 0 to 12,
+            precision: The number of fractional-second digits, from 0 to 6,
                 or None for the default rendering.
 
         Raises:
-            ValueError: If ``precision`` is outside 0 to 12.
+            ValueError: If ``precision`` is outside 0 to 6.
         """
-        if precision is not None and not 0 <= precision <= 12:
-            raise ValueError(f"TIMESTAMP precision must be between 0 and 12: {precision}")
+        if precision is not None and not 0 <= precision <= 6:
+            raise ValueError(f"TIMESTAMP precision must be between 0 and 6: {precision}")
         self.precision = precision
 
     @property
@@ -64,6 +66,40 @@ class AthenaTimestamp(TypeEngine[datetime]):
             ``datetime.datetime``.
         """
         return datetime
+
+    def bind_processor(self, dialect: Dialect) -> _BindProcessorType[datetime] | None:
+        """Return a processor truncating bound datetimes to the precision.
+
+        Args:
+            dialect: The dialect binding the value.
+
+        Returns:
+            The processor, or None without a precision below 6.
+        """
+        if self.precision is None or self.precision == 6:
+            return None
+        unit = 10 ** (6 - self.precision)
+
+        def process(value: datetime | Any | None) -> datetime | Any | None:
+            if isinstance(value, datetime):
+                return value.replace(microsecond=value.microsecond // unit * unit)
+            return value
+
+        return process
+
+    def coerce_compared_value(self, op: OperatorType | None, value: Any) -> TypeEngine[Any]:
+        """Keep this type for a datetime compared with a column of it.
+
+        Args:
+            op: The comparison operator.
+            value: The compared value.
+
+        Returns:
+            This type for a datetime, so its precision applies.
+        """
+        if isinstance(value, datetime):
+            return self
+        return super().coerce_compared_value(op, value)
 
     @staticmethod
     def process(

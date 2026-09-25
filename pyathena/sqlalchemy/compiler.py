@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from functools import partial
 from itertools import product
 from typing import TYPE_CHECKING, Any, cast
 
@@ -408,7 +409,7 @@ class AthenaStatementCompiler(SQLCompiler):
         empty = (
             f"slice({sql}, 1, 0)"
             if _ArrayTypeInspector.has_unknown_element(array_type)
-            else f"CAST(ARRAY[] AS {self._complex_dml_type(array_type)})"
+            else f"CAST(ARRAY[] AS {self._complex_dml_type(array_type, timestamp_precision=False)})"
         )
         return f"IF({step_sql} = 1, {sql}, slice({empty}, {failure}, 0))"
 
@@ -673,7 +674,7 @@ class AthenaStatementCompiler(SQLCompiler):
             ``TIMESTAMP(precision)`` for an AthenaTimestamp with a precision,
             ``TIMESTAMP(6)`` for any other DateTime type, otherwise None.
         """
-        if isinstance(type_, types.TypeDecorator):
+        while isinstance(type_, types.TypeDecorator):
             type_ = self._array_type_inspector.decorator_impl(type_)
         if isinstance(type_, AthenaTimestamp) and type_.precision is not None:
             return f"TIMESTAMP({type_.precision})"
@@ -681,29 +682,39 @@ class AthenaStatementCompiler(SQLCompiler):
             return "TIMESTAMP(6)"
         return None
 
-    def _complex_dml_type(self, type_, *, require_precision=False):
+    def _complex_dml_type(self, type_, *, require_precision=False, timestamp_precision=True):
+        """Render a type for a DML cast.
+
+        Args:
+            type_: The type to render.
+            require_precision: Reject a Numeric without an explicit precision.
+            timestamp_precision: Render DateTime types with their precision.
+                A cast that only types an empty value passes False to keep a
+                bare ``TIMESTAMP``, which Athena widens to the other operand's
+                precision instead of widening that operand.
+
+        Returns:
+            The type clause.
+
+        Raises:
+            CompileError: For an element type that cannot be cast.
+        """
+        recurse = partial(
+            self._complex_dml_type,
+            require_precision=require_precision,
+            timestamp_precision=timestamp_precision,
+        )
         if isinstance(type_, types.TypeDecorator):
-            return self._complex_dml_type(
-                self._array_type_inspector.decorator_impl(type_),
-                require_precision=require_precision,
-            )
+            return recurse(self._array_type_inspector.decorator_impl(type_))
         if isinstance(type_, types.NullType):
             raise exc.CompileError("Bound ARRAY values require an explicit element type")
         if isinstance(type_, types.ARRAY):
-            item = self._complex_dml_type(
-                _ArrayTypeInspector.item_type(type_), require_precision=require_precision
-            )
-            return f"ARRAY({item})"
+            return f"ARRAY({recurse(_ArrayTypeInspector.item_type(type_))})"
         if isinstance(type_, AthenaMap):
-            key_type = self._complex_dml_type(type_.key_type, require_precision=require_precision)
-            value_type = self._complex_dml_type(
-                type_.value_type, require_precision=require_precision
-            )
-            return f"MAP({key_type}, {value_type})"
+            return f"MAP({recurse(type_.key_type)}, {recurse(type_.value_type)})"
         if isinstance(type_, AthenaStruct):
             fields = ", ".join(
-                f"{self.preparer.quote(name)} "
-                f"{self._complex_dml_type(field_type, require_precision=require_precision)}"
+                f"{self.preparer.quote(name)} {recurse(field_type)}"
                 for name, field_type in type_.fields.items()
             )
             return f"ROW({fields})"
@@ -715,7 +726,7 @@ class AthenaStatementCompiler(SQLCompiler):
             return "DOUBLE"
         if isinstance(type_, types.Float):
             return "REAL"
-        timestamp_type = self._timestamp_dml_type(type_)
+        timestamp_type = self._timestamp_dml_type(type_) if timestamp_precision else None
         if timestamp_type is not None:
             return timestamp_type
         if require_precision and isinstance(type_, types.Numeric) and type_.precision is None:

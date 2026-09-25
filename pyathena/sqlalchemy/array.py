@@ -15,6 +15,7 @@ from sqlalchemy.sql.schema import Column
 from sqlalchemy.sql.type_api import TypeEngine
 from sqlalchemy.sql.visitors import InternalTraversal
 
+from pyathena.converter import _parse_datetime
 from pyathena.formatter import _ComplexParameter
 from pyathena.sqlalchemy.map import AthenaMap
 from pyathena.sqlalchemy.struct import AthenaStruct
@@ -385,7 +386,7 @@ class _ArrayValueProcessor:
         if isinstance(type_, types.Numeric):
             return Decimal(value) if type_.asdecimal else float(value)
         if isinstance(type_, (types.DateTime, AthenaTimestamp)):
-            return value if isinstance(value, datetime) else datetime.fromisoformat(value)
+            return value if isinstance(value, datetime) else _parse_datetime(value)
         if isinstance(type_, (types.Date, AthenaDate)):
             return value if isinstance(value, date) else date.fromisoformat(value)
         if isinstance(type_, (types.LargeBinary, types.BINARY, types.VARBINARY)):

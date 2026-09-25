@@ -269,9 +269,8 @@ def _timestamp_literal(value: datetime, precision: int | None = None) -> str:
 
     Args:
         value: The datetime to render. Its time zone, if any, is not rendered.
-        precision: The number of fractional-second digits, from 0 to 12.
-            Digits beyond the value's microseconds are truncated, and digits
-            it lacks are zero-filled.
+        precision: The number of fractional-second digits, from 0 to 6.
+            Digits beyond it are truncated.
 
     Returns:
         The TIMESTAMP literal, with a four-digit year.
@@ -280,7 +279,7 @@ def _timestamp_literal(value: datetime, precision: int | None = None) -> str:
         precision = 3 if value.microsecond % 1000 == 0 else 6
     text = value.replace(tzinfo=None).isoformat(sep=" ", timespec="seconds")
     if precision:
-        text += "." + f"{value.microsecond:06d}".ljust(precision, "0")[:precision]
+        text += "." + f"{value.microsecond:06d}"[:precision]
     return f"TIMESTAMP '{text}'"
 
 
