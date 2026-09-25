@@ -24,6 +24,16 @@ from scripts.sweep_databases import (
 CATALOG = "123456789012"
 OLD = datetime.now(timezone.utc) - timedelta(days=10)
 DATABASE = {"Name": "pyathena_test_abcdefghij", "CreateTime": OLD}
+BUCKET_ARN = f"arn:aws:s3tables:us-west-2:{CATALOG}:bucket/table-bucket"
+NAMESPACE = {
+    "namespace": ["pyathena_test_abcdefghij"],
+    "namespaceId": "namespace-id",
+    "createdAt": OLD,
+    "createdBy": CATALOG,
+    "ownerAccountId": CATALOG,
+}
+TARGET = {"tableBucketARN": BUCKET_ARN, "namespace": NAMESPACE["namespace"][0]}
+RECREATED = {**NAMESPACE, "namespaceId": "recreated-id"}
 
 
 @pytest.fixture
@@ -182,18 +192,6 @@ def test_cli_defaults_to_preview(monkeypatch, tmp_path, arguments, dry_run, s3ta
     else:
         sweep_namespaces.assert_not_called()
         assert len(lines) == 1
-
-
-BUCKET_ARN = f"arn:aws:s3tables:us-west-2:{CATALOG}:bucket/table-bucket"
-NAMESPACE = {
-    "namespace": ["pyathena_test_abcdefghij"],
-    "namespaceId": "namespace-id",
-    "createdAt": OLD,
-    "createdBy": CATALOG,
-    "ownerAccountId": CATALOG,
-}
-TARGET = {"tableBucketARN": BUCKET_ARN, "namespace": NAMESPACE["namespace"][0]}
-RECREATED = {**NAMESPACE, "namespaceId": "recreated-id"}
 
 
 def _listed_table(name):
