@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import types
 from sqlalchemy.sql.type_api import TypeEngine
 
-from pyathena.formatter import _escape_trino, _timestamp_literal
+from pyathena.formatter import _date_literal, _escape_trino, _timestamp_literal
 
 if TYPE_CHECKING:
     from sqlalchemy import Dialect
@@ -114,7 +114,7 @@ class AthenaDate(TypeEngine[date]):
         # datetime is a subclass of date, so this branch also covers datetime,
         # which is truncated to its date part.
         if isinstance(value, date):
-            return f"DATE '{value:%Y-%m-%d}'"
+            return _date_literal(value)
         return f"DATE {quote(str(value))}"
 
     def literal_processor(self, dialect: Dialect) -> _LiteralProcessorType[date] | None:

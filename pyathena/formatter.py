@@ -244,8 +244,20 @@ def _format_default(formatter: Formatter, escaper: Callable[[str], str], val: An
     return val
 
 
+def _date_literal(value: date) -> str:
+    """Render a date as an Athena DATE literal.
+
+    Args:
+        value: The date to render. A datetime is rendered as its date part.
+
+    Returns:
+        The DATE literal, with a four-digit year.
+    """
+    return f"DATE '{value.year:04d}-{value.month:02d}-{value.day:02d}'"
+
+
 def _format_date(formatter: Formatter, escaper: Callable[[str], str], val: Any) -> Any:
-    return f"DATE '{val:%Y-%m-%d}'"
+    return _date_literal(val)
 
 
 def _timestamp_literal(value: datetime) -> str:
@@ -259,11 +271,10 @@ def _timestamp_literal(value: datetime) -> str:
         value: The datetime to render. Its time zone, if any, is not rendered.
 
     Returns:
-        The TIMESTAMP literal.
+        The TIMESTAMP literal, with a four-digit year.
     """
-    text = f"{value:%Y-%m-%d %H:%M:%S.%f}"
-    if value.microsecond % 1000 == 0:
-        text = text[:-3]
+    timespec = "milliseconds" if value.microsecond % 1000 == 0 else "microseconds"
+    text = value.replace(tzinfo=None).isoformat(sep=" ", timespec=timespec)
     return f"TIMESTAMP '{text}'"
 
 
