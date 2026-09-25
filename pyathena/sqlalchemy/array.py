@@ -345,10 +345,6 @@ class _ArrayValueProcessor:
             raise TypeError("ARRAY element shape does not match its declared type.")
         if isinstance(type_, (types.LargeBinary, types.BINARY, types.VARBINARY)):
             return f"X'{bytes(value).hex()}'"
-        if isinstance(type_, types.DateTime) and isinstance(value, datetime):
-            return AthenaTimestamp.process(value)
-        if isinstance(type_, types.Date) and isinstance(value, date):
-            return AthenaDate.process(value)
         processor = type_.dialect_impl(self.dialect).literal_processor(self.dialect)
         if processor is None:
             raise exc.CompileError(f"No ARRAY element literal processor for {type_!r}.")

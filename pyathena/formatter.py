@@ -261,7 +261,7 @@ def _timestamp_literal(value: datetime) -> str:
     Returns:
         The TIMESTAMP literal.
     """
-    text = value.strftime("%Y-%m-%d %H:%M:%S.%f")
+    text = f"{value:%Y-%m-%d %H:%M:%S.%f}"
     if value.microsecond % 1000 == 0:
         text = text[:-3]
     return f"TIMESTAMP '{text}'"

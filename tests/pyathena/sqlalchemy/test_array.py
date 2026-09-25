@@ -389,6 +389,11 @@ class TestArrayValueProcessor:
                 [datetime(2025, 1, 2, 3, 4, 5)],
                 "ARRAY[TIMESTAMP '2025-01-02 03:04:05.000']",
             ),
+            (
+                AthenaArray(types.DateTime),
+                [datetime(2025, 1, 2, 3, 4, 5, 123456)],
+                "ARRAY[TIMESTAMP '2025-01-02 03:04:05.123456']",
+            ),
             (AthenaArray(types.BINARY), [b"\x00\xff"], "ARRAY[X'00ff']"),
             (AthenaArray(Integer), [], "ARRAY[]"),
             (AthenaArray(Integer), None, "NULL"),
@@ -400,6 +405,16 @@ class TestArrayValueProcessor:
         bound = type_.bind_processor(dialect)(value)
         actual = DefaultParameterFormatter().format("SELECT %(value)s", {"value": bound})
         assert actual == "SELECT " + expected.replace("NULL", "null")
+
+    @pytest.mark.parametrize(
+        ("type_", "expected"),
+        [
+            (AthenaArray(types.Date), "ARRAY[DATE '2025-01-02']"),
+            (AthenaArray(types.DateTime), "ARRAY[TIMESTAMP '2025-01-02']"),
+        ],
+    )
+    def test_array_literal_renders_temporal_string_elements(self, type_, expected):
+        assert type_.literal_processor(AthenaDialect())(["2025-01-02"]) == expected
 
     def test_array_binding_preserves_in_parameters(self):
         formatter = DefaultParameterFormatter()

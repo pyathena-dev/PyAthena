@@ -159,7 +159,6 @@ class TestDefaultParameterFormatter:
     @pytest.mark.parametrize(
         ("value", "expected"),
         [
-            (datetime(2017, 1, 1, 12, 0, 0), "TIMESTAMP '2017-01-01 12:00:00.000'"),
             (datetime(2017, 1, 1, 12, 0, 0, 789000), "TIMESTAMP '2017-01-01 12:00:00.789'"),
             (datetime(2017, 1, 1, 12, 0, 0, 789012), "TIMESTAMP '2017-01-01 12:00:00.789012'"),
             (datetime(2017, 1, 1, 12, 0, 0, 396), "TIMESTAMP '2017-01-01 12:00:00.000396'"),

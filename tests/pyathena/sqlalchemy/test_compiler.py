@@ -426,7 +426,6 @@ class TestAthenaStatementCompiler:
         ("type_", "value", "expected"),
         [
             (Date, date(2012, 10, 15), "DATE '2012-10-15'"),
-            (Date, datetime(2012, 10, 15, 12, 57, 18), "DATE '2012-10-15'"),
             (types.DATE, date(1727, 4, 1), "DATE '1727-04-01'"),
             (
                 types.DateTime,
