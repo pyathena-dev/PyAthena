@@ -27,9 +27,9 @@ The following statements summarize the [2026-09-25 run](history/2026-09-25-9f77e
 - Native output from the Pandas, Arrow, and Polars cursors, and from AWS Wrangler, took 1.4–4.4 seconds end to end.
   Row retrieval through the Cursor API took 3.3–23.4 seconds with the default arraysize of 1000, and 3.2–4.7 times as long with arraysize 100.
 - The synchronous, ThreadPool, and native asyncio Cursor APIs had similar end-to-end times, both for single queries and at a concurrency of 10.
-- Constructing an Arrow result set on the event loop blocked the loop for 0.29–0.38 seconds at 10,000 rows; `asyncio.to_thread()` construction, which the Aio cursors use, kept the event-loop lag p95 at 6–12 ms.
+- Constructing an Arrow result set on the event loop blocked the loop for 0.29–0.38 seconds at 10,000 rows; `asyncio.to_thread()` construction, which `AioArrowCursor` uses, kept the event-loop lag p95 at 6–12 ms.
 - Among full-result native readers at 100,000 rows, Arrow had the largest RSS increase and Polars the smallest.
-  A chunksize smaller than the result reduced the Pandas and Wrangler RSS increase; Polars chunk iteration did not.
+  A chunksize smaller than the result reduced the Pandas and Wrangler RSS increase; Polars chunk iteration reduced it by at most 2 MiB.
 
 ## Comparing runs
 

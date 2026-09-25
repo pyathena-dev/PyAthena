@@ -28,7 +28,8 @@
   },
   "globs": [
     "docs/**/*.md",
-    "benchmarks/**/*.md",
+    "benchmarks/*.md",
+    "benchmarks/history/**/*.md",
     "scripts/**/*.md",
     "cloudformation/**/*.md",
     "*.md"

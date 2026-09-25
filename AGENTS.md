@@ -97,7 +97,7 @@ uv run --env-file .env pytest -n 1 tests/pyathena/test_cursor.py -v
 
 ### Markdown Lint
 
-`docs/**/*.md`, `benchmarks/**/*.md`, `scripts/**/*.md`, `cloudformation/**/*.md`, and project-root `*.md` files are linted with [markdownlint-cli2](https://github.com/DavidAnson/markdownlint-cli2). The config lives at `.markdownlint-cli2.jsonc`. CI runs lint + Sphinx build on PRs that touch docs (`.github/workflows/docs-lint.yaml`).
+`docs/**/*.md`, `benchmarks/*.md`, `benchmarks/history/**/*.md`, `scripts/**/*.md`, `cloudformation/**/*.md`, and project-root `*.md` files are linted with [markdownlint-cli2](https://github.com/DavidAnson/markdownlint-cli2). The config lives at `.markdownlint-cli2.jsonc`. CI runs lint + Sphinx build on PRs that touch docs (`.github/workflows/docs-lint.yaml`).
 
 `markdownlint-cli2` is pinned in `.mise.toml`, so [`mise`](https://mise.jdx.dev/) installs the exact version used in CI. Run locally:
 

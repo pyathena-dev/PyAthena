@@ -72,11 +72,12 @@ Not measured in this run: the large and xlarge scales, concurrency 50 and 100, D
 
 ## Results
 
-All values are medians of five measured trials unless labeled otherwise.
-p95 values are interpolated from five samples and are descriptive only.
+Times are medians over all measured queries: five per case, or 50 at concurrency 10.
+RSS increase is the median over the five measured trials; peak RSS and peak threads are maxima across them, and loop-lag columns summarize all heartbeat samples.
+p95 values are interpolated from these few samples and are descriptive only.
 `Total` is execute plus full result consumption, including Athena execution and 1-second polling.
 `Client result` starts at the observed Athena completion and ends after consumption.
-RSS increase is the median increase over the per-trial baseline of about 150 MiB, which includes importing all DataFrame backends.
+RSS increase is measured from a per-trial baseline of 151–153 MiB, which includes importing all DataFrame backends.
 Peak threads include SDK and native library threads.
 See [measurement semantics](https://github.com/pyathena-dev/PyAthena/blob/9f77e151e8677230fd3f98c796f3b676663bc206/benchmarks/README.md#measurement-semantics) for the definitions.
 
@@ -179,7 +180,7 @@ These observations apply to 10,000- and 100,000-row results in this environment.
 - The synchronous, ThreadPool, and native asyncio Cursor APIs differed in end-to-end time by at most 0.3 seconds at 10,000 rows and 2.7 seconds (2.5%) at 100,000 rows with arraysize 100.
   At concurrency 10, the ThreadPool and native asyncio APIs differed by 0.02 seconds per query.
 - Constructing an Arrow result set directly on the event loop blocked it for 0.29–0.38 seconds at 10,000 rows.
-  Constructing it with `asyncio.to_thread()`, as the Aio cursors do, took the same time and kept the event-loop lag p95 at 6–12 ms.
+  Constructing it with `asyncio.to_thread()`, as `AioArrowCursor` does, took the same time and kept the event-loop lag p95 at 6–12 ms.
 - The Arrow cursor had the largest RSS increase among the full-result native readers: 175 MiB (flat) and 263 MiB (nested) at 100,000 rows.
   Polars without a chunksize had the smallest: 95 MiB and 145 MiB.
 - A chunksize of 10,000 reduced the RSS increase at 100,000 rows for pandas (134 to 81 MiB flat, 208 to 135 MiB nested) and Wrangler (147 to 74 MiB flat), without changing the total time by more than 0.1 seconds.
