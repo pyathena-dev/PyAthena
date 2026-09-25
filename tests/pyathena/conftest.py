@@ -16,8 +16,8 @@ from tests.pyathena.util import read_query
 def pytest_sessionstart(session):
     # pytest skips pytest_sessionfinish after a failed pytest_sessionstart, so
     # a failure after the namespace is created deletes it here.
-    runs_tests = _runs_tests(session.config)
-    if runs_tests:
+    is_test_process = _is_test_process(session.config)
+    if is_test_process:
         _create_s3tables_namespace()
     try:
         _upload_rows()
@@ -25,7 +25,7 @@ def pytest_sessionstart(session):
             _create_database(cursor)
             _create_table(cursor)
     except BaseException:
-        if runs_tests:
+        if is_test_process:
             _delete_s3tables_namespace()
         raise
 
@@ -39,11 +39,11 @@ def pytest_sessionfinish(session):
         try:
             _delete_rows()
         finally:
-            if _runs_tests(session.config):
+            if _is_test_process(session.config):
                 _delete_s3tables_namespace()
 
 
-def _runs_tests(config):
+def _is_test_process(config):
     """Whether this process runs tests, rather than only controlling xdist workers.
 
     Args:
