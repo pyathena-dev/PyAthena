@@ -155,6 +155,11 @@ class TestAthenaTypeCompiler:
         assert result == "JSON"
 
 
+class _DecoratedDateTime(types.TypeDecorator):
+    impl = types.DateTime
+    cache_ok = True
+
+
 class TestAthenaStatementCompiler:
     """Test cases for Athena statement compiler functionality."""
 
@@ -453,29 +458,37 @@ class TestAthenaStatementCompiler:
         sql = str(stmt.compile(dialect=self.dialect, compile_kwargs=compile_kwargs))
         assert sql == f"SELECT {expected} AS anon_1"
 
-    def test_timestamp_cast_keeps_microseconds(self):
-        value = datetime(2012, 10, 15, 12, 57, 18, 396)
-        items = column("items", AthenaArray(types.DateTime))
-        cases = [
-            (select(cast(column("col", String), types.DateTime)), "CAST(col AS TIMESTAMP(6))"),
+    @pytest.mark.parametrize(
+        ("expression", "expected"),
+        [
             (
-                select(items.concat([value])),
+                cast(column("col", String), types.DateTime),
+                "CAST(col AS TIMESTAMP(6))",
+            ),
+            (
+                cast(column("col", String), _DecoratedDateTime()),
+                "CAST(col AS TIMESTAMP(6))",
+            ),
+            (
+                column("items", AthenaArray(types.DateTime)).concat(
+                    [datetime(2012, 10, 15, 12, 57, 18, 396)]
+                ),
                 "items || CAST(ARRAY[TIMESTAMP '2012-10-15 12:57:18.000396'] "
                 "AS ARRAY(TIMESTAMP(6)))",
             ),
-        ]
-        for stmt, expected in cases:
-            sql = str(stmt.compile(dialect=self.dialect, compile_kwargs={"literal_binds": True}))
-            assert expected in sql
+        ],
+    )
+    def test_timestamp_cast_keeps_microseconds(self, expression, expected):
+        assert expected in self._compile_sql(select(expression))
 
     @pytest.mark.parametrize(
         ("type_", "expected"),
         [(types.Date, "DATE '2012-10-15 10%%'"), (types.DateTime, "TIMESTAMP '2012-10-15 10%%'")],
     )
     def test_temporal_string_literal_doubles_percent(self, type_, expected):
-        stmt = select(literal("2012-10-15 10%", type_))
-        sql = str(stmt.compile(dialect=self.dialect, compile_kwargs={"literal_binds": True}))
-        assert sql == f"SELECT {expected} AS anon_1"
+        assert self._compile_sql(select(literal("2012-10-15 10%", type_))) == (
+            f"SELECT {expected} AS anon_1"
+        )
 
 
 class TestAthenaDDLCompiler:

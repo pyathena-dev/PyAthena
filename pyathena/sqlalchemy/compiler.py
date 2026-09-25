@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from sqlalchemy.sql.ddl import CreateTable
     from sqlalchemy.sql.functions import Function
     from sqlalchemy.sql.selectable import GenerativeSelect
+    from sqlalchemy.sql.type_api import TypeEngine
 
     from pyathena.sqlalchemy.base import AthenaDialect
 
@@ -653,12 +654,29 @@ class AthenaStatementCompiler(SQLCompiler):
             # In Athena, use float in DDL statements like CREATE TABLE
             # and real in SQL functions like SELECT CAST.
             type_clause = "REAL"
-        elif isinstance(cast.type, (types.DateTime, AthenaTimestamp)):
-            # A bare TIMESTAMP is timestamp(3) in Athena and truncates microseconds.
-            type_clause = "TIMESTAMP(6)"
+        elif (timestamp_type := self._timestamp_dml_type(cast.type)) is not None:
+            type_clause = timestamp_type
         else:
             type_clause = cast.typeclause._compiler_dispatch(self, **kwargs)
         return f"CAST({cast.clause._compiler_dispatch(self, **kwargs)} AS {type_clause})"
+
+    def _timestamp_dml_type(self, type_: TypeEngine[Any]) -> str | None:
+        """Return the DML type clause for a DateTime type.
+
+        A bare ``TIMESTAMP`` is ``timestamp(3)`` in Athena and truncates
+        microseconds, so DML casts use ``TIMESTAMP(6)``.
+
+        Args:
+            type_: The type to cast to, possibly a TypeDecorator.
+
+        Returns:
+            ``TIMESTAMP(6)`` for a DateTime type, otherwise None.
+        """
+        if isinstance(type_, types.TypeDecorator):
+            type_ = self._array_type_inspector.decorator_impl(type_)
+        if isinstance(type_, (types.DateTime, AthenaTimestamp)):
+            return "TIMESTAMP(6)"
+        return None
 
     def _complex_dml_type(self, type_, *, require_precision=False):
         if isinstance(type_, types.TypeDecorator):
@@ -694,8 +712,9 @@ class AthenaStatementCompiler(SQLCompiler):
             return "DOUBLE"
         if isinstance(type_, types.Float):
             return "REAL"
-        if isinstance(type_, (types.DateTime, AthenaTimestamp)):
-            return "TIMESTAMP(6)"
+        timestamp_type = self._timestamp_dml_type(type_)
+        if timestamp_type is not None:
+            return timestamp_type
         if require_precision and isinstance(type_, types.Numeric) and type_.precision is None:
             raise exc.CompileError(
                 "ARRAY decimal values require explicit Numeric precision; "

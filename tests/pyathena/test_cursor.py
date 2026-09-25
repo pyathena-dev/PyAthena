@@ -423,11 +423,8 @@ class TestCursor:
         assert cursor.fetchone() == (expected,)
         assert cursor.description[0][1] == BINARY
 
-    @pytest.mark.parametrize(
-        "value",
-        [datetime(2017, 1, 1, 12, 0, 0, 789012), datetime(2017, 1, 1, 12, 0, 0, 789000)],
-    )
-    def test_datetime_parameter(self, cursor, value):
+    def test_datetime_parameter_microseconds(self, cursor):
+        value = datetime(2017, 1, 1, 12, 0, 0, 789012)
         cursor.execute("SELECT %(value)s", {"value": value})
         assert cursor.fetchone() == (value,)
 

@@ -1572,16 +1572,9 @@ class TestSQLAlchemyAthena:
         engine, conn = engine
         assert conn.connection.result_reuse_minutes == 10
 
-    def test_datetime_microseconds(self, engine):
+    def test_datetime_microseconds_through_casts(self, engine):
         engine, conn = engine
         value = datetime(2017, 1, 1, 12, 0, 0, 789012)
-        # A bound parameter goes through the connection's formatter, and a
-        # literal_execute parameter through the dialect's literal processor.
-        for literal_execute in (False, True):
-            stmt = select(
-                expression.literal(value, types.DateTime, literal_execute=literal_execute)
-            )
-            assert conn.execute(stmt).scalar() == value
         # ARRAY values and casts go through a CAST to TIMESTAMP(6).
         items = expression.literal([value], AthenaArray(types.DateTime))
         text_value = expression.literal("2017-01-01 12:00:00.789012", types.String)

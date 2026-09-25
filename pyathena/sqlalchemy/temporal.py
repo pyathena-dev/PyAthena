@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import date, datetime
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import types
@@ -69,12 +70,7 @@ class AthenaTimestamp(TypeEngine[datetime]):
         Returns:
             A function rendering a value as a TIMESTAMP literal.
         """
-        quote = _string_quote(dialect)
-
-        def process(value: datetime | Any | None) -> str:
-            return self.process(value, quote)
-
-        return process
+        return partial(self.process, quote=_string_quote(dialect))
 
 
 class AthenaDate(TypeEngine[date]):
@@ -130,12 +126,7 @@ class AthenaDate(TypeEngine[date]):
         Returns:
             A function rendering a value as a DATE literal.
         """
-        quote = _string_quote(dialect)
-
-        def process(value: date | Any) -> str:
-            return self.process(value, quote)
-
-        return process
+        return partial(self.process, quote=_string_quote(dialect))
 
 
 def _string_quote(dialect: Dialect) -> Callable[[str], str]:
