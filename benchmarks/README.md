@@ -226,7 +226,7 @@ API row conversion and native DataFrame/Table access appear as separate cases.
 Sampled RSS can miss short peaks, and the constructor suite's RSS includes its subsequent validation read.
 If the operating system denies access to per-thread CPU times, `thread_cpu_available` is false; thread counts and RSS are still recorded.
 Each trial process receives its own `POLARS_TEMP_DIR`, which the parent samples with RSS and removes after the trial.
-Polars lazy scans of S3 objects download each object into a file cache in this directory before yielding batches; in the recorded runs, those files remained after the process exited.
+Polars lazy CSV scans of S3 objects download the whole object into a file cache in this directory before yielding batches; in the recorded runs, those files remained after the process exited.
 When the temporary directory is a tmpfs, as `/tmp` is on Amazon Linux 2023, this storage uses memory that RSS does not include.
 
 | Capability | Treatment |
@@ -321,7 +321,8 @@ uv run --env-file ../.env --locked python -m pyathena_bench --profile pyathena s
 A worker claims a job by creating `claims/<job>` with an S3 conditional write, so exactly one host runs each job.
 After a job, the worker uploads its output directory to `results/<job>/` and its log to `logs/`, then writes `done/<job>` with the exit code, host, and times.
 A failed trial stops only its own job; `status` lists jobs with a non-zero exit code.
-A worker that dies leaves a claim without a `done` marker.
+A worker that dies leaves a claim without a `done` marker, and it can also leave an API slot under `slots/`, which lowers the fleet's API-heavy capacity.
+`status` lists slots in use; delete a slot object only after confirming that the host named in it no longer runs a job.
 Workers exit when every job has been claimed.
 To retry jobs, wait until all workers have exited, run `cleanup --trials-only --execute` for the manifest, and publish the selected jobs under a new queue name with the same manifest.
 Download `fleet/<name>/` with `aws s3 sync` before cleanup and stack deletion, as described below.
