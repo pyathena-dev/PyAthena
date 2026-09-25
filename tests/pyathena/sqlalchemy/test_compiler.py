@@ -38,11 +38,24 @@ from sqlalchemy.sql.ddl import CreateTable
 from pyathena.sqlalchemy.base import AthenaDialect
 from pyathena.sqlalchemy.compiler import AthenaTypeCompiler
 from pyathena.sqlalchemy.pandas import AthenaPandasDialect
-from pyathena.sqlalchemy.types import ARRAY, MAP, STRUCT, AthenaArray, AthenaMap, AthenaStruct
+from pyathena.sqlalchemy.types import (
+    ARRAY,
+    MAP,
+    STRUCT,
+    AthenaArray,
+    AthenaMap,
+    AthenaStruct,
+    AthenaTimestamp,
+)
 from tests import ENV
 
 
 class TestAthenaTypeCompiler:
+    @pytest.mark.parametrize("precision", [None, 3])
+    def test_timestamp_ddl_ignores_precision(self, precision):
+        compiler = AthenaTypeCompiler(AthenaDialect())
+        assert compiler.process(AthenaTimestamp(precision)) == "TIMESTAMP"
+
     def test_visit_struct_empty(self):
         dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
@@ -157,6 +170,11 @@ class TestAthenaTypeCompiler:
 
 class _DecoratedDateTime(types.TypeDecorator):
     impl = types.DateTime
+    cache_ok = True
+
+
+class _DecoratedMillisecondTimestamp(types.TypeDecorator):
+    impl = AthenaTimestamp(precision=3)
     cache_ok = True
 
 
@@ -470,6 +488,21 @@ class TestAthenaStatementCompiler:
                 "CAST(col AS TIMESTAMP(6))",
             ),
             (
+                cast(column("col", String), AthenaTimestamp(precision=3)),
+                "CAST(col AS TIMESTAMP(3))",
+            ),
+            (
+                cast(column("col", String), _DecoratedMillisecondTimestamp()),
+                "CAST(col AS TIMESTAMP(3))",
+            ),
+            (
+                literal(
+                    [datetime(2012, 10, 15, 12, 57, 18, 789999)],
+                    AthenaArray(AthenaTimestamp(precision=3)),
+                ),
+                "CAST(ARRAY[TIMESTAMP '2012-10-15 12:57:18.789'] AS ARRAY(TIMESTAMP(3)))",
+            ),
+            (
                 column("items", AthenaArray(types.DateTime)).concat(
                     [datetime(2012, 10, 15, 12, 57, 18, 396)]
                 ),
@@ -480,6 +513,12 @@ class TestAthenaStatementCompiler:
     )
     def test_timestamp_cast_keeps_microseconds(self, expression, expected):
         assert expected in self._compile_sql(select(expression))
+
+    def test_timestamp_precision_in_cache_key(self):
+        value = datetime(2012, 10, 15, 12, 57, 18, 789999)
+        millis = select(literal(value, AthenaTimestamp(precision=3), literal_execute=True))
+        micros = select(literal(value, AthenaTimestamp(precision=6), literal_execute=True))
+        assert millis._generate_cache_key() != micros._generate_cache_key()
 
     @pytest.mark.parametrize(
         ("type_", "expected"),

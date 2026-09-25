@@ -26,16 +26,35 @@ class AthenaTimestamp(TypeEngine[datetime]):
     fractional digits (``timestamp(6)``) when the value has a sub-millisecond
     part. Iceberg tables store microseconds; Hive tables store milliseconds.
 
+    With a ``precision``, literals render that many fractional digits and
+    casts render ``TIMESTAMP(precision)``; without one, casts render
+    ``TIMESTAMP(6)``. ``CREATE TABLE`` always renders ``TIMESTAMP``.
+
     Example:
-        >>> from sqlalchemy import Column, Table, MetaData
+        >>> from sqlalchemy import Column, Table, MetaData, cast, select
         >>> from pyathena.sqlalchemy.types import AthenaTimestamp
         >>> metadata = MetaData()
         >>> events = Table('events', metadata,
         ...     Column('event_time', AthenaTimestamp)
         ... )
+        >>> millis = select(cast(events.c.event_time, AthenaTimestamp(precision=3)))
     """
 
     __visit_name__ = "TIMESTAMP"
+
+    def __init__(self, precision: int | None = None) -> None:
+        """Initialize the type.
+
+        Args:
+            precision: The number of fractional-second digits, from 0 to 12,
+                or None for the default rendering.
+
+        Raises:
+            ValueError: If ``precision`` is outside 0 to 12.
+        """
+        if precision is not None and not 0 <= precision <= 12:
+            raise ValueError(f"TIMESTAMP precision must be between 0 and 12: {precision}")
+        self.precision = precision
 
     @property
     def python_type(self) -> type[datetime]:
@@ -47,18 +66,24 @@ class AthenaTimestamp(TypeEngine[datetime]):
         return datetime
 
     @staticmethod
-    def process(value: datetime | Any | None, quote: Callable[[str], str] = _escape_trino) -> str:
+    def process(
+        value: datetime | Any | None,
+        quote: Callable[[str], str] = _escape_trino,
+        precision: int | None = None,
+    ) -> str:
         """Render a value as an Athena TIMESTAMP literal.
 
         Args:
             value: A datetime, or any other value rendered with ``str()``.
             quote: The function quoting a value that is not a datetime.
+            precision: The number of fractional-second digits for a datetime,
+                or None for the default rendering.
 
         Returns:
             The TIMESTAMP literal.
         """
         if isinstance(value, datetime):
-            return _timestamp_literal(value)
+            return _timestamp_literal(value, precision)
         return f"TIMESTAMP {quote(str(value))}"
 
     def literal_processor(self, dialect: Dialect) -> _LiteralProcessorType[datetime] | None:
@@ -70,7 +95,7 @@ class AthenaTimestamp(TypeEngine[datetime]):
         Returns:
             A function rendering a value as a TIMESTAMP literal.
         """
-        return partial(self.process, quote=_string_quote(dialect))
+        return partial(self.process, quote=_string_quote(dialect), precision=self.precision)
 
 
 class AthenaDate(TypeEngine[date]):

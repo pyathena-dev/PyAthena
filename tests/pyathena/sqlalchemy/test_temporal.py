@@ -67,6 +67,24 @@ class TestAthenaTimestamp:
         )
 
     @pytest.mark.parametrize(
+        ("precision", "expected"),
+        [
+            (0, "TIMESTAMP '2017-01-01 12:34:56'"),
+            (3, "TIMESTAMP '2017-01-01 12:34:56.789'"),
+            (6, "TIMESTAMP '2017-01-01 12:34:56.789999'"),
+            (9, "TIMESTAMP '2017-01-01 12:34:56.789999000'"),
+        ],
+    )
+    def test_literal_processor_precision(self, precision, expected):
+        processor = AthenaTimestamp(precision=precision).literal_processor(AthenaDialect())
+        assert processor(datetime(2017, 1, 1, 12, 34, 56, 789999)) == expected
+
+    @pytest.mark.parametrize("precision", [-1, 13])
+    def test_invalid_precision(self, precision):
+        with pytest.raises(ValueError, match="precision"):
+            AthenaTimestamp(precision=precision)
+
+    @pytest.mark.parametrize(
         "type_", [types.DateTime, types.DATETIME, types.TIMESTAMP, AthenaTimestamp]
     )
     def test_python_type(self, type_):

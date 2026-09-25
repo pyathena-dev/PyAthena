@@ -198,12 +198,7 @@ class _ArrayTypeInspector:
     def decorator_impl(self, type_: types.TypeDecorator[Any]) -> TypeEngine[Any]:
         if self.dialect.name in type_._variant_mapping:
             return type_._variant_mapping[self.dialect.name]
-        implementation = type_.load_dialect_impl(self.dialect)
-        if isinstance(implementation, AthenaTimestamp):
-            return types.TIMESTAMP()
-        if isinstance(implementation, AthenaDate):
-            return types.DATE()
-        return implementation
+        return type_.load_dialect_impl(self.dialect)
 
     @staticmethod
     def has_unknown_element(type_: TypeEngine[Any]) -> bool:

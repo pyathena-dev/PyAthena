@@ -670,10 +670,13 @@ class AthenaStatementCompiler(SQLCompiler):
             type_: The type to cast to, possibly a TypeDecorator.
 
         Returns:
-            ``TIMESTAMP(6)`` for a DateTime type, otherwise None.
+            ``TIMESTAMP(precision)`` for an AthenaTimestamp with a precision,
+            ``TIMESTAMP(6)`` for any other DateTime type, otherwise None.
         """
         if isinstance(type_, types.TypeDecorator):
             type_ = self._array_type_inspector.decorator_impl(type_)
+        if isinstance(type_, AthenaTimestamp) and type_.precision is not None:
+            return f"TIMESTAMP({type_.precision})"
         if isinstance(type_, (types.DateTime, AthenaTimestamp)):
             return "TIMESTAMP(6)"
         return None
