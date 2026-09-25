@@ -13,7 +13,13 @@ import pytest
 from botocore.exceptions import ClientError
 from botocore.stub import Stubber
 
-from scripts.sweep_databases import _eligible, main, sweep_databases
+from scripts.sweep_databases import (
+    _eligible,
+    _eligible_namespace,
+    main,
+    sweep_databases,
+    sweep_s3tables_namespaces,
+)
 
 CATALOG = "123456789012"
 OLD = datetime.now(timezone.utc) - timedelta(days=10)
@@ -143,15 +149,152 @@ def test_failed_inventory_does_not_delete_anything(glue):
 
 
 @pytest.mark.parametrize(("arguments", "dry_run"), [([], True), (["--apply"], False)])
-def test_cli_defaults_to_preview(monkeypatch, tmp_path, arguments, dry_run):
-    session = Mock()
+@pytest.mark.parametrize("s3tables_catalog", [None, "s3tablescatalog/table-bucket"])
+def test_cli_defaults_to_preview(monkeypatch, tmp_path, arguments, dry_run, s3tables_catalog):
+    session = Mock(region_name="us-west-2")
     session.client.return_value.get_caller_identity.return_value = {"Account": CATALOG}
     monkeypatch.setattr("scripts.sweep_databases.boto3.Session", lambda: session)
-    sweep = Mock(return_value={"eligible": 1, "deleted": int(not dry_run), "skipped": 0})
+    result = {"eligible": 1, "deleted": int(not dry_run), "skipped": 0}
+    sweep = Mock(return_value=result)
+    sweep_namespaces = Mock(return_value=result)
     monkeypatch.setattr("scripts.sweep_databases.sweep_databases", sweep)
+    monkeypatch.setattr("scripts.sweep_databases.sweep_s3tables_namespaces", sweep_namespaces)
     monkeypatch.setattr("sys.argv", ["sweep_databases.py", *arguments])
+    if s3tables_catalog:
+        monkeypatch.setenv("AWS_ATHENA_S3_TABLES_CATALOG", s3tables_catalog)
+    else:
+        monkeypatch.delenv("AWS_ATHENA_S3_TABLES_CATALOG", raising=False)
     summary = tmp_path / "summary"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     main()
     sweep.assert_called_once_with(session.client.return_value, CATALOG, dry_run=dry_run)
-    assert summary.read_text().startswith("Preview:" if dry_run else "Sweep:")
+    mode = "Preview" if dry_run else "Sweep"
+    lines = summary.read_text().splitlines()
+    assert lines[0].startswith(f"{mode} databases:")
+    if s3tables_catalog:
+        sweep_namespaces.assert_called_once_with(
+            session.client.return_value,
+            f"arn:aws:s3tables:us-west-2:{CATALOG}:bucket/table-bucket",
+            dry_run=dry_run,
+        )
+        assert lines[1].startswith(f"{mode} S3 Tables namespaces:")
+    else:
+        sweep_namespaces.assert_not_called()
+        assert len(lines) == 1
+
+
+BUCKET_ARN = f"arn:aws:s3tables:us-west-2:{CATALOG}:bucket/table-bucket"
+NAMESPACE = {
+    "namespace": ["pyathena_test_abcdefghij"],
+    "createdAt": OLD,
+    "createdBy": CATALOG,
+    "ownerAccountId": CATALOG,
+}
+
+
+@pytest.fixture
+def s3tables(monkeypatch):
+    session = boto3.Session(
+        aws_access_key_id="testing", aws_secret_access_key="testing", region_name="us-west-2"
+    )
+    client = session.client("s3tables")
+    monkeypatch.setattr("scripts.sweep_databases.time.sleep", lambda _: None)
+    with Stubber(client) as stubber:
+        yield client, stubber
+        stubber.assert_no_pending_responses()
+
+
+@pytest.mark.parametrize(
+    ("properties", "expected"),
+    [
+        ({}, True),
+        ({"namespace": ["pyathena"]}, False),
+        ({"namespace": ["default"]}, False),
+        ({"namespace": ["pyathena_test_abcdefghij_extra"]}, False),
+        ({"namespace": ["pyathena_test_ABCDEFGHIJ"]}, False),
+        ({"namespace": ["pyathena_test_abcdefghij", "child"]}, False),
+        ({"createdAt": OLD + timedelta(days=2)}, False),
+        ({"createdAt": OLD.replace(tzinfo=None)}, False),
+    ],
+)
+def test_only_expired_session_namespaces_are_eligible(properties, expected):
+    assert _eligible_namespace({**NAMESPACE, **properties}, OLD + timedelta(days=1)) is expected
+
+
+def test_namespace_sweep_deletes_tables_then_namespace(s3tables):
+    client, stubber = s3tables
+    listing = {"tableBucketARN": BUCKET_ARN, "prefix": "pyathena_test_"}
+    target = {"tableBucketARN": BUCKET_ARN, "namespace": NAMESPACE["namespace"][0]}
+    table = {
+        "namespace": NAMESPACE["namespace"],
+        "name": "leftover",
+        "type": "customer",
+        "tableARN": f"{BUCKET_ARN}/table/leftover",
+        "createdAt": OLD,
+        "modifiedAt": OLD,
+    }
+    for dry_run in (True, False):
+        stubber.add_response(
+            "list_namespaces", {"namespaces": [NAMESPACE], "continuationToken": "next"}, listing
+        )
+        stubber.add_response(
+            "list_namespaces",
+            {"namespaces": [{**NAMESPACE, "namespace": ["pyathena"]}]},
+            {**listing, "continuationToken": "next"},
+        )
+        if not dry_run:
+            stubber.add_response("get_namespace", NAMESPACE, target)
+            stubber.add_response("list_tables", {"tables": [table]}, target)
+            stubber.add_response("delete_table", {}, {**target, "name": "leftover"})
+            stubber.add_response("delete_namespace", {}, target)
+        assert sweep_s3tables_namespaces(client, BUCKET_ARN, dry_run=dry_run) == {
+            "eligible": 1,
+            "deleted": int(not dry_run),
+            "skipped": 0,
+        }
+
+
+@pytest.mark.parametrize(
+    "current",
+    [
+        {**NAMESPACE, "createdAt": OLD - timedelta(days=1)},
+        {**NAMESPACE, "createdAt": datetime.now(timezone.utc)},
+    ],
+)
+def test_namespace_identity_is_rechecked(s3tables, current):
+    client, stubber = s3tables
+    stubber.add_response(
+        "list_namespaces",
+        {"namespaces": [NAMESPACE]},
+        {"tableBucketARN": BUCKET_ARN, "prefix": "pyathena_test_"},
+    )
+    stubber.add_response(
+        "get_namespace",
+        current,
+        {"tableBucketARN": BUCKET_ARN, "namespace": NAMESPACE["namespace"][0]},
+    )
+    assert sweep_s3tables_namespaces(client, BUCKET_ARN, dry_run=False) == {
+        "eligible": 1,
+        "deleted": 0,
+        "skipped": 1,
+    }
+
+
+@pytest.mark.parametrize("error", ["NotFoundException", "AccessDeniedException"])
+def test_only_concurrent_namespace_absence_is_ignored(s3tables, error):
+    client, stubber = s3tables
+    stubber.add_response(
+        "list_namespaces",
+        {"namespaces": [NAMESPACE]},
+        {"tableBucketARN": BUCKET_ARN, "prefix": "pyathena_test_"},
+    )
+    stubber.add_client_error(
+        "get_namespace",
+        error,
+        expected_params={"tableBucketARN": BUCKET_ARN, "namespace": NAMESPACE["namespace"][0]},
+    )
+    if error == "NotFoundException":
+        assert sweep_s3tables_namespaces(client, BUCKET_ARN, dry_run=False)["skipped"] == 1
+    else:
+        with pytest.raises(ClientError, match=error):
+            sweep_s3tables_namespaces(client, BUCKET_ARN, dry_run=False)

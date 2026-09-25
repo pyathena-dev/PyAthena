@@ -24,10 +24,6 @@ Parameters:
     Type: String
     Default: "laughingman7743-pyathena-s3-tables"
     Description: Name of the Amazon S3 Tables table bucket used by the SQLAlchemy S3 Tables tests.
-  S3TablesNamespaceName:
-    Type: String
-    Default: "pyathena"
-    Description: Namespace created in the S3 Tables table bucket for the SQLAlchemy S3 Tables tests.
   OIDCProviderArn:
     Type: String
     Default: ""
@@ -352,12 +348,6 @@ Resources:
         Status: Enabled
         UnreferencedDays: 1
         NoncurrentDays: 1
-
-  S3TablesNamespace:
-    Type: AWS::S3Tables::Namespace
-    Properties:
-      TableBucketARN: !GetAtt S3TablesBucket.TableBucketARN
-      Namespace: !Sub "${S3TablesNamespaceName}"
 
   # One-time, per-Region integration: register S3 Tables into the Glue Data
   # Catalog as the federated `s3tablescatalog` catalog so Athena can query them.
