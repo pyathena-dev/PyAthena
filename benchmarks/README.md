@@ -286,7 +286,8 @@ It orders API-heavy jobs first and longer jobs earlier.
 With `--split-pages`, a job whose single trial needs at least that many pages becomes one job per measured repetition without a warmup, so those repetitions run on different hosts.
 `run` accepts the matching `--arraysize`, `--warmups`, and `--repetitions` options.
 
-Deploy with the fleet size, then prepare and publish the queue on one host:
+Deploy a new stack with the fleet size; changing `FleetSize` on an existing stack does not wait for the added hosts to finish bootstrap.
+Then resolve its hosts, and prepare and publish the queue on one host:
 
 ```bash
 uv run --env-file ../.env --locked aws cloudformation deploy \
@@ -295,6 +296,10 @@ uv run --env-file ../.env --locked aws cloudformation deploy \
   --capabilities CAPABILITY_IAM \
   --tags Purpose=pyathena-benchmark \
   --parameter-overrides GitCommit="$BENCHMARK_COMMIT" FleetSize=20
+BENCHMARK_GROUP=$(uv run --env-file ../.env --locked aws cloudformation describe-stacks --stack-name "$BENCHMARK_STACK" \
+  --query 'Stacks[0].Outputs[?OutputKey==`AutoScalingGroup`].OutputValue | [0]' --output text)
+BENCHMARK_INSTANCES=$(uv run --env-file ../.env --locked aws autoscaling describe-auto-scaling-groups \
+  --auto-scaling-group-names "$BENCHMARK_GROUP" --query 'AutoScalingGroups[0].Instances[].InstanceId' --output text)
 ```
 
 ```bash
