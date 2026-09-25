@@ -193,7 +193,9 @@ class AthenaDialect(DefaultDialect):
         types.BINARY: AthenaBinary,
         types.VARBINARY: AthenaBinary,
         types.ARRAY: AthenaArray,
+        types.Date: AthenaDate,
         types.DATE: AthenaDate,
+        types.DateTime: AthenaTimestamp,
         types.DATETIME: AthenaTimestamp,
         types.TIMESTAMP: AthenaTimestamp,
     }

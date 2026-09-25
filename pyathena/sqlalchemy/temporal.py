@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.sql.type_api import TypeEngine
 
+from pyathena.formatter import _timestamp_literal
+
 if TYPE_CHECKING:
     from sqlalchemy import Dialect
     from sqlalchemy.sql.type_api import _LiteralProcessorType
@@ -17,10 +19,9 @@ class AthenaTimestamp(TypeEngine[datetime]):
 
     This type handles the conversion of Python datetime objects to Athena's
     TIMESTAMP literal syntax. When used in queries, datetime values are
-    rendered as ``TIMESTAMP 'YYYY-MM-DD HH:MM:SS.mmm'``.
-
-    The type supports millisecond precision (3 decimal places) which matches
-    Athena's TIMESTAMP type precision.
+    rendered as ``TIMESTAMP 'YYYY-MM-DD HH:MM:SS.mmm'``, or with six
+    fractional digits (``timestamp(6)``) when the value has a sub-millisecond
+    part. Iceberg tables store microseconds; Hive tables store milliseconds.
 
     Example:
         >>> from sqlalchemy import Column, Table, MetaData
@@ -33,13 +34,18 @@ class AthenaTimestamp(TypeEngine[datetime]):
 
     __visit_name__ = "TIMESTAMP"
 
-    render_literal_cast = True
-    render_bind_cast = True
-
     @staticmethod
     def process(value: datetime | Any | None) -> str:
+        """Render a value as an Athena TIMESTAMP literal.
+
+        Args:
+            value: A datetime, or any other value rendered with ``str()``.
+
+        Returns:
+            The TIMESTAMP literal.
+        """
         if isinstance(value, datetime):
-            return f"""TIMESTAMP '{value.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]}'"""
+            return _timestamp_literal(value)
         return f"TIMESTAMP '{value!s}'"
 
     def literal_processor(self, dialect: Dialect) -> _LiteralProcessorType[datetime] | None:
@@ -63,9 +69,6 @@ class AthenaDate(TypeEngine[date]):
     """
 
     __visit_name__ = "DATE"
-
-    render_literal_cast = True
-    render_bind_cast = True
 
     @staticmethod
     def process(value: date | Any) -> str:

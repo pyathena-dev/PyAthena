@@ -248,8 +248,27 @@ def _format_date(formatter: Formatter, escaper: Callable[[str], str], val: Any) 
     return f"DATE '{val:%Y-%m-%d}'"
 
 
+def _timestamp_literal(value: datetime) -> str:
+    """Render a datetime as an Athena TIMESTAMP literal.
+
+    Values with a sub-millisecond part keep all six fractional digits and
+    produce a ``timestamp(6)`` literal. Other values use three digits and
+    produce a ``timestamp(3)`` literal.
+
+    Args:
+        value: The datetime to render. Its time zone, if any, is not rendered.
+
+    Returns:
+        The TIMESTAMP literal.
+    """
+    text = value.strftime("%Y-%m-%d %H:%M:%S.%f")
+    if value.microsecond % 1000 == 0:
+        text = text[:-3]
+    return f"TIMESTAMP '{text}'"
+
+
 def _format_datetime(formatter: Formatter, escaper: Callable[[str], str], val: Any) -> Any:
-    return f"""TIMESTAMP '{val.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]}'"""
+    return _timestamp_literal(val)
 
 
 def _format_bool(formatter: Formatter, escaper: Callable[[str], str], val: Any) -> Any:

@@ -156,6 +156,19 @@ class TestDefaultParameterFormatter:
         )
         assert actual == expected
 
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (datetime(2017, 1, 1, 12, 0, 0), "TIMESTAMP '2017-01-01 12:00:00.000'"),
+            (datetime(2017, 1, 1, 12, 0, 0, 789000), "TIMESTAMP '2017-01-01 12:00:00.789'"),
+            (datetime(2017, 1, 1, 12, 0, 0, 789012), "TIMESTAMP '2017-01-01 12:00:00.789012'"),
+            (datetime(2017, 1, 1, 12, 0, 0, 396), "TIMESTAMP '2017-01-01 12:00:00.000396'"),
+        ],
+    )
+    def test_format_datetime_precision(self, formatter, value, expected):
+        actual = formatter.format("SELECT %(param)s", {"param": value})
+        assert actual == f"SELECT {expected}"
+
     def test_format_date(self, formatter):
         expected = textwrap.dedent(
             """

@@ -27,10 +27,14 @@ class TestAthenaTimestamp:
     @pytest.mark.parametrize(
         ("value", "expected"),
         [
-            # Athena TIMESTAMP has millisecond precision, so the six digits
-            # strftime("%f") emits are truncated to three.
+            # A sub-millisecond part keeps all six digits (timestamp(6));
+            # other values keep three digits (timestamp(3)).
             (
                 datetime(2017, 1, 1, 12, 34, 56, 789012),
+                "TIMESTAMP '2017-01-01 12:34:56.789012'",
+            ),
+            (
+                datetime(2017, 1, 1, 12, 34, 56, 789000),
                 "TIMESTAMP '2017-01-01 12:34:56.789'",
             ),
             (
@@ -39,7 +43,7 @@ class TestAthenaTimestamp:
             ),
         ],
     )
-    def test_process_renders_millisecond_precision_literal(self, value, expected):
+    def test_process_renders_literal_precision(self, value, expected):
         assert AthenaTimestamp.process(value) == expected
 
     def test_process_falls_back_to_str(self):

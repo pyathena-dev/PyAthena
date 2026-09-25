@@ -6,6 +6,7 @@
 # SPDX-License-Identifier: MIT
 
 import warnings
+from datetime import date, datetime
 
 import pytest
 from sqlalchemy import (
@@ -420,6 +421,38 @@ class TestAthenaStatementCompiler:
         assert "array_agg(length('abc'))" in sql
         assert "Unsupported ARRAY slice step" in sql
         assert "ARRAY(NULL)" not in sql
+
+    @pytest.mark.parametrize(
+        ("type_", "value", "expected"),
+        [
+            (Date, date(2012, 10, 15), "DATE '2012-10-15'"),
+            (Date, datetime(2012, 10, 15, 12, 57, 18), "DATE '2012-10-15'"),
+            (types.DATE, date(1727, 4, 1), "DATE '1727-04-01'"),
+            (
+                types.DateTime,
+                datetime(2012, 10, 15, 12, 57, 18, 39642),
+                "TIMESTAMP '2012-10-15 12:57:18.039642'",
+            ),
+            (
+                types.DATETIME,
+                datetime(2012, 10, 15, 12, 57, 18),
+                "TIMESTAMP '2012-10-15 12:57:18.000'",
+            ),
+            (
+                types.TIMESTAMP,
+                datetime(2012, 10, 15, 12, 57, 18, 396),
+                "TIMESTAMP '2012-10-15 12:57:18.000396'",
+            ),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("literal_execute", "compile_kwargs"),
+        [(False, {"literal_binds": True}), (True, {"render_postcompile": True})],
+    )
+    def test_datetime_literal(self, type_, value, expected, literal_execute, compile_kwargs):
+        stmt = select(literal(value, type_, literal_execute=literal_execute))
+        sql = str(stmt.compile(dialect=self.dialect, compile_kwargs=compile_kwargs))
+        assert sql == f"SELECT {expected} AS anon_1"
 
 
 class TestAthenaDDLCompiler:
