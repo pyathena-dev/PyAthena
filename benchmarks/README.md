@@ -118,9 +118,8 @@ uv run --env-file ../.env --locked aws cloudformation deploy \
 uv run --env-file ../.env --locked aws cloudformation describe-stacks --stack-name "$BENCHMARK_STACK"
 BENCHMARK_GROUP=$(uv run --env-file ../.env --locked aws cloudformation describe-stacks --stack-name "$BENCHMARK_STACK" \
   --query 'Stacks[0].Outputs[?OutputKey==`AutoScalingGroup`].OutputValue | [0]' --output text)
-BENCHMARK_INSTANCES=$(uv run --env-file ../.env --locked aws autoscaling describe-auto-scaling-groups \
-  --auto-scaling-group-names "$BENCHMARK_GROUP" --query 'AutoScalingGroups[0].Instances[].InstanceId' --output text)
-BENCHMARK_INSTANCE=${BENCHMARK_INSTANCES%%[[:space:]]*}
+BENCHMARK_INSTANCE=$(uv run --env-file ../.env --locked aws autoscaling describe-auto-scaling-groups \
+  --auto-scaling-group-names "$BENCHMARK_GROUP" --query 'AutoScalingGroups[0].Instances[0].InstanceId' --output text)
 uv run --env-file ../.env --locked aws ssm start-session --target "$BENCHMARK_INSTANCE"
 ```
 
@@ -287,7 +286,7 @@ With `--split-pages`, a job whose single trial needs at least that many pages be
 `run` accepts the matching `--arraysize`, `--warmups`, and `--repetitions` options.
 
 Deploy a new stack with the fleet size under its own name; changing `FleetSize` on an existing stack does not wait for the added hosts to finish bootstrap.
-Then resolve its hosts and open a session on one of them:
+Then open a session on one of its hosts:
 
 ```bash
 BENCHMARK_STACK=pyathena-benchmark-fleet
@@ -299,9 +298,8 @@ uv run --env-file ../.env --locked aws cloudformation deploy \
   --parameter-overrides GitCommit="$BENCHMARK_COMMIT" FleetSize=20
 BENCHMARK_GROUP=$(uv run --env-file ../.env --locked aws cloudformation describe-stacks --stack-name "$BENCHMARK_STACK" \
   --query 'Stacks[0].Outputs[?OutputKey==`AutoScalingGroup`].OutputValue | [0]' --output text)
-BENCHMARK_INSTANCES=$(uv run --env-file ../.env --locked aws autoscaling describe-auto-scaling-groups \
-  --auto-scaling-group-names "$BENCHMARK_GROUP" --query 'AutoScalingGroups[0].Instances[].InstanceId' --output text)
-BENCHMARK_INSTANCE=${BENCHMARK_INSTANCES%%[[:space:]]*}
+BENCHMARK_INSTANCE=$(uv run --env-file ../.env --locked aws autoscaling describe-auto-scaling-groups \
+  --auto-scaling-group-names "$BENCHMARK_GROUP" --query 'AutoScalingGroups[0].Instances[0].InstanceId' --output text)
 uv run --env-file ../.env --locked aws ssm start-session --target "$BENCHMARK_INSTANCE"
 ```
 
@@ -329,7 +327,7 @@ Every worker runs its jobs with that stored configuration.
 Start a worker on every host from the local machine:
 
 ```bash
-uv run --env-file ../.env --locked aws ssm send-command --instance-ids $BENCHMARK_INSTANCES \
+uv run --env-file ../.env --locked aws ssm send-command --targets "Key=tag:aws:autoscaling:groupName,Values=$BENCHMARK_GROUP" \
   --document-name AWS-RunShellScript \
   --parameters 'commands=["sudo -iu ec2-user bash -lc \"cd /opt/pyathena/benchmarks && mkdir -p results && (nohup uv run --no-sync python -m pyathena_bench worker --stack $(cat /opt/pyathena/benchmarks/stack-id.txt) --name large-1 > results/worker-large-1.log 2>&1 &)\""]'
 uv run --env-file ../.env --locked python -m pyathena_bench status \
@@ -390,7 +388,8 @@ mkdir -p results/recovered
 uv run --env-file ../.env --locked aws s3 sync "s3://$BENCHMARK_BUCKET/reports/" results/recovered/
 uv run --env-file ../.env --locked aws cloudformation describe-stacks --stack-name "$BENCHMARK_STACK" > results/recovered/stack.json
 uv run --env-file ../.env --locked aws s3 sync "s3://$BENCHMARK_BUCKET/fleet/" results/recovered/fleet/
-uv run --env-file ../.env --locked aws ec2 describe-instances --instance-ids $BENCHMARK_INSTANCES > results/recovered/instances.json
+uv run --env-file ../.env --locked aws ec2 describe-instances \
+  --filters "Name=tag:aws:autoscaling:groupName,Values=$BENCHMARK_GROUP" > results/recovered/instances.json
 ```
 
 Verify the downloaded files before proceeding.
