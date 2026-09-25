@@ -111,6 +111,14 @@ def summarize(trials: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     ],
                     0.5,
                 ),
+                "peak_temp_dir_bytes": max(
+                    (
+                        t["temp_dir_peak_bytes"]
+                        for t in good
+                        if t.get("temp_dir_peak_bytes") is not None
+                    ),
+                    default=None,
+                ),
                 "loop_lag_p95_seconds": percentile(lag, 0.95),
                 "loop_lag_max_seconds": max(lag, default=None),
                 "peak_threads": max((t["max_threads"] for t in good), default=None),
@@ -160,10 +168,12 @@ def report(directory: Path) -> None:
         "Client result time starts at observed Athena completion and excludes polling latency.",
         "Total time includes Athena execution and polling; init time excludes validation.",
         "Thread counts include SDK and native library threads, not just executor workers.",
+        "Peak temp dir is the per-trial Polars temporary directory, which is outside the RSS.",
         "",
         "| Scale | Case | OK | Fail | Warmup fail | Unsupported | Total (s) | "
-        "Client result (s) | Init (s) | Peak RSS (B) | RSS increase (B) | Notes |",
-        "| --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |",
+        "Client result (s) | Init (s) | Peak RSS (B) | RSS increase (B) | "
+        "Peak temp dir (B) | Notes |",
+        "| --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for row in rows:
         values = [
@@ -180,6 +190,7 @@ def report(directory: Path) -> None:
                 "median_init_seconds",
                 "peak_rss_bytes",
                 "median_rss_increase_bytes",
+                "peak_temp_dir_bytes",
                 "notes",
             )
         ]

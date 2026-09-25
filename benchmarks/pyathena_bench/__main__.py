@@ -16,9 +16,19 @@ import sys
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from pyathena_bench.aws import cleanup, preflight, prepare, prepare_fixtures, validate_manifest
+from pyathena_bench.aws import (
+    cleanup,
+    client,
+    preflight,
+    prepare,
+    prepare_fixtures,
+    session,
+    stack_resources,
+    validate_manifest,
+)
 from pyathena_bench.cases import FAMILIES, matrix
 from pyathena_bench.config import Settings, read_json
+from pyathena_bench.fleet import Filters, Queue, expand_jobs, status, submit, work
 from pyathena_bench.report import report
 from pyathena_bench.runner import run
 
@@ -38,20 +48,56 @@ def parser() -> argparse.ArgumentParser:
     prep.add_argument("--stack", required=True)
     prep.add_argument("--manifest", type=Path, required=True)
     prep.add_argument("--scale", nargs="+", required=True)
-    for name in ("plan", "run"):
+    for name in ("plan", "run", "jobs"):
         command = commands.add_parser(name)
-        command.add_argument("--suite", choices=("single", "concurrent", "init"), required=True)
+        suites = ("single", "concurrent", "init")
+        if name == "jobs":
+            command.add_argument("--suite", choices=suites, nargs="+", required=True)
+            command.add_argument("--shape", choices=("flat", "nested"), nargs="+", default=["flat"])
+            command.add_argument(
+                "--split-pages",
+                type=int,
+                help="Run each repetition as a separate job when one trial needs this many "
+                "GetQueryResults pages",
+            )
+        else:
+            command.add_argument("--suite", choices=suites, required=True)
+            command.add_argument("--shape", choices=("flat", "nested"), default="flat")
+            command.add_argument("--warmups", type=int, help="Override the configured warmups")
+            command.add_argument(
+                "--repetitions", type=int, help="Override the configured repetitions"
+            )
         command.add_argument("--scale", nargs="+", required=True)
-        command.add_argument("--shape", choices=("flat", "nested"), default="flat")
         command.add_argument("--family", choices=(*FAMILIES, "wrangler"), nargs="+")
         command.add_argument(
             "--api", choices=("sync", "thread", "aio", "direct", "to_thread"), nargs="+"
         )
         command.add_argument("--transport", choices=("csv", "unload", "ctas"), nargs="+")
         command.add_argument("--output-kind", choices=("rows", "native"))
+        command.add_argument("--arraysize", type=int, nargs="+")
         if name == "run":
             command.add_argument("--manifest", type=Path, required=True)
             command.add_argument("--out", type=Path, required=True)
+    enqueue = commands.add_parser(
+        "queue", help="Publish jobs and a prepared manifest for fleet workers"
+    )
+    enqueue.add_argument("--stack", required=True)
+    enqueue.add_argument("--name", required=True)
+    enqueue.add_argument("--jobs", type=Path, required=True)
+    enqueue.add_argument("--manifest", type=Path, required=True)
+    consume = commands.add_parser("worker", help="Run queued jobs on this host until none remain")
+    consume.add_argument("--stack", required=True)
+    consume.add_argument("--name", required=True)
+    consume.add_argument(
+        "--api-slots",
+        type=int,
+        default=10,
+        help="Fleet-wide limit for jobs that page through GetQueryResults",
+    )
+    consume.add_argument("--workdir", type=Path)
+    progress = commands.add_parser("status", help="Summarize a fleet queue")
+    progress.add_argument("--stack", required=True)
+    progress.add_argument("--name", required=True)
     summary = commands.add_parser(
         "report", help="Generate CSV and Markdown from local measurements"
     )
@@ -108,16 +154,33 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.execute:
             cleanup(settings, manifest, args.manifest, trials_only=args.trials_only)
+    elif args.command in {"queue", "worker", "status"}:
+        session_ = session(settings)
+        queue = Queue(
+            client(session_, "s3"), stack_resources(session_, args.stack)["Bucket"], args.name
+        )
+        if args.command == "queue":
+            validate_manifest(settings, read_json(args.manifest))
+            submit(queue, read_json(args.jobs), args.config, args.manifest)
+        elif args.command == "worker":
+            if args.api_slots < 1:
+                raise ValueError("--api-slots must be positive")
+            ran = work(queue, args.workdir or Path("results/fleet") / args.name, args.api_slots)
+            sys.stdout.write(json.dumps({"ran": ran}, indent=2) + "\n")
+        else:
+            sys.stdout.write(json.dumps(status(queue), indent=2) + "\n")
+    elif args.command == "jobs":
+        filters = Filters(args.family, args.api, args.transport, args.output_kind, args.arraysize)
+        jobs = expand_jobs(settings, args.suite, scales, args.shape, filters, args.split_pages)
+        sys.stdout.write(json.dumps(jobs, indent=1) + "\n")
     else:
-        cases = matrix(settings, args.suite, args.shape)
-        cases = [
-            c
-            for c in cases
-            if (not args.family or c.family in args.family)
-            and (not args.api or c.api in args.api)
-            and (not args.transport or c.transport in args.transport)
-            and (not args.output_kind or c.output == args.output_kind)
-        ]
+        overrides = {
+            k: v for k in ("warmups", "repetitions") if (v := getattr(args, k)) is not None
+        }
+        if overrides:
+            settings = replace(settings, **overrides)
+        filters = Filters(args.family, args.api, args.transport, args.output_kind, args.arraysize)
+        cases = filters.select(matrix(settings, args.suite, args.shape))
         if not cases:
             raise ValueError("No cases match the selected filters")
         if args.command == "plan":

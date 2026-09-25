@@ -51,7 +51,7 @@ def stack_resources(session_: Any, stack: str) -> dict[str, str]:
         "SourceDatabase",
         "SourceTable",
         "WorkGroup",
-        "InstanceId",
+        "AutoScalingGroup",
     }
     if not required <= result.keys():
         raise ValueError("Stack outputs are incomplete")
