@@ -23,6 +23,7 @@ from pyathena.converter import Converter
 from pyathena.cursor import Cursor
 from pyathena.error import NotSupportedError, ProgrammingError
 from pyathena.formatter import DefaultParameterFormatter, Formatter
+from pyathena.glue import GlueMetadataClient
 from pyathena.util import RetryConfig
 
 if TYPE_CHECKING:
@@ -128,6 +129,7 @@ class Connection(Generic[ConnectionCursor]):
         result_reuse_minutes: int = ...,
         on_start_query_execution: Callable[[str], None] | None = ...,
         on_poll: OnPollCallback | None = ...,
+        glue_metadata_fallback: bool = ...,
         **kwargs,
     ) -> None: ...
 
@@ -160,6 +162,7 @@ class Connection(Generic[ConnectionCursor]):
         result_reuse_minutes: int = ...,
         on_start_query_execution: Callable[[str], None] | None = ...,
         on_poll: OnPollCallback | None = ...,
+        glue_metadata_fallback: bool = ...,
         **kwargs,
     ) -> None: ...
 
@@ -191,6 +194,7 @@ class Connection(Generic[ConnectionCursor]):
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
         on_start_query_execution: Callable[[str], None] | None = None,
         on_poll: OnPollCallback | None = None,
+        glue_metadata_fallback: bool = True,
         **kwargs,
     ) -> None:
         """Initialize a new Athena database connection.
@@ -231,6 +235,10 @@ class Connection(Generic[ConnectionCursor]):
                 execution object (``AthenaQueryExecution``, or
                 ``AthenaCalculationExecutionStatus`` for Spark). Useful for
                 monitoring live query progress. Defaults to None.
+            glue_metadata_fallback: In ``AwsDataCatalog`` and S3 Tables catalogs,
+                answer a throttled table-metadata, table-listing or
+                database-listing request from the AWS Glue Data Catalog before
+                retrying it. Defaults to True.
             **kwargs: Additional arguments passed to boto3 Session and client.
 
         Raises:
@@ -339,6 +347,10 @@ class Connection(Generic[ConnectionCursor]):
         self.result_reuse_minutes = result_reuse_minutes
         self.on_start_query_execution = on_start_query_execution
         self.on_poll = on_poll
+        self.glue_metadata_fallback = glue_metadata_fallback
+        self._glue = GlueMetadataClient(
+            self._session, self.region_name, self.config, self._client_kwargs
+        )
 
     def _assume_role(
         self,

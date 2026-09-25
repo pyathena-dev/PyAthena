@@ -1,5 +1,6 @@
 import asyncio
 import re
+import threading
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -8,11 +9,13 @@ import pytest
 from pyathena import BINARY, Binary, ExecuteOptions
 from pyathena.aio.cursor import AioCursor
 from pyathena.error import DatabaseError, OperationalError, ProgrammingError
+from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.aio.conftest import _aio_connect
+from tests.pyathena.util import throttle_metadata_api
 
 
 class TestAioCursor:
@@ -473,6 +476,30 @@ class TestAioCursor:
         with pytest.raises(ProgrammingError):
             aio_cursor.arraysize = -1
 
+    async def test_glue_request_runs_off_the_event_loop(self, aio_cursor, monkeypatch):
+        throttle_metadata_api(aio_cursor.connection.client, monkeypatch)
+        loop_thread = threading.get_ident()
+        threads = []
+        # Record where the real client is built and the real request is sent.
+        client = GlueMetadataClient.client
+        get_table = GlueMetadataClient.get_table
+
+        def recorded_client(self):
+            threads.append(("client", threading.get_ident()))
+            return client.fget(self)
+
+        def recorded_get_table(self, *args, **kwargs):
+            threads.append(("request", threading.get_ident()))
+            return get_table(self, *args, **kwargs)
+
+        monkeypatch.setattr(GlueMetadataClient, "client", property(recorded_client))
+        monkeypatch.setattr(GlueMetadataClient, "get_table", recorded_get_table)
+
+        assert (await aio_cursor.get_table_metadata("one_row")).name == "one_row"
+        # Building the client and sending the request would block the loop.
+        assert [step for step, _ in threads] == ["request", "client"]
+        assert all(thread != loop_thread for _, thread in threads)
+
     async def test_list_databases(self, aio_cursor):
         databases = await aio_cursor.list_databases(catalog_name="AwsDataCatalog")
         assert len(databases) > 0
@@ -489,6 +516,24 @@ class TestAioCursor:
         assert len(metadata_list) > 0
         table_names = [m.name for m in metadata_list]
         assert "one_row" in table_names
+
+    async def test_throttled_metadata_reads_glue(self, aio_cursor, monkeypatch):
+        def view(metadata):
+            return (metadata.name, metadata.table_type, metadata.parameters)
+
+        async def read():
+            return (
+                view(await aio_cursor.get_table_metadata("one_row")),
+                sorted(view(m) for m in await aio_cursor.list_table_metadata()),
+                ENV.schema in [d.name for d in await aio_cursor.list_databases("AwsDataCatalog")],
+            )
+
+        expected = await read()
+        calls = throttle_metadata_api(aio_cursor.connection.client, monkeypatch)
+
+        # The Glue request runs in a worker thread, as the Athena calls do.
+        assert await read() == expected
+        assert sorted(calls) == ["get_table_metadata", "list_databases", "list_table_metadata"]
 
 
 class TestAioDictCursor:

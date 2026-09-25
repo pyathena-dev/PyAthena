@@ -147,7 +147,21 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             time.sleep(self._poll_interval)
 
     def _exists_session(self, session_id: str) -> bool:
-        request = {"SessionId": session_id}
+        """Whether a Spark session exists, from ``GetSession``.
+
+        Waits for an existing session to become idle before returning.
+
+        Args:
+            session_id: The session ID.
+
+        Returns:
+            True if the session exists; False if Athena rejects it with
+            ``InvalidRequestException``.
+
+        Raises:
+            OperationalError: If the request fails for another reason.
+        """
+        request: dict[str, Any] = {"SessionId": session_id}
         try:
             retry_api_call(
                 self._connection.client.get_session,
@@ -193,7 +207,12 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             return session_id
 
     def _terminate_session(self) -> None:
-        request = {"SessionId": self._session_id}
+        """Terminate the cursor's Spark session with ``TerminateSession``.
+
+        Raises:
+            OperationalError: If the request fails.
+        """
+        request: dict[str, Any] = {"SessionId": self._session_id}
         try:
             retry_api_call(
                 self._connection.client.terminate_session,
@@ -231,7 +250,15 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         return query_execution
 
     def _cancel(self, query_id: str) -> None:
-        request = {"CalculationExecutionId": query_id}
+        """Stop a calculation execution with ``StopCalculationExecution``.
+
+        Args:
+            query_id: The calculation execution ID.
+
+        Raises:
+            OperationalError: If the request fails.
+        """
+        request: dict[str, Any] = {"CalculationExecutionId": query_id}
         try:
             retry_api_call(
                 self._connection.client.stop_calculation_execution,

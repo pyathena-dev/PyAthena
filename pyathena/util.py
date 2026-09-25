@@ -154,6 +154,26 @@ class RetryConfig:
         self.exponential_base = exponential_base
 
 
+def _without_retries(config: RetryConfig, codes: Iterable[str]) -> RetryConfig:
+    """Copy a retry policy without retrying ``codes``.
+
+    Args:
+        config: The retry policy to copy.
+        codes: The error codes to leave out of ``config.exceptions``.
+
+    Returns:
+        A new policy; ``config`` is unchanged.
+    """
+    excluded = set(codes)
+    return RetryConfig(
+        exceptions=[c for c in config.exceptions if c not in excluded],
+        attempt=config.attempt,
+        multiplier=config.multiplier,
+        max_delay=config.max_delay,
+        exponential_base=config.exponential_base,
+    )
+
+
 def _get_error_code(ex: BaseException, unwrap_metadata: bool = False) -> str | None:
     response = getattr(ex, "response", None)
     error = response.get("Error") if isinstance(response, dict) else None
@@ -167,6 +187,21 @@ def _get_error_code(ex: BaseException, unwrap_metadata: bool = False) -> str | N
             if match:
                 return match.group(1)
     return code if isinstance(code, str) else None
+
+
+def _is_throttling_error(ex: BaseException) -> bool:
+    """Whether an AWS error is throttling.
+
+    That includes Glue's own throttling, which Athena reports inside a
+    ``MetadataException``.
+
+    Args:
+        ex: The exception an AWS API call raised.
+
+    Returns:
+        True if its error code is in ``THROTTLING_ERROR_CODES``.
+    """
+    return _get_error_code(ex, unwrap_metadata=True) in THROTTLING_ERROR_CODES
 
 
 def is_retryable_error(ex: BaseException, config: RetryConfig) -> bool:
@@ -194,6 +229,7 @@ def retry_api_call(
     config: RetryConfig,
     logger: logging.Logger | None = None,
     *args,
+    stop_on: Callable[[BaseException], bool] | None = None,
     **kwargs,
 ) -> Any:
     """Execute a function with automatic retry logic for AWS API calls.
@@ -207,6 +243,8 @@ def retry_api_call(
         config: RetryConfig instance specifying retry behavior.
         logger: Optional logger for retry attempt logging.
         *args: Positional arguments to pass to the function.
+        stop_on: Optional predicate; an exception it accepts is raised at once
+            instead of being retried.
         **kwargs: Keyword arguments to pass to the function.
 
     Returns:
@@ -230,9 +268,10 @@ def retry_api_call(
         This includes recognized Glue error codes wrapped in MetadataException.
         Other errors are propagated without retrying.
     """
-
     retry = tenacity.Retrying(
-        retry=retry_if_exception(lambda ex: is_retryable_error(ex, config)),
+        retry=retry_if_exception(
+            lambda ex: is_retryable_error(ex, config) and not (stop_on and stop_on(ex))
+        ),
         stop=stop_after_attempt(config.attempt),
         # Uniform jitter of up to one multiplier keeps concurrent clients from
         # retrying in lockstep after a shared throttling response.

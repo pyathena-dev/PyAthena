@@ -33,6 +33,7 @@ from pyathena.sqlalchemy.types import (
 )
 from pyathena.util import RetryConfig
 from tests.pyathena.conftest import ENV
+from tests.pyathena.util import throttle_metadata_api
 
 # Amazon S3 Tables tests need a pre-provisioned table-bucket catalog and namespace.
 # Skip them unless AWS_ATHENA_S3_TABLES_CATALOG / AWS_ATHENA_S3_TABLES_NAMESPACE are set.
@@ -912,18 +913,82 @@ class TestSQLAlchemyAthena:
         assert not actual["autoincrement"]
         assert actual["comment"] == "some comment"
 
+    def test_throttled_reflection_reads_glue(self, engine, monkeypatch):
+        engine, conn = engine
+        # Existing tables with a comment, compression and partitions, so the
+        # comparison covers each derived option without extra DDL.
+        tables = ["one_row", "parquet_with_compression", "partition_table"]
+
+        def reflect():
+            # A fresh Inspector each time, so nothing is served from its cache;
+            # table-level reflection runs before listings would seed it.
+            insp = sqlalchemy.inspect(conn)
+            return (
+                {
+                    t: (
+                        insp.get_table_comment(t, schema=ENV.schema),
+                        insp.get_table_options(t, schema=ENV.schema),
+                    )
+                    for t in tables
+                },
+                insp.get_table_names(schema=ENV.schema),
+                insp.get_view_names(schema=ENV.schema),
+                # Other runs create and drop schemas concurrently, so only this
+                # run's schema is compared.
+                ENV.schema in insp.get_schema_names(),
+            )
+
+        expected = reflect()
+        calls = throttle_metadata_api(conn.connection.driver_connection.client, monkeypatch)
+
+        assert reflect() == expected
+        # Each request was refused once and answered by Glue without retrying.
+        assert sorted(calls) == sorted(
+            ["get_table_metadata"] * len(tables) + ["list_table_metadata", "list_databases"]
+        )
+
+    @requires_s3_tables
+    @pytest.mark.parametrize("engine", [{"catalog_name": ENV.s3tables_catalog}], indirect=True)
+    def test_throttled_s3tables_reflection_reads_glue(self, engine, monkeypatch):
+        engine, conn = engine
+        schema = ENV.s3tables_namespace
+        table_name = unique_s3tables_table_name("test_throttled_s3tables_reflection")
+        conn.execute(
+            text(
+                f"CREATE TABLE {schema}.{table_name} (a INT, b STRING) "
+                "PARTITIONED BY (b) TBLPROPERTIES ('table_type'='ICEBERG')"
+            )
+        )
+        try:
+
+            def reflect():
+                insp = sqlalchemy.inspect(conn)
+                return (
+                    insp.get_table_options(table_name, schema=schema),
+                    table_name in insp.get_table_names(schema=schema),
+                )
+
+            expected = reflect()
+            calls = throttle_metadata_api(conn.connection.driver_connection.client, monkeypatch)
+
+            # Glue addresses the table-bucket catalog by its Athena name.
+            assert reflect() == expected
+            assert expected[1]
+            assert sorted(calls) == ["get_table_metadata", "list_table_metadata"]
+        finally:
+            monkeypatch.undo()
+            conn.execute(text(f"DROP TABLE IF EXISTS {schema}.{table_name}"))
+
     # `unload` states what each case configures, independently of the URL the
     # fixture builds, so the engine's setting can be checked before asserting
-    # that the dialect's own query ignores it.
+    # that the dialect's own query ignores it. The Glue fallback is off so that
+    # a throttled lookup in AwsDataCatalog reaches information_schema.
     @pytest.mark.parametrize(
         ("engine", "unload"),
         [
-            ({"driver": "pandas"}, False),
-            ({"driver": "pandas", "unload": "true"}, True),
-            ({"driver": "arrow"}, False),
-            ({"driver": "arrow", "unload": "true"}, True),
-            ({"driver": "polars"}, False),
-            ({"driver": "polars", "unload": "true"}, True),
+            ({"driver": driver, "glue_metadata_fallback": "false", **options}, unload)
+            for driver in ("pandas", "arrow", "polars")
+            for options, unload in (({}, False), ({"unload": "true"}, True))
         ],
         indirect=["engine"],
     )
@@ -1487,6 +1552,11 @@ class TestSQLAlchemyAthena:
     def test_conn_str_kill_on_interrupt(self, engine):
         engine, conn = engine
         assert not conn.connection.kill_on_interrupt
+
+    @pytest.mark.parametrize("engine", [{"glue_metadata_fallback": "false"}], indirect=["engine"])
+    def test_conn_str_glue_metadata_fallback(self, engine):
+        engine, conn = engine
+        assert not conn.connection.glue_metadata_fallback
 
     @pytest.mark.parametrize("engine", [{"result_reuse_enable": "true"}], indirect=["engine"])
     def test_conn_str_result_reuse_enable(self, engine):

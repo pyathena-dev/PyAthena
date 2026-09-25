@@ -7,6 +7,8 @@ from botocore.exceptions import ClientError
 from pyathena import DataError
 from pyathena.util import (
     RetryConfig,
+    _is_throttling_error,
+    _without_retries,
     is_retryable_error,
     parse_output_location,
     retry_api_call,
@@ -257,3 +259,85 @@ def test_is_retryable_error(code, message, expected):
     error = ClientError({"Error": {"Code": code, "Message": message}}, "GetTableMetadata")
     assert is_retryable_error(error, RetryConfig()) is expected
     assert is_retryable_error(ValueError("no response"), RetryConfig()) is False
+
+
+@pytest.mark.parametrize(
+    ("code", "message", "expected"),
+    [
+        ("ThrottlingException", "Rate exceeded", True),
+        ("TooManyRequestsException", "Too many requests", True),
+        # Glue's own throttling, reported by Athena inside a MetadataException.
+        (
+            "MetadataException",
+            "Rate exceeded (Service: AmazonDataCatalog; Status Code: 400; "
+            "Error Code: ThrottlingException; Request ID: example; Proxy: null)",
+            True,
+        ),
+        (
+            "MetadataException",
+            "Not authorized (Service: AmazonDataCatalog; Status Code: 400; "
+            "Error Code: AccessDeniedException; Request ID: example; Proxy: null)",
+            False,
+        ),
+        ("MetadataException", "Table ThrottlingException not found", False),
+        ("InternalServerException", "Internal error", False),
+    ],
+)
+def test_is_throttling_error(code, message, expected):
+    error = ClientError({"Error": {"Code": code, "Message": message}}, "GetTableMetadata")
+    assert _is_throttling_error(error) is expected
+    assert _is_throttling_error(ValueError("no response")) is False
+
+
+def test_without_retries():
+    config = RetryConfig(
+        exceptions=("ThrottlingException", "MetadataException", "InternalServerException"),
+        attempt=4,
+        multiplier=2,
+        max_delay=30,
+        exponential_base=3,
+    )
+
+    derived = _without_retries(config, ["ThrottlingException", "MetadataException"])
+
+    assert derived.exceptions == ("InternalServerException",)
+    assert (derived.attempt, derived.multiplier, derived.max_delay) == (4, 2, 30)
+    assert derived.exponential_base == 3
+    # The original policy is left as it was.
+    assert config.exceptions == (
+        "ThrottlingException",
+        "MetadataException",
+        "InternalServerException",
+    )
+
+
+@pytest.mark.parametrize(
+    ("code", "expected_calls"),
+    [
+        # Stopped at once, although the policy retries it.
+        ("ThrottlingException", 1),
+        # Other retryable codes keep the policy's attempts.
+        ("InternalServerException", 3),
+    ],
+)
+def test_retry_api_call_stops_on_predicate(code, expected_calls):
+    error = ClientError({"Error": {"Code": code, "Message": ""}}, "GetTableMetadata")
+    calls = 0
+
+    def call():
+        nonlocal calls
+        calls += 1
+        raise error
+
+    config = RetryConfig(
+        exceptions=("ThrottlingException", "InternalServerException"),
+        attempt=3,
+        multiplier=0,
+        max_delay=0,
+    )
+
+    with pytest.raises(ClientError) as caught:
+        retry_api_call(call, config, stop_on=_is_throttling_error)
+
+    assert caught.value is error
+    assert calls == expected_calls

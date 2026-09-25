@@ -4,6 +4,7 @@ from sqlalchemy import cast, literal, select, text, types
 from sqlalchemy.sql.schema import MetaData, Table
 
 from tests import ENV
+from tests.pyathena.util import throttle_metadata_api
 
 
 class TestAsyncSQLAlchemyAthena:
@@ -126,6 +127,28 @@ class TestAsyncSQLAlchemyAthena:
 
         table_names = await conn.run_sync(_inspect)
         assert "many_rows" in table_names
+
+    async def test_throttled_reflection_reads_glue(self, async_engine, monkeypatch):
+        _, conn = async_engine
+
+        def reflect(sync_conn):
+            insp = sqlalchemy.inspect(sync_conn)
+            return (
+                insp.get_table_comment("one_row", schema=ENV.schema),
+                insp.get_table_options("one_row", schema=ENV.schema),
+                insp.get_table_names(schema=ENV.schema),
+            )
+
+        expected = await conn.run_sync(reflect)
+        # The adapter wraps an AioConnection, whose client serves the metadata API.
+        client = (await conn.get_raw_connection()).driver_connection.driver_connection.client
+        calls = throttle_metadata_api(
+            client, monkeypatch, operations=("get_table_metadata", "list_table_metadata")
+        )
+
+        # Glue runs in a worker thread here, as the adapted cursor's calls do.
+        assert await conn.run_sync(reflect) == expected
+        assert sorted(calls) == ["get_table_metadata", "list_table_metadata"]
 
     async def test_has_table(self, async_engine):
         _, conn = async_engine

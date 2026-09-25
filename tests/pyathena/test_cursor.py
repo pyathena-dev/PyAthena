@@ -14,6 +14,7 @@ from random import randint
 from unittest.mock import MagicMock, patch
 
 import pytest
+from botocore.exceptions import ClientError
 
 from pyathena import (
     BINARY,
@@ -34,6 +35,7 @@ from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
+from tests.pyathena.util import throttle_metadata_api, unreachable_glue
 
 _logger = logging.getLogger(__name__)
 
@@ -1341,6 +1343,193 @@ class TestCursor:
     def test_fetch_all_rows(self, cursor):
         cursor.execute("SELECT 1 AS col")
         assert cursor.fetchall() == [(1,)]
+
+    @staticmethod
+    def _metadata_view(metadata):
+        return (
+            metadata.name,
+            metadata.table_type,
+            metadata.create_time,
+            [(c.name, c.type, c.comment) for c in metadata.columns],
+            [(c.name, c.type, c.comment) for c in metadata.partition_keys],
+            metadata.parameters,
+        )
+
+    def test_throttled_metadata_reads_glue(self, cursor, monkeypatch):
+        def read():
+            return (
+                [
+                    self._metadata_view(cursor.get_table_metadata(t))
+                    for t in ("one_row", "parquet_with_compression", "partition_table")
+                ],
+                sorted(self._metadata_view(m) for m in cursor.list_table_metadata()),
+                ENV.schema in [d.name for d in cursor.list_databases("AwsDataCatalog")],
+            )
+
+        expected = read()
+        calls = throttle_metadata_api(cursor.connection.client, monkeypatch)
+
+        # Glue reports each table as Athena does, and nothing is retried first.
+        assert read() == expected
+        assert sorted(calls) == sorted(
+            ["get_table_metadata"] * 3 + ["list_table_metadata", "list_databases"]
+        )
+
+    def test_wrapped_glue_throttling_reads_glue(self, cursor, monkeypatch):
+        # Athena reports Glue's own throttling inside a MetadataException, and
+        # the first attempt does not retry it either.
+        calls = throttle_metadata_api(
+            cursor.connection.client,
+            monkeypatch,
+            code="MetadataException",
+            message=(
+                "Rate exceeded (Service: AmazonDataCatalog; Status Code: 400; "
+                "Error Code: ThrottlingException; Request ID: example; Proxy: null)"
+            ),
+        )
+
+        assert cursor.get_table_metadata("one_row").name == "one_row"
+        assert calls == ["get_table_metadata"]
+
+    @staticmethod
+    def _unreachable_glue(connection, monkeypatch):
+        glue = unreachable_glue(connection)
+        monkeypatch.setattr(connection, "_glue", glue)
+        return glue
+
+    @pytest.mark.parametrize(
+        "cursor", [{"retry_config": RetryConfig(attempt=1)}], indirect=["cursor"]
+    )
+    def test_glue_answer_that_the_table_is_missing(self, cursor, monkeypatch):
+        # Glue's answer about absence is raised as Athena's would be.
+        calls = throttle_metadata_api(cursor.connection.client, monkeypatch)
+
+        with pytest.raises(OperationalError) as caught:
+            cursor.get_table_metadata("no_such_table_786")
+
+        assert caught.value.__cause__.response["Error"]["Code"] == "EntityNotFoundException"
+        assert calls == ["get_table_metadata"]
+
+    @pytest.mark.parametrize(
+        "cursor", [{"retry_config": RetryConfig(attempt=1)}], indirect=["cursor"]
+    )
+    def test_missing_database_in_glue_listing_asks_athena(self, cursor, monkeypatch):
+        # Only a table lookup takes Glue's answer about absence as final; a
+        # listing asks Athena again, whose error for a missing catalog or
+        # database callers may already handle.
+        calls = throttle_metadata_api(cursor.connection.client, monkeypatch)
+
+        with pytest.raises(OperationalError) as caught:
+            cursor.list_table_metadata(schema_name="no_such_database_786")
+
+        assert caught.value.__cause__.response["Error"]["Code"] == "ThrottlingException"
+        assert calls == ["list_table_metadata"] * 2
+        assert cursor.connection._glue.reachable
+
+    @pytest.mark.parametrize(
+        "cursor", [{"retry_config": RetryConfig(attempt=1)}], indirect=["cursor"]
+    )
+    def test_unreachable_glue_is_not_tried_again(self, cursor, monkeypatch):
+        calls = throttle_metadata_api(cursor.connection.client, monkeypatch)
+        glue = self._unreachable_glue(cursor.connection, monkeypatch)
+
+        # The Athena request runs again with its policy after Glue fails.
+        with pytest.raises(OperationalError) as caught:
+            cursor.get_table_metadata("one_row")
+        assert caught.value.__cause__.response["Error"]["Code"] == "ThrottlingException"
+        assert calls == ["get_table_metadata"] * 2
+        assert not glue.reachable
+
+        # A later request does not wait for Glue again.
+        with pytest.raises(OperationalError):
+            cursor.get_table_metadata("one_row")
+        assert calls == ["get_table_metadata"] * 3
+
+    # A policy that retries every MetadataException.
+    _METADATA_EXCEPTION_POLICY = RetryConfig(
+        exceptions=("ThrottlingException", "MetadataException"), attempt=2, multiplier=0
+    )
+
+    @pytest.mark.parametrize(
+        "cursor", [{"retry_config": _METADATA_EXCEPTION_POLICY}], indirect=["cursor"]
+    )
+    def test_wrapped_glue_throttling_skips_metadata_exception_retries(self, cursor, monkeypatch):
+        calls = throttle_metadata_api(
+            cursor.connection.client,
+            monkeypatch,
+            code="MetadataException",
+            message=(
+                "Rate exceeded (Service: AmazonDataCatalog; Status Code: 400; "
+                "Error Code: ThrottlingException; Request ID: example; Proxy: null)"
+            ),
+        )
+
+        assert cursor.get_table_metadata("one_row").name == "one_row"
+        assert calls == ["get_table_metadata"]
+
+    @pytest.mark.parametrize(
+        "cursor", [{"retry_config": _METADATA_EXCEPTION_POLICY}], indirect=["cursor"]
+    )
+    def test_other_metadata_exception_keeps_its_retries(self, cursor, monkeypatch):
+        calls = throttle_metadata_api(
+            cursor.connection.client,
+            monkeypatch,
+            code="MetadataException",
+            message="Unrecognized connector error",
+        )
+
+        with pytest.raises(OperationalError):
+            cursor.get_table_metadata("one_row")
+        assert calls == ["get_table_metadata"] * 2
+
+    @pytest.mark.parametrize(
+        "cursor", [{"retry_config": RetryConfig(attempt=1)}], indirect=["cursor"]
+    )
+    def test_listing_resumes_after_a_failed_glue_request(self, cursor, monkeypatch):
+        # A page throttled mid-listing is read again, not the pages before it.
+        expected = sorted(m.name for m in cursor.list_table_metadata(max_results=2))
+        client = cursor.connection.client
+        list_table_metadata = client.list_table_metadata
+        requests = []
+
+        def throttle_second_page_once(**kwargs):
+            requests.append(kwargs.get("NextToken"))
+            if len(requests) == 2:
+                raise ClientError(
+                    {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
+                    "ListTableMetadata",
+                )
+            return list_table_metadata(**kwargs)
+
+        monkeypatch.setattr(client, "list_table_metadata", throttle_second_page_once)
+        self._unreachable_glue(cursor.connection, monkeypatch)
+
+        assert sorted(m.name for m in cursor.list_table_metadata(max_results=2)) == expected
+        # Every page once, and the throttled second page a second time.
+        assert len(expected) > 2
+        assert requests[0] is None
+        assert requests[1] == requests[2]
+        assert len(requests) == len(set(requests)) + 1
+
+    @pytest.mark.parametrize(
+        ("cursor", "catalog_name"),
+        [
+            ({"retry_config": RetryConfig(attempt=1), "glue_metadata_fallback": False}, None),
+            ({"retry_config": RetryConfig(attempt=1)}, "federated_catalog"),
+        ],
+        indirect=["cursor"],
+        ids=["disabled", "outside-glue"],
+    )
+    def test_throttled_metadata_without_glue(self, cursor, monkeypatch, catalog_name):
+        calls = throttle_metadata_api(cursor.connection.client, monkeypatch)
+        # Still reachable afterwards means no request was sent to it.
+        glue = self._unreachable_glue(cursor.connection, monkeypatch)
+
+        with pytest.raises(OperationalError):
+            cursor.get_table_metadata("one_row", catalog_name=catalog_name)
+
+        assert calls == ["get_table_metadata"]
+        assert glue.reachable
 
 
 class TestDictCursor:

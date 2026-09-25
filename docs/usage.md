@@ -661,6 +661,33 @@ heuristic behavior may see string values where it previously saw integers or flo
 To restore typed conversion, pass `result_set_type_hints` with the appropriate type
 signatures for the affected columns.
 
+(usage-table-metadata)=
+
+## Table and database metadata
+
+`get_table_metadata()`, `list_table_metadata()`, and `list_databases()` call the Athena metadata API.
+Athena applies its metadata API rate limits per account, and they are not listed in Service Quotas.
+In `AwsDataCatalog` and S3 Tables catalogs (`s3tablescatalog/<table-bucket>`), a throttled request is answered from the AWS Glue Data Catalog instead, and a warning is logged.
+The request goes to Glue on the first throttled response, without waiting for the retry policy.
+Glue throttling that Athena reports inside a `MetadataException` counts as throttled.
+The fallback calls these Glue APIs with the connection's credentials:
+
+| Cursor method | Glue API | IAM action |
+|---|---|---|
+| `get_table_metadata()` | `GetTable` | `glue:GetTable` |
+| `list_table_metadata()` | `GetTables` | `glue:GetTables` |
+| `list_databases()` | `GetDatabases` | `glue:GetDatabases` |
+
+Glue's report that the table does not exist, for `get_table_metadata()`, raises `OperationalError`, as Athena's does.
+If the Glue request fails for any other reason, for example for lack of permission or because the Glue endpoint cannot be reached, a second warning is logged and the Athena request runs again with the retry policy.
+A request that cannot connect to Glue, such as from a network with an Athena VPC endpoint but no route to Glue, or that finds no Glue endpoint for the connection's region and endpoint options, also turns the fallback off for the rest of that connection; a request that cannot connect first waits out the botocore connect timeout and retries of the connection's `config`.
+For `list_table_metadata()` and `list_databases()`, Glue's report that the database or catalog does not exist also returns to the Athena request.
+Requests in other catalogs use the Athena API with the retry policy only.
+
+The connection builds one Glue client on first use from its session, region, and botocore `config`, but not its `endpoint_url`.
+Pass `glue_metadata_fallback=False` to `connect()` to turn the fallback off.
+The Glue request does not carry the connection's workgroup; turn the fallback off where access depends on the workgroup, such as a workgroup enabled for IAM Identity Center.
+
 ## Environment variables
 
 Support [Boto3 environment variables](https://boto3.amazonaws.com/v1/documentation/api/latest/guide/configuration.html#using-environment-variables).

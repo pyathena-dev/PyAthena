@@ -82,6 +82,7 @@ def create_engine(**kwargs):
         "compression",
         "duration_seconds",
         "file_format",
+        "glue_metadata_fallback",
         "kill_on_interrupt",
         "partition",
         "poll_interval",

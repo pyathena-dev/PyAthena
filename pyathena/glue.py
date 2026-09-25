@@ -1,0 +1,290 @@
+# Copyright 2026 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
+# SPDX-License-Identifier: MIT
+"""Read Athena table and database metadata from the AWS Glue Data Catalog."""
+
+from __future__ import annotations
+
+import threading
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any
+
+from botocore.exceptions import BaseEndpointResolverError
+from botocore.exceptions import ConnectionError as BotoConnectionError
+
+from pyathena.model import AthenaDatabase, AthenaTableMetadata
+
+if TYPE_CHECKING:
+    from boto3.session import Session
+    from botocore.client import BaseClient
+    from botocore.config import Config
+
+
+class GlueMetadataClient:
+    """Reads Athena metadata of Glue-backed catalogs through the Glue API.
+
+    Reports the metadata Athena's ``GetTableMetadata``, ``ListTableMetadata``
+    and ``ListDatabases`` would give for the same catalog, from ``GetTable``,
+    ``GetTables`` and ``GetDatabases``. A connection holds one, which builds
+    its Glue client on first use.
+
+    Args:
+        session: The connection's boto3 session.
+        region_name: The connection's region.
+        config: The connection's botocore config.
+        client_kwargs: The connection's client arguments. Athena's
+            ``endpoint_url`` and ``api_version`` are not passed to Glue.
+    """
+
+    # Failures every later request would repeat: no connection to Glue, or no
+    # Glue endpoint for the region or the endpoint variant the config asks for.
+    UNREACHABLE_ERRORS: tuple[type[Exception], ...] = (
+        BotoConnectionError,
+        BaseEndpointResolverError,
+    )
+
+    def __init__(
+        self,
+        session: Session,
+        region_name: str | None,
+        config: Config | None,
+        client_kwargs: Mapping[str, Any],
+    ) -> None:
+        self._session = session
+        self._region_name = region_name
+        self._config = config
+        self._client_kwargs = {
+            k: v for k, v in client_kwargs.items() if k not in ("endpoint_url", "api_version")
+        }
+        # Build the client once per connection, even when several threads need
+        # it at the same time.
+        self._lock = threading.Lock()
+        self._client: BaseClient | None = None
+        self._reachable = True
+
+    @property
+    def reachable(self) -> bool:
+        """False once a request could not reach Glue."""
+        return self._reachable
+
+    @property
+    def client(self) -> BaseClient:
+        """The Glue client, built on first use."""
+        with self._lock:
+            if self._client is None:
+                self._client = self._session.client(
+                    "glue",
+                    region_name=self._region_name,
+                    config=self._config,
+                    **self._client_kwargs,
+                )
+            return self._client
+
+    @staticmethod
+    def _catalog_request_kwargs(catalog_name: str | None) -> dict[str, str] | None:
+        # AwsDataCatalog is the caller's default Glue catalog. An S3 Tables
+        # catalog is a Glue federated catalog addressed by its Athena name.
+        """Glue request arguments that address an Athena catalog.
+
+        ``AwsDataCatalog`` is the caller's default Glue catalog. An S3 Tables
+        catalog is a Glue federated catalog addressed by its Athena name.
+
+        Args:
+            catalog_name: An Athena catalog name.
+
+        Returns:
+            The arguments, or None if Glue cannot answer for the catalog.
+        """
+        if not catalog_name:
+            return None
+        lowered = catalog_name.lower()
+        if lowered == "awsdatacatalog":
+            return {}
+        if lowered.startswith("s3tablescatalog/"):
+            return {"CatalogId": catalog_name}
+        return None
+
+    @classmethod
+    def _require_catalog(cls, catalog_name: str | None) -> dict[str, str]:
+        """Glue request arguments for a catalog Glue must answer for.
+
+        Args:
+            catalog_name: An Athena catalog name.
+
+        Returns:
+            The arguments.
+
+        Raises:
+            ValueError: If Glue cannot answer for the catalog.
+        """
+        request_kwargs = cls._catalog_request_kwargs(catalog_name)
+        if request_kwargs is None:
+            raise ValueError(f"Glue cannot answer for the catalog {catalog_name!r}.")
+        return request_kwargs
+
+    @classmethod
+    def supports(cls, catalog_name: str | None) -> bool:
+        """Whether the Athena catalog is one Glue can answer for.
+
+        Args:
+            catalog_name: An Athena catalog name.
+
+        Returns:
+            True for ``AwsDataCatalog`` and S3 Tables catalogs
+            (``s3tablescatalog/<table-bucket>``).
+        """
+        return cls._catalog_request_kwargs(catalog_name) is not None
+
+    def usable_for(self, catalog_name: str | None) -> bool:
+        """Whether to ask Glue about the catalog.
+
+        Args:
+            catalog_name: An Athena catalog name.
+
+        Returns:
+            True if :meth:`supports` accepts the catalog and Glue is still reachable.
+        """
+        return self._reachable and self.supports(catalog_name)
+
+    @contextmanager
+    def _tracking_reachability(self) -> Iterator[None]:
+        """Record that Glue cannot be reached when a request fails that way.
+
+        Yields:
+            None.
+
+        Raises:
+            Exception: The request's exception, unchanged.
+        """
+        try:
+            yield
+        except self.UNREACHABLE_ERRORS:
+            self._reachable = False
+            raise
+
+    def get_table(
+        self, catalog_name: str | None, schema_name: str | None, table_name: str
+    ) -> AthenaTableMetadata:
+        """Get one table's metadata with ``GetTable``.
+
+        Args:
+            catalog_name: An Athena catalog name that :meth:`supports` accepts.
+            schema_name: The database name.
+            table_name: The table name.
+
+        Returns:
+            The table's metadata as Athena reports it.
+
+        Raises:
+            ValueError: If Glue cannot answer for the catalog.
+            botocore.exceptions.ClientError: If Glue rejects the request, for
+                example with ``EntityNotFoundException``.
+            botocore.exceptions.BotoCoreError: If the request fails before a
+                response.
+        """
+        request = {"DatabaseName": schema_name, "Name": table_name}
+        request.update(self._require_catalog(catalog_name))
+        with self._tracking_reachability():
+            response = self.client.get_table(**request)
+        return self.table_metadata(response["Table"])
+
+    def list_tables(
+        self, catalog_name: str | None, schema_name: str | None, expression: str | None = None
+    ) -> list[AthenaTableMetadata]:
+        """List a database's table metadata with ``GetTables``.
+
+        Args:
+            catalog_name: An Athena catalog name that :meth:`supports` accepts.
+            schema_name: The database name.
+            expression: A table name pattern, as for ``ListTableMetadata``.
+
+        Returns:
+            The metadata of every table in the database, as Athena reports it.
+
+        Raises:
+            ValueError: If Glue cannot answer for the catalog.
+            botocore.exceptions.ClientError: If Glue rejects the request.
+            botocore.exceptions.BotoCoreError: If a request fails before a
+                response.
+        """
+        request: dict[str, Any] = {"DatabaseName": schema_name}
+        request.update(self._require_catalog(catalog_name))
+        if expression:
+            request["Expression"] = expression
+        with self._tracking_reachability():
+            pages = self.client.get_paginator("get_tables").paginate(**request)
+            return [self.table_metadata(t) for page in pages for t in page["TableList"]]
+
+    def list_databases(self, catalog_name: str | None) -> list[AthenaDatabase]:
+        """List the catalog's databases with ``GetDatabases``.
+
+        Args:
+            catalog_name: An Athena catalog name that :meth:`supports` accepts.
+
+        Returns:
+            The catalog's databases.
+
+        Raises:
+            ValueError: If Glue cannot answer for the catalog.
+            botocore.exceptions.ClientError: If Glue rejects the request.
+            botocore.exceptions.BotoCoreError: If a request fails before a
+                response.
+        """
+        request = self._require_catalog(catalog_name)
+        with self._tracking_reachability():
+            pages = self.client.get_paginator("get_databases").paginate(**request)
+            return [AthenaDatabase({"Database": d}) for page in pages for d in page["DatabaseList"]]
+
+    @staticmethod
+    def table_metadata(table: Mapping[str, Any]) -> AthenaTableMetadata:
+        """Build the metadata Athena reports for a Glue table.
+
+        Athena flattens the storage descriptor into the table parameters: the
+        location and formats are always present, the SerDe library whenever
+        the descriptor has SerDe information, and SerDe parameters with a
+        ``serde.param.`` prefix. The Glue description is not the table comment.
+        Glue keeps an Iceberg table's dropped and renamed columns, marked as
+        not current, which Athena leaves out.
+
+        Args:
+            table: A ``Table`` from a Glue ``GetTable`` or ``GetTables`` response.
+
+        Returns:
+            The table's metadata as Athena reports it.
+        """
+        descriptor = table.get("StorageDescriptor") or {}
+        parameters = dict(table.get("Parameters") or {})
+        parameters["location"] = descriptor.get("Location")
+        parameters["inputformat"] = descriptor.get("InputFormat")
+        parameters["outputformat"] = descriptor.get("OutputFormat")
+        if "SerdeInfo" in descriptor:
+            serde = descriptor["SerdeInfo"]
+            parameters["serde.serialization.lib"] = serde.get("SerializationLibrary")
+            parameters.update(
+                {f"serde.param.{k}": v for k, v in (serde.get("Parameters") or {}).items()}
+            )
+
+        def column(c: Mapping[str, Any]) -> dict[str, Any]:
+            return {k: c[k] for k in ("Name", "Type", "Comment") if k in c}
+
+        return AthenaTableMetadata(
+            {
+                "TableMetadata": {
+                    "Name": table.get("Name"),
+                    "CreateTime": table.get("CreateTime"),
+                    "LastAccessTime": table.get("LastAccessTime"),
+                    "TableType": table.get("TableType"),
+                    "Columns": [
+                        column(c)
+                        for c in descriptor.get("Columns") or []
+                        if (c.get("Parameters") or {}).get("iceberg.field.current") != "false"
+                    ],
+                    "PartitionKeys": [column(c) for c in table.get("PartitionKeys") or []],
+                    "Parameters": parameters,
+                }
+            }
+        )

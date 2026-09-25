@@ -102,7 +102,7 @@ A throttling or permission error from a table-metadata lookup never by itself es
 For failed metadata requests, the error response establishes absence only when it is a recognized `EntityNotFoundException`; an unrecognized error is never guessed to mean a missing table.
 The `information_schema` queries described below can still establish absence after a failed request, from the query's result rather than from the error.
 Column reflection and `has_table()` do not retry a table-metadata request that `information_schema` can answer; they read `information_schema.columns` instead, executed without query result reuse, and log a warning.
-That covers a throttled request in any catalog.
+That covers a throttled request in any catalog that the cursor's Glue fallback, described below, does not answer.
 It also covers a `MetadataException` carrying no recognized Glue error envelope, but only outside `AwsDataCatalog`: a federated catalog reports a missing table in its connector's own words, so absence is decided by the query against that catalog rather than by an unrecognized message.
 In `AwsDataCatalog` an unrecognized `MetadataException` still propagates, because Glue does state missing tables and permission failures in a recognized envelope, and `information_schema` filters by Lake Formation instead of failing, so reading it there would report a table the caller cannot see as absent.
 Other error codes listed in the connection's `RetryConfig.exceptions` are still retried on that path, except those; list the wrapped Glue codes instead of `MetadataException`.
@@ -114,6 +114,13 @@ Table comments and table options still come from the metadata API with the confi
 When that request fails, they raise `NoSuchTableError` for a recognized `EntityNotFoundException` and propagate any other error, except that for an unrecognized `MetadataException` outside `AwsDataCatalog` they query `information_schema.columns` and raise `NoSuchTableError` if it has no row for the table.
 The query is skipped when column reflection in the same Inspector has already read the table's columns from `information_schema`.
 The dialect runs its own queries — this fallback and `get_view_definition()` — through the API cursor, whatever `cursor_class` or `unload` setting the connection carries, because it parses those result rows itself.
+
+In `AwsDataCatalog` and S3 Tables catalogs, the cursor answers a throttled metadata request from the AWS Glue Data Catalog, as described in {ref}`usage-table-metadata`.
+Reflection of columns, `has_table()`, table comments, table options, and table, view, and schema names uses it, so these need the Glue permissions listed there.
+A table that Glue reports as missing raises `NoSuchTableError`.
+When the Glue request fails, the metadata request runs again with the configured retries, and the paths above apply to its result.
+Set `glue_metadata_fallback=false` in the connection URL to turn the Glue fallback off.
+
 Athena applies its metadata API rate limits per account, and they are not listed in Service Quotas.
 PyAthena's API retries use exponential backoff with uniform jitter; `RetryConfig` documents the default attempt count and waits.
 PyAthena recognizes Glue error codes in Athena's `MetadataException` service-error envelope and applies `RetryConfig.exceptions` to those codes.

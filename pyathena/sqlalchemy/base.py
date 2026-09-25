@@ -41,7 +41,13 @@ from pyathena.sqlalchemy.types import (
     get_double_type,
 )
 from pyathena.sqlalchemy.util import _HashableDict, _split_type_arguments
-from pyathena.util import THROTTLING_ERROR_CODES, RetryConfig, _get_error_code, strtobool
+from pyathena.util import (
+    THROTTLING_ERROR_CODES,
+    RetryConfig,
+    _get_error_code,
+    _without_retries,
+    strtobool,
+)
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -229,6 +235,17 @@ class AthenaDialect(DefaultDialect):
         return cast(tuple[str], ()), self._create_connect_args(url)
 
     def _create_connect_args(self, url: URL) -> dict[str, Any]:
+        """Build ``pyathena.connect()`` arguments from a SQLAlchemy URL.
+
+        Query parameters are passed through, with the known boolean, integer
+        and float options converted from their string form.
+
+        Args:
+            url: The SQLAlchemy URL.
+
+        Returns:
+            The connection arguments.
+        """
         opts: dict[str, Any] = {
             "aws_access_key_id": url.username if url.username else None,
             "aws_secret_access_key": url.password if url.password else None,
@@ -254,6 +271,8 @@ class AthenaDialect(DefaultDialect):
             opts.update({"kill_on_interrupt": bool(strtobool(opts["kill_on_interrupt"]))})
         if "result_reuse_enable" in opts:
             opts.update({"result_reuse_enable": bool(strtobool(opts["result_reuse_enable"]))})
+        if "glue_metadata_fallback" in opts:
+            opts.update({"glue_metadata_fallback": bool(strtobool(opts["glue_metadata_fallback"]))})
         if "result_reuse_minutes" in opts:
             opts.update({"result_reuse_minutes": int(opts["result_reuse_minutes"])})
         # Store on the dialect so compilers can consult connection options
@@ -430,14 +449,14 @@ class AthenaDialect(DefaultDialect):
 
         Retrying those spends the policy's whole budget on a question one query
         settles; specific wrapped Glue codes stay retryable.
+
+        Args:
+            retry_config: The connection's retry policy.
+
+        Returns:
+            A new policy without ``_FALLBACK_ERROR_CODES``.
         """
-        return RetryConfig(
-            exceptions=[c for c in retry_config.exceptions if c not in cls._FALLBACK_ERROR_CODES],
-            attempt=retry_config.attempt,
-            multiplier=retry_config.multiplier,
-            max_delay=retry_config.max_delay,
-            exponential_base=retry_config.exponential_base,
-        )
+        return _without_retries(retry_config, cls._FALLBACK_ERROR_CODES)
 
     @staticmethod
     def _internal_cursor(raw_connection: PoolProxiedConnection) -> Any:

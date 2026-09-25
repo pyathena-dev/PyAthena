@@ -985,6 +985,9 @@ class HasTableTest(_HasTableTest):
                 Column("label", String),
             ).create(connection)
         raw_connection = _raw_connection(connection)
+        # Glue would answer a throttled lookup in this catalog first; this case
+        # covers the information_schema path it falls back to without Glue.
+        monkeypatch.setattr(raw_connection, "glue_metadata_fallback", False)
         # Retries are not shortened: the fallback must not wait for them.
         error = _metadata_error("ThrottlingException", "Rate exceeded")
         calls = _fail_get_table_metadata(monkeypatch, raw_connection, error, attempt=None)
