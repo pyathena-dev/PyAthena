@@ -286,10 +286,11 @@ It orders API-heavy jobs first and longer jobs earlier.
 With `--split-pages`, a job whose single trial needs at least that many pages becomes one job per measured repetition without a warmup, so those repetitions run on different hosts.
 `run` accepts the matching `--arraysize`, `--warmups`, and `--repetitions` options.
 
-Deploy a new stack with the fleet size; changing `FleetSize` on an existing stack does not wait for the added hosts to finish bootstrap.
-Then resolve its hosts, and prepare and publish the queue on one host:
+Deploy a new stack with the fleet size under its own name; changing `FleetSize` on an existing stack does not wait for the added hosts to finish bootstrap.
+Then resolve its hosts and open a session on one of them:
 
 ```bash
+BENCHMARK_STACK=pyathena-benchmark-fleet
 uv run --env-file ../.env --locked aws cloudformation deploy \
   --stack-name "$BENCHMARK_STACK" \
   --template-file cloudformation/benchmark.yaml \
@@ -300,10 +301,19 @@ BENCHMARK_GROUP=$(uv run --env-file ../.env --locked aws cloudformation describe
   --query 'Stacks[0].Outputs[?OutputKey==`AutoScalingGroup`].OutputValue | [0]' --output text)
 BENCHMARK_INSTANCES=$(uv run --env-file ../.env --locked aws autoscaling describe-auto-scaling-groups \
   --auto-scaling-group-names "$BENCHMARK_GROUP" --query 'AutoScalingGroups[0].Instances[].InstanceId' --output text)
+BENCHMARK_INSTANCE=${BENCHMARK_INSTANCES%%[[:space:]]*}
+uv run --env-file ../.env --locked aws ssm start-session --target "$BENCHMARK_INSTANCE"
 ```
 
+Prepare and publish the queue in that session:
+
 ```bash
-# On one host, as ec2-user in /opt/pyathena/benchmarks, with a configuration copied to results/fleet.toml
+sudo -iu ec2-user
+cd /opt/pyathena/benchmarks
+export AWS_DEFAULT_REGION=us-west-2
+BENCHMARK_STACK_ID=$(cat stack-id.txt)
+mkdir -p results
+cp config.toml results/fleet.toml  # edit scales, timeouts, and concurrency as needed
 uv run --no-sync python -m pyathena_bench --config results/fleet.toml prepare \
   --stack "$BENCHMARK_STACK_ID" --manifest results/input-large.json --scale large xlarge
 uv run --no-sync python -m pyathena_bench --config results/fleet.toml jobs \
@@ -322,7 +332,7 @@ Start a worker on every host from the local machine:
 uv run --env-file ../.env --locked aws ssm send-command --instance-ids $BENCHMARK_INSTANCES \
   --document-name AWS-RunShellScript \
   --parameters 'commands=["sudo -iu ec2-user bash -lc \"cd /opt/pyathena/benchmarks && mkdir -p results && (nohup uv run --no-sync python -m pyathena_bench worker --stack $(cat /opt/pyathena/benchmarks/stack-id.txt) --name large-1 > results/worker-large-1.log 2>&1 &)\""]'
-uv run --env-file ../.env --locked python -m pyathena_bench --profile pyathena status \
+uv run --env-file ../.env --locked python -m pyathena_bench status \
   --stack "$BENCHMARK_STACK" --name large-1
 ```
 
