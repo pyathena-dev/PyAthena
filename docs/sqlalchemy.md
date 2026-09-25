@@ -161,6 +161,7 @@ awsathena+aiorest://:@athena.{region_name}.amazonaws.com:443/{schema_name}?s3_st
 
 `Date` and `DateTime` values render as `DATE` and `TIMESTAMP` literals, both as bound parameters and as inline literals, and `TIMESTAMP` literals keep microseconds as described in {ref}`usage-query-with-parameters`.
 A `cast()` to `DateTime`, and the casts that ARRAY, MAP and ROW values use, render `TIMESTAMP(6)`, because a bare `TIMESTAMP` is `timestamp(3)` in Athena.
+Their results are `timestamp(6)` whatever the value, so `CREATE TABLE AS SELECT` into a Hive table and `UNLOAD`, including the `unload=True` option of the arrow, pandas and polars drivers, reject them as output columns.
 Column definitions in `CREATE TABLE` still render `TIMESTAMP`.
 
 ## Dialect & driver
