@@ -387,3 +387,25 @@ class TestQuiesce:
         monkeypatch.setattr("pyathena_bench.fleet.session", lambda settings: None)
         monkeypatch.setattr("pyathena_bench.fleet.client", lambda session_, name: athena)
         assert quiesce(Settings(poll_interval=0.01), tmp_path) == []
+
+
+class TestFollowUpSafety:
+    def test_a_queue_without_a_reservation_is_not_overwritten(self, tmp_path):
+        s3, queue = queue_with([job("a")], tmp_path)
+        s3.delete_object(Bucket="bucket", Key=queue.key("reservation.json"))
+        with pytest.raises(ValueError, match="already exists"):
+            submit(queue, [job("b")], tmp_path / "config.toml", tmp_path / "manifest.json")
+        assert json.loads(queue.read("jobs.json"))[0]["id"] == "a"
+
+    def test_quiesce_errors_are_recorded_before_the_worker_stops(self, tmp_path):
+        _, queue = queue_with([job("first"), job("second")], tmp_path)
+
+        def settle(output):
+            raise RuntimeError("Could not inspect query history")
+
+        ran = work(queue, tmp_path / "w", api_slots=1, runner=lambda *a: 1, settle=settle)
+        assert ran == ["first"]
+        errors = status(queue)["failed"]["first"]["quiesce_errors"]
+        assert errors == [
+            "Could not quiesce the job: RuntimeError: Could not inspect query history"
+        ]

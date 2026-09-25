@@ -337,6 +337,9 @@ def submit(queue: Queue, jobs: list[dict[str, Any]], config: Path, manifest: Pat
     reservation = queue.key("reservation.json")
     if not queue.put_if_absent(reservation, {"host": socket.gethostname(), "at": now()}):
         raise ValueError("Queue name is already reserved; choose a new name")
+    if queue.exists("queue.json"):
+        # A queue published without a reservation still owns the name.
+        raise ValueError("Queue already exists; choose a new name")
     try:
         for name, path in (("config.toml", config), ("manifest.json", manifest)):
             queue.s3.upload_file(str(path), queue.bucket, queue.key(name))
@@ -520,7 +523,10 @@ def work(
                     continue
                 start = now()
                 code = runner(job, workdir)
-                settle_errors = settle(workdir / "results" / job["id"]) if code else []
+                try:
+                    settle_errors = settle(workdir / "results" / job["id"]) if code else []
+                except Exception as exc:
+                    settle_errors = [f"Could not quiesce the job: {type(exc).__name__}: {exc}"]
                 queue.upload_tree(workdir / "results" / job["id"], "results", job["id"])
                 log = workdir / "logs" / f"{job['id']}.log"
                 if log.exists():
