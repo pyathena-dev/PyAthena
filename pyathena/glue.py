@@ -88,6 +88,17 @@ class GlueMetadataClient:
     def _catalog_request_kwargs(catalog_name: str | None) -> dict[str, str] | None:
         # AwsDataCatalog is the caller's default Glue catalog. An S3 Tables
         # catalog is a Glue federated catalog addressed by its Athena name.
+        """Glue request arguments that address an Athena catalog.
+
+        ``AwsDataCatalog`` is the caller's default Glue catalog. An S3 Tables
+        catalog is a Glue federated catalog addressed by its Athena name.
+
+        Args:
+            catalog_name: An Athena catalog name.
+
+        Returns:
+            The arguments, or None if Glue cannot answer for the catalog.
+        """
         if not catalog_name:
             return None
         lowered = catalog_name.lower()
@@ -99,6 +110,17 @@ class GlueMetadataClient:
 
     @classmethod
     def _require_catalog(cls, catalog_name: str | None) -> dict[str, str]:
+        """Glue request arguments for a catalog Glue must answer for.
+
+        Args:
+            catalog_name: An Athena catalog name.
+
+        Returns:
+            The arguments.
+
+        Raises:
+            ValueError: If Glue cannot answer for the catalog.
+        """
         request_kwargs = cls._catalog_request_kwargs(catalog_name)
         if request_kwargs is None:
             raise ValueError(f"Glue cannot answer for the catalog {catalog_name!r}.")
@@ -130,6 +152,14 @@ class GlueMetadataClient:
 
     @contextmanager
     def _tracking_reachability(self) -> Iterator[None]:
+        """Record that Glue cannot be reached when a request fails that way.
+
+        Yields:
+            None.
+
+        Raises:
+            Exception: The request's exception, unchanged.
+        """
         try:
             yield
         except self.UNREACHABLE_ERRORS:

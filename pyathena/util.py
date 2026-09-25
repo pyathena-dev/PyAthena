@@ -155,7 +155,15 @@ class RetryConfig:
 
 
 def _without_retries(config: RetryConfig, codes: Iterable[str]) -> RetryConfig:
-    """Copy a retry policy without retrying ``codes``."""
+    """Copy a retry policy without retrying ``codes``.
+
+    Args:
+        config: The retry policy to copy.
+        codes: The error codes to leave out of ``config.exceptions``.
+
+    Returns:
+        A new policy; ``config`` is unchanged.
+    """
     excluded = set(codes)
     return RetryConfig(
         exceptions=[c for c in config.exceptions if c not in excluded],
@@ -186,6 +194,12 @@ def _is_throttling_error(ex: BaseException) -> bool:
 
     That includes Glue's own throttling, which Athena reports inside a
     ``MetadataException``.
+
+    Args:
+        ex: The exception an AWS API call raised.
+
+    Returns:
+        True if its error code is in ``THROTTLING_ERROR_CODES``.
     """
     return _get_error_code(ex, unwrap_metadata=True) in THROTTLING_ERROR_CODES
 

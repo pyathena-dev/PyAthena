@@ -145,6 +145,28 @@ class S3FileSystem(AbstractFileSystem):
         *args,
         **kwargs,
     ) -> None:
+        """Create a filesystem for Amazon S3.
+
+        Args:
+            connection: A PyAthena connection whose session, region, config and
+                retry policy the S3 client uses. Without one, the client is built
+                from s3fs-compatible arguments in ``kwargs``.
+            default_block_size: The block size for reads and writes; defaults to
+                ``DEFAULT_BLOCK_SIZE``.
+            default_cache_type: The fsspec cache type for reads; defaults to
+                ``"bytes"``.
+            max_workers: The number of threads for parallel transfers.
+            s3_additional_kwargs: Extra arguments for S3 requests.
+            allow_bucket_creation: Whether ``mkdir``/``makedirs`` may create a
+                bucket.
+            allow_bucket_deletion: Whether ``rmdir`` may delete a bucket.
+            version_aware: Whether reads pin the object version observed at open
+                time.
+            *args: Passed to ``fsspec.AbstractFileSystem``.
+            **kwargs: Passed to ``fsspec.AbstractFileSystem``; without a
+                ``connection``, also s3fs-compatible client arguments.
+                ``requester_pays=True`` sends requester-pays requests.
+        """
         super().__init__(*args, **kwargs)
         if connection:
             self._client = connection.session.client(

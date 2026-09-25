@@ -88,6 +88,17 @@ class AioBaseCursor(BaseCursor):
         return query_id
 
     async def _get_query_execution(self, query_id: str) -> AthenaQueryExecution:  # type: ignore[override]
+        """Get a query execution with ``GetQueryExecution``.
+
+        Args:
+            query_id: The query execution ID.
+
+        Returns:
+            The query execution.
+
+        Raises:
+            OperationalError: If the request fails.
+        """
         request: dict[str, Any] = {"QueryExecutionId": query_id}
         try:
             response = await async_retry_api_call(
@@ -128,6 +139,14 @@ class AioBaseCursor(BaseCursor):
         return query_execution
 
     async def _cancel(self, query_id: str) -> None:  # type: ignore[override]
+        """Stop a query execution with ``StopQueryExecution``.
+
+        Args:
+            query_id: The query execution ID.
+
+        Raises:
+            OperationalError: If the request fails.
+        """
         request: dict[str, Any] = {"QueryExecutionId": query_id}
         try:
             await async_retry_api_call(
@@ -251,6 +270,23 @@ class AioBaseCursor(BaseCursor):
 
         The Glue client is built and the Glue request sent in a worker thread,
         as the Athena requests are.
+
+        Args:
+            catalog_name: The requested catalog, or None for the cursor's catalog.
+            athena_request: Sends the Athena request; receives the predicate
+                that stops its retries (or None) and whether to log a failure.
+            glue_request: Sends the Glue request; receives the connection's
+                ``GlueMetadataClient`` and the catalog name.
+            description: What the request does, for log messages.
+            logging_: Whether to log a failed request.
+            absence_is_final: Whether Glue's ``EntityNotFoundException`` answers
+                the request.
+
+        Returns:
+            The result of the Athena or the Glue request.
+
+        Raises:
+            OperationalError: If the request fails.
         """
         glue_catalog = self._glue_catalog_name(catalog_name)
         if glue_catalog is None:
@@ -277,6 +313,22 @@ class AioBaseCursor(BaseCursor):
         logging_: bool = True,
         stop_on: Callable[[BaseException], bool] | None = None,
     ) -> tuple[str | None, list[AthenaDatabase]]:
+        """List one page of the catalog's databases with ``ListDatabases``.
+
+        Args:
+            catalog_name: The catalog, or None for the cursor's catalog.
+            next_token: The token of the page to read.
+            max_results: The page size.
+            logging_: Whether to log a failed request.
+            stop_on: Stops the retries at an exception it accepts; used for
+                the first attempt of the Glue fallback.
+
+        Returns:
+            The next page's token, or None, and the page's databases.
+
+        Raises:
+            OperationalError: If the request fails.
+        """
         request = self._build_list_databases_request(
             catalog_name=catalog_name,
             next_token=next_token,
@@ -305,6 +357,21 @@ class AioBaseCursor(BaseCursor):
         max_results: int | None = None,
     ) -> list[AthenaDatabase]:
         # Pages already read are kept, so a retried request resumes after them.
+        """List the catalog's databases.
+
+        In ``AwsDataCatalog`` and S3 Tables catalogs, a throttled request is
+        answered from the AWS Glue Data Catalog; see ``glue_metadata_fallback``.
+
+        Args:
+            catalog_name: The catalog, or None for the cursor's catalog.
+            max_results: The page size of each request.
+
+        Returns:
+            The catalog's databases.
+
+        Raises:
+            OperationalError: If the request fails.
+        """
         databases: list[AthenaDatabase] = []
         next_token = None
 
@@ -336,6 +403,22 @@ class AioBaseCursor(BaseCursor):
         logging_: bool = True,
         stop_on: Callable[[BaseException], bool] | None = None,
     ) -> AthenaTableMetadata:
+        """Get one table's metadata with ``GetTableMetadata``.
+
+        Args:
+            table_name: The table name.
+            catalog_name: The catalog, or None for the cursor's catalog.
+            schema_name: The database, or None for the cursor's schema.
+            logging_: Whether to log a failed request.
+            stop_on: Stops the retries at an exception it accepts; used for
+                the first attempt of the Glue fallback.
+
+        Returns:
+            The table's metadata.
+
+        Raises:
+            OperationalError: If the request fails.
+        """
         request = self._build_get_table_metadata_request(
             table_name=table_name,
             catalog_name=catalog_name,
@@ -363,6 +446,24 @@ class AioBaseCursor(BaseCursor):
         schema_name: str | None = None,
         logging_: bool = True,
     ) -> AthenaTableMetadata:
+        """Get one table's metadata.
+
+        In ``AwsDataCatalog`` and S3 Tables catalogs, a throttled request is
+        answered from the AWS Glue Data Catalog; see ``glue_metadata_fallback``.
+
+        Args:
+            table_name: The table name.
+            catalog_name: The catalog, or None for the cursor's catalog.
+            schema_name: The database, or None for the cursor's schema.
+            logging_: Whether to log a failed request.
+
+        Returns:
+            The table's metadata.
+
+        Raises:
+            OperationalError: If the request fails, including when the table does
+                not exist.
+        """
         schema_name = schema_name if schema_name else self._schema_name
         return await self._async_with_glue_fallback(
             catalog_name,
@@ -389,6 +490,24 @@ class AioBaseCursor(BaseCursor):
         logging_: bool = True,
         stop_on: Callable[[BaseException], bool] | None = None,
     ) -> tuple[str | None, list[AthenaTableMetadata]]:
+        """List one page of a database's table metadata with ``ListTableMetadata``.
+
+        Args:
+            catalog_name: The catalog, or None for the cursor's catalog.
+            schema_name: The database, or None for the cursor's schema.
+            expression: A table name pattern.
+            next_token: The token of the page to read.
+            max_results: The page size.
+            logging_: Whether to log a failed request.
+            stop_on: Stops the retries at an exception it accepts; used for
+                the first attempt of the Glue fallback.
+
+        Returns:
+            The next page's token, or None, and the page's table metadata.
+
+        Raises:
+            OperationalError: If the request fails.
+        """
         request = self._build_list_table_metadata_request(
             catalog_name=catalog_name,
             schema_name=schema_name,
@@ -422,6 +541,24 @@ class AioBaseCursor(BaseCursor):
         max_results: int | None = None,
         logging_: bool = True,
     ) -> list[AthenaTableMetadata]:
+        """List a database's table metadata.
+
+        In ``AwsDataCatalog`` and S3 Tables catalogs, a throttled request is
+        answered from the AWS Glue Data Catalog; see ``glue_metadata_fallback``.
+
+        Args:
+            catalog_name: The catalog, or None for the cursor's catalog.
+            schema_name: The database, or None for the cursor's schema.
+            expression: A table name pattern.
+            max_results: The page size of each request.
+            logging_: Whether to log a failed request.
+
+        Returns:
+            The metadata of the database's tables.
+
+        Raises:
+            OperationalError: If the request fails.
+        """
         schema_name = schema_name if schema_name else self._schema_name
         # Pages already read are kept, so a retried request resumes after them.
         metadata: list[AthenaTableMetadata] = []

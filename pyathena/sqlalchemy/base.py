@@ -235,6 +235,17 @@ class AthenaDialect(DefaultDialect):
         return cast(tuple[str], ()), self._create_connect_args(url)
 
     def _create_connect_args(self, url: URL) -> dict[str, Any]:
+        """Build ``pyathena.connect()`` arguments from a SQLAlchemy URL.
+
+        Query parameters are passed through, with the known boolean, integer
+        and float options converted from their string form.
+
+        Args:
+            url: The SQLAlchemy URL.
+
+        Returns:
+            The connection arguments.
+        """
         opts: dict[str, Any] = {
             "aws_access_key_id": url.username if url.username else None,
             "aws_secret_access_key": url.password if url.password else None,
@@ -438,6 +449,12 @@ class AthenaDialect(DefaultDialect):
 
         Retrying those spends the policy's whole budget on a question one query
         settles; specific wrapped Glue codes stay retryable.
+
+        Args:
+            retry_config: The connection's retry policy.
+
+        Returns:
+            A new policy without ``_FALLBACK_ERROR_CODES``.
         """
         return _without_retries(retry_config, cls._FALLBACK_ERROR_CODES)
 
