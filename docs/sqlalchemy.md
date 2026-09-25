@@ -159,6 +159,10 @@ For async, replace the driver portion (e.g. `+rest` with `+aiorest`):
 awsathena+aiorest://:@athena.{region_name}.amazonaws.com:443/{schema_name}?s3_staging_dir={s3_staging_dir}&...
 ```
 
+`Date` and `DateTime` values render as `DATE` and `TIMESTAMP` literals, both as bound parameters and as inline literals, and `TIMESTAMP` literals keep microseconds as described in {ref}`usage-query-with-parameters`.
+A `cast()` to `DateTime`, and the casts that ARRAY, MAP and ROW values use, render `TIMESTAMP(6)`, because a bare `TIMESTAMP` is `timestamp(3)` in Athena.
+Column definitions in `CREATE TABLE` still render `TIMESTAMP`.
+
 ## Dialect & driver
 
 ### Sync
