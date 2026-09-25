@@ -423,6 +423,18 @@ class TestCursor:
         assert cursor.fetchone() == (expected,)
         assert cursor.description[0][1] == BINARY
 
+    def test_timestamp_result_precision(self, cursor):
+        cursor.execute(
+            """
+            SELECT TIMESTAMP '2020-01-01 00:00:00',
+                   CAST(TIMESTAMP '2020-01-01 00:00:00.123456' AS TIMESTAMP(9))
+            """
+        )
+        assert cursor.fetchone() == (
+            datetime(2020, 1, 1),
+            datetime(2020, 1, 1, 0, 0, 0, 123456),
+        )
+
     def test_datetime_parameter_microseconds(self, cursor):
         value = datetime(2017, 1, 1, 12, 0, 0, 789012)
         cursor.execute("SELECT %(value)s", {"value": value})
