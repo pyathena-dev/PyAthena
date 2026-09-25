@@ -14,7 +14,15 @@ import pytest
 from botocore.exceptions import ClientError
 from pyathena_bench.__main__ import main
 from pyathena_bench.config import Settings
-from pyathena_bench.fleet import Filters, Queue, expand_jobs, status, submit, work
+from pyathena_bench.fleet import (
+    Filters,
+    Queue,
+    expand_jobs,
+    job_query_ids,
+    status,
+    submit,
+    work,
+)
 
 SETTINGS = Settings(scales={"small": 10000, "xlarge": 10000000})
 
@@ -39,6 +47,10 @@ class FakeS3:
     def upload_file(self, filename, bucket, key):
         self.objects[key] = Path(filename).read_bytes()
 
+    def list_objects_v2(self, **kwargs):
+        keys = [k for k in self.objects if k.startswith(kwargs["Prefix"])]
+        return {"KeyCount": len(keys[: kwargs.get("MaxKeys", 1000)])}
+
     def get_paginator(self, name):
         def paginate(**kwargs):
             keys = [k for k in sorted(self.objects) if k.startswith(kwargs["Prefix"])]
@@ -58,8 +70,19 @@ def queue_with(jobs, tmp_path):
     return s3, queue
 
 
-def job(job_id, heavy=False):
-    return {"id": job_id, "args": [], "api_heavy": heavy, "pages": 0, "weight": 0}
+def job(job_id, heavy=False, api_weight=1):
+    return {
+        "id": job_id,
+        "args": [],
+        "api_heavy": heavy,
+        "api_weight": api_weight if heavy else 0,
+        "pages": 0,
+        "weight": 0,
+    }
+
+
+def no_queries(ids):
+    return []
 
 
 class TestExpandJobs:
@@ -110,6 +133,27 @@ class TestExpandJobs:
         assert heavy == sorted(heavy, reverse=True)
 
 
+class TestExpandJobsArraysize:
+    def test_row_output_jobs_keep_one_arraysize_for_every_family(self):
+        jobs = expand_jobs(
+            SETTINGS,
+            ["single"],
+            ["small"],
+            ["flat"],
+            Filters(family=["s3fs"], api=["sync"], arraysize=[100]),
+        )
+        assert [j["id"] for j in jobs] == ["single-small-flat-s3fs-sync-csv-rows-a100"]
+        assert jobs[0]["args"][-2:] == ["--arraysize", "100"]
+        assert not jobs[0]["api_heavy"]
+
+    def test_concurrent_row_jobs_weigh_simultaneous_paging_queries(self):
+        settings = Settings(scales={"small": 10000}, concurrency=[1, 10])
+        jobs = expand_jobs(
+            settings, ["concurrent"], ["small"], ["flat"], Filters(family=["cursor"], api=["aio"])
+        )
+        assert [(j["api_heavy"], j["api_weight"]) for j in jobs] == [(True, 10)]
+
+
 class TestQueue:
     def test_submit_refuses_an_existing_queue_and_duplicate_ids(self, tmp_path):
         s3, queue = queue_with([job("a")], tmp_path)
@@ -126,6 +170,7 @@ class TestQueue:
     def test_workers_run_each_job_once_and_record_results(self, tmp_path):
         s3, queue = queue_with([job("heavy", heavy=True), job("light")], tmp_path)
         runs = []
+        settled = []
 
         def runner(item, workdir):
             runs.append(item["id"])
@@ -134,9 +179,27 @@ class TestQueue:
             (out / "summary.csv").write_text("x")
             return 0 if item["id"] == "light" else 1
 
-        assert work(queue, tmp_path / "w1", api_slots=1, poll_seconds=0, runner=runner)
-        assert work(queue, tmp_path / "w2", api_slots=1, poll_seconds=0, runner=runner) == []
+        assert work(
+            queue,
+            tmp_path / "w1",
+            api_slots=1,
+            poll_seconds=0,
+            runner=runner,
+            settle=settled.append,
+        )
+        assert (
+            work(
+                queue,
+                tmp_path / "w2",
+                api_slots=1,
+                poll_seconds=0,
+                runner=runner,
+                settle=no_queries,
+            )
+            == []
+        )
         assert sorted(runs) == ["heavy", "light"]
+        assert settled == [set()]
         assert queue.key("results", "light", "summary.csv") in s3.objects
         assert not queue.names("slots")
         summary = status(queue)
@@ -154,7 +217,7 @@ class TestQueue:
             s3.delete_object(Bucket="bucket", Key=other_host)
             return 0
 
-        work(queue, tmp_path / "w", api_slots=1, poll_seconds=0, runner=runner)
+        work(queue, tmp_path / "w", api_slots=1, poll_seconds=0, runner=runner, settle=no_queries)
         assert order == ["light", "heavy"]
 
 
@@ -177,3 +240,76 @@ class TestCommandLine:
         plan = json.loads(capsys.readouterr().out)
         assert [c["arraysize"] for c in plan["cases"]] == [1000]
         assert plan["trials"] == 1
+
+
+class TestQueueSafety:
+    def test_interrupted_publication_can_be_repeated_and_is_not_consumed(self, tmp_path):
+        s3 = FakeS3()
+        queue = Queue(s3, "bucket", "run1")
+        config = tmp_path / "config.toml"
+        config.write_text("[scales]\nsmall = 10000\n")
+        with pytest.raises(FileNotFoundError):
+            submit(queue, [job("a")], config, tmp_path / "missing.json")
+        with pytest.raises(ValueError, match="incompletely published"):
+            work(queue, tmp_path / "w", api_slots=1, runner=lambda *a: 0, settle=no_queries)
+        manifest = tmp_path / "manifest.json"
+        manifest.write_text("{}")
+        submit(queue, [job("a")], config, manifest)
+        assert status(queue)["jobs"] == 1
+
+    def test_failed_jobs_are_quiesced_and_unconfirmed_queries_stop_the_worker(self, tmp_path):
+        _, queue = queue_with([job("first"), job("second")], tmp_path)
+        runs = []
+
+        def runner(item, workdir):
+            runs.append(item["id"])
+            out = workdir / "results" / item["id"]
+            out.mkdir(parents=True)
+            (out / "events.jsonl").write_text(
+                json.dumps({"event": "query", "query_id": "q1", "trial": "t"}) + "\n"
+            )
+            return 1
+
+        def settle(ids):
+            assert ids == {"q1"}
+            return ["q1: still RUNNING"]
+
+        assert work(queue, tmp_path / "w", api_slots=1, runner=runner, settle=settle) == ["first"]
+        assert runs == ["first"]
+        assert status(queue)["failed"]["first"]["quiesce_errors"] == ["q1: still RUNNING"]
+
+    def test_waiting_heavy_job_reserves_slots_from_later_heavy_jobs(self, tmp_path, monkeypatch):
+        s3, queue = queue_with(
+            [job("wide", heavy=True, api_weight=2), job("narrow", heavy=True)], tmp_path
+        )
+        other_host = queue.key("slots", "0")
+        s3.put_object(Bucket="bucket", Key=other_host, Body=b"{}")
+        attempts = []
+
+        def sleep_and_release(seconds):
+            attempts.append(sorted(queue.names("claims")))
+            s3.delete_object(Bucket="bucket", Key=other_host)
+
+        order = []
+
+        def runner(item, workdir):
+            order.append(item["id"])
+            return 0
+
+        monkeypatch.setattr("pyathena_bench.fleet.time.sleep", sleep_and_release)
+        work(queue, tmp_path / "w", api_slots=2, runner=runner, settle=no_queries)
+        assert attempts == [[]]
+        assert order == ["wide", "narrow"]
+
+    def test_job_query_ids_reads_reported_queries(self, tmp_path):
+        (tmp_path / "events.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps({"event": "query", "query_id": "a"}),
+                    json.dumps({"event": "athena", "query_id": "b"}),
+                    "{incomplete",
+                ]
+            )
+        )
+        assert job_query_ids(tmp_path) == {"a"}
+        assert job_query_ids(tmp_path / "missing") == set()

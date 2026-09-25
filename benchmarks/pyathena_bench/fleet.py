@@ -22,6 +22,7 @@ from typing import Any
 
 from botocore.exceptions import ClientError
 
+from pyathena_bench.aws import cancel_queries, client, session
 from pyathena_bench.cases import Case, matrix
 from pyathena_bench.config import Settings
 
@@ -87,10 +88,11 @@ def expand_jobs(
     """Split a selection into independent ``run`` invocations.
 
     A job covers one suite, scale, shape, family, API, transport, and output
-    kind, and additionally one arraysize for API row cursors. Jobs that page
-    through GetQueryResults are marked so workers can bound their concurrency.
-    When one trial of such a job needs at least ``split_pages`` pages, each
-    measured repetition becomes a separate single-trial job without a warmup.
+    kind, and additionally one arraysize for row output. Jobs that page through
+    GetQueryResults are marked with the number of simultaneous paging queries
+    so workers can bound the fleet's request rate. When one trial of such a job
+    needs at least ``split_pages`` pages, each measured repetition becomes a
+    separate single-trial job without a warmup.
 
     Args:
         settings: Configuration that defines the matrix and repetitions.
@@ -113,7 +115,7 @@ def expand_jobs(
             for shape in shapes:
                 groups: dict[tuple[Any, ...], list[Case]] = {}
                 for case in filters.select(matrix(settings, suite, shape)):
-                    arraysize = case.arraysize if case.family in API_FAMILIES else None
+                    arraysize = case.arraysize if case.output == "rows" else None
                     key = (case.family, case.api, case.transport, case.output, arraysize)
                     groups.setdefault(key, []).append(case)
                 for (family, api, transport, output, arraysize), cases in groups.items():
@@ -128,6 +130,9 @@ def expand_jobs(
                         args += ["--arraysize", str(arraysize)]
                     runnable = [c for c in cases if c.unsupported is None]
                     pages = max((api_pages(c, rows) for c in runnable), default=0)
+                    api_weight = max(
+                        (c.concurrency for c in runnable if api_pages(c, rows)), default=0
+                    )
                     weight = rows * max(len(runnable), 1)
                     if split_pages and pages >= split_pages:
                         jobs.extend(
@@ -135,6 +140,7 @@ def expand_jobs(
                                 "id": f"{base}-r{repetition}",
                                 "args": [*args, "--warmups", "0", "--repetitions", "1"],
                                 "api_heavy": True,
+                                "api_weight": api_weight,
                                 "pages": pages * len(runnable),
                                 "weight": weight,
                             }
@@ -147,6 +153,7 @@ def expand_jobs(
                                 "id": base,
                                 "args": args,
                                 "api_heavy": pages > 0,
+                                "api_weight": api_weight,
                                 "pages": pages * len(runnable) * trials,
                                 "weight": weight * trials,
                             }
@@ -240,21 +247,44 @@ class Queue:
         """
         return self.s3.get_object(Bucket=self.bucket, Key=self.key(*parts))["Body"].read()
 
-    def acquire_slot(self, slots: int, owner: dict[str, Any]) -> str | None:
-        """Take one of the API slots that bound concurrent API-heavy jobs.
+    def acquire_slots(self, slots: int, count: int, owner: dict[str, Any]) -> list[str] | None:
+        """Take API slots that bound simultaneous GetQueryResults paging.
 
         Args:
-            slots: Number of API slots.
-            owner: Description stored in the slot object.
+            slots: Number of API slots in the fleet.
+            count: Slots needed; one per simultaneous paging query, capped at ``slots``.
+            owner: Description stored in each slot object.
 
         Returns:
-            Slot object key, or None if every slot is taken.
+            Slot object keys, or None if not enough slots are free; partially
+            acquired slots are released.
         """
+        needed = min(max(count, 1), slots)
+        taken: list[str] = []
         for index in range(slots):
             key = self.key("slots", str(index))
             if self.put_if_absent(key, owner):
-                return key
+                taken.append(key)
+                if len(taken) == needed:
+                    return taken
+        for key in taken:
+            self.release(key)
         return None
+
+    def exists(self, *parts: str) -> bool:
+        """Return whether a queue object exists.
+
+        Args:
+            *parts: Path segments below the queue prefix.
+
+        Returns:
+            True if the object exists.
+        """
+        return bool(
+            self.s3.list_objects_v2(Bucket=self.bucket, Prefix=self.key(*parts), MaxKeys=1).get(
+                "KeyCount"
+            )
+        )
 
     def release(self, key: str) -> None:
         """Delete a queue object such as a slot.
@@ -293,13 +323,16 @@ def submit(queue: Queue, jobs: list[dict[str, Any]], config: Path, manifest: Pat
     """
     if len({j["id"] for j in jobs}) != len(jobs):
         raise ValueError("Job IDs must be unique")
-    if not queue.put_if_absent(queue.key("queue.json"), {"created": now(), "jobs": len(jobs)}):
+    if queue.exists("queue.json"):
         raise ValueError("Queue already exists; choose a new name")
     for name, path in (("config.toml", config), ("manifest.json", manifest)):
         queue.s3.upload_file(str(path), queue.bucket, queue.key(name))
     queue.s3.put_object(
         Bucket=queue.bucket, Key=queue.key("jobs.json"), Body=json.dumps(jobs, indent=1).encode()
     )
+    # Workers start only after this marker, so an interrupted upload can be repeated.
+    if not queue.put_if_absent(queue.key("queue.json"), {"created": now(), "jobs": len(jobs)}):
+        raise ValueError("Queue already exists; choose a new name")
 
 
 def run_job(job: dict[str, Any], workdir: Path) -> int:
@@ -322,32 +355,103 @@ def run_job(job: dict[str, Any], workdir: Path) -> int:
         return subprocess.call(command, stdout=stream, stderr=subprocess.STDOUT)
 
 
+def job_query_ids(output: Path) -> set[str]:
+    """Collect the query IDs that a job's trials reported.
+
+    Args:
+        output: Job output directory with ``events.jsonl``.
+
+    Returns:
+        Observed query IDs; empty if the job wrote no events.
+    """
+    events = output / "events.jsonl"
+    if not events.exists():
+        return set()
+    ids = set()
+    for line in events.read_text().splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("event") == "query" and event.get("query_id"):
+            ids.add(event["query_id"])
+    return ids
+
+
+def quiesce(settings: Settings, query_ids: set[str]) -> list[str]:
+    """Cancel a failed job's observed queries and wait until none is active.
+
+    Args:
+        settings: Configuration with the AWS region, workgroup, and timeouts.
+        query_ids: Query IDs that the job's trials reported.
+
+    Returns:
+        Errors from cancellation or from waiting past the timeout.
+    """
+    errors = cancel_queries(settings, query_ids)
+    athena = client(session(settings), "athena")
+    deadline = time.monotonic() + settings.timeout_seconds
+    for query_id in sorted(query_ids):
+        while True:
+            try:
+                state = athena.get_query_execution(QueryExecutionId=query_id)["QueryExecution"][
+                    "Status"
+                ]["State"]
+            except ClientError as exc:
+                errors.append(f"{query_id}: {exc}")
+                break
+            if state not in {"QUEUED", "RUNNING"}:
+                break
+            if time.monotonic() >= deadline:
+                errors.append(f"{query_id}: still {state}")
+                break
+            time.sleep(settings.poll_interval)
+    return errors
+
+
 def work(
     queue: Queue,
     workdir: Path,
     api_slots: int,
     poll_seconds: float = 30.0,
     runner: Callable[[dict[str, Any], Path], int] = run_job,
+    settle: Callable[[set[str]], list[str]] | None = None,
 ) -> list[str]:
     """Claim and run queued jobs until every job has been claimed.
 
-    Each host runs one worker, so jobs on a host never overlap. API-heavy jobs
-    start only after the worker takes one of ``api_slots`` shared slots.
+    Each host runs one worker, so jobs on a host never overlap. An API-heavy
+    job starts only after the worker takes one shared slot per simultaneous
+    paging query; while it waits, no later API-heavy job takes slots. After a
+    failed job, the worker cancels the job's observed queries and waits until
+    they stop before claiming another job.
 
     Args:
         queue: Queue to consume.
         workdir: Local directory for queue files, results, and logs.
-        api_slots: Maximum number of API-heavy jobs running across the fleet.
+        api_slots: Fleet-wide number of simultaneous GetQueryResults paging queries.
         poll_seconds: Wait before rescanning when only slot-limited jobs remain.
         runner: Function that runs one job and returns its exit code.
+        settle: Function that quiesces a failed job's query IDs and returns
+            errors; defaults to :func:`quiesce` with the queued configuration.
 
     Returns:
         IDs of the jobs this worker ran.
+
+    Raises:
+        ValueError: If the queue has not been completely published.
     """
+    if not queue.exists("queue.json"):
+        raise ValueError("Queue is missing or incompletely published")
     workdir.mkdir(parents=True, exist_ok=True)
     for name in ("config.toml", "manifest.json", "jobs.json"):
         (workdir / name).write_bytes(queue.read(name))
     jobs = json.loads((workdir / "jobs.json").read_text())
+    if settle is None:
+        settings = Settings.load(workdir / "config.toml")
+
+        def settle(ids: set[str]) -> list[str]:
+            return quiesce(settings, ids)
+
     host = socket.gethostname()
     completed: list[str] = []
     while True:
@@ -356,16 +460,27 @@ def work(
         if not pending:
             return completed
         started = False
+        reserved = False
         for job in pending:
             owner = {"host": host, "job": job["id"], "at": now()}
-            slot = queue.acquire_slot(api_slots, owner) if job["api_heavy"] else None
-            if job["api_heavy"] and slot is None:
-                continue
+            slots: list[str] = []
+            if job["api_heavy"]:
+                if reserved:
+                    continue
+                acquired = queue.acquire_slots(api_slots, job.get("api_weight", 1), owner)
+                if acquired is None:
+                    # Let slots drain for this job instead of starving it with smaller ones.
+                    reserved = True
+                    continue
+                slots = acquired
             try:
                 if not queue.put_if_absent(queue.key("claims", job["id"]), owner):
                     continue
                 start = now()
                 code = runner(job, workdir)
+                settle_errors = (
+                    settle(job_query_ids(workdir / "results" / job["id"])) if code else []
+                )
                 queue.upload_tree(workdir / "results" / job["id"], "results", job["id"])
                 log = workdir / "logs" / f"{job['id']}.log"
                 if log.exists():
@@ -374,14 +489,23 @@ def work(
                     Bucket=queue.bucket,
                     Key=queue.key("done", job["id"]),
                     Body=json.dumps(
-                        {"exit_code": code, "host": host, "start": start, "end": now()}
+                        {
+                            "exit_code": code,
+                            "host": host,
+                            "start": start,
+                            "end": now(),
+                            "quiesce_errors": settle_errors,
+                        }
                     ).encode(),
                 )
                 completed.append(job["id"])
+                if settle_errors:
+                    # Unconfirmed queries could overlap later trials on this host.
+                    return completed
                 started = True
                 break
             finally:
-                if slot is not None:
+                for slot in slots:
                     queue.release(slot)
         if not started:
             time.sleep(poll_seconds)
@@ -396,6 +520,8 @@ def status(queue: Queue) -> dict[str, Any]:
     Returns:
         Counts of jobs, claims, and completions, with failed job details.
     """
+    if not queue.exists("queue.json"):
+        raise ValueError("Queue is missing or incompletely published")
     jobs = json.loads(queue.read("jobs.json"))
     done = queue.names("done")
     failed = {}
