@@ -409,12 +409,12 @@ class TestArrayValueProcessor:
     @pytest.mark.parametrize(
         ("type_", "expected"),
         [
-            (AthenaArray(types.Date), "ARRAY[DATE '2025-01-02']"),
-            (AthenaArray(types.DateTime), "ARRAY[TIMESTAMP '2025-01-02']"),
+            (AthenaArray(types.Date), "ARRAY[DATE '2025-01-02'' --']"),
+            (AthenaArray(types.DateTime), "ARRAY[TIMESTAMP '2025-01-02'' --']"),
         ],
     )
     def test_array_literal_renders_temporal_string_elements(self, type_, expected):
-        assert type_.literal_processor(AthenaDialect())(["2025-01-02"]) == expected
+        assert type_.literal_processor(AthenaDialect())(["2025-01-02' --"]) == expected
 
     def test_array_binding_preserves_in_parameters(self):
         formatter = DefaultParameterFormatter()

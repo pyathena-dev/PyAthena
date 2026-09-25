@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
+from sqlalchemy import types
 from sqlalchemy.sql.type_api import TypeEngine
 
-from pyathena.formatter import _timestamp_literal
+from pyathena.formatter import _escape_trino, _timestamp_literal
 
 if TYPE_CHECKING:
     from sqlalchemy import Dialect
@@ -34,22 +36,45 @@ class AthenaTimestamp(TypeEngine[datetime]):
 
     __visit_name__ = "TIMESTAMP"
 
+    @property
+    def python_type(self) -> type[datetime]:
+        """The Python type of TIMESTAMP values.
+
+        Returns:
+            ``datetime.datetime``.
+        """
+        return datetime
+
     @staticmethod
-    def process(value: datetime | Any | None) -> str:
+    def process(value: datetime | Any | None, quote: Callable[[str], str] = _escape_trino) -> str:
         """Render a value as an Athena TIMESTAMP literal.
 
         Args:
             value: A datetime, or any other value rendered with ``str()``.
+            quote: The function quoting a value that is not a datetime.
 
         Returns:
             The TIMESTAMP literal.
         """
         if isinstance(value, datetime):
             return _timestamp_literal(value)
-        return f"TIMESTAMP '{value!s}'"
+        return f"TIMESTAMP {quote(str(value))}"
 
     def literal_processor(self, dialect: Dialect) -> _LiteralProcessorType[datetime] | None:
-        return self.process
+        """Return the literal renderer for the dialect.
+
+        Args:
+            dialect: The dialect compiling the statement.
+
+        Returns:
+            A function rendering a value as a TIMESTAMP literal.
+        """
+        quote = _string_quote(dialect)
+
+        def process(value: datetime | Any | None) -> str:
+            return self.process(value, quote)
+
+        return process
 
 
 class AthenaDate(TypeEngine[date]):
@@ -70,13 +95,58 @@ class AthenaDate(TypeEngine[date]):
 
     __visit_name__ = "DATE"
 
+    @property
+    def python_type(self) -> type[date]:
+        """The Python type of DATE values.
+
+        Returns:
+            ``datetime.date``.
+        """
+        return date
+
     @staticmethod
-    def process(value: date | Any) -> str:
+    def process(value: date | Any, quote: Callable[[str], str] = _escape_trino) -> str:
+        """Render a value as an Athena DATE literal.
+
+        Args:
+            value: A date, or any other value rendered with ``str()``.
+            quote: The function quoting a value that is not a date.
+
+        Returns:
+            The DATE literal.
+        """
         # datetime is a subclass of date, so this branch also covers datetime,
         # which is truncated to its date part.
         if isinstance(value, date):
             return f"DATE '{value:%Y-%m-%d}'"
-        return f"DATE '{value!s}'"
+        return f"DATE {quote(str(value))}"
 
     def literal_processor(self, dialect: Dialect) -> _LiteralProcessorType[date] | None:
-        return self.process
+        """Return the literal renderer for the dialect.
+
+        Args:
+            dialect: The dialect compiling the statement.
+
+        Returns:
+            A function rendering a value as a DATE literal.
+        """
+        quote = _string_quote(dialect)
+
+        def process(value: date | Any) -> str:
+            return self.process(value, quote)
+
+        return process
+
+
+def _string_quote(dialect: Dialect) -> Callable[[str], str]:
+    """Return the dialect's string literal renderer.
+
+    It also doubles ``%`` for dialects whose paramstyle needs it.
+
+    Args:
+        dialect: The dialect compiling the statement.
+
+    Returns:
+        A function rendering a string as a quoted SQL literal.
+    """
+    return types.String().literal_processor(dialect) or _escape_trino

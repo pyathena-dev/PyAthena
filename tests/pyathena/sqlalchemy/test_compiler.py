@@ -453,6 +453,15 @@ class TestAthenaStatementCompiler:
         sql = str(stmt.compile(dialect=self.dialect, compile_kwargs=compile_kwargs))
         assert sql == f"SELECT {expected} AS anon_1"
 
+    @pytest.mark.parametrize(
+        ("type_", "expected"),
+        [(types.Date, "DATE '2012-10-15 10%%'"), (types.DateTime, "TIMESTAMP '2012-10-15 10%%'")],
+    )
+    def test_temporal_string_literal_doubles_percent(self, type_, expected):
+        stmt = select(literal("2012-10-15 10%", type_))
+        sql = str(stmt.compile(dialect=self.dialect, compile_kwargs={"literal_binds": True}))
+        assert sql == f"SELECT {expected} AS anon_1"
+
 
 class TestAthenaDDLCompiler:
     """Compile-only (no AWS) tests for the DDL compiler's S3 Tables support.
