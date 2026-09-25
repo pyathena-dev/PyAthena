@@ -99,8 +99,8 @@ def setup(app):
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = "PyAthena"
-copyright = f"{datetime.now(timezone.utc).year}, laughingman7743"
-author = "laughingman7743"
+copyright = f"2017-{datetime.now(timezone.utc).year}, The PyAthena authors"
+author = "The PyAthena authors"
 # Version will be set dynamically in setup() function
 version = ""
 release = ""
