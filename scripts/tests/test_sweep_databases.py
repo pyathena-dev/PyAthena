@@ -151,8 +151,9 @@ def test_failed_inventory_does_not_delete_anything(glue):
 @pytest.mark.parametrize(("arguments", "dry_run"), [([], True), (["--apply"], False)])
 @pytest.mark.parametrize("s3tables_catalog", [None, "s3tablescatalog/table-bucket"])
 def test_cli_defaults_to_preview(monkeypatch, tmp_path, arguments, dry_run, s3tables_catalog):
-    session = Mock(region_name="us-west-2")
+    session = Mock()
     session.client.return_value.get_caller_identity.return_value = {"Account": CATALOG}
+    session.client.return_value.meta.region_name = "us-west-2"
     monkeypatch.setattr("scripts.sweep_databases.boto3.Session", lambda: session)
     result = {"eligible": 1, "deleted": int(not dry_run), "skipped": 0}
     sweep = Mock(return_value=result)
@@ -298,3 +299,39 @@ def test_only_concurrent_namespace_absence_is_ignored(s3tables, error):
     else:
         with pytest.raises(ClientError, match=error):
             sweep_s3tables_namespaces(client, BUCKET_ARN, dry_run=False)
+
+
+def test_cli_rejects_a_malformed_s3tables_catalog(monkeypatch):
+    session = Mock()
+    session.client.return_value.get_caller_identity.return_value = {"Account": CATALOG}
+    monkeypatch.setattr("scripts.sweep_databases.boto3.Session", lambda: session)
+    sweep = Mock()
+    monkeypatch.setattr("scripts.sweep_databases.sweep_databases", sweep)
+    monkeypatch.setattr("sys.argv", ["sweep_databases.py"])
+    monkeypatch.setenv("AWS_ATHENA_S3_TABLES_CATALOG", "table-bucket")
+    with pytest.raises(SystemExit):
+        main()
+    # Nothing is swept when the configuration is wrong.
+    sweep.assert_not_called()
+
+
+def test_cli_reports_databases_before_a_failing_namespace_sweep(monkeypatch, tmp_path):
+    session = Mock()
+    session.client.return_value.get_caller_identity.return_value = {"Account": CATALOG}
+    session.client.return_value.meta.region_name = "us-west-2"
+    monkeypatch.setattr("scripts.sweep_databases.boto3.Session", lambda: session)
+    monkeypatch.setattr(
+        "scripts.sweep_databases.sweep_databases",
+        Mock(return_value={"eligible": 2, "deleted": 2, "skipped": 0}),
+    )
+    monkeypatch.setattr(
+        "scripts.sweep_databases.sweep_s3tables_namespaces",
+        Mock(side_effect=RuntimeError("namespace sweep failed")),
+    )
+    monkeypatch.setattr("sys.argv", ["sweep_databases.py", "--apply"])
+    monkeypatch.setenv("AWS_ATHENA_S3_TABLES_CATALOG", "s3tablescatalog/table-bucket")
+    summary = tmp_path / "summary"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    with pytest.raises(RuntimeError):
+        main()
+    assert summary.read_text().splitlines() == ["Sweep databases: eligible=2, deleted=2, skipped=0"]

@@ -62,7 +62,9 @@ class TestGlueMetadataClient:
         reason="AWS_ATHENA_S3_TABLES_CATALOG is not configured",
     )
     def test_reads_s3_tables_catalog(self):
-        # A table of its own, so a rerun of this test starts clean.
+        # A table of its own, so a rerun of this test starts clean. Listing the
+        # bucket's namespaces is left out: other sessions create and delete
+        # theirs, and a listing fails when a namespace goes away during it.
         schema = ENV.s3tables_namespace
         table = f"test_glue_reads_s3_tables_{uuid.uuid4().hex[:8]}"
         with (
@@ -86,7 +88,6 @@ class TestGlueMetadataClient:
                 assert [self._view(m) for m in listed] == [
                     self._view(m) for m in cursor.list_table_metadata(expression=table)
                 ]
-                assert schema in [d.name for d in glue.list_databases(ENV.s3tables_catalog)]
             finally:
                 cursor.execute(f"DROP TABLE IF EXISTS {schema}.{table}")
 

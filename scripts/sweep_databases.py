@@ -43,10 +43,12 @@ import boto3
 from botocore.config import Config
 
 _LOGGER = logging.getLogger(__name__)
+# PyAthena test sessions name their schema, and their S3 Tables namespace, this way.
+_PYATHENA_TEST_SCHEMA = r"pyathena_test_[a-z0-9]{10}"
 _TEST_DATABASE = re.compile(
-    r"(?:pyathena_test_[a-z0-9]{10}|test_[0-9a-f]{12}(?:_test_schema(?:_2)?)?)"
+    rf"(?:{_PYATHENA_TEST_SCHEMA}|test_[0-9a-f]{{12}}(?:_test_schema(?:_2)?)?)"
 )
-_TEST_NAMESPACE = re.compile(r"pyathena_test_[a-z0-9]{10}")
+_TEST_NAMESPACE = re.compile(_PYATHENA_TEST_SCHEMA)
 
 
 def _eligible(database: dict[str, Any], cutoff: datetime) -> bool:
@@ -196,28 +198,48 @@ def main() -> None:
     session = boto3.Session()
     catalog_id = session.client("sts", config=config).get_caller_identity()["Account"]
     mode = "Sweep" if args.apply else "Preview"
-    results = {
-        "databases": sweep_databases(
-            session.client("glue", config=config), catalog_id, dry_run=not args.apply
-        )
-    }
     s3tables_catalog = os.environ.get("AWS_ATHENA_S3_TABLES_CATALOG")
+    bucket = None
     if s3tables_catalog:
-        bucket = s3tables_catalog.split("/", 1)[1]
-        arn = f"arn:aws:s3tables:{session.region_name}:{catalog_id}:bucket/{bucket}"
-        results["S3 Tables namespaces"] = sweep_s3tables_namespaces(
-            session.client("s3tables", config=config), arn, dry_run=not args.apply
+        prefix, _, bucket = s3tables_catalog.partition("/")
+        if prefix != "s3tablescatalog" or not bucket:
+            parser.error(
+                "AWS_ATHENA_S3_TABLES_CATALOG must be s3tablescatalog/<table-bucket>, "
+                f"not {s3tables_catalog!r}"
+            )
+    # Report each sweep as it finishes, so a later failure keeps earlier results.
+    _report(
+        mode,
+        "databases",
+        sweep_databases(session.client("glue", config=config), catalog_id, dry_run=not args.apply),
+    )
+    if bucket:
+        client = session.client("s3tables", config=config)
+        arn = f"arn:aws:s3tables:{client.meta.region_name}:{catalog_id}:bucket/{bucket}"
+        _report(
+            mode,
+            "S3 Tables namespaces",
+            sweep_s3tables_namespaces(client, arn, dry_run=not args.apply),
         )
+
+
+def _report(mode: str, kind: str, result: dict[str, int]) -> None:
+    """Log a sweep's counts and append them to the GitHub Actions step summary.
+
+    Args:
+        mode: ``"Sweep"`` or ``"Preview"``.
+        kind: What was swept.
+        result: The counts the sweep returned.
+    """
+    summary = (
+        f"{mode} {kind}: eligible={result['eligible']}, "
+        f"deleted={result['deleted']}, skipped={result['skipped']}"
+    )
+    _LOGGER.info(summary)
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-    for kind, result in results.items():
-        summary = (
-            f"{mode} {kind}: eligible={result['eligible']}, "
-            f"deleted={result['deleted']}, skipped={result['skipped']}"
-        )
-        _LOGGER.info(summary)
-        if summary_path:
-            with open(summary_path, "a", encoding="utf-8") as output:
-                output.write(summary + "\n")
+    if summary_path:
+        with open(summary_path, "a", encoding="utf-8") as output:
+            output.write(summary + "\n")
 
 
 if __name__ == "__main__":
