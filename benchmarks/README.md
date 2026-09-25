@@ -316,7 +316,7 @@ Start a worker on every host from the local machine:
 ```bash
 uv run --env-file ../.env --locked aws ssm send-command --instance-ids $BENCHMARK_INSTANCES \
   --document-name AWS-RunShellScript \
-  --parameters 'commands=["sudo -iu ec2-user bash -lc \"cd /opt/pyathena/benchmarks && (nohup uv run --no-sync python -m pyathena_bench worker --stack $(cat /opt/pyathena/benchmarks/stack-id.txt) --name large-1 > results/worker-large-1.log 2>&1 &)\""]'
+  --parameters 'commands=["sudo -iu ec2-user bash -lc \"cd /opt/pyathena/benchmarks && mkdir -p results && (nohup uv run --no-sync python -m pyathena_bench worker --stack $(cat /opt/pyathena/benchmarks/stack-id.txt) --name large-1 > results/worker-large-1.log 2>&1 &)\""]'
 uv run --env-file ../.env --locked python -m pyathena_bench --profile pyathena status \
   --stack "$BENCHMARK_STACK" --name large-1
 ```
