@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 import sqlalchemy
 from botocore.exceptions import ClientError
-from sqlalchemy import create_engine, func, literal_column, select, text, types
+from sqlalchemy import create_engine, engine_from_config, func, literal_column, select, text, types
 from sqlalchemy.exc import NoSuchTableError
 from sqlalchemy.sql import expression, type_coerce
 from sqlalchemy.sql.ddl import CreateTable
@@ -61,12 +61,15 @@ def unique_s3tables_table_name(base: str) -> str:
     return f"{base}_{uuid.uuid4().hex[:8]}"
 
 
-def recording_engine(rowcounts=None, **kwargs):
+def recording_engine(rowcounts=None, query="", config=None, **kwargs):
     """Create an engine whose DB API connection records statements offline.
 
     Args:
         rowcounts: Row counts reported by successive cursor calls. By default,
             a call reports the number of rows it inserted.
+        query: The query string of the connection URL, without ``?``.
+        config: String engine options to pass through ``engine_from_config``
+            instead of calling ``create_engine`` directly.
         **kwargs: Additional keyword arguments for ``create_engine``.
 
     Returns:
@@ -95,11 +98,13 @@ def recording_engine(rowcounts=None, **kwargs):
     connection = SimpleNamespace(
         cursor=RecordingCursor, close=lambda: None, commit=lambda: None, rollback=lambda: None
     )
-    engine = create_engine(
-        "awsathena+rest://athena.us-west-2.amazonaws.com/default",
-        creator=lambda: connection,
-        **kwargs,
-    )
+    url = f"awsathena+rest://athena.us-west-2.amazonaws.com/default?{query}"
+    if config is not None:
+        configuration = {"sqlalchemy.url": url}
+        configuration.update({f"sqlalchemy.{key}": value for key, value in config.items()})
+        engine = engine_from_config(configuration, creator=lambda: connection, **kwargs)
+    else:
+        engine = create_engine(url, creator=lambda: connection, **kwargs)
     return engine, calls
 
 
@@ -577,6 +582,52 @@ class TestAthenaDialect:
             result = conn.execute(table.insert(), [{"id": i} for i in range(5)])
 
         assert [len(parameters) for _, _, parameters in calls] == [2, 2, 1]
+        assert result.rowcount == 5
+
+    @pytest.mark.parametrize(
+        ("query", "expected"),
+        [
+            ("insertmanyvalues_page_size=2", [("execute", 2), ("execute", 2), ("execute", 1)]),
+            ("use_insertmanyvalues=false", [("executemany", 5)]),
+            (
+                "use_insertmanyvalues=true&insertmanyvalues_page_size=3",
+                [("execute", 3), ("execute", 2)],
+            ),
+        ],
+    )
+    def test_insertmanyvalues_url_options(self, query, expected):
+        engine, calls = recording_engine(query=f"s3_staging_dir=s3://bucket/path/&{query}")
+        table = Table("t", MetaData(), Column("id", types.Integer))
+
+        with engine.connect() as conn:
+            result = conn.execute(table.insert(), [{"id": i} for i in range(5)])
+
+        assert [(method, len(parameters)) for method, _, parameters in calls] == expected
+        assert result.rowcount == 5
+        # The options configure the dialect and never reach pyathena.connect().
+        assert engine.dialect._connect_options == {
+            "aws_access_key_id": None,
+            "aws_secret_access_key": None,
+            "region_name": "us-west-2",
+            "schema_name": "default",
+            "s3_staging_dir": "s3://bucket/path/",
+        }
+
+    @pytest.mark.parametrize(
+        ("config", "expected"),
+        [
+            ({"insertmanyvalues_page_size": "2"}, [("execute", 2), ("execute", 2), ("execute", 1)]),
+            ({"use_insertmanyvalues": "false"}, [("executemany", 5)]),
+        ],
+    )
+    def test_insertmanyvalues_engine_from_config(self, config, expected):
+        engine, calls = recording_engine(config=config)
+        table = Table("t", MetaData(), Column("id", types.Integer))
+
+        with engine.connect() as conn:
+            result = conn.execute(table.insert(), [{"id": i} for i in range(5)])
+
+        assert [(method, len(parameters)) for method, _, parameters in calls] == expected
         assert result.rowcount == 5
 
     def test_insertmanyvalues_disabled(self):

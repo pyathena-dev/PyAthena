@@ -784,6 +784,13 @@ engine_per_row = create_engine(
 )
 ```
 
+Both engine options can also be set in the connection string, or as string values for `engine_from_config`:
+
+```text
+awsathena+rest://:@athena.us-west-2.amazonaws.com:443/default?s3_staging_dir=s3://YOUR_S3_BUCKET/path/to/&insertmanyvalues_page_size=20
+awsathena+rest://:@athena.us-west-2.amazonaws.com:443/default?s3_staging_dir=s3://YOUR_S3_BUCKET/path/to/&use_insertmanyvalues=false
+```
+
 ## Complex data types
 
 ### STRUCT type support

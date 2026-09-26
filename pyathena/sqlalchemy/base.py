@@ -159,6 +159,14 @@ class AthenaDialect(DefaultDialect):
     use_insertmanyvalues: bool = True
     use_insertmanyvalues_wo_returning: bool = True
     insertmanyvalues_page_size: int = 100
+    # Coerce these options from engine_from_config string values.
+    engine_config_types: Mapping[str, Any] = util.immutabledict(
+        {
+            **DefaultDialect.engine_config_types,
+            "insertmanyvalues_page_size": util.asint,
+            "use_insertmanyvalues": util.asbool,
+        }
+    )
     supports_sane_rowcount: bool = True
     supports_sane_multi_rowcount: bool = True
     supports_native_decimal: bool = True
@@ -243,7 +251,9 @@ class AthenaDialect(DefaultDialect):
         """Build ``pyathena.connect()`` arguments from a SQLAlchemy URL.
 
         Query parameters are passed through, with the known boolean, integer
-        and float options converted from their string form.
+        and float options converted from their string form. The
+        ``insertmanyvalues_page_size`` and ``use_insertmanyvalues`` parameters
+        configure this dialect instead and are not passed through.
 
         Args:
             url: The SQLAlchemy URL.
@@ -280,6 +290,10 @@ class AthenaDialect(DefaultDialect):
             opts.update({"glue_metadata_fallback": bool(strtobool(opts["glue_metadata_fallback"]))})
         if "result_reuse_minutes" in opts:
             opts.update({"result_reuse_minutes": int(opts["result_reuse_minutes"])})
+        if "insertmanyvalues_page_size" in opts:
+            self.insertmanyvalues_page_size = int(opts.pop("insertmanyvalues_page_size"))
+        if "use_insertmanyvalues" in opts:
+            self.use_insertmanyvalues = bool(strtobool(opts.pop("use_insertmanyvalues")))
         # Store on the dialect so compilers can consult connection options
         # (e.g. catalog_name for S3 Tables detection). Assigned here rather than
         # in create_connect_args because subclass dialects call this method
