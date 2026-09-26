@@ -508,7 +508,7 @@ requests cancellation, waits until the query reaches a terminal state, and then 
 Cancellation is a best-effort request, so the query can still end as `SUCCEEDED` or `FAILED`.
 The `query_id` property keeps the ID of the interrupted query.
 If the cancellation request fails, the `KeyboardInterrupt` propagates with the error as its cause.
-A second `KeyboardInterrupt` during that wait propagates without waiting for the terminal state.
+A second `KeyboardInterrupt` during the cancellation request or that wait propagates immediately, and the query can keep running.
 With `kill_on_interrupt=False`, the `KeyboardInterrupt` propagates immediately and the query keeps running.
 
 ```python
