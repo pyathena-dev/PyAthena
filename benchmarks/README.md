@@ -92,6 +92,8 @@ There is no inbound security-group rule or SSH key; use Session Manager.
 Internet access permits package installation and calls to AWS APIs without a NAT gateway.
 
 The defaults are Amazon Linux 2023 x86_64, `r7i.2xlarge` (8 vCPUs, 64 GiB), and an encrypted 100 GiB gp3 root volume.
+Set `Architecture=arm64` with an `r7g` or `r8g` instance type to run on AWS Graviton; the template rejects an instance type that does not match the architecture.
+Measurements depend on the CPU architecture; `environment.json` records it, and runs on different architectures are not directly comparable.
 Instance size and disk size are parameters, so a later run can deliberately test another memory budget.
 The AMI parameter resolves the current AL2023 image at deployment; record the resulting AMI when comparing environments.
 Source bucket access is read-only and restricted to the configured prefix.
