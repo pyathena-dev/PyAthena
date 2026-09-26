@@ -77,7 +77,8 @@ def api_pages(case: Case, rows: int) -> int:
     """
     if case.family not in API_FAMILIES:
         return 0
-    return -(-rows // case.arraysize) * case.concurrency
+    # The first page of a SELECT result also carries the column labels.
+    return -(-(rows + 1) // case.arraysize) * case.concurrency
 
 
 def expand_jobs(
