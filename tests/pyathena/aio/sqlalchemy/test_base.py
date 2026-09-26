@@ -271,11 +271,22 @@ class TestAsyncSQLAlchemyAthena:
             {"id": 5, "name": "e", "data": b"e", "ts": None, "amount": None, "tags": [5, 5]},
         ]
 
-        await conn.run_sync(table.create)
-        result = await conn.execute(
-            table.insert(), rows, execution_options={"insertmanyvalues_page_size": 2}
-        )
+        statements = []
 
+        def record(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+
+        await conn.run_sync(table.create)
+        sqlalchemy.event.listen(conn.sync_connection, "before_cursor_execute", record)
+        try:
+            result = await conn.execute(
+                table.insert(), rows, execution_options={"insertmanyvalues_page_size": 2}
+            )
+        finally:
+            sqlalchemy.event.remove(conn.sync_connection, "before_cursor_execute", record)
+
+        # One event per page; a DB API executemany would fire a single event.
+        assert len(statements) == 3
         assert result.rowcount == 5
         actual = (await conn.execute(select(table).order_by(table.c.id))).mappings().all()
         assert [dict(row) for row in actual] == rows
