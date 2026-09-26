@@ -13,7 +13,7 @@ from typing import (
 
 from sqlalchemy import exc, schema, types, util
 from sqlalchemy.engine import Engine, reflection
-from sqlalchemy.engine.default import DefaultDialect
+from sqlalchemy.engine.default import DefaultDialect, DefaultExecutionContext
 from sqlalchemy.engine.interfaces import ExecutionContext
 from sqlalchemy.sql.compiler import (
     DDLCompiler,
@@ -153,6 +153,12 @@ class AthenaDialect(DefaultDialect):
     supports_default_values: bool = False
     supports_empty_insert: bool = False
     supports_multivalues_insert: bool = True
+    # Render executemany inserts as multi-row INSERT statements. Athena has no
+    # RETURNING, so batching must also apply to inserts without it. The page
+    # size keeps typical rows well below Athena's 262,144-byte query limit.
+    use_insertmanyvalues: bool = True
+    use_insertmanyvalues_wo_returning: bool = True
+    insertmanyvalues_page_size: int = 100
     supports_sane_rowcount: bool = True
     supports_sane_multi_rowcount: bool = True
     supports_native_decimal: bool = True
@@ -708,6 +714,19 @@ class AthenaDialect(DefaultDialect):
         return []  # pragma: no cover
 
     def do_execute(self, cursor, statement, parameters, context=None):
+        """Execute a statement with the DB API cursor.
+
+        SQLAlchemy calls this once per page of an "insertmanyvalues" insert.
+        For those pages, the execution context's row count accumulates the
+        cursor row counts, so that ``CursorResult.rowcount`` reports the total
+        like ``Cursor.executemany``, or -1 if any page has an unknown count.
+
+        Args:
+            cursor: The DB API cursor.
+            statement: The SQL statement.
+            parameters: The statement parameters.
+            context: The SQLAlchemy execution context, if any.
+        """
         on_start_query_execution = None
         if isinstance(context, ExecutionContext):
             execution_options = context.execution_options
@@ -718,6 +737,16 @@ class AthenaDialect(DefaultDialect):
             cursor.execute(statement, parameters, on_start_query_execution=on_start_query_execution)
         else:
             cursor.execute(statement, parameters)
+
+        # An executemany context reaches do_execute only for insertmanyvalues
+        # pages; other executemany statements go through do_executemany.
+        if isinstance(context, DefaultExecutionContext) and context.executemany:
+            total = context._rowcount
+            count = cursor.rowcount
+            if total is None:
+                context._rowcount = count
+            else:
+                context._rowcount = total + count if total >= 0 and count >= 0 else -1
 
     def do_rollback(self, dbapi_connection: PoolProxiedConnection) -> None:
         # No transactions for Athena
