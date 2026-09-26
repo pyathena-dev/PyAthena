@@ -23,7 +23,7 @@ RESOURCES = {
     "SourceDatabase": "pyathena_benchmark",
     "SourceTable": "pypi_file_downloads",
     "WorkGroup": "pyathena",
-    "InstanceId": "i-test",
+    "AutoScalingGroup": "fleet-test",
 }
 
 

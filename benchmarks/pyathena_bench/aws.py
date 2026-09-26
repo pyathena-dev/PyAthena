@@ -51,7 +51,7 @@ def stack_resources(session_: Any, stack: str) -> dict[str, str]:
         "SourceDatabase",
         "SourceTable",
         "WorkGroup",
-        "InstanceId",
+        "AutoScalingGroup",
     }
     if not required <= result.keys():
         raise ValueError("Stack outputs are incomplete")
@@ -286,6 +286,46 @@ def cancel_queries(settings: Settings, query_ids: set[str]) -> list[str]:
     return errors
 
 
+def active_queries(athena: Any, workgroup: str, prefixes: tuple[str, ...]) -> set[str]:
+    """Find queued or running queries whose output location starts with a prefix.
+
+    This scans the workgroup's live history, so it also finds queries whose
+    IDs were never reported by the process that started them.
+
+    Args:
+        athena: Athena client.
+        workgroup: Workgroup whose history is scanned.
+        prefixes: S3 output location prefixes to match.
+
+    Returns:
+        IDs of matching queries that are still queued or running.
+
+    Raises:
+        RuntimeError: If part of the history cannot be inspected.
+    """
+    ids: set[str] = set()
+    for page in athena.get_paginator("list_query_executions").paginate(WorkGroup=workgroup):
+        query_ids = page["QueryExecutionIds"]
+        for offset in range(0, len(query_ids), 50):
+            batch = athena.batch_get_query_execution(
+                QueryExecutionIds=query_ids[offset : offset + 50]
+            )
+            if batch.get("UnprocessedQueryExecutionIds"):
+                raise RuntimeError(
+                    f"Could not inspect query history: {batch['UnprocessedQueryExecutionIds']}"
+                )
+            for query in batch["QueryExecutions"]:
+                if (
+                    query.get("WorkGroup") == workgroup
+                    and query.get("ResultConfiguration", {})
+                    .get("OutputLocation", "")
+                    .startswith(prefixes)
+                    and query["Status"]["State"] in {"RUNNING", "QUEUED"}
+                ):
+                    ids.add(query["QueryExecutionId"])
+    return ids
+
+
 def cleanup(
     settings: Settings, manifest: dict[str, Any], path: Path, trials_only: bool = False
 ) -> None:
@@ -320,27 +360,7 @@ def cleanup(
             raise ValueError("Manifest contains a query outside this run")
         if query["Status"]["State"] in {"RUNNING", "QUEUED"}:
             ids.add(entry["query_id"])
-    for page in athena.get_paginator("list_query_executions").paginate(
-        WorkGroup=settings.workgroup
-    ):
-        query_ids = page["QueryExecutionIds"]
-        for offset in range(0, len(query_ids), 50):
-            batch = athena.batch_get_query_execution(
-                QueryExecutionIds=query_ids[offset : offset + 50]
-            )
-            if batch.get("UnprocessedQueryExecutionIds"):
-                raise RuntimeError(
-                    f"Could not inspect query history: {batch['UnprocessedQueryExecutionIds']}"
-                )
-            for query in batch["QueryExecutions"]:
-                if (
-                    query.get("WorkGroup") == settings.workgroup
-                    and query.get("ResultConfiguration", {})
-                    .get("OutputLocation", "")
-                    .startswith(f"s3://{bucket}/{root}")
-                    and query["Status"]["State"] in {"RUNNING", "QUEUED"}
-                ):
-                    ids.add(query["QueryExecutionId"])
+    ids |= active_queries(athena, settings.workgroup, (f"s3://{bucket}/{root}",))
     errors = cancel_queries(settings, ids)
     if errors:
         raise RuntimeError("Could not cancel queries: " + "; ".join(errors))

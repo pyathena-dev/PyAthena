@@ -86,7 +86,8 @@ Keep the same configuration for preparation, measurement, and cleanup.
 ## Disposable EC2 environment
 
 Deploy `cloudformation/benchmark.yaml` in `us-west-2` with the stack tag `Purpose=pyathena-benchmark`.
-The template creates its own VPC, public subnet, route, Internet Gateway, EC2 instance, EBS volume, IAM role, scratch Glue database, and scratch S3 bucket.
+The template creates its own VPC, public subnet, route, Internet Gateway, IAM role, scratch Glue database, scratch S3 bucket, and an Auto Scaling group of `FleetSize` identical EC2 instances with their EBS volumes.
+`FleetSize` defaults to one host; see [Running on a fleet](#running-on-a-fleet) for parallel runs.
 There is no inbound security-group rule or SSH key; use Session Manager.
 Internet access permits package installation and calls to AWS APIs without a NAT gateway.
 
@@ -94,7 +95,7 @@ The defaults are Amazon Linux 2023 x86_64, `r7i.2xlarge` (8 vCPUs, 64 GiB), and 
 Instance size and disk size are parameters, so a later run can deliberately test another memory budget.
 The AMI parameter resolves the current AL2023 image at deployment; record the resulting AMI when comparing environments.
 Source bucket access is read-only and restricted to the configured prefix.
-The instance can write only to its scratch bucket and database, and can query the specified existing workgroup.
+The instances can write only to the scratch bucket and database, and can query the specified existing workgroup.
 The supplied template assumes ordinary IAM access and SSE-S3 source objects; Lake Formation restrictions or a customer-managed KMS key require corresponding grants before execution.
 
 The deployment identity needs permission to create these resources and pass the instance role.
@@ -115,8 +116,10 @@ uv run --env-file ../.env --locked aws cloudformation deploy \
   --tags Purpose=pyathena-benchmark \
   --parameter-overrides GitCommit="$BENCHMARK_COMMIT"
 uv run --env-file ../.env --locked aws cloudformation describe-stacks --stack-name "$BENCHMARK_STACK"
-BENCHMARK_INSTANCE=$(uv run --env-file ../.env --locked aws cloudformation describe-stacks --stack-name "$BENCHMARK_STACK" \
-  --query 'Stacks[0].Outputs[?OutputKey==`InstanceId`].OutputValue | [0]' --output text)
+BENCHMARK_GROUP=$(uv run --env-file ../.env --locked aws cloudformation describe-stacks --stack-name "$BENCHMARK_STACK" \
+  --query 'Stacks[0].Outputs[?OutputKey==`AutoScalingGroup`].OutputValue | [0]' --output text)
+BENCHMARK_INSTANCE=$(uv run --env-file ../.env --locked aws autoscaling describe-auto-scaling-groups \
+  --auto-scaling-group-names "$BENCHMARK_GROUP" --query 'AutoScalingGroups[0].Instances[0].InstanceId' --output text)
 uv run --env-file ../.env --locked aws ssm start-session --target "$BENCHMARK_INSTANCE"
 ```
 
@@ -210,6 +213,7 @@ Athena result reuse and library query caches are disabled.
 | Process high-water RSS | OS high-water value, including imports and process startup |
 | Event-loop lag | Delay beyond the heartbeat interval; 10 ms interval by default |
 | Thread metrics | Observed process threads and CPU time since the baseline, including native library threads |
+| Peak temp dir | Largest sampled size of the trial's Polars temporary directory |
 
 Some cursors eagerly read data during `execute()`, while others fetch lazily.
 Consequently, `consume_seconds` alone is not a fair retrieval comparison.
@@ -220,6 +224,9 @@ Client result time excludes the delay between server completion and its observat
 API row conversion and native DataFrame/Table access appear as separate cases.
 Sampled RSS can miss short peaks, and the constructor suite's RSS includes its subsequent validation read.
 If the operating system denies access to per-thread CPU times, `thread_cpu_available` is false; thread counts and RSS are still recorded.
+Each trial process receives its own `POLARS_TEMP_DIR`, which the parent samples with RSS and removes after the trial.
+Polars lazy CSV scans of S3 objects download the whole object into a file cache in this directory before yielding batches; in the recorded runs, those files remained after the process exited.
+When the temporary directory is a tmpfs, as `/tmp` is on Amazon Linux 2023, this storage uses memory that RSS does not include.
 
 | Capability | Treatment |
 | --- | --- |
@@ -259,6 +266,85 @@ There is no automatic continuation of a partially recorded trial; rerun the sele
 Large API row cases may exceed the default one-hour timeout: 10 million rows require at least 10,000 pages with arraysize 1000, or 100,000 pages with arraysize 100.
 Choose the timeout using a smaller-scale pilot before the full run.
 Do not run two orchestrators concurrently on the same dedicated host.
+
+## Running on a fleet
+
+Large scales and API row retrieval can take hours per case, so a single host cannot cover a full large-scale matrix in a working session.
+Deploy with `FleetSize` greater than one to run independent jobs on identical hosts.
+All hosts share the stack's scratch bucket and database: prepare once, and every host measures the same snapshot through the same manifest.
+Each host runs one worker, and each worker runs one orchestrator at a time, so trials on a host never overlap.
+
+Athena executes queries from different hosts independently, but API request rates are account-wide.
+Cursor and DictCursor row retrieval calls GetQueryResults for every page, about 5 to 10 pages per second per query in the recorded runs; check the account's GetQueryResults rate in Service Quotas (100 calls per second in the tested account).
+`jobs` marks these jobs as API-heavy with an estimated page count and the number of simultaneous paging queries, which is the concurrency level for the concurrent suite.
+`worker --api-slots` bounds the simultaneous paging queries across the fleet (10 by default): a job takes one slot per paging query, and a worker refuses to start if any job needs more slots than that.
+While an API-heavy job waits for slots, workers do not start later API-heavy jobs; other jobs run on every free host.
+
+`jobs` splits a selection into one `run` invocation per suite, scale, shape, family, API, transport, and output kind, and per arraysize for row output.
+It orders API-heavy jobs first and longer jobs earlier.
+With `--split-pages`, a job whose single trial needs at least that many pages becomes one job per measured repetition without a warmup, so those repetitions run on different hosts.
+`run` accepts the matching `--arraysize`, `--warmups`, and `--repetitions` options.
+
+Deploy a new stack with the fleet size under its own name; changing `FleetSize` on an existing stack does not wait for the added hosts to finish bootstrap.
+Then open a session on one of its hosts:
+
+```bash
+BENCHMARK_STACK=pyathena-benchmark-fleet
+uv run --env-file ../.env --locked aws cloudformation deploy \
+  --stack-name "$BENCHMARK_STACK" \
+  --template-file cloudformation/benchmark.yaml \
+  --capabilities CAPABILITY_IAM \
+  --tags Purpose=pyathena-benchmark \
+  --parameter-overrides GitCommit="$BENCHMARK_COMMIT" FleetSize=20
+BENCHMARK_GROUP=$(uv run --env-file ../.env --locked aws cloudformation describe-stacks --stack-name "$BENCHMARK_STACK" \
+  --query 'Stacks[0].Outputs[?OutputKey==`AutoScalingGroup`].OutputValue | [0]' --output text)
+BENCHMARK_INSTANCE=$(uv run --env-file ../.env --locked aws autoscaling describe-auto-scaling-groups \
+  --auto-scaling-group-names "$BENCHMARK_GROUP" --query 'AutoScalingGroups[0].Instances[0].InstanceId' --output text)
+uv run --env-file ../.env --locked aws ssm start-session --target "$BENCHMARK_INSTANCE"
+```
+
+Prepare and publish the queue in that session:
+
+```bash
+sudo -iu ec2-user
+cd /opt/pyathena/benchmarks
+export AWS_DEFAULT_REGION=us-west-2
+BENCHMARK_STACK_ID=$(cat stack-id.txt)
+mkdir -p results
+cp config.toml results/fleet.toml  # edit scales, timeouts, and concurrency as needed
+uv run --no-sync python -m pyathena_bench --config results/fleet.toml prepare \
+  --stack "$BENCHMARK_STACK_ID" --manifest results/input-large.json --scale large xlarge
+uv run --no-sync python -m pyathena_bench --config results/fleet.toml jobs \
+  --suite single init --scale large xlarge --shape flat nested --split-pages 20000 > results/jobs-large.json
+uv run --no-sync python -m pyathena_bench --config results/fleet.toml queue \
+  --stack "$BENCHMARK_STACK_ID" --name large-1 --jobs results/jobs-large.json --manifest results/input-large.json
+```
+
+`queue` reserves the name with a conditional write, stores the configuration, manifest, and jobs under `fleet/<name>/` in the scratch bucket, and writes the `queue.json` marker last.
+Workers refuse a queue without the marker.
+A failed `queue` releases the reservation, so the same name can be published again; a `queue` process killed while publishing leaves `fleet/<name>/reservation.json`, which must be deleted before reusing the name.
+Every worker runs its jobs with that stored configuration.
+Start a worker on every host from the local machine:
+
+```bash
+uv run --env-file ../.env --locked aws ssm send-command --targets "Key=tag:aws:autoscaling:groupName,Values=$BENCHMARK_GROUP" \
+  --document-name AWS-RunShellScript \
+  --parameters 'commands=["sudo -iu ec2-user bash -lc \"cd /opt/pyathena/benchmarks && mkdir -p results && (nohup uv run --no-sync python -m pyathena_bench worker --stack $(cat /opt/pyathena/benchmarks/stack-id.txt) --name large-1 > results/worker-large-1.log 2>&1 &)\""]'
+uv run --env-file ../.env --locked python -m pyathena_bench status \
+  --stack "$BENCHMARK_STACK" --name large-1
+```
+
+A worker claims a job by creating `claims/<job>` with an S3 conditional write, so exactly one host runs each job.
+After a job, the worker uploads its output directory to `results/<job>/` and its log to `logs/`, then writes `done/<job>` with the exit code, host, and times.
+A failed trial stops only its own job; `status` lists jobs with a non-zero exit code.
+After a failed job, the worker stops the job's reported queries and every queued or running query in the workgroup that writes under the job's trial output prefixes, which also covers queries whose IDs were never reported before a trial process died.
+It waits until they stop before claiming another job; this scans the workgroup's query history.
+If it cannot confirm that, it records the errors in the `done` marker and exits.
+A worker that dies leaves a claim without a `done` marker, and it can also leave an API slot under `slots/`, which lowers the fleet's API-heavy capacity.
+`status` lists slots in use; delete a slot object only after confirming that the host named in it no longer runs a job.
+Workers exit when every job has been claimed.
+To retry jobs, wait until all workers have exited, run `cleanup --trials-only --execute` for the manifest, and publish the selected jobs under a new queue name with the same manifest.
+Download `fleet/<name>/` with `aws s3 sync` before cleanup and stack deletion, as described below.
 
 ## Reports and recovery
 
@@ -301,7 +387,9 @@ BENCHMARK_BUCKET=$(uv run --env-file ../.env --locked aws cloudformation describ
 mkdir -p results/recovered
 uv run --env-file ../.env --locked aws s3 sync "s3://$BENCHMARK_BUCKET/reports/" results/recovered/
 uv run --env-file ../.env --locked aws cloudformation describe-stacks --stack-name "$BENCHMARK_STACK" > results/recovered/stack.json
-uv run --env-file ../.env --locked aws ec2 describe-instances --instance-ids "$BENCHMARK_INSTANCE" > results/recovered/instance.json
+uv run --env-file ../.env --locked aws s3 sync "s3://$BENCHMARK_BUCKET/fleet/" results/recovered/fleet/
+uv run --env-file ../.env --locked aws ec2 describe-instances \
+  --filters "Name=tag:aws:autoscaling:groupName,Values=$BENCHMARK_GROUP" > results/recovered/instances.json
 ```
 
 Verify the downloaded files before proceeding.
@@ -320,7 +408,7 @@ Unavailable recorded query metadata produces a warning and falls back to scannin
 The transfer copy under `reports/` remains until the final stack teardown.
 For multiple manifests, repeat cleanup for each; never clean while another process is still submitting queries.
 
-Confirm the scratch database is empty and the only remaining S3 objects are the recovered reports.
+Confirm the scratch database is empty and the only remaining S3 objects are the recovered reports and fleet queues.
 An unexpected table or object is a reason to inspect the corresponding run before deleting anything further.
 
 ```bash
@@ -329,6 +417,7 @@ BENCHMARK_DATABASE=$(uv run --env-file ../.env --locked aws cloudformation descr
 uv run --env-file ../.env --locked aws glue get-tables --database-name "$BENCHMARK_DATABASE" --query 'TableList[].Name'
 uv run --env-file ../.env --locked aws s3 ls "s3://$BENCHMARK_BUCKET/" --recursive
 uv run --env-file ../.env --locked aws s3 rm "s3://$BENCHMARK_BUCKET/reports/" --recursive
+uv run --env-file ../.env --locked aws s3 rm "s3://$BENCHMARK_BUCKET/fleet/" --recursive
 uv run --env-file ../.env --locked aws s3api list-multipart-uploads --bucket "$BENCHMARK_BUCKET"
 uv run --env-file ../.env --locked aws s3 ls "s3://$BENCHMARK_BUCKET/" --recursive
 uv run --env-file ../.env --locked aws cloudformation delete-stack --stack-name "$BENCHMARK_STACK"
@@ -340,5 +429,5 @@ The template does not retain EBS, S3, or other benchmark resources, and it does 
 The source table, source data, and existing workgroup are not owned by this stack and remain intact.
 The local recovered reports are the retained benchmark evidence.
 If bootstrap fails, inspect the stack events; no benchmark data is created during bootstrap.
-Default rollback removes the instance and its local logs.
-For bootstrap diagnosis, deploy with `--disable-rollback`, inspect `/var/log/cloud-init-output.log` while the instance exists, and explicitly delete the failed stack afterward.
+Default rollback removes the instances and their local logs.
+For bootstrap diagnosis, deploy with `--disable-rollback`, inspect `/var/log/cloud-init-output.log` while the instances exist, and explicitly delete the failed stack afterward.

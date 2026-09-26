@@ -6,9 +6,15 @@
 # SPDX-License-Identifier: MIT
 
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Disposable PyAthena benchmark host and scratch storage; existing source data is read-only.
+Description: Disposable PyAthena benchmark hosts and scratch storage; existing source data is read-only.
 
 Parameters:
+  FleetSize:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 64
+    Description: Number of identical benchmark hosts sharing the scratch bucket and database.
   GitCommit:
     Type: String
     AllowedPattern: '[0-9a-f]{40}'
@@ -199,59 +205,68 @@ Resources:
         MetadataOptions:
           HttpTokens: required
           HttpEndpoint: enabled
-  Instance:
-    Type: AWS::EC2::Instance
+        ImageId: !Ref ImageId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt InstanceProfile.Arn
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            AssociatePublicIpAddress: true
+            SubnetId: !Ref Subnet
+            Groups: [!Ref SecurityGroup]
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeType: gp3
+              VolumeSize: !Ref VolumeSize
+              Encrypted: true
+              DeleteOnTermination: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub '${AWS::StackName}-benchmark'
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euo pipefail
+            dnf install -y git aws-cfn-bootstrap
+            trap '/opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource Fleet --region ${AWS::Region}' EXIT
+            curl --proto '=https' --tlsv1.2 -LsSf https://astral.sh/uv/${UvVersion}/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+            git clone https://github.com/pyathena-dev/PyAthena.git /opt/pyathena
+            git -C /opt/pyathena fetch origin ${GitCommit}
+            git -C /opt/pyathena checkout --detach ${GitCommit}
+            export UV_PYTHON_INSTALL_DIR=/opt/uv-python
+            uv python install ${PythonVersion}
+            uv sync --directory /opt/pyathena/benchmarks --locked --no-dev --python ${PythonVersion}
+            chmod -R a+rX /opt/uv-python
+            chown -R ec2-user:ec2-user /opt/pyathena
+            printf '%s\n' '${AWS::StackId}' > /opt/pyathena/benchmarks/stack-id.txt
+            printf '%s\n' 'Setup complete. Run preflight and prepare manually.'
+  Fleet:
+    Type: AWS::AutoScaling::AutoScalingGroup
     DependsOn: [Route, RouteAssociation]
     CreationPolicy:
       ResourceSignal:
+        Count: !Ref FleetSize
         Timeout: PT30M
     Properties:
-      ImageId: !Ref ImageId
-      InstanceType: !Ref InstanceType
-      IamInstanceProfile: !Ref InstanceProfile
+      MinSize: !Ref FleetSize
+      MaxSize: !Ref FleetSize
+      DesiredCapacity: !Ref FleetSize
+      VPCZoneIdentifier: [!Ref Subnet]
+      HealthCheckType: EC2
       LaunchTemplate:
         LaunchTemplateId: !Ref LaunchTemplate
         Version: !GetAtt LaunchTemplate.LatestVersionNumber
-      NetworkInterfaces:
-        - DeviceIndex: '0'
-          AssociatePublicIpAddress: true
-          SubnetId: !Ref Subnet
-          GroupSet: [!Ref SecurityGroup]
-      BlockDeviceMappings:
-        - DeviceName: /dev/xvda
-          Ebs:
-            VolumeType: gp3
-            VolumeSize: !Ref VolumeSize
-            Encrypted: true
-            DeleteOnTermination: true
-      Tags:
-        - Key: Name
-          Value: !Sub '${AWS::StackName}-benchmark'
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          set -euo pipefail
-          dnf install -y git aws-cfn-bootstrap
-          trap '/opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource Instance --region ${AWS::Region}' EXIT
-          curl --proto '=https' --tlsv1.2 -LsSf https://astral.sh/uv/${UvVersion}/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
-          git clone https://github.com/pyathena-dev/PyAthena.git /opt/pyathena
-          git -C /opt/pyathena fetch origin ${GitCommit}
-          git -C /opt/pyathena checkout --detach ${GitCommit}
-          export UV_PYTHON_INSTALL_DIR=/opt/uv-python
-          uv python install ${PythonVersion}
-          uv sync --directory /opt/pyathena/benchmarks --locked --no-dev --python ${PythonVersion}
-          chmod -R a+rX /opt/uv-python
-          chown -R ec2-user:ec2-user /opt/pyathena
-          printf '%s\n' '${AWS::StackId}' > /opt/pyathena/benchmarks/stack-id.txt
-          printf '%s\n' 'Setup complete. Run preflight and prepare manually.'
 
 Outputs:
   Bucket:
     Value: !Ref Bucket
   ScratchDatabase:
     Value: !Ref ScratchDatabase
-  InstanceId:
-    Value: !Ref Instance
+  AutoScalingGroup:
+    Value: !Ref Fleet
   SourceBucket:
     Value: !Ref SourceBucket
   SourcePrefix:

@@ -14,10 +14,13 @@ import hashlib
 import importlib.metadata
 import json
 import multiprocessing
+import os
 import platform
 import resource
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -150,13 +153,56 @@ def thread_snapshot(process: psutil.Process) -> tuple[int, dict[int, float] | No
         return count, None
 
 
+def directory_bytes(path: Path) -> int:
+    """Return the total size of the regular files below a directory.
+
+    Args:
+        path: Directory to measure; files removed during the walk are skipped.
+
+    Returns:
+        Total size in bytes.
+    """
+    total = 0
+    for root, _, files in os.walk(path):
+        for name in files:
+            try:
+                total += (Path(root) / name).stat().st_size
+            except FileNotFoundError:
+                continue
+    return total
+
+
+def start_with_temp_dir(process: Any, temp_dir: Path) -> None:
+    """Start a spawned trial process with its own Polars temporary directory.
+
+    Polars downloads cloud objects for lazy scans into a file cache under
+    ``POLARS_TEMP_DIR`` and keeps the files after the process exits. A
+    per-trial directory lets the parent measure and remove that storage.
+
+    Args:
+        process: Unstarted multiprocessing process; it inherits the environment.
+        temp_dir: Directory to expose as ``POLARS_TEMP_DIR`` to the child.
+    """
+    previous = os.environ.get("POLARS_TEMP_DIR")
+    os.environ["POLARS_TEMP_DIR"] = str(temp_dir)
+    try:
+        process.start()
+    finally:
+        if previous is None:
+            os.environ.pop("POLARS_TEMP_DIR", None)
+        else:
+            os.environ["POLARS_TEMP_DIR"] = previous
+
+
 def supervise(
     payload: dict[str, Any], events: Path, settings: Settings, target: Any = worker
 ) -> dict[str, Any]:
     context = multiprocessing.get_context("spawn")
     parent, child = context.Pipe()
     process = context.Process(target=target, args=(child, payload))
-    process.start()
+    temp_dir = Path(tempfile.mkdtemp(prefix="pyathena-bench-trial-"))
+    temp_peak = 0
+    start_with_temp_dir(process, temp_dir)
     child.close()
     watched = psutil.Process(process.pid)
     deadline = time.monotonic() + settings.timeout_seconds
@@ -202,6 +248,7 @@ def supervise(
                         thread_cpu[thread_id] = max(
                             thread_cpu.get(thread_id, 0), cpu - thread_baseline.get(thread_id, 0)
                         )
+                    temp_peak = max(temp_peak, directory_bytes(temp_dir))
                     samples.append({"at": time.time(), "rss_bytes": rss, "threads": thread_count})
                     if rss > psutil.virtual_memory().total * settings.memory_fraction:
                         result = {
@@ -233,6 +280,8 @@ def supervise(
                 process.kill()
         process.join(timeout=5)
         parent.close()
+        temp_peak = max(temp_peak, directory_bytes(temp_dir))
+        shutil.rmtree(temp_dir, ignore_errors=True)
     if result is None:
         result = {"status": "worker_exit", "exit_code": process.exitcode}
     if result["status"] != "ok" and query_ids:
@@ -242,6 +291,7 @@ def supervise(
         rss_peak_bytes=peak,
         rss_increase_bytes=peak - baseline if baseline is not None else None,
         max_threads=max_threads,
+        temp_dir_peak_bytes=temp_peak,
         thread_cpu_seconds=thread_cpu,
         thread_cpu_available=thread_cpu_available,
         resource_samples=samples,

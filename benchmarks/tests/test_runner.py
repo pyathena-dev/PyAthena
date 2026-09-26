@@ -6,8 +6,10 @@
 # SPDX-License-Identifier: MIT
 
 import json
+import os
 import time
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from pyathena_bench.cases import Case
@@ -25,6 +27,18 @@ def successful_worker(pipe, payload):
 
 def waiting_worker(pipe, payload):
     time.sleep(30)
+
+
+def cache_writing_worker(pipe, payload):
+    pipe.send({"event": "ready"})
+    pipe.recv()
+    cache = Path(os.environ["POLARS_TEMP_DIR"]) / "file-cache"
+    cache.mkdir(parents=True)
+    (cache / "object").write_bytes(b"x" * 4096)
+    time.sleep(0.2)
+    result = {"status": "ok", "temp_dir": os.environ["POLARS_TEMP_DIR"]}
+    pipe.send({"event": "result", "result": result})
+    pipe.close()
 
 
 def test_observer_keeps_first_completion_and_query_id():
@@ -67,6 +81,20 @@ class TestRunner:
         assert result["resource_samples"]
         events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
         assert events[0]["event"] == "ready"
+
+    def test_each_trial_gets_a_measured_and_removed_polars_temp_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("POLARS_TEMP_DIR", "/parent/value")
+        result = supervise(
+            {"trial": "test"},
+            tmp_path / "events.jsonl",
+            replace(Settings(), timeout_seconds=20),
+            cache_writing_worker,
+        )
+        assert result["status"] == "ok"
+        assert result["temp_dir_peak_bytes"] >= 4096
+        assert result["temp_dir"] != "/parent/value"
+        assert not Path(result["temp_dir"]).exists()
+        assert os.environ["POLARS_TEMP_DIR"] == "/parent/value"
 
     def test_timeout_does_not_become_a_successful_timing(self, tmp_path):
         result = supervise(
