@@ -687,10 +687,9 @@ class AthenaStatementCompiler(SQLCompiler):
             The resolved type.
         """
         while True:
-            # SQLAlchemy 1.x types have no _variant_mapping.
-            variants = getattr(type_, "_variant_mapping", {})
-            if self.dialect.name in variants:
-                type_ = variants[self.dialect.name]
+            variant = self._array_type_inspector.variant(type_)
+            if variant is not None:
+                type_ = variant
             elif isinstance(type_, types.TypeDecorator):
                 type_ = self._array_type_inspector.decorator_impl(type_)
             else:
@@ -777,8 +776,7 @@ class AthenaStatementCompiler(SQLCompiler):
         return f"json_format(CAST(MAP(ARRAY['_pyathena_array'], ARRAY[{encoded}]) AS JSON))"
 
     def _array_json(self, value, type_, depth=0):
-        if isinstance(type_, types.TypeDecorator):
-            return self._array_json(value, self._array_type_inspector.decorator_impl(type_), depth)
+        type_ = self._dialect_type(type_)
         # Each recursive value becomes JSON, including map keys and typed scalar leaves.
         variable = f"_pyathena_array_{depth}"
         if isinstance(type_, types.ARRAY):

@@ -213,9 +213,22 @@ class _ArrayTypeInspector:
             )
         return type_.item_type
 
+    def variant(self, type_: TypeEngine[Any]) -> TypeEngine[Any] | None:
+        """Return the type's ``with_variant()`` type for this dialect.
+
+        Args:
+            type_: The declared type.
+
+        Returns:
+            The variant type, or None when the type has no variant for this dialect.
+        """
+        # SQLAlchemy 1.x types have no _variant_mapping.
+        return getattr(type_, "_variant_mapping", {}).get(self.dialect.name)
+
     def decorator_impl(self, type_: types.TypeDecorator[Any]) -> TypeEngine[Any]:
-        if self.dialect.name in type_._variant_mapping:
-            return type_._variant_mapping[self.dialect.name]
+        variant = self.variant(type_)
+        if variant is not None:
+            return variant
         return type_.load_dialect_impl(self.dialect)
 
     @staticmethod
@@ -297,8 +310,9 @@ class _ArrayValueProcessor:
         return None
 
     def _bind(self, value: Any, type_: TypeEngine[Any]) -> Any:
-        if self.dialect.name in type_._variant_mapping:
-            return self._bind(value, type_._variant_mapping[self.dialect.name])
+        variant = self._type_inspector.variant(type_)
+        if variant is not None:
+            return self._bind(value, variant)
         if isinstance(type_, types.TypeDecorator):
             if type(type_).bind_processor is not types.TypeDecorator.bind_processor:
                 processor = type_.bind_processor(self.dialect)
@@ -327,8 +341,9 @@ class _ArrayValueProcessor:
         return processor(value) if processor else value
 
     def _literal(self, value: Any, type_: TypeEngine[Any]) -> str:
-        if self.dialect.name in type_._variant_mapping:
-            return self._literal(value, type_._variant_mapping[self.dialect.name])
+        variant = self._type_inspector.variant(type_)
+        if variant is not None:
+            return self._literal(value, variant)
         if isinstance(type_, types.TypeDecorator):
             if type(type_).literal_processor is not types.TypeDecorator.literal_processor:
                 literal_override = type_.literal_processor(self.dialect)
@@ -361,8 +376,9 @@ class _ArrayValueProcessor:
         return str(processor(value))
 
     def _decode(self, value: Any, type_: TypeEngine[Any], as_tuple: bool = False) -> Any:
-        if self.dialect.name in type_._variant_mapping:
-            return self._decode(value, type_._variant_mapping[self.dialect.name], as_tuple)
+        variant = self._type_inspector.variant(type_)
+        if variant is not None:
+            return self._decode(value, variant, as_tuple)
         if isinstance(type_, types.TypeDecorator):
             value = self._decode(value, self._type_inspector.decorator_impl(type_), as_tuple)
             if type(type_).result_processor is not types.TypeDecorator.result_processor:
