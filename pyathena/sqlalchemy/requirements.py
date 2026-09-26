@@ -106,12 +106,18 @@ class Requirements(SuiteRequirements):
 
     @property
     def precision_generic_float_type(self):
-        # TODO: AssertionError:
-        #  {Decimal('15.7563820'), Decimal('15.7563830')} != {Decimal('15.7563827')}
-        return unsupported()
+        return exclusions.skip_if(
+            lambda _: True,
+            "Generic Float maps to Athena REAL, a 32-bit type with about seven "
+            "significant digits; use Double for 64-bit values.",
+        )
 
     @property
     def precision_numerics_many_significant_digits(self):
+        return supported()
+
+    @property
+    def precision_numerics_retains_significant_digits(self):
         return supported()
 
     @property
