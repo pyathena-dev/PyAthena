@@ -222,10 +222,18 @@ class AthenaDialect(DefaultDialect):
     # EntityNotFoundException envelope.
     _FALLBACK_ERROR_CODES: tuple[str, ...] = (*THROTTLING_ERROR_CODES, "MetadataException")
 
+    # Engine options that the connection URL query can also set.
+    _URL_ENGINE_OPTIONS: tuple[str, ...] = ("insertmanyvalues_page_size", "use_insertmanyvalues")
+
     def __init__(self, json_deserializer=None, json_serializer=None, **kwargs):
         DefaultDialect.__init__(self, **kwargs)
         self._json_deserializer = json_deserializer
         self._json_serializer = json_serializer
+        # create_engine passes only the options its caller gave; those take
+        # precedence over the same options in the URL query.
+        self._explicit_engine_options = frozenset(
+            name for name in self._URL_ENGINE_OPTIONS if name in kwargs
+        )
 
     @classmethod
     def import_dbapi(cls) -> ModuleType:
@@ -253,7 +261,8 @@ class AthenaDialect(DefaultDialect):
         Query parameters are passed through, with the known boolean, integer
         and float options converted from their string form. The
         ``insertmanyvalues_page_size`` and ``use_insertmanyvalues`` parameters
-        configure this dialect instead and are not passed through.
+        configure this dialect instead and are not passed through; the same
+        options given to ``create_engine`` take precedence.
 
         Args:
             url: The SQLAlchemy URL.
@@ -291,9 +300,13 @@ class AthenaDialect(DefaultDialect):
         if "result_reuse_minutes" in opts:
             opts.update({"result_reuse_minutes": int(opts["result_reuse_minutes"])})
         if "insertmanyvalues_page_size" in opts:
-            self.insertmanyvalues_page_size = int(opts.pop("insertmanyvalues_page_size"))
+            page_size = int(opts.pop("insertmanyvalues_page_size"))
+            if "insertmanyvalues_page_size" not in self._explicit_engine_options:
+                self.insertmanyvalues_page_size = page_size
         if "use_insertmanyvalues" in opts:
-            self.use_insertmanyvalues = bool(strtobool(opts.pop("use_insertmanyvalues")))
+            use_insertmanyvalues = bool(strtobool(opts.pop("use_insertmanyvalues")))
+            if "use_insertmanyvalues" not in self._explicit_engine_options:
+                self.use_insertmanyvalues = use_insertmanyvalues
         # Store on the dialect so compilers can consult connection options
         # (e.g. catalog_name for S3 Tables detection). Assigned here rather than
         # in create_connect_args because subclass dialects call this method

@@ -614,6 +614,32 @@ class TestAthenaDialect:
         }
 
     @pytest.mark.parametrize(
+        ("query", "kwargs", "expected"),
+        [
+            (
+                "use_insertmanyvalues=true",
+                {"use_insertmanyvalues": False},
+                [("executemany", 5)],
+            ),
+            (
+                "insertmanyvalues_page_size=2",
+                {"insertmanyvalues_page_size": 3},
+                [("execute", 3), ("execute", 2)],
+            ),
+        ],
+    )
+    def test_insertmanyvalues_keyword_overrides_url(self, query, kwargs, expected):
+        engine, calls = recording_engine(query=query, **kwargs)
+        table = Table("t", MetaData(), Column("id", types.Integer))
+
+        with engine.connect() as conn:
+            result = conn.execute(table.insert(), [{"id": i} for i in range(5)])
+
+        assert [(method, len(parameters)) for method, _, parameters in calls] == expected
+        assert result.rowcount == 5
+        assert set(engine.dialect._connect_options).isdisjoint(AthenaDialect._URL_ENGINE_OPTIONS)
+
+    @pytest.mark.parametrize(
         ("config", "expected"),
         [
             ({"insertmanyvalues_page_size": "2"}, [("execute", 2), ("execute", 2), ("execute", 1)]),
