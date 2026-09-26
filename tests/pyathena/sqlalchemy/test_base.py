@@ -61,6 +61,20 @@ def unique_s3tables_table_name(base: str) -> str:
 
 
 class TestAthenaDialect:
+    def test_bare_scheme_uses_rest_driver(self):
+        # The bare scheme must describe itself exactly like awsathena+rest; a
+        # missing driver made Engine.driver raise AttributeError.
+        url = "awsathena://athena.us-west-2.amazonaws.com:443/default?s3_staging_dir=s3://bucket/path/"
+        bare = create_engine(url)
+        rest = create_engine(url.replace("awsathena://", "awsathena+rest://"))
+        assert type(bare.dialect) is AthenaDialect
+        assert bare.driver == rest.driver == "rest"
+        assert bare.url.get_driver_name() == "rest"
+        assert bare.dialect.dialect_description == "awsathena+rest"
+        assert bare.dialect.create_connect_args(bare.url) == rest.dialect.create_connect_args(
+            rest.url
+        )
+
     def test_columns_from_information_schema(self):
         # Rows arrive unordered, and Athena reports a missing comment as NULL.
         # An API cursor hands that over as None or as an empty string; a
