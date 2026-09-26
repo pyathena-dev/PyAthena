@@ -1305,7 +1305,7 @@ requires-dist = [
     { name = "pyarrow", marker = "python_full_version >= '3.14' and extra == 'arrow'", specifier = ">=22.0.0" },
     { name = "pyarrow", marker = "python_full_version < '3.14' and extra == 'arrow'", specifier = ">=10.0.0" },
     { name = "python-dateutil" },
-    { name = "sqlalchemy", marker = "extra == 'sqlalchemy'", specifier = ">=1.0.0" },
+    { name = "sqlalchemy", marker = "extra == 'sqlalchemy'", specifier = ">=2.0.0" },
     { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'aiosqlalchemy'", specifier = ">=2.0.0" },
     { name = "tenacity", specifier = ">=4.1.0" },
 ]
@@ -1335,7 +1335,7 @@ dev = [
     { name = "sphinx-design" },
     { name = "sphinx-multiversion" },
     { name = "sphinxext-opengraph" },
-    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=1.0.0" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.0" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0.0" },
     { name = "types-python-dateutil" },
 ]

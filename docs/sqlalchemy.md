@@ -2,11 +2,10 @@
 
 # SQLAlchemy
 
-Install SQLAlchemy with `pip install "SQLAlchemy>=1.0.0"` or `pip install PyAthena[sqlalchemy]`.
-Supported SQLAlchemy is 1.0.0 or higher.
+Install SQLAlchemy with `pip install "SQLAlchemy>=2.0.0"` or `pip install PyAthena[sqlalchemy]`.
+Supported SQLAlchemy is 2.0.0 or higher.
 
-For async support (`create_async_engine`), install with `pip install PyAthena[aiosqlalchemy]`
-(requires SQLAlchemy 2.0+).
+For async support (`create_async_engine`), install with `pip install PyAthena[aiosqlalchemy]`.
 
 ## Basic usage
 
@@ -86,7 +85,7 @@ Glue rejects line breaks in Hive column comments.
 Athena does not persist the table-level `COMMENT` when creating an Iceberg table, so its reflected table comment is `None`; column comments are preserved.
 
 SQLAlchemy's Inspector caches reflection results, including both positive and negative `has_table()` results.
-After creating or dropping a table, use a new Inspector or call `inspector.clear_cache()` (SQLAlchemy 2.0+) before inspecting it again.
+After creating or dropping a table, use a new Inspector or call `inspector.clear_cache()` before inspecting it again.
 The dialect does not cache direct `has_table()` calls without an `info_cache`.
 
 Table listings include column and table metadata.
@@ -753,12 +752,12 @@ engine_arrow = create_engine(
 | `Double`, `DOUBLE`, `DOUBLE_PRECISION` | `DOUBLE` | `DOUBLE` |
 
 Athena `FLOAT` and `REAL` are the same 32-bit floating-point type, which keeps about seven significant digits.
-Use `Double` (SQLAlchemy 2.0+) for 64-bit values.
+Use `Double` for 64-bit values.
 `Float(precision)` does not change the Athena type.
 
 ## Bulk inserts
 
-With SQLAlchemy 2.0, an insert executed with a list of parameter sets runs as multi-row `INSERT INTO ... VALUES (...), (...)` statements of up to 100 rows each, instead of one query per row.
+An insert executed with a list of parameter sets runs as multi-row `INSERT INTO ... VALUES (...), (...)` statements of up to 100 rows each, instead of one query per row.
 This applies to Core `insert()` with a list of parameters and to ORM flushes that insert several objects.
 `CursorResult.rowcount` is the total number of inserted rows, or -1 if Athena does not report a count.
 If a statement fails, the rows of the earlier statements remain inserted.

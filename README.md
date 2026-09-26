@@ -44,7 +44,7 @@ Extra packages:
 
 | Package       | Install command                         | Version  |
 |---------------|-----------------------------------------|----------|
-| SQLAlchemy    | `pip install PyAthena[SQLAlchemy]`      | >=1.0.0  |
+| SQLAlchemy    | `pip install PyAthena[SQLAlchemy]`      | >=2.0.0  |
 | AioSQLAlchemy | `pip install PyAthena[AioSQLAlchemy]`   | >=2.0.0  |
 | Pandas        | `pip install PyAthena[Pandas]`          | >=1.3.0  |
 | Arrow         | `pip install PyAthena[Arrow]`           | >=10.0.0 |
