@@ -97,10 +97,11 @@ class AsyncSparkCursor(SparkBaseCursor):
         """Terminate the Spark session, then shut down the executor.
 
         The executor is shut down even if terminating the session fails.
-        Calling this method again retries the termination.
+        If termination fails, calling this method again retries it.
 
         Args:
-            wait: Whether to wait for submitted futures to finish before returning.
+            wait: Whether to wait for submitted futures to finish before returning
+                or raising.
 
         Raises:
             OperationalError: If terminating the session fails.
