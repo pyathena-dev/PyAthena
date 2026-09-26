@@ -160,7 +160,7 @@ It runs the offline checks (`just lint`) on each of them, including Drafts and e
 For the compliance suites, the related files are `pyathena/sqlalchemy/`, `pyathena/aio/sqlalchemy/`, `tests/sqlalchemy/`, and `setup.cfg`.
 For the Spark tests, they are `pyathena/spark/`, `pyathena/aio/spark/`, `tests/pyathena/spark/`, and `tests/pyathena/aio/spark/`.
 Changes to `pyproject.toml`, `uv.lock`, `justfile`, or the Test workflows run both.
-Marking a Draft pull request ready for review starts its AWS jobs.
+Marking a Draft pull request ready for review starts its AWS jobs, and converting it back to Draft cancels them.
 To run every suite on a branch, dispatch the workflow:
 
 ```bash

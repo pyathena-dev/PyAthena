@@ -9,8 +9,10 @@ name: Test
 
 on:
   pull_request:
-    # ready_for_review starts the AWS jobs for a pull request leaving Draft.
-    types: [opened, synchronize, reopened, ready_for_review]
+    # ready_for_review starts the AWS jobs for a pull request leaving Draft;
+    # converted_to_draft starts a run without them, which cancels any
+    # in-progress run through the concurrency group.
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     paths-ignore:
       - 'docs/**'
       - '**.md'
