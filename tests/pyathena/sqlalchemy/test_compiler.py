@@ -591,14 +591,11 @@ class TestAthenaStatementCompiler:
             The SQL string produced by ``DefaultParameterFormatter``.
         """
         compiled = statement.compile(dialect=self.dialect)
-        compiled_params = compiled.construct_params(parameters, escape_names=False)
-        sql = compiled.string
-        if compiled.post_compile_params:
-            expanded = compiled._process_parameters_for_postcompile(compiled_params)
-            sql, compiled_params = expanded.statement, expanded.parameters
+        # Expand before escaping names, as SQLAlchemy's execution context does.
+        expanded = compiled.construct_expanded_state(parameters, escape_names=False)
         escaped_names = compiled.escaped_bind_names
-        formatted_params = {escaped_names.get(k, k): v for k, v in compiled_params.items()}
-        return DefaultParameterFormatter().format(sql, formatted_params)
+        formatted_params = {escaped_names.get(k, k): v for k, v in expanded.parameters.items()}
+        return DefaultParameterFormatter().format(expanded.statement, formatted_params)
 
     @pytest.mark.parametrize("name", DIFFICULT_PARAMETER_NAMES)
     def test_difficult_bind_parameter_name(self, name):
