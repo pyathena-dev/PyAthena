@@ -310,8 +310,11 @@ for chunk in cursor.iter_chunks():
     print(f"Processed chunk with {chunk.height} rows")
 ```
 
-This method uses Polars' `scan_csv()` and `scan_parquet()` with `collect_batches()`
-for efficient lazy evaluation, minimizing memory usage when processing large datasets.
+This method uses Polars' `scan_csv()` and `scan_parquet()` with `collect_batches()`,
+which stream the result from S3 without writing it to local storage.
+Polars reads ahead a bounded amount of data, so memory usage does not grow with the result size,
+but it is determined by Polars' read-ahead buffer rather than by `chunksize`.
+If reading a chunk fails, iteration raises `OperationalError` instead of ending early.
 
 The chunked iteration also works with the unload option:
 
