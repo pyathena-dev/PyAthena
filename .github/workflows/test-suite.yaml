@@ -17,6 +17,10 @@ on:
         description: Maximum number of Python versions tested concurrently
         type: number
         default: 5
+      skip-spark:
+        description: Skip the Spark tests of the PyAthena suite
+        type: boolean
+        default: false
 
 jobs:
   run:
@@ -26,6 +30,7 @@ jobs:
 
     env:
       TEST_TYPE: ${{ inputs.test-type }}
+      PYTEST_ADDOPTS: ${{ inputs.skip-spark && '--ignore=tests/pyathena/spark --ignore=tests/pyathena/aio/spark' || '' }}
       AWS_DEFAULT_REGION: us-west-2
       # Keep SDK retries bounded; PyAthena also retries wrapped catalog errors.
       AWS_RETRY_MODE: standard

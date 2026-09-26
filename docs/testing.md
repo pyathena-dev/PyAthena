@@ -148,6 +148,25 @@ Sanitize logs before sharing them.
 
 ## GitHub Actions
 
+The Test workflow runs the offline checks (`just lint`) on every pull request.
+It runs the AWS suites as follows:
+
+| Trigger | PyAthena suite | SQLAlchemy compliance suites | Spark tests |
+| --- | --- | --- | --- |
+| Draft pull request | No | No | No |
+| Ready pull request | Yes | When related files change | When related files change |
+| Weekly schedule and manual dispatch | Yes | Yes | Yes |
+
+For the compliance suites, the related files are `pyathena/sqlalchemy/`, `pyathena/aio/sqlalchemy/`, `tests/sqlalchemy/`, and `setup.cfg`.
+For the Spark tests, they are `pyathena/spark/`, `pyathena/aio/spark/`, `tests/pyathena/spark/`, and `tests/pyathena/aio/spark/`.
+Changes to `pyproject.toml`, `uv.lock`, `justfile`, or the Test workflows run both.
+Marking a Draft pull request ready for review starts its AWS jobs.
+To run every suite on a branch, dispatch the workflow:
+
+```bash
+gh workflow run test.yaml --ref <branch>
+```
+
 Project policy excludes external-fork pull requests from AWS integration CI.
 Maintainers do not approve those jobs as a substitute for contributor testing.
 Checks without AWS access may still run on a fork pull request.
