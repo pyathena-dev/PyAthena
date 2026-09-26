@@ -40,7 +40,6 @@ from sqlalchemy.testing.suite import CTETest as _CTETest
 from sqlalchemy.testing.suite import FetchLimitOffsetTest as _FetchLimitOffsetTest
 from sqlalchemy.testing.suite import HasTableTest as _HasTableTest
 from sqlalchemy.testing.suite import InsertBehaviorTest as _InsertBehaviorTest
-from sqlalchemy.testing.suite import IntegerTest as _IntegerTest
 from sqlalchemy.testing.suite import LongNameBlowoutTest as _LongNameBlowoutTest
 from sqlalchemy.testing.suite import QuotedNameArgumentTest as _QuotedNameArgumentTest
 from sqlalchemy.testing.suite import SimpleUpdateDeleteTest as _SimpleUpdateDeleteTest
@@ -1213,13 +1212,6 @@ class FetchLimitOffsetTest(_FetchLimitOffsetTest):
 
     @pytest.mark.skip("TODO")
     def test_limit_render_multiple_times(self, connection):
-        # TODO
-        pass
-
-
-class IntegerTest(_IntegerTest):
-    @pytest.mark.skip("TODO")
-    def test_huge_int(self, integer_round_trip, intvalue):
         # TODO
         pass
 
