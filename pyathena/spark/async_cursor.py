@@ -94,8 +94,21 @@ class AsyncSparkCursor(SparkBaseCursor):
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
 
     def close(self, wait: bool = False) -> None:
-        super().close()
-        self._executor.shutdown(wait=wait)
+        """Terminate the Spark session, then shut down the executor.
+
+        The executor is shut down even if terminating the session fails.
+        Calling this method again retries the termination.
+
+        Args:
+            wait: Whether to wait for submitted futures to finish before returning.
+
+        Raises:
+            OperationalError: If terminating the session fails.
+        """
+        try:
+            super().close()
+        finally:
+            self._executor.shutdown(wait=wait)
 
     def calculation_execution(self, query_id: str) -> "Future[AthenaCalculationExecution]":
         return self._executor.submit(self._get_calculation_execution, query_id)
