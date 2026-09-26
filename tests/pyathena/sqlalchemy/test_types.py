@@ -10,9 +10,5 @@ from pyathena.sqlalchemy.types import (
 def test_get_double_type():
     from pyathena.sqlalchemy.base import ischema_names
 
-    result = get_double_type()
-    if hasattr(types, "DOUBLE"):
-        assert result is types.DOUBLE
-    else:
-        assert result is types.FLOAT
-    assert ischema_names["double"] is result
+    assert get_double_type() is types.DOUBLE
+    assert ischema_names["double"] is types.DOUBLE

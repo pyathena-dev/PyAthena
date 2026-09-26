@@ -37,18 +37,12 @@ __all__ = [
 
 
 def get_double_type() -> type[Any]:
-    """Get the appropriate type for DOUBLE based on SQLAlchemy version.
-
-    SQLAlchemy 2.0+ provides a native DOUBLE type, while earlier versions
-    only have FLOAT. This function returns the appropriate type based on
-    what's available.
+    """Get the SQLAlchemy type for Athena DOUBLE.
 
     Returns:
-        types.DOUBLE for SQLAlchemy 2.0+, types.FLOAT for earlier versions.
+        ``types.DOUBLE``.
     """
-    if hasattr(types, "DOUBLE"):
-        return types.DOUBLE
-    return types.FLOAT
+    return types.DOUBLE
 
 
 class AthenaBinary(types.LargeBinary):

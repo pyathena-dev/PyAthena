@@ -31,7 +31,6 @@ from pyathena.sqlalchemy.types import (
     AthenaStruct,
     AthenaTimestamp,
     Tinyint,
-    get_double_type,
 )
 from pyathena.util import RetryConfig
 from tests.pyathena.conftest import ENV
@@ -934,30 +933,13 @@ class TestSQLAlchemyAthena:
     def test_reflect_table_include_columns(self, engine):
         engine, conn = engine
         one_row_complex = Table("one_row_complex", MetaData(schema=ENV.schema))
-        version = float(re.search(r"^([\d]+\.[\d]+)\..+", sqlalchemy.__version__).group(1))
-        if version <= 1.2:
-            engine.dialect.reflecttable(
-                conn, one_row_complex, include_columns=["col_int"], exclude_columns=[]
-            )
-        elif version == 1.3:
-            # https://docs.sqlalchemy.org/en/13/changelog/changelog_13.html#change-64ac776996da1a5c3e3460b4c0f0b257
-            engine.dialect.reflecttable(
-                conn,
-                one_row_complex,
-                include_columns=["col_int"],
-                exclude_columns=[],
-                resolve_fks=True,
-            )
-        else:  # version >= 1.4
-            # https://docs.sqlalchemy.org/en/14/changelog/changelog_14.html#change-0215fae622c01f9409eb1ba2754f4792
-            # https://docs.sqlalchemy.org/en/14/core/reflection.html#sqlalchemy.engine.reflection.Inspector.reflect_table
-            insp = sqlalchemy.inspect(engine)
-            insp.reflect_table(
-                one_row_complex,
-                include_columns=["col_int"],
-                exclude_columns=[],
-                resolve_fks=True,
-            )
+        insp = sqlalchemy.inspect(engine)
+        insp.reflect_table(
+            one_row_complex,
+            include_columns=["col_int"],
+            exclude_columns=[],
+            resolve_fks=True,
+        )
         assert len(one_row_complex.c) == 1
         assert one_row_complex.c.col_int is not None
         pytest.raises(AttributeError, lambda: one_row_complex.c.col_tinyint)
@@ -1357,7 +1339,7 @@ class TestSQLAlchemyAthena:
         assert isinstance(one_row_complex.c.col_int.type, types.INTEGER)
         assert isinstance(one_row_complex.c.col_bigint.type, types.BIGINT)
         assert isinstance(one_row_complex.c.col_float.type, types.FLOAT)
-        assert isinstance(one_row_complex.c.col_double.type, get_double_type())
+        assert isinstance(one_row_complex.c.col_double.type, types.DOUBLE)
         assert isinstance(one_row_complex.c.col_string.type, types.String)
         assert isinstance(one_row_complex.c.col_varchar.type, types.VARCHAR)
         assert one_row_complex.c.col_varchar.type.length == 10
@@ -1408,7 +1390,7 @@ class TestSQLAlchemyAthena:
         assert isinstance(dialect._get_column_type("int"), types.INTEGER)
         assert isinstance(dialect._get_column_type("bigint"), types.BIGINT)
         assert isinstance(dialect._get_column_type("float"), types.FLOAT)
-        assert isinstance(dialect._get_column_type("double"), get_double_type())
+        assert isinstance(dialect._get_column_type("double"), types.DOUBLE)
         assert isinstance(dialect._get_column_type("real"), types.FLOAT)
         assert isinstance(dialect._get_column_type("string"), types.String)
         assert isinstance(dialect._get_column_type("varchar"), types.VARCHAR)
@@ -3265,9 +3247,7 @@ SELECT {ENV.schema}.{table_name}.id, {ENV.schema}.{table_name}.name \n\
         assert type(actual.c.col_integer2.type) in [types.INT, types.INTEGER, types.Integer]
         assert type(actual.c.col_bigint.type) in [types.BIGINT, types.BigInteger]
         assert type(actual.c.col_biginteger.type) in [types.BIGINT, types.BigInteger]
-        expected_double_types = [types.FLOAT, types.Float]
-        if hasattr(types, "DOUBLE"):
-            expected_double_types.extend([types.DOUBLE, types.Double, types.DOUBLE_PRECISION])
+        expected_double_types = [types.DOUBLE, types.Double, types.DOUBLE_PRECISION]
         assert type(actual.c.col_double1.type) in expected_double_types
         assert type(actual.c.col_double2.type) in expected_double_types
         assert type(actual.c.col_double_precision.type) in expected_double_types
