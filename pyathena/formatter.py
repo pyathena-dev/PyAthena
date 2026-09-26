@@ -244,12 +244,47 @@ def _format_default(formatter: Formatter, escaper: Callable[[str], str], val: An
     return val
 
 
+def _date_literal(value: date) -> str:
+    """Render a date as an Athena DATE literal.
+
+    Args:
+        value: The date to render. A datetime is rendered as its date part.
+
+    Returns:
+        The DATE literal, with a four-digit year.
+    """
+    return f"DATE '{value.year:04d}-{value.month:02d}-{value.day:02d}'"
+
+
 def _format_date(formatter: Formatter, escaper: Callable[[str], str], val: Any) -> Any:
-    return f"DATE '{val:%Y-%m-%d}'"
+    return _date_literal(val)
+
+
+def _timestamp_literal(value: datetime, precision: int | None = None) -> str:
+    """Render a datetime as an Athena TIMESTAMP literal.
+
+    Without a precision, values with a sub-millisecond part keep all six
+    fractional digits and produce a ``timestamp(6)`` literal, and other values
+    use three digits and produce a ``timestamp(3)`` literal.
+
+    Args:
+        value: The datetime to render. Its time zone, if any, is not rendered.
+        precision: The number of fractional-second digits, from 0 to 6.
+            Digits beyond it are truncated.
+
+    Returns:
+        The TIMESTAMP literal, with a four-digit year.
+    """
+    if precision is None:
+        precision = 3 if value.microsecond % 1000 == 0 else 6
+    text = value.replace(tzinfo=None).isoformat(sep=" ", timespec="seconds")
+    if precision:
+        text += "." + f"{value.microsecond:06d}"[:precision]
+    return f"TIMESTAMP '{text}'"
 
 
 def _format_datetime(formatter: Formatter, escaper: Callable[[str], str], val: Any) -> Any:
-    return f"""TIMESTAMP '{val.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]}'"""
+    return _timestamp_literal(val)
 
 
 def _format_bool(formatter: Formatter, escaper: Callable[[str], str], val: Any) -> Any:

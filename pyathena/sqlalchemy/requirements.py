@@ -98,11 +98,13 @@ class Requirements(SuiteRequirements):
 
     @property
     def datetime_literals(self):
-        return unsupported()
+        return supported()
 
     @property
     def timestamp_microseconds(self):
-        return unsupported()
+        # Iceberg tables store microseconds; Hive tables store milliseconds.
+        # The compliance suite creates Iceberg tables.
+        return supported()
 
     @property
     def precision_generic_float_type(self):

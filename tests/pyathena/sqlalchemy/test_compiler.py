@@ -6,6 +6,7 @@
 # SPDX-License-Identifier: MIT
 
 import warnings
+from datetime import date, datetime
 
 import pytest
 from sqlalchemy import (
@@ -37,11 +38,24 @@ from sqlalchemy.sql.ddl import CreateTable
 from pyathena.sqlalchemy.base import AthenaDialect
 from pyathena.sqlalchemy.compiler import AthenaTypeCompiler
 from pyathena.sqlalchemy.pandas import AthenaPandasDialect
-from pyathena.sqlalchemy.types import ARRAY, MAP, STRUCT, AthenaArray, AthenaMap, AthenaStruct
+from pyathena.sqlalchemy.types import (
+    ARRAY,
+    MAP,
+    STRUCT,
+    AthenaArray,
+    AthenaMap,
+    AthenaStruct,
+    AthenaTimestamp,
+)
 from tests import ENV
 
 
 class TestAthenaTypeCompiler:
+    @pytest.mark.parametrize("precision", [None, 3])
+    def test_timestamp_ddl_ignores_precision(self, precision):
+        compiler = AthenaTypeCompiler(AthenaDialect())
+        assert compiler.process(AthenaTimestamp(precision)) == "TIMESTAMP"
+
     def test_visit_struct_empty(self):
         dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
@@ -152,6 +166,21 @@ class TestAthenaTypeCompiler:
         json_type = types.JSON()
         result = compiler.visit_JSON(json_type)
         assert result == "JSON"
+
+
+class _DecoratedDateTime(types.TypeDecorator):
+    impl = types.DateTime
+    cache_ok = True
+
+
+class _DecoratedMillisecondTimestamp(types.TypeDecorator):
+    impl = AthenaTimestamp(precision=3)
+    cache_ok = True
+
+
+class _NestedDecoratedDateTime(types.TypeDecorator):
+    impl = _DecoratedDateTime
+    cache_ok = True
 
 
 class TestAthenaStatementCompiler:
@@ -420,6 +449,109 @@ class TestAthenaStatementCompiler:
         assert "array_agg(length('abc'))" in sql
         assert "Unsupported ARRAY slice step" in sql
         assert "ARRAY(NULL)" not in sql
+
+    @pytest.mark.parametrize(
+        ("type_", "value", "expected"),
+        [
+            (Date, date(2012, 10, 15), "DATE '2012-10-15'"),
+            (types.DATE, date(1727, 4, 1), "DATE '1727-04-01'"),
+            (
+                types.DateTime,
+                datetime(2012, 10, 15, 12, 57, 18, 39642),
+                "TIMESTAMP '2012-10-15 12:57:18.039642'",
+            ),
+            (
+                types.DATETIME,
+                datetime(2012, 10, 15, 12, 57, 18),
+                "TIMESTAMP '2012-10-15 12:57:18.000'",
+            ),
+            (
+                types.TIMESTAMP,
+                datetime(2012, 10, 15, 12, 57, 18, 396),
+                "TIMESTAMP '2012-10-15 12:57:18.000396'",
+            ),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("literal_execute", "compile_kwargs"),
+        [(False, {"literal_binds": True}), (True, {"render_postcompile": True})],
+    )
+    def test_datetime_literal(self, type_, value, expected, literal_execute, compile_kwargs):
+        stmt = select(literal(value, type_, literal_execute=literal_execute))
+        sql = str(stmt.compile(dialect=self.dialect, compile_kwargs=compile_kwargs))
+        assert sql == f"SELECT {expected} AS anon_1"
+
+    @pytest.mark.parametrize(
+        ("expression", "expected"),
+        [
+            (
+                cast(column("col", String), types.DateTime),
+                "CAST(col AS TIMESTAMP(6))",
+            ),
+            (
+                cast(column("col", String), _DecoratedDateTime()),
+                "CAST(col AS TIMESTAMP(6))",
+            ),
+            (
+                cast(column("col", String), _NestedDecoratedDateTime()),
+                "CAST(col AS TIMESTAMP(6))",
+            ),
+            (
+                cast(column("col", String), AthenaTimestamp(precision=3)),
+                "CAST(col AS TIMESTAMP(3))",
+            ),
+            (
+                cast(column("col", String), _DecoratedMillisecondTimestamp()),
+                "CAST(col AS TIMESTAMP(3))",
+            ),
+            (
+                literal(
+                    [datetime(2012, 10, 15, 12, 57, 18, 789999)],
+                    AthenaArray(AthenaTimestamp(precision=3)),
+                ),
+                "CAST(ARRAY[TIMESTAMP '2012-10-15 12:57:18.789'] AS ARRAY(TIMESTAMP(3)))",
+            ),
+            (
+                column("items", AthenaArray(types.DateTime)).concat(
+                    [datetime(2012, 10, 15, 12, 57, 18, 396)]
+                ),
+                "items || CAST(ARRAY[TIMESTAMP '2012-10-15 12:57:18.000396'] "
+                "AS ARRAY(TIMESTAMP(6)))",
+            ),
+        ],
+    )
+    def test_timestamp_cast_keeps_microseconds(self, expression, expected):
+        assert expected in self._compile_sql(select(expression))
+
+    def test_timestamp_precision_applies_to_compared_values(self):
+        col = column("col", AthenaTimestamp(precision=3))
+        value = datetime(2012, 10, 15, 12, 57, 18, 789999)
+        assert self._compile_sql(select(col).where(col == value)) == (
+            "SELECT col \nWHERE col = TIMESTAMP '2012-10-15 12:57:18.789'"
+        )
+        bound = select(col).where(col == value).compile(dialect=self.dialect).binds["col_1"]
+        processor = bound.type.dialect_impl(self.dialect).bind_processor(self.dialect)
+        assert processor(bound.value) == datetime(2012, 10, 15, 12, 57, 18, 789000)
+
+    def test_array_slice_fallback_keeps_bare_timestamp(self):
+        items = column("items", types.ARRAY(types.DateTime))
+        sql = str(select(items[2:3:1]).compile(dialect=self.dialect))
+        assert "CAST(ARRAY[] AS ARRAY(TIMESTAMP))" in sql
+
+    def test_timestamp_precision_in_cache_key(self):
+        value = datetime(2012, 10, 15, 12, 57, 18, 789999)
+        millis = select(literal(value, AthenaTimestamp(precision=3), literal_execute=True))
+        micros = select(literal(value, AthenaTimestamp(precision=6), literal_execute=True))
+        assert millis._generate_cache_key() != micros._generate_cache_key()
+
+    @pytest.mark.parametrize(
+        ("type_", "expected"),
+        [(types.Date, "DATE '2012-10-15 10%%'"), (types.DateTime, "TIMESTAMP '2012-10-15 10%%'")],
+    )
+    def test_temporal_string_literal_doubles_percent(self, type_, expected):
+        assert self._compile_sql(select(literal("2012-10-15 10%", type_))) == (
+            f"SELECT {expected} AS anon_1"
+        )
 
 
 class TestAthenaDDLCompiler:

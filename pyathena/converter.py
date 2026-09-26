@@ -34,17 +34,50 @@ def _to_date(value: str | datetime | date | None) -> date | None:
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
+def _parse_datetime(value: str) -> datetime:
+    """Parse an Athena TIMESTAMP value of any precision.
+
+    Args:
+        value: The value as ``YYYY-MM-DD HH:MM:SS`` followed by an optional
+            fraction of up to 12 digits.
+
+    Returns:
+        The datetime. Digits beyond microseconds are truncated.
+    """
+    seconds, _, fraction = value.partition(".")
+    parsed = datetime.strptime(seconds, "%Y-%m-%d %H:%M:%S")
+    if fraction:
+        parsed = parsed.replace(microsecond=int(fraction[:6].ljust(6, "0")))
+    return parsed
+
+
 def _to_datetime(varchar_value: str | None) -> datetime | None:
+    """Convert an Athena TIMESTAMP value to a datetime.
+
+    Args:
+        varchar_value: The value as text, or None.
+
+    Returns:
+        The datetime, or None.
+    """
     if varchar_value is None:
         return None
-    return datetime.strptime(varchar_value, "%Y-%m-%d %H:%M:%S.%f")
+    return _parse_datetime(varchar_value)
 
 
 def _to_datetime_with_tz(varchar_value: str | None) -> datetime | None:
+    """Convert an Athena TIMESTAMP WITH TIME ZONE value to an aware datetime.
+
+    Args:
+        varchar_value: The value as text with a trailing zone name, or None.
+
+    Returns:
+        The aware datetime, or None.
+    """
     if varchar_value is None:
         return None
     datetime_, _, tz = varchar_value.rpartition(" ")
-    return datetime.strptime(datetime_, "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=gettz(tz))
+    return _parse_datetime(datetime_).replace(tzinfo=gettz(tz))
 
 
 def _to_time(varchar_value: str | None) -> time | None:

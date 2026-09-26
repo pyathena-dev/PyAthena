@@ -86,7 +86,6 @@ def _fail_get_table_metadata(monkeypatch, raw_connection, error, attempt=1):
 
 
 del CompositeKeyReflectionTest  # noqa: F821
-del DateTimeMicrosecondsTest  # noqa: F821
 del DifficultParametersTest  # noqa: F821
 del DistinctOnTest  # noqa: F821
 del HasIndexTest  # noqa: F821
@@ -94,7 +93,6 @@ del IdentityAutoincrementTest  # noqa: F821
 del JoinTest  # noqa: F821
 del TimeMicrosecondsTest  # noqa: F821
 del TimeTest  # noqa: F821
-del TimestampMicrosecondsTest  # noqa: F821
 del UuidTest  # noqa: F821
 
 

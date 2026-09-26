@@ -358,13 +358,18 @@ class TestArrayTypeInspector:
         assert "anon_1" not in sql
 
     @pytest.mark.parametrize(
-        ("item_type", "expected"), [(AthenaDate(), "DATE"), (AthenaTimestamp(), "TIMESTAMP")]
+        ("item_type", "ddl", "dml"),
+        [
+            (AthenaDate(), "DATE", "DATE"),
+            (AthenaTimestamp(), "TIMESTAMP", "TIMESTAMP(6)"),
+            (AthenaTimestamp(precision=3), "TIMESTAMP", "TIMESTAMP(3)"),
+        ],
     )
-    def test_array_athena_temporal_element_type_compilation(self, item_type, expected):
+    def test_array_athena_temporal_element_type_compilation(self, item_type, ddl, dml):
         dialect = AthenaDialect()
         array = AthenaArray(item_type)
-        assert dialect.type_compiler_instance.process(array) == f"ARRAY<{expected}>"
-        assert f"AS ARRAY({expected})" in str(select(literal([], array)).compile(dialect=dialect))
+        assert dialect.type_compiler_instance.process(array) == f"ARRAY<{ddl}>"
+        assert f"AS ARRAY({dml})" in str(select(literal([], array)).compile(dialect=dialect))
 
 
 class TestArrayValueProcessor:
@@ -389,6 +394,11 @@ class TestArrayValueProcessor:
                 [datetime(2025, 1, 2, 3, 4, 5)],
                 "ARRAY[TIMESTAMP '2025-01-02 03:04:05.000']",
             ),
+            (
+                AthenaArray(types.DateTime),
+                [datetime(2025, 1, 2, 3, 4, 5, 123456)],
+                "ARRAY[TIMESTAMP '2025-01-02 03:04:05.123456']",
+            ),
             (AthenaArray(types.BINARY), [b"\x00\xff"], "ARRAY[X'00ff']"),
             (AthenaArray(Integer), [], "ARRAY[]"),
             (AthenaArray(Integer), None, "NULL"),
@@ -400,6 +410,16 @@ class TestArrayValueProcessor:
         bound = type_.bind_processor(dialect)(value)
         actual = DefaultParameterFormatter().format("SELECT %(value)s", {"value": bound})
         assert actual == "SELECT " + expected.replace("NULL", "null")
+
+    @pytest.mark.parametrize(
+        ("type_", "expected"),
+        [
+            (AthenaArray(types.Date), "ARRAY[DATE '2025-01-02'' --']"),
+            (AthenaArray(types.DateTime), "ARRAY[TIMESTAMP '2025-01-02'' --']"),
+        ],
+    )
+    def test_array_literal_renders_temporal_string_elements(self, type_, expected):
+        assert type_.literal_processor(AthenaDialect())(["2025-01-02' --"]) == expected
 
     def test_array_binding_preserves_in_parameters(self):
         formatter = DefaultParameterFormatter()
@@ -449,6 +469,15 @@ class TestArrayValueProcessor:
                 AthenaArray(AthenaTimestamp),
                 '["2025-01-02 03:04:05"]',
                 [datetime(2025, 1, 2, 3, 4, 5)],
+            ),
+            (
+                AthenaArray(types.DateTime),
+                '["2025-01-02 03:04:05.1","2025-01-02 03:04:05.123456789","2025-01-02T03:04:05"]',
+                [
+                    datetime(2025, 1, 2, 3, 4, 5, 100000),
+                    datetime(2025, 1, 2, 3, 4, 5, 123456),
+                    datetime(2025, 1, 2, 3, 4, 5),
+                ],
             ),
             (AthenaArray(types.BINARY), '["00FF",""]', [b"\x00\xff", b""]),
             (AthenaArray(types.JSON), '[{"fraction":0.1}]', [{"fraction": 0.1}]),
