@@ -637,7 +637,8 @@ class AthenaStatementCompiler(SQLCompiler):
     def visit_cast(self, cast: Cast[Any], **kwargs):
         """Render a CAST with the Athena DML name of the target type.
 
-        A TypeDecorator is cast as its implementation type.
+        The target is resolved to the type the dialect uses: an Athena variant
+        from ``with_variant()`` or the implementation of a TypeDecorator.
 
         Args:
             cast: The CAST expression.
@@ -650,8 +651,15 @@ class AthenaStatementCompiler(SQLCompiler):
             CompileError: For an ARRAY, MAP, or ROW type that cannot be cast.
         """
         type_ = cast.type
-        while isinstance(type_, types.TypeDecorator):
-            type_ = self._array_type_inspector.decorator_impl(type_)
+        while True:
+            # SQLAlchemy 1.x types have no _variant_mapping.
+            variants = getattr(type_, "_variant_mapping", {})
+            if self.dialect.name in variants:
+                type_ = variants[self.dialect.name]
+            elif isinstance(type_, types.TypeDecorator):
+                type_ = self._array_type_inspector.decorator_impl(type_)
+            else:
+                break
         if isinstance(type_, (types.ARRAY, AthenaMap, AthenaStruct)):
             type_clause = self._complex_dml_type(
                 type_, require_precision=cast._annotations.get("_pyathena_array_bind", False)

@@ -582,9 +582,14 @@ class TestAthenaStatementCompiler:
             (types.ARRAY(String), "ARRAY(VARCHAR)"),
             (AthenaMap(String, Integer), "MAP(VARCHAR, INTEGER)"),
             (AthenaStruct(("name", String)), "ROW(name VARCHAR)"),
+            (Integer().with_variant(String(50), "awsathena"), "VARCHAR"),
+            (Integer().with_variant(Float(), "awsathena"), "REAL"),
+            (String().with_variant(Integer(), "awsathena"), "INTEGER"),
+            (String().with_variant(Integer(), "postgresql"), "VARCHAR"),
+            (decorated(String()).with_variant(Float(), "awsathena"), "REAL"),
         ],
     )
-    def test_decorated_cast_uses_impl_type(self, type_, expected):
+    def test_cast_resolves_variants_and_decorators(self, type_, expected):
         for target in (type_, decorated(type_), decorated(decorated(type_))):
             assert self._compile_sql(cast(column("col"), target)) == f"CAST(col AS {expected})"
 
