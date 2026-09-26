@@ -236,6 +236,7 @@ commands =
     sqla_async: just test sqla-async
 passenv =
     TOXENV
+    PYTEST_ADDOPTS
     AWS_*
     GITHUB_*
 """

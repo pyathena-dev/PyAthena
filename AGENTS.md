@@ -23,7 +23,7 @@ Preserve existing and upstream copyright notices; do not apply the new original-
 - **NEVER** commit directly to `master` — always create a feature branch and PR
 - Create PRs as drafts: `gh pr create --draft`
 - Use a dedicated worktree for each PR and follow the repository's PR template.
-- For PR delivery, follow [development-workflow](.agents/skills/development-workflow/SKILL.md): create the draft, complete two distinct self-reviews, collect an independent review, and check current CI before Ready.
+- For PR delivery, follow [development-workflow](.agents/skills/development-workflow/SKILL.md): create the draft, complete two distinct self-reviews, collect an independent review, then mark the PR Ready to start its AWS CI and confirm the result.
 - Run [self-review](.agents/skills/self-review/SKILL.md) for behavior and implementation, then [self-review-round-two](.agents/skills/self-review-round-two/SKILL.md) for compatibility, operational consequences, and factual claims.
 - Follow [independent-review](.agents/skills/independent-review/SKILL.md) after both rounds; Codex-authored changes use Claude Code `claude-fable-5-1`, profile `max`, effort `high`, never Enterprise.
 - Post new review records inline on relevant diff lines using the GitHub review API's `comments` array with an empty review body; record repairs with the review-comment reply API.
