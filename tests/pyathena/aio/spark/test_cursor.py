@@ -219,6 +219,23 @@ class TestAioSparkCursor:
         cancel.assert_awaited_once_with("calculation_id")
         assert cursor.state == final_state
 
+    async def test_execute_kill_on_interrupt_cancel_failure(self):
+        """A failed cancellation request does not replace the task cancellation (no AWS)."""
+        cursor, cancel, polling = _offline_cursor(
+            kill_on_interrupt=True,
+            final_state=AthenaCalculationExecutionStatus.STATE_COMPLETED,
+        )
+        cancel.side_effect = OperationalError("cancel failed")
+        task = asyncio.create_task(cursor.execute("code"))
+        await polling.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert task.cancelled()
+        cancel.assert_awaited_once_with("calculation_id")
+        assert cursor.calculation_execution is None
+
     async def test_execute_cancellation_without_kill_on_interrupt(self):
         """Without kill_on_interrupt, task cancellation propagates without cancel (no AWS)."""
         cursor, cancel, polling = _offline_cursor(

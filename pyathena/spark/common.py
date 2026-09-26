@@ -266,17 +266,23 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             The calculation execution in a terminal state.
 
         Raises:
-            KeyboardInterrupt: If interrupted while waiting.
-            OperationalError: If a status or cancellation request fails.
+            KeyboardInterrupt: If interrupted while waiting. A failure to cancel or
+                wait for the calculation becomes its ``__cause__``.
+            OperationalError: If a status request fails.
         """
         try:
             return self.__poll(query_id)
-        except KeyboardInterrupt:
+        except KeyboardInterrupt as interrupt:
             if not self._kill_on_interrupt:
                 raise
             _logger.warning("Query canceled by user.")
-            self._cancel(query_id)
-            self._calculation_execution = cast(AthenaCalculationExecution, self.__poll(query_id))
+            try:
+                self._cancel(query_id)
+                self._calculation_execution = cast(
+                    AthenaCalculationExecution, self.__poll(query_id)
+                )
+            except Exception as e:
+                raise interrupt from e
             raise
 
     def _cancel(self, query_id: str) -> None:

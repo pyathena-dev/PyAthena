@@ -164,19 +164,23 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
             The calculation execution in a terminal state.
 
         Raises:
-            asyncio.CancelledError: If the task is cancelled while waiting.
-            OperationalError: If a status or cancellation request fails.
+            asyncio.CancelledError: If the task is cancelled while waiting. A failure
+                to cancel or wait for the calculation becomes its ``__cause__``.
+            OperationalError: If a status request fails.
         """
         try:
             return await self.__poll(query_id)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as cancellation:
             if not self._kill_on_interrupt:
                 raise
             _logger.warning("Query canceled by user.")
-            await self._cancel(query_id)
-            self._calculation_execution = cast(
-                AthenaCalculationExecution, await self.__poll(query_id)
-            )
+            try:
+                await self._cancel(query_id)
+                self._calculation_execution = cast(
+                    AthenaCalculationExecution, await self.__poll(query_id)
+                )
+            except Exception as e:
+                raise cancellation from e
             raise
 
     async def _cancel(self, query_id: str) -> None:  # type: ignore[override]
