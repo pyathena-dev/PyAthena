@@ -37,6 +37,7 @@ from sqlalchemy.testing.suite import BinaryTest as _BinaryTest
 from sqlalchemy.testing.suite import ComponentReflectionTest as _ComponentReflectionTest
 from sqlalchemy.testing.suite import ComponentReflectionTestExtra as _ComponentReflectionTestExtra
 from sqlalchemy.testing.suite import CTETest as _CTETest
+from sqlalchemy.testing.suite import DifficultParametersTest as _DifficultParametersTest
 from sqlalchemy.testing.suite import FetchLimitOffsetTest as _FetchLimitOffsetTest
 from sqlalchemy.testing.suite import HasTableTest as _HasTableTest
 from sqlalchemy.testing.suite import InsertBehaviorTest as _InsertBehaviorTest
@@ -44,7 +45,6 @@ from sqlalchemy.testing.suite import IntegerTest as _IntegerTest
 from sqlalchemy.testing.suite import LongNameBlowoutTest as _LongNameBlowoutTest
 from sqlalchemy.testing.suite import QuotedNameArgumentTest as _QuotedNameArgumentTest
 from sqlalchemy.testing.suite import SimpleUpdateDeleteTest as _SimpleUpdateDeleteTest
-from sqlalchemy.testing.suite import StringTest as _StringTest
 
 from pyathena.error import OperationalError
 from pyathena.sqlalchemy.types import (
@@ -86,7 +86,6 @@ def _fail_get_table_metadata(monkeypatch, raw_connection, error, attempt=1):
 
 
 del CompositeKeyReflectionTest  # noqa: F821
-del DifficultParametersTest  # noqa: F821
 del DistinctOnTest  # noqa: F821
 del HasIndexTest  # noqa: F821
 del IdentityAutoincrementTest  # noqa: F821
@@ -1178,6 +1177,20 @@ class IdentifierReflectionTest(fixtures.TestBase):
             metadata.remove(too_long)
 
 
+class DifficultParametersTest(_DifficultParametersTest):
+    # Each case creates an Iceberg table, and the formatter inlines bind values before the
+    # query reaches Athena. test_round_trip_same_named_column still sends every name live
+    # as a column name and an explicit bind parameter; test_compiler.py covers explicit
+    # expanding binds offline, because round-trip IN parameters get sanitized names.
+    @pytest.mark.skip("Explicit binds are covered live by test_round_trip_same_named_column.")
+    def test_standalone_bindparam_escape(self, paramname, connection, multirow_fixture):
+        pass
+
+    @pytest.mark.skip("Expanding binds are covered offline by the dialect compile tests.")
+    def test_standalone_bindparam_escape_expanding(self, paramname, connection, multirow_fixture):
+        pass
+
+
 class InsertBehaviorTest(_InsertBehaviorTest):
     @pytest.mark.skip("Athena does not support auto-incrementing.")
     def test_insert_from_select_autoinc(self, connection):
@@ -1209,21 +1222,9 @@ class FetchLimitOffsetTest(_FetchLimitOffsetTest):
     def test_expr_offset(self, connection):
         pass
 
-    @pytest.mark.skip("TODO")
-    def test_limit_render_multiple_times(self, connection):
-        # TODO
-        pass
-
 
 class IntegerTest(_IntegerTest):
     @pytest.mark.skip("TODO")
     def test_huge_int(self, integer_round_trip, intvalue):
-        # TODO
-        pass
-
-
-class StringTest(_StringTest):
-    @pytest.mark.skip("TODO")
-    def test_dont_truncate_rightside(self, metadata, connection, expr, expected):
         # TODO
         pass

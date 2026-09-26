@@ -29,12 +29,14 @@ from sqlalchemy import (
     table,
     text,
     types,
+    union,
 )
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.sql import literal, literal_column, operators
 from sqlalchemy.sql.compiler import FROM_LINTING
 from sqlalchemy.sql.ddl import CreateTable
 
+from pyathena.formatter import DefaultParameterFormatter
 from pyathena.sqlalchemy.base import AthenaDialect
 from pyathena.sqlalchemy.compiler import AthenaTypeCompiler
 from pyathena.sqlalchemy.pandas import AthenaPandasDialect
@@ -48,6 +50,31 @@ from pyathena.sqlalchemy.types import (
     AthenaTimestamp,
 )
 from tests import ENV
+
+# Bind parameter names from SQLAlchemy's DifficultParametersTest.
+DIFFICULT_PARAMETER_NAMES = [
+    "boring",
+    "per cent",
+    "per % cent",
+    "%percent",
+    "par(ens)",
+    "percent%(ens)yah",
+    "col:ons",
+    "_starts_with_underscore",
+    "dot.s",
+    "more :: %colons%",
+    "_name",
+    "___name",
+    "[BracketsAndCase]",
+    "42numbers",
+    "percent%signs",
+    "has spaces",
+    "/slashes/",
+    "more/slashes",
+    "q?marks",
+    "1param",
+    "1col:on",
+]
 
 
 class TestAthenaTypeCompiler:
@@ -552,6 +579,50 @@ class TestAthenaStatementCompiler:
         assert self._compile_sql(select(literal("2012-10-15 10%", type_))) == (
             f"SELECT {expected} AS anon_1"
         )
+
+    def _format_sql(self, statement, parameters=None):
+        """Format a statement with the parameter names SQLAlchemy sends to the cursor.
+
+        Bind processors are not applied, so use this only for types without one.
+
+        Args:
+            statement: SQLAlchemy statement to compile.
+            parameters: Values for the statement's bind parameters.
+
+        Returns:
+            The SQL string produced by ``DefaultParameterFormatter``.
+        """
+        compiled = statement.compile(dialect=self.dialect)
+        # Expand before escaping names, as SQLAlchemy's execution context does.
+        expanded = compiled.construct_expanded_state(parameters, escape_names=False)
+        escaped_names = compiled.escaped_bind_names
+        formatted_params = {escaped_names.get(k, k): v for k, v in expanded.parameters.items()}
+        return DefaultParameterFormatter().format(expanded.statement, formatted_params)
+
+    @pytest.mark.parametrize("name", DIFFICULT_PARAMETER_NAMES)
+    def test_difficult_bind_parameter_name(self, name):
+        id_ = column("id", Integer)
+        stmt = select(id_).where(id_ == bindparam(name, type_=Integer))
+        assert self._format_sql(stmt, {name: 3}).endswith("WHERE id = 3")
+
+    @pytest.mark.parametrize("name", DIFFICULT_PARAMETER_NAMES)
+    def test_difficult_expanding_bind_parameter_name(self, name):
+        id_ = column("id", Integer)
+        stmt = select(id_).where(id_.in_(bindparam(name, value=[1, 2])))
+        assert self._format_sql(stmt, {name: [4, 1]}).endswith("WHERE id IN (4, 1)")
+
+    def test_limit_rendered_multiple_times(self):
+        limited = (
+            select(self.test_table.c.id).order_by(self.test_table.c.id).limit(1).scalar_subquery()
+        )
+        sql = self._format_sql(union(select(limited), select(limited)).subquery().select())
+        assert sql.count("LIMIT 1") == 2
+        assert "%(" not in sql
+
+    @pytest.mark.parametrize("pattern", ["%B%", "A%C", "A%C%Z", "%(x)s"])
+    def test_like_pattern_is_not_truncated(self, pattern):
+        stmt = select(column("x", String)).where(column("x", String).like(pattern))
+        assert self._format_sql(stmt).endswith(f"WHERE x LIKE '{pattern}'")
 
 
 class TestAthenaDDLCompiler:
