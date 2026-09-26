@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 from abc import ABCMeta, abstractmethod
@@ -72,6 +73,17 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         self._notebook_version = notebook_version
         self._session_description = description
         self._session_idle_timeout_minutes = session_idle_timeout_minutes
+        self._calculation_id: str | None = None
+        self._calculation_execution: AthenaCalculationExecution | None = None
+
+        # Created before the session so that a local failure cannot leave
+        # a newly started session behind.
+        self._client = self.connection.session.client(
+            "s3",
+            region_name=self.connection.region_name,
+            config=self.connection.config,
+            **self.connection._client_kwargs,
+        )
 
         if session_id:
             if self._exists_session(session_id):
@@ -80,16 +92,6 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
                 raise OperationalError(f"Session: {session_id} not found.")
         else:
             self._session_id = self._start_session()
-
-        self._calculation_id: str | None = None
-        self._calculation_execution: AthenaCalculationExecution | None = None
-
-        self._client = self.connection.session.client(
-            "s3",
-            region_name=self.connection.region_name,
-            config=self.connection.config,
-            **self.connection._client_kwargs,
-        )
 
     @property
     def session_id(self) -> str:
@@ -195,6 +197,18 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             return True
 
     def _start_session(self) -> str:
+        """Start a Spark session with ``StartSession`` and wait until it is idle.
+
+        If the new session does not become idle, it is terminated before the
+        error is re-raised.
+
+        Returns:
+            The ID of the new session.
+
+        Raises:
+            OperationalError: If the session cannot be started or does not
+                become idle.
+        """
         request: dict[str, Any] = {
             "WorkGroup": self._work_group,
             "EngineConfiguration": self._engine_configuration,
@@ -215,9 +229,16 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         except Exception as e:
             _logger.exception("Failed to start session.")
             raise OperationalError(*e.args) from e
-        else:
+
+        try:
             self._wait_for_idle_session(session_id)
-            return session_id
+        except BaseException:
+            # The caller receives no cursor to close, so the session is released here.
+            with contextlib.suppress(OperationalError):
+                # Already logged with the session ID; the original error takes precedence.
+                self.__terminate_session(session_id)
+            raise
+        return session_id
 
     def _terminate_session(self) -> None:
         """Terminate the cursor's Spark session with ``TerminateSession``.
@@ -225,7 +246,21 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         Raises:
             OperationalError: If the request fails.
         """
-        request: dict[str, Any] = {"SessionId": self._session_id}
+        self.__terminate_session(self._session_id)
+
+    def __terminate_session(self, session_id: str) -> None:
+        """Terminate a Spark session with ``TerminateSession``.
+
+        Session startup calls this synchronously in every cursor variant,
+        including those that override ``_terminate_session`` with a coroutine.
+
+        Args:
+            session_id: The session ID.
+
+        Raises:
+            OperationalError: If the request fails.
+        """
+        request: dict[str, Any] = {"SessionId": session_id}
         try:
             retry_api_call(
                 self._connection.client.terminate_session,
@@ -234,7 +269,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
                 **request,
             )
         except Exception as e:
-            _logger.exception("Failed to terminate session.")
+            _logger.exception(f"Failed to terminate session: {session_id}.")
             raise OperationalError(*e.args) from e
 
     def __poll(self, query_id: str) -> AthenaQueryExecution | AthenaCalculationExecution:

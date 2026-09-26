@@ -82,6 +82,10 @@ class AsyncSparkCursor(SparkBaseCursor):
         max_workers: int = (cpu_count() or 1) * 5,
         **kwargs,
     ):
+        # Created before the session so that an invalid max_workers cannot leave
+        # a newly started session behind; the executor starts no threads until used.
+        self._max_workers = max_workers
+        self._executor = ThreadPoolExecutor(max_workers=max_workers)
         super().__init__(
             session_id=session_id,
             description=description,
@@ -90,8 +94,6 @@ class AsyncSparkCursor(SparkBaseCursor):
             session_idle_timeout_minutes=session_idle_timeout_minutes,
             **kwargs,
         )
-        self._max_workers = max_workers
-        self._executor = ThreadPoolExecutor(max_workers=max_workers)
 
     def close(self, wait: bool = False) -> None:
         """Terminate the Spark session, then shut down the executor.
