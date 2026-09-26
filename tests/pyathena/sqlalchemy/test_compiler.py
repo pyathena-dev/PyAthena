@@ -581,7 +581,9 @@ class TestAthenaStatementCompiler:
         )
 
     def _format_sql(self, statement, parameters=None):
-        """Format a statement the way SQLAlchemy passes it to the PyAthena cursor.
+        """Format a statement with the parameter names SQLAlchemy sends to the cursor.
+
+        Bind processors are not applied, so use this only for types without one.
 
         Args:
             statement: SQLAlchemy statement to compile.

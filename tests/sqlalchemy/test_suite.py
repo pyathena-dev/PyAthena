@@ -1178,15 +1178,15 @@ class IdentifierReflectionTest(fixtures.TestBase):
 
 
 class DifficultParametersTest(_DifficultParametersTest):
-    # Each case creates an Iceberg table. The standalone cases use these names only as
-    # bind parameters, which the formatter inlines before the query reaches Athena.
-    # test_round_trip_same_named_column runs the same names through Athena as column
-    # names and bind parameters, and test_compiler.py formats every name offline.
-    @pytest.mark.skip("Covered by test_round_trip_same_named_column and compile tests.")
+    # Each case creates an Iceberg table, and the formatter inlines bind values before the
+    # query reaches Athena. test_round_trip_same_named_column still sends every name live
+    # as a column name and an explicit bind parameter; test_compiler.py covers explicit
+    # expanding binds offline, because round-trip IN parameters get sanitized names.
+    @pytest.mark.skip("Explicit binds are covered live by test_round_trip_same_named_column.")
     def test_standalone_bindparam_escape(self, paramname, connection, multirow_fixture):
         pass
 
-    @pytest.mark.skip("Covered by test_round_trip_same_named_column and compile tests.")
+    @pytest.mark.skip("Expanding binds are covered offline by the dialect compile tests.")
     def test_standalone_bindparam_escape_expanding(self, paramname, connection, multirow_fixture):
         pass
 
