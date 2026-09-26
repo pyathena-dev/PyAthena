@@ -70,14 +70,34 @@ class SparkCursor(SparkBaseCursor, WithCalculationExecution):
         engine_configuration: dict[str, Any] | None = None,
         notebook_version: str | None = None,
         session_idle_timeout_minutes: int | None = None,
+        terminate_session_on_close: bool | None = None,
         **kwargs,
     ) -> None:
+        """Initialize the cursor and start or attach to a Spark session.
+
+        Args:
+            session_id: ID of an existing session to use. If omitted, a new
+                session is started.
+            description: Description of a new session.
+            engine_configuration: Engine configuration of a new session.
+            notebook_version: Notebook version of a new session.
+            session_idle_timeout_minutes: Idle timeout of a new session in minutes.
+            terminate_session_on_close: Whether ``close()`` terminates the session.
+                If None, only a session started by this cursor is terminated;
+                a session supplied with ``session_id`` is left running.
+            **kwargs: Arguments passed to ``SparkBaseCursor``.
+
+        Raises:
+            OperationalError: If the supplied session does not exist, or the
+                session cannot be started or does not become idle.
+        """
         super().__init__(
             session_id=session_id,
             description=description,
             engine_configuration=engine_configuration,
             notebook_version=notebook_version,
             session_idle_timeout_minutes=session_idle_timeout_minutes,
+            terminate_session_on_close=terminate_session_on_close,
             **kwargs,
         )
 

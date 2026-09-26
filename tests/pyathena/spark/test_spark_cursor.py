@@ -13,10 +13,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from pyathena import OperationalError
-from pyathena.model import AthenaCalculationExecutionStatus
+from pyathena.model import AthenaCalculationExecutionStatus, AthenaSessionStatus
 from pyathena.spark.cursor import SparkCursor
 from tests import ENV
-from tests.pyathena.util import CANCELABLE_SPARK_JOB, wait_for_spark_job
+from tests.pyathena.util import (
+    CANCELABLE_SPARK_JOB,
+    wait_for_spark_job,
+    wait_for_spark_session_state,
+)
 
 
 class TestSparkCursor:
@@ -154,6 +158,21 @@ class TestSparkCursor:
         # Canceling a completed calculation does not change its state.
         spark_cursor.cancel()
         assert spark_cursor.state == AthenaCalculationExecutionStatus.STATE_COMPLETED
+
+    def test_session_ownership(self, spark_cursor):
+        client = spark_cursor.connection.client
+        session_id = spark_cursor.session_id
+        with spark_cursor.connection.cursor(SparkCursor, session_id=session_id) as borrower:
+            borrower.execute("print(1)")
+            assert borrower.get_std_out() == "1"
+
+        # Closing a cursor that was given the session leaves the session running.
+        spark_cursor.execute("print(2)")
+        assert spark_cursor.get_std_out() == "2"
+
+        # Closing the cursor that started the session terminates it.
+        spark_cursor.close()
+        wait_for_spark_session_state(client, session_id, AthenaSessionStatus.STATE_TERMINATED)
 
     @pytest.mark.parametrize(
         "final_state",

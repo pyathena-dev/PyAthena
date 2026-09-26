@@ -55,14 +55,34 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
         engine_configuration: dict[str, Any] | None = None,
         notebook_version: str | None = None,
         session_idle_timeout_minutes: int | None = None,
+        terminate_session_on_close: bool | None = None,
         **kwargs,
     ) -> None:
+        """Initialize the cursor and start or attach to a Spark session.
+
+        Args:
+            session_id: ID of an existing session to use. If omitted, a new
+                session is started.
+            description: Description of a new session.
+            engine_configuration: Engine configuration of a new session.
+            notebook_version: Notebook version of a new session.
+            session_idle_timeout_minutes: Idle timeout of a new session in minutes.
+            terminate_session_on_close: Whether ``close()`` terminates the session.
+                If None, only a session started by this cursor is terminated;
+                a session supplied with ``session_id`` is left running.
+            **kwargs: Arguments passed to ``SparkBaseCursor``.
+
+        Raises:
+            OperationalError: If the supplied session does not exist, or the
+                session cannot be started or does not become idle.
+        """
         super().__init__(
             session_id=session_id,
             description=description,
             engine_configuration=engine_configuration,
             notebook_version=notebook_version,
             session_idle_timeout_minutes=session_idle_timeout_minutes,
+            terminate_session_on_close=terminate_session_on_close,
             **kwargs,
         )
 
@@ -291,8 +311,18 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
         await self._cancel(self.calculation_id)
 
     async def close(self) -> None:  # type: ignore[override]
-        """Close the cursor by terminating the Spark session."""
-        await self._terminate_session()
+        """Close the cursor, terminating its Spark session if configured to.
+
+        See ``terminate_session_on_close``. After a successful termination,
+        further calls do not terminate the session again; after a failed one,
+        calling this method again retries it.
+
+        Raises:
+            OperationalError: If terminating the session fails.
+        """
+        if self._should_terminate_session():
+            await self._terminate_session()
+            self._session_terminated = True
 
     async def executemany(  # type: ignore[override]
         self,

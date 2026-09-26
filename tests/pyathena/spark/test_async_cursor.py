@@ -13,13 +13,30 @@ from unittest.mock import MagicMock
 import pytest
 
 from pyathena import OperationalError
-from pyathena.model import AthenaCalculationExecutionStatus
+from pyathena.model import AthenaCalculationExecutionStatus, AthenaSessionStatus
 from pyathena.spark.async_cursor import AsyncSparkCursor
 from tests import ENV
-from tests.pyathena.util import CANCELABLE_SPARK_JOB, wait_for_spark_job
+from tests.pyathena.util import (
+    CANCELABLE_SPARK_JOB,
+    wait_for_spark_job,
+    wait_for_spark_session_state,
+)
 
 # Bounds how long the executor test task blocks when nothing releases it.
 _TIMEOUT = 10
+
+
+def _owned_session_cursor() -> AsyncSparkCursor:
+    """An AsyncSparkCursor that started its own session, without AWS calls.
+
+    Returns:
+        The cursor, whose ``close()`` terminates the session.
+    """
+    cursor = AsyncSparkCursor.__new__(AsyncSparkCursor)  # bypass __init__ to avoid AWS calls
+    cursor._owns_session = True
+    cursor._terminate_session_on_close = None
+    cursor._session_terminated = False
+    return cursor
 
 
 class TestAsyncSparkCursor:
@@ -139,6 +156,25 @@ class TestAsyncSparkCursor:
             == AthenaCalculationExecutionStatus.STATE_COMPLETED
         )
 
+    def test_session_ownership(self, async_spark_cursor):
+        client = async_spark_cursor.connection.client
+        session_id = async_spark_cursor.session_id
+        with async_spark_cursor.connection.cursor(
+            AsyncSparkCursor, session_id=session_id
+        ) as borrower:
+            _, future = borrower.execute("print(1)")
+            calculation_execution = future.result()
+            assert borrower.get_std_out(calculation_execution).result() == "1"
+
+        # Closing a cursor that was given the session leaves the session running.
+        _, future = async_spark_cursor.execute("print(2)")
+        calculation_execution = future.result()
+        assert async_spark_cursor.get_std_out(calculation_execution).result() == "2"
+
+        # Closing the cursor that started the session terminates it.
+        async_spark_cursor.close()
+        wait_for_spark_session_state(client, session_id, AthenaSessionStatus.STATE_TERMINATED)
+
     @staticmethod
     def _cursor_with_submitted_work():
         """Build a cursor whose executor holds one running and one queued future.
@@ -147,7 +183,7 @@ class TestAsyncSparkCursor:
             A tuple of the cursor, the event that releases the running future,
             the running future, and the queued future.
         """
-        cursor = AsyncSparkCursor.__new__(AsyncSparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor = _owned_session_cursor()
         cursor._executor = MagicMock(wraps=ThreadPoolExecutor(max_workers=1))
         started = threading.Event()
         release = threading.Event()
@@ -211,7 +247,7 @@ class TestAsyncSparkCursor:
         assert queued.result(_TIMEOUT) == "queued"
 
     def test_close_retries_termination_after_failure(self):
-        cursor = AsyncSparkCursor.__new__(AsyncSparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor = _owned_session_cursor()
         cursor._terminate_session = MagicMock(
             side_effect=[OperationalError("termination failed"), None]
         )

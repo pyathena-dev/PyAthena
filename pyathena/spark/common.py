@@ -62,9 +62,13 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         engine_configuration: dict[str, Any] | None = None,
         notebook_version: str | None = None,
         session_idle_timeout_minutes: int | None = None,
+        terminate_session_on_close: bool | None = None,
         **kwargs,
     ) -> None:
         """Initialize the cursor and start or attach to a Spark session.
+
+        If waiting for a newly started session fails, that session is terminated
+        regardless of ``terminate_session_on_close``; a supplied session is not.
 
         Args:
             session_id: ID of an existing session to use. If omitted, a new
@@ -74,6 +78,9 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
                 Defaults to ``get_default_engine_configuration()``.
             notebook_version: Notebook version of a new session.
             session_idle_timeout_minutes: Idle timeout of a new session in minutes.
+            terminate_session_on_close: Whether ``close()`` terminates the session.
+                If None, only a session started by this cursor is terminated;
+                a session supplied with ``session_id`` is left running.
             **kwargs: Arguments passed to ``BaseCursor``.
 
         Raises:
@@ -89,6 +96,8 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         self._notebook_version = notebook_version
         self._session_description = description
         self._session_idle_timeout_minutes = session_idle_timeout_minutes
+        self._terminate_session_on_close = terminate_session_on_close
+        self._session_terminated = False
         self._calculation_id: str | None = None
         self._calculation_execution: AthenaCalculationExecution | None = None
 
@@ -104,10 +113,12 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         if session_id:
             if self._exists_session(session_id):
                 self._session_id = session_id
+                self._owns_session = False
             else:
                 raise OperationalError(f"Session: {session_id} not found.")
         else:
             self._session_id = self._start_session()
+            self._owns_session = True
 
     @property
     def session_id(self) -> str:
@@ -358,8 +369,33 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             _logger.exception("Failed to cancel calculation.")
             raise OperationalError(*e.args) from e
 
+    def _should_terminate_session(self) -> bool:
+        """Whether ``close()`` terminates the cursor's Spark session.
+
+        Returns:
+            False if the session has already been terminated by ``close()``;
+            otherwise ``terminate_session_on_close``, or whether this cursor
+            started the session if that is None.
+        """
+        if self._session_terminated:
+            return False
+        if self._terminate_session_on_close is None:
+            return self._owns_session
+        return self._terminate_session_on_close
+
     def close(self) -> None:
-        self._terminate_session()
+        """Close the cursor, terminating its Spark session if configured to.
+
+        See ``terminate_session_on_close``. After a successful termination,
+        further calls do not terminate the session again; after a failed one,
+        calling this method again retries it.
+
+        Raises:
+            OperationalError: If terminating the session fails.
+        """
+        if self._should_terminate_session():
+            self._terminate_session()
+            self._session_terminated = True
 
     def executemany(
         self,

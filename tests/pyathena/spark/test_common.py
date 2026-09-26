@@ -5,6 +5,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+import asyncio
 import logging
 from unittest.mock import MagicMock, patch
 
@@ -64,6 +65,18 @@ def _init_cursor(cursor_class, connection, **kwargs):
         result_reuse_minutes=60,
         **kwargs,
     )
+
+
+def _close(cursor) -> None:
+    """Close a Spark cursor, running ``AioSparkCursor.close()`` to completion.
+
+    Args:
+        cursor: The cursor to close.
+    """
+    if isinstance(cursor, AioSparkCursor):
+        asyncio.run(cursor.close())
+    else:
+        cursor.close()
 
 
 class TestSparkBaseCursor:
@@ -236,3 +249,63 @@ class TestSparkBaseCursor:
             _init_cursor(AsyncSparkCursor, connection, max_workers=0)
 
         connection.client.start_session.assert_not_called()
+
+    @pytest.mark.parametrize("cursor_class", SPARK_CURSOR_CLASSES)
+    @pytest.mark.parametrize("session_id", [None, "supplied-session"])
+    @pytest.mark.parametrize("terminate_session_on_close", [None, True, False])
+    def test_close_terminates_session_by_ownership(
+        self, cursor_class, session_id, terminate_session_on_close
+    ):
+        connection = _connection()
+        cursor = _init_cursor(
+            cursor_class,
+            connection,
+            session_id=session_id,
+            terminate_session_on_close=terminate_session_on_close,
+        )
+        _close(cursor)
+
+        if terminate_session_on_close is None:
+            terminates = session_id is None
+        else:
+            terminates = terminate_session_on_close
+        if terminates:
+            connection.client.terminate_session.assert_called_once_with(SessionId=cursor.session_id)
+        else:
+            connection.client.terminate_session.assert_not_called()
+
+    @pytest.mark.parametrize("cursor_class", SPARK_CURSOR_CLASSES)
+    def test_close_does_not_terminate_session_twice(self, cursor_class):
+        connection = _connection()
+        cursor = _init_cursor(cursor_class, connection)
+        _close(cursor)
+        _close(cursor)
+
+        connection.client.terminate_session.assert_called_once_with(SessionId="new-session")
+
+    @pytest.mark.parametrize("cursor_class", SPARK_CURSOR_CLASSES)
+    def test_close_retries_failed_termination(self, cursor_class):
+        connection = _connection()
+        connection.client.terminate_session.side_effect = [
+            ClientError(
+                {"Error": {"Code": "InternalServerException", "Message": "Termination failed."}},
+                "TerminateSession",
+            ),
+            {},
+        ]
+        cursor = _init_cursor(cursor_class, connection)
+        with pytest.raises(OperationalError):
+            _close(cursor)
+        _close(cursor)
+        _close(cursor)
+
+        assert connection.client.terminate_session.call_count == 2
+
+    def test_async_close_shuts_down_executor_without_terminating_session(self):
+        connection = _connection()
+        cursor = _init_cursor(AsyncSparkCursor, connection, session_id="supplied-session")
+        cursor.close()
+
+        connection.client.terminate_session.assert_not_called()
+        with pytest.raises(RuntimeError):
+            cursor.calculation_execution("calculation_id")
