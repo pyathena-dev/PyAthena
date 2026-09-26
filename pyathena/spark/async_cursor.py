@@ -82,6 +82,23 @@ class AsyncSparkCursor(SparkBaseCursor):
         max_workers: int = (cpu_count() or 1) * 5,
         **kwargs,
     ):
+        """Initialize the cursor and start or attach to a Spark session.
+
+        Args:
+            session_id: ID of an existing session to use. If omitted, a new
+                session is started.
+            description: Description of a new session.
+            engine_configuration: Engine configuration of a new session.
+            notebook_version: Notebook version of a new session.
+            session_idle_timeout_minutes: Idle timeout of a new session in minutes.
+            max_workers: Maximum number of threads for asynchronous operations.
+            **kwargs: Arguments passed to ``SparkBaseCursor``.
+
+        Raises:
+            ValueError: If ``max_workers`` is not greater than 0.
+            OperationalError: If the supplied session does not exist, or the
+                session cannot be started or does not become idle.
+        """
         # Created before the session so that an invalid max_workers cannot leave
         # a newly started session behind; the executor starts no threads until used.
         self._max_workers = max_workers

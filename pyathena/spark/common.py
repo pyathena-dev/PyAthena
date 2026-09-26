@@ -64,6 +64,22 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         session_idle_timeout_minutes: int | None = None,
         **kwargs,
     ) -> None:
+        """Initialize the cursor and start or attach to a Spark session.
+
+        Args:
+            session_id: ID of an existing session to use. If omitted, a new
+                session is started.
+            description: Description of a new session.
+            engine_configuration: Engine configuration of a new session.
+                Defaults to ``get_default_engine_configuration()``.
+            notebook_version: Notebook version of a new session.
+            session_idle_timeout_minutes: Idle timeout of a new session in minutes.
+            **kwargs: Arguments passed to ``BaseCursor``.
+
+        Raises:
+            OperationalError: If the supplied session does not exist, or the
+                session cannot be started or does not become idle.
+        """
         super().__init__(**kwargs)
         self._engine_configuration = (
             engine_configuration
