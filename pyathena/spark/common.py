@@ -133,12 +133,21 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         else:
             return AthenaSessionStatus(response)
 
-    def _wait_for_idle_session(self, session_id: str):
+    def _wait_for_idle_session(self, session_id: str) -> None:
+        """Poll a Spark session with ``GetSessionStatus`` until it is idle.
+
+        Args:
+            session_id: The session ID.
+
+        Raises:
+            OperationalError: If the session is terminated, degraded, or failed,
+                with the session's state change reason, or if the request fails.
+        """
         while True:
             session_status = self._get_session_status(session_id)
             if session_status.state in [AthenaSessionStatus.STATE_IDLE]:
                 break
-            if session_status in [
+            if session_status.state in [
                 AthenaSessionStatus.STATE_TERMINATED,
                 AthenaSessionStatus.STATE_DEGRADED,
                 AthenaSessionStatus.STATE_FAILED,
