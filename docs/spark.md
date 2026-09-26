@@ -27,18 +27,20 @@ with the connect method or connection object.
 from pyathena import connect
 from pyathena.spark.cursor import SparkCursor
 
-cursor = connect(region_name="us-west-2",
-                 work_group="YOUR_SPARK_WORKGROUP",
-                 cursor_class=SparkCursor).cursor()
+with connect(region_name="us-west-2",
+             work_group="YOUR_SPARK_WORKGROUP",
+             cursor_class=SparkCursor).cursor() as cursor:
+    ...
 ```
 
 ```python
 from pyathena.connection import Connection
 from pyathena.spark.cursor import SparkCursor
 
-cursor = Connection(region_name="us-west-2",
-                    work_group="YOUR_SPARK_WORKGROUP",
-                    cursor_class=SparkCursor).cursor()
+with Connection(region_name="us-west-2",
+                work_group="YOUR_SPARK_WORKGROUP",
+                cursor_class=SparkCursor).cursor() as cursor:
+    ...
 ```
 
 It can also be used by specifying the cursor class when calling the connection object's cursor method.
@@ -47,27 +49,32 @@ It can also be used by specifying the cursor class when calling the connection o
 from pyathena import connect
 from pyathena.spark.cursor import SparkCursor
 
-cursor = connect(region_name="us-west-2"
-                 work_group="YOUR_SPARK_WORKGROUP").cursor(SparkCursor)
+with connect(region_name="us-west-2",
+             work_group="YOUR_SPARK_WORKGROUP").cursor(SparkCursor) as cursor:
+    ...
 ```
 
 ```python
 from pyathena.connection import Connection
 from pyathena.spark.cursor import SparkCursor
 
-cursor = Connection(region_name="us-west-2"
-                    work_group="YOUR_SPARK_WORKGROUP").cursor(SparkCursor)
+with Connection(region_name="us-west-2",
+                work_group="YOUR_SPARK_WORKGROUP").cursor(SparkCursor) as cursor:
+    ...
 ```
 
 This cursor allows you to send PySpark code blocks and use Spark DataFrame and SQL.
 
+(spark-session-lifecycle)=
+
 ### Session lifecycle
 
-If session_id is not specified as an argument when creating a Spark cursor, it will start a new session;
-if session_id is specified, it will check if the session is idle.
+When a Spark cursor is created, it starts a new session and waits until the session is idle.
+If `session_id` is specified, the cursor uses that existing session instead, after waiting until it is idle.
 
 The session idle timeout minutes can be specified with the `session_idle_timeout_minutes` argument when creating
 the cursor and the engine DPU and Spark properties can also be specified with the `engine_configuration` argument.
+These arguments apply only to a session started by the cursor.
 
 ```python
 from pyathena import connect
@@ -75,29 +82,52 @@ from pyathena.spark.cursor import SparkCursor
 
 conn = connect(work_group="YOUR_SPARK_WORKGROUP",
                cursor_class=SparkCursor)
-cursor = conn.cursor(session_idle_timeout_minutes=60,
-                     engine_configuration={
-                         "CoordinatorDpuSize": 1,
-                         "MaxConcurrentDpus": 20,
-                         "DefaultExecutorDpuSize": 1,
-                         "AdditionalConfigs": {"string": "string"},
-                         "SparkProperties": {"string": "string"},
-                     })
-```
-
-The session is not terminated until the close method of the cursor is called.
-You can use the context manager to automatically call the close method.
-
-```python
-from pyathena import connect
-from pyathena.spark.cursor import SparkCursor
-
-conn = connect(work_group="YOUR_SPARK_WORKGROUP",
-               cursor_class=SparkCursor)
-with conn.cursor() as cursor:
+with conn.cursor(session_idle_timeout_minutes=60,
+                 engine_configuration={
+                     "CoordinatorDpuSize": 1,
+                     "MaxConcurrentDpus": 20,
+                     "DefaultExecutorDpuSize": 1,
+                     "AdditionalConfigs": {"string": "string"},
+                     "SparkProperties": {"string": "string"},
+                 }) as cursor:
     cursor.execute("...")
     ...
 ```
+
+The close method of the cursor terminates the session that the cursor started.
+A session specified with `session_id` is not terminated.
+The `terminate_session_on_close` argument changes which sessions the close method terminates:
+
+| `terminate_session_on_close` | Session started by the cursor | Session specified with `session_id` |
+|------------------------------|-------------------------------|-------------------------------------|
+| `None` (default)             | Terminated                    | Not terminated                      |
+| `True`                       | Terminated                    | Terminated                          |
+| `False`                      | Not terminated                | Not terminated                      |
+
+Once the close method has terminated the session, calling it again does not terminate the session again.
+If termination fails, the close method raises `OperationalError`, and calling it again retries the termination.
+
+The following example keeps the session started by the first cursor, runs another calculation on it with a second cursor,
+and terminates it when the second cursor is closed:
+
+```python
+from pyathena import connect
+from pyathena.spark.cursor import SparkCursor
+
+conn = connect(work_group="YOUR_SPARK_WORKGROUP",
+               cursor_class=SparkCursor)
+with conn.cursor(terminate_session_on_close=False) as cursor:
+    cursor.execute("...")
+    session_id = cursor.session_id
+
+with conn.cursor(session_id=session_id, terminate_session_on_close=True) as cursor:
+    cursor.execute("...")
+```
+
+Closing the connection does not close its cursors or terminate their sessions.
+This applies to `Connection` and `AioConnection`, including their context managers.
+Close each Spark cursor, for example with the context manager of the cursor.
+A session that is left running is terminated by Athena after its idle timeout.
 
 ### Spark DataFrames
 
@@ -268,18 +298,20 @@ with the connect method or connection object.
 from pyathena import connect
 from pyathena.spark.async_cursor import AsyncSparkCursor
 
-cursor = connect(region_name="us-west-2",
-                 work_group="YOUR_SPARK_WORKGROUP",
-                 cursor_class=AsyncSparkCursor).cursor()
+with connect(region_name="us-west-2",
+             work_group="YOUR_SPARK_WORKGROUP",
+             cursor_class=AsyncSparkCursor).cursor() as cursor:
+    ...
 ```
 
 ```python
 from pyathena.connection import Connection
 from pyathena.spark.async_cursor import AsyncSparkCursor
 
-cursor = Connection(region_name="us-west-2",
-                    work_group="YOUR_SPARK_WORKGROUP",
-                    cursor_class=AsyncSparkCursor).cursor()
+with Connection(region_name="us-west-2",
+                work_group="YOUR_SPARK_WORKGROUP",
+                cursor_class=AsyncSparkCursor).cursor() as cursor:
+    ...
 ```
 
 It can also be used by specifying the cursor class when calling the connection object's cursor method.
@@ -288,16 +320,18 @@ It can also be used by specifying the cursor class when calling the connection o
 from pyathena import connect
 from pyathena.spark.async_cursor import AsyncSparkCursor
 
-cursor = connect(region_name="us-west-2"
-                 work_group="YOUR_SPARK_WORKGROUP").cursor(AsyncSparkCursor)
+with connect(region_name="us-west-2",
+             work_group="YOUR_SPARK_WORKGROUP").cursor(AsyncSparkCursor) as cursor:
+    ...
 ```
 
 ```python
 from pyathena.connection import Connection
 from pyathena.spark.async_cursor import AsyncSparkCursor
 
-cursor = Connection(region_name="us-west-2"
-                    work_group="YOUR_SPARK_WORKGROUP").cursor(AsyncSparkCursor)
+with Connection(region_name="us-west-2",
+                work_group="YOUR_SPARK_WORKGROUP").cursor(AsyncSparkCursor) as cursor:
+    ...
 ```
 
 The default number of workers is 5 or cpu number * 5.
@@ -307,9 +341,10 @@ If you want to change the number of workers you can specify like the following.
 from pyathena import connect
 from pyathena.spark.async_cursor import AsyncSparkCursor
 
-cursor = connect(region_name="us-west-2",
-                 work_group="YOUR_SPARK_WORKGROUP",
-                 cursor_class=AsyncSparkCursor).cursor(max_workers=10)
+with connect(region_name="us-west-2",
+             work_group="YOUR_SPARK_WORKGROUP",
+             cursor_class=AsyncSparkCursor).cursor(max_workers=10) as cursor:
+    ...
 ```
 
 The execute method of the AsyncSparkCursor returns the tuple of the calculation ID and the [future object](https://docs.python.org/3/library/concurrent.futures.html#future-objects).
@@ -401,11 +436,15 @@ from pyathena.aio.spark.cursor import AioSparkCursor
 async with await aio_connect(work_group="YOUR_SPARK_WORKGROUP",
                           cursor_class=AioSparkCursor) as conn:
     cursor = await asyncio.to_thread(conn.cursor)
-    await cursor.execute("""spark.sql("SELECT 1").show()""")
-    print(await cursor.get_std_out())
+    try:
+        await cursor.execute("""spark.sql("SELECT 1").show()""")
+        print(await cursor.get_std_out())
+    finally:
+        await cursor.close()
 ```
 
-The cursor supports the async context manager for automatic session termination:
+The close method follows the rules described in {ref}`spark-session-lifecycle`.
+The cursor supports the async context manager, which calls the close method:
 
 ```python
 import asyncio

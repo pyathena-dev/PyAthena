@@ -13,10 +13,14 @@ import pytest
 
 from pyathena.aio.spark.cursor import AioSparkCursor
 from pyathena.error import NotSupportedError, OperationalError
-from pyathena.model import AthenaCalculationExecutionStatus
+from pyathena.model import AthenaCalculationExecutionStatus, AthenaSessionStatus
 from tests import ENV
 from tests.pyathena.aio.conftest import _aio_connect
-from tests.pyathena.util import CANCELABLE_SPARK_JOB, wait_for_spark_job
+from tests.pyathena.util import (
+    CANCELABLE_SPARK_JOB,
+    wait_for_spark_job,
+    wait_for_spark_session_state,
+)
 
 
 def _offline_cursor(kill_on_interrupt, final_state):
@@ -256,6 +260,29 @@ class TestAioSparkCursor:
         assert task.cancelled()
         cancel.assert_not_awaited()
         assert cursor.calculation_execution is None
+
+    async def test_session_ownership(self, aio_spark_cursor):
+        client = aio_spark_cursor.connection.client
+        session_id = aio_spark_cursor.session_id
+        borrower = await asyncio.to_thread(
+            aio_spark_cursor.connection.cursor, AioSparkCursor, session_id=session_id
+        )
+        async with borrower:
+            await borrower.execute("print(1)")
+            assert await borrower.get_std_out() == "1"
+
+        # Closing a cursor that was given the session leaves the session running.
+        await aio_spark_cursor.execute("print(2)")
+        assert await aio_spark_cursor.get_std_out() == "2"
+
+        # Closing the cursor that started the session terminates it.
+        await aio_spark_cursor.close()
+        await asyncio.to_thread(
+            wait_for_spark_session_state,
+            client,
+            session_id,
+            AthenaSessionStatus.STATE_TERMINATED,
+        )
 
     async def test_executemany(self, aio_spark_cursor):
         with pytest.raises(NotSupportedError):

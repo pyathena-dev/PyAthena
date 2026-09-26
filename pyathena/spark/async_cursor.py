@@ -80,6 +80,7 @@ class AsyncSparkCursor(SparkBaseCursor):
         notebook_version: str | None = None,
         session_idle_timeout_minutes: int | None = None,
         max_workers: int = (cpu_count() or 1) * 5,
+        terminate_session_on_close: bool | None = None,
         **kwargs,
     ):
         """Initialize the cursor and start or attach to a Spark session.
@@ -92,6 +93,9 @@ class AsyncSparkCursor(SparkBaseCursor):
             notebook_version: Notebook version of a new session.
             session_idle_timeout_minutes: Idle timeout of a new session in minutes.
             max_workers: Maximum number of threads for asynchronous operations.
+            terminate_session_on_close: Whether ``close()`` terminates the session.
+                If None, only a session started by this cursor is terminated;
+                a session supplied with ``session_id`` is left running.
             **kwargs: Arguments passed to ``SparkBaseCursor``.
 
         Raises:
@@ -109,14 +113,15 @@ class AsyncSparkCursor(SparkBaseCursor):
             engine_configuration=engine_configuration,
             notebook_version=notebook_version,
             session_idle_timeout_minutes=session_idle_timeout_minutes,
+            terminate_session_on_close=terminate_session_on_close,
             **kwargs,
         )
 
     def close(self, wait: bool = False) -> None:
-        """Terminate the Spark session, then shut down the executor.
+        """Close the cursor, then shut down the executor.
 
+        The session is terminated as described in ``SparkBaseCursor.close()``.
         The executor is shut down even if terminating the session fails.
-        If termination fails, calling this method again retries it.
 
         Args:
             wait: Whether to wait for submitted futures to finish before returning

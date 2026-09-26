@@ -100,3 +100,23 @@ def wait_for_spark_job(client, calculation_id, timeout=120, job_start_delay=10):
         ), f"Calculation {calculation_id} ended as {state} before it was canceled."
         time.sleep(1)
     raise AssertionError(f"Calculation {calculation_id} did not start in {timeout} seconds.")
+
+
+def wait_for_spark_session_state(client, session_id, state, timeout=120):
+    """Wait until a Spark session reaches a state.
+
+    Args:
+        client: The Athena client.
+        session_id: The session ID.
+        state: The session state to wait for.
+        timeout: Seconds to wait.
+
+    Raises:
+        AssertionError: If the session does not reach the state in time.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if client.get_session_status(SessionId=session_id)["Status"]["State"] == state:
+            return
+        time.sleep(1)
+    raise AssertionError(f"Session {session_id} did not become {state} in {timeout} seconds.")
