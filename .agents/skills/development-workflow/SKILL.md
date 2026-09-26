@@ -6,7 +6,7 @@
 #
 # SPDX-License-Identifier: MIT
 name: development-workflow
-description: Deliver a PyAthena change through a dedicated worktree, Draft PR, two distinct self-reviews, independent review, and current CI before Ready. Use when implementing or updating a PR, not for a bounded review-only request.
+description: Deliver a PyAthena change through a dedicated worktree, Draft PR, two distinct self-reviews, independent review, and current CI once marked Ready. Use when implementing or updating a PR, not for a bounded review-only request.
 ---
 
 # PyAthena PR delivery
@@ -28,8 +28,11 @@ Keep unrelated worktrees and changes intact.
 4. Complete [self-review](../self-review/SKILL.md), then [self-review-round-two](../self-review-round-two/SKILL.md), fixing verified findings and validating affected behavior.
 5. Collect [independent-review](../independent-review/SKILL.md).
    Repairs pass through both self-review perspectives and an independent follow-up before completion.
-6. Check the current PR with `gh pr view` and `gh pr checks` before `gh pr ready`.
-   Confirm the published head matches the reviewed head, all applicable checks have completed successfully, and the PR has no merge conflict.
+6. Draft PRs run only the offline checks; `gh pr ready` starts the AWS jobs.
+   Before it, confirm the published head matches the reviewed head, the offline checks have completed successfully, and the PR has no merge conflict.
+   After it, check the current PR with `gh pr view` and `gh pr checks`, and confirm all applicable checks have completed successfully.
+   If an AWS job fails, return the PR to Draft with `gh pr ready --undo` until the failure is resolved.
+   To obtain AWS results while the PR is still Draft, dispatch the Test workflow on its branch.
    Pending, cancelled, missing expected checks, and `UNKNOWN` mergeability do not establish readiness.
    Explain intentionally skipped jobs from workflow conditions; a passing rerun of one failed job does not make the remaining failures pass.
    Keep the PR Draft while required review or validation remains incomplete, unless the user explicitly changes that requirement.

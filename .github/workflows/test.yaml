@@ -9,14 +9,21 @@ name: Test
 
 on:
   pull_request:
+    # ready_for_review starts the AWS jobs for a pull request leaving Draft;
+    # converted_to_draft starts a run without them, which cancels an
+    # in-progress run through the concurrency group. paths-ignore applies to
+    # both, so a pull request that now changes only docs starts neither.
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     paths-ignore:
       - 'docs/**'
       - '**.md'
+  # The scheduled run executes every suite, including the ones that pull
+  # requests only run when related files change.
   schedule:
     - cron:  '0 0 * * 0'
-  # Allows refreshing the README status badge on demand: the badge reflects
-  # the latest run on the default branch, which is otherwise only the weekly
-  # scheduled run and stays red for up to a week after a transient failure.
+  # Runs every suite on the selected branch: before a release, on demand for
+  # a pull request, and to refresh the README status badge after a transient
+  # failure on the default branch.
   workflow_dispatch:
 
 permissions:
@@ -29,20 +36,91 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# The three suites create their own schemas and tables, so they run in
-# parallel; each is still a separate job for "Re-run failed jobs".
 jobs:
+  # Offline checks run for every event, including Draft and fork pull requests.
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          python-version: '3.12'
+          enable-cache: true
+      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: just
+      - run: just lint
+
+  # Selects the AWS suites. Draft and external-fork pull requests run none.
+  # A ready pull request always runs the PyAthena suite; it runs the
+  # SQLAlchemy tests (the compliance suites and the PyAthena suite's
+  # SQLAlchemy tests) and the Spark tests only when their code, tests,
+  # dependencies, or this workflow change.
+  changes:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (!github.event.pull_request.draft &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      sqla: ${{ steps.filter.outputs.sqla }}
+      spark: ${{ steps.filter.outputs.spark }}
+    steps:
+      - id: filter
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            echo "sqla=true" >> "$GITHUB_OUTPUT"
+            echo "spark=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename')
+          printf 'Changed files:\n%s\n' "$files"
+          shared='^(\.github/workflows/test(-suite)?\.yaml|justfile|pyproject\.toml|uv\.lock)$'
+          sqla="$shared|^pyathena/(aio/)?sqlalchemy/|^tests/sqlalchemy/|^tests/pyathena/(aio/)?sqlalchemy/|^setup\.cfg$"
+          spark="$shared|^pyathena/(aio/)?spark/|^tests/pyathena/(aio/)?spark/"
+          if grep -qE "$sqla" <<< "$files"; then
+            echo "sqla=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "sqla=false" >> "$GITHUB_OUTPUT"
+          fi
+          if grep -qE "$spark" <<< "$files"; then
+            echo "spark=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "spark=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # The three suites create their own schemas and tables, so they run in
+  # parallel; each is still a separate job for "Re-run failed jobs".
   test:
+    needs: changes
     uses: ./.github/workflows/test-suite.yaml
     with:
       test-type: pyathena
+      skip-spark: ${{ needs.changes.outputs.spark != 'true' }}
+      skip-sqla: ${{ needs.changes.outputs.sqla != 'true' }}
 
   test-sqla:
+    needs: changes
+    if: needs.changes.outputs.sqla == 'true'
     uses: ./.github/workflows/test-suite.yaml
     with:
       test-type: sqla
 
   test-sqla-async:
+    needs: changes
+    if: needs.changes.outputs.sqla == 'true'
     uses: ./.github/workflows/test-suite.yaml
     with:
       test-type: sqla_async

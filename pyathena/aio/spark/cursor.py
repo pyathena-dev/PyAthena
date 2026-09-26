@@ -148,16 +148,40 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
     async def _poll(  # type: ignore[override]
         self, query_id: str
     ) -> AthenaQueryExecution | AthenaCalculationExecution:
+        """Wait for a calculation execution to reach a terminal state.
+
+        On task cancellation with ``kill_on_interrupt`` enabled, requests
+        cancellation, waits for the calculation to reach a terminal state, stores
+        it as the cursor's calculation execution, and re-raises
+        ``asyncio.CancelledError``.
+        Cancellation is a best-effort request, so the terminal state can be
+        ``COMPLETED`` or ``FAILED`` instead of ``CANCELED``.
+
+        Args:
+            query_id: The calculation execution ID.
+
+        Returns:
+            The calculation execution in a terminal state.
+
+        Raises:
+            asyncio.CancelledError: If the task is cancelled while waiting. A failure
+                to cancel or wait for the calculation becomes its ``__cause__``.
+            OperationalError: If a status request fails.
+        """
         try:
-            query_execution = await self.__poll(query_id)
-        except asyncio.CancelledError:
-            if self._kill_on_interrupt:
-                _logger.warning("Query canceled by user.")
-                await self._cancel(query_id)
-                query_execution = await self.__poll(query_id)
-            else:
+            return await self.__poll(query_id)
+        except asyncio.CancelledError as cancellation:
+            if not self._kill_on_interrupt:
                 raise
-        return query_execution
+            _logger.warning("Query canceled by user.")
+            try:
+                await self._cancel(query_id)
+                self._calculation_execution = cast(
+                    AthenaCalculationExecution, await self.__poll(query_id)
+                )
+            except Exception as e:
+                raise cancellation from e
+            raise
 
     async def _cancel(self, query_id: str) -> None:  # type: ignore[override]
         request: dict[str, Any] = {"CalculationExecutionId": query_id}

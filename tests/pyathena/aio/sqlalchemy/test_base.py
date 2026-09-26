@@ -1,8 +1,12 @@
+from datetime import datetime
+from decimal import Decimal
+
 import pytest
 import sqlalchemy
 from sqlalchemy import cast, literal, select, text, types
-from sqlalchemy.sql.schema import MetaData, Table
+from sqlalchemy.sql.schema import Column, MetaData, Table
 
+from pyathena.sqlalchemy.types import AthenaArray
 from tests import ENV
 from tests.pyathena.util import throttle_metadata_api
 
@@ -229,3 +233,60 @@ class TestAsyncSQLAlchemyAthena:
         assert rows == [(1, 11), (2, 21), (3, 30)]
         result = await conn.execute(statement, {"group_id": "2"})
         assert result.rowcount == 1
+
+    async def test_insertmanyvalues(self, async_engine):
+        _, conn = async_engine
+        table_name = "insertmanyvalues_async"
+        table = Table(
+            table_name,
+            MetaData(schema=ENV.schema),
+            Column("id", types.Integer),
+            Column("name", types.String),
+            Column("data", types.LargeBinary),
+            Column("ts", types.DateTime),
+            Column("amount", types.Numeric(10, 3)),
+            Column("tags", AthenaArray(types.Integer)),
+            awsathena_location=f"{ENV.s3_staging_dir}{ENV.schema}/{table_name}/",
+            awsathena_tblproperties={"table_type": "ICEBERG"},
+        )
+        rows = [
+            {
+                "id": 1,
+                "name": "it's",
+                "data": b"\x00\x01",
+                "ts": datetime(2026, 1, 2, 3, 4, 5, 123000),
+                "amount": Decimal("1.5"),
+                "tags": [1, None],
+            },
+            {
+                "id": 2,
+                "name": None,
+                "data": None,
+                "ts": datetime(2026, 1, 2, 3, 4, 5, 123456),
+                "amount": Decimal("12.345"),
+                "tags": None,
+            },
+            {"id": 3, "name": "c", "data": b"", "ts": None, "amount": None, "tags": []},
+            {"id": 4, "name": "d", "data": b"d", "ts": None, "amount": None, "tags": [4]},
+            {"id": 5, "name": "e", "data": b"e", "ts": None, "amount": None, "tags": [5, 5]},
+        ]
+
+        statements = []
+
+        def record(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+
+        await conn.run_sync(table.create)
+        sqlalchemy.event.listen(conn.sync_connection, "before_cursor_execute", record)
+        try:
+            result = await conn.execute(
+                table.insert(), rows, execution_options={"insertmanyvalues_page_size": 2}
+            )
+        finally:
+            sqlalchemy.event.remove(conn.sync_connection, "before_cursor_execute", record)
+
+        # One event per page; a DB API executemany would fire a single event.
+        assert len(statements) == 3
+        assert result.rowcount == 5
+        actual = (await conn.execute(select(table).order_by(table.c.id))).mappings().all()
+        assert [dict(row) for row in actual] == rows

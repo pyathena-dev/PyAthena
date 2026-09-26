@@ -218,6 +218,43 @@ with conn.cursor() as cursor:
     print(cursor.get_std_out())
 ```
 
+(spark-cancellation)=
+
+### Cancellation
+
+The `cancel()` method sends a [StopCalculationExecution](https://docs.aws.amazon.com/athena/latest/APIReference/API_StopCalculationExecution.html)
+request for the calculation. It does not terminate the session.
+Athena cancels the calculation on a best-effort basis:
+
+- A running Spark job, such as a DataFrame action, stops within seconds.
+  The calculation ends in the `CANCELED` state, and the session remains usable for later calculations.
+- Python code that runs on the driver without a Spark job, such as `time.sleep()`, runs to completion.
+  The calculation ends in the `COMPLETED` state, and the session rejects new calculations until then.
+- Canceling a calculation that has already finished does not raise an error or change its state.
+
+The `execute()` method raises `OperationalError` when the calculation ends in the `CANCELED` state.
+The following example cancels the calculation from another thread after 60 seconds:
+
+```python
+import threading
+from pyathena import connect
+from pyathena.spark.cursor import SparkCursor
+
+conn = connect(work_group="YOUR_SPARK_WORKGROUP", cursor_class=SparkCursor)
+with conn.cursor() as cursor:
+    timer = threading.Timer(60, cursor.cancel)
+    timer.start()
+    try:
+        cursor.execute("""print(spark.read.parquet("s3://YOUR_S3_BUCKET/large_dataset/").count())""")
+    finally:
+        timer.cancel()
+```
+
+With `kill_on_interrupt` enabled, which is the default, a `KeyboardInterrupt` while `execute()` waits for the calculation
+requests cancellation, waits until the calculation reaches a terminal state, and then propagates.
+The `state` property returns that terminal state.
+If the cancellation request fails, the `KeyboardInterrupt` propagates with the error as its cause.
+
 (async-spark-cursor)=
 
 ## AsyncSparkCursor
@@ -326,7 +363,8 @@ with conn.cursor() as cursor:
     print(cursor.get_std_error(calculation_execution).result())
 ```
 
-As with AsyncSparkCursor, you need a calculation ID to cancel a calculation.
+As with AsyncCursor, you need a calculation ID to cancel a calculation.
+The cancel method returns a future object that returns nothing.
 
 ```python
 from pyathena import connect
@@ -334,14 +372,15 @@ from pyathena.spark.async_cursor import AsyncSparkCursor
 
 conn = connect(work_group="YOUR_SPARK_WORKGROUP", cursor_class=AsyncSparkCursor)
 with conn.cursor() as cursor:
-    calculation_id, future = cursor.execute("""spark.sql("SELECT * FROM many_rows")""")
-    cursor.cancel(calculation_id)  # The cancel method future object returns nothing.
-    # It is better not to get the result of cursor execution.
-    # Because it will be blocked until the session is terminated.
-    # future.result()
+    calculation_id, future = cursor.execute("""spark.sql("SELECT * FROM many_rows").show()""")
+    cursor.cancel(calculation_id).result()
+    calculation_execution = future.result()
+    print(calculation_execution.state)
 ```
 
-NOTE: Currently it appears that the calculation is not canceled unless the session is terminated.
+Cancellation follows the rules described in {ref}`spark-cancellation`.
+The future returned by `execute()` completes when the calculation reaches a terminal state,
+which can be `COMPLETED` if the calculation was not canceled.
 
 (aio-spark-cursor)=
 
@@ -396,15 +435,27 @@ async with await aio_connect(work_group="YOUR_SPARK_WORKGROUP",
         print(await cursor.get_std_error())
 ```
 
-To cancel a running calculation:
+To cancel a running calculation, call `cancel()` while `execute()` is waiting for it.
+Cancellation follows the rules described in {ref}`spark-cancellation`.
 
 ```python
 import asyncio
 from pyathena import aio_connect
 from pyathena.aio.spark.cursor import AioSparkCursor
+from pyathena.error import OperationalError
 
 async with await aio_connect(work_group="YOUR_SPARK_WORKGROUP",
                           cursor_class=AioSparkCursor) as conn:
     cursor = await asyncio.to_thread(conn.cursor)
-    await cursor.cancel()
+    async with cursor:
+        task = asyncio.create_task(cursor.execute("""spark.sql("SELECT * FROM many_rows").show()"""))
+        await asyncio.sleep(60)
+        await cursor.cancel()
+        try:
+            await task
+        except OperationalError:
+            print(cursor.state)
 ```
+
+With `kill_on_interrupt` enabled, which is the default, cancelling the task while `execute()` waits for the calculation
+requests cancellation of the calculation, waits until it reaches a terminal state, and then raises `asyncio.CancelledError`.

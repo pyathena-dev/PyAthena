@@ -148,6 +148,28 @@ Sanitize logs before sharing them.
 
 ## GitHub Actions
 
+The Test workflow runs for pull requests that change files other than `docs/` and Markdown.
+It runs the offline checks (`just lint`) on each of them, including Drafts and external forks, and runs the AWS suites as follows:
+
+| Trigger | PyAthena suite | SQLAlchemy tests | Spark tests |
+| --- | --- | --- | --- |
+| Draft pull request | No | No | No |
+| Ready pull request from a branch of this repository | Yes | When related files change | When related files change |
+| Weekly schedule and manual dispatch | Yes | Yes | Yes |
+
+The SQLAlchemy tests are the compliance suites and the PyAthena suite's `tests/pyathena/sqlalchemy/` and `tests/pyathena/aio/sqlalchemy/`.
+The Spark tests are the PyAthena suite's `tests/pyathena/spark/` and `tests/pyathena/aio/spark/`.
+When the SQLAlchemy or Spark tests do not run, the PyAthena suite runs without them.
+For the SQLAlchemy tests, the related files are `pyathena/sqlalchemy/`, `pyathena/aio/sqlalchemy/`, `tests/sqlalchemy/`, their PyAthena suite test directories, and `setup.cfg`.
+For the Spark tests, they are `pyathena/spark/`, `pyathena/aio/spark/`, and their PyAthena suite test directories.
+Changes to `pyproject.toml`, `uv.lock`, `justfile`, or the Test workflows run both.
+For a pull request from a branch of this repository that still changes files other than `docs/` and Markdown, marking the Draft ready for review starts the AWS jobs, and converting it back to Draft cancels AWS jobs still running.
+To run every suite on a branch, dispatch the workflow:
+
+```bash
+gh workflow run test.yaml --ref <branch>
+```
+
 Project policy excludes external-fork pull requests from AWS integration CI.
 Maintainers do not approve those jobs as a substitute for contributor testing.
 Checks without AWS access may still run on a fork pull request.

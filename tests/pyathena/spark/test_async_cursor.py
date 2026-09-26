@@ -6,11 +6,20 @@
 # SPDX-License-Identifier: MIT
 
 import textwrap
-import time
-from random import randint
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import MagicMock
 
+import pytest
+
+from pyathena import OperationalError
 from pyathena.model import AthenaCalculationExecutionStatus
+from pyathena.spark.async_cursor import AsyncSparkCursor
 from tests import ENV
+from tests.pyathena.util import CANCELABLE_SPARK_JOB, wait_for_spark_job
+
+# Bounds how long the executor test task blocks when nothing releases it.
+_TIMEOUT = 10
 
 
 class TestAsyncSparkCursor:
@@ -112,19 +121,104 @@ class TestAsyncSparkCursor:
         )
 
     def test_cancel(self, async_spark_cursor):
-        query_id, future = async_spark_cursor.execute(
-            textwrap.dedent(
-                """
-                import time
-                time.sleep(60)
-                """
-            )
-        )
-        time.sleep(randint(5, 10))
+        query_id, future = async_spark_cursor.execute(CANCELABLE_SPARK_JOB)
+        wait_for_spark_job(async_spark_cursor.connection.client, query_id)
         async_spark_cursor.cancel(query_id).result()
-
-        # TODO: Calculation execution is not canceled unless session is terminated
-        async_spark_cursor.close()
-
         calculation_execution = future.result()
         assert calculation_execution.state == AthenaCalculationExecutionStatus.STATE_CANCELED
+
+        # Canceling a calculation leaves the session usable.
+        query_id, future = async_spark_cursor.execute("print(1)")
+        calculation_execution = future.result()
+        assert calculation_execution.state == AthenaCalculationExecutionStatus.STATE_COMPLETED
+        assert async_spark_cursor.get_std_out(calculation_execution).result() == "1"
+        # Canceling a completed calculation does not change its state.
+        async_spark_cursor.cancel(query_id).result()
+        assert (
+            async_spark_cursor.calculation_execution(query_id).result().state
+            == AthenaCalculationExecutionStatus.STATE_COMPLETED
+        )
+
+    @staticmethod
+    def _cursor_with_submitted_work():
+        """Build a cursor whose executor holds one running and one queued future.
+
+        Returns:
+            A tuple of the cursor, the event that releases the running future,
+            the running future, and the queued future.
+        """
+        cursor = AsyncSparkCursor.__new__(AsyncSparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._executor = MagicMock(wraps=ThreadPoolExecutor(max_workers=1))
+        started = threading.Event()
+        release = threading.Event()
+
+        def run():
+            started.set()
+            release.wait(_TIMEOUT)
+            return "running"
+
+        running = cursor._executor.submit(run)
+        queued = cursor._executor.submit(lambda: "queued")
+        assert started.wait(_TIMEOUT)
+        return cursor, release, running, queued
+
+    @pytest.mark.parametrize("fails", [False, True])
+    def test_close_wait_shuts_down_executor(self, fails):
+        cursor, release, running, queued = self._cursor_with_submitted_work()
+
+        def terminate():
+            # Let the running future finish so that shutdown(wait=True) returns.
+            release.set()
+            if fails:
+                raise OperationalError("termination failed")
+
+        cursor._terminate_session = MagicMock(side_effect=terminate)
+        if fails:
+            with pytest.raises(OperationalError, match="termination failed"):
+                cursor.close(wait=True)
+        else:
+            cursor.close(wait=True)
+
+        cursor._terminate_session.assert_called_once_with()
+        cursor._executor.shutdown.assert_called_once_with(wait=True)
+        assert running.done()
+        assert running.result() == "running"
+        assert queued.done()
+        assert queued.result() == "queued"
+        with pytest.raises(RuntimeError):
+            cursor._executor.submit(lambda: None)
+
+    @pytest.mark.parametrize("fails", [False, True])
+    def test_close_no_wait_shuts_down_executor(self, fails):
+        cursor, release, running, queued = self._cursor_with_submitted_work()
+        cursor._terminate_session = MagicMock(
+            side_effect=OperationalError("termination failed") if fails else None
+        )
+        try:
+            if fails:
+                with pytest.raises(OperationalError, match="termination failed"):
+                    cursor.close(wait=False)
+            else:
+                cursor.close(wait=False)
+
+            cursor._terminate_session.assert_called_once_with()
+            cursor._executor.shutdown.assert_called_once_with(wait=False)
+            with pytest.raises(RuntimeError):
+                cursor._executor.submit(lambda: None)
+        finally:
+            release.set()
+        assert running.result(_TIMEOUT) == "running"
+        assert queued.result(_TIMEOUT) == "queued"
+
+    def test_close_retries_termination_after_failure(self):
+        cursor = AsyncSparkCursor.__new__(AsyncSparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._terminate_session = MagicMock(
+            side_effect=[OperationalError("termination failed"), None]
+        )
+        cursor._executor = ThreadPoolExecutor(max_workers=1)
+
+        with pytest.raises(OperationalError, match="termination failed"):
+            cursor.close()
+        cursor.close()
+
+        assert cursor._terminate_session.call_count == 2

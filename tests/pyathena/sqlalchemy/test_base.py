@@ -22,6 +22,7 @@ from sqlalchemy.sql.selectable import TextualSelect
 from pyathena.converter import DefaultTypeConverter
 from pyathena.cursor import Cursor
 from pyathena.error import DatabaseError, OperationalError
+from pyathena.formatter import DefaultParameterFormatter
 from pyathena.sqlalchemy.base import AthenaDialect
 from pyathena.sqlalchemy.types import (
     TINYINT,
@@ -58,6 +59,48 @@ def unique_s3tables_table_name(base: str) -> str:
         ``base`` with a random suffix.
     """
     return f"{base}_{uuid.uuid4().hex[:8]}"
+
+
+def recording_engine(rowcounts=None, **kwargs):
+    """Create an engine whose DB API connection records statements offline.
+
+    Args:
+        rowcounts: Row counts reported by successive cursor calls. By default,
+            a call reports the number of rows it inserted.
+        **kwargs: Additional keyword arguments for ``create_engine``.
+
+    Returns:
+        A tuple of the engine and the list of recorded
+        ``(method, operation, parameters)`` calls.
+    """
+    calls = []
+    counts = iter(rowcounts or ())
+
+    class RecordingCursor:
+        description = None
+        rowcount = -1
+
+        def execute(self, operation, parameters=None, **_):
+            calls.append(("execute", operation, parameters))
+            rows = sum(1 for key in parameters if key.startswith("id"))
+            self.rowcount = next(counts, rows)
+
+        def executemany(self, operation, seq_of_parameters, **_):
+            calls.append(("executemany", operation, seq_of_parameters))
+            self.rowcount = next(counts, len(seq_of_parameters))
+
+        def close(self):
+            pass
+
+    connection = SimpleNamespace(
+        cursor=RecordingCursor, close=lambda: None, commit=lambda: None, rollback=lambda: None
+    )
+    engine = create_engine(
+        "awsathena+rest://athena.us-west-2.amazonaws.com/default",
+        creator=lambda: connection,
+        **kwargs,
+    )
+    return engine, calls
 
 
 class TestAthenaDialect:
@@ -489,6 +532,108 @@ class TestAthenaDialect:
         assert info_cache == {
             ("pyathena_table_metadata", "other_catalog", "default", table_name): listed
         }
+
+    def test_insertmanyvalues_pages(self):
+        engine, calls = recording_engine()
+        table = Table("t", MetaData(), Column("id", types.Integer), Column("name", types.String))
+
+        with engine.connect() as conn:
+            result = conn.execute(
+                table.insert(), [{"id": i, "name": f"name {i}"} for i in range(250)]
+            )
+
+        # 100 rows per statement by default, and the total row count.
+        assert [(method, len(parameters) // 2) for method, _, parameters in calls] == [
+            ("execute", 100),
+            ("execute", 100),
+            ("execute", 50),
+        ]
+        assert result.rowcount == 250
+        _, operation, parameters = calls[-1]
+        assert (
+            DefaultParameterFormatter()
+            .format(operation, parameters)
+            .startswith("INSERT INTO t (id, name) VALUES (200, 'name 200'), (201, 'name 201'), ")
+        )
+
+    def test_insertmanyvalues_unknown_rowcount(self):
+        engine, _ = recording_engine(rowcounts=[100, -1, 50])
+        table = Table("t", MetaData(), Column("id", types.Integer))
+
+        with engine.connect() as conn:
+            result = conn.execute(table.insert(), [{"id": i} for i in range(250)])
+
+        assert result.rowcount == -1
+
+    @pytest.mark.parametrize("configure", ["engine", "execution_options"])
+    def test_insertmanyvalues_page_size(self, configure):
+        engine_kwargs = {"insertmanyvalues_page_size": 2} if configure == "engine" else {}
+        engine, calls = recording_engine(**engine_kwargs)
+        table = Table("t", MetaData(), Column("id", types.Integer))
+
+        with engine.connect() as conn:
+            if configure == "execution_options":
+                conn = conn.execution_options(insertmanyvalues_page_size=2)
+            result = conn.execute(table.insert(), [{"id": i} for i in range(5)])
+
+        assert [len(parameters) for _, _, parameters in calls] == [2, 2, 1]
+        assert result.rowcount == 5
+
+    def test_insertmanyvalues_disabled(self):
+        engine, calls = recording_engine(use_insertmanyvalues=False)
+        table = Table("t", MetaData(), Column("id", types.Integer))
+
+        with engine.connect() as conn:
+            result = conn.execute(table.insert(), [{"id": i} for i in range(3)])
+
+        ((method, operation, parameters),) = calls
+        assert method == "executemany"
+        assert operation == "INSERT INTO t (id) VALUES (%(id)s)"
+        assert parameters == [{"id": 0}, {"id": 1}, {"id": 2}]
+        assert result.rowcount == 3
+
+    def test_insertmanyvalues_formats_rows(self):
+        engine, calls = recording_engine()
+        table = Table(
+            "t",
+            MetaData(),
+            Column("id", types.Integer),
+            Column("name", types.String),
+            Column("data", types.LargeBinary),
+            Column("ts", types.DateTime),
+            Column("amount", types.Numeric(10, 3)),
+            Column("tags", AthenaArray(types.Integer)),
+        )
+        rows = [
+            {
+                "id": 1,
+                "name": "it's 100%",
+                "data": b"\x00\x01",
+                "ts": datetime(2026, 1, 2, 3, 4, 5, 123000),
+                "amount": Decimal("1.5"),
+                "tags": [1, None],
+            },
+            {
+                "id": 2,
+                "name": None,
+                "data": None,
+                "ts": datetime(2026, 1, 2, 3, 4, 5, 123456),
+                "amount": None,
+                "tags": None,
+            },
+        ]
+
+        with engine.connect() as conn:
+            conn.execute(table.insert(), rows)
+
+        ((_, operation, parameters),) = calls
+        assert DefaultParameterFormatter().format(operation, parameters) == (
+            "INSERT INTO t (id, name, data, ts, amount, tags) VALUES "
+            "(1, 'it''s 100%', X'0001', TIMESTAMP '2026-01-02 03:04:05.123', DECIMAL '1.5', "
+            "CAST(ARRAY[1, null] AS ARRAY(INTEGER))), "
+            "(2, null, null, TIMESTAMP '2026-01-02 03:04:05.123456', null, "
+            "CAST(null AS ARRAY(INTEGER)))"
+        )
 
 
 class TestSQLAlchemyAthena:
@@ -2970,6 +3115,62 @@ SELECT {ENV.schema}.{table_name}.id, {ENV.schema}.{table_name}.name \n\
             ).strip()
         )
         assert actual == [(2, "bar")]
+
+    def test_insertmanyvalues(self, engine):
+        engine, conn = engine
+        table_name = "insertmanyvalues"
+        table = Table(
+            table_name,
+            MetaData(schema=ENV.schema),
+            Column("id", types.Integer),
+            Column("name", types.String),
+            Column("data", types.LargeBinary),
+            Column("ts", types.DateTime),
+            Column("amount", types.Numeric(10, 3)),
+            Column("tags", AthenaArray(types.Integer)),
+            awsathena_location=f"{ENV.s3_staging_dir}{ENV.schema}/{table_name}/",
+            awsathena_tblproperties={"table_type": "ICEBERG"},
+        )
+        rows = [
+            {
+                "id": 1,
+                "name": "it's",
+                "data": b"\x00\x01",
+                "ts": datetime(2026, 1, 2, 3, 4, 5, 123000),
+                "amount": Decimal("1.5"),
+                "tags": [1, None],
+            },
+            {
+                "id": 2,
+                "name": None,
+                "data": None,
+                "ts": datetime(2026, 1, 2, 3, 4, 5, 123456),
+                "amount": Decimal("12.345"),
+                "tags": None,
+            },
+            {"id": 3, "name": "c", "data": b"", "ts": None, "amount": None, "tags": []},
+            {"id": 4, "name": "d", "data": b"d", "ts": None, "amount": None, "tags": [4]},
+            {"id": 5, "name": "e", "data": b"e", "ts": None, "amount": None, "tags": [5, 5]},
+        ]
+        statements = []
+
+        def record(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+
+        table.create(bind=conn)
+        sqlalchemy.event.listen(conn, "before_cursor_execute", record)
+        try:
+            result = conn.execution_options(insertmanyvalues_page_size=2).execute(
+                table.insert(), rows
+            )
+        finally:
+            sqlalchemy.event.remove(conn, "before_cursor_execute", record)
+
+        # Rows with different literal precisions share each multi-row statement.
+        assert len(statements) == 3
+        assert result.rowcount == 5
+        actual = conn.execute(sqlalchemy.select(table).order_by(table.c.id)).mappings().all()
+        assert [dict(row) for row in actual] == rows
 
     def test_get_view_definition(self, engine):
         engine, conn = engine
