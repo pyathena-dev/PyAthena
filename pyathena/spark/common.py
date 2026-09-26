@@ -141,7 +141,6 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
 
         Raises:
             OperationalError: If the session is terminated, degraded, or failed,
-                with the session's state change reason or, without one, its state;
                 or if the request fails.
         """
         while True:
@@ -153,10 +152,10 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
                 AthenaSessionStatus.STATE_DEGRADED,
                 AthenaSessionStatus.STATE_FAILED,
             ]:
-                raise OperationalError(
-                    session_status.state_change_reason
-                    or f"Session: {session_id} is {session_status.state}."
-                )
+                message = f"Session: {session_id} is {session_status.state}."
+                if session_status.state_change_reason:
+                    message += f" {session_status.state_change_reason}"
+                raise OperationalError(message)
             time.sleep(self._poll_interval)
 
     def _exists_session(self, session_id: str) -> bool:
@@ -172,7 +171,8 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             ``InvalidRequestException``.
 
         Raises:
-            OperationalError: If the request fails for another reason.
+            OperationalError: If the request fails for another reason, or if the
+                session is terminated, degraded, or failed.
         """
         request: dict[str, Any] = {"SessionId": session_id}
         try:

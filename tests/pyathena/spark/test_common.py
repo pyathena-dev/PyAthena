@@ -47,7 +47,10 @@ class TestSparkBaseCursor:
                 return_value=_session_status(state, "session failure reason"),
             ),
             patch("pyathena.spark.common.time.sleep", side_effect=AssertionError("slept")),
-            pytest.raises(OperationalError, match="session failure reason"),
+            pytest.raises(
+                OperationalError,
+                match=rf"^Session: session_id is {state}\. session failure reason$",
+            ),
         ):
             cursor._wait_for_idle_session("session_id")
 
@@ -60,7 +63,7 @@ class TestSparkBaseCursor:
                 return_value=_session_status(AthenaSessionStatus.STATE_TERMINATED),
             ),
             patch("pyathena.spark.common.time.sleep", side_effect=AssertionError("slept")),
-            pytest.raises(OperationalError, match=r"Session: session_id is TERMINATED\."),
+            pytest.raises(OperationalError, match=r"^Session: session_id is TERMINATED\.$"),
         ):
             cursor._wait_for_idle_session("session_id")
 
