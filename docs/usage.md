@@ -501,6 +501,29 @@ The `on_start_query_execution` callback is supported by the following cursor typ
 Note: `AsyncCursor` and its variants do not support this callback as they already
 return the query ID immediately through their different execution model.
 
+## Query cancellation on interrupt
+
+With `kill_on_interrupt` enabled, which is the default, a `KeyboardInterrupt` while `execute()` waits for the query
+requests cancellation, waits until the query reaches a terminal state, and then propagates.
+Cancellation is a best-effort request, so the query can still end as `SUCCEEDED` or `FAILED`.
+The `query_id` property keeps the ID of the interrupted query.
+If the cancellation request fails, the `KeyboardInterrupt` propagates with the error as its cause.
+With `kill_on_interrupt=False`, the `KeyboardInterrupt` propagates immediately and the query keeps running.
+
+```python
+from pyathena import connect
+
+cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                 region_name="us-west-2").cursor()
+try:
+    cursor.execute("SELECT * FROM many_rows")
+except KeyboardInterrupt:
+    print(f"Query {cursor.query_id} was interrupted")
+    raise
+```
+
+For the native asyncio cursors, see {ref}`aio-task-cancellation`.
+
 ## Query polling callback
 
 PyAthena provides an `on_poll` callback that is invoked once per poll iteration with the
