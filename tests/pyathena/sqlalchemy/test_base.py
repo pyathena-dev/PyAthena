@@ -626,6 +626,12 @@ class TestAthenaDialect:
                 {"insertmanyvalues_page_size": 3},
                 [("execute", 3), ("execute", 2)],
             ),
+            # An overridden URL value is not parsed.
+            (
+                "insertmanyvalues_page_size=invalid&use_insertmanyvalues=invalid",
+                {"insertmanyvalues_page_size": 3, "use_insertmanyvalues": True},
+                [("execute", 3), ("execute", 2)],
+            ),
         ],
     )
     def test_insertmanyvalues_keyword_overrides_url(self, query, kwargs, expected):

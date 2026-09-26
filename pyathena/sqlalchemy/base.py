@@ -299,14 +299,20 @@ class AthenaDialect(DefaultDialect):
             opts.update({"glue_metadata_fallback": bool(strtobool(opts["glue_metadata_fallback"]))})
         if "result_reuse_minutes" in opts:
             opts.update({"result_reuse_minutes": int(opts["result_reuse_minutes"])})
-        if "insertmanyvalues_page_size" in opts:
-            page_size = int(opts.pop("insertmanyvalues_page_size"))
-            if "insertmanyvalues_page_size" not in self._explicit_engine_options:
-                self.insertmanyvalues_page_size = page_size
-        if "use_insertmanyvalues" in opts:
-            use_insertmanyvalues = bool(strtobool(opts.pop("use_insertmanyvalues")))
-            if "use_insertmanyvalues" not in self._explicit_engine_options:
-                self.use_insertmanyvalues = use_insertmanyvalues
+        # Remove these URL options even when an explicit create_engine value
+        # overrides them, and parse them only when they apply.
+        page_size = opts.pop("insertmanyvalues_page_size", None)
+        if (
+            page_size is not None
+            and "insertmanyvalues_page_size" not in self._explicit_engine_options
+        ):
+            self.insertmanyvalues_page_size = int(page_size)
+        use_insertmanyvalues = opts.pop("use_insertmanyvalues", None)
+        if (
+            use_insertmanyvalues is not None
+            and "use_insertmanyvalues" not in self._explicit_engine_options
+        ):
+            self.use_insertmanyvalues = bool(strtobool(use_insertmanyvalues))
         # Store on the dialect so compilers can consult connection options
         # (e.g. catalog_name for S3 Tables detection). Assigned here rather than
         # in create_connect_args because subclass dialects call this method
