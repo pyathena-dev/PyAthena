@@ -153,6 +153,22 @@ class TestAthenaTypeCompiler:
         result = compiler.visit_JSON(json_type)
         assert result == "JSON"
 
+    @pytest.mark.parametrize(
+        ("type_", "ddl", "cast_type"),
+        [
+            (types.Float(), "FLOAT", "REAL"),
+            (types.FLOAT(), "FLOAT", "REAL"),
+            (types.REAL(), "FLOAT", "REAL"),
+            (types.Double(), "DOUBLE", "DOUBLE"),
+            (types.DOUBLE(), "DOUBLE", "DOUBLE"),
+            (types.DOUBLE_PRECISION(), "DOUBLE", "DOUBLE"),
+        ],
+    )
+    def test_floating_point_types(self, type_, ddl, cast_type):
+        dialect = AthenaDialect()
+        assert dialect.type_compiler_instance.process(type_) == ddl
+        assert str(cast(column("x"), type_).compile(dialect=dialect)) == f"CAST(x AS {cast_type})"
+
 
 class TestAthenaStatementCompiler:
     """Test cases for Athena statement compiler functionality."""
