@@ -189,7 +189,7 @@ Column definitions in `CREATE TABLE` render `TIMESTAMP` for `DateTime` and for `
 
 ### Async
 
-Requires `pip install PyAthena[aiosqlalchemy]` (SQLAlchemy 2.0+).
+Requires `pip install PyAthena[aiosqlalchemy]`.
 
 | Dialect   | Driver    | Schema              | Cursor                       |
 |-----------|-----------|---------------------|------------------------------|
