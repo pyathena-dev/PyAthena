@@ -35,7 +35,7 @@ from pyathena.sqlalchemy.types import (
 )
 from pyathena.util import RetryConfig
 from tests.pyathena.conftest import ENV
-from tests.pyathena.util import throttle_metadata_api
+from tests.pyathena.util import decorated, throttle_metadata_api
 
 # Amazon S3 Tables tests need a pre-provisioned table-bucket catalog; the session
 # creates its own namespace in it.
@@ -2417,6 +2417,37 @@ OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat'
         assert actual[0] == b"a string"
         assert actual[1] == b"varchar"
         assert actual[2] == b"a string"
+
+    def test_cast_as_decorated_types(self, engine):
+        _, conn = engine
+        casts = [
+            ("'a string'", types.String(50)),
+            ("'a string'", types.LargeBinary()),
+            ("1.5", types.Float()),
+            ("MAP(ARRAY['a'], ARRAY[1])", AthenaMap(types.String, types.Integer)),
+        ]
+        actual = conn.execute(
+            sqlalchemy.select(
+                *(expression.cast(literal_column(value), type_) for value, type_ in casts),
+                *(
+                    expression.cast(literal_column(value), decorated(type_))
+                    for value, type_ in casts
+                ),
+            )
+        ).one()
+        assert actual[: len(casts)] == actual[len(casts) :]
+        assert actual[:3] == ("a string", b"a string", 1.5)
+
+    def test_array_element_variant_round_trip(self, engine):
+        _, conn = engine
+        array = AthenaArray(types.String().with_variant(types.Integer(), "awsathena"))
+        actual = conn.execute(
+            sqlalchemy.select(
+                expression.literal([1, 2], array),
+                expression.literal([1, 2], array, literal_execute=True),
+            )
+        ).one()
+        assert actual == ([1, 2], [1, 2])
 
     def test_create_table_with_partition(self, engine):
         engine, conn = engine

@@ -50,6 +50,7 @@ from pyathena.sqlalchemy.types import (
     AthenaTimestamp,
 )
 from tests import ENV
+from tests.pyathena.util import decorated
 
 # Bind parameter names from SQLAlchemy's DifficultParametersTest.
 DIFFICULT_PARAMETER_NAMES = [
@@ -565,6 +566,45 @@ class TestAthenaStatementCompiler:
     )
     def test_timestamp_cast_keeps_microseconds(self, expression, expected):
         assert expected in self._compile_sql(select(expression))
+
+    @pytest.mark.parametrize(
+        ("type_", "expected"),
+        [
+            (types.String(50), "VARCHAR"),
+            (types.Text(), "VARCHAR"),
+            (types.CHAR(3), "VARCHAR"),
+            (types.LargeBinary(), "VARBINARY"),
+            (types.VARBINARY(), "VARBINARY"),
+            (types.Float(), "REAL"),
+            (types.REAL(), "REAL"),
+            (types.Double(), "DOUBLE"),
+            (types.Numeric(10, 2), "DECIMAL(10, 2)"),
+            (types.ARRAY(String), "ARRAY(VARCHAR)"),
+            (AthenaMap(String, Integer), "MAP(VARCHAR, INTEGER)"),
+            (AthenaStruct(("name", String)), "ROW(name VARCHAR)"),
+            (Integer().with_variant(String(50), "awsathena"), "VARCHAR"),
+            (Integer().with_variant(Float(), "awsathena"), "REAL"),
+            (String().with_variant(Integer(), "awsathena"), "INTEGER"),
+            (String().with_variant(Integer(), "postgresql"), "VARCHAR"),
+            (decorated(String()).with_variant(Float(), "awsathena"), "REAL"),
+            (
+                types.DateTime().with_variant(AthenaTimestamp(precision=3), "awsathena"),
+                "TIMESTAMP(3)",
+            ),
+            (types.ARRAY(String().with_variant(Integer(), "awsathena")), "ARRAY(INTEGER)"),
+            (
+                types.ARRAY(types.DateTime().with_variant(AthenaTimestamp(3), "awsathena")),
+                "ARRAY(TIMESTAMP(3))",
+            ),
+            (
+                AthenaMap(String, decorated(String().with_variant(Integer(), "awsathena"))),
+                "MAP(VARCHAR, INTEGER)",
+            ),
+        ],
+    )
+    def test_cast_resolves_variants_and_decorators(self, type_, expected):
+        for target in (type_, decorated(type_), decorated(decorated(type_))):
+            assert self._compile_sql(cast(column("col"), target)) == f"CAST(col AS {expected})"
 
     def test_timestamp_precision_applies_to_compared_values(self):
         col = column("col", AthenaTimestamp(precision=3))

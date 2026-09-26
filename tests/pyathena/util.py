@@ -11,6 +11,7 @@ from pathlib import Path
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from jinja2 import Environment, FileSystemLoader
+from sqlalchemy import types
 
 from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaCalculationExecutionStatus
@@ -100,3 +101,15 @@ def wait_for_spark_job(client, calculation_id, timeout=120, job_start_delay=10):
         ), f"Calculation {calculation_id} ended as {state} before it was canceled."
         time.sleep(1)
     raise AssertionError(f"Calculation {calculation_id} did not start in {timeout} seconds.")
+
+
+def decorated(impl):
+    """Wrap a SQLAlchemy type in a TypeDecorator.
+
+    Args:
+        impl: The type the decorator delegates to.
+
+    Returns:
+        A TypeDecorator instance whose implementation is ``impl``.
+    """
+    return type("Decorated", (types.TypeDecorator,), {"impl": impl, "cache_ok": True})()

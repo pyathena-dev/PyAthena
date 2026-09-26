@@ -534,6 +534,37 @@ class TestArrayValueProcessor:
         )
         assert array.result_processor(dialect, None)(json.dumps([encoded])) == [value]
 
+    @pytest.mark.parametrize(
+        ("item_type", "value", "encoded", "sql", "projection"),
+        [
+            (
+                String().with_variant(Integer(), "awsathena"),
+                1,
+                "1",
+                "ARRAY[1]",
+                "CAST(CAST(_pyathena_array_0 AS VARCHAR) AS JSON)",
+            ),
+            (
+                String().with_variant(AthenaMap(String, Integer), "awsathena"),
+                {"a": 1},
+                {"a": "1"},
+                "ARRAY[MAP(ARRAY['a'], ARRAY[1])]",
+                "map_entries(_pyathena_array_0)",
+            ),
+        ],
+    )
+    def test_element_variant_bind_literal_and_result_paths(
+        self, item_type, value, encoded, sql, projection
+    ):
+        dialect = AthenaDialect()
+        array = AthenaArray(item_type)
+        bind = array.bind_processor(dialect)([value])
+        rendered = DefaultParameterFormatter().format("SELECT %(value)s", {"value": bind})
+        assert rendered == f"SELECT {sql}"
+        assert array.literal_processor(dialect)([value]) == sql
+        assert array.result_processor(dialect, None)(json.dumps([encoded])) == [value]
+        assert projection in str(select(column("items", array)).compile(dialect=dialect))
+
     def test_array_pickle_type_uses_overridden_processors(self):
         dialect = AthenaDialect(dbapi=SimpleNamespace(Binary=bytes, paramstyle="pyformat"))
         array = AthenaArray(types.PickleType())
