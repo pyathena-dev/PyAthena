@@ -215,8 +215,9 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
     def _start_session(self) -> str:
         """Start a Spark session with ``StartSession`` and wait until it is idle.
 
-        If the new session does not become idle, it is terminated before the
-        error is re-raised.
+        If waiting for the new session raises, including ``KeyboardInterrupt``,
+        the session is terminated on a best-effort basis before the exception is
+        re-raised.
 
         Returns:
             The ID of the new session.
