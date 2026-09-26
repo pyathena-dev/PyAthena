@@ -161,6 +161,33 @@ class TestSparkBaseCursor:
         connection.client.terminate_session.assert_called_once_with(SessionId="new-session")
 
     @pytest.mark.parametrize("cursor_class", SPARK_CURSOR_CLASSES)
+    @pytest.mark.parametrize(
+        "state",
+        [
+            AthenaSessionStatus.STATE_TERMINATED,
+            AthenaSessionStatus.STATE_DEGRADED,
+            AthenaSessionStatus.STATE_FAILED,
+        ],
+    )
+    def test_init_terminates_new_session_in_failure_state(self, cursor_class, state):
+        connection = _connection()
+        connection.client.get_session_status.return_value = {
+            "SessionId": "new-session",
+            "Status": {"State": state, "StateChangeReason": "session failure reason"},
+        }
+        with (
+            patch("pyathena.spark.common.time.sleep", side_effect=AssertionError("slept")),
+            pytest.raises(
+                OperationalError,
+                match=rf"^Session: new-session is {state}\. session failure reason$",
+            ),
+        ):
+            _init_cursor(cursor_class, connection)
+
+        connection.client.get_session_status.assert_called_once_with(SessionId="new-session")
+        connection.client.terminate_session.assert_called_once_with(SessionId="new-session")
+
+    @pytest.mark.parametrize("cursor_class", SPARK_CURSOR_CLASSES)
     def test_init_keeps_original_error_when_cleanup_fails(self, cursor_class, caplog):
         connection = _connection()
         connection.client.terminate_session.side_effect = ClientError(
