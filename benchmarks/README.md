@@ -275,7 +275,7 @@ All hosts share the stack's scratch bucket and database: prepare once, and every
 Each host runs one worker, and each worker runs one orchestrator at a time, so trials on a host never overlap.
 
 Athena executes queries from different hosts independently, but API request rates are account-wide.
-Cursor and DictCursor row retrieval calls GetQueryResults for every page, about 5 to 10 pages per second per query in the recorded runs; check the account's GetQueryResults rate in Service Quotas (100 calls per second in the tested account).
+Cursor and DictCursor row retrieval calls GetQueryResults for every page, including the initialization suite's row-count validation, about 5 to 10 pages per second per query in the recorded runs; check the account's GetQueryResults rate in Service Quotas (100 calls per second in the tested account).
 `jobs` marks these jobs as API-heavy with an estimated page count and the number of simultaneous paging queries, which is the concurrency level for the concurrent suite.
 `worker --api-slots` bounds the simultaneous paging queries across the fleet (10 by default): a job takes one slot per paging query, and a worker refuses to start if any job needs more slots than that.
 While an API-heavy job waits for slots, workers do not start later API-heavy jobs; other jobs run on every free host.
