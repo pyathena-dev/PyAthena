@@ -19,10 +19,15 @@ Parameters:
     Type: String
     AllowedPattern: '[0-9a-f]{40}'
     Description: Full commit SHA containing the benchmark implementation.
+  Architecture:
+    Type: String
+    Default: x86_64
+    AllowedValues: [x86_64, arm64]
+    Description: CPU architecture of the benchmark hosts; it must match the instance type.
   InstanceType:
     Type: String
     Default: r7i.2xlarge
-    AllowedValues: [r7i.large, r7i.xlarge, r7i.2xlarge, r7i.4xlarge, r7i.8xlarge]
+    AllowedValues: [r7i.large, r7i.xlarge, r7i.2xlarge, r7i.4xlarge, r7i.8xlarge, r7g.large, r7g.xlarge, r7g.2xlarge, r7g.4xlarge, r7g.8xlarge, r8g.large, r8g.xlarge, r8g.2xlarge, r8g.4xlarge, r8g.8xlarge]
   VolumeSize:
     Type: Number
     Default: 100
@@ -31,6 +36,11 @@ Parameters:
   ImageId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Image for x86_64 hosts.
+  Arm64ImageId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+    Description: Image for arm64 hosts.
   UvVersion:
     Type: String
     Default: '0.12.5'
@@ -59,6 +69,21 @@ Parameters:
     Type: String
     Default: pypi_file_downloads
     AllowedPattern: '[a-z][a-z0-9_]*'
+
+Rules:
+  X86InstanceType:
+    RuleCondition: !Equals [!Ref Architecture, x86_64]
+    Assertions:
+      - Assert: !Contains [[r7i.large, r7i.xlarge, r7i.2xlarge, r7i.4xlarge, r7i.8xlarge], !Ref InstanceType]
+        AssertDescription: Use an r7i instance type with the x86_64 architecture.
+  Arm64InstanceType:
+    RuleCondition: !Equals [!Ref Architecture, arm64]
+    Assertions:
+      - Assert: !Contains [[r7g.large, r7g.xlarge, r7g.2xlarge, r7g.4xlarge, r7g.8xlarge, r8g.large, r8g.xlarge, r8g.2xlarge, r8g.4xlarge, r8g.8xlarge], !Ref InstanceType]
+        AssertDescription: Use an r7g or r8g instance type with the arm64 architecture.
+
+Conditions:
+  IsArm64: !Equals [!Ref Architecture, arm64]
 
 Resources:
   Vpc:
@@ -205,7 +230,7 @@ Resources:
         MetadataOptions:
           HttpTokens: required
           HttpEndpoint: enabled
-        ImageId: !Ref ImageId
+        ImageId: !If [IsArm64, !Ref Arm64ImageId, !Ref ImageId]
         InstanceType: !Ref InstanceType
         IamInstanceProfile:
           Arn: !GetAtt InstanceProfile.Arn
