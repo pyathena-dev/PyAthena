@@ -193,8 +193,10 @@ class TestSparkCursor:
         assert cursor.calculation_execution is final_execution
         assert cursor.state == final_state
 
-    def test_execute_kill_on_interrupt_cancel_failure(self):
-        """A failed cancellation request does not replace the interrupt (no AWS)."""
+    @pytest.mark.parametrize("failing", ["cancel", "wait"])
+    def test_execute_kill_on_interrupt_failure(self, failing):
+        """A failure to cancel or wait becomes the cause of the interrupt (no AWS)."""
+        error = OperationalError("failed")
         cursor = SparkCursor.__new__(SparkCursor)  # bypass __init__ to avoid AWS calls
         cursor._session_id = "session_id"
         cursor._poll_interval = 0
@@ -205,14 +207,19 @@ class TestSparkCursor:
         with (
             patch.object(SparkCursor, "_calculate", return_value="calculation_id"),
             patch.object(
-                SparkCursor, "_get_calculation_execution_status", side_effect=KeyboardInterrupt()
+                SparkCursor,
+                "_get_calculation_execution_status",
+                side_effect=[KeyboardInterrupt(), error],
             ),
-            patch.object(SparkCursor, "_cancel", side_effect=OperationalError("cancel failed")),
+            patch.object(
+                SparkCursor, "_cancel", side_effect=error if failing == "cancel" else None
+            ) as cancel,
             pytest.raises(KeyboardInterrupt) as exc_info,
         ):
             cursor.execute("code")
 
-        assert isinstance(exc_info.value.__cause__, OperationalError)
+        assert exc_info.value.__cause__ is error
+        cancel.assert_called_once_with("calculation_id")
         assert cursor.calculation_execution is None
 
     def test_execute_interrupt_without_kill_on_interrupt(self):

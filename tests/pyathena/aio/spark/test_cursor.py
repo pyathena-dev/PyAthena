@@ -219,20 +219,25 @@ class TestAioSparkCursor:
         cancel.assert_awaited_once_with("calculation_id")
         assert cursor.state == final_state
 
-    async def test_execute_kill_on_interrupt_cancel_failure(self):
-        """A failed cancellation request does not replace the task cancellation (no AWS)."""
-        cursor, cancel, polling = _offline_cursor(
+    @pytest.mark.parametrize("failing", ["cancel", "wait"])
+    async def test_execute_kill_on_interrupt_failure(self, failing):
+        """A failure to cancel or wait becomes the cause of the cancellation (no AWS)."""
+        error = OperationalError("failed")
+        cursor, cancel, _ = _offline_cursor(
             kill_on_interrupt=True,
             final_state=AthenaCalculationExecutionStatus.STATE_COMPLETED,
         )
-        cancel.side_effect = OperationalError("cancel failed")
-        task = asyncio.create_task(cursor.execute("code"))
-        await polling.wait()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        # Raise the cancellation from the first status request directly, so that the
+        # test receives the re-raised exception itself rather than one made by a task.
+        cursor._get_calculation_execution_status = AsyncMock(
+            side_effect=[asyncio.CancelledError(), error]
+        )
+        if failing == "cancel":
+            cancel.side_effect = error
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await cursor.execute("code")
 
-        assert task.cancelled()
+        assert exc_info.value.__cause__ is error
         cancel.assert_awaited_once_with("calculation_id")
         assert cursor.calculation_execution is None
 

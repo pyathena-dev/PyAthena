@@ -245,13 +245,13 @@ with conn.cursor() as cursor:
     timer = threading.Timer(60, cursor.cancel)
     timer.start()
     try:
-        cursor.execute("...")
+        cursor.execute("""print(spark.read.parquet("s3://YOUR_S3_BUCKET/large_dataset/").count())""")
     finally:
         timer.cancel()
 ```
 
-With `kill_on_interrupt` enabled, which is the default, a `KeyboardInterrupt` during `execute()` requests cancellation,
-waits until the calculation reaches a terminal state, and then propagates.
+With `kill_on_interrupt` enabled, which is the default, a `KeyboardInterrupt` while `execute()` waits for the calculation
+requests cancellation, waits until the calculation reaches a terminal state, and then propagates.
 The `state` property returns that terminal state.
 If the cancellation request fails, the `KeyboardInterrupt` propagates with the error as its cause.
 
@@ -457,5 +457,5 @@ async with await aio_connect(work_group="YOUR_SPARK_WORKGROUP",
             print(cursor.state)
 ```
 
-With `kill_on_interrupt` enabled, which is the default, cancelling the task that awaits `execute()` requests
-cancellation of the calculation, waits until it reaches a terminal state, and then raises `asyncio.CancelledError`.
+With `kill_on_interrupt` enabled, which is the default, cancelling the task while `execute()` waits for the calculation
+requests cancellation of the calculation, waits until it reaches a terminal state, and then raises `asyncio.CancelledError`.
