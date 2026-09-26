@@ -28,6 +28,7 @@ from pyathena.sqlalchemy.types import (
     AthenaArray,
     AthenaMap,
     AthenaStruct,
+    AthenaTimestamp,
     Tinyint,
     get_double_type,
 )
@@ -1571,6 +1572,23 @@ class TestSQLAlchemyAthena:
     def test_conn_str_result_reuse_minutes(self, engine):
         engine, conn = engine
         assert conn.connection.result_reuse_minutes == 10
+
+    def test_datetime_microseconds_through_casts(self, engine):
+        engine, conn = engine
+        value = datetime(2017, 1, 1, 12, 0, 0, 789012)
+        # ARRAY values and casts go through a CAST to TIMESTAMP(6).
+        items = expression.literal([value], AthenaArray(types.DateTime))
+        text_value = expression.literal("2017-01-01 12:00:00.789012", types.String)
+        stmt = select(
+            items,
+            expression.cast(text_value, types.DateTime),
+            expression.cast(text_value, AthenaTimestamp(precision=3)),
+        )
+        assert tuple(conn.execute(stmt).one()) == (
+            [value],
+            value,
+            datetime(2017, 1, 1, 12, 0, 0, 789000),
+        )
 
     def test_create_table(self, engine):
         engine, conn = engine

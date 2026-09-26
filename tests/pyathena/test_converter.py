@@ -1,11 +1,40 @@
+from datetime import datetime
+
 import pytest
+from dateutil.tz import gettz
 
 from pyathena.converter import (
     DefaultTypeConverter,
     _to_array,
+    _to_datetime,
+    _to_datetime_with_tz,
     _to_map,
     _to_struct,
 )
+
+
+@pytest.mark.parametrize(
+    ("input_value", "expected"),
+    [
+        (None, None),
+        ("2020-01-01 00:00:00", datetime(2020, 1, 1)),
+        ("2020-01-01 00:00:00.1", datetime(2020, 1, 1, 0, 0, 0, 100000)),
+        ("2020-01-01 00:00:00.123", datetime(2020, 1, 1, 0, 0, 0, 123000)),
+        ("2020-01-01 00:00:00.123456", datetime(2020, 1, 1, 0, 0, 0, 123456)),
+        ("2020-01-01 00:00:00.123456789012", datetime(2020, 1, 1, 0, 0, 0, 123456)),
+    ],
+)
+def test_to_datetime_any_precision(input_value, expected):
+    assert _to_datetime(input_value) == expected
+
+
+def test_to_datetime_with_tz_any_precision():
+    assert _to_datetime_with_tz("2020-01-01 00:00:00 UTC") == datetime(
+        2020, 1, 1, tzinfo=gettz("UTC")
+    )
+    assert _to_datetime_with_tz("2020-01-01 00:00:00.123456789 UTC") == datetime(
+        2020, 1, 1, 0, 0, 0, 123456, tzinfo=gettz("UTC")
+    )
 
 
 @pytest.mark.parametrize(

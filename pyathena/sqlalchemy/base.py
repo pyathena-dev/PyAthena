@@ -193,9 +193,8 @@ class AthenaDialect(DefaultDialect):
         types.BINARY: AthenaBinary,
         types.VARBINARY: AthenaBinary,
         types.ARRAY: AthenaArray,
-        types.DATE: AthenaDate,
-        types.DATETIME: AthenaTimestamp,
-        types.TIMESTAMP: AthenaTimestamp,
+        types.Date: AthenaDate,
+        types.DateTime: AthenaTimestamp,
     }
 
     ischema_names: dict[str, type[Any]] = ischema_names

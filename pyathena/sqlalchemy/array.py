@@ -15,6 +15,7 @@ from sqlalchemy.sql.schema import Column
 from sqlalchemy.sql.type_api import TypeEngine
 from sqlalchemy.sql.visitors import InternalTraversal
 
+from pyathena.converter import _parse_datetime
 from pyathena.formatter import _ComplexParameter
 from pyathena.sqlalchemy.map import AthenaMap
 from pyathena.sqlalchemy.struct import AthenaStruct
@@ -166,6 +167,23 @@ class _ArrayJSONProjection(ColumnElement[Any]):
         self.array_type = type_
 
 
+def _decode_datetime(value: str) -> datetime:
+    """Decode an ARRAY element as a datetime.
+
+    Args:
+        value: The element as ISO 8601 text, or as Athena TIMESTAMP text of any
+            precision.
+
+    Returns:
+        The datetime. Fractional digits beyond microseconds are truncated.
+    """
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        # Python 3.10 accepts only 3 or 6 fractional digits.
+        return _parse_datetime(value)
+
+
 class _ArrayTypeInspector:
     """Interpret nested ARRAY element types for SQL compilation and value conversion.
 
@@ -198,12 +216,7 @@ class _ArrayTypeInspector:
     def decorator_impl(self, type_: types.TypeDecorator[Any]) -> TypeEngine[Any]:
         if self.dialect.name in type_._variant_mapping:
             return type_._variant_mapping[self.dialect.name]
-        implementation = type_.load_dialect_impl(self.dialect)
-        if isinstance(implementation, AthenaTimestamp):
-            return types.TIMESTAMP()
-        if isinstance(implementation, AthenaDate):
-            return types.DATE()
-        return implementation
+        return type_.load_dialect_impl(self.dialect)
 
     @staticmethod
     def has_unknown_element(type_: TypeEngine[Any]) -> bool:
@@ -345,10 +358,6 @@ class _ArrayValueProcessor:
             raise TypeError("ARRAY element shape does not match its declared type.")
         if isinstance(type_, (types.LargeBinary, types.BINARY, types.VARBINARY)):
             return f"X'{bytes(value).hex()}'"
-        if isinstance(type_, types.DateTime) and isinstance(value, datetime):
-            return AthenaTimestamp.process(value)
-        if isinstance(type_, types.Date) and isinstance(value, date):
-            return AthenaDate.process(value)
         processor = type_.dialect_impl(self.dialect).literal_processor(self.dialect)
         if processor is None:
             raise exc.CompileError(f"No ARRAY element literal processor for {type_!r}.")
@@ -394,7 +403,7 @@ class _ArrayValueProcessor:
         if isinstance(type_, types.Numeric):
             return Decimal(value) if type_.asdecimal else float(value)
         if isinstance(type_, (types.DateTime, AthenaTimestamp)):
-            return value if isinstance(value, datetime) else datetime.fromisoformat(value)
+            return value if isinstance(value, datetime) else _decode_datetime(value)
         if isinstance(type_, (types.Date, AthenaDate)):
             return value if isinstance(value, date) else date.fromisoformat(value)
         if isinstance(type_, (types.LargeBinary, types.BINARY, types.VARBINARY)):

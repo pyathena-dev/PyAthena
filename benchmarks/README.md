@@ -92,6 +92,8 @@ There is no inbound security-group rule or SSH key; use Session Manager.
 Internet access permits package installation and calls to AWS APIs without a NAT gateway.
 
 The defaults are Amazon Linux 2023 x86_64, `r7i.2xlarge` (8 vCPUs, 64 GiB), and an encrypted 100 GiB gp3 root volume.
+Set `Architecture=arm64` with an `r7g` or `r8g` instance type to run on AWS Graviton; the template rejects an instance type that does not match the architecture.
+Measurements depend on the CPU architecture; `environment.json` records it, and runs on different architectures are not directly comparable.
 Instance size and disk size are parameters, so a later run can deliberately test another memory budget.
 The AMI parameter resolves the current AL2023 image at deployment; record the resulting AMI when comparing environments.
 Source bucket access is read-only and restricted to the configured prefix.
@@ -225,8 +227,8 @@ API row conversion and native DataFrame/Table access appear as separate cases.
 Sampled RSS can miss short peaks, and the constructor suite's RSS includes its subsequent validation read.
 If the operating system denies access to per-thread CPU times, `thread_cpu_available` is false; thread counts and RSS are still recorded.
 Each trial process receives its own `POLARS_TEMP_DIR`, which the parent samples with RSS and removes after the trial.
-Polars lazy CSV scans of S3 objects download the whole object into a file cache in this directory before yielding batches; in the recorded runs, those files remained after the process exited.
-When the temporary directory is a tmpfs, as `/tmp` is on Amazon Linux 2023, this storage uses memory that RSS does not include.
+Polars before 1.39.0 downloaded the whole S3 object of a lazy CSV scan into a file cache in this directory before yielding batches and left the file after the process exited; PyAthena requires Polars 1.39.0 or later, whose scans do not write that cache.
+When the temporary directory is a tmpfs, as `/tmp` is on Amazon Linux 2023, files written there use memory that RSS does not include.
 
 | Capability | Treatment |
 | --- | --- |
@@ -275,7 +277,7 @@ All hosts share the stack's scratch bucket and database: prepare once, and every
 Each host runs one worker, and each worker runs one orchestrator at a time, so trials on a host never overlap.
 
 Athena executes queries from different hosts independently, but API request rates are account-wide.
-Cursor and DictCursor row retrieval calls GetQueryResults for every page, about 5 to 10 pages per second per query in the recorded runs; check the account's GetQueryResults rate in Service Quotas (100 calls per second in the tested account).
+Cursor and DictCursor row retrieval calls GetQueryResults for every page, including the initialization suite's row-count validation, about 5 to 10 pages per second per query in the recorded runs; check the account's GetQueryResults rate in Service Quotas (100 calls per second in the tested account).
 `jobs` marks these jobs as API-heavy with an estimated page count and the number of simultaneous paging queries, which is the concurrency level for the concurrent suite.
 `worker --api-slots` bounds the simultaneous paging queries across the fleet (10 by default): a job takes one slot per paging query, and a worker refuses to start if any job needs more slots than that.
 While an API-heavy job waits for slots, workers do not start later API-heavy jobs; other jobs run on every free host.

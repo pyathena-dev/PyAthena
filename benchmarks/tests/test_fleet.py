@@ -147,6 +147,25 @@ class TestExpandJobsArraysize:
         assert jobs[0]["args"][-2:] == ["--arraysize", "100"]
         assert not jobs[0]["api_heavy"]
 
+    def test_initialization_validation_of_row_cursors_is_api_heavy(self):
+        jobs = expand_jobs(
+            SETTINGS, ["init"], ["small"], ["flat"], Filters(family=["cursor", "arrow"])
+        )
+        heavy = {j["id"]: (j["api_heavy"], j["api_weight"]) for j in jobs}
+        assert heavy["init-small-flat-cursor-direct-csv-rows-a1000"] == (True, 1)
+        assert heavy["init-small-flat-arrow-direct-csv-native"] == (False, 0)
+
+    def test_page_estimate_includes_the_column_label_row(self):
+        cursor = Filters(family=["cursor"], api=["direct"])
+        jobs = expand_jobs(SETTINGS, ["init"], ["small"], ["flat"], cursor, split_pages=11)
+        assert [j["id"] for j in jobs] == [
+            f"init-small-flat-cursor-direct-csv-rows-a1000-r{repetition}"
+            for repetition in range(1, 6)
+        ]
+        assert {j["pages"] for j in jobs} == {11}
+        unsplit = expand_jobs(SETTINGS, ["init"], ["small"], ["flat"], cursor, split_pages=12)
+        assert [j["id"] for j in unsplit] == ["init-small-flat-cursor-direct-csv-rows-a1000"]
+
     def test_concurrent_row_jobs_weigh_simultaneous_paging_queries(self):
         settings = Settings(scales={"small": 10000}, concurrency=[1, 10])
         jobs = expand_jobs(

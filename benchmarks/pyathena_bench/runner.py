@@ -175,9 +175,10 @@ def directory_bytes(path: Path) -> int:
 def start_with_temp_dir(process: Any, temp_dir: Path) -> None:
     """Start a spawned trial process with its own Polars temporary directory.
 
-    Polars downloads cloud objects for lazy scans into a file cache under
-    ``POLARS_TEMP_DIR`` and keeps the files after the process exits. A
-    per-trial directory lets the parent measure and remove that storage.
+    Polars before 1.39.0 downloads cloud objects for lazy CSV scans into a
+    file cache under ``POLARS_TEMP_DIR`` and keeps the files after the process
+    exits. A per-trial directory lets the parent measure and remove any
+    storage Polars writes there.
 
     Args:
         process: Unstarted multiprocessing process; it inherits the environment.

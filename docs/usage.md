@@ -56,6 +56,8 @@ for row in cursor:
     print(row)
 ```
 
+(usage-query-with-parameters)=
+
 ## Query with parameters
 
 Supported [DB API paramstyle](https://www.python.org/dev/peps/pep-0249/#paramstyle) is only `PyFormat`.
@@ -79,6 +81,28 @@ if `%` character is contained in your query, it must be escaped with `%%` like t
 ```sql
 SELECT col_string FROM one_row_complex
 WHERE col_string = %(param)s OR col_string LIKE 'a%%'
+```
+
+A `datetime` parameter is rendered as a `TIMESTAMP` literal that keeps its microseconds.
+A value without a sub-millisecond part is rendered with three fractional digits as a `timestamp(3)` literal, and any other value with six as a `timestamp(6)` literal.
+
+```python
+from datetime import datetime
+
+cursor.execute("SELECT %(a)s, %(b)s",
+               {"a": datetime(2024, 1, 1, 12, 0, 0, 789000),
+                "b": datetime(2024, 1, 1, 12, 0, 0, 789012)})
+# SELECT TIMESTAMP '2024-01-01 12:00:00.789', TIMESTAMP '2024-01-01 12:00:00.789012'
+```
+
+Athena pads a `timestamp(3)` value with zeros when it meets a `timestamp(6)` value, and truncates a value written to a lower precision.
+Iceberg `TIMESTAMP` columns store microseconds, while Hive `TIMESTAMP` columns store milliseconds and truncate sub-millisecond digits on write.
+A `timestamp(6)` value with a sub-millisecond part therefore does not equal the value stored in a Hive column.
+`CREATE TABLE AS SELECT` into a Hive table and `UNLOAD` with Parquet output, including the `UNLOAD` that cursors run with `unload=True`, reject a `timestamp(6)` output column with `NOT_SUPPORTED: Incorrect timestamp precision for timestamp(6)`; the value can still be used in a `WHERE` clause.
+Cast such a column to `TIMESTAMP(3)` to write it with millisecond precision:
+
+```sql
+SELECT CAST(%(param)s AS TIMESTAMP(3)) AS col_timestamp
 ```
 
 ### Use parameterized queries

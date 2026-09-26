@@ -47,3 +47,24 @@ def test_fleet_size_controls_identical_hosts_and_signals():
         template["Resources"]["LaunchTemplate"]["Properties"]["LaunchTemplateData"]["UserData"]
     )
     assert "AutoScalingGroup" in template["Outputs"]
+
+
+def test_architecture_selects_the_image_and_rules_match_instance_families():
+    template, errors = decode(
+        str(Path(__file__).resolve().parents[1] / "cloudformation/benchmark.yaml")
+    )
+    assert not errors
+    launch = template["Resources"]["LaunchTemplate"]["Properties"]["LaunchTemplateData"]
+    assert launch["ImageId"] == {"Fn::If": ["IsArm64", {"Ref": "Arm64ImageId"}, {"Ref": "ImageId"}]}
+    assert "arm64" in template["Parameters"]["Arm64ImageId"]["Default"]
+    assert "x86_64" in template["Parameters"]["ImageId"]["Default"]
+    allowed = set(template["Parameters"]["InstanceType"]["AllowedValues"])
+    families = {}
+    for name, architecture in (("X86InstanceType", "x86_64"), ("Arm64InstanceType", "arm64")):
+        rule = template["Rules"][name]
+        assert rule["RuleCondition"] == {"Fn::Equals": [{"Ref": "Architecture"}, architecture]}
+        families[architecture] = set(rule["Assertions"][0]["Assert"]["Fn::Contains"][0])
+    assert families["x86_64"] | families["arm64"] == allowed
+    assert not families["x86_64"] & families["arm64"]
+    assert all(t.startswith("r7i.") for t in families["x86_64"])
+    assert all(t.startswith(("r7g.", "r8g.")) for t in families["arm64"])
