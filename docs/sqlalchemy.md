@@ -756,6 +756,34 @@ Athena `FLOAT` and `REAL` are the same 32-bit floating-point type, which keeps a
 Use `Double` (SQLAlchemy 2.0+) for 64-bit values.
 `Float(precision)` does not change the Athena type.
 
+## Bulk inserts
+
+With SQLAlchemy 2.0, an insert executed with a list of parameter sets runs as multi-row `INSERT INTO ... VALUES (...), (...)` statements of up to 100 rows each, instead of one query per row.
+This applies to Core `insert()` with a list of parameters and to ORM flushes that insert several objects.
+`CursorResult.rowcount` is the total number of inserted rows, or -1 if Athena does not report a count.
+If a statement fails, the rows of the earlier statements remain inserted.
+
+Athena limits a query to 262,144 bytes.
+For wide rows, lower the number of rows per statement for the engine or for one execution.
+To run one query per row, disable the batching:
+
+```python
+from sqlalchemy import create_engine
+
+engine = create_engine(
+    "awsathena+rest://:@athena.us-west-2.amazonaws.com:443/default?s3_staging_dir=s3://YOUR_S3_BUCKET/path/to/",
+    insertmanyvalues_page_size=20,
+)
+
+with engine.begin() as conn:
+    conn.execution_options(insertmanyvalues_page_size=5).execute(table.insert(), rows)
+
+engine_per_row = create_engine(
+    "awsathena+rest://:@athena.us-west-2.amazonaws.com:443/default?s3_staging_dir=s3://YOUR_S3_BUCKET/path/to/",
+    use_insertmanyvalues=False,
+)
+```
+
 ## Complex data types
 
 ### STRUCT type support
