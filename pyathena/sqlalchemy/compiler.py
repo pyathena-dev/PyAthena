@@ -635,8 +635,21 @@ class AthenaStatementCompiler(SQLCompiler):
         return super().visit_truediv_binary(binary, operator, **kw)
 
     def visit_cast(self, cast: Cast[Any], **kwargs):
+        """Render a CAST with the Athena DML name of the target type.
+
+        A TypeDecorator is cast as its implementation type.
+
+        Args:
+            cast: The CAST expression.
+            **kwargs: Compiler keyword arguments.
+
+        Returns:
+            The CAST SQL.
+
+        Raises:
+            CompileError: For an ARRAY, MAP, or ROW type that cannot be cast.
+        """
         type_ = cast.type
-        # A TypeDecorator casts as its implementation type.
         while isinstance(type_, types.TypeDecorator):
             type_ = self._array_type_inspector.decorator_impl(type_)
         if isinstance(type_, (types.ARRAY, AthenaMap, AthenaStruct)):
