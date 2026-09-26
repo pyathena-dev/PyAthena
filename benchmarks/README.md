@@ -225,7 +225,7 @@ API row conversion and native DataFrame/Table access appear as separate cases.
 Sampled RSS can miss short peaks, and the constructor suite's RSS includes its subsequent validation read.
 If the operating system denies access to per-thread CPU times, `thread_cpu_available` is false; thread counts and RSS are still recorded.
 Each trial process receives its own `POLARS_TEMP_DIR`, which the parent samples with RSS and removes after the trial.
-Polars lazy CSV scans of S3 objects download the whole object into a file cache in this directory before yielding batches; in the recorded runs, those files remained after the process exited.
+Polars before 1.39.0 downloaded the whole S3 object of a lazy CSV scan into a file cache in this directory before yielding batches and left the file after the process exited; PyAthena requires Polars 1.39.0 or later, whose scans do not write that cache.
 When the temporary directory is a tmpfs, as `/tmp` is on Amazon Linux 2023, this storage uses memory that RSS does not include.
 
 | Capability | Treatment |

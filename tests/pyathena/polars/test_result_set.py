@@ -30,7 +30,7 @@ def _chunked_result_set() -> AthenaPolarsResultSet:
 
 class TestAthenaPolarsResultSet:
     def test_iter_csv_chunks_raises_when_read_fails_partway(self, tmp_path):
-        """A CSV read that fails after some batches raises instead of ending the iteration."""
+        """A CSV read that fails partway through the data raises instead of ending early."""
         path = tmp_path / "result.csv"
         path.write_text(
             "a\n" + "".join(f"{i}\n" for i in range(_ROWS_BEFORE_FAILURE)) + "not-a-number\n"
@@ -61,7 +61,7 @@ class TestAthenaPolarsResultSet:
             list(result_set._iter_csv_chunks())
 
     def test_iter_parquet_chunks_raises_when_read_fails_partway(self, tmp_path):
-        """A Parquet read that fails after some batches raises instead of ending the iteration."""
+        """A Parquet read that fails partway through the data raises instead of ending early."""
         pl.DataFrame({"a": range(_ROWS_BEFORE_FAILURE)}).write_parquet(
             tmp_path / "0.parquet", row_group_size=10_000
         )

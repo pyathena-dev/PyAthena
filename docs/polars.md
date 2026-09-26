@@ -311,9 +311,9 @@ for chunk in cursor.iter_chunks():
 ```
 
 This method uses Polars' `scan_csv()` and `scan_parquet()` with `collect_batches()`,
-which stream the result from S3 without writing it to local storage.
-Polars reads ahead a bounded amount of data, so memory usage does not grow with the result size,
-but it is determined by Polars' read-ahead buffer rather than by `chunksize`.
+which read the result from S3 without writing it to local storage.
+Memory usage depends on how far Polars reads ahead, not on `chunksize`.
+For CSV results, Polars limits the read-ahead by the number of CPU cores, so memory usage does not grow with the result size.
 If reading a chunk fails, iteration raises `OperationalError` instead of ending early.
 
 The chunked iteration also works with the unload option:
