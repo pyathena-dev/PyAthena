@@ -253,6 +253,7 @@ with conn.cursor() as cursor:
 With `kill_on_interrupt` enabled, which is the default, a `KeyboardInterrupt` during `execute()` requests cancellation,
 waits until the calculation reaches a terminal state, and then propagates.
 The `state` property returns that terminal state.
+If the cancellation request fails, the `KeyboardInterrupt` propagates with the error as its cause.
 
 (async-spark-cursor)=
 
