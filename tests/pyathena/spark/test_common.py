@@ -51,6 +51,19 @@ class TestSparkBaseCursor:
         ):
             cursor._wait_for_idle_session("session_id")
 
+    def test_wait_for_idle_session_raises_without_reason(self):
+        cursor = _cursor()
+        with (
+            patch.object(
+                SparkCursor,
+                "_get_session_status",
+                return_value=_session_status(AthenaSessionStatus.STATE_TERMINATED),
+            ),
+            patch("pyathena.spark.common.time.sleep", side_effect=AssertionError("slept")),
+            pytest.raises(OperationalError, match=r"Session: session_id is TERMINATED\."),
+        ):
+            cursor._wait_for_idle_session("session_id")
+
     def test_wait_for_idle_session_waits_until_idle(self):
         cursor = _cursor()
         statuses = [
