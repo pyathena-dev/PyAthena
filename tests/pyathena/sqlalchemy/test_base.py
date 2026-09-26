@@ -2438,6 +2438,17 @@ OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat'
         assert actual[: len(casts)] == actual[len(casts) :]
         assert actual[:3] == ("a string", b"a string", 1.5)
 
+    def test_array_element_variant_round_trip(self, engine):
+        _, conn = engine
+        array = AthenaArray(types.String().with_variant(types.Integer(), "awsathena"))
+        actual = conn.execute(
+            sqlalchemy.select(
+                expression.literal([1, 2], array),
+                expression.literal([1, 2], array, literal_execute=True),
+            )
+        ).one()
+        assert actual == ([1, 2], [1, 2])
+
     def test_create_table_with_partition(self, engine):
         engine, conn = engine
         table_name = "test_create_table_with_partition"
