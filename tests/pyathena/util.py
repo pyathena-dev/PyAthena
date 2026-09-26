@@ -10,6 +10,7 @@ from pathlib import Path
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from jinja2 import Environment, FileSystemLoader
+from sqlalchemy import types
 
 from pyathena.glue import GlueMetadataClient
 
@@ -60,3 +61,15 @@ def unreachable_glue(connection):
         ),
         {},
     )
+
+
+def decorated(impl):
+    """Wrap a SQLAlchemy type in a TypeDecorator.
+
+    Args:
+        impl: The type the decorator delegates to.
+
+    Returns:
+        A TypeDecorator instance whose implementation is ``impl``.
+    """
+    return type("Decorated", (types.TypeDecorator,), {"impl": impl, "cache_ok": True})()

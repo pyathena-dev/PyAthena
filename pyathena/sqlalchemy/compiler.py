@@ -635,27 +635,31 @@ class AthenaStatementCompiler(SQLCompiler):
         return super().visit_truediv_binary(binary, operator, **kw)
 
     def visit_cast(self, cast: Cast[Any], **kwargs):
-        if isinstance(cast.type, (types.ARRAY, AthenaMap, AthenaStruct)):
+        type_ = cast.type
+        # A TypeDecorator casts as its implementation type.
+        while isinstance(type_, types.TypeDecorator):
+            type_ = self._array_type_inspector.decorator_impl(type_)
+        if isinstance(type_, (types.ARRAY, AthenaMap, AthenaStruct)):
             type_clause = self._complex_dml_type(
-                cast.type, require_precision=cast._annotations.get("_pyathena_array_bind", False)
+                type_, require_precision=cast._annotations.get("_pyathena_array_bind", False)
             )
             return f"CAST({self.process(cast.clause, **kwargs)} AS {type_clause})"
-        if (isinstance(cast.type, types.VARCHAR) and cast.type.length is None) or isinstance(
-            cast.type, types.String
+        if (isinstance(type_, types.VARCHAR) and type_.length is None) or isinstance(
+            type_, types.String
         ):
             type_clause = "VARCHAR"
-        elif isinstance(cast.type, types.CHAR) and cast.type.length is None:
+        elif isinstance(type_, types.CHAR) and type_.length is None:
             type_clause = "CHAR"
-        elif isinstance(cast.type, (types.LargeBinary, types.BINARY, types.VARBINARY)):
+        elif isinstance(type_, (types.LargeBinary, types.BINARY, types.VARBINARY)):
             type_clause = "VARBINARY"
-        elif hasattr(types, "Double") and isinstance(cast.type, types.Double):
+        elif hasattr(types, "Double") and isinstance(type_, types.Double):
             type_clause = "DOUBLE"
-        elif isinstance(cast.type, (types.FLOAT, types.Float, types.REAL)):
+        elif isinstance(type_, (types.FLOAT, types.Float, types.REAL)):
             # https://docs.aws.amazon.com/athena/latest/ug/data-types.html
             # In Athena, use float in DDL statements like CREATE TABLE
             # and real in SQL functions like SELECT CAST.
             type_clause = "REAL"
-        elif (timestamp_type := self._timestamp_dml_type(cast.type)) is not None:
+        elif (timestamp_type := self._timestamp_dml_type(type_)) is not None:
             type_clause = timestamp_type
         else:
             type_clause = cast.typeclause._compiler_dispatch(self, **kwargs)
