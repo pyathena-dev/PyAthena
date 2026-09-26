@@ -19,8 +19,7 @@ from pyathena.model import AthenaCalculationExecutionStatus
 from pyathena.spark.async_cursor import AsyncSparkCursor
 from tests import ENV
 
-# Bounds how long the executor tests block, so that a regression fails instead of
-# hanging. No assertion depends on a task still running when this expires.
+# Bounds how long the executor test task blocks when nothing releases it.
 _TIMEOUT = 10
 
 
@@ -149,7 +148,7 @@ class TestAsyncSparkCursor:
             the running future, and the queued future.
         """
         cursor = AsyncSparkCursor.__new__(AsyncSparkCursor)  # bypass __init__ to avoid AWS calls
-        cursor._executor = ThreadPoolExecutor(max_workers=1)
+        cursor._executor = MagicMock(wraps=ThreadPoolExecutor(max_workers=1))
         started = threading.Event()
         release = threading.Event()
 
@@ -181,6 +180,7 @@ class TestAsyncSparkCursor:
             cursor.close(wait=True)
 
         cursor._terminate_session.assert_called_once_with()
+        cursor._executor.shutdown.assert_called_once_with(wait=True)
         assert running.done()
         assert running.result() == "running"
         assert queued.done()
@@ -202,6 +202,7 @@ class TestAsyncSparkCursor:
                 cursor.close(wait=False)
 
             cursor._terminate_session.assert_called_once_with()
+            cursor._executor.shutdown.assert_called_once_with(wait=False)
             with pytest.raises(RuntimeError):
                 cursor._executor.submit(lambda: None)
         finally:
