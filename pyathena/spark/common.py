@@ -303,16 +303,39 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             time.sleep(self._poll_interval)
 
     def _poll(self, query_id: str) -> AthenaQueryExecution | AthenaCalculationExecution:
+        """Wait for a calculation execution to reach a terminal state.
+
+        On ``KeyboardInterrupt`` with ``kill_on_interrupt`` enabled, requests
+        cancellation, waits for the calculation to reach a terminal state, stores
+        it as the cursor's calculation execution, and re-raises the interrupt.
+        Cancellation is a best-effort request, so the terminal state can be
+        ``COMPLETED`` or ``FAILED`` instead of ``CANCELED``.
+
+        Args:
+            query_id: The calculation execution ID.
+
+        Returns:
+            The calculation execution in a terminal state.
+
+        Raises:
+            KeyboardInterrupt: If interrupted while waiting. A failure to cancel or
+                wait for the calculation becomes its ``__cause__``.
+            OperationalError: If a status request fails.
+        """
         try:
-            query_execution = self.__poll(query_id)
-        except KeyboardInterrupt as e:
-            if self._kill_on_interrupt:
-                _logger.warning("Query canceled by user.")
+            return self.__poll(query_id)
+        except KeyboardInterrupt as interrupt:
+            if not self._kill_on_interrupt:
+                raise
+            _logger.warning("Query canceled by user.")
+            try:
                 self._cancel(query_id)
-                query_execution = self.__poll(query_id)
-            else:
-                raise e
-        return query_execution
+                self._calculation_execution = cast(
+                    AthenaCalculationExecution, self.__poll(query_id)
+                )
+            except Exception as e:
+                raise interrupt from e
+            raise
 
     def _cancel(self, query_id: str) -> None:
         """Stop a calculation execution with ``StopCalculationExecution``.
