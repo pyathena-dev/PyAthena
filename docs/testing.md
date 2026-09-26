@@ -148,8 +148,8 @@ Sanitize logs before sharing them.
 
 ## GitHub Actions
 
-The Test workflow runs the offline checks (`just lint`) on every pull request.
-It runs the AWS suites as follows:
+The Test workflow runs for pull requests that change files other than `docs/` and Markdown.
+It runs the offline checks (`just lint`) on each of them, including Drafts and external forks, and runs the AWS suites as follows:
 
 | Trigger | PyAthena suite | SQLAlchemy compliance suites | Spark tests |
 | --- | --- | --- | --- |

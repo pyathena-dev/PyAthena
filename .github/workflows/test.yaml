@@ -34,7 +34,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Offline checks run on every pull request, including Drafts and forks.
+  # Offline checks run for every event, including Draft and fork pull requests.
   lint:
     runs-on: ubuntu-latest
     permissions:
