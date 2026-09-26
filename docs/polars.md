@@ -11,8 +11,9 @@ This cursor downloads the CSV file after executing the query and loads it into a
 Performance is better than fetching data with Cursor.
 
 PolarsCursor uses [Polars](https://pola.rs/) native reading capabilities (`pl.read_csv`, `pl.read_parquet`) and
-does not require PyArrow as a dependency. PyAthena's own S3FileSystem (fsspec compatible)
-is used for S3 access, so s3fs is also not required.
+does not require PyArrow as a dependency. CSV results read without the chunksize option use
+PyAthena's own S3FileSystem (fsspec compatible), and other reads use Polars' native S3 access,
+so s3fs is also not required.
 
 You can use the PolarsCursor by specifying the `cursor_class`
 with the connect method or connection object.
@@ -312,7 +313,7 @@ for chunk in cursor.iter_chunks():
 
 This method uses Polars' `scan_csv()` and `scan_parquet()` with `collect_batches()`,
 which read the result from S3 without writing it to local storage.
-Memory usage depends on how far Polars reads ahead, not on `chunksize`.
+Memory usage depends on the size of each chunk and on how far Polars reads ahead, which `chunksize` does not limit.
 For CSV results, Polars limits the read-ahead by the number of CPU cores, so memory usage does not grow with the result size.
 If reading a chunk fails, iteration raises `OperationalError` instead of ending early.
 
