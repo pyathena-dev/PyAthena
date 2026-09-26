@@ -52,10 +52,12 @@ class AthenaTimestamp(TypeEngine[datetime]):
                 or None for the default rendering.
 
         Raises:
-            ValueError: If ``precision`` is outside 0 to 6.
+            ValueError: If ``precision`` is not an integer from 0 to 6.
         """
-        if precision is not None and not 0 <= precision <= 6:
-            raise ValueError(f"TIMESTAMP precision must be between 0 and 6: {precision}")
+        if precision is not None and (
+            not isinstance(precision, int) or isinstance(precision, bool) or not 0 <= precision <= 6
+        ):
+            raise ValueError(f"TIMESTAMP precision must be an integer from 0 to 6: {precision!r}")
         self.precision = precision
 
     @property

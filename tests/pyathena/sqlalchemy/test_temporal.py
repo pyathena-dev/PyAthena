@@ -95,7 +95,7 @@ class TestAthenaTimestamp:
     def test_bind_processor_without_truncation(self, precision):
         assert AthenaTimestamp(precision=precision).bind_processor(AthenaDialect()) is None
 
-    @pytest.mark.parametrize("precision", [-1, 7])
+    @pytest.mark.parametrize("precision", [-1, 7, 3.0, True, "3"])
     def test_invalid_precision(self, precision):
         with pytest.raises(ValueError, match="precision"):
             AthenaTimestamp(precision=precision)

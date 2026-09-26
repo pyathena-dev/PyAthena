@@ -472,8 +472,12 @@ class TestArrayValueProcessor:
             ),
             (
                 AthenaArray(types.DateTime),
-                '["2025-01-02 03:04:05.1","2025-01-02 03:04:05.123456789"]',
-                [datetime(2025, 1, 2, 3, 4, 5, 100000), datetime(2025, 1, 2, 3, 4, 5, 123456)],
+                '["2025-01-02 03:04:05.1","2025-01-02 03:04:05.123456789","2025-01-02T03:04:05"]',
+                [
+                    datetime(2025, 1, 2, 3, 4, 5, 100000),
+                    datetime(2025, 1, 2, 3, 4, 5, 123456),
+                    datetime(2025, 1, 2, 3, 4, 5),
+                ],
             ),
             (AthenaArray(types.BINARY), '["00FF",""]', [b"\x00\xff", b""]),
             (AthenaArray(types.JSON), '[{"fraction":0.1}]', [{"fraction": 0.1}]),
