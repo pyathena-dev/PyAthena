@@ -21,6 +21,8 @@ from tests.pyathena.util import throttle_metadata_api
 def _offline_cursor(kill_on_interrupt, final_state):
     """An AioCursor whose first status request blocks until the task is cancelled.
 
+    Later status requests report ``RUNNING`` once, then ``final_state``.
+
     Args:
         kill_on_interrupt: Whether the cursor cancels the query on cancellation.
         final_state: The state of the query after cancellation.
@@ -30,12 +32,13 @@ def _offline_cursor(kill_on_interrupt, final_state):
         first status request starts.
     """
     polling = asyncio.Event()
+    states = iter([AthenaQueryExecution.STATE_RUNNING, final_state])
 
     async def get_query_execution(query_id):
         if not polling.is_set():
             polling.set()
             await asyncio.Event().wait()
-        return MagicMock(state=final_state)
+        return MagicMock(state=next(states))
 
     cursor = AioCursor.__new__(AioCursor)  # bypass __init__ to avoid AWS calls
     cursor._rowcount = -1
@@ -196,7 +199,9 @@ class TestAioCursor:
     )
     async def test_execute_kill_on_interrupt(self, final_state):
         """Task cancellation cancels the query, waits for it, and is re-raised (no AWS)."""
+        polled = []
         cursor, cancel, polling = _offline_cursor(kill_on_interrupt=True, final_state=final_state)
+        cursor._on_poll = polled.append
         task = asyncio.create_task(cursor.execute("SELECT 1"))
         await polling.wait()
         task.cancel()
@@ -205,6 +210,11 @@ class TestAioCursor:
 
         assert task.cancelled()
         cancel.assert_awaited_once_with("query_id")
+        # The cancellation is re-raised only after the query reaches a terminal state.
+        assert [execution.state for execution in polled] == [
+            AthenaQueryExecution.STATE_RUNNING,
+            final_state,
+        ]
         assert cursor.query_id == "query_id"
         assert cursor.result_set is None
 

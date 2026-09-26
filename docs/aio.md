@@ -139,9 +139,12 @@ requests cancellation of the query, waits until it reaches a terminal state, and
 Cancellation is a best-effort request, so the query can still end as `SUCCEEDED` or `FAILED`.
 The `query_id` property keeps the ID of the cancelled query.
 If the cancellation request fails, `asyncio.CancelledError` is raised with the error as its cause.
+Cancelling the task again during that wait raises `asyncio.CancelledError` without waiting for the terminal state.
 With `kill_on_interrupt=False`, `asyncio.CancelledError` is raised immediately and the query keeps running.
 
-A timeout from `asyncio.wait_for()` therefore cancels the query and raises `asyncio.TimeoutError`:
+A timeout from `asyncio.wait_for()` that expires while `execute()` waits for the query therefore cancels the query
+and raises `asyncio.TimeoutError`.
+If it expires while the query is being started, `query_id` is `None`, and the pending start request can still start the query.
 
 ```python
 import asyncio
@@ -154,7 +157,7 @@ async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
         try:
             await asyncio.wait_for(cursor.execute("SELECT * FROM many_rows"), timeout=60)
         except asyncio.TimeoutError:
-            print(f"Query {cursor.query_id} timed out")
+            print(f"Query timed out: {cursor.query_id}")
 ```
 
 (aio-dict-cursor)=

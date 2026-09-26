@@ -1318,15 +1318,25 @@ class TestCursor:
     )
     def test_execute_kill_on_interrupt(self, final_state):
         """An interrupt cancels the query, waits for it, and is re-raised (no AWS)."""
+        polled = []
         cursor, cancel = _offline_cursor(kill_on_interrupt=True)
+        cursor._on_poll = polled.append
         cursor._get_query_execution = MagicMock(
-            side_effect=[KeyboardInterrupt(), MagicMock(state=final_state)]
+            side_effect=[
+                KeyboardInterrupt(),
+                MagicMock(state=AthenaQueryExecution.STATE_RUNNING),
+                MagicMock(state=final_state),
+            ]
         )
         with pytest.raises(KeyboardInterrupt):
             cursor.execute("SELECT 1")
 
         cancel.assert_called_once_with("query_id")
-        assert cursor._get_query_execution.call_count == 2
+        # The interrupt is re-raised only after the query reaches a terminal state.
+        assert [execution.state for execution in polled] == [
+            AthenaQueryExecution.STATE_RUNNING,
+            final_state,
+        ]
         assert cursor.query_id == "query_id"
         assert cursor.result_set is None
 
