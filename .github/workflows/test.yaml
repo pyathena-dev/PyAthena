@@ -58,8 +58,9 @@ jobs:
 
   # Selects the AWS suites. Draft and external-fork pull requests run none.
   # A ready pull request always runs the PyAthena suite; it runs the
-  # SQLAlchemy compliance suites and the Spark tests only when their code,
-  # tests, dependencies, or this workflow change.
+  # SQLAlchemy tests (the compliance suites and the PyAthena suite's
+  # SQLAlchemy tests) and the Spark tests only when their code, tests,
+  # dependencies, or this workflow change.
   changes:
     if: >-
       github.event_name != 'pull_request' ||
@@ -87,7 +88,7 @@ jobs:
           files=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename')
           printf 'Changed files:\n%s\n' "$files"
           shared='^(\.github/workflows/test(-suite)?\.yaml|justfile|pyproject\.toml|uv\.lock)$'
-          sqla="$shared|^pyathena/(aio/)?sqlalchemy/|^tests/sqlalchemy/|^setup\.cfg$"
+          sqla="$shared|^pyathena/(aio/)?sqlalchemy/|^tests/sqlalchemy/|^tests/pyathena/(aio/)?sqlalchemy/|^setup\.cfg$"
           spark="$shared|^pyathena/(aio/)?spark/|^tests/pyathena/(aio/)?spark/"
           if grep -qE "$sqla" <<< "$files"; then
             echo "sqla=true" >> "$GITHUB_OUTPUT"
@@ -108,6 +109,7 @@ jobs:
     with:
       test-type: pyathena
       skip-spark: ${{ needs.changes.outputs.spark != 'true' }}
+      skip-sqla: ${{ needs.changes.outputs.sqla != 'true' }}
 
   test-sqla:
     needs: changes
