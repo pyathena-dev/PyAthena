@@ -68,11 +68,14 @@ def api_pages(case: Case, rows: int) -> int:
         case: Benchmark case.
         rows: Rows in the selected snapshot.
 
+    The initialization suite counts too: it validates the constructed result
+    set by reading every row.
+
     Returns:
         Page count summed over the trial's concurrent queries; 0 for cases that
         do not page through the API.
     """
-    if case.family not in API_FAMILIES or case.suite == "init":
+    if case.family not in API_FAMILIES:
         return 0
     return -(-rows // case.arraysize) * case.concurrency
 

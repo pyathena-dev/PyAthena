@@ -147,6 +147,14 @@ class TestExpandJobsArraysize:
         assert jobs[0]["args"][-2:] == ["--arraysize", "100"]
         assert not jobs[0]["api_heavy"]
 
+    def test_initialization_validation_of_row_cursors_is_api_heavy(self):
+        jobs = expand_jobs(
+            SETTINGS, ["init"], ["small"], ["flat"], Filters(family=["cursor", "arrow"])
+        )
+        heavy = {j["id"]: (j["api_heavy"], j["api_weight"]) for j in jobs}
+        assert heavy["init-small-flat-cursor-direct-csv-rows-a1000"] == (True, 1)
+        assert heavy["init-small-flat-arrow-direct-csv-native"] == (False, 0)
+
     def test_concurrent_row_jobs_weigh_simultaneous_paging_queries(self):
         settings = Settings(scales={"small": 10000}, concurrency=[1, 10])
         jobs = expand_jobs(
