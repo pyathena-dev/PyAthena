@@ -876,16 +876,37 @@ class BaseCursor(metaclass=ABCMeta):
             time.sleep(self._poll_interval)
 
     def _poll(self, query_id: str) -> AthenaQueryExecution | AthenaCalculationExecution:
+        """Wait for a query execution to reach a terminal state.
+
+        On ``KeyboardInterrupt`` with ``kill_on_interrupt`` enabled, requests
+        cancellation, waits for the query to reach a terminal state, and re-raises
+        the interrupt.
+        Cancellation is a best-effort request, so the terminal state can be
+        ``SUCCEEDED`` or ``FAILED`` instead of ``CANCELLED``.
+
+        Args:
+            query_id: The query execution ID.
+
+        Returns:
+            The query execution in a terminal state.
+
+        Raises:
+            KeyboardInterrupt: If interrupted while waiting. A failure to cancel or
+                wait for the query becomes its ``__cause__``.
+            OperationalError: If a status request fails.
+        """
         try:
-            query_execution = self.__poll(query_id)
-        except KeyboardInterrupt as e:
-            if self._kill_on_interrupt:
-                _logger.warning("Query canceled by user.")
+            return self.__poll(query_id)
+        except KeyboardInterrupt as interrupt:
+            if not self._kill_on_interrupt:
+                raise
+            _logger.warning("Query canceled by user.")
+            try:
                 self._cancel(query_id)
-                query_execution = self.__poll(query_id)
-            else:
-                raise e
-        return query_execution
+                self.__poll(query_id)
+            except Exception as e:
+                raise interrupt from e
+            raise
 
     def _find_previous_query_id(
         self,
