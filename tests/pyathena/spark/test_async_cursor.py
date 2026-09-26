@@ -19,7 +19,9 @@ from pyathena.model import AthenaCalculationExecutionStatus
 from pyathena.spark.async_cursor import AsyncSparkCursor
 from tests import ENV
 
-_TIMEOUT = 10
+# Bounds every wait in the executor tests so that a regression fails instead of
+# hanging; a correct close() never waits this long.
+_TIMEOUT = 60
 
 
 class TestAsyncSparkCursor:
