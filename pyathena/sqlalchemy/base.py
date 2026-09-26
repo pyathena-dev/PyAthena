@@ -141,6 +141,11 @@ class AthenaDialect(DefaultDialect):
     """
 
     name: str = "awsathena"
+    # The bare ``awsathena://`` scheme resolves to this class. SQLAlchemy reads
+    # ``driver`` when describing a dialect (for example ``Engine.driver`` and
+    # ``URL.get_driver_name()``), so default it to the REST cursor, which is
+    # what ``awsathena+rest://`` selects.
+    driver: str = "rest"
     preparer: type[IdentifierPreparer] = AthenaDMLIdentifierPreparer
     statement_compiler: type[SQLCompiler] = AthenaStatementCompiler
     ddl_compiler: type[DDLCompiler] = AthenaDDLCompiler
