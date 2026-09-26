@@ -637,9 +637,6 @@ class AthenaStatementCompiler(SQLCompiler):
     def visit_cast(self, cast: Cast[Any], **kwargs):
         """Render a CAST with the Athena DML name of the target type.
 
-        The target is resolved to the type the dialect uses: an Athena variant
-        from ``with_variant()`` or the implementation of a TypeDecorator.
-
         Args:
             cast: The CAST expression.
             **kwargs: Compiler keyword arguments.
@@ -650,16 +647,7 @@ class AthenaStatementCompiler(SQLCompiler):
         Raises:
             CompileError: For an ARRAY, MAP, or ROW type that cannot be cast.
         """
-        type_ = cast.type
-        while True:
-            # SQLAlchemy 1.x types have no _variant_mapping.
-            variants = getattr(type_, "_variant_mapping", {})
-            if self.dialect.name in variants:
-                type_ = variants[self.dialect.name]
-            elif isinstance(type_, types.TypeDecorator):
-                type_ = self._array_type_inspector.decorator_impl(type_)
-            else:
-                break
+        type_ = self._dialect_type(cast.type)
         if isinstance(type_, (types.ARRAY, AthenaMap, AthenaStruct)):
             type_clause = self._complex_dml_type(
                 type_, require_precision=cast._annotations.get("_pyathena_array_bind", False)
@@ -686,6 +674,28 @@ class AthenaStatementCompiler(SQLCompiler):
             type_clause = cast.typeclause._compiler_dispatch(self, **kwargs)
         return f"CAST({cast.clause._compiler_dispatch(self, **kwargs)} AS {type_clause})"
 
+    def _dialect_type(self, type_: TypeEngine[Any]) -> TypeEngine[Any]:
+        """Resolve the type this dialect uses for a SQLAlchemy type.
+
+        Takes the Athena variant from ``with_variant()`` and the implementation
+        of a TypeDecorator until neither applies.
+
+        Args:
+            type_: The declared type.
+
+        Returns:
+            The resolved type.
+        """
+        while True:
+            # SQLAlchemy 1.x types have no _variant_mapping.
+            variants = getattr(type_, "_variant_mapping", {})
+            if self.dialect.name in variants:
+                type_ = variants[self.dialect.name]
+            elif isinstance(type_, types.TypeDecorator):
+                type_ = self._array_type_inspector.decorator_impl(type_)
+            else:
+                return type_
+
     def _timestamp_dml_type(self, type_: TypeEngine[Any]) -> str | None:
         """Return the DML type clause for a DateTime type.
 
@@ -693,14 +703,14 @@ class AthenaStatementCompiler(SQLCompiler):
         microseconds, so DML casts use ``TIMESTAMP(6)``.
 
         Args:
-            type_: The type to cast to, possibly a TypeDecorator.
+            type_: The type to cast to, possibly a TypeDecorator or a type
+                with an Athena variant.
 
         Returns:
             ``TIMESTAMP(precision)`` for an AthenaTimestamp with a precision,
             ``TIMESTAMP(6)`` for any other DateTime type, otherwise None.
         """
-        while isinstance(type_, types.TypeDecorator):
-            type_ = self._array_type_inspector.decorator_impl(type_)
+        type_ = self._dialect_type(type_)
         if isinstance(type_, AthenaTimestamp) and type_.precision is not None:
             return f"TIMESTAMP({type_.precision})"
         if isinstance(type_, (types.DateTime, AthenaTimestamp)):
@@ -729,8 +739,7 @@ class AthenaStatementCompiler(SQLCompiler):
             require_precision=require_precision,
             timestamp_precision=timestamp_precision,
         )
-        if isinstance(type_, types.TypeDecorator):
-            return recurse(self._array_type_inspector.decorator_impl(type_))
+        type_ = self._dialect_type(type_)
         if isinstance(type_, types.NullType):
             raise exc.CompileError("Bound ARRAY values require an explicit element type")
         if isinstance(type_, types.ARRAY):

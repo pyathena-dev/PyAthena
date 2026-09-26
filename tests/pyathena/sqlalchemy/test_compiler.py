@@ -587,6 +587,19 @@ class TestAthenaStatementCompiler:
             (String().with_variant(Integer(), "awsathena"), "INTEGER"),
             (String().with_variant(Integer(), "postgresql"), "VARCHAR"),
             (decorated(String()).with_variant(Float(), "awsathena"), "REAL"),
+            (
+                types.DateTime().with_variant(AthenaTimestamp(precision=3), "awsathena"),
+                "TIMESTAMP(3)",
+            ),
+            (types.ARRAY(String().with_variant(Integer(), "awsathena")), "ARRAY(INTEGER)"),
+            (
+                types.ARRAY(types.DateTime().with_variant(AthenaTimestamp(3), "awsathena")),
+                "ARRAY(TIMESTAMP(3))",
+            ),
+            (
+                AthenaMap(String, decorated(String().with_variant(Integer(), "awsathena"))),
+                "MAP(VARCHAR, INTEGER)",
+            ),
         ],
     )
     def test_cast_resolves_variants_and_decorators(self, type_, expected):
