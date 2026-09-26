@@ -5,14 +5,50 @@
 #
 # SPDX-License-Identifier: MIT
 
+import asyncio
 import textwrap
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from pyathena.error import DatabaseError, NotSupportedError, OperationalError
+from pyathena.aio.spark.cursor import AioSparkCursor
+from pyathena.error import NotSupportedError, OperationalError
 from pyathena.model import AthenaCalculationExecutionStatus
 from tests import ENV
 from tests.pyathena.aio.conftest import _aio_connect
+from tests.pyathena.util import CANCELABLE_SPARK_JOB, wait_for_spark_job
+
+
+def _offline_cursor(kill_on_interrupt, final_state):
+    """An AioSparkCursor whose first status request blocks until the task is cancelled.
+
+    Args:
+        kill_on_interrupt: Whether the cursor cancels the calculation on cancellation.
+        final_state: The state of the calculation after cancellation.
+
+    Returns:
+        The cursor, the mock of its cancellation request, and an event set when the
+        first status request starts.
+    """
+    polling = asyncio.Event()
+
+    async def get_status(query_id):
+        if not polling.is_set():
+            polling.set()
+            await asyncio.Event().wait()
+        return MagicMock(state=final_state)
+
+    cursor = AioSparkCursor.__new__(AioSparkCursor)  # bypass __init__ to avoid AWS calls
+    cursor._session_id = "session_id"
+    cursor._poll_interval = 0
+    cursor._kill_on_interrupt = kill_on_interrupt
+    cursor._on_poll = None
+    cursor._calculation_execution = None
+    cursor._calculate = AsyncMock(return_value="calculation_id")
+    cursor._get_calculation_execution_status = get_status
+    cursor._get_calculation_execution = AsyncMock(return_value=MagicMock(state=final_state))
+    cancel = cursor._cancel = AsyncMock()
+    return cursor, cancel, polling
 
 
 class TestAioSparkCursor:
@@ -129,36 +165,81 @@ class TestAioSparkCursor:
         )
 
     async def test_cancel(self, aio_spark_cursor):
-        import asyncio
-
-        async def cancel_after_delay(c):
-            await asyncio.sleep(5)
-            await c.cancel()
-            await c.close()
-
-        task = asyncio.create_task(cancel_after_delay(aio_spark_cursor))
-
-        with pytest.raises(DatabaseError):
-            await aio_spark_cursor.execute(
-                textwrap.dedent(
-                    """
-                    import time
-                    time.sleep(60)
-                    """
-                )
+        async def wait_for_job(previous_calculation_id=None):
+            for _ in range(60):
+                if aio_spark_cursor.calculation_id not in (None, previous_calculation_id):
+                    break
+                await asyncio.sleep(1)
+            await asyncio.to_thread(
+                wait_for_spark_job,
+                aio_spark_cursor.connection.client,
+                aio_spark_cursor.calculation_id,
             )
 
-        await task
+        task = asyncio.create_task(aio_spark_cursor.execute(CANCELABLE_SPARK_JOB))
+        await wait_for_job()
+        await aio_spark_cursor.cancel()
+        with pytest.raises(OperationalError):
+            await task
+        assert aio_spark_cursor.state == AthenaCalculationExecutionStatus.STATE_CANCELED
+
+        # Cancelling the task cancels the calculation and re-raises the cancellation.
+        canceled_calculation_id = aio_spark_cursor.calculation_id
+        task = asyncio.create_task(aio_spark_cursor.execute(CANCELABLE_SPARK_JOB))
+        await wait_for_job(canceled_calculation_id)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert aio_spark_cursor.state == AthenaCalculationExecutionStatus.STATE_CANCELED
+
+        # Canceling a calculation leaves the session usable.
+        await aio_spark_cursor.execute("print(1)")
+        assert await aio_spark_cursor.get_std_out() == "1"
+        # Canceling a completed calculation does not change its state.
+        await aio_spark_cursor.cancel()
+        assert aio_spark_cursor.state == AthenaCalculationExecutionStatus.STATE_COMPLETED
+
+    @pytest.mark.parametrize(
+        "final_state",
+        [
+            AthenaCalculationExecutionStatus.STATE_CANCELED,
+            AthenaCalculationExecutionStatus.STATE_COMPLETED,
+        ],
+    )
+    async def test_execute_kill_on_interrupt(self, final_state):
+        """Task cancellation cancels the calculation, waits for it, and is re-raised (no AWS)."""
+        cursor, cancel, polling = _offline_cursor(kill_on_interrupt=True, final_state=final_state)
+        task = asyncio.create_task(cursor.execute("code"))
+        await polling.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert task.cancelled()
+        cancel.assert_awaited_once_with("calculation_id")
+        assert cursor.state == final_state
+
+    async def test_execute_cancellation_without_kill_on_interrupt(self):
+        """Without kill_on_interrupt, task cancellation propagates without cancel (no AWS)."""
+        cursor, cancel, polling = _offline_cursor(
+            kill_on_interrupt=False,
+            final_state=AthenaCalculationExecutionStatus.STATE_COMPLETED,
+        )
+        task = asyncio.create_task(cursor.execute("code"))
+        await polling.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert task.cancelled()
+        cancel.assert_not_awaited()
+        assert cursor.calculation_execution is None
 
     async def test_executemany(self, aio_spark_cursor):
         with pytest.raises(NotSupportedError):
             await aio_spark_cursor.executemany("SELECT 1", [])
 
     async def test_context_manager(self):
-        import asyncio
-
-        from pyathena.aio.spark.cursor import AioSparkCursor
-
         conn = await _aio_connect(
             schema_name=ENV.schema,
             cursor_class=AioSparkCursor,

@@ -7,9 +7,7 @@
 
 import textwrap
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
-from random import randint
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,6 +16,7 @@ from pyathena import OperationalError
 from pyathena.model import AthenaCalculationExecutionStatus
 from pyathena.spark.async_cursor import AsyncSparkCursor
 from tests import ENV
+from tests.pyathena.util import CANCELABLE_SPARK_JOB, wait_for_spark_job
 
 # Bounds how long the executor test task blocks when nothing releases it.
 _TIMEOUT = 10
@@ -122,22 +121,23 @@ class TestAsyncSparkCursor:
         )
 
     def test_cancel(self, async_spark_cursor):
-        query_id, future = async_spark_cursor.execute(
-            textwrap.dedent(
-                """
-                import time
-                time.sleep(60)
-                """
-            )
-        )
-        time.sleep(randint(5, 10))
+        query_id, future = async_spark_cursor.execute(CANCELABLE_SPARK_JOB)
+        wait_for_spark_job(async_spark_cursor.connection.client, query_id)
         async_spark_cursor.cancel(query_id).result()
-
-        # TODO: Calculation execution is not canceled unless session is terminated
-        async_spark_cursor.close()
-
         calculation_execution = future.result()
         assert calculation_execution.state == AthenaCalculationExecutionStatus.STATE_CANCELED
+
+        # Canceling a calculation leaves the session usable.
+        query_id, future = async_spark_cursor.execute("print(1)")
+        calculation_execution = future.result()
+        assert calculation_execution.state == AthenaCalculationExecutionStatus.STATE_COMPLETED
+        assert async_spark_cursor.get_std_out(calculation_execution).result() == "1"
+        # Canceling a completed calculation does not change its state.
+        async_spark_cursor.cancel(query_id).result()
+        assert (
+            async_spark_cursor.calculation_execution(query_id).result().state
+            == AthenaCalculationExecutionStatus.STATE_COMPLETED
+        )
 
     @staticmethod
     def _cursor_with_submitted_work():

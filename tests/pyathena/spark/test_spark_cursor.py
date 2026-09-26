@@ -8,15 +8,15 @@
 import textwrap
 import time
 from concurrent.futures import ThreadPoolExecutor
-from random import randint
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pyathena import DatabaseError, OperationalError
+from pyathena import OperationalError
 from pyathena.model import AthenaCalculationExecutionStatus
 from pyathena.spark.cursor import SparkCursor
 from tests import ENV
+from tests.pyathena.util import CANCELABLE_SPARK_JOB, wait_for_spark_job
 
 
 class TestSparkCursor:
@@ -134,26 +134,86 @@ class TestSparkCursor:
 
     def test_cancel(self, spark_cursor):
         def cancel(c):
-            time.sleep(randint(5, 10))
+            for _ in range(60):
+                if c.calculation_id:
+                    break
+                time.sleep(1)
+            wait_for_spark_job(c.connection.client, c.calculation_id)
             c.cancel()
 
-            # TODO: Calculation execution is not canceled unless session is terminated
-            c.close()
-
         with ThreadPoolExecutor(max_workers=1) as executor:
-            executor.submit(cancel, spark_cursor)
+            future = executor.submit(cancel, spark_cursor)
+            with pytest.raises(OperationalError):
+                spark_cursor.execute(CANCELABLE_SPARK_JOB)
+            future.result()
+        assert spark_cursor.state == AthenaCalculationExecutionStatus.STATE_CANCELED
 
-            pytest.raises(
-                DatabaseError,
-                lambda: spark_cursor.execute(
-                    textwrap.dedent(
-                        """
-                        import time
-                        time.sleep(60)
-                        """
-                    )
-                ),
-            )
+        # Canceling a calculation leaves the session usable.
+        spark_cursor.execute("print(1)")
+        assert spark_cursor.get_std_out() == "1"
+        # Canceling a completed calculation does not change its state.
+        spark_cursor.cancel()
+        assert spark_cursor.state == AthenaCalculationExecutionStatus.STATE_COMPLETED
+
+    @pytest.mark.parametrize(
+        "final_state",
+        [
+            AthenaCalculationExecutionStatus.STATE_CANCELED,
+            AthenaCalculationExecutionStatus.STATE_COMPLETED,
+        ],
+    )
+    def test_execute_kill_on_interrupt(self, final_state):
+        """An interrupt cancels the calculation, waits for it, and is re-raised (no AWS)."""
+        final_execution = MagicMock(state=final_state)
+        cursor = SparkCursor.__new__(SparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._session_id = "session_id"
+        cursor._poll_interval = 0
+        cursor._kill_on_interrupt = True
+        cursor._on_poll = None
+        cursor._calculation_execution = None
+
+        with (
+            patch.object(SparkCursor, "_calculate", return_value="calculation_id"),
+            patch.object(
+                SparkCursor,
+                "_get_calculation_execution_status",
+                side_effect=[
+                    KeyboardInterrupt(),
+                    MagicMock(state=AthenaCalculationExecutionStatus.STATE_RUNNING),
+                    MagicMock(state=final_state),
+                ],
+            ),
+            patch.object(SparkCursor, "_get_calculation_execution", return_value=final_execution),
+            patch.object(SparkCursor, "_cancel") as cancel,
+            pytest.raises(KeyboardInterrupt),
+        ):
+            cursor.execute("code")
+
+        cancel.assert_called_once_with("calculation_id")
+        assert cursor.calculation_execution is final_execution
+        assert cursor.state == final_state
+
+    def test_execute_interrupt_without_kill_on_interrupt(self):
+        """Without kill_on_interrupt, an interrupt propagates without cancellation (no AWS)."""
+        cursor = SparkCursor.__new__(SparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._session_id = "session_id"
+        cursor._poll_interval = 0
+        cursor._kill_on_interrupt = False
+        cursor._on_poll = None
+        cursor._calculation_execution = None
+
+        with (
+            patch.object(SparkCursor, "_calculate", return_value="calculation_id"),
+            patch.object(
+                SparkCursor, "_get_calculation_execution_status", side_effect=KeyboardInterrupt()
+            ),
+            patch.object(SparkCursor, "_cancel") as cancel,
+            pytest.raises(KeyboardInterrupt),
+        ):
+            cursor.execute("code")
+
+        cancel.assert_not_called()
+        assert cursor.calculation_execution is None
 
 
 def test_spark_on_poll_invoked_each_iteration():
