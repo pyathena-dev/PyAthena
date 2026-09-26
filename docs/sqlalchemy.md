@@ -745,6 +745,17 @@ engine_arrow = create_engine(
 )
 ```
 
+## Floating-point types
+
+| SQLAlchemy type | Table DDL | CAST |
+|---|---|---|
+| `Float`, `FLOAT`, `REAL` | `FLOAT` | `REAL` |
+| `Double`, `DOUBLE`, `DOUBLE_PRECISION` | `DOUBLE` | `DOUBLE` |
+
+Athena `FLOAT` and `REAL` are the same 32-bit floating-point type, which keeps about seven significant digits.
+Use `Double` (SQLAlchemy 2.0+) for 64-bit values.
+`Float(precision)` does not change the Athena type.
+
 ## Complex data types
 
 ### STRUCT type support
