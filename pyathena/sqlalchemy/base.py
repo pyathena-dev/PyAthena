@@ -38,7 +38,6 @@ from pyathena.sqlalchemy.types import (
     AthenaMap,
     AthenaStruct,
     AthenaTimestamp,
-    get_double_type,
 )
 from pyathena.sqlalchemy.util import _HashableDict, _split_type_arguments
 from pyathena.util import (
@@ -71,7 +70,7 @@ _logger = logging.getLogger(__name__)
 ischema_names: dict[str, type[Any]] = {
     "boolean": types.BOOLEAN,
     "float": types.FLOAT,
-    "double": get_double_type(),
+    "double": types.DOUBLE,
     "real": types.FLOAT,
     "tinyint": TINYINT,
     "smallint": types.SMALLINT,

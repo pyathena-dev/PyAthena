@@ -222,8 +222,7 @@ class _ArrayTypeInspector:
         Returns:
             The variant type, or None when the type has no variant for this dialect.
         """
-        # SQLAlchemy 1.x types have no _variant_mapping.
-        return getattr(type_, "_variant_mapping", {}).get(self.dialect.name)
+        return type_._variant_mapping.get(self.dialect.name)
 
     def decorator_impl(self, type_: types.TypeDecorator[Any]) -> TypeEngine[Any]:
         variant = self.variant(type_)

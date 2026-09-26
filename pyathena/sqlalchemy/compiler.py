@@ -45,7 +45,6 @@ from pyathena.sqlalchemy.types import (
     AthenaMap,
     AthenaStruct,
     AthenaTimestamp,
-    get_double_type,
 )
 from pyathena.sqlalchemy.util import _split_type_arguments
 
@@ -608,7 +607,7 @@ class AthenaStatementCompiler(SQLCompiler):
         right_type = binary.right.type
 
         if isinstance(left_type, types.Float) or isinstance(right_type, types.Float):
-            division_type = get_double_type()()
+            division_type: TypeEngine[Any] = types.DOUBLE()
             return (
                 self.process(Cast(binary.left, division_type), **kw)
                 + " / "
@@ -629,7 +628,7 @@ class AthenaStatementCompiler(SQLCompiler):
             return (
                 self.process(binary.left, **kw)
                 + " / "
-                + self.process(Cast(binary.right, get_double_type()()), **kw)
+                + self.process(Cast(binary.right, types.DOUBLE()), **kw)
             )
 
         return super().visit_truediv_binary(binary, operator, **kw)
@@ -661,7 +660,7 @@ class AthenaStatementCompiler(SQLCompiler):
             type_clause = "CHAR"
         elif isinstance(type_, (types.LargeBinary, types.BINARY, types.VARBINARY)):
             type_clause = "VARBINARY"
-        elif hasattr(types, "Double") and isinstance(type_, types.Double):
+        elif isinstance(type_, types.Double):
             type_clause = "DOUBLE"
         elif isinstance(type_, (types.FLOAT, types.Float, types.REAL)):
             # https://docs.aws.amazon.com/athena/latest/ug/data-types.html
@@ -755,7 +754,7 @@ class AthenaStatementCompiler(SQLCompiler):
             return "VARCHAR"
         if isinstance(type_, (types.LargeBinary, types.BINARY, types.VARBINARY)):
             return "VARBINARY"
-        if isinstance(type_, getattr(types, "Double", get_double_type())):
+        if isinstance(type_, types.Double):
             return "DOUBLE"
         if isinstance(type_, types.Float):
             return "REAL"
