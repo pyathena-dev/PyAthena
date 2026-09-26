@@ -154,13 +154,13 @@ It runs the offline checks (`just lint`) on each of them, including Drafts and e
 | Trigger | PyAthena suite | SQLAlchemy compliance suites | Spark tests |
 | --- | --- | --- | --- |
 | Draft pull request | No | No | No |
-| Ready pull request | Yes | When related files change | When related files change |
+| Ready pull request from a branch of this repository | Yes | When related files change | When related files change |
 | Weekly schedule and manual dispatch | Yes | Yes | Yes |
 
 For the compliance suites, the related files are `pyathena/sqlalchemy/`, `pyathena/aio/sqlalchemy/`, `tests/sqlalchemy/`, and `setup.cfg`.
 For the Spark tests, they are `pyathena/spark/`, `pyathena/aio/spark/`, `tests/pyathena/spark/`, and `tests/pyathena/aio/spark/`.
 Changes to `pyproject.toml`, `uv.lock`, `justfile`, or the Test workflows run both.
-For these pull requests, marking a Draft ready for review starts the AWS jobs, and converting it back to Draft cancels AWS jobs still running.
+For a pull request from a branch of this repository, marking the Draft ready for review starts the AWS jobs, and converting it back to Draft cancels AWS jobs still running.
 To run every suite on a branch, dispatch the workflow:
 
 ```bash
