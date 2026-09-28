@@ -1571,6 +1571,32 @@ class TestCursor:
             cursor.get_table_metadata("one_row")
         assert calls == ["get_table_metadata"] * 2
 
+    # The tables the test session creates; other tests add and drop their own.
+    _SESSION_TABLES = (
+        "one_row",
+        "many_rows",
+        "one_row_complex",
+        "partition_table",
+        "integer_na_values",
+        "boolean_na_values",
+        "execute_many",
+        "execute_many_aio",
+        "execute_many_pandas",
+        "execute_many_pandas_unload_auto",
+        "execute_many_pandas_unload_pyarrow",
+        "execute_many_arrow",
+        "execute_many_arrow_unload",
+        "execute_many_polars",
+        "execute_many_polars_unload",
+        "parquet_with_compression",
+    )
+
+    def test_listing_reads_every_page(self, cursor):
+        # At five tables per page, the session's 16 tables span several pages.
+        names = [m.name for m in cursor.list_table_metadata(max_results=5)]
+
+        assert sorted(n for n in names if n in self._SESSION_TABLES) == sorted(self._SESSION_TABLES)
+
     @pytest.mark.parametrize(
         "cursor", [{"retry_config": RetryConfig(attempt=1)}], indirect=["cursor"]
     )
