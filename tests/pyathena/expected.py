@@ -215,6 +215,10 @@ def _athena_text(value: Any, athena_type: str) -> str:
     Returns:
         The text, such as ``[1, 2]`` for an array, ``{1=2, 3=4}`` for a map,
         and ``{a=1, b=2}`` for a struct.
+
+    Raises:
+        NotImplementedError: For a type without a rendering rule here, such as
+            float and double, whose rendering follows Java's formatting.
     """
     name = family(athena_type)
     arguments = _type_arguments(athena_type)
@@ -232,9 +236,15 @@ def _athena_text(value: Any, athena_type: str) -> str:
         return f"{{{', '.join(entries)}}}"
     if name == "boolean":
         return str(value).lower()
+    if name in ("tinyint", "smallint", "int", "bigint", "string", "varchar", "date"):
+        return str(value)
     if name == "timestamp":
         return value.isoformat(sep=" ", timespec="milliseconds")
-    return str(value)
+    if name == "binary":
+        return " ".join(f"{b:02x}" for b in value)
+    if name == "decimal":
+        return f"{value:.{_parameters(athena_type)[1]}f}"
+    raise NotImplementedError(f"No text rendering rule for {athena_type}.")
 
 
 _COMPLEX_FAMILIES = ("array", "map", "struct")
