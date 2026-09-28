@@ -34,9 +34,9 @@ from pyathena.sqlalchemy.types import (
 )
 from pyathena.util import RetryConfig
 from tests.pyathena.conftest import ENV
-from tests.pyathena.expected import PYTHON, Selection, assert_sqlalchemy_type
+from tests.pyathena.expected import PYTHON_VALUES, ExpectedResult
 from tests.pyathena.tables import ONE_ROW_COMPLEX
-from tests.pyathena.util import decorated, throttle_metadata_api
+from tests.pyathena.util import assert_sqlalchemy_type, decorated, throttle_metadata_api
 
 # Amazon S3 Tables tests need a pre-provisioned table-bucket catalog; the session
 # creates its own namespace in it.
@@ -1399,7 +1399,7 @@ class TestSQLAlchemyAthena:
         assert [c.name for c in one_row_complex.c] == [c.name for c in ONE_ROW_COMPLEX.columns]
         assert isinstance(one_row_complex.c.col_string, Column)
         rows = conn.execute(one_row_complex.select()).fetchall()
-        assert [tuple(row) for row in rows] == Selection(ONE_ROW_COMPLEX).rows(PYTHON)
+        assert [tuple(row) for row in rows] == ExpectedResult(ONE_ROW_COMPLEX).rows(PYTHON_VALUES)
         for column in ONE_ROW_COMPLEX.columns:
             assert_sqlalchemy_type(one_row_complex.c[column.name].type, column)
 

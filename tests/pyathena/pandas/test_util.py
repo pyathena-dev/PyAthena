@@ -15,7 +15,13 @@ from pyathena.pandas.util import (
     to_sql,
 )
 from tests import ENV
-from tests.pyathena.expected import ARRAY_JSON, MAP_JSON, PYTHON, TIME_OF_TIMESTAMP, Selection
+from tests.pyathena.expected import (
+    ARRAY_JSON,
+    MAP_JSON,
+    PYTHON_VALUES,
+    TIME_OF_TIMESTAMP,
+    ExpectedResult,
+)
 from tests.pyathena.tables import ONE_ROW_COMPLEX
 
 
@@ -53,11 +59,11 @@ def test_reset_index():
 
 
 def test_as_pandas(cursor):
-    selection = Selection(ONE_ROW_COMPLEX, (TIME_OF_TIMESTAMP, ARRAY_JSON, MAP_JSON))
-    cursor.execute(selection.sql)
+    expected = ExpectedResult(ONE_ROW_COMPLEX, casts=(TIME_OF_TIMESTAMP, ARRAY_JSON, MAP_JSON))
+    cursor.execute(expected.sql)
     df = as_pandas(cursor)
-    assert list(df.columns) == selection.names
-    assert [tuple(row) for _, row in df.iterrows()] == selection.rows(PYTHON)
+    assert list(df.columns) == expected.names
+    assert [tuple(row) for _, row in df.iterrows()] == expected.rows(PYTHON_VALUES)
 
 
 def test_as_pandas_integer_na_values(cursor):

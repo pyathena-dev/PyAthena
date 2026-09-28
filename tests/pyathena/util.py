@@ -15,6 +15,9 @@ from sqlalchemy import types
 
 from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaCalculationExecutionStatus
+from pyathena.sqlalchemy.types import TINYINT, AthenaArray, AthenaStruct
+from tests.pyathena.expected import base_type, type_arguments, type_parameters
+from tests.pyathena.tables import Column
 
 _queries = Environment(
     loader=FileSystemLoader(Path(__file__).parents[1].resolve() / "resources" / "queries")
@@ -133,3 +136,46 @@ def wait_for_spark_session_state(client, session_id, state, timeout=120):
             return
         time.sleep(1)
     raise AssertionError(f"Session {session_id} did not become {state} in {timeout} seconds.")
+
+
+# The SQLAlchemy type class of a reflected column, by base type.
+_SQLALCHEMY_TYPES = {
+    "boolean": types.BOOLEAN,
+    "tinyint": TINYINT,
+    "smallint": types.SMALLINT,
+    "int": types.INTEGER,
+    "bigint": types.BIGINT,
+    "float": types.FLOAT,
+    "double": types.DOUBLE,
+    "string": types.String,
+    "varchar": types.VARCHAR,
+    "timestamp": types.TIMESTAMP,
+    "date": types.DATE,
+    "binary": types.BINARY,
+    "array": AthenaArray,
+    "map": types.String,
+    "struct": AthenaStruct,
+    "decimal": types.DECIMAL,
+}
+
+
+def assert_sqlalchemy_type(sqlalchemy_type, column: Column) -> None:
+    """Assert that a reflected SQLAlchemy column type matches a table column's definition.
+
+    Args:
+        sqlalchemy_type: The reflected column type.
+        column: The column in ``tests.pyathena.tables``.
+
+    Raises:
+        AssertionError: If the type class or its parameters differ.
+    """
+    name = base_type(column.athena_type)
+    assert isinstance(sqlalchemy_type, _SQLALCHEMY_TYPES[name]), (column.name, sqlalchemy_type)
+    if name == "varchar":
+        assert sqlalchemy_type.length == type_parameters(column.athena_type)[0], column.name
+    elif name == "decimal":
+        precision, scale = type_parameters(column.athena_type)
+        assert (sqlalchemy_type.precision, sqlalchemy_type.scale) == (precision, scale)
+    elif name == "array":
+        (element,) = type_arguments(column.athena_type)
+        assert isinstance(sqlalchemy_type.item_type, _SQLALCHEMY_TYPES[base_type(element)])

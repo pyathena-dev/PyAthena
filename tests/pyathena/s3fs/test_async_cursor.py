@@ -17,7 +17,13 @@ from pyathena.s3fs.async_cursor import AsyncS3FSCursor
 from pyathena.s3fs.result_set import AthenaS3FSResultSet
 from tests import ENV
 from tests.pyathena.conftest import connect
-from tests.pyathena.expected import ARRAY_JSON, MAP_JSON, PYTHON, TIME_OF_TIMESTAMP, Selection
+from tests.pyathena.expected import (
+    ARRAY_JSON,
+    MAP_JSON,
+    PYTHON_VALUES,
+    TIME_OF_TIMESTAMP,
+    ExpectedResult,
+)
 from tests.pyathena.tables import ONE_ROW_COMPLEX
 
 
@@ -61,11 +67,11 @@ class TestAsyncS3FSCursor:
             async_s3fs_cursor.arraysize = -1
 
     def test_complex(self, async_s3fs_cursor):
-        selection = Selection(ONE_ROW_COMPLEX, (TIME_OF_TIMESTAMP, ARRAY_JSON, MAP_JSON))
-        query_id, future = async_s3fs_cursor.execute(selection.sql)
+        expected = ExpectedResult(ONE_ROW_COMPLEX, casts=(TIME_OF_TIMESTAMP, ARRAY_JSON, MAP_JSON))
+        query_id, future = async_s3fs_cursor.execute(expected.sql)
         result_set = future.result()
-        assert result_set.description == selection.description()
-        assert result_set.fetchall() == selection.rows(PYTHON)
+        assert result_set.description == expected.description()
+        assert result_set.fetchall() == expected.rows(PYTHON_VALUES)
 
     def test_cancel(self, async_s3fs_cursor):
         query_id, future = async_s3fs_cursor.execute(

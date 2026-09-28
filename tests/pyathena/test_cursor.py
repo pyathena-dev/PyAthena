@@ -32,10 +32,10 @@ from tests.pyathena.conftest import connect
 from tests.pyathena.expected import (
     ARRAY_JSON,
     MAP_JSON,
-    PYTHON,
+    PYTHON_VALUES,
     TIME_OF_TIMESTAMP,
     TIMESTAMP_TZ,
-    Selection,
+    ExpectedResult,
 )
 from tests.pyathena.tables import ONE_ROW_COMPLEX
 from tests.pyathena.util import throttle_metadata_api, unreachable_glue
@@ -602,18 +602,18 @@ class TestCursor:
         assert cursor.effective_engine_version is None
 
     def test_complex(self, cursor):
-        selection = Selection(
-            ONE_ROW_COMPLEX, (TIMESTAMP_TZ, TIME_OF_TIMESTAMP, ARRAY_JSON, MAP_JSON)
+        expected = ExpectedResult(
+            ONE_ROW_COMPLEX, casts=(TIMESTAMP_TZ, TIME_OF_TIMESTAMP, ARRAY_JSON, MAP_JSON)
         )
-        cursor.execute(selection.sql)
-        assert cursor.description == selection.description()
+        cursor.execute(expected.sql)
+        assert cursor.description == expected.description()
         rows = cursor.fetchall()
-        expected = selection.rows(PYTHON)
-        assert rows == expected
+        expected_rows = expected.rows(PYTHON_VALUES)
+        assert rows == expected_rows
         # catch unicode/str
-        assert list(map(type, rows[0])) == list(map(type, expected[0]))
+        assert list(map(type, rows[0])) == list(map(type, expected_rows[0]))
         # compare dbapi type object
-        assert [d[1] for d in cursor.description] == selection.dbapi_types()
+        assert [d[1] for d in cursor.description] == expected.dbapi_types()
 
     def test_complex_with_type_hints(self, cursor):
         # 1. Basic complex columns from one_row_complex
