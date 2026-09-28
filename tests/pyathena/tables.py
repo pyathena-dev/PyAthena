@@ -101,6 +101,12 @@ class Table:
 
         Returns:
             The file name and content, or None for a table without rows.
+
+        Raises:
+            ValueError: If a Parquet table's row does not round-trip through the
+                columns' Arrow types unchanged, for example a timestamp with more
+                precision than the type or a struct without all of its fields.
+                The tests derive their expectations from the rows as written.
         """
         if not self.rows:
             return None
@@ -108,9 +114,11 @@ class Table:
             lines = ["\t".join(_to_text(v) for v in row) for row in self.rows]
             return "data.tsv", "".join(f"{line}\n" for line in lines).encode()
         schema = pa.schema([(c.name, c.arrow_type) for c in self.columns])
-        table = pa.Table.from_pylist(
-            [dict(zip(schema.names, row, strict=True)) for row in self.rows], schema=schema
-        )
+        rows = [dict(zip(schema.names, row, strict=True)) for row in self.rows]
+        table = pa.Table.from_pylist(rows, schema=schema)
+        for row, stored in zip(rows, table.to_pylist(), strict=True):
+            if changed := [n for n in schema.names if row[n] != stored[n]]:
+                raise ValueError(f"{self.name}: values of {changed} change in their Arrow type.")
         buffer = io.BytesIO()
         pq.write_table(table, buffer)
         return "data.parquet", buffer.getvalue()

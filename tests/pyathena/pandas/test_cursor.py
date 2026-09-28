@@ -5,8 +5,6 @@ import random
 import string
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
-from decimal import Decimal
 from unittest.mock import PropertyMock, patch
 
 import numpy as np
@@ -19,10 +17,18 @@ from pyathena.pandas.cursor import PandasCursor
 from pyathena.pandas.result_set import AthenaPandasResultSet, PandasDataFrameIterator
 from tests import ENV
 from tests.pyathena.conftest import connect
+from tests.pyathena.expected import (
+    ARRAY_JSON,
+    MAP_JSON,
+    PANDAS_VALUES,
+    TIME_OF_TIMESTAMP,
+    UNLOAD_VALUES,
+    ExpectedResult,
+)
+from tests.pyathena.tables import ONE_ROW_COMPLEX
 
 # pandas 3 infers its "str" dtype for strings, which represents NULL as NaN; pandas 2 uses
 # object columns with None.
-STRING_TYPE = pd.Series(["a"]).dtype.type
 STRING_NULL = pd.Series(["a", None]).iloc[1]
 
 
@@ -347,76 +353,10 @@ class TestPandasCursor:
         indirect=["pandas_cursor"],
     )
     def test_complex(self, pandas_cursor, chunksize):
-        pandas_cursor.execute(
-            """
-            SELECT
-              col_boolean
-              ,col_tinyint
-              ,col_smallint
-              ,col_int
-              ,col_bigint
-              ,col_float
-              ,col_double
-              ,col_string
-              ,col_varchar
-              ,col_timestamp
-              ,CAST(col_timestamp AS time) AS col_time
-              ,col_date
-              ,col_binary
-              ,col_array
-              ,CAST(col_array AS json) AS col_array_json
-              ,col_map
-              ,CAST(col_map AS json) AS col_map_json
-              ,col_struct
-              ,col_decimal
-            FROM one_row_complex
-            """,
-            chunksize=chunksize,
-        )
-        assert pandas_cursor.description == [
-            ("col_boolean", "boolean", None, None, 0, 0, "UNKNOWN"),
-            ("col_tinyint", "tinyint", None, None, 3, 0, "UNKNOWN"),
-            ("col_smallint", "smallint", None, None, 5, 0, "UNKNOWN"),
-            ("col_int", "integer", None, None, 10, 0, "UNKNOWN"),
-            ("col_bigint", "bigint", None, None, 19, 0, "UNKNOWN"),
-            ("col_float", "float", None, None, 17, 0, "UNKNOWN"),
-            ("col_double", "double", None, None, 17, 0, "UNKNOWN"),
-            ("col_string", "varchar", None, None, 2147483647, 0, "UNKNOWN"),
-            ("col_varchar", "varchar", None, None, 10, 0, "UNKNOWN"),
-            ("col_timestamp", "timestamp", None, None, 3, 0, "UNKNOWN"),
-            ("col_time", "time", None, None, 3, 0, "UNKNOWN"),
-            ("col_date", "date", None, None, 0, 0, "UNKNOWN"),
-            ("col_binary", "varbinary", None, None, 1073741824, 0, "UNKNOWN"),
-            ("col_array", "array", None, None, 0, 0, "UNKNOWN"),
-            ("col_array_json", "json", None, None, 0, 0, "UNKNOWN"),
-            ("col_map", "map", None, None, 0, 0, "UNKNOWN"),
-            ("col_map_json", "json", None, None, 0, 0, "UNKNOWN"),
-            ("col_struct", "row", None, None, 0, 0, "UNKNOWN"),
-            ("col_decimal", "decimal", None, None, 10, 1, "UNKNOWN"),
-        ]
-        assert pandas_cursor.fetchall() == [
-            (
-                True,
-                127,
-                32767,
-                2147483647,
-                9223372036854775807,
-                0.5,
-                0.25,
-                "a string",
-                "varchar",
-                pd.Timestamp(2017, 1, 1, 0, 0, 0),
-                datetime(2017, 1, 1, 0, 0, 0).time(),
-                pd.Timestamp(2017, 1, 2),
-                b"123",
-                "[1, 2]",
-                [1, 2],
-                "{1=2, 3=4}",
-                {"1": 2, "3": 4},
-                "{a=1, b=2}",
-                Decimal("0.1"),
-            )
-        ]
+        expected = ExpectedResult(ONE_ROW_COMPLEX, casts=(TIME_OF_TIMESTAMP, ARRAY_JSON, MAP_JSON))
+        pandas_cursor.execute(expected.sql, chunksize=chunksize)
+        assert pandas_cursor.description == expected.description()
+        assert pandas_cursor.fetchall() == expected.rows(PANDAS_VALUES)
 
     @pytest.mark.parametrize(
         ("pandas_cursor", "parquet_engine"),
@@ -428,106 +368,12 @@ class TestPandasCursor:
     )
     def test_complex_unload_pyarrow(self, pandas_cursor, parquet_engine):
         # NOT_SUPPORTED: Unsupported Hive type: time, json
-        pandas_cursor.execute(
-            """
-            SELECT
-              col_boolean
-              ,col_tinyint
-              ,col_smallint
-              ,col_int
-              ,col_bigint
-              ,col_float
-              ,col_double
-              ,col_string
-              ,col_varchar
-              ,col_timestamp
-              ,col_date
-              ,col_binary
-              ,col_array
-              ,col_map
-              ,col_struct
-              ,col_decimal
-            FROM one_row_complex
-            """,
-            engine=parquet_engine,
-        )
-        assert pandas_cursor.description == [
-            ("col_boolean", "boolean", None, None, 0, 0, "NULLABLE"),
-            (
-                "col_tinyint",
-                "tinyint",
-                None,
-                None,
-                3,
-                0,
-                "NULLABLE",
-            ),
-            (
-                "col_smallint",
-                "smallint",
-                None,
-                None,
-                5,
-                0,
-                "NULLABLE",
-            ),
-            ("col_int", "integer", None, None, 10, 0, "NULLABLE"),
-            ("col_bigint", "bigint", None, None, 19, 0, "NULLABLE"),
-            ("col_float", "float", None, None, 17, 0, "NULLABLE"),
-            ("col_double", "double", None, None, 17, 0, "NULLABLE"),
-            ("col_string", "varchar", None, None, 2147483647, 0, "NULLABLE"),
-            ("col_varchar", "varchar", None, None, 2147483647, 0, "NULLABLE"),
-            ("col_timestamp", "timestamp", None, None, 3, 0, "NULLABLE"),
-            ("col_date", "date", None, None, 0, 0, "NULLABLE"),
-            ("col_binary", "varbinary", None, None, 1073741824, 0, "NULLABLE"),
-            ("col_array", "array", None, None, 0, 0, "NULLABLE"),
-            ("col_map", "map", None, None, 0, 0, "NULLABLE"),
-            ("col_struct", "row", None, None, 0, 0, "NULLABLE"),
-            ("col_decimal", "decimal", None, None, 10, 1, "NULLABLE"),
-        ]
-        rows = [
-            (
-                row[0],
-                row[1],
-                row[2],
-                row[3],
-                row[4],
-                row[5],
-                row[6],
-                row[7],
-                row[8],
-                row[9],
-                row[10],
-                row[11],
-                list(row[12]),
-                row[13],
-                row[14],
-                row[15],
-            )
-            for row in pandas_cursor.fetchall()
-        ]
-        assert rows == [
-            (
-                True,
-                127,
-                32767,
-                2147483647,
-                9223372036854775807,
-                0.5,
-                0.25,
-                "a string",
-                "varchar",
-                pd.Timestamp(2017, 1, 1, 0, 0, 0),
-                datetime(2017, 1, 2).date(),
-                b"123",
-                # ValueError: The truth value of an array with more than one element is ambiguous.
-                # Use a.any() or a.all()
-                list(np.array([1, 2], dtype=np.int32)),
-                [(1, 2), (3, 4)],
-                {"a": 1, "b": 2},
-                Decimal("0.1"),
-            )
-        ]
+        expected = ExpectedResult(ONE_ROW_COMPLEX)
+        pandas_cursor.execute(expected.sql, engine=parquet_engine)
+        assert pandas_cursor.description == expected.description(unload=True)
+        assert [
+            expected.with_array_lists(row) for row in pandas_cursor.fetchall()
+        ] == expected.rows(UNLOAD_VALUES)
 
     def test_fetch_no_data(self, pandas_cursor):
         pytest.raises(ProgrammingError, pandas_cursor.fetchone)
@@ -587,125 +433,13 @@ class TestPandasCursor:
         indirect=["pandas_cursor"],
     )
     def test_complex_as_pandas(self, pandas_cursor, chunksize):
-        df = pandas_cursor.execute(
-            """
-            SELECT
-              col_boolean
-              ,col_tinyint
-              ,col_smallint
-              ,col_int
-              ,col_bigint
-              ,col_float
-              ,col_double
-              ,col_string
-              ,col_varchar
-              ,col_timestamp
-              ,CAST(col_timestamp AS time) AS col_time
-              ,col_date
-              ,col_binary
-              ,col_array
-              ,CAST(col_array AS json) AS col_array_json
-              ,col_map
-              ,CAST(col_map AS json) AS col_map_json
-              ,col_struct
-              ,col_decimal
-            FROM one_row_complex
-            """,
-            chunksize=chunksize,
-        ).as_pandas()
+        expected = ExpectedResult(ONE_ROW_COMPLEX, casts=(TIME_OF_TIMESTAMP, ARRAY_JSON, MAP_JSON))
+        df = pandas_cursor.execute(expected.sql, chunksize=chunksize).as_pandas()
         if chunksize:
             df = pd.concat((d for d in df), ignore_index=True)
-        assert df.shape[0] == 1
-        assert df.shape[1] == 19
-        dtypes = (
-            df["col_boolean"].dtype.type,
-            df["col_tinyint"].dtype.type,
-            df["col_smallint"].dtype.type,
-            df["col_int"].dtype.type,
-            df["col_bigint"].dtype.type,
-            df["col_float"].dtype.type,
-            df["col_double"].dtype.type,
-            df["col_string"].dtype.type,
-            df["col_varchar"].dtype.type,
-            df["col_timestamp"].dtype.type,
-            df["col_time"].dtype.type,
-            df["col_date"].dtype.type,
-            df["col_binary"].dtype.type,
-            df["col_array"].dtype.type,
-            df["col_array_json"].dtype.type,
-            df["col_map"].dtype.type,
-            df["col_map_json"].dtype.type,
-            df["col_struct"].dtype.type,
-            df["col_decimal"].dtype.type,
-        )
-        assert dtypes == (
-            np.bool_,
-            np.int64,
-            np.int64,
-            np.int64,
-            np.int64,
-            np.float64,
-            np.float64,
-            STRING_TYPE,
-            STRING_TYPE,
-            np.datetime64,
-            np.object_,
-            np.datetime64,
-            np.object_,
-            STRING_TYPE,
-            np.object_,
-            STRING_TYPE,
-            np.object_,
-            STRING_TYPE,
-            np.object_,
-        )
-        rows = [
-            (
-                row["col_boolean"],
-                row["col_tinyint"],
-                row["col_smallint"],
-                row["col_int"],
-                row["col_bigint"],
-                row["col_float"],
-                row["col_double"],
-                row["col_string"],
-                row["col_varchar"],
-                row["col_timestamp"],
-                row["col_time"],
-                row["col_date"],
-                row["col_binary"],
-                row["col_array"],
-                row["col_array_json"],
-                row["col_map"],
-                row["col_map_json"],
-                row["col_struct"],
-                row["col_decimal"],
-            )
-            for _, row in df.iterrows()
-        ]
-        assert rows == [
-            (
-                True,
-                127,
-                32767,
-                2147483647,
-                9223372036854775807,
-                0.5,
-                0.25,
-                "a string",
-                "varchar",
-                pd.Timestamp(2017, 1, 1, 0, 0, 0),
-                datetime(2017, 1, 1, 0, 0, 0).time(),
-                pd.Timestamp(2017, 1, 2),
-                b"123",
-                "[1, 2]",
-                [1, 2],
-                "{1=2, 3=4}",
-                {"1": 2, "3": 4},
-                "{a=1, b=2}",
-                Decimal("0.1"),
-            )
-        ]
+        assert list(df.columns) == expected.names
+        assert [df[n].dtype.type for n in expected.names] == expected.pandas_types()
+        assert [tuple(row) for _, row in df.iterrows()] == expected.rows(PANDAS_VALUES)
 
     @pytest.mark.parametrize(
         ("pandas_cursor", "parquet_engine"),
@@ -717,110 +451,13 @@ class TestPandasCursor:
     )
     def test_complex_unload_as_pandas_pyarrow(self, pandas_cursor, parquet_engine):
         # NOT_SUPPORTED: Unsupported Hive type: time, json
-        df = pandas_cursor.execute(
-            """
-            SELECT
-              col_boolean
-              ,col_tinyint
-              ,col_smallint
-              ,col_int
-              ,col_bigint
-              ,col_float
-              ,col_double
-              ,col_string
-              ,col_varchar
-              ,col_timestamp
-              ,col_date
-              ,col_binary
-              ,col_array
-              ,col_map
-              ,col_struct
-              ,col_decimal
-            FROM one_row_complex
-            """,
-            engine=parquet_engine,
-        ).as_pandas()
-        assert df.shape[0] == 1
-        assert df.shape[1] == 16
-        dtypes = (
-            df["col_boolean"].dtype.type,
-            df["col_tinyint"].dtype.type,
-            df["col_smallint"].dtype.type,
-            df["col_int"].dtype.type,
-            df["col_bigint"].dtype.type,
-            df["col_float"].dtype.type,
-            df["col_double"].dtype.type,
-            df["col_string"].dtype.type,
-            df["col_varchar"].dtype.type,
-            df["col_timestamp"].dtype.type,
-            df["col_date"].dtype.type,
-            df["col_binary"].dtype.type,
-            df["col_array"].dtype.type,
-            df["col_map"].dtype.type,
-            df["col_struct"].dtype.type,
-            df["col_decimal"].dtype.type,
+        expected = ExpectedResult(ONE_ROW_COMPLEX)
+        df = pandas_cursor.execute(expected.sql, engine=parquet_engine).as_pandas()
+        assert list(df.columns) == expected.names
+        assert [df[n].dtype.type for n in expected.names] == expected.pandas_types(unload=True)
+        assert [expected.with_array_lists(row) for _, row in df.iterrows()] == expected.rows(
+            UNLOAD_VALUES
         )
-        assert dtypes == (
-            np.bool_,
-            np.int8,
-            np.int16,
-            np.int32,
-            np.int64,
-            np.float32,
-            np.float64,
-            STRING_TYPE,
-            STRING_TYPE,
-            np.datetime64,
-            np.object_,
-            np.object_,
-            np.object_,
-            np.object_,
-            np.object_,
-            np.object_,
-        )
-        rows = [
-            (
-                row["col_boolean"],
-                row["col_tinyint"],
-                row["col_smallint"],
-                row["col_int"],
-                row["col_bigint"],
-                row["col_float"],
-                row["col_double"],
-                row["col_string"],
-                row["col_varchar"],
-                row["col_timestamp"],
-                row["col_date"],
-                row["col_binary"],
-                list(row["col_array"]),
-                row["col_map"],
-                row["col_struct"],
-                row["col_decimal"],
-            )
-            for _, row in df.iterrows()
-        ]
-        assert rows == [
-            (
-                True,
-                127,
-                32767,
-                2147483647,
-                9223372036854775807,
-                0.5,
-                0.25,
-                "a string",
-                "varchar",
-                pd.Timestamp(2017, 1, 1, 0, 0, 0),
-                datetime(2017, 1, 2).date(),
-                b"123",
-                # ValueError: The truth value of an array with more than one element is ambiguous.
-                # Use a.any() or a.all()
-                list(np.array([1, 2], dtype=np.int32)),
-                [(1, 2), (3, 4)],
-                {"a": 1, "b": 2},
-                Decimal("0.1"),
-            )
-        ]
 
     def test_cancel(self, pandas_cursor):
         def cancel(c):

@@ -10,8 +10,6 @@ import random
 import string
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
-from decimal import Decimal
 
 import polars as pl
 import pytest
@@ -21,6 +19,8 @@ from pyathena.polars.cursor import PolarsCursor
 from pyathena.polars.result_set import AthenaPolarsResultSet
 from tests import ENV
 from tests.pyathena.conftest import connect
+from tests.pyathena.expected import POLARS_EXCLUDED_TYPES, PYTHON_VALUES, ExpectedResult
+from tests.pyathena.tables import ONE_ROW_COMPLEX
 
 
 class TestPolarsCursor:
@@ -119,54 +119,10 @@ class TestPolarsCursor:
         assert df.width == 1
 
     def test_complex(self, polars_cursor):
-        polars_cursor.execute(
-            """
-            SELECT
-              col_boolean
-              ,col_tinyint
-              ,col_smallint
-              ,col_int
-              ,col_bigint
-              ,col_float
-              ,col_double
-              ,col_string
-              ,col_varchar
-              ,col_timestamp
-              ,col_date
-              ,col_decimal
-            FROM one_row_complex
-            """
-        )
-        assert polars_cursor.description == [
-            ("col_boolean", "boolean", None, None, 0, 0, "UNKNOWN"),
-            ("col_tinyint", "tinyint", None, None, 3, 0, "UNKNOWN"),
-            ("col_smallint", "smallint", None, None, 5, 0, "UNKNOWN"),
-            ("col_int", "integer", None, None, 10, 0, "UNKNOWN"),
-            ("col_bigint", "bigint", None, None, 19, 0, "UNKNOWN"),
-            ("col_float", "float", None, None, 17, 0, "UNKNOWN"),
-            ("col_double", "double", None, None, 17, 0, "UNKNOWN"),
-            ("col_string", "varchar", None, None, 2147483647, 0, "UNKNOWN"),
-            ("col_varchar", "varchar", None, None, 10, 0, "UNKNOWN"),
-            ("col_timestamp", "timestamp", None, None, 3, 0, "UNKNOWN"),
-            ("col_date", "date", None, None, 0, 0, "UNKNOWN"),
-            ("col_decimal", "decimal", None, None, 10, 1, "UNKNOWN"),
-        ]
-        assert polars_cursor.fetchall() == [
-            (
-                True,
-                127,
-                32767,
-                2147483647,
-                9223372036854775807,
-                0.5,
-                0.25,
-                "a string",
-                "varchar",
-                datetime(2017, 1, 1, 0, 0, 0),
-                datetime(2017, 1, 2).date(),
-                Decimal("0.1"),
-            )
-        ]
+        expected = ExpectedResult(ONE_ROW_COMPLEX, exclude_types=POLARS_EXCLUDED_TYPES)
+        polars_cursor.execute(expected.sql)
+        assert polars_cursor.description == expected.description()
+        assert polars_cursor.fetchall() == expected.rows(PYTHON_VALUES)
 
     @pytest.mark.parametrize(
         "polars_cursor",
@@ -178,104 +134,19 @@ class TestPolarsCursor:
         indirect=["polars_cursor"],
     )
     def test_complex_unload(self, polars_cursor):
-        polars_cursor.execute(
-            """
-            SELECT
-              col_boolean
-              ,col_tinyint
-              ,col_smallint
-              ,col_int
-              ,col_bigint
-              ,col_float
-              ,col_double
-              ,col_string
-              ,col_varchar
-              ,col_timestamp
-              ,col_date
-              ,col_decimal
-            FROM one_row_complex
-            """
-        )
-        assert polars_cursor.description == [
-            ("col_boolean", "boolean", None, None, 0, 0, "NULLABLE"),
-            ("col_tinyint", "tinyint", None, None, 3, 0, "NULLABLE"),
-            ("col_smallint", "smallint", None, None, 5, 0, "NULLABLE"),
-            ("col_int", "integer", None, None, 10, 0, "NULLABLE"),
-            ("col_bigint", "bigint", None, None, 19, 0, "NULLABLE"),
-            ("col_float", "float", None, None, 17, 0, "NULLABLE"),
-            ("col_double", "double", None, None, 17, 0, "NULLABLE"),
-            ("col_string", "varchar", None, None, 2147483647, 0, "NULLABLE"),
-            ("col_varchar", "varchar", None, None, 2147483647, 0, "NULLABLE"),
-            ("col_timestamp", "timestamp", None, None, 3, 0, "NULLABLE"),
-            ("col_date", "date", None, None, 0, 0, "NULLABLE"),
-            ("col_decimal", "decimal", None, None, 10, 1, "NULLABLE"),
-        ]
-        assert polars_cursor.fetchall() == [
-            (
-                True,
-                127,
-                32767,
-                2147483647,
-                9223372036854775807,
-                0.5,
-                0.25,
-                "a string",
-                "varchar",
-                datetime(2017, 1, 1, 0, 0, 0),
-                datetime(2017, 1, 2).date(),
-                Decimal("0.1"),
-            )
-        ]
+        expected = ExpectedResult(ONE_ROW_COMPLEX, exclude_types=POLARS_EXCLUDED_TYPES)
+        polars_cursor.execute(expected.sql)
+        assert polars_cursor.description == expected.description(unload=True)
+        assert polars_cursor.fetchall() == expected.rows(PYTHON_VALUES)
 
     def test_complex_as_polars(self, polars_cursor):
-        df = polars_cursor.execute(
-            """
-            SELECT
-              col_boolean
-              ,col_tinyint
-              ,col_smallint
-              ,col_int
-              ,col_bigint
-              ,col_float
-              ,col_double
-              ,col_string
-              ,col_varchar
-              ,col_timestamp
-              ,col_date
-              ,col_decimal
-            FROM one_row_complex
-            """
-        ).as_polars()
+        expected = ExpectedResult(ONE_ROW_COMPLEX, exclude_types=POLARS_EXCLUDED_TYPES)
+        df = polars_cursor.execute(expected.sql).as_polars()
         assert isinstance(df, pl.DataFrame)
-        assert (df.height, df.width) == (1, 12)
-        assert df.schema == {
-            "col_boolean": pl.Boolean,
-            "col_tinyint": pl.Int8,
-            "col_smallint": pl.Int16,
-            "col_int": pl.Int32,
-            "col_bigint": pl.Int64,
-            "col_float": pl.Float32,
-            "col_double": pl.Float64,
-            "col_string": pl.String,
-            "col_varchar": pl.String,
-            "col_timestamp": pl.Datetime("us"),
-            "col_date": pl.Date,
-            "col_decimal": pl.Decimal(precision=10, scale=1),
-        }
-        assert df.row(0) == (
-            True,
-            127,
-            32767,
-            2147483647,
-            9223372036854775807,
-            0.5,
-            0.25,
-            "a string",
-            "varchar",
-            datetime(2017, 1, 1, 0, 0, 0),
-            datetime(2017, 1, 2).date(),
-            Decimal("0.1"),
+        assert list(df.schema.items()) == list(
+            zip(expected.names, expected.polars_types(), strict=True)
         )
+        assert df.rows() == expected.rows(PYTHON_VALUES)
 
     @pytest.mark.parametrize(
         "polars_cursor",
@@ -287,40 +158,11 @@ class TestPolarsCursor:
         indirect=["polars_cursor"],
     )
     def test_complex_unload_as_polars(self, polars_cursor):
-        df = polars_cursor.execute(
-            """
-            SELECT
-              col_boolean
-              ,col_tinyint
-              ,col_smallint
-              ,col_int
-              ,col_bigint
-              ,col_float
-              ,col_double
-              ,col_string
-              ,col_varchar
-              ,col_timestamp
-              ,col_date
-              ,col_decimal
-            FROM one_row_complex
-            """
-        ).as_polars()
+        expected = ExpectedResult(ONE_ROW_COMPLEX, exclude_types=POLARS_EXCLUDED_TYPES)
+        df = polars_cursor.execute(expected.sql).as_polars()
         assert isinstance(df, pl.DataFrame)
-        assert (df.height, df.width) == (1, 12)
-        assert df.row(0) == (
-            True,
-            127,
-            32767,
-            2147483647,
-            9223372036854775807,
-            0.5,
-            0.25,
-            "a string",
-            "varchar",
-            datetime(2017, 1, 1, 0, 0, 0),
-            datetime(2017, 1, 2).date(),
-            Decimal("0.1"),
-        )
+        assert df.columns == expected.names
+        assert df.rows() == expected.rows(PYTHON_VALUES)
 
     @pytest.mark.parametrize(
         "polars_cursor",

@@ -10,12 +10,7 @@ import random
 import string
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
-from decimal import Decimal
 
-import pandas as pd
-import polars as pl
-import pyarrow as pa
 import pytest
 
 from pyathena.arrow.cursor import ArrowCursor
@@ -23,6 +18,18 @@ from pyathena.arrow.result_set import AthenaArrowResultSet
 from pyathena.error import DatabaseError, ProgrammingError
 from tests import ENV
 from tests.pyathena.conftest import connect
+from tests.pyathena.expected import (
+    ARRAY_JSON,
+    ARROW_TABLE_VALUES,
+    ARROW_VALUES,
+    MAP_JSON,
+    TIME_OF_TIMESTAMP,
+    UNLOAD_POLARS_VALUES,
+    UNLOAD_VALUES,
+    ExpectedResult,
+    polars_type,
+)
+from tests.pyathena.tables import ONE_ROW_COMPLEX
 
 
 class TestArrowCursor:
@@ -112,75 +119,10 @@ class TestArrowCursor:
             arrow_cursor.arraysize = -1
 
     def test_complex(self, arrow_cursor):
-        arrow_cursor.execute(
-            """
-            SELECT
-              col_boolean
-              ,col_tinyint
-              ,col_smallint
-              ,col_int
-              ,col_bigint
-              ,col_float
-              ,col_double
-              ,col_string
-              ,col_varchar
-              ,col_timestamp
-              ,CAST(col_timestamp AS time) AS col_time
-              ,col_date
-              ,col_binary
-              ,col_array
-              ,CAST(col_array AS json) AS col_array_json
-              ,col_map
-              ,CAST(col_map AS json) AS col_map_json
-              ,col_struct
-              ,col_decimal
-            FROM one_row_complex
-            """
-        )
-        assert arrow_cursor.description == [
-            ("col_boolean", "boolean", None, None, 0, 0, "UNKNOWN"),
-            ("col_tinyint", "tinyint", None, None, 3, 0, "UNKNOWN"),
-            ("col_smallint", "smallint", None, None, 5, 0, "UNKNOWN"),
-            ("col_int", "integer", None, None, 10, 0, "UNKNOWN"),
-            ("col_bigint", "bigint", None, None, 19, 0, "UNKNOWN"),
-            ("col_float", "float", None, None, 17, 0, "UNKNOWN"),
-            ("col_double", "double", None, None, 17, 0, "UNKNOWN"),
-            ("col_string", "varchar", None, None, 2147483647, 0, "UNKNOWN"),
-            ("col_varchar", "varchar", None, None, 10, 0, "UNKNOWN"),
-            ("col_timestamp", "timestamp", None, None, 3, 0, "UNKNOWN"),
-            ("col_time", "time", None, None, 3, 0, "UNKNOWN"),
-            ("col_date", "date", None, None, 0, 0, "UNKNOWN"),
-            ("col_binary", "varbinary", None, None, 1073741824, 0, "UNKNOWN"),
-            ("col_array", "array", None, None, 0, 0, "UNKNOWN"),
-            ("col_array_json", "json", None, None, 0, 0, "UNKNOWN"),
-            ("col_map", "map", None, None, 0, 0, "UNKNOWN"),
-            ("col_map_json", "json", None, None, 0, 0, "UNKNOWN"),
-            ("col_struct", "row", None, None, 0, 0, "UNKNOWN"),
-            ("col_decimal", "decimal", None, None, 10, 1, "UNKNOWN"),
-        ]
-        assert arrow_cursor.fetchall() == [
-            (
-                True,
-                127,
-                32767,
-                2147483647,
-                9223372036854775807,
-                0.5,
-                0.25,
-                "a string",
-                "varchar",
-                datetime(2017, 1, 1, 0, 0, 0),
-                datetime(2017, 1, 1, 0, 0, 0).time(),
-                datetime(2017, 1, 2).date(),
-                b"123",
-                "[1, 2]",
-                [1, 2],
-                "{1=2, 3=4}",
-                {"1": 2, "3": 4},
-                "{a=1, b=2}",
-                Decimal("0.1"),
-            )
-        ]
+        expected = ExpectedResult(ONE_ROW_COMPLEX, casts=(TIME_OF_TIMESTAMP, ARRAY_JSON, MAP_JSON))
+        arrow_cursor.execute(expected.sql)
+        assert arrow_cursor.description == expected.description()
+        assert arrow_cursor.fetchall() == expected.rows(ARROW_VALUES)
 
     @pytest.mark.parametrize(
         "arrow_cursor",
@@ -194,82 +136,10 @@ class TestArrowCursor:
     def test_complex_unload(self, arrow_cursor):
         # NOT_SUPPORTED: Unsupported Hive type: time
         # NOT_SUPPORTED: Unsupported Hive type: json
-        arrow_cursor.execute(
-            """
-            SELECT
-              col_boolean
-              ,col_tinyint
-              ,col_smallint
-              ,col_int
-              ,col_bigint
-              ,col_float
-              ,col_double
-              ,col_string
-              ,col_varchar
-              ,col_timestamp
-              ,col_date
-              ,col_binary
-              ,col_array
-              ,col_map
-              ,col_struct
-              ,col_decimal
-            FROM one_row_complex
-            """
-        )
-        assert arrow_cursor.description == [
-            ("col_boolean", "boolean", None, None, 0, 0, "NULLABLE"),
-            (
-                "col_tinyint",
-                "tinyint",
-                None,
-                None,
-                3,
-                0,
-                "NULLABLE",
-            ),
-            (
-                "col_smallint",
-                "smallint",
-                None,
-                None,
-                5,
-                0,
-                "NULLABLE",
-            ),
-            ("col_int", "integer", None, None, 10, 0, "NULLABLE"),
-            ("col_bigint", "bigint", None, None, 19, 0, "NULLABLE"),
-            ("col_float", "float", None, None, 17, 0, "NULLABLE"),
-            ("col_double", "double", None, None, 17, 0, "NULLABLE"),
-            ("col_string", "varchar", None, None, 2147483647, 0, "NULLABLE"),
-            ("col_varchar", "varchar", None, None, 2147483647, 0, "NULLABLE"),
-            ("col_timestamp", "timestamp", None, None, 3, 0, "NULLABLE"),
-            ("col_date", "date", None, None, 0, 0, "NULLABLE"),
-            ("col_binary", "varbinary", None, None, 1073741824, 0, "NULLABLE"),
-            ("col_array", "array", None, None, 0, 0, "NULLABLE"),
-            ("col_map", "map", None, None, 0, 0, "NULLABLE"),
-            ("col_struct", "row", None, None, 0, 0, "NULLABLE"),
-            ("col_decimal", "decimal", None, None, 10, 1, "NULLABLE"),
-        ]
-        assert arrow_cursor.fetchall() == [
-            (
-                True,
-                127,
-                32767,
-                2147483647,
-                9223372036854775807,
-                0.5,
-                0.25,
-                "a string",
-                "varchar",
-                pd.Timestamp(2017, 1, 1, 0, 0, 0),
-                datetime(2017, 1, 2).date(),
-                b"123",
-                [1, 2],
-                [(1, 2), (3, 4)],
-                {"a": 1, "b": 2},
-                Decimal("0.1"),
-            )
-        ]
+        expected = ExpectedResult(ONE_ROW_COMPLEX)
+        arrow_cursor.execute(expected.sql)
+        assert arrow_cursor.description == expected.description(unload=True)
+        assert arrow_cursor.fetchall() == expected.rows(UNLOAD_VALUES)
 
     def test_fetch_no_data(self, arrow_cursor):
         pytest.raises(ProgrammingError, arrow_cursor.fetchone)
@@ -301,79 +171,12 @@ class TestArrowCursor:
         assert list(zip(*table.to_pydict().values(), strict=False)) == [(i,) for i in range(10000)]
 
     def test_complex_as_arrow(self, arrow_cursor):
-        table = arrow_cursor.execute(
-            """
-            SELECT
-              col_boolean
-              ,col_tinyint
-              ,col_smallint
-              ,col_int
-              ,col_bigint
-              ,col_float
-              ,col_double
-              ,col_string
-              ,col_varchar
-              ,col_timestamp
-              ,CAST(col_timestamp AS time) AS col_time
-              ,col_date
-              ,col_binary
-              ,col_array
-              ,CAST(col_array AS json) AS col_array_json
-              ,col_map
-              ,CAST(col_map AS json) AS col_map_json
-              ,col_struct
-              ,col_decimal
-            FROM one_row_complex
-            """
-        ).as_arrow()
-        assert table.shape[0] == 1
-        assert table.shape[1] == 19
-        assert table.schema == pa.schema(
-            [
-                pa.field("col_boolean", pa.bool_()),
-                pa.field("col_tinyint", pa.int8()),
-                pa.field("col_smallint", pa.int16()),
-                pa.field("col_int", pa.int32()),
-                pa.field("col_bigint", pa.int64()),
-                pa.field("col_float", pa.float32()),
-                pa.field("col_double", pa.float64()),
-                pa.field("col_string", pa.string()),
-                pa.field("col_varchar", pa.string()),
-                pa.field("col_timestamp", pa.timestamp("ms")),
-                pa.field("col_time", pa.string()),
-                pa.field("col_date", pa.timestamp("ms")),
-                pa.field("col_binary", pa.string()),
-                pa.field("col_array", pa.string()),
-                pa.field("col_array_json", pa.string()),
-                pa.field("col_map", pa.string()),
-                pa.field("col_map_json", pa.string()),
-                pa.field("col_struct", pa.string()),
-                pa.field("col_decimal", pa.string()),
-            ]
+        expected = ExpectedResult(ONE_ROW_COMPLEX, casts=(TIME_OF_TIMESTAMP, ARRAY_JSON, MAP_JSON))
+        table = arrow_cursor.execute(expected.sql).as_arrow()
+        assert table.schema == expected.arrow_schema()
+        assert list(zip(*table.to_pydict().values(), strict=True)) == expected.rows(
+            ARROW_TABLE_VALUES
         )
-        assert list(zip(*table.to_pydict().values(), strict=False)) == [
-            (
-                True,
-                127,
-                32767,
-                2147483647,
-                9223372036854775807,
-                0.5,
-                0.25,
-                "a string",
-                "varchar",
-                datetime(2017, 1, 1, 0, 0, 0),
-                "00:00:00.000",
-                datetime(2017, 1, 2, 0, 0, 0),
-                "31 32 33",
-                "[1, 2]",
-                "[1,2]",
-                "{1=2, 3=4}",
-                '{"1":2,"3":4}',
-                "{a=1, b=2}",
-                "0.1",
-            )
-        ]
 
     @pytest.mark.parametrize(
         "arrow_cursor",
@@ -387,73 +190,10 @@ class TestArrowCursor:
     def test_complex_unload_as_arrow(self, arrow_cursor):
         # NOT_SUPPORTED: Unsupported Hive type: time
         # NOT_SUPPORTED: Unsupported Hive type: json
-        table = arrow_cursor.execute(
-            """
-            SELECT
-              col_boolean
-              ,col_tinyint
-              ,col_smallint
-              ,col_int
-              ,col_bigint
-              ,col_float
-              ,col_double
-              ,col_string
-              ,col_varchar
-              ,col_timestamp
-              ,col_date
-              ,col_binary
-              ,col_array
-              ,col_map
-              ,col_struct
-              ,col_decimal
-            FROM one_row_complex
-            """
-        ).as_arrow()
-        assert table.shape[0] == 1
-        assert table.shape[1] == 16
-        assert table.schema == pa.schema(
-            [
-                pa.field("col_boolean", pa.bool_()),
-                pa.field("col_tinyint", pa.int8()),
-                pa.field("col_smallint", pa.int16()),
-                pa.field("col_int", pa.int32()),
-                pa.field("col_bigint", pa.int64()),
-                pa.field("col_float", pa.float32()),
-                pa.field("col_double", pa.float64()),
-                pa.field("col_string", pa.string()),
-                pa.field("col_varchar", pa.string()),
-                pa.field("col_timestamp", pa.timestamp("ns")),
-                pa.field("col_date", pa.date32()),
-                pa.field("col_binary", pa.binary()),
-                pa.field("col_array", pa.list_(pa.field("array_element", pa.int32()))),
-                pa.field("col_map", pa.map_(pa.int32(), pa.field("entries", pa.int32()))),
-                pa.field(
-                    "col_struct",
-                    pa.struct([pa.field("a", pa.int32()), pa.field("b", pa.int32())]),
-                ),
-                pa.field("col_decimal", pa.decimal128(10, 1)),
-            ]
-        )
-        assert list(zip(*table.to_pydict().values(), strict=False)) == [
-            (
-                True,
-                127,
-                32767,
-                2147483647,
-                9223372036854775807,
-                0.5,
-                0.25,
-                "a string",
-                "varchar",
-                pd.Timestamp(2017, 1, 1, 0, 0, 0),
-                datetime(2017, 1, 2).date(),
-                b"123",
-                [1, 2],
-                [(1, 2), (3, 4)],
-                {"a": 1, "b": 2},
-                Decimal("0.1"),
-            )
-        ]
+        expected = ExpectedResult(ONE_ROW_COMPLEX)
+        table = arrow_cursor.execute(expected.sql).as_arrow()
+        assert table.schema == expected.arrow_schema(unload=True)
+        assert list(zip(*table.to_pydict().values(), strict=True)) == expected.rows(UNLOAD_VALUES)
 
     @pytest.mark.parametrize(
         "arrow_cursor",
@@ -478,79 +218,12 @@ class TestArrowCursor:
         assert df.to_dicts() == [{"a": i} for i in range(10000)]
 
     def test_complex_as_polars(self, arrow_cursor):
-        df = arrow_cursor.execute(
-            """
-            SELECT
-              col_boolean
-              ,col_tinyint
-              ,col_smallint
-              ,col_int
-              ,col_bigint
-              ,col_float
-              ,col_double
-              ,col_string
-              ,col_varchar
-              ,col_timestamp
-              ,CAST(col_timestamp AS time) AS col_time
-              ,col_date
-              ,col_binary
-              ,col_array
-              ,CAST(col_array AS json) AS col_array_json
-              ,col_map
-              ,CAST(col_map AS json) AS col_map_json
-              ,col_struct
-              ,col_decimal
-            FROM one_row_complex
-            """
-        ).as_polars()
-        assert df.height == 1
-        assert df.width == 19
-        dtypes = tuple(df.dtypes)
-        assert dtypes == (
-            pl.Boolean,
-            pl.Int8,
-            pl.Int16,
-            pl.Int32,
-            pl.Int64,
-            pl.Float32,
-            pl.Float64,
-            pl.String,
-            pl.String,
-            pl.Datetime("ms"),
-            pl.String,
-            pl.Datetime("ms"),
-            pl.String,
-            pl.String,
-            pl.String,
-            pl.String,
-            pl.String,
-            pl.String,
-            pl.String,
-        )
-        rows = df.to_dicts()
-        assert rows == [
-            {
-                "col_boolean": True,
-                "col_tinyint": 127,
-                "col_smallint": 32767,
-                "col_int": 2147483647,
-                "col_bigint": 9223372036854775807,
-                "col_float": 0.5,
-                "col_double": 0.25,
-                "col_string": "a string",
-                "col_varchar": "varchar",
-                "col_timestamp": datetime(2017, 1, 1, 0, 0, 0),
-                "col_time": "00:00:00.000",
-                "col_date": datetime(2017, 1, 2, 0, 0, 0),
-                "col_binary": "31 32 33",
-                "col_array": "[1, 2]",
-                "col_array_json": "[1,2]",
-                "col_map": "{1=2, 3=4}",
-                "col_map_json": '{"1":2,"3":4}',
-                "col_struct": "{a=1, b=2}",
-                "col_decimal": "0.1",
-            }
+        expected = ExpectedResult(ONE_ROW_COMPLEX, casts=(TIME_OF_TIMESTAMP, ARRAY_JSON, MAP_JSON))
+        df = arrow_cursor.execute(expected.sql).as_polars()
+        assert list(zip(df.columns, df.dtypes, strict=True)) == [
+            (f.name, polars_type(f.type)) for f in expected.arrow_schema()
         ]
+        assert df.to_dicts() == expected.dicts(ARROW_TABLE_VALUES)
 
     @pytest.mark.parametrize(
         "arrow_cursor",
@@ -564,70 +237,12 @@ class TestArrowCursor:
     def test_complex_unload_as_polars(self, arrow_cursor):
         # NOT_SUPPORTED: Unsupported Hive type: time
         # NOT_SUPPORTED: Unsupported Hive type: json
-        df = arrow_cursor.execute(
-            """
-            SELECT
-              col_boolean
-              ,col_tinyint
-              ,col_smallint
-              ,col_int
-              ,col_bigint
-              ,col_float
-              ,col_double
-              ,col_string
-              ,col_varchar
-              ,col_timestamp
-              ,col_date
-              ,col_binary
-              ,col_array
-              ,col_map
-              ,col_struct
-              ,col_decimal
-            FROM one_row_complex
-            """
-        ).as_polars()
-        assert df.height == 1
-        assert df.width == 16
-        dtypes = tuple(df.dtypes)
-        assert dtypes == (
-            pl.Boolean,
-            pl.Int8,
-            pl.Int16,
-            pl.Int32,
-            pl.Int64,
-            pl.Float32,
-            pl.Float64,
-            pl.String,
-            pl.String,
-            pl.Datetime("ns"),
-            pl.Date,
-            pl.Binary,
-            pl.List(pl.Int32),
-            pl.List(pl.Struct([pl.Field("key", pl.Int32), pl.Field("value", pl.Int32)])),
-            pl.Struct([pl.Field("a", pl.Int32), pl.Field("b", pl.Int32)]),
-            pl.Decimal(precision=10, scale=1),
-        )
-        rows = df.to_dicts()
-        assert rows == [
-            {
-                "col_boolean": True,
-                "col_tinyint": 127,
-                "col_smallint": 32767,
-                "col_int": 2147483647,
-                "col_bigint": 9223372036854775807,
-                "col_float": 0.5,
-                "col_double": 0.25,
-                "col_string": "a string",
-                "col_varchar": "varchar",
-                "col_timestamp": datetime(2017, 1, 1, 0, 0, 0),
-                "col_date": datetime(2017, 1, 2).date(),
-                "col_binary": b"123",
-                "col_array": [1, 2],
-                "col_map": [{"key": 1, "value": 2}, {"key": 3, "value": 4}],
-                "col_struct": {"a": 1, "b": 2},
-                "col_decimal": Decimal("0.1"),
-            }
+        expected = ExpectedResult(ONE_ROW_COMPLEX)
+        df = arrow_cursor.execute(expected.sql).as_polars()
+        assert list(zip(df.columns, df.dtypes, strict=True)) == [
+            (f.name, polars_type(f.type)) for f in expected.arrow_schema(unload=True)
         ]
+        assert df.to_dicts() == expected.dicts(UNLOAD_POLARS_VALUES)
 
     def test_cancel(self, arrow_cursor):
         def cancel(c):
