@@ -231,9 +231,8 @@ def _athena_text(value: Any, athena_type: str) -> str:
         entries = (f"{_athena_text(k, key_type)}={_athena_text(x, value_type)}" for k, x in value)
         return f"{{{', '.join(entries)}}}"
     if name == "struct":
-        field_types = dict(_struct_fields(athena_type))
-        entries = (f"{k}={_athena_text(x, field_types[k])}" for k, x in value.items())
-        return f"{{{', '.join(entries)}}}"
+        items = _struct_items(value, athena_type)
+        return f"{{{', '.join(f'{k}={_athena_text(x, t)}' for k, x, t in items)}}}"
     if name == "boolean":
         return str(value).lower()
     if name in ("tinyint", "smallint", "int", "bigint", "string", "varchar", "date"):
@@ -263,6 +262,26 @@ _NESTED_SCALAR_FAMILIES = (
     "binary",
     "decimal",
 )
+
+
+def _struct_items(value: Mapping[str, Any], athena_type: str) -> list[tuple[str, Any, str]]:
+    """Return a struct value's fields in declared order.
+
+    Args:
+        value: The struct value from the table definition; a missing field is
+            null, as in the generated Parquet data.
+        athena_type: The struct type.
+
+    Returns:
+        ``(name, value, type)`` per declared field.
+
+    Raises:
+        ValueError: If the value has a field that the type does not declare.
+    """
+    fields = _struct_fields(athena_type)
+    if unknown := set(value) - {name for name, _ in fields}:
+        raise ValueError(f"Undeclared struct fields {sorted(unknown)} for {athena_type}.")
+    return [(name, value.get(name), field_type) for name, field_type in fields]
 
 
 def _member_types(athena_type: str) -> list[str]:
@@ -386,8 +405,7 @@ def _python_struct(value: Any, athena_type: str) -> dict[str, Any] | None:
     _check_nesting(athena_type)
     if value is None:
         return None
-    field_types = dict(_struct_fields(athena_type))
-    return {k: _element_text(x, field_types[k]) for k, x in value.items()}
+    return {k: _element_text(x, t) for k, x, t in _struct_items(value, athena_type)}
 
 
 def _same(value: Any, athena_type: str) -> Any:
