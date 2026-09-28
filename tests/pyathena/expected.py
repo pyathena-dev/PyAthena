@@ -256,6 +256,8 @@ def _athena_text(value: Any, athena_type: str) -> str:
             strings, whose rendering has no rule here.
     """
     name = base_type(athena_type)
+    if value is None:
+        return "null"
     if name == "array":
         (element_type,) = type_arguments(athena_type)
         return f"[{', '.join(_athena_text(e, element_type) for e in value)}]"
@@ -264,12 +266,24 @@ def _athena_text(value: Any, athena_type: str) -> str:
         entries = (f"{_athena_text(k, key_type)}={_athena_text(x, value_type)}" for k, x in value)
         return f"{{{', '.join(entries)}}}"
     if name == "struct":
-        field_types = dict(_struct_fields(athena_type))
-        entries = (f"{k}={_athena_text(x, field_types[k])}" for k, x in value.items())
+        entries = (f"{k}={_athena_text(value[k], t)}" for k, t in _struct_fields(athena_type))
         return f"{{{', '.join(entries)}}}"
     if name in ("tinyint", "smallint", "int", "bigint", "string", "varchar"):
         return str(value)
     raise NotImplementedError(f"No text rendering rule for {athena_type}.")
+
+
+def _member_value(value: Any, athena_type: str) -> str | None:
+    """Return a value nested in an array, map, or struct as the cursors parse it.
+
+    Args:
+        value: The nested value.
+        athena_type: The value's Athena type.
+
+    Returns:
+        Its text rendering, or None for a null.
+    """
+    return None if value is None else _athena_text(value, athena_type)
 
 
 def _check_scalar_members(athena_type: str) -> None:
@@ -295,17 +309,18 @@ def _python_array(value: Any, athena_type: str) -> list[Any]:
 
     Returns:
         The parsed JSON if Athena's rendering is valid JSON, such as ``[1, 2]``;
-        otherwise the elements' text, such as ``["a", "b"]`` for ``[a, b]``.
+        otherwise the elements' text, such as ``["a", "b"]`` for ``[a, b]``,
+        with None for a null element.
     """
     _check_scalar_members(athena_type)
     (element_type,) = type_arguments(athena_type)
     try:
         return json.loads(_athena_text(value, athena_type))
     except ValueError:
-        return [_athena_text(e, element_type) for e in value]
+        return [_member_value(e, element_type) for e in value]
 
 
-def _python_map(value: Any, athena_type: str) -> dict[str, str]:
+def _python_map(value: Any, athena_type: str) -> dict[str, str | None]:
     """Return a map as a cursor without type hints returns it.
 
     Args:
@@ -313,14 +328,14 @@ def _python_map(value: Any, athena_type: str) -> dict[str, str]:
         athena_type: The map type.
 
     Returns:
-        The keys and values as their text renderings.
+        The keys and values as their text renderings; a null value is None.
     """
     _check_scalar_members(athena_type)
     key_type, value_type = type_arguments(athena_type)
-    return {_athena_text(k, key_type): _athena_text(x, value_type) for k, x in value}
+    return {_athena_text(k, key_type): _member_value(x, value_type) for k, x in value}
 
 
-def _python_struct(value: Any, athena_type: str) -> dict[str, str]:
+def _python_struct(value: Any, athena_type: str) -> dict[str, str | None]:
     """Return a struct as a cursor without type hints returns it.
 
     Args:
@@ -328,11 +343,11 @@ def _python_struct(value: Any, athena_type: str) -> dict[str, str]:
         athena_type: The struct type.
 
     Returns:
-        The field values as their text renderings.
+        The field values as their text renderings, in declared order; a null
+        value is None.
     """
     _check_scalar_members(athena_type)
-    field_types = dict(_struct_fields(athena_type))
-    return {k: _athena_text(x, field_types[k]) for k, x in value.items()}
+    return {k: _member_value(value[k], t) for k, t in _struct_fields(athena_type)}
 
 
 def _parsed_json(value: Any, athena_type: str) -> Any:
