@@ -192,6 +192,7 @@ ONE_ROW_COMPLEX = Table(
             pa.struct([("a", pa.int32()), ("b", pa.int32())]),
         ),
         Column("col_decimal", "DECIMAL(10,1)", pa.decimal128(10, 1)),
+        Column("col_array_string", "ARRAY<string>", pa.list_(pa.string())),
     ),
     rows=(
         (
@@ -211,6 +212,7 @@ ONE_ROW_COMPLEX = Table(
             [(1, 2), (3, 4)],
             {"a": 1, "b": 2},
             Decimal("0.1"),
+            ["a", "b"],
         ),
     ),
 )
