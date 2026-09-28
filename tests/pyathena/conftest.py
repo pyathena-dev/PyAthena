@@ -59,7 +59,8 @@ def pytest_sessionstart(session):
     step, and ``pytest_sessionfinish`` runs them. pytest skips
     ``pytest_sessionfinish`` after a failed session start, so a failure here or
     in a later session-start hook runs them at once, before the error reaches
-    pytest-xdist, which may stop a worker that reports it.
+    pytest-xdist, which may stop a worker that reports it. A config cleanup runs
+    whatever is still recorded after a failure outside this wrapper.
 
     Args:
         session: The pytest session.
@@ -68,6 +69,8 @@ def pytest_sessionstart(session):
         The results of the other session-start hooks.
     """
     config = session.config
+    # For a failure after this wrapper returns, such as in an outer wrapper.
+    config.add_cleanup(_run_cleanups)
     try:
         if _owns_fixture_schema(config):
             _cleanups.append(_drop_fixture_schema)
