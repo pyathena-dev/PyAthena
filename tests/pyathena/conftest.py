@@ -45,41 +45,58 @@ def pytest_configure(config):
         config.pluginmanager.register(_XDistHooks())
 
 
+# The removals of what pytest_sessionstart created, in creation order.
+_cleanups = []
+
+
 def pytest_sessionstart(session):
     """Create the fixture schema and this process's own schema, as its role requires.
 
     The pytest-xdist controller creates the fixture schema before it starts the
     workers, and each worker creates its own schema. A run without workers
-    creates both. Each step registers its removal as a config cleanup first,
-    because pytest skips ``pytest_sessionfinish`` after a failed session start,
-    including a failure to start the workers, but still runs config cleanups.
+    creates both. Each removal is recorded before its step, and
+    ``pytest_sessionfinish`` runs them. pytest skips ``pytest_sessionfinish``
+    after a failed session start, including a failure to start the workers, so
+    a config cleanup runs whatever is still recorded then.
 
     Args:
         session: The pytest session.
     """
     config = session.config
+    config.add_cleanup(_run_cleanups)
     if _owns_fixture_schema(config):
-        config.add_cleanup(_drop_fixture_schema)
+        _cleanups.append(_drop_fixture_schema)
         _create_fixture_schema()
     if _is_test_process(config):
+        _cleanups.append(_delete_s3tables_namespace)
         _create_s3tables_namespace()
-        config.add_cleanup(_delete_s3tables_namespace)
-        config.add_cleanup(functools.partial(_drop_database, ENV.schema))
+        _cleanups.append(functools.partial(_drop_database, ENV.schema))
         with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
             _create_database(cursor, ENV.schema)
 
 
 def pytest_sessionfinish(session):
-    """Fail the run if the fixture schema changed, in the process that owns it.
+    """Check the fixture schema in the process that owns it, then remove what was created.
 
-    The schemas themselves are dropped by the config cleanups that
-    ``pytest_sessionstart`` registers, after this hook.
+    The removal runs here, not in a config cleanup, because a pytest-xdist worker
+    reports that it finished after this hook and the controller may then stop
+    it.
 
     Args:
         session: The pytest session.
     """
-    if _owns_fixture_schema(session.config):
-        _check_fixture_schema(session)
+    try:
+        if _owns_fixture_schema(session.config):
+            _check_fixture_schema(session)
+    finally:
+        _run_cleanups()
+
+
+def _run_cleanups():
+    """Run and forget the recorded removals, newest first, each even if one fails."""
+    steps = list(reversed(_cleanups))
+    _cleanups.clear()
+    _run_all(steps)
 
 
 def _is_test_process(config):
@@ -210,10 +227,14 @@ def _create_s3tables_namespace():
 
 
 def _delete_s3tables_namespace():
-    """Delete this process's S3 Tables namespace and any table left in it."""
+    """Delete this process's S3 Tables namespace and any table left in it, if it exists."""
     if not ENV.s3tables_catalog:
         return
     client, arn = _s3tables()
+    try:
+        client.get_namespace(tableBucketARN=arn, namespace=ENV.s3tables_namespace)
+    except client.exceptions.NotFoundException:
+        return
     tables = [
         table["name"]
         for page in client.get_paginator("list_tables").paginate(
