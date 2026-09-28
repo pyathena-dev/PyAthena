@@ -377,7 +377,7 @@ def test_to_sql(cursor):
         compression="snappy",
     )
 
-    cursor.execute(f"SELECT * FROM {table_name}")
+    cursor.execute(f"SELECT * FROM {ENV.schema}.{table_name}")
     assert cursor.fetchall() == [
         (
             1,
@@ -413,7 +413,7 @@ def test_to_sql(cursor):
         if_exists="append",
         compression="snappy",
     )
-    cursor.execute(f"SELECT * FROM {table_name}")
+    cursor.execute(f"SELECT * FROM {ENV.schema}.{table_name}")
     assert cursor.fetchall() == [
         (
             1,
@@ -455,7 +455,7 @@ def test_to_sql_with_index(cursor):
         index=True,
         index_label="col_index",
     )
-    cursor.execute(f"SELECT * FROM {table_name}")
+    cursor.execute(f"SELECT * FROM {ENV.schema}.{table_name}")
     assert cursor.fetchall() == [(0, 1)]
     assert [(d[0], d[1]) for d in cursor.description] == [
         ("col_index", "bigint"),
@@ -483,9 +483,9 @@ def test_to_sql_with_partitions(cursor):
         if_exists="fail",
         compression="snappy",
     )
-    cursor.execute(f"SHOW PARTITIONS {table_name}")
+    cursor.execute(f"SHOW PARTITIONS {ENV.schema}.{table_name}")
     assert sorted(cursor.fetchall()) == [(f"col_int={i}",) for i in range(10)]
-    cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+    cursor.execute(f"SELECT COUNT(*) FROM {ENV.schema}.{table_name}")
     assert cursor.fetchall() == [(10,)]
 
 
@@ -509,11 +509,11 @@ def test_to_sql_with_multiple_partitions(cursor):
         if_exists="fail",
         compression="snappy",
     )
-    cursor.execute(f"SHOW PARTITIONS {table_name}")
+    cursor.execute(f"SHOW PARTITIONS {ENV.schema}.{table_name}")
     assert sorted(cursor.fetchall()), [(f"col_int={i}/col_string=a",) for i in range(5)] + [
         (f"col_int={i}/col_string=b",) for i in range(5, 10)
     ]
-    cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+    cursor.execute(f"SELECT COUNT(*) FROM {ENV.schema}.{table_name}")
     assert cursor.fetchall() == [(10,)]
 
 

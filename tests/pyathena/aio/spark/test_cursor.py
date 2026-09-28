@@ -112,7 +112,7 @@ class TestAioSparkCursor:
                 df = spark.read.format("csv") \\
                     .option("header", "true") \\
                     .option("inferSchema", "true") \\
-                    .load("{ENV.s3_staging_dir}{ENV.schema}/spark_group_by/spark_group_by.csv")
+                    .load("{ENV.s3_staging_dir}{ENV.fixture_schema}/spark_group_by/spark_group_by.csv")
                 """
             ),
             description="test description",
@@ -172,7 +172,7 @@ class TestAioSparkCursor:
         await aio_spark_cursor.execute(
             textwrap.dedent(
                 f"""
-                spark.sql("SELECT * FROM {ENV.schema}.one_row").show()
+                spark.sql("SELECT * FROM {ENV.fixture_schema}.one_row").show()
                 """
             )
         )
@@ -484,7 +484,7 @@ class TestAioSparkCursor:
 
     async def test_context_manager(self):
         conn = await _aio_connect(
-            schema_name=ENV.schema,
+            schema_name=ENV.fixture_schema,
             cursor_class=AioSparkCursor,
             work_group=ENV.spark_work_group,
         )

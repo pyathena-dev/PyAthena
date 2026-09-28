@@ -121,7 +121,7 @@ class TestAsyncPolarsCursor:
         future = async_polars_cursor.query_execution(query_id)
         query_execution = future.result()
 
-        assert query_execution.database == ENV.schema
+        assert query_execution.database == ENV.fixture_schema
         assert query_execution.catalog
         assert query_execution.query_id
         if async_polars_cursor._unload:

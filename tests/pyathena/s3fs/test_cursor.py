@@ -148,14 +148,14 @@ class TestS3FSCursor:
 
     def test_open_close(self):
         with (
-            contextlib.closing(connect(schema_name=ENV.schema)) as conn,
+            contextlib.closing(connect(schema_name=ENV.fixture_schema)) as conn,
             conn.cursor(S3FSCursor) as cursor,
         ):
             cursor.execute("SELECT * FROM one_row")
             assert cursor.fetchall() == [(1,)]
 
     def test_no_ops(self):
-        conn = connect(schema_name=ENV.schema)
+        conn = connect(schema_name=ENV.fixture_schema)
         cursor = conn.cursor(S3FSCursor)
         cursor.close()
         conn.close()
@@ -247,7 +247,7 @@ class TestS3FSCursor:
         with (
             contextlib.closing(
                 connect(
-                    schema_name=ENV.schema,
+                    schema_name=ENV.fixture_schema,
                     cursor_class=S3FSCursor,
                     cursor_kwargs={"on_start_query_execution": callback},
                 )
@@ -267,7 +267,7 @@ class TestS3FSCursor:
         with (
             contextlib.closing(
                 connect(
-                    schema_name=ENV.schema,
+                    schema_name=ENV.fixture_schema,
                     cursor_class=S3FSCursor,
                 )
             ) as conn,
@@ -321,7 +321,7 @@ class TestS3FSCursor:
         with (
             contextlib.closing(
                 connect(
-                    schema_name=ENV.schema,
+                    schema_name=ENV.fixture_schema,
                     cursor_class=S3FSCursor,
                     cursor_kwargs={"csv_reader": csv_reader_class},
                 )
@@ -341,7 +341,7 @@ class TestS3FSCursor:
         with (
             contextlib.closing(
                 connect(
-                    schema_name=ENV.schema,
+                    schema_name=ENV.fixture_schema,
                     cursor_class=S3FSCursor,
                     cursor_kwargs={"csv_reader": csv_reader_class},
                 )
@@ -364,7 +364,7 @@ class TestS3FSCursor:
         with (
             contextlib.closing(
                 connect(
-                    schema_name=ENV.schema,
+                    schema_name=ENV.fixture_schema,
                     cursor_class=S3FSCursor,
                     cursor_kwargs={"csv_reader": DefaultCSVReader},
                 )
@@ -380,7 +380,7 @@ class TestS3FSCursor:
         with (
             contextlib.closing(
                 connect(
-                    schema_name=ENV.schema,
+                    schema_name=ENV.fixture_schema,
                     cursor_class=S3FSCursor,
                     cursor_kwargs={"csv_reader": AthenaCSVReader},
                 )
@@ -396,7 +396,7 @@ class TestS3FSCursor:
         with (
             contextlib.closing(
                 connect(
-                    schema_name=ENV.schema,
+                    schema_name=ENV.fixture_schema,
                     cursor_class=S3FSCursor,
                     cursor_kwargs={"csv_reader": DefaultCSVReader},
                 )
@@ -413,7 +413,7 @@ class TestS3FSCursor:
         with (
             contextlib.closing(
                 connect(
-                    schema_name=ENV.schema,
+                    schema_name=ENV.fixture_schema,
                     cursor_class=S3FSCursor,
                     cursor_kwargs={"csv_reader": AthenaCSVReader},
                 )
@@ -444,7 +444,7 @@ class TestS3FSCursor:
         with (
             contextlib.closing(
                 connect(
-                    schema_name=ENV.schema,
+                    schema_name=ENV.fixture_schema,
                     cursor_class=S3FSCursor,
                     cursor_kwargs={"csv_reader": csv_reader},
                 )
@@ -463,7 +463,7 @@ class TestS3FSCursor:
         with (
             contextlib.closing(
                 connect(
-                    schema_name=ENV.schema,
+                    schema_name=ENV.fixture_schema,
                     cursor_class=S3FSCursor,
                     cursor_kwargs={"csv_reader": AthenaCSVReader},
                 )
@@ -491,7 +491,7 @@ class TestS3FSCursor:
         with (
             contextlib.closing(
                 connect(
-                    schema_name=ENV.schema,
+                    schema_name=ENV.fixture_schema,
                     cursor_class=S3FSCursor,
                     cursor_kwargs={"csv_reader": csv_reader_class},
                 )

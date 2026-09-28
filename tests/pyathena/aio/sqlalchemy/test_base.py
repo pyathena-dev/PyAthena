@@ -105,7 +105,9 @@ class TestAsyncSQLAlchemyAthena:
     async def test_reflect_table(self, async_engine):
         _, conn = async_engine
         one_row = await conn.run_sync(
-            lambda sync_conn: Table("one_row", MetaData(schema=ENV.schema), autoload_with=sync_conn)
+            lambda sync_conn: Table(
+                "one_row", MetaData(schema=ENV.fixture_schema), autoload_with=sync_conn
+            )
         )
         assert len(one_row.c) == 1
         assert one_row.c.number_of_rows is not None
@@ -119,7 +121,7 @@ class TestAsyncSQLAlchemyAthena:
             return insp.get_schema_names()
 
         schemas = await conn.run_sync(_inspect)
-        assert ENV.schema in schemas
+        assert ENV.fixture_schema in schemas
         assert "default" in schemas
 
     async def test_get_table_names(self, async_engine):
@@ -127,7 +129,7 @@ class TestAsyncSQLAlchemyAthena:
 
         def _inspect(sync_conn):
             insp = sqlalchemy.inspect(sync_conn)
-            return insp.get_table_names(schema=ENV.schema)
+            return insp.get_table_names(schema=ENV.fixture_schema)
 
         table_names = await conn.run_sync(_inspect)
         assert "many_rows" in table_names
@@ -138,9 +140,9 @@ class TestAsyncSQLAlchemyAthena:
         def reflect(sync_conn):
             insp = sqlalchemy.inspect(sync_conn)
             return (
-                insp.get_table_comment("one_row", schema=ENV.schema),
-                insp.get_table_options("one_row", schema=ENV.schema),
-                insp.get_table_names(schema=ENV.schema),
+                insp.get_table_comment("one_row", schema=ENV.fixture_schema),
+                insp.get_table_options("one_row", schema=ENV.fixture_schema),
+                insp.get_table_names(schema=ENV.fixture_schema),
             )
 
         expected = await conn.run_sync(reflect)
@@ -160,8 +162,8 @@ class TestAsyncSQLAlchemyAthena:
         def _inspect(sync_conn):
             insp = sqlalchemy.inspect(sync_conn)
             return (
-                insp.has_table("one_row", schema=ENV.schema),
-                insp.has_table("this_table_does_not_exist", schema=ENV.schema),
+                insp.has_table("one_row", schema=ENV.fixture_schema),
+                insp.has_table("this_table_does_not_exist", schema=ENV.fixture_schema),
             )
 
         exists, not_exists = await conn.run_sync(_inspect)
@@ -173,7 +175,7 @@ class TestAsyncSQLAlchemyAthena:
 
         def _inspect(sync_conn):
             insp = sqlalchemy.inspect(sync_conn)
-            return insp.get_columns(table_name="one_row", schema=ENV.schema)
+            return insp.get_columns(table_name="one_row", schema=ENV.fixture_schema)
 
         columns = await conn.run_sync(_inspect)
         actual = columns[0]

@@ -44,7 +44,7 @@ class TestAioCursor:
         assert await aio_cursor.fetchone() == (1,)
         assert aio_cursor.rownumber == 1
         assert await aio_cursor.fetchone() is None
-        assert aio_cursor.database == ENV.schema
+        assert aio_cursor.database == ENV.fixture_schema
         assert aio_cursor.catalog
         assert aio_cursor.query_id
         assert aio_cursor.query
@@ -440,7 +440,7 @@ class TestAioCursor:
             await aio_cursor.fetchone()
 
     async def test_context_manager(self):
-        conn = await _aio_connect(schema_name=ENV.schema)
+        conn = await _aio_connect(schema_name=ENV.fixture_schema)
         try:
             async with conn.cursor() as cursor:
                 await cursor.execute("SELECT * FROM one_row")
@@ -525,7 +525,8 @@ class TestAioCursor:
             return (
                 view(await aio_cursor.get_table_metadata("one_row")),
                 sorted(view(m) for m in await aio_cursor.list_table_metadata()),
-                ENV.schema in [d.name for d in await aio_cursor.list_databases("AwsDataCatalog")],
+                ENV.fixture_schema
+                in [d.name for d in await aio_cursor.list_databases("AwsDataCatalog")],
             )
 
         expected = await read()

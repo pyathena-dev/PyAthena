@@ -225,7 +225,7 @@ class TestAsyncPandasCursor:
         future = async_pandas_cursor.query_execution(query_id)
         query_execution = future.result()
 
-        assert query_execution.database == ENV.schema
+        assert query_execution.database == ENV.fixture_schema
         assert query_execution.catalog
         assert query_execution.query_id
         if async_pandas_cursor._unload:

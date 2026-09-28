@@ -63,7 +63,7 @@ class TestAioPolarsCursor:
     async def test_context_manager(self):
         from pyathena.aio.polars.cursor import AioPolarsCursor
 
-        conn = await _aio_connect(schema_name=ENV.schema, cursor_class=AioPolarsCursor)
+        conn = await _aio_connect(schema_name=ENV.fixture_schema, cursor_class=AioPolarsCursor)
         try:
             async with conn.cursor() as cursor:
                 await cursor.execute("SELECT * FROM one_row")

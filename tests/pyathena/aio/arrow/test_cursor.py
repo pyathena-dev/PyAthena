@@ -80,7 +80,7 @@ class TestAioArrowCursor:
     async def test_context_manager(self):
         from pyathena.aio.arrow.cursor import AioArrowCursor
 
-        conn = await _aio_connect(schema_name=ENV.schema, cursor_class=AioArrowCursor)
+        conn = await _aio_connect(schema_name=ENV.fixture_schema, cursor_class=AioArrowCursor)
         try:
             async with conn.cursor() as cursor:
                 await cursor.execute("SELECT * FROM one_row")

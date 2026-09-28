@@ -71,7 +71,7 @@ def _eligible(database: dict[str, Any], cutoff: datetime) -> bool:
 def sweep_databases(client: Any, catalog_id: str, *, dry_run: bool = True) -> dict[str, int]:
     """Preview or delete test databases older than seven days.
 
-    Fixtures generate fresh database names for each session or worker.
+    Fixtures generate fresh database names for each pytest run and each test process.
     Databases younger than seven days are retained, including concurrent CI runs.
     Only Glue metadata is deleted; S3 objects and child catalogs are untouched.
     """

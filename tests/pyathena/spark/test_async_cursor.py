@@ -45,7 +45,7 @@ class TestAsyncSparkCursor:
                 df = spark.read.format("csv") \\
                     .option("header", "true") \\
                     .option("inferSchema", "true") \\
-                    .load("{ENV.s3_staging_dir}{ENV.schema}/spark_group_by/spark_group_by.csv")
+                    .load("{ENV.s3_staging_dir}{ENV.fixture_schema}/spark_group_by/spark_group_by.csv")
                 """
             ),
             description="test description",
@@ -95,7 +95,7 @@ class TestAsyncSparkCursor:
         query_id, future = async_spark_cursor.execute(
             textwrap.dedent(
                 f"""
-                spark.sql("SELECT * FROM {ENV.schema}.one_row").show()
+                spark.sql("SELECT * FROM {ENV.fixture_schema}.one_row").show()
                 """
             )
         )

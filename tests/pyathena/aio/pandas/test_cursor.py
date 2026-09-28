@@ -71,7 +71,7 @@ class TestAioPandasCursor:
     async def test_context_manager(self):
         from pyathena.aio.pandas.cursor import AioPandasCursor
 
-        conn = await _aio_connect(schema_name=ENV.schema, cursor_class=AioPandasCursor)
+        conn = await _aio_connect(schema_name=ENV.fixture_schema, cursor_class=AioPandasCursor)
         try:
             async with conn.cursor() as cursor:
                 await cursor.execute("SELECT * FROM one_row")

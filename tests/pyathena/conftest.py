@@ -1,5 +1,6 @@
 import contextlib
 import functools
+import sys
 import uuid
 
 import boto3
@@ -11,36 +12,82 @@ from tests import ASYNC_SQLALCHEMY_CONNECTION_STRING, ENV, SQLALCHEMY_CONNECTION
 from tests.pyathena.tables import TABLES, VIEWS, spark_group_by_csv
 from tests.pyathena.util import read_query
 
+# The key of ENV.fixture_schema in a pytest-xdist worker's workerinput.
+_FIXTURE_SCHEMA_KEY = "pyathena_fixture_schema"
+
+
+class _XDistHooks:
+    """pytest-xdist hooks, registered only when the plugin is present."""
+
+    def pytest_configure_node(self, node):
+        """Pass the fixture schema's name to a pytest-xdist worker.
+
+        Args:
+            node: The controller's handle of the worker.
+        """
+        node.workerinput[_FIXTURE_SCHEMA_KEY] = ENV.fixture_schema
+
+
+def pytest_configure(config):
+    """Share one fixture schema between the pytest-xdist controller and its workers.
+
+    A worker takes the name the controller passed; pytest-xdist sets
+    ``workerinput`` before it configures the worker.
+
+    Args:
+        config: The pytest config.
+    """
+    workerinput = getattr(config, "workerinput", None)
+    if workerinput is None:
+        if config.pluginmanager.hasplugin("xdist"):
+            config.pluginmanager.register(_XDistHooks())
+    elif _FIXTURE_SCHEMA_KEY in workerinput:
+        ENV.fixture_schema = workerinput[_FIXTURE_SCHEMA_KEY]
+
 
 def pytest_sessionstart(session):
-    # The pytest-xdist controller runs no tests, so it sets up nothing.
-    if not _is_test_process(session.config):
-        return
-    _create_s3tables_namespace()
-    # pytest skips pytest_sessionfinish after a failed pytest_sessionstart, so
-    # a failure after the namespace is created deletes it here.
+    """Create the fixture schema and this process's own schema, as its role requires.
+
+    The pytest-xdist controller creates the fixture schema before it starts the
+    workers, and each worker creates its own schema. A run without workers
+    creates both.
+
+    Args:
+        session: The pytest session.
+    """
+    cleanups = []
     try:
-        _upload_data()
-        with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
-            _create_database(cursor)
-            _create_tables(cursor)
+        if _owns_fixture_schema(session.config):
+            cleanups.append(_drop_fixture_schema)
+            _create_fixture_schema()
+        if _is_test_process(session.config):
+            cleanups.append(_drop_test_schema)
+            _create_test_schema()
     except BaseException:
-        _delete_s3tables_namespace()
+        # pytest skips pytest_sessionfinish after a failed pytest_sessionstart,
+        # so what was created is removed here, keeping the original error.
+        with contextlib.suppress(Exception):
+            _run_all(reversed(cleanups))
         raise
 
 
 def pytest_sessionfinish(session):
-    if not _is_test_process(session.config):
-        return
-    # Each cleanup step runs even if an earlier one fails.
-    try:
-        with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
-            _drop_database(cursor)
-    finally:
-        try:
-            _delete_data()
-        finally:
-            _delete_s3tables_namespace()
+    """Drop what ``pytest_sessionstart`` created; each step runs even if one fails.
+
+    The process that owns the fixture schema checks that it holds only the
+    tables and views from ``tests.pyathena.tables`` before dropping it, and fails
+    the run if it does not.
+
+    Args:
+        session: The pytest session.
+    """
+    steps = []
+    if _is_test_process(session.config):
+        steps.append(_drop_test_schema)
+    if _owns_fixture_schema(session.config):
+        steps.append(functools.partial(_check_fixture_schema, session))
+        steps.append(_drop_fixture_schema)
+    _run_all(steps)
 
 
 def _is_test_process(config):
@@ -54,6 +101,93 @@ def _is_test_process(config):
         workers.
     """
     return hasattr(config, "workerinput") or not getattr(config.option, "numprocesses", None)
+
+
+def _owns_fixture_schema(config):
+    """Whether this process creates and drops the fixture schema.
+
+    Args:
+        config: The pytest config.
+
+    Returns:
+        True for the pytest-xdist controller or a run without workers, False for
+        a worker that got the fixture schema from the controller. The controller
+        loads this conftest only when a path given to pytest leads to it, so a
+        worker that got no fixture schema owns its own.
+    """
+    return _FIXTURE_SCHEMA_KEY not in getattr(config, "workerinput", {})
+
+
+def _run_all(steps):
+    """Run every step in order, even after one fails, then raise the last failure.
+
+    Args:
+        steps: Callables that take no arguments.
+
+    Raises:
+        BaseException: The last exception a step raised, with the earlier ones
+            as its context.
+    """
+    with contextlib.ExitStack() as stack:
+        for step in reversed(list(steps)):
+            stack.callback(step)
+
+
+def _create_fixture_schema():
+    """Upload the data files and create the fixture schema with its tables and views."""
+    _upload_data()
+    with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
+        _create_database(cursor, ENV.fixture_schema)
+        _create_tables(cursor)
+
+
+def _drop_fixture_schema():
+    """Drop the fixture schema and delete the uploaded data files."""
+    _run_all([functools.partial(_drop_database, ENV.fixture_schema), _delete_data])
+
+
+def _create_test_schema():
+    """Create this process's schema and S3 Tables namespace for the objects of its tests."""
+    _create_s3tables_namespace()
+    with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
+        _create_database(cursor, ENV.schema)
+
+
+def _drop_test_schema():
+    """Drop this process's schema and delete its S3 Tables namespace."""
+    _run_all([functools.partial(_drop_database, ENV.schema), _delete_s3tables_namespace])
+
+
+def _check_fixture_schema(session):
+    """Fail the run if the fixture schema holds other tables than those it was created with.
+
+    A failure to list the tables is reported but does not fail the run.
+
+    Args:
+        session: The pytest session, whose exit status is set to failed.
+    """
+    expected = {t.name for t in TABLES} | {v.name for v in VIEWS}
+    try:
+        actual = {
+            table["Name"]
+            for page in boto3.client("glue")
+            .get_paginator("get_tables")
+            .paginate(DatabaseName=ENV.fixture_schema)
+            for table in page["TableList"]
+        }
+    except Exception as e:
+        sys.stderr.write(
+            f"\nCould not list the tables of fixture schema {ENV.fixture_schema}: {e!r}\n"
+        )
+        return
+    if actual != expected:
+        sys.stderr.write(
+            f"\nFixture schema {ENV.fixture_schema} changed during the run; "
+            f"unexpected: {sorted(actual - expected)}, missing: {sorted(expected - actual)}. "
+            "Tests must create their objects in ENV.schema.\n"
+        )
+        if session.exitstatus == pytest.ExitCode.OK:
+            session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 @functools.cache
@@ -108,12 +242,12 @@ def _delete_s3tables_namespace():
 
 @functools.cache
 def _data_objects():
-    """Return the S3 objects the session uploads: the table data files and test files.
+    """Return the S3 objects of the fixture schema: the table data files and test files.
 
     Returns:
         A dict from S3 key to object content.
     """
-    prefix = f"{ENV.s3_staging_key}{ENV.schema}"
+    prefix = f"{ENV.s3_staging_key}{ENV.fixture_schema}"
     objects = {
         ENV.s3_filesystem_test_file_key: b"0123456789",
         f"{prefix}/spark_group_by/spark_group_by.csv": spark_group_by_csv(),
@@ -139,27 +273,39 @@ def _delete_data():
         client.delete_object(Bucket=ENV.s3_staging_bucket, Key=key)
 
 
-def _create_database(cursor):
-    for q in read_query("create_database.sql.jinja2", schema=ENV.schema):
+def _create_database(cursor, schema):
+    """Create a database.
+
+    Args:
+        cursor: The cursor to run the statement with.
+        schema: The database name.
+    """
+    for q in read_query("create_database.sql.jinja2", schema=schema):
         cursor.execute(q)
 
 
-def _drop_database(cursor):
-    for q in read_query("drop_database.sql.jinja2", schema=ENV.schema):
-        cursor.execute(q)
+def _drop_database(schema):
+    """Drop a database and its tables.
+
+    Args:
+        schema: The database name.
+    """
+    with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
+        for q in read_query("drop_database.sql.jinja2", schema=schema):
+            cursor.execute(q)
 
 
 def _create_tables(cursor):
-    """Create the tables and views from ``tests.pyathena.tables``.
+    """Create the tables and views from ``tests.pyathena.tables`` in the fixture schema.
 
     Args:
         cursor: The cursor to run the statements with.
     """
     for table in TABLES:
-        location = f"{ENV.s3_staging_dir}{ENV.schema}/{table.name}/"
-        cursor.execute(table.create_statement(ENV.schema, location))
+        location = f"{ENV.s3_staging_dir}{ENV.fixture_schema}/{table.name}/"
+        cursor.execute(table.create_statement(ENV.fixture_schema, location))
     for view in VIEWS:
-        cursor.execute(view.create_statement(ENV.schema))
+        cursor.execute(view.create_statement(ENV.fixture_schema))
 
 
 def connect(schema_name="default", **kwargs):
@@ -171,6 +317,14 @@ def connect(schema_name="default", **kwargs):
 
 
 def create_engine(**kwargs):
+    """Create a SQLAlchemy engine whose default schema is the fixture schema.
+
+    Args:
+        **kwargs: ``driver`` and the connection options to add to the URL.
+
+    Returns:
+        The engine.
+    """
     driver = kwargs.pop("driver", "rest")
     conn_str = SQLALCHEMY_CONNECTION_STRING.replace("+rest", f"+{driver}")
     for arg in [
@@ -197,7 +351,7 @@ def create_engine(**kwargs):
     return sqlalchemy.engine.create_engine(
         conn_str.format(
             region_name=ENV.region_name,
-            schema_name=ENV.schema,
+            schema_name=ENV.fixture_schema,
             s3_staging_dir=ENV.s3_staging_dir,
             location=ENV.s3_staging_dir,
             **kwargs,
@@ -206,6 +360,14 @@ def create_engine(**kwargs):
 
 
 def create_async_engine(**kwargs):
+    """Create an async SQLAlchemy engine whose default schema is the fixture schema.
+
+    Args:
+        **kwargs: ``driver`` and the connection options to add to the URL.
+
+    Returns:
+        The engine.
+    """
     driver = kwargs.pop("driver", "aiorest")
     conn_str = ASYNC_SQLALCHEMY_CONNECTION_STRING.replace("+aiorest", f"+{driver}")
     if "unload" in kwargs:
@@ -213,7 +375,7 @@ def create_async_engine(**kwargs):
     return _create_async_engine(
         conn_str.format(
             region_name=ENV.region_name,
-            schema_name=ENV.schema,
+            schema_name=ENV.fixture_schema,
             s3_staging_dir=ENV.s3_staging_dir,
             location=ENV.s3_staging_dir,
             **kwargs,
@@ -222,11 +384,20 @@ def create_async_engine(**kwargs):
 
 
 def _cursor(cursor_class, request):
+    """Yield a cursor whose default schema is the fixture schema.
+
+    Args:
+        cursor_class: The cursor class.
+        request: The fixture request; its optional ``param`` holds connection options.
+
+    Yields:
+        The cursor.
+    """
     if not hasattr(request, "param"):
         request.param = {}
     with (
         contextlib.closing(
-            connect(schema_name=ENV.schema, cursor_class=cursor_class, **request.param)
+            connect(schema_name=ENV.fixture_schema, cursor_class=cursor_class, **request.param)
         ) as conn,
         conn.cursor() as cursor,
     ):

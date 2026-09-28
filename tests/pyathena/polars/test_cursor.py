@@ -455,7 +455,7 @@ class TestPolarsCursor:
 
     def test_iter_chunks(self):
         """Test chunked iteration over query results."""
-        with contextlib.closing(connect(schema_name=ENV.schema)) as conn:
+        with contextlib.closing(connect(schema_name=ENV.fixture_schema)) as conn:
             cursor = conn.cursor(PolarsCursor, chunksize=5)
             cursor.execute("SELECT * FROM many_rows LIMIT 15")
             chunks = list(cursor.iter_chunks())
@@ -476,7 +476,7 @@ class TestPolarsCursor:
 
     def test_iter_chunks_many_rows(self):
         """Test chunked iteration with many rows."""
-        with contextlib.closing(connect(schema_name=ENV.schema)) as conn:
+        with contextlib.closing(connect(schema_name=ENV.fixture_schema)) as conn:
             cursor = conn.cursor(PolarsCursor, chunksize=1000)
             cursor.execute("SELECT * FROM many_rows")
             chunks = list(cursor.iter_chunks())
@@ -505,7 +505,7 @@ class TestPolarsCursor:
 
     def test_iter_chunks_data_consistency(self):
         """Test that chunked and regular reading produce the same data."""
-        with contextlib.closing(connect(schema_name=ENV.schema)) as conn:
+        with contextlib.closing(connect(schema_name=ENV.fixture_schema)) as conn:
             # Regular reading (no chunksize)
             regular_cursor = conn.cursor(PolarsCursor)
             regular_cursor.execute("SELECT * FROM many_rows LIMIT 100")
@@ -527,7 +527,7 @@ class TestPolarsCursor:
 
     def test_iter_chunks_chunk_sizes(self):
         """Test that chunks have correct sizes."""
-        with contextlib.closing(connect(schema_name=ENV.schema)) as conn:
+        with contextlib.closing(connect(schema_name=ENV.fixture_schema)) as conn:
             cursor = conn.cursor(PolarsCursor, chunksize=10)
             cursor.execute("SELECT * FROM many_rows LIMIT 50")
 
@@ -550,7 +550,7 @@ class TestPolarsCursor:
 
     def test_fetchone_with_chunksize(self):
         """Test that fetchone works correctly with chunksize enabled."""
-        with contextlib.closing(connect(schema_name=ENV.schema)) as conn:
+        with contextlib.closing(connect(schema_name=ENV.fixture_schema)) as conn:
             cursor = conn.cursor(PolarsCursor, chunksize=5)
             cursor.execute("SELECT * FROM many_rows LIMIT 15")
 
@@ -565,7 +565,7 @@ class TestPolarsCursor:
 
     def test_fetchmany_with_chunksize(self):
         """Test that fetchmany works correctly with chunksize enabled."""
-        with contextlib.closing(connect(schema_name=ENV.schema)) as conn:
+        with contextlib.closing(connect(schema_name=ENV.fixture_schema)) as conn:
             cursor = conn.cursor(PolarsCursor, chunksize=5)
             cursor.execute("SELECT * FROM many_rows LIMIT 15")
 
@@ -577,7 +577,7 @@ class TestPolarsCursor:
 
     def test_fetchall_with_chunksize(self):
         """Test that fetchall works correctly with chunksize enabled."""
-        with contextlib.closing(connect(schema_name=ENV.schema)) as conn:
+        with contextlib.closing(connect(schema_name=ENV.fixture_schema)) as conn:
             cursor = conn.cursor(PolarsCursor, chunksize=5)
             cursor.execute("SELECT * FROM many_rows LIMIT 15")
 
@@ -586,7 +586,7 @@ class TestPolarsCursor:
 
     def test_iterator_with_chunksize(self):
         """Test that cursor iteration works correctly with chunksize enabled."""
-        with contextlib.closing(connect(schema_name=ENV.schema)) as conn:
+        with contextlib.closing(connect(schema_name=ENV.fixture_schema)) as conn:
             cursor = conn.cursor(PolarsCursor, chunksize=5)
             cursor.execute("SELECT * FROM many_rows LIMIT 15")
 

@@ -71,7 +71,7 @@ class TestAioS3FSCursor:
         assert rows == [(1,)]
 
     async def test_context_manager(self):
-        conn = await _aio_connect(schema_name=ENV.schema)
+        conn = await _aio_connect(schema_name=ENV.fixture_schema)
         try:
             async with conn.cursor(AioS3FSCursor) as cursor:
                 await cursor.execute("SELECT * FROM one_row")

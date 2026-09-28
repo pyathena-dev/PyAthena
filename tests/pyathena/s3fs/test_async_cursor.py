@@ -151,7 +151,7 @@ class TestAsyncS3FSCursor:
 
     def test_open_close(self):
         with (
-            contextlib.closing(connect(schema_name=ENV.schema)) as conn,
+            contextlib.closing(connect(schema_name=ENV.fixture_schema)) as conn,
             conn.cursor(AsyncS3FSCursor) as cursor,
         ):
             query_id, future = cursor.execute("SELECT * FROM one_row")
@@ -159,7 +159,7 @@ class TestAsyncS3FSCursor:
             assert result_set.fetchall() == [(1,)]
 
     def test_no_ops(self):
-        conn = connect(schema_name=ENV.schema)
+        conn = connect(schema_name=ENV.fixture_schema)
         cursor = conn.cursor(AsyncS3FSCursor)
         cursor.close()
         conn.close()

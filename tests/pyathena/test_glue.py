@@ -48,14 +48,16 @@ class TestGlueMetadataClient:
         catalog = cursor.connection.catalog_name
 
         for table in ("one_row", "parquet_with_compression", "partition_table", "view_one_row"):
-            assert self._view(glue.get_table(catalog, ENV.schema, table)) == self._view(
+            assert self._view(glue.get_table(catalog, ENV.fixture_schema, table)) == self._view(
                 cursor.get_table_metadata(table)
             )
-        assert sorted(self._view(m) for m in glue.list_tables(catalog, ENV.schema)) == sorted(
-            self._view(m) for m in cursor.list_table_metadata()
-        )
-        assert [m.name for m in glue.list_tables(catalog, ENV.schema, "one_row")] == ["one_row"]
-        assert ENV.schema in [d.name for d in glue.list_databases(catalog)]
+        assert sorted(
+            self._view(m) for m in glue.list_tables(catalog, ENV.fixture_schema)
+        ) == sorted(self._view(m) for m in cursor.list_table_metadata())
+        assert [m.name for m in glue.list_tables(catalog, ENV.fixture_schema, "one_row")] == [
+            "one_row"
+        ]
+        assert ENV.fixture_schema in [d.name for d in glue.list_databases(catalog)]
 
     @pytest.mark.skipif(
         not ENV.s3tables_catalog,
@@ -94,7 +96,7 @@ class TestGlueMetadataClient:
     def test_reports_a_missing_table(self, cursor):
         with pytest.raises(ClientError) as caught:
             cursor.connection._glue.get_table(
-                cursor.connection.catalog_name, ENV.schema, "no_such_table_786"
+                cursor.connection.catalog_name, ENV.fixture_schema, "no_such_table_786"
             )
 
         assert caught.value.response["Error"]["Code"] == "EntityNotFoundException"
@@ -102,13 +104,13 @@ class TestGlueMetadataClient:
 
     def test_rejects_an_unsupported_catalog(self, cursor):
         with pytest.raises(ValueError, match="federated_catalog"):
-            cursor.connection._glue.get_table("federated_catalog", ENV.schema, "one_row")
+            cursor.connection._glue.get_table("federated_catalog", ENV.fixture_schema, "one_row")
 
     def test_stops_after_it_cannot_reach_glue(self, cursor):
         glue = unreachable_glue(cursor.connection)
 
         with pytest.raises(BotoConnectionError):
-            glue.get_table("AwsDataCatalog", ENV.schema, "one_row")
+            glue.get_table("AwsDataCatalog", ENV.fixture_schema, "one_row")
 
         assert not glue.reachable
         assert not glue.usable_for("AwsDataCatalog")

@@ -49,7 +49,7 @@ class TestCursor:
         assert cursor.fetchone() == (1,)
         assert cursor.rownumber == 1
         assert cursor.fetchone() is None
-        assert cursor.database == ENV.schema
+        assert cursor.database == ENV.fixture_schema
         assert cursor.catalog
         assert cursor.query_id
         assert cursor.query
@@ -797,7 +797,7 @@ class TestCursor:
     def test_multiple_connection(self):
         def execute_other_thread():
             with (
-                contextlib.closing(connect(schema_name=ENV.schema)) as conn,
+                contextlib.closing(connect(schema_name=ENV.fixture_schema)) as conn,
                 conn.cursor() as cursor,
             ):
                 cursor.execute("SELECT * FROM one_row")
@@ -1397,7 +1397,7 @@ class TestCursor:
                     for t in ("one_row", "parquet_with_compression", "partition_table")
                 ],
                 sorted(self._metadata_view(m) for m in cursor.list_table_metadata()),
-                ENV.schema in [d.name for d in cursor.list_databases("AwsDataCatalog")],
+                ENV.fixture_schema in [d.name for d in cursor.list_databases("AwsDataCatalog")],
             )
 
         expected = read()

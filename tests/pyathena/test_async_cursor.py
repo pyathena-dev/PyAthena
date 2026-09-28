@@ -21,7 +21,7 @@ class TestAsyncCursor:
         assert result_set.fetchone() == (1,)
         assert result_set.rownumber == 1
         assert result_set.fetchone() is None
-        assert result_set.database == ENV.schema
+        assert result_set.database == ENV.fixture_schema
         assert result_set.catalog
         assert result_set.query_id
         assert result_set.query
@@ -101,7 +101,7 @@ class TestAsyncCursor:
         future = async_cursor.query_execution(query_id)
         query_execution = future.result()
 
-        assert query_execution.database == ENV.schema
+        assert query_execution.database == ENV.fixture_schema
         assert query_execution.catalog
         assert query_execution.query_id
         assert query_execution.query == query

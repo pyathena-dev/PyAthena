@@ -985,7 +985,7 @@ class TestSQLAlchemyAthena:
 
     def test_reflect_table(self, engine):
         engine, conn = engine
-        one_row = Table("one_row", MetaData(schema=ENV.schema), autoload_with=conn)
+        one_row = Table("one_row", MetaData(schema=ENV.fixture_schema), autoload_with=conn)
         assert len(one_row.c) == 1
         assert one_row.c.number_of_rows is not None
         assert one_row.comment == "table comment"
@@ -996,7 +996,7 @@ class TestSQLAlchemyAthena:
         assert "file_format" in dialect_opts
         assert "serdeproperties" in dialect_opts
         assert "tblproperties" in dialect_opts
-        assert dialect_opts["location"] == f"{ENV.s3_staging_dir}{ENV.schema}/one_row"
+        assert dialect_opts["location"] == f"{ENV.s3_staging_dir}{ENV.fixture_schema}/one_row"
         assert (
             dialect_opts["row_format"]
             == "SERDE 'org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe'"
@@ -1014,7 +1014,7 @@ class TestSQLAlchemyAthena:
 
     def test_reflect_table_with_schema(self, engine):
         engine, conn = engine
-        one_row = Table("one_row", MetaData(schema=ENV.schema), autoload_with=conn)
+        one_row = Table("one_row", MetaData(schema=ENV.fixture_schema), autoload_with=conn)
         assert len(one_row.c) == 1
         assert one_row.c.number_of_rows is not None
         assert one_row.comment == "table comment"
@@ -1025,7 +1025,7 @@ class TestSQLAlchemyAthena:
         assert "file_format" in dialect_opts
         assert "serdeproperties" in dialect_opts
         assert "tblproperties" in dialect_opts
-        assert dialect_opts["location"] == f"{ENV.s3_staging_dir}{ENV.schema}/one_row"
+        assert dialect_opts["location"] == f"{ENV.s3_staging_dir}{ENV.fixture_schema}/one_row"
         assert (
             dialect_opts["row_format"]
             == "SERDE 'org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe'"
@@ -1043,7 +1043,7 @@ class TestSQLAlchemyAthena:
 
     def test_reflect_table_include_columns(self, engine):
         engine, conn = engine
-        one_row_complex = Table("one_row_complex", MetaData(schema=ENV.schema))
+        one_row_complex = Table("one_row_complex", MetaData(schema=ENV.fixture_schema))
         insp = sqlalchemy.inspect(engine)
         insp.reflect_table(
             one_row_complex,
@@ -1057,7 +1057,9 @@ class TestSQLAlchemyAthena:
 
     def test_partition_table_columns(self, engine):
         engine, conn = engine
-        partition_table = Table("partition_table", MetaData(schema=ENV.schema), autoload_with=conn)
+        partition_table = Table(
+            "partition_table", MetaData(schema=ENV.fixture_schema), autoload_with=conn
+        )
         assert len(partition_table.columns) == 2
         assert "a" in partition_table.columns
         assert "b" in partition_table.columns
@@ -1074,38 +1076,38 @@ class TestSQLAlchemyAthena:
         engine, conn = engine
         insp = sqlalchemy.inspect(engine)
         schemas = insp.get_schema_names()
-        assert ENV.schema in schemas
+        assert ENV.fixture_schema in schemas
         assert "default" in schemas
 
     def test_get_table_names(self, engine):
         engine, conn = engine
-        meta = MetaData(schema=ENV.schema)
+        meta = MetaData(schema=ENV.fixture_schema)
         meta.reflect(bind=engine)
         # With schema specified, table names are schema-qualified
-        schema_qualified_one_row = f"{ENV.schema}.one_row"
-        schema_qualified_one_row_complex = f"{ENV.schema}.one_row_complex"
-        schema_qualified_view_one_row = f"{ENV.schema}.view_one_row"
+        schema_qualified_one_row = f"{ENV.fixture_schema}.one_row"
+        schema_qualified_one_row_complex = f"{ENV.fixture_schema}.one_row_complex"
+        schema_qualified_view_one_row = f"{ENV.fixture_schema}.view_one_row"
         assert schema_qualified_one_row in meta.tables
         assert schema_qualified_one_row_complex in meta.tables
         assert schema_qualified_view_one_row not in meta.tables
 
         insp = sqlalchemy.inspect(engine)
-        assert "many_rows" in insp.get_table_names(schema=ENV.schema)
+        assert "many_rows" in insp.get_table_names(schema=ENV.fixture_schema)
 
     def test_get_view_names(self, engine):
         engine, conn = engine
-        meta = MetaData(schema=ENV.schema)
+        meta = MetaData(schema=ENV.fixture_schema)
         meta.reflect(bind=engine, views=True)
         # With schema specified, table names are schema-qualified
-        schema_qualified_one_row = f"{ENV.schema}.one_row"
-        schema_qualified_one_row_complex = f"{ENV.schema}.one_row_complex"
-        schema_qualified_view_one_row = f"{ENV.schema}.view_one_row"
+        schema_qualified_one_row = f"{ENV.fixture_schema}.one_row"
+        schema_qualified_one_row_complex = f"{ENV.fixture_schema}.one_row_complex"
+        schema_qualified_view_one_row = f"{ENV.fixture_schema}.view_one_row"
         assert schema_qualified_one_row in meta.tables
         assert schema_qualified_one_row_complex in meta.tables
         assert schema_qualified_view_one_row in meta.tables
 
         insp = sqlalchemy.inspect(engine)
-        actual = insp.get_view_names(schema=ENV.schema)
+        actual = insp.get_view_names(schema=ENV.fixture_schema)
         assert "one_row" not in actual
         assert "one_row_complex" not in actual
         assert "view_one_row" in actual
@@ -1113,16 +1115,16 @@ class TestSQLAlchemyAthena:
     def test_get_table_comment(self, engine):
         engine, conn = engine
         insp = sqlalchemy.inspect(engine)
-        actual = insp.get_table_comment("one_row", schema=ENV.schema)
+        actual = insp.get_table_comment("one_row", schema=ENV.fixture_schema)
         assert actual == {"text": "table comment"}
 
     def test_get_table_options(self, engine):
         engine, conn = engine
         insp = sqlalchemy.inspect(engine)
-        actual = insp.get_table_options("parquet_with_compression", schema=ENV.schema)
+        actual = insp.get_table_options("parquet_with_compression", schema=ENV.fixture_schema)
         assert (
             actual["awsathena_location"]
-            == f"{ENV.s3_staging_dir}{ENV.schema}/parquet_with_compression"
+            == f"{ENV.s3_staging_dir}{ENV.fixture_schema}/parquet_with_compression"
         )
         assert actual["awsathena_compression"] == "SNAPPY"
         assert (
@@ -1142,13 +1144,13 @@ class TestSQLAlchemyAthena:
     def test_has_table(self, engine):
         engine, conn = engine
         insp = sqlalchemy.inspect(engine)
-        assert insp.has_table("one_row", schema=ENV.schema)
-        assert not insp.has_table("this_table_does_not_exist", schema=ENV.schema)
+        assert insp.has_table("one_row", schema=ENV.fixture_schema)
+        assert not insp.has_table("this_table_does_not_exist", schema=ENV.fixture_schema)
 
     def test_get_columns(self, engine):
         engine, conn = engine
         insp = sqlalchemy.inspect(engine)
-        actual = insp.get_columns(table_name="one_row", schema=ENV.schema)[0]
+        actual = insp.get_columns(table_name="one_row", schema=ENV.fixture_schema)[0]
         assert actual["name"] == "number_of_rows"
         assert isinstance(actual["type"], types.INTEGER)
         assert actual["nullable"]
@@ -1169,16 +1171,16 @@ class TestSQLAlchemyAthena:
             return (
                 {
                     t: (
-                        insp.get_table_comment(t, schema=ENV.schema),
-                        insp.get_table_options(t, schema=ENV.schema),
+                        insp.get_table_comment(t, schema=ENV.fixture_schema),
+                        insp.get_table_options(t, schema=ENV.fixture_schema),
                     )
                     for t in tables
                 },
-                insp.get_table_names(schema=ENV.schema),
-                insp.get_view_names(schema=ENV.schema),
+                insp.get_table_names(schema=ENV.fixture_schema),
+                insp.get_view_names(schema=ENV.fixture_schema),
                 # Other runs create and drop schemas concurrently, so only this
                 # run's schema is compared.
-                ENV.schema in insp.get_schema_names(),
+                ENV.fixture_schema in insp.get_schema_names(),
             )
 
         expected = reflect()
@@ -1354,7 +1356,9 @@ class TestSQLAlchemyAthena:
 
     def test_char_length(self, engine):
         engine, conn = engine
-        one_row_complex = Table("one_row_complex", MetaData(schema=ENV.schema), autoload_with=conn)
+        one_row_complex = Table(
+            "one_row_complex", MetaData(schema=ENV.fixture_schema), autoload_with=conn
+        )
         result = conn.execute(
             sqlalchemy.select(sqlalchemy.func.char_length(one_row_complex.c.col_string))
         ).scalar()
@@ -1362,7 +1366,9 @@ class TestSQLAlchemyAthena:
 
     def test_filter_func(self, engine):
         engine, conn = engine
-        one_row_complex = Table("one_row_complex", MetaData(schema=ENV.schema), autoload_with=conn)
+        one_row_complex = Table(
+            "one_row_complex", MetaData(schema=ENV.fixture_schema), autoload_with=conn
+        )
 
         # Test filter() function basic functionality
         #
@@ -1421,7 +1427,9 @@ class TestSQLAlchemyAthena:
 
     def test_reflect_select(self, engine):
         engine, conn = engine
-        one_row_complex = Table("one_row_complex", MetaData(schema=ENV.schema), autoload_with=conn)
+        one_row_complex = Table(
+            "one_row_complex", MetaData(schema=ENV.fixture_schema), autoload_with=conn
+        )
         assert len(one_row_complex.c) == 16
         assert isinstance(one_row_complex.c.col_string, Column)
         rows = conn.execute(one_row_complex.select()).fetchall()
@@ -1472,7 +1480,7 @@ class TestSQLAlchemyAthena:
 
     def test_select_offset_limit(self, engine):
         engine, conn = engine
-        many_rows = Table("many_rows", MetaData(schema=ENV.schema), autoload_with=conn)
+        many_rows = Table("many_rows", MetaData(schema=ENV.fixture_schema), autoload_with=conn)
         rows = conn.execute(many_rows.select().offset(10).limit(5)).fetchall()
         assert rows == [(i,) for i in range(10, 15)]
 
@@ -2426,7 +2434,7 @@ OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat'
         engine, conn = engine
 
         # varchar without length
-        one_row = Table("one_row", MetaData(schema=ENV.schema), autoload_with=conn)
+        one_row = Table("one_row", MetaData(schema=ENV.fixture_schema), autoload_with=conn)
         actual = conn.execute(
             sqlalchemy.select(expression.cast(one_row.c.number_of_rows, types.VARCHAR))
         ).scalar()
@@ -2499,7 +2507,9 @@ OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat'
 
     def test_cast_as_binary(self, engine):
         engine, conn = engine
-        one_row_complex = Table("one_row_complex", MetaData(schema=ENV.schema), autoload_with=conn)
+        one_row_complex = Table(
+            "one_row_complex", MetaData(schema=ENV.fixture_schema), autoload_with=conn
+        )
         actual = conn.execute(
             sqlalchemy.select(
                 expression.cast(one_row_complex.c.col_string, types.BINARY),
@@ -3279,15 +3289,15 @@ SELECT {ENV.schema}.{table_name}.id, {ENV.schema}.{table_name}.name \n\
     def test_get_view_definition(self, engine):
         engine, conn = engine
         insp = sqlalchemy.inspect(engine)
-        actual = insp.get_view_definition(schema=ENV.schema, view_name="v_one_row")
+        actual = insp.get_view_definition(schema=ENV.fixture_schema, view_name="v_one_row")
         assert (
             actual
             == textwrap.dedent(
                 f"""
-                CREATE VIEW {ENV.schema}.v_one_row AS
+                CREATE VIEW {ENV.fixture_schema}.v_one_row AS
                 SELECT number_of_rows
                 FROM
-                  {ENV.schema}.one_row
+                  {ENV.fixture_schema}.one_row
                 """
             ).strip()
         )
@@ -3297,7 +3307,7 @@ SELECT {ENV.schema}.{table_name}.id, {ENV.schema}.{table_name}.name \n\
         insp = sqlalchemy.inspect(engine)
         pytest.raises(
             NoSuchTableError,
-            lambda: insp.get_view_definition(schema=ENV.schema, view_name="test_view"),
+            lambda: insp.get_view_definition(schema=ENV.fixture_schema, view_name="test_view"),
         )
 
     def test_numeric_type_variants(self, engine):
