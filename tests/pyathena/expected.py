@@ -240,23 +240,39 @@ def _athena_text(value: Any, athena_type: str) -> str:
 _COMPLEX_FAMILIES = ("array", "map", "struct")
 
 
-def _scalar_type(athena_type: str) -> str:
-    """Return a nested type after checking that the rules support it.
+def _member_types(athena_type: str) -> list[str]:
+    """Return the types nested directly in a complex type.
 
     Args:
-        athena_type: The type of a value nested in an array, map, or struct.
+        athena_type: An array, map, or struct type.
 
     Returns:
-        The type.
+        The element type, the key and value types, or the field types.
+    """
+    if family(athena_type) == "struct":
+        return [field_type for _, field_type in _struct_fields(athena_type)]
+    return _type_arguments(athena_type)
+
+
+def _check_nesting(athena_type: str) -> None:
+    """Check that the rules model the nesting of a complex type.
+
+    They model scalars nested in an array, map, or struct, and arrays of maps
+    or structs of scalars.
+
+    Args:
+        athena_type: An array, map, or struct type.
 
     Raises:
-        NotImplementedError: If the type is an array, map, or struct. The cursors
-            parse deeper nesting with further rules; add a rule for it here
-            together with the column that needs it.
+        NotImplementedError: For deeper nesting, which the cursors parse with
+            further rules; add a rule for it here together with the column that
+            needs it.
     """
-    if family(athena_type) in _COMPLEX_FAMILIES:
-        raise NotImplementedError(f"No expectation rule for nested {athena_type}.")
-    return athena_type
+    members = _member_types(athena_type)
+    if family(athena_type) == "array" and family(members[0]) in ("map", "struct"):
+        members = _member_types(members[0])
+    if any(family(m) in _COMPLEX_FAMILIES for m in members):
+        raise NotImplementedError(f"No expectation rule for the nesting in {athena_type}.")
 
 
 def _element_text(value: Any, athena_type: str) -> str | None:
@@ -269,59 +285,67 @@ def _element_text(value: Any, athena_type: str) -> str | None:
     Returns:
         Athena's text rendering of the value, or None for a null.
     """
-    return None if value is None else _athena_text(value, _scalar_type(athena_type))
+    return None if value is None else _athena_text(value, athena_type)
 
 
 def _python_array(value: Any, athena_type: str) -> Any:
     """Return an array as a cursor without type hints returns it.
-
-    Supports arrays of scalars and arrays of maps or structs of scalars.
 
     Args:
         value: The value from the table definition.
         athena_type: The array type.
 
     Returns:
-        The parsed JSON if Athena's rendering is valid JSON, such as ``[1, 2]``.
-        Otherwise a list of the elements, where a map or struct element is a
-        dict and any other element is its text rendering.
+        None for a null. Otherwise the parsed JSON if Athena's rendering is
+        valid JSON, such as ``[1, 2]``, or else a list of the elements, where a
+        map or struct element is a dict and any other element is its text
+        rendering.
     """
+    _check_nesting(athena_type)
+    if value is None:
+        return None
     (element_type,) = _type_arguments(athena_type)
     element_family = family(element_type)
     if element_family == "map":
-        return [None if e is None else _python_map(e, element_type) for e in value]
+        return [_python_map(e, element_type) for e in value]
     if element_family == "struct":
-        return [None if e is None else _python_struct(e, element_type) for e in value]
+        return [_python_struct(e, element_type) for e in value]
     try:
         return json.loads(_athena_text(value, athena_type))
     except ValueError:
         return [_element_text(e, element_type) for e in value]
 
 
-def _python_map(value: Any, athena_type: str) -> dict[str, Any]:
-    """Return a map of scalars as a cursor without type hints returns it.
+def _python_map(value: Any, athena_type: str) -> dict[str, Any] | None:
+    """Return a map as a cursor without type hints returns it.
 
     Args:
         value: The value from the table definition.
         athena_type: The map type.
 
     Returns:
-        The keys and values as their text renderings.
+        None for a null; otherwise the keys and values as their text renderings.
     """
+    _check_nesting(athena_type)
+    if value is None:
+        return None
     key_type, value_type = _type_arguments(athena_type)
-    return {_athena_text(k, _scalar_type(key_type)): _element_text(x, value_type) for k, x in value}
+    return {_athena_text(k, key_type): _element_text(x, value_type) for k, x in value}
 
 
-def _python_struct(value: Any, athena_type: str) -> dict[str, Any]:
-    """Return a struct of scalars as a cursor without type hints returns it.
+def _python_struct(value: Any, athena_type: str) -> dict[str, Any] | None:
+    """Return a struct as a cursor without type hints returns it.
 
     Args:
         value: The value from the table definition.
         athena_type: The struct type.
 
     Returns:
-        The field values as their text renderings.
+        None for a null; otherwise the field values as their text renderings.
     """
+    _check_nesting(athena_type)
+    if value is None:
+        return None
     field_types = dict(_struct_fields(athena_type))
     return {k: _element_text(x, field_types[k]) for k, x in value.items()}
 
