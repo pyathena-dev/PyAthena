@@ -34,6 +34,8 @@ from pyathena.sqlalchemy.types import (
 )
 from pyathena.util import RetryConfig
 from tests.pyathena.conftest import ENV
+from tests.pyathena.expected import PYTHON, Selection, assert_sqlalchemy_type
+from tests.pyathena.tables import ONE_ROW_COMPLEX
 from tests.pyathena.util import decorated, throttle_metadata_api
 
 # Amazon S3 Tables tests need a pre-provisioned table-bucket catalog; the session
@@ -1394,53 +1396,12 @@ class TestSQLAlchemyAthena:
     def test_reflect_select(self, engine):
         engine, conn = engine
         one_row_complex = Table("one_row_complex", MetaData(schema=ENV.schema), autoload_with=conn)
-        assert len(one_row_complex.c) == 16
+        assert [c.name for c in one_row_complex.c] == [c.name for c in ONE_ROW_COMPLEX.columns]
         assert isinstance(one_row_complex.c.col_string, Column)
         rows = conn.execute(one_row_complex.select()).fetchall()
-        assert len(rows) == 1
-        assert list(rows[0]) == [
-            True,
-            127,
-            32767,
-            2147483647,
-            9223372036854775807,
-            0.5,
-            0.25,
-            "a string",
-            "varchar",
-            datetime(2017, 1, 1, 0, 0, 0),
-            date(2017, 1, 2),
-            b"123",
-            [1, 2],
-            {"1": "2", "3": "4"},  # map type now converted to dict
-            {"a": "1", "b": "2"},  # row type now converted to dict
-            Decimal("0.1"),
-        ]
-        assert isinstance(one_row_complex.c.col_boolean.type, types.BOOLEAN)
-        assert isinstance(one_row_complex.c.col_tinyint.type, TINYINT)
-        assert isinstance(one_row_complex.c.col_smallint.type, types.SMALLINT)
-        assert isinstance(one_row_complex.c.col_int.type, types.INTEGER)
-        assert isinstance(one_row_complex.c.col_bigint.type, types.BIGINT)
-        assert isinstance(one_row_complex.c.col_float.type, types.FLOAT)
-        assert isinstance(one_row_complex.c.col_double.type, types.DOUBLE)
-        assert isinstance(one_row_complex.c.col_string.type, types.String)
-        assert isinstance(one_row_complex.c.col_varchar.type, types.VARCHAR)
-        assert one_row_complex.c.col_varchar.type.length == 10
-        assert isinstance(one_row_complex.c.col_timestamp.type, types.TIMESTAMP)
-        assert isinstance(one_row_complex.c.col_date.type, types.DATE)
-        assert isinstance(one_row_complex.c.col_binary.type, types.BINARY)
-        assert isinstance(one_row_complex.c.col_array.type, AthenaArray)
-        assert isinstance(one_row_complex.c.col_array.type.item_type, types.INTEGER)
-        assert isinstance(one_row_complex.c.col_map.type, types.String)
-        # With struct support, col_struct should now be recognized as AthenaStruct
-
-        assert isinstance(one_row_complex.c.col_struct.type, AthenaStruct)
-        assert isinstance(
-            one_row_complex.c.col_decimal.type,
-            types.DECIMAL,
-        )
-        assert one_row_complex.c.col_decimal.type.precision == 10
-        assert one_row_complex.c.col_decimal.type.scale == 1
+        assert [tuple(row) for row in rows] == Selection(ONE_ROW_COMPLEX).rows(PYTHON)
+        for column in ONE_ROW_COMPLEX.columns:
+            assert_sqlalchemy_type(one_row_complex.c[column.name].type, column)
 
     def test_select_offset_limit(self, engine):
         engine, conn = engine

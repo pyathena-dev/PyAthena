@@ -9,7 +9,7 @@ import time
 import uuid
 from concurrent import futures
 from concurrent.futures.thread import ThreadPoolExecutor
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 from random import randint
 from unittest.mock import MagicMock, patch
@@ -19,13 +19,6 @@ from botocore.exceptions import ClientError
 
 from pyathena import (
     BINARY,
-    BOOLEAN,
-    DATE,
-    DATETIME,
-    JSON,
-    NUMBER,
-    STRING,
-    TIME,
     Binary,
     ExecuteOptions,
 )
@@ -36,6 +29,15 @@ from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
+from tests.pyathena.expected import (
+    ARRAY_JSON,
+    MAP_JSON,
+    PYTHON,
+    TIME_OF_TIMESTAMP,
+    TIMESTAMP_TZ,
+    Selection,
+)
+from tests.pyathena.tables import ONE_ROW_COMPLEX
 from tests.pyathena.util import throttle_metadata_api, unreachable_glue
 
 _logger = logging.getLogger(__name__)
@@ -600,105 +602,18 @@ class TestCursor:
         assert cursor.effective_engine_version is None
 
     def test_complex(self, cursor):
-        cursor.execute(
-            """
-            SELECT
-              col_boolean
-              ,col_tinyint
-              ,col_smallint
-              ,col_int
-              ,col_bigint
-              ,col_float
-              ,col_double
-              ,col_string
-              ,col_varchar
-              ,col_timestamp
-              ,CAST(col_timestamp AS timestamp with time zone) AS col_timestamp_tz
-              ,CAST(col_timestamp AS time) AS col_time
-              ,col_date
-              ,col_binary
-              ,col_array
-              ,CAST(col_array AS json) AS col_array_json
-              ,col_map
-              ,CAST(col_map AS json) AS col_map_json
-              ,col_struct
-              ,col_decimal
-            FROM one_row_complex
-            """
+        selection = Selection(
+            ONE_ROW_COMPLEX, (TIMESTAMP_TZ, TIME_OF_TIMESTAMP, ARRAY_JSON, MAP_JSON)
         )
-        assert cursor.description == [
-            ("col_boolean", "boolean", None, None, 0, 0, "UNKNOWN"),
-            ("col_tinyint", "tinyint", None, None, 3, 0, "UNKNOWN"),
-            ("col_smallint", "smallint", None, None, 5, 0, "UNKNOWN"),
-            ("col_int", "integer", None, None, 10, 0, "UNKNOWN"),
-            ("col_bigint", "bigint", None, None, 19, 0, "UNKNOWN"),
-            ("col_float", "float", None, None, 17, 0, "UNKNOWN"),
-            ("col_double", "double", None, None, 17, 0, "UNKNOWN"),
-            ("col_string", "varchar", None, None, 2147483647, 0, "UNKNOWN"),
-            ("col_varchar", "varchar", None, None, 10, 0, "UNKNOWN"),
-            ("col_timestamp", "timestamp", None, None, 3, 0, "UNKNOWN"),
-            ("col_timestamp_tz", "timestamp with time zone", None, None, 3, 0, "UNKNOWN"),
-            ("col_time", "time", None, None, 3, 0, "UNKNOWN"),
-            ("col_date", "date", None, None, 0, 0, "UNKNOWN"),
-            ("col_binary", "varbinary", None, None, 1073741824, 0, "UNKNOWN"),
-            ("col_array", "array", None, None, 0, 0, "UNKNOWN"),
-            ("col_array_json", "json", None, None, 0, 0, "UNKNOWN"),
-            ("col_map", "map", None, None, 0, 0, "UNKNOWN"),
-            ("col_map_json", "json", None, None, 0, 0, "UNKNOWN"),
-            ("col_struct", "row", None, None, 0, 0, "UNKNOWN"),
-            ("col_decimal", "decimal", None, None, 10, 1, "UNKNOWN"),
-        ]
+        cursor.execute(selection.sql)
+        assert cursor.description == selection.description()
         rows = cursor.fetchall()
-        expected = [
-            (
-                True,
-                127,
-                32767,
-                2147483647,
-                9223372036854775807,
-                0.5,
-                0.25,
-                "a string",
-                "varchar",
-                datetime(2017, 1, 1, 0, 0, 0),
-                datetime(2017, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
-                datetime(2017, 1, 1, 0, 0, 0).time(),
-                date(2017, 1, 2),
-                b"123",
-                [1, 2],
-                [1, 2],
-                {"1": "2", "3": "4"},
-                {"1": 2, "3": 4},
-                {"a": "1", "b": "2"},
-                Decimal("0.1"),
-            )
-        ]
+        expected = selection.rows(PYTHON)
         assert rows == expected
         # catch unicode/str
         assert list(map(type, rows[0])) == list(map(type, expected[0]))
         # compare dbapi type object
-        assert [d[1] for d in cursor.description] == [
-            BOOLEAN,
-            NUMBER,
-            NUMBER,
-            NUMBER,
-            NUMBER,
-            NUMBER,
-            NUMBER,
-            STRING,
-            STRING,
-            DATETIME,
-            DATETIME,
-            TIME,
-            DATE,
-            BINARY,
-            STRING,
-            JSON,
-            STRING,
-            JSON,
-            STRING,
-            NUMBER,
-        ]
+        assert [d[1] for d in cursor.description] == selection.dbapi_types()
 
     def test_complex_with_type_hints(self, cursor):
         # 1. Basic complex columns from one_row_complex

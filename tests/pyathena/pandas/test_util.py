@@ -1,7 +1,6 @@
 import textwrap
 import uuid
 from datetime import date, datetime
-from decimal import Decimal
 
 import numpy as np
 import pandas as pd
@@ -16,6 +15,8 @@ from pyathena.pandas.util import (
     to_sql,
 )
 from tests import ENV
+from tests.pyathena.expected import ARRAY_JSON, MAP_JSON, PYTHON, TIME_OF_TIMESTAMP, Selection
+from tests.pyathena.tables import ONE_ROW_COMPLEX
 
 
 def test_get_chunks():
@@ -52,77 +53,11 @@ def test_reset_index():
 
 
 def test_as_pandas(cursor):
-    cursor.execute(
-        """
-        SELECT
-          col_boolean
-          , col_tinyint
-          , col_smallint
-          , col_int
-          , col_bigint
-          , col_float
-          , col_double
-          , col_string
-          , col_timestamp
-          , CAST(col_timestamp AS time) AS col_time
-          , col_date
-          , col_binary
-          , col_array
-          , CAST(col_array AS json) AS col_array_json
-          , col_map
-          , CAST(col_map AS json) AS col_map_json
-          , col_struct
-          , col_decimal
-        FROM one_row_complex
-        """
-    )
+    selection = Selection(ONE_ROW_COMPLEX, (TIME_OF_TIMESTAMP, ARRAY_JSON, MAP_JSON))
+    cursor.execute(selection.sql)
     df = as_pandas(cursor)
-    rows = [
-        (
-            row["col_boolean"],
-            row["col_tinyint"],
-            row["col_smallint"],
-            row["col_int"],
-            row["col_bigint"],
-            row["col_float"],
-            row["col_double"],
-            row["col_string"],
-            row["col_timestamp"],
-            row["col_time"],
-            row["col_date"],
-            row["col_binary"],
-            row["col_array"],
-            row["col_array_json"],
-            row["col_map"],
-            row["col_map_json"],
-            row["col_struct"],
-            row["col_decimal"],
-        )
-        for _, row in df.iterrows()
-    ]
-    expected = [
-        (
-            True,
-            127,
-            32767,
-            2147483647,
-            9223372036854775807,
-            0.5,
-            0.25,
-            "a string",
-            datetime(2017, 1, 1, 0, 0, 0),
-            datetime(2017, 1, 1, 0, 0, 0).time(),
-            date(2017, 1, 2),
-            b"123",
-            [1, 2],
-            [1, 2],
-            {"1": "2", "3": "4"},
-            {"1": 2, "3": 4},
-            {"a": "1", "b": "2"},
-            Decimal("0.1"),
-        )
-    ]
-    assert rows == expected
+    assert list(df.columns) == selection.names
+    assert [tuple(row) for _, row in df.iterrows()] == selection.rows(PYTHON)
 
 
 def test_as_pandas_integer_na_values(cursor):

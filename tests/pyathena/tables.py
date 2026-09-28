@@ -156,6 +156,57 @@ def _to_text(value: Any) -> str:
     return str(value)
 
 
+# One row with a value of each column type. Tests derive their expected results
+# from this definition with tests.pyathena.expected. Keep string values free of
+# the separators in Athena's text rendering of arrays, maps, and structs
+# (, = [ ] { }), because the cursors parse that rendering.
+ONE_ROW_COMPLEX = Table(
+    "one_row_complex",
+    (
+        Column("col_boolean", "BOOLEAN", pa.bool_()),
+        Column("col_tinyint", "TINYINT", pa.int8()),
+        Column("col_smallint", "SMALLINT", pa.int16()),
+        Column("col_int", "INT", pa.int32()),
+        Column("col_bigint", "BIGINT", pa.int64()),
+        Column("col_float", "FLOAT", pa.float32()),
+        Column("col_double", "DOUBLE", pa.float64()),
+        Column("col_string", "STRING", pa.string()),
+        Column("col_varchar", "VARCHAR(10)", pa.string()),
+        Column("col_timestamp", "TIMESTAMP", pa.timestamp("ms")),
+        Column("col_date", "DATE", pa.date32()),
+        Column("col_binary", "BINARY", pa.binary()),
+        Column("col_array", "ARRAY<int>", pa.list_(pa.int32())),
+        Column("col_map", "MAP<int, int>", pa.map_(pa.int32(), pa.int32())),
+        Column(
+            "col_struct",
+            "STRUCT<a: int, b: int>",
+            pa.struct([("a", pa.int32()), ("b", pa.int32())]),
+        ),
+        Column("col_decimal", "DECIMAL(10,1)", pa.decimal128(10, 1)),
+    ),
+    rows=(
+        (
+            True,
+            127,
+            32767,
+            2147483647,
+            9223372036854775807,
+            0.5,
+            0.25,
+            "a string",
+            "varchar",
+            datetime(2017, 1, 1, 0, 0, 0),
+            date(2017, 1, 2),
+            b"123",
+            [1, 2],
+            [(1, 2), (3, 4)],
+            {"a": 1, "b": 2},
+            Decimal("0.1"),
+        ),
+    ),
+)
+
+
 TABLES = (
     # A text table: the reflection tests assert its SerDe and delimiters.
     Table(
@@ -173,51 +224,7 @@ TABLES = (
         rows=tuple((i,) for i in range(10000)),
         storage="text",
     ),
-    Table(
-        "one_row_complex",
-        (
-            Column("col_boolean", "BOOLEAN", pa.bool_()),
-            Column("col_tinyint", "TINYINT", pa.int8()),
-            Column("col_smallint", "SMALLINT", pa.int16()),
-            Column("col_int", "INT", pa.int32()),
-            Column("col_bigint", "BIGINT", pa.int64()),
-            Column("col_float", "FLOAT", pa.float32()),
-            Column("col_double", "DOUBLE", pa.float64()),
-            Column("col_string", "STRING", pa.string()),
-            Column("col_varchar", "VARCHAR(10)", pa.string()),
-            Column("col_timestamp", "TIMESTAMP", pa.timestamp("ms")),
-            Column("col_date", "DATE", pa.date32()),
-            Column("col_binary", "BINARY", pa.binary()),
-            Column("col_array", "ARRAY<int>", pa.list_(pa.int32())),
-            Column("col_map", "MAP<int, int>", pa.map_(pa.int32(), pa.int32())),
-            Column(
-                "col_struct",
-                "STRUCT<a: int, b: int>",
-                pa.struct([("a", pa.int32()), ("b", pa.int32())]),
-            ),
-            Column("col_decimal", "DECIMAL(10,1)", pa.decimal128(10, 1)),
-        ),
-        rows=(
-            (
-                True,
-                127,
-                32767,
-                2147483647,
-                9223372036854775807,
-                0.5,
-                0.25,
-                "a string",
-                "varchar",
-                datetime(2017, 1, 1, 0, 0, 0),
-                date(2017, 1, 2),
-                b"123",
-                [1, 2],
-                [(1, 2), (3, 4)],
-                {"a": 1, "b": 2},
-                Decimal("0.1"),
-            ),
-        ),
-    ),
+    ONE_ROW_COMPLEX,
     Table(
         "partition_table",
         (Column("a", "STRING", pa.string()),),
