@@ -49,22 +49,25 @@ def pytest_configure(config):
 _cleanups = []
 
 
+@pytest.hookimpl(wrapper=True)
 def pytest_sessionstart(session):
     """Create the fixture schema and this process's own schema, as its role requires.
 
-    The pytest-xdist controller creates the fixture schema before it starts the
-    workers, and each worker creates its own schema. A run without workers
-    creates both. Each removal is recorded before its step, and
-    ``pytest_sessionfinish`` runs them. A failure here runs them at once.
-    pytest skips ``pytest_sessionfinish`` after a failed session start,
-    including a failure to start the workers after this hook, so a config
-    cleanup runs whatever is still recorded then.
+    The pytest-xdist controller creates the fixture schema before its own
+    session start starts the workers, and each worker creates its own schema.
+    A run without workers creates both. Each removal is recorded before its
+    step, and ``pytest_sessionfinish`` runs them. pytest skips
+    ``pytest_sessionfinish`` after a failed session start, so a failure here or
+    in a later session-start hook runs them at once, before the error reaches
+    pytest-xdist, which may stop a worker that reports it.
 
     Args:
         session: The pytest session.
+
+    Returns:
+        The results of the other session-start hooks.
     """
     config = session.config
-    config.add_cleanup(_run_cleanups)
     try:
         if _owns_fixture_schema(config):
             _cleanups.append(_drop_fixture_schema)
@@ -75,9 +78,9 @@ def pytest_sessionstart(session):
             _cleanups.append(functools.partial(_drop_database, ENV.schema))
             with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
                 _create_database(cursor, ENV.schema)
+        return (yield)
     except BaseException:
-        # Remove what was created before the error reaches pytest-xdist, which
-        # may stop a worker that reports it; the original error is kept.
+        # The original error is kept.
         with contextlib.suppress(Exception):
             _run_cleanups()
         raise
@@ -86,9 +89,8 @@ def pytest_sessionstart(session):
 def pytest_sessionfinish(session):
     """Check the fixture schema in the process that owns it, then remove what was created.
 
-    The removal runs here, not in a config cleanup, because a pytest-xdist worker
-    reports that it finished after this hook and the controller may then stop
-    it.
+    The removal runs in this hook because a pytest-xdist worker reports that it
+    finished after it, and the controller may then stop the worker.
 
     Args:
         session: The pytest session.
