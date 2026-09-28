@@ -714,7 +714,8 @@ class ExpectedResult:
         """Return a result row with the NumPy arrays of array columns as lists.
 
         pandas returns array values read from Parquet as NumPy arrays, which do
-        not compare with ``==``. Other columns keep their values.
+        not compare with ``==``, and a null in an integer array as NaN. The
+        arrays become lists with None for NaN. Other columns keep their values.
 
         Args:
             row: A result row, or a pandas row from ``DataFrame.iterrows``.
@@ -723,7 +724,9 @@ class ExpectedResult:
             The row as a tuple.
         """
         return tuple(
-            list(v) if base_type(t) == "array" and isinstance(v, np.ndarray) else v
+            [None if isinstance(x, float) and np.isnan(x) else x for x in v]
+            if base_type(t) == "array" and isinstance(v, np.ndarray)
+            else v
             for t, v in zip(self._types(), row, strict=True)
         )
 
