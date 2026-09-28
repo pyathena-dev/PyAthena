@@ -109,7 +109,8 @@ Do not assume that `-k` or a single test path makes this suite offline.
 
 The tables and views from `tests/pyathena/tables.py` and the data files they read are in a fixture schema, `ENV.fixture_schema`, which tests only read.
 With pytest-xdist, the controller creates it once before the workers start and drops it after they finish.
-The controller loads these session hooks only when a path given to pytest is `tests/pyathena/` or inside it; otherwise, and in a run without workers, each test process creates and drops its own fixture schema.
+A run without workers creates and drops the fixture schema itself.
+The session hooks run only when a path given to pytest is `tests/pyathena/` or inside it, as with `just test pyathena`.
 Each test process also creates its own schema, `ENV.schema`, where tests create their tables and views.
 The fixture schema is the default schema of the cursor and engine fixtures, so a test that creates an object qualifies its name with `ENV.schema`.
 At the end of the run, the process that created the fixture schema lists its tables and fails the run if they differ from the ones it created.

@@ -6,6 +6,7 @@ import uuid
 import boto3
 import pytest
 import sqlalchemy
+from botocore.exceptions import ClientError
 from sqlalchemy.ext.asyncio import create_async_engine as _create_async_engine
 
 from tests import ASYNC_SQLALCHEMY_CONNECTION_STRING, ENV, SQLALCHEMY_CONNECTION_STRING
@@ -38,11 +39,10 @@ def pytest_configure(config):
         config: The pytest config.
     """
     workerinput = getattr(config, "workerinput", None)
-    if workerinput is None:
-        if config.pluginmanager.hasplugin("xdist"):
-            config.pluginmanager.register(_XDistHooks())
-    elif _FIXTURE_SCHEMA_KEY in workerinput:
+    if workerinput is not None:
         ENV.fixture_schema = workerinput[_FIXTURE_SCHEMA_KEY]
+    elif config.pluginmanager.hasplugin("xdist"):
+        config.pluginmanager.register(_XDistHooks())
 
 
 def pytest_sessionstart(session):
@@ -50,44 +50,36 @@ def pytest_sessionstart(session):
 
     The pytest-xdist controller creates the fixture schema before it starts the
     workers, and each worker creates its own schema. A run without workers
-    creates both.
+    creates both. Each step registers its removal as a config cleanup first,
+    because pytest skips ``pytest_sessionfinish`` after a failed session start,
+    including a failure to start the workers, but still runs config cleanups.
 
     Args:
         session: The pytest session.
     """
-    cleanups = []
-    try:
-        if _owns_fixture_schema(session.config):
-            cleanups.append(_drop_fixture_schema)
-            _create_fixture_schema()
-        if _is_test_process(session.config):
-            cleanups.append(_drop_test_schema)
-            _create_test_schema()
-    except BaseException:
-        # pytest skips pytest_sessionfinish after a failed pytest_sessionstart,
-        # so what was created is removed here, keeping the original error.
-        with contextlib.suppress(Exception):
-            _run_all(reversed(cleanups))
-        raise
+    config = session.config
+    if _owns_fixture_schema(config):
+        config.add_cleanup(_drop_fixture_schema)
+        _create_fixture_schema()
+    if _is_test_process(config):
+        _create_s3tables_namespace()
+        config.add_cleanup(_delete_s3tables_namespace)
+        config.add_cleanup(functools.partial(_drop_database, ENV.schema))
+        with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
+            _create_database(cursor, ENV.schema)
 
 
 def pytest_sessionfinish(session):
-    """Drop what ``pytest_sessionstart`` created; each step runs even if one fails.
+    """Fail the run if the fixture schema changed, in the process that owns it.
 
-    The process that owns the fixture schema checks that it holds only the
-    tables and views from ``tests.pyathena.tables`` before dropping it, and fails
-    the run if it does not.
+    The schemas themselves are dropped by the config cleanups that
+    ``pytest_sessionstart`` registers, after this hook.
 
     Args:
         session: The pytest session.
     """
-    steps = []
-    if _is_test_process(session.config):
-        steps.append(_drop_test_schema)
     if _owns_fixture_schema(session.config):
-        steps.append(functools.partial(_check_fixture_schema, session))
-        steps.append(_drop_fixture_schema)
-    _run_all(steps)
+        _check_fixture_schema(session)
 
 
 def _is_test_process(config):
@@ -111,11 +103,9 @@ def _owns_fixture_schema(config):
 
     Returns:
         True for the pytest-xdist controller or a run without workers, False for
-        a worker that got the fixture schema from the controller. The controller
-        loads this conftest only when a path given to pytest leads to it, so a
-        worker that got no fixture schema owns its own.
+        a worker, which uses the controller's fixture schema.
     """
-    return _FIXTURE_SCHEMA_KEY not in getattr(config, "workerinput", {})
+    return not hasattr(config, "workerinput")
 
 
 def _run_all(steps):
@@ -146,22 +136,11 @@ def _drop_fixture_schema():
     _run_all([functools.partial(_drop_database, ENV.fixture_schema), _delete_data])
 
 
-def _create_test_schema():
-    """Create this process's schema and S3 Tables namespace for the objects of its tests."""
-    _create_s3tables_namespace()
-    with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
-        _create_database(cursor, ENV.schema)
-
-
-def _drop_test_schema():
-    """Drop this process's schema and delete its S3 Tables namespace."""
-    _run_all([functools.partial(_drop_database, ENV.schema), _delete_s3tables_namespace])
-
-
 def _check_fixture_schema(session):
     """Fail the run if the fixture schema holds other tables than those it was created with.
 
-    A failure to list the tables is reported but does not fail the run.
+    A missing fixture schema counts as holding no tables. Another failure to
+    list the tables is reported but does not fail the run.
 
     Args:
         session: The pytest session, whose exit status is set to failed.
@@ -175,6 +154,13 @@ def _check_fixture_schema(session):
             .paginate(DatabaseName=ENV.fixture_schema)
             for table in page["TableList"]
         }
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "EntityNotFoundException":
+            sys.stderr.write(
+                f"\nCould not list the tables of fixture schema {ENV.fixture_schema}: {e!r}\n"
+            )
+            return
+        actual = set()
     except Exception as e:
         sys.stderr.write(
             f"\nCould not list the tables of fixture schema {ENV.fixture_schema}: {e!r}\n"
