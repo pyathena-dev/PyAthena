@@ -250,7 +250,7 @@ def _element_text(value: Any, athena_type: str) -> str | None:
     return None if value is None else _athena_text(value, athena_type)
 
 
-def _python_array(value: Any, athena_type: str) -> list[Any]:
+def _python_array(value: Any, athena_type: str) -> Any:
     """Return an array as a cursor without type hints returns it.
 
     Args:
@@ -258,14 +258,25 @@ def _python_array(value: Any, athena_type: str) -> list[Any]:
         athena_type: The array type.
 
     Returns:
-        The parsed JSON if Athena's rendering is valid JSON, such as ``[1, 2]``;
-        otherwise the elements' text renderings.
+        The parsed JSON if Athena's rendering is valid JSON, such as ``[1, 2]``.
+        Otherwise a list of the elements, where a map or struct element is a
+        dict and any other element is its text rendering; or the rendering
+        itself for nested arrays, which the cursors leave unparsed.
     """
+    text = _athena_text(value, athena_type)
     try:
-        return json.loads(_athena_text(value, athena_type))
+        return json.loads(text)
     except ValueError:
-        (element_type,) = _type_arguments(athena_type)
-        return [_element_text(e, element_type) for e in value]
+        pass
+    (element_type,) = _type_arguments(athena_type)
+    element_family = family(element_type)
+    if element_family == "array":
+        return text
+    if element_family == "map":
+        return [None if e is None else _python_map(e, element_type) for e in value]
+    if element_family == "struct":
+        return [None if e is None else _python_struct(e, element_type) for e in value]
+    return [_element_text(e, element_type) for e in value]
 
 
 def _python_map(value: Any, athena_type: str) -> dict[str, Any]:
