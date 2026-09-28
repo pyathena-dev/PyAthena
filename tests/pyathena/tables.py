@@ -157,10 +157,10 @@ def _to_text(value: Any) -> str:
 
 
 # One row with a value of each column type. Tests derive their expected results
-# from this definition with tests.pyathena.expected. Keep string values free of
-# the separators in Athena's text rendering of arrays, maps, and structs
-# (, = [ ] { }) and different from null, because the cursors parse that
-# rendering.
+# from this definition with tests.pyathena.expected. Strings nested in arrays,
+# maps, and structs may contain only letters, digits, underscores, and spaces,
+# and must not be null, because the cursors parse Athena's text rendering of
+# those types; tests.pyathena.expected rejects other nested strings.
 ONE_ROW_COMPLEX = Table(
     "one_row_complex",
     (

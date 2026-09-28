@@ -284,8 +284,19 @@ def _element_text(value: Any, athena_type: str) -> str | None:
 
     Returns:
         Athena's text rendering of the value, or None for a null.
+
+    Raises:
+        ValueError: For a string that the cursors would not parse back as
+            itself: one with characters other than letters, digits, underscores,
+            and spaces, or the text null.
     """
-    return None if value is None else _athena_text(value, athena_type)
+    if value is None:
+        return None
+    if family(athena_type) in ("string", "varchar", "char") and (
+        not re.fullmatch(r"[\w ]*", value) or value.lower() == "null"
+    ):
+        raise ValueError(f"Unsupported nested string value: {value!r}")
+    return _athena_text(value, athena_type)
 
 
 def _python_array(value: Any, athena_type: str) -> Any:
@@ -330,7 +341,7 @@ def _python_map(value: Any, athena_type: str) -> dict[str, Any] | None:
     if value is None:
         return None
     key_type, value_type = _type_arguments(athena_type)
-    return {_athena_text(k, key_type): _element_text(x, value_type) for k, x in value}
+    return {_element_text(k, key_type): _element_text(x, value_type) for k, x in value}
 
 
 def _python_struct(value: Any, athena_type: str) -> dict[str, Any] | None:
