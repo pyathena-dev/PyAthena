@@ -249,6 +249,21 @@ def _athena_text(value: Any, athena_type: str) -> str:
 
 _COMPLEX_FAMILIES = ("array", "map", "struct")
 
+# The scalar types the rules render when nested in an array, map, or struct.
+_NESTED_SCALAR_FAMILIES = (
+    "boolean",
+    "tinyint",
+    "smallint",
+    "int",
+    "bigint",
+    "string",
+    "varchar",
+    "date",
+    "timestamp",
+    "binary",
+    "decimal",
+)
+
 
 def _member_types(athena_type: str) -> list[str]:
     """Return the types nested directly in a complex type.
@@ -267,21 +282,20 @@ def _member_types(athena_type: str) -> list[str]:
 def _check_nesting(athena_type: str) -> None:
     """Check that the rules model the nesting of a complex type.
 
-    They model scalars nested in an array, map, or struct, and arrays of maps
-    or structs of scalars.
+    They model scalars of ``_NESTED_SCALAR_FAMILIES`` nested in an array, map,
+    or struct, and arrays of maps or structs of such scalars.
 
     Args:
         athena_type: An array, map, or struct type.
 
     Raises:
-        NotImplementedError: For deeper nesting, which the cursors parse with
-            further rules; add a rule for it here together with the column that
-            needs it.
+        NotImplementedError: For deeper nesting or another nested scalar type;
+            add a rule for it here together with the column that needs it.
     """
     members = _member_types(athena_type)
     if family(athena_type) == "array" and family(members[0]) in ("map", "struct"):
         members = _member_types(members[0])
-    if any(family(m) in _COMPLEX_FAMILIES for m in members):
+    if any(family(m) not in _NESTED_SCALAR_FAMILIES for m in members):
         raise NotImplementedError(f"No expectation rule for the nesting in {athena_type}.")
 
 
@@ -296,17 +310,21 @@ def _element_text(value: Any, athena_type: str) -> str | None:
         Athena's text rendering of the value, or None for a null.
 
     Raises:
-        ValueError: For a string that the cursors might not parse back as
-            itself. Nested strings must be words of letters, digits, and
-            underscores separated by single spaces, and not the word null.
+        ValueError: For a value that the cursors might not parse back as
+            itself: a string other than words of letters, digits, and
+            underscores separated by single spaces, the word null, or a value
+            rendered as empty text, such as empty binary.
     """
     if value is None:
         return None
-    if family(athena_type) in ("string", "varchar", "char") and (
+    if family(athena_type) in ("string", "varchar") and (
         not re.fullmatch(r"\w+(?: \w+)*", value) or value.lower() == "null"
     ):
         raise ValueError(f"Unsupported nested string value: {value!r}")
-    return _athena_text(value, athena_type)
+    text = _athena_text(value, athena_type)
+    if not text:
+        raise ValueError(f"Unsupported nested value rendered as empty text: {value!r}")
+    return text
 
 
 def _python_array(value: Any, athena_type: str) -> Any:
