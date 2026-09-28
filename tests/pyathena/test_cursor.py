@@ -1576,29 +1576,34 @@ class TestCursor:
     )
     def test_listing_resumes_after_a_failed_glue_request(self, cursor, monkeypatch):
         # A page throttled mid-listing is read again, not the pages before it.
-        expected = sorted(m.name for m in cursor.list_table_metadata(max_results=2))
-        client = cursor.connection.client
-        list_table_metadata = client.list_table_metadata
+        # The pages are stubbed so that real throttling cannot change the requests.
+        pages = {
+            None: {"TableMetadataList": [{"Name": "t0"}, {"Name": "t1"}], "NextToken": "1"},
+            "1": {"TableMetadataList": [{"Name": "t2"}, {"Name": "t3"}], "NextToken": "2"},
+            "2": {"TableMetadataList": [{"Name": "t4"}]},
+        }
         requests = []
 
-        def throttle_second_page_once(**kwargs):
+        def throttle_second_request_once(**kwargs):
             requests.append(kwargs.get("NextToken"))
             if len(requests) == 2:
                 raise ClientError(
                     {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
                     "ListTableMetadata",
                 )
-            return list_table_metadata(**kwargs)
+            return pages[kwargs.get("NextToken")]
 
-        monkeypatch.setattr(client, "list_table_metadata", throttle_second_page_once)
-        self._unreachable_glue(cursor.connection, monkeypatch)
+        monkeypatch.setattr(
+            cursor.connection.client, "list_table_metadata", throttle_second_request_once
+        )
+        glue = self._unreachable_glue(cursor.connection, monkeypatch)
 
-        assert sorted(m.name for m in cursor.list_table_metadata(max_results=2)) == expected
+        names = [m.name for m in cursor.list_table_metadata(max_results=2)]
+
+        assert names == ["t0", "t1", "t2", "t3", "t4"]
         # Every page once, and the throttled second page a second time.
-        assert len(expected) > 2
-        assert requests[0] is None
-        assert requests[1] == requests[2]
-        assert len(requests) == len(set(requests)) + 1
+        assert requests == [None, "1", "1", "2"]
+        assert not glue.reachable
 
     @pytest.mark.parametrize(
         ("cursor", "catalog_name"),
