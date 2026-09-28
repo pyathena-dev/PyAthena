@@ -55,24 +55,32 @@ def pytest_sessionstart(session):
     The pytest-xdist controller creates the fixture schema before it starts the
     workers, and each worker creates its own schema. A run without workers
     creates both. Each removal is recorded before its step, and
-    ``pytest_sessionfinish`` runs them. pytest skips ``pytest_sessionfinish``
-    after a failed session start, including a failure to start the workers, so
-    a config cleanup runs whatever is still recorded then.
+    ``pytest_sessionfinish`` runs them. A failure here runs them at once.
+    pytest skips ``pytest_sessionfinish`` after a failed session start,
+    including a failure to start the workers after this hook, so a config
+    cleanup runs whatever is still recorded then.
 
     Args:
         session: The pytest session.
     """
     config = session.config
     config.add_cleanup(_run_cleanups)
-    if _owns_fixture_schema(config):
-        _cleanups.append(_drop_fixture_schema)
-        _create_fixture_schema()
-    if _is_test_process(config):
-        _cleanups.append(_delete_s3tables_namespace)
-        _create_s3tables_namespace()
-        _cleanups.append(functools.partial(_drop_database, ENV.schema))
-        with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
-            _create_database(cursor, ENV.schema)
+    try:
+        if _owns_fixture_schema(config):
+            _cleanups.append(_drop_fixture_schema)
+            _create_fixture_schema()
+        if _is_test_process(config):
+            _cleanups.append(_delete_s3tables_namespace)
+            _create_s3tables_namespace()
+            _cleanups.append(functools.partial(_drop_database, ENV.schema))
+            with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
+                _create_database(cursor, ENV.schema)
+    except BaseException:
+        # Remove what was created before the error reaches pytest-xdist, which
+        # may stop a worker that reports it; the original error is kept.
+        with contextlib.suppress(Exception):
+            _run_cleanups()
+        raise
 
 
 def pytest_sessionfinish(session):
@@ -232,16 +240,15 @@ def _delete_s3tables_namespace():
         return
     client, arn = _s3tables()
     try:
-        client.get_namespace(tableBucketARN=arn, namespace=ENV.s3tables_namespace)
+        tables = [
+            table["name"]
+            for page in client.get_paginator("list_tables").paginate(
+                tableBucketARN=arn, namespace=ENV.s3tables_namespace
+            )
+            for table in page["tables"]
+        ]
     except client.exceptions.NotFoundException:
         return
-    tables = [
-        table["name"]
-        for page in client.get_paginator("list_tables").paginate(
-            tableBucketARN=arn, namespace=ENV.s3tables_namespace
-        )
-        for table in page["tables"]
-    ]
     for table in tables:
         client.delete_table(tableBucketARN=arn, namespace=ENV.s3tables_namespace, name=table)
     client.delete_namespace(tableBucketARN=arn, namespace=ENV.s3tables_namespace)
