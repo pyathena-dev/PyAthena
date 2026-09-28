@@ -1582,26 +1582,23 @@ class TestCursor:
             "1": {"TableMetadataList": [{"Name": "t2"}, {"Name": "t3"}], "NextToken": "2"},
             "2": {"TableMetadataList": [{"Name": "t4"}]},
         }
+        client = cursor.connection.client
         requests = []
 
         def throttle_second_request_once(**kwargs):
-            requests.append(kwargs.get("NextToken"))
+            token = kwargs.get("NextToken")
+            requests.append(token)
             if len(requests) == 2:
                 raise ClientError(
                     {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
                     "ListTableMetadata",
                 )
-            return pages[kwargs.get("NextToken")]
+            return pages[token]
 
-        monkeypatch.setattr(
-            cursor.connection.client, "list_table_metadata", throttle_second_request_once
-        )
+        monkeypatch.setattr(client, "list_table_metadata", throttle_second_request_once)
         glue = self._unreachable_glue(cursor.connection, monkeypatch)
 
-        names = [m.name for m in cursor.list_table_metadata(max_results=2)]
-
-        assert names == ["t0", "t1", "t2", "t3", "t4"]
-        # Every page once, and the throttled second page a second time.
+        assert [m.name for m in cursor.list_table_metadata()] == ["t0", "t1", "t2", "t3", "t4"]
         assert requests == [None, "1", "1", "2"]
         assert not glue.reachable
 
