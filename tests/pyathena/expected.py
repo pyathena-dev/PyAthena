@@ -160,39 +160,44 @@ _SQLALCHEMY_TYPES = {
 }
 
 
-def _json_compatible(value: Any, athena_type: str) -> Any:
-    """Return a value as the JSON structure Athena renders for ``CAST(... AS json)``.
+def _parsed_json(value: Any, athena_type: str) -> Any:
+    """Return a value as Athena renders it with ``CAST(... AS json)``, after JSON parsing.
 
     Args:
         value: The value from the table definition.
         athena_type: The value's Athena type.
 
     Returns:
-        The value, with a map's key-value pairs as a dict.
+        The parsed JSON value; a map becomes a dict with string keys.
     """
     if family(athena_type) == "map":
-        return dict(value)
-    return value
-
-
-def _parsed_json(value: Any, athena_type: str) -> Any:
-    """Return a value after a round trip through JSON text.
-
-    Args:
-        value: The value from the table definition.
-        athena_type: The value's Athena type.
-
-    Returns:
-        The parsed JSON value; map keys become strings.
-    """
-    return json.loads(json.dumps(_json_compatible(value, athena_type)))
+        value = dict(value)
+    return json.loads(json.dumps(value))
 
 
 def _same(value: Any, athena_type: str) -> Any:
+    """Return the value unchanged.
+
+    Args:
+        value: The value from the table definition.
+        athena_type: The value's Athena type.
+
+    Returns:
+        The value.
+    """
     return value
 
 
 def _as_list(value: Any, athena_type: str) -> Any:
+    """Return an array value as a list.
+
+    Args:
+        value: The value from the table definition.
+        athena_type: The value's Athena type.
+
+    Returns:
+        The elements as a list.
+    """
     return list(value)
 
 
@@ -220,8 +225,8 @@ _SCALARS: Representation = dict.fromkeys(
     _same,
 )
 
-# Cursor, DictCursor, S3FSCursor, pyathena.pandas.util.as_pandas, and SQLAlchemy
-# result rows. Without type hints, map and struct values are strings.
+# Rows of Cursor, S3FSCursor, pyathena.pandas.util.as_pandas, and SQLAlchemy.
+# Without type hints, map and struct values are strings.
 PYTHON: Representation = {
     **_SCALARS,
     "timestamp with time zone": lambda v, t: v.replace(tzinfo=timezone.utc),
