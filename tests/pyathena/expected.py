@@ -237,21 +237,45 @@ def _athena_text(value: Any, athena_type: str) -> str:
     return str(value)
 
 
+_COMPLEX_FAMILIES = ("array", "map", "struct")
+
+
+def _scalar_type(athena_type: str) -> str:
+    """Return a nested type after checking that the rules support it.
+
+    Args:
+        athena_type: The type of a value nested in an array, map, or struct.
+
+    Returns:
+        The type.
+
+    Raises:
+        NotImplementedError: If the type is an array, map, or struct. The cursors
+            parse deeper nesting with further rules; add a rule for it here
+            together with the column that needs it.
+    """
+    if family(athena_type) in _COMPLEX_FAMILIES:
+        raise NotImplementedError(f"No expectation rule for nested {athena_type}.")
+    return athena_type
+
+
 def _element_text(value: Any, athena_type: str) -> str | None:
-    """Return a nested value as a cursor without type hints returns it.
+    """Return a nested scalar value as a cursor without type hints returns it.
 
     Args:
         value: The nested value.
-        athena_type: The value's Athena type.
+        athena_type: The value's Athena type, a scalar type.
 
     Returns:
         Athena's text rendering of the value, or None for a null.
     """
-    return None if value is None else _athena_text(value, athena_type)
+    return None if value is None else _athena_text(value, _scalar_type(athena_type))
 
 
 def _python_array(value: Any, athena_type: str) -> Any:
     """Return an array as a cursor without type hints returns it.
+
+    Supports arrays of scalars and arrays of maps or structs of scalars.
 
     Args:
         value: The value from the table definition.
@@ -260,27 +284,22 @@ def _python_array(value: Any, athena_type: str) -> Any:
     Returns:
         The parsed JSON if Athena's rendering is valid JSON, such as ``[1, 2]``.
         Otherwise a list of the elements, where a map or struct element is a
-        dict and any other element is its text rendering; or the rendering
-        itself for nested arrays, which the cursors leave unparsed.
+        dict and any other element is its text rendering.
     """
-    text = _athena_text(value, athena_type)
-    try:
-        return json.loads(text)
-    except ValueError:
-        pass
     (element_type,) = _type_arguments(athena_type)
     element_family = family(element_type)
-    if element_family == "array":
-        return text
     if element_family == "map":
         return [None if e is None else _python_map(e, element_type) for e in value]
     if element_family == "struct":
         return [None if e is None else _python_struct(e, element_type) for e in value]
-    return [_element_text(e, element_type) for e in value]
+    try:
+        return json.loads(_athena_text(value, athena_type))
+    except ValueError:
+        return [_element_text(e, element_type) for e in value]
 
 
 def _python_map(value: Any, athena_type: str) -> dict[str, Any]:
-    """Return a map as a cursor without type hints returns it.
+    """Return a map of scalars as a cursor without type hints returns it.
 
     Args:
         value: The value from the table definition.
@@ -290,11 +309,11 @@ def _python_map(value: Any, athena_type: str) -> dict[str, Any]:
         The keys and values as their text renderings.
     """
     key_type, value_type = _type_arguments(athena_type)
-    return {_athena_text(k, key_type): _element_text(x, value_type) for k, x in value}
+    return {_athena_text(k, _scalar_type(key_type)): _element_text(x, value_type) for k, x in value}
 
 
 def _python_struct(value: Any, athena_type: str) -> dict[str, Any]:
-    """Return a struct as a cursor without type hints returns it.
+    """Return a struct of scalars as a cursor without type hints returns it.
 
     Args:
         value: The value from the table definition.
