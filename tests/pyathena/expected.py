@@ -46,22 +46,52 @@ def _parameters(athena_type: str) -> tuple[int, ...]:
         athena_type: An Athena type, such as ``DECIMAL(10,1)``.
 
     Returns:
-        The parameters, such as ``(10, 1)``; empty for a type without them.
+        The parameters of the outer type, such as ``(10, 1)``; empty for a type
+        without them, such as ``ARRAY<DECIMAL(10,1)>``.
     """
-    match = re.search(r"\(([\d,\s]+)\)", athena_type)
+    match = re.match(r"\s*[a-zA-Z ]+\(([\d,\s]+)\)", athena_type)
     return tuple(int(p) for p in match.group(1).split(",")) if match else ()
 
 
-def _element_type(athena_type: str) -> str:
-    """Return the element type of an array type.
+def _type_arguments(athena_type: str) -> list[str]:
+    """Return the type arguments of a complex type.
 
     Args:
-        athena_type: An array type, such as ``ARRAY<int>``.
+        athena_type: An Athena type, such as ``MAP<int, int>``.
 
     Returns:
-        The element type, such as ``int``.
+        The element type of an array, the key and value types of a map, or the
+        ``name: type`` fields of a struct; empty for other types.
     """
-    return athena_type[athena_type.index("<") + 1 : athena_type.rindex(">")]
+    if "<" not in athena_type:
+        return []
+    inner = athena_type[athena_type.index("<") + 1 : athena_type.rindex(">")]
+    arguments, depth, start = [], 0, 0
+    for i, char in enumerate(inner):
+        if char in "<(":
+            depth += 1
+        elif char in ">)":
+            depth -= 1
+        elif char == "," and depth == 0:
+            arguments.append(inner[start:i].strip())
+            start = i + 1
+    arguments.append(inner[start:].strip())
+    return arguments
+
+
+def _struct_fields(athena_type: str) -> list[tuple[str, str]]:
+    """Return the fields of a struct type.
+
+    Args:
+        athena_type: A struct type, such as ``STRUCT<a: int, b: int>``.
+
+    Returns:
+        ``(name, type)`` pairs.
+    """
+    return [
+        (name.strip(), field_type.strip())
+        for name, field_type in (a.split(":", 1) for a in _type_arguments(athena_type))
+    ]
 
 
 @dataclass(frozen=True)
@@ -175,6 +205,97 @@ def _parsed_json(value: Any, athena_type: str) -> Any:
     return json.loads(json.dumps(value))
 
 
+def _athena_text(value: Any, athena_type: str) -> str:
+    """Return a value as Athena renders it in a CSV result.
+
+    Args:
+        value: The value from the table definition.
+        athena_type: The value's Athena type.
+
+    Returns:
+        The text, such as ``[1, 2]`` for an array, ``{1=2, 3=4}`` for a map,
+        and ``{a=1, b=2}`` for a struct.
+    """
+    name = family(athena_type)
+    arguments = _type_arguments(athena_type)
+    if value is None:
+        return "null"
+    if name == "array":
+        return f"[{', '.join(_athena_text(e, arguments[0]) for e in value)}]"
+    if name == "map":
+        key_type, value_type = arguments
+        entries = (f"{_athena_text(k, key_type)}={_athena_text(x, value_type)}" for k, x in value)
+        return f"{{{', '.join(entries)}}}"
+    if name == "struct":
+        field_types = dict(_struct_fields(athena_type))
+        entries = (f"{k}={_athena_text(x, field_types[k])}" for k, x in value.items())
+        return f"{{{', '.join(entries)}}}"
+    if name == "boolean":
+        return str(value).lower()
+    if name == "timestamp":
+        return value.isoformat(sep=" ", timespec="milliseconds")
+    return str(value)
+
+
+def _element_text(value: Any, athena_type: str) -> str | None:
+    """Return a nested value as a cursor without type hints returns it.
+
+    Args:
+        value: The nested value.
+        athena_type: The value's Athena type.
+
+    Returns:
+        Athena's text rendering of the value, or None for a null.
+    """
+    return None if value is None else _athena_text(value, athena_type)
+
+
+def _python_array(value: Any, athena_type: str) -> list[Any]:
+    """Return an array as a cursor without type hints returns it.
+
+    Args:
+        value: The value from the table definition.
+        athena_type: The array type.
+
+    Returns:
+        The parsed JSON if Athena's rendering is valid JSON, such as ``[1, 2]``;
+        otherwise the elements' text renderings.
+    """
+    try:
+        return json.loads(_athena_text(value, athena_type))
+    except ValueError:
+        (element_type,) = _type_arguments(athena_type)
+        return [_element_text(e, element_type) for e in value]
+
+
+def _python_map(value: Any, athena_type: str) -> dict[str, Any]:
+    """Return a map as a cursor without type hints returns it.
+
+    Args:
+        value: The value from the table definition.
+        athena_type: The map type.
+
+    Returns:
+        The keys and values as their text renderings.
+    """
+    key_type, value_type = _type_arguments(athena_type)
+    return {_athena_text(k, key_type): _element_text(x, value_type) for k, x in value}
+
+
+def _python_struct(value: Any, athena_type: str) -> dict[str, Any]:
+    """Return a struct as a cursor without type hints returns it.
+
+    Args:
+        value: The value from the table definition.
+        athena_type: The struct type.
+
+    Returns:
+        The field values as their text renderings.
+    """
+    field_types = dict(_struct_fields(athena_type))
+    return {k: _element_text(x, field_types[k]) for k, x in value.items()}
+
+
 def _same(value: Any, athena_type: str) -> Any:
     """Return the value unchanged.
 
@@ -186,19 +307,6 @@ def _same(value: Any, athena_type: str) -> Any:
         The value.
     """
     return value
-
-
-def _as_list(value: Any, athena_type: str) -> Any:
-    """Return an array value as a list.
-
-    Args:
-        value: The value from the table definition.
-        athena_type: The value's Athena type.
-
-    Returns:
-        The elements as a list.
-    """
-    return list(value)
 
 
 # A representation maps a type family to a rule(value, athena_type) that
@@ -226,14 +334,15 @@ _SCALARS: Representation = dict.fromkeys(
 )
 
 # Rows of Cursor, S3FSCursor, pyathena.pandas.util.as_pandas, and SQLAlchemy.
-# Without type hints, map and struct values are strings.
+# Without type hints, the cursors parse Athena's text rendering of arrays, maps,
+# and structs, so nested values that are not JSON are strings.
 PYTHON: Representation = {
     **_SCALARS,
     "timestamp with time zone": lambda v, t: v.replace(tzinfo=timezone.utc),
     "time": lambda v, t: v.time(),
-    "array": _as_list,
-    "map": lambda v, t: {str(k): str(x) for k, x in v},
-    "struct": lambda v, t: {k: str(x) for k, x in v.items()},
+    "array": _python_array,
+    "map": _python_map,
+    "struct": _python_struct,
     "json": _parsed_json,
 }
 
@@ -335,5 +444,5 @@ def assert_sqlalchemy_type(sqlalchemy_type: Any, column: Column) -> None:
         precision, scale = _parameters(column.athena_type)
         assert (sqlalchemy_type.precision, sqlalchemy_type.scale) == (precision, scale)
     elif name == "array":
-        element = _element_type(column.athena_type)
+        (element,) = _type_arguments(column.athena_type)
         assert isinstance(sqlalchemy_type.item_type, _SQLALCHEMY_TYPES[family(element)])
