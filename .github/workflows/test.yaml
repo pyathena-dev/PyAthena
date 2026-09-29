@@ -2,15 +2,23 @@ name: Test
 
 on:
   pull_request:
+    # ready_for_review starts the AWS jobs for a pull request leaving Draft;
+    # converted_to_draft starts a run without them, which cancels an
+    # in-progress run through the concurrency group.
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     paths-ignore:
       - 'docs/**'
       - '**.md'
-  schedule:
-    - cron:  '0 0 * * 0'
-  # Allows refreshing the README status badge on demand: the badge reflects
-  # the latest run on the default branch, which is otherwise only the weekly
-  # scheduled run and stays red for up to a week after a transient failure.
+  # Runs every suite on the selected branch, on the requested Python versions.
   workflow_dispatch:
+    inputs:
+      python-versions:
+        description: Comma-separated Python versions, such as 3.12 or 3.11,3.14; empty for every supported version
+        type: string
+        default: ''
+  # The Release workflow runs every suite on every supported Python version
+  # before publishing.
+  workflow_call:
 
 permissions:
   id-token: write
@@ -23,19 +31,83 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Offline checks run for every event, including Draft and fork pull requests.
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          python-version: '3.12'
+          enable-cache: true
+      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: just
+      - run: just lint
+
+  # Selects the Python versions of the AWS suites. Draft and external-fork pull
+  # requests run none. A ready pull request tests the newest Python version; a
+  # dispatch tests the requested versions or every version, and the Release
+  # workflow every version.
+  versions:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (!github.event.pull_request.draft &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      python-versions: ${{ steps.select.outputs.python-versions }}
+    steps:
+      - id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_VERSIONS: ${{ inputs.python-versions }}
+          # Every supported version, oldest first; keep in sync with the
+          # pyproject.toml classifiers.
+          PYTHON_VERSIONS: '["3.10", "3.11", "3.12", "3.13", "3.14"]'
+        run: |
+          case "$EVENT_NAME" in
+            pull_request)
+              versions=$(jq -c '[last]' <<< "$PYTHON_VERSIONS")
+              ;;
+            workflow_dispatch)
+              versions=$(jq -c --arg requested "$REQUESTED_VERSIONS" '
+                ($requested | split(",") | map(gsub("\\s"; "")) | map(select(. != "")) | unique) as $selected
+                | if $selected == [] then .
+                  elif ($selected - .) == [] then $selected
+                  else error("unsupported Python versions: \($selected - . | join(", "))")
+                  end' <<< "$PYTHON_VERSIONS")
+              ;;
+            *)
+              # The Release workflow (a workflow_call from a tag push).
+              versions=$(jq -c '.' <<< "$PYTHON_VERSIONS")
+              ;;
+          esac
+          echo "python-versions=$versions" >> "$GITHUB_OUTPUT"
+
   test:
+    needs: versions
     uses: ./.github/workflows/test-suite.yaml
     with:
       test-type: pyathena
+      python-versions: ${{ needs.versions.outputs.python-versions }}
 
   test-sqla:
-    needs: [test]
+    needs: [versions, test]
     uses: ./.github/workflows/test-suite.yaml
     with:
       test-type: sqla
+      python-versions: ${{ needs.versions.outputs.python-versions }}
 
   test-sqla-async:
-    needs: [test-sqla]
+    needs: [versions, test-sqla]
     uses: ./.github/workflows/test-suite.yaml
     with:
       test-type: sqla_async
+      python-versions: ${{ needs.versions.outputs.python-versions }}

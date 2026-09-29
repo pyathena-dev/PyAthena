@@ -6,9 +6,15 @@ on:
       test-type:
         required: true
         type: string
+      python-versions:
+        description: JSON array of the Python versions to test
+        required: true
+        type: string
 
 jobs:
   run:
+    # External fork contributions must validate AWS behavior in their own account.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
 
     env:
@@ -18,16 +24,15 @@ jobs:
       AWS_ATHENA_WORKGROUP: pyathena
       AWS_ATHENA_SPARK_WORKGROUP: pyathena-spark
       AWS_ATHENA_MANAGED_WORKGROUP: pyathena-managed
-      # Registered S3 Tables catalog (s3tablescatalog/<table-bucket>) and namespace
-      # for the SQLAlchemy S3 Tables tests; the table bucket, namespace, and the
-      # AWS analytics-services integration are provisioned out of band.
+      # The SQLAlchemy S3 Tables tests need a fixed namespace, which the test
+      # account no longer provides (master creates one per test session), so
+      # they are skipped on this branch.
       AWS_ATHENA_S3_TABLES_CATALOG: s3tablescatalog/laughingman7743-pyathena-s3-tables
-      AWS_ATHENA_S3_TABLES_NAMESPACE: pyathena
 
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+        python-version: ${{ fromJSON(inputs.python-versions) }}
 
     steps:
       - name: Checkout
