@@ -10,9 +10,12 @@ from sqlalchemy import (
     Numeric,
     String,
     Table,
+    cast,
+    column,
     exc,
     func,
     select,
+    types,
 )
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.sql import literal, literal_column
@@ -136,6 +139,24 @@ class TestAthenaTypeCompiler:
         json_type = types.JSON()
         result = compiler.visit_JSON(json_type)
         assert result == "JSON"
+
+    @pytest.mark.skipif(not hasattr(types, "Double"), reason="Requires SQLAlchemy 2.0")
+    @pytest.mark.parametrize(
+        ("type_name", "ddl", "cast_type"),
+        [
+            ("Float", "FLOAT", "REAL"),
+            ("FLOAT", "FLOAT", "REAL"),
+            ("REAL", "FLOAT", "REAL"),
+            ("Double", "DOUBLE", "DOUBLE"),
+            ("DOUBLE", "DOUBLE", "DOUBLE"),
+            ("DOUBLE_PRECISION", "DOUBLE", "DOUBLE"),
+        ],
+    )
+    def test_floating_point_types(self, type_name, ddl, cast_type):
+        dialect = AthenaDialect()
+        type_ = getattr(types, type_name)()
+        assert dialect.type_compiler_instance.process(type_) == ddl
+        assert str(cast(column("x"), type_).compile(dialect=dialect)) == f"CAST(x AS {cast_type})"
 
 
 class TestAthenaStatementCompiler:
