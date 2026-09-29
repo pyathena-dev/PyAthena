@@ -1,4 +1,4 @@
-"""Athena ARRAY types, JSON result projection, and nested value processing."""
+"""Athena ARRAY types, expressions, JSON projection, and nested value processing."""
 
 from __future__ import annotations
 
@@ -6,11 +6,11 @@ import json
 from collections.abc import Mapping
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import cast, exc, types
-from sqlalchemy.sql import sqltypes
-from sqlalchemy.sql.elements import ColumnElement
+from sqlalchemy.sql import operators, sqltypes
+from sqlalchemy.sql.elements import ColumnElement, Slice
 from sqlalchemy.sql.type_api import TypeEngine
 from sqlalchemy.sql.visitors import InternalTraversal
 
@@ -18,6 +18,12 @@ from pyathena.formatter import _ComplexParameter
 from pyathena.sqlalchemy.map import AthenaMap
 from pyathena.sqlalchemy.struct import AthenaStruct
 from pyathena.sqlalchemy.temporal import AthenaDate, AthenaTimestamp
+
+# SQLAlchemy 2.0.0's ARRAY comparator is not generic at runtime.
+if TYPE_CHECKING:
+    _ArrayComparatorBase = sqltypes.ARRAY.Comparator[Any]
+else:
+    _ArrayComparatorBase = sqltypes.ARRAY.Comparator
 
 
 class AthenaArray(sqltypes.ARRAY[Any]):
@@ -45,6 +51,24 @@ class AthenaArray(sqltypes.ARRAY[Any]):
     """
 
     __visit_name__ = "array"
+
+    class Comparator(_ArrayComparatorBase):
+        """Build array indexing expressions with inclusive SQL slice bounds."""
+
+        def _setup_getitem(self, index):
+            if isinstance(index, slice):
+                if index.step is not None and (type(index.step) is not int or index.step != 1):
+                    raise exc.CompileError("Athena ARRAY slices support only step=None or step=1")
+                start, stop = index.start, index.stop
+                if self.type.zero_indexes:
+                    start = start + 1 if start is not None else None
+                    stop = stop + 1 if stop is not None else None
+                return operators.getitem, Slice(start, stop, None), self.type
+            if self.type.zero_indexes:
+                index = index + 1
+            return operators.getitem, index, _ArrayTypeInspector.item_type(self.type)
+
+    comparator_factory = Comparator
 
     def __init__(
         self,
@@ -93,6 +117,21 @@ class AthenaArray(sqltypes.ARRAY[Any]):
         return _ArrayValueProcessor(self, dialect).result
 
 
+class _ArraySliceStepType(types.TypeDecorator[int]):
+    """Validate step values when SQLAlchemy reuses a generic ARRAY slice statement."""
+
+    impl = types.Integer
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if type(value) is not int or value != 1:
+            raise ValueError("Athena ARRAY slices support only step=None or step=1")
+        return value
+
+    def process_literal_param(self, value, dialect):
+        return self.process_bind_param(value, dialect)
+
+
 class ARRAY(AthenaArray):
     """Uppercase alias for AthenaArray type."""
 
@@ -136,6 +175,13 @@ class _ArrayTypeInspector:
 
     def __init__(self, dialect: Any) -> None:
         self.dialect = dialect
+
+    def array_type(self, type_: TypeEngine[Any]) -> sqltypes.ARRAY[Any] | None:
+        """Resolve the dialect's ARRAY implementation through variants and decorators."""
+        implementation = type_.dialect_impl(self.dialect)
+        while isinstance(implementation, types.TypeDecorator):
+            implementation = self.decorator_impl(implementation)
+        return implementation if isinstance(implementation, sqltypes.ARRAY) else None
 
     @staticmethod
     def item_type(type_: sqltypes.ARRAY[Any]) -> TypeEngine[Any]:

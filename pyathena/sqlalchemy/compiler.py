@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from itertools import product
 from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import exc, select, types, util
@@ -16,20 +17,23 @@ from sqlalchemy.sql.compiler import (
 from sqlalchemy.sql.elements import (
     BindParameter,
     Cast,
+    CollectionAggregate,
+    Null,
+    Slice,
     TextClause,
     UnaryExpression,
     _label_reference,
     _textual_label_reference,
 )
 from sqlalchemy.sql.schema import Column
-from sqlalchemy.sql.selectable import CompoundSelect
+from sqlalchemy.sql.selectable import CompoundSelect, ScalarSelect
 
 from pyathena.model import (
     AthenaFileFormat,
     AthenaPartitionTransform,
     AthenaRowFormatSerde,
 )
-from pyathena.sqlalchemy.array import _ArrayTypeInspector
+from pyathena.sqlalchemy.array import _ArraySliceStepType, _ArrayTypeInspector
 from pyathena.sqlalchemy.preparer import AthenaDDLIdentifierPreparer
 from pyathena.sqlalchemy.types import (
     AthenaMap,
@@ -259,6 +263,139 @@ class AthenaStatementCompiler(SQLCompiler):
     def visit_char_length_func(self, fn: Function[Any], **kw: Any) -> str:
         return f"length{self.function_argspec(fn, **kw)}"
 
+    @staticmethod
+    def _original_froms(elements):
+        for element in elements:
+            while element._is_clone_of is not None:
+                element = element._is_clone_of
+            yield element
+
+    def _array_lambda_name(self):
+        names = {
+            str(
+                element.text if isinstance(element, TextClause) else getattr(element, "name", "")
+            ).lower()
+            for element in visitors.iterate(self.statement)
+        }
+        index = getattr(self, "_array_lambda_index", 0)
+        # Textual SQL can embed a column name inside a larger expression.
+        while any(f"_pyathena_element_{index}" in name for name in names):
+            index += 1
+        self._array_lambda_index = index + 1
+        return f"_pyathena_element_{index}"
+
+    def visit_binary(
+        self,
+        binary,
+        override_operator=None,
+        eager_grouping=False,
+        from_linter=None,
+        lateral_from_linter=None,
+        **kw,
+    ):
+        kw.update(
+            eager_grouping=eager_grouping,
+            from_linter=from_linter,
+            lateral_from_linter=lateral_from_linter,
+        )
+        aggregate = binary.right
+        aggregate_on_left = isinstance(binary.left, CollectionAggregate)
+        if aggregate_on_left:
+            aggregate = binary.left
+        array_type = (
+            self._array_type_inspector.array_type(aggregate.element.type)
+            if isinstance(aggregate, CollectionAggregate)
+            and not isinstance(aggregate.element, ScalarSelect)
+            else None
+        )
+        if array_type is not None:
+            variable = self._array_lambda_name()
+            predicate = binary._clone()
+            item_type = _ArrayTypeInspector.item_type(array_type)
+            if aggregate_on_left:
+                predicate.left = Column(variable, item_type)
+            else:
+                predicate.right = Column(variable, item_type)
+                if isinstance(predicate.left, BindParameter) and (
+                    isinstance(item_type, types.ARRAY)
+                    or (
+                        predicate.left.type is aggregate.element.type
+                        and predicate.left.type._type_affinity is not types.ARRAY
+                    )
+                ):
+                    predicate.left = predicate.left._with_binary_element_type(item_type)
+            if from_linter is not None and operators.is_comparison(binary.operator):
+                if lateral_from_linter is not None:
+                    enclosing = [kw["enclosing_lateral"]]
+                    lateral_from_linter.edges.update(
+                        product(
+                            self._original_froms(binary.left._from_objects + enclosing),
+                            self._original_froms(binary.right._from_objects + enclosing),
+                        )
+                    )
+                else:
+                    from_linter.edges.update(
+                        product(
+                            self._original_froms(binary.left._from_objects),
+                            self._original_froms(binary.right._from_objects),
+                        )
+                    )
+            sql = super().visit_binary(predicate, override_operator=override_operator, **kw)
+            function = "any_match" if aggregate.operator is operators.any_op else "all_match"
+            array = self.process(aggregate.element, **kw)
+            return f"{function}({array}, {variable} -> {sql})"
+        return super().visit_binary(binary, override_operator=override_operator, **kw)
+
+    def visit_getitem_binary(self, binary, operator, **kw):
+        array_type = self._array_type_inspector.array_type(binary.left.type)
+        if array_type is None:
+            raise exc.CompileError("Athena indexing requires an ARRAY expression")
+        array = self.process(binary.left, **kw)
+        if isinstance(binary.right, Slice):
+            bounds = binary.right
+            if not isinstance(bounds.step, Null) and not (
+                isinstance(bounds.step, BindParameter)
+                and bounds.step.unique
+                and type(bounds.step.value) is int
+                and bounds.step.value == 1
+            ):
+                raise exc.CompileError("Athena ARRAY slices support only step=None or step=1")
+            start = "1" if isinstance(bounds.start, Null) else self.process(bounds.start, **kw)
+            stop = (
+                f"cardinality({array})"
+                if isinstance(bounds.stop, Null)
+                else self.process(bounds.stop, **kw)
+            )
+            start = f"greatest({start}, 1)"
+            length = f"greatest(least({stop}, cardinality({array})) - {start} + 1, 0)"
+            sql = f"slice({array}, {start}, {length})"
+            return self._array_slice_step(sql, bounds.step, array_type, **kw)
+        index_expression = binary.right
+        if (
+            isinstance(index_expression, BindParameter)
+            and self._array_type_inspector.array_type(index_expression.type) is not None
+        ):
+            index_expression = index_expression._with_binary_element_type(types.Integer())
+        index = self.process(index_expression, **kw)
+        return f"element_at({array}, NULLIF(greatest({index}, 0), 0))"
+
+    def _array_slice_step(self, sql, step, array_type, **kw):
+        if isinstance(step, Null):
+            return sql
+        if isinstance(step, BindParameter):
+            step = step._with_binary_element_type(_ArraySliceStepType())
+        step_sql = self.process(step, **kw)
+        failure = (
+            "CAST(concat('Unsupported ARRAY slice step: ', "
+            f"coalesce(CAST({step_sql} AS VARCHAR), 'NULL')) AS BIGINT)"
+        )
+        empty = (
+            f"slice({sql}, 1, 0)"
+            if _ArrayTypeInspector.has_unknown_element(array_type)
+            else f"CAST(ARRAY[] AS {self._complex_dml_type(array_type)})"
+        )
+        return f"IF({step_sql} = 1, {sql}, slice({empty}, {failure}, 0))"
+
     def translate_select_structure(self, select_stmt, **kw):
         """Keep DISTINCT and ordering on native arrays before result serialization."""
         if (
@@ -287,10 +424,8 @@ class AthenaStatementCompiler(SQLCompiler):
         return super().visit_compound_select(cs, asfrom=asfrom, compound_index=compound_index, **kw)
 
     def _has_array_result(self, column):
-        type_ = column.type.dialect_impl(self.dialect)
-        while isinstance(type_, types.TypeDecorator):
-            type_ = self._array_type_inspector.decorator_impl(type_)
-        return isinstance(type_, types.ARRAY) and not _ArrayTypeInspector.has_unknown_element(type_)
+        type_ = self._array_type_inspector.array_type(column.type)
+        return type_ is not None and not _ArrayTypeInspector.has_unknown_element(type_)
 
     def _array_result_select(self, statement):
         if any(
