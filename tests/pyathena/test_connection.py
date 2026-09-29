@@ -96,6 +96,12 @@ class TestConnection:
         assert conn.cursor(cursor_class).arraysize == 25
         assert conn.cursor(cursor_class, arraysize=50).arraysize == 50
 
+    def test_cursor_arraysize_default_fetch_size(self):
+        class SmallPageCursor(Cursor):
+            DEFAULT_FETCH_SIZE = 500
+
+        assert _connection().cursor(SmallPageCursor).arraysize == 500
+
     @pytest.mark.parametrize("cursor_class", PAGED_CURSORS)
     def test_cursor_arraysize_over_page_size(self, cursor_class):
         with pytest.raises(ProgrammingError):
