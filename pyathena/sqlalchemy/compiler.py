@@ -645,7 +645,7 @@ class AthenaStatementCompiler(SQLCompiler):
             type_clause = "CHAR"
         elif isinstance(cast.type, (types.LargeBinary, types.BINARY, types.VARBINARY)):
             type_clause = "VARBINARY"
-        elif hasattr(types, "DOUBLE") and isinstance(cast.type, types.DOUBLE):
+        elif hasattr(types, "Double") and isinstance(cast.type, types.Double):
             type_clause = "DOUBLE"
         elif isinstance(cast.type, (types.FLOAT, types.Float, types.REAL)):
             # https://docs.aws.amazon.com/athena/latest/ug/data-types.html
