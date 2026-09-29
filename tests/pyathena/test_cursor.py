@@ -6,6 +6,7 @@ import re
 import string
 import threading
 import time
+import uuid
 from concurrent import futures
 from concurrent.futures.thread import ThreadPoolExecutor
 from datetime import date, datetime, timezone
@@ -796,17 +797,29 @@ class TestCursor:
         conn.close()
 
     def test_show_partition(self, cursor):
-        location = f"{ENV.s3_staging_dir}{ENV.schema}/partition_table/"
-        for i in range(10):
+        table_name = f"partition_{uuid.uuid4().hex}"
+        table = f"{ENV.schema}.{table_name}"
+        location = f"{ENV.s3_staging_dir}{ENV.schema}/{table_name}/"
+        try:
             cursor.execute(
+                f"""
+                CREATE EXTERNAL TABLE {table} (a STRING)
+                PARTITIONED BY (b INT)
+                LOCATION '{location}'
                 """
-                ALTER TABLE partition_table ADD PARTITION (b=%(b)d)
-                LOCATION %(location)s
-                """,
-                {"b": i, "location": location},
             )
-        cursor.execute("SHOW PARTITIONS partition_table")
-        assert sorted(cursor.fetchall()) == [(f"b={i}",) for i in range(10)]
+            for i in range(10):
+                cursor.execute(
+                    f"""
+                    ALTER TABLE {table} ADD PARTITION (b=%(b)d)
+                    LOCATION %(location)s
+                    """,
+                    {"b": i, "location": location},
+                )
+            cursor.execute(f"SHOW PARTITIONS {table}")
+            assert sorted(cursor.fetchall()) == [(f"b={i}",) for i in range(10)]
+        finally:
+            cursor.execute(f"DROP TABLE IF EXISTS {table}")
 
     @pytest.mark.parametrize("cursor", [{"work_group": ENV.work_group}], indirect=["cursor"])
     def test_workgroup(self, cursor):
@@ -819,15 +832,15 @@ class TestCursor:
         cursor.execute("SELECT * FROM one_row")
         assert cursor.output_location
 
-    def test_executemany(self, cursor):
+    def test_executemany(self, cursor, empty_table):
         rows = [(1, "foo"), (2, "bar"), (3, "jim o'rourke")]
         cursor.executemany(
-            "INSERT INTO execute_many (a, b) VALUES (%(a)d, %(b)s)",
+            f"INSERT INTO {empty_table} (a, b) VALUES (%(a)d, %(b)s)",
             [{"a": a, "b": b} for a, b in rows],
         )
         # rowcount is not supported for executemany
         assert cursor.rowcount == -1
-        cursor.execute("SELECT * FROM execute_many")
+        cursor.execute(f"SELECT * FROM {empty_table}")
         assert sorted(cursor.fetchall()) == list(rows)
 
     def test_executemany_fetch(self, cursor):

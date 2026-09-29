@@ -1,5 +1,6 @@
 import contextlib
 import functools
+import uuid
 from io import BytesIO
 from pathlib import Path
 
@@ -220,6 +221,33 @@ def cursor(request):
     from pyathena.cursor import Cursor
 
     yield from _cursor(Cursor, request)
+
+
+@pytest.fixture
+def empty_table():
+    """Create an empty ``(a INT, b STRING)`` text table for one test and drop it on teardown.
+
+    The table has its own connection, so a test with any cursor type, including
+    the aio cursors, can write to it.
+
+    Yields:
+        The table name qualified with ``ENV.schema``.
+    """
+    table_name = f"empty_{uuid.uuid4().hex}"
+    table = f"{ENV.schema}.{table_name}"
+    with contextlib.closing(connect(schema_name=ENV.schema)) as conn, conn.cursor() as cursor:
+        try:
+            cursor.execute(
+                f"""
+                CREATE EXTERNAL TABLE {table} (a INT, b STRING)
+                ROW FORMAT DELIMITED FIELDS TERMINATED BY '\\t' LINES TERMINATED BY '\\n'
+                STORED AS TEXTFILE
+                LOCATION '{ENV.s3_staging_dir}{ENV.schema}/{table_name}/'
+                """
+            )
+            yield table
+        finally:
+            cursor.execute(f"DROP TABLE IF EXISTS {table}")
 
 
 @pytest.fixture

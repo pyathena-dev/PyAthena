@@ -288,14 +288,14 @@ class TestAioCursor:
         with pytest.raises(ProgrammingError):
             await aio_cursor.cancel()
 
-    async def test_executemany(self, aio_cursor):
+    async def test_executemany(self, aio_cursor, empty_table):
         rows = [(1, "foo"), (2, "bar"), (3, "jim o'rourke")]
         await aio_cursor.executemany(
-            "INSERT INTO execute_many_aio (a, b) VALUES (%(a)d, %(b)s)",
+            f"INSERT INTO {empty_table} (a, b) VALUES (%(a)d, %(b)s)",
             [{"a": a, "b": b} for a, b in rows],
         )
         assert aio_cursor.rowcount == -1
-        await aio_cursor.execute("SELECT * FROM execute_many_aio")
+        await aio_cursor.execute(f"SELECT * FROM {empty_table}")
         assert sorted(await aio_cursor.fetchall()) == list(rows)
 
     async def test_executemany_fetch(self, aio_cursor):

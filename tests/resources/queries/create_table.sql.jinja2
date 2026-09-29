@@ -53,69 +53,6 @@ CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.boolean_na_values (
 ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
 LOCATION '{{ s3_staging_dir }}{{ schema }}/boolean_na_values/';
 
-CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.execute_many (
-    a INT,
-    b STRING
-)
-ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
-LOCATION '{{ s3_staging_dir }}{{ schema }}/execute_many/';
-
-CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.execute_many_aio (
-    a INT,
-    b STRING
-)
-ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
-LOCATION '{{ s3_staging_dir }}{{ schema }}/execute_many_aio/';
-
-CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.execute_many_pandas (
-    a INT,
-    b STRING
-)
-ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
-LOCATION '{{ s3_staging_dir }}{{ schema }}/execute_many_pandas/';
-
-CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.execute_many_pandas_unload_auto (
-  a INT,
-  b STRING
-)
-ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
-LOCATION '{{ s3_staging_dir }}{{ schema }}/execute_many_pandas_unload_auto/';
-
-CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.execute_many_pandas_unload_pyarrow (
-    a INT,
-    b STRING
-)
-ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
-LOCATION '{{ s3_staging_dir }}{{ schema }}/execute_many_pandas_unload_pyarrow/';
-
-CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.execute_many_arrow (
-    a INT,
-    b STRING
-)
-ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
-LOCATION '{{ s3_staging_dir }}{{ schema }}/execute_many_arrow/';
-
-CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.execute_many_arrow_unload (
-    a INT,
-    b STRING
-)
-ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
-LOCATION '{{ s3_staging_dir }}{{ schema }}/execute_many_arrow_unload/';
-
-CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.execute_many_polars (
-    a INT,
-    b STRING
-)
-ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
-LOCATION '{{ s3_staging_dir }}{{ schema }}/execute_many_polars/';
-
-CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.execute_many_polars_unload (
-    a INT,
-    b STRING
-)
-ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
-LOCATION '{{ s3_staging_dir }}{{ schema }}/execute_many_polars_unload/';
-
 CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.parquet_with_compression (
     a INT
 )

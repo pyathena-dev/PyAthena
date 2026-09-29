@@ -1131,16 +1131,13 @@ class TestPandasCursor:
         ],
         indirect=["pandas_cursor"],
     )
-    def test_executemany(self, pandas_cursor, parquet_engine):
+    def test_executemany(self, pandas_cursor, parquet_engine, empty_table):
         rows = [(1, "foo"), (2, "bar"), (3, "jim o'rourke")]
-        table_name = "execute_many_pandas" + (
-            f"_unload_{parquet_engine}" if pandas_cursor._unload else ""
-        )
         pandas_cursor.executemany(
-            f"INSERT INTO {table_name} (a, b) VALUES (%(a)d, %(b)s)",
+            f"INSERT INTO {empty_table} (a, b) VALUES (%(a)d, %(b)s)",
             [{"a": a, "b": b} for a, b in rows],
         )
-        pandas_cursor.execute(f"SELECT * FROM {table_name}", engine=parquet_engine)
+        pandas_cursor.execute(f"SELECT * FROM {empty_table}", engine=parquet_engine)
         assert sorted(pandas_cursor.fetchall()) == list(rows)
 
     @pytest.mark.parametrize(
