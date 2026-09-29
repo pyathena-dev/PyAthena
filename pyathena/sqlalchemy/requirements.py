@@ -8,7 +8,7 @@ unsupported = exclusions.closed
 class Requirements(SuiteRequirements):
     @property
     def array_type(self):
-        return unsupported()
+        return supported()
 
     @property
     def uuid_data_type(self):

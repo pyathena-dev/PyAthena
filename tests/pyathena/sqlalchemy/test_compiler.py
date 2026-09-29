@@ -1,5 +1,3 @@
-from unittest.mock import Mock
-
 import pytest
 from sqlalchemy import (
     Column,
@@ -27,14 +25,14 @@ from tests import ENV
 
 class TestAthenaTypeCompiler:
     def test_visit_struct_empty(self):
-        dialect = Mock()
+        dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
         struct_type = AthenaStruct()
         result = compiler.visit_struct(struct_type)
         assert result == "ROW()"
 
     def test_visit_struct_with_fields(self):
-        dialect = Mock()
+        dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
         struct_type = AthenaStruct(("name", String), ("age", Integer))
         result = compiler.visit_struct(struct_type)
@@ -45,7 +43,7 @@ class TestAthenaTypeCompiler:
         assert result.endswith(")")
 
     def test_visit_struct_uppercase(self):
-        dialect = Mock()
+        dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
         struct_type = STRUCT(("id", Integer), ("title", String))
         result = compiler.visit_STRUCT(struct_type)
@@ -56,35 +54,35 @@ class TestAthenaTypeCompiler:
 
     def test_visit_struct_no_fields_attribute(self):
         # Test struct type without fields attribute
-        dialect = Mock()
+        dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
         struct_type = type("MockStruct", (), {})()
         result = compiler.visit_struct(struct_type)
         assert result == "ROW()"
 
     def test_visit_struct_single_field(self):
-        dialect = Mock()
+        dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
         struct_type = AthenaStruct(("name", String))
         result = compiler.visit_struct(struct_type)
         assert result == "ROW(name STRING)" or result == "ROW(name VARCHAR)"
 
     def test_visit_map_default(self):
-        dialect = Mock()
+        dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
         map_type = AthenaMap()
         result = compiler.visit_map(map_type)
         assert result == "MAP<STRING, STRING>"
 
     def test_visit_map_with_types(self):
-        dialect = Mock()
+        dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
         map_type = AthenaMap(String, Integer)
         result = compiler.visit_map(map_type)
         assert result == "MAP<STRING, INTEGER>" or result == "MAP<VARCHAR, INTEGER>"
 
     def test_visit_map_uppercase(self):
-        dialect = Mock()
+        dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
         map_type = MAP(Integer, String)
         result = compiler.visit_MAP(map_type)
@@ -92,28 +90,28 @@ class TestAthenaTypeCompiler:
 
     def test_visit_map_no_attributes(self):
         # Test map type without key_type/value_type attributes
-        dialect = Mock()
+        dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
         map_type = type("MockMap", (), {})()
         result = compiler.visit_map(map_type)
         assert result == "MAP<STRING, STRING>"
 
     def test_visit_array_default(self):
-        dialect = Mock()
+        dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
         array_type = AthenaArray()
         result = compiler.visit_array(array_type)
         assert result == "ARRAY<STRING>"
 
     def test_visit_array_with_type(self):
-        dialect = Mock()
+        dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
         array_type = AthenaArray(Integer)
         result = compiler.visit_array(array_type)
-        assert result == "ARRAY<INTEGER>"
+        assert result == "ARRAY<INT>"
 
     def test_visit_array_uppercase(self):
-        dialect = Mock()
+        dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
         array_type = ARRAY(String)
         result = compiler.visit_ARRAY(array_type)
@@ -121,7 +119,7 @@ class TestAthenaTypeCompiler:
 
     def test_visit_array_no_attributes(self):
         # Test array type without item_type attribute
-        dialect = Mock()
+        dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
         array_type = type("MockArray", (), {})()
         result = compiler.visit_array(array_type)
@@ -131,7 +129,7 @@ class TestAthenaTypeCompiler:
         """Test JSON type compilation."""
         from sqlalchemy import types
 
-        dialect = Mock()
+        dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
         json_type = types.JSON()
         result = compiler.visit_JSON(json_type)
