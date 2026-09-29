@@ -163,6 +163,8 @@ class AsyncAdapt_pyathena_dbapi:
     """
 
     paramstyle = "pyformat"
+    Binary = pyathena.Binary
+    BINARY = pyathena.BINARY
 
     # DBAPI exception hierarchy
     Error = Error

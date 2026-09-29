@@ -63,6 +63,7 @@ JSON: DBAPITypeObject = DBAPITypeObject(("json",))
 Date: type[datetime.date] = datetime.date
 Time: type[datetime.time] = datetime.time
 Timestamp: type[datetime.datetime] = datetime.datetime
+Binary: type[bytes] = bytes
 
 
 @overload

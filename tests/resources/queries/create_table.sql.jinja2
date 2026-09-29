@@ -1,4 +1,3 @@
-DROP TABLE IF EXISTS {{ schema }}.one_row;
 CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.one_row (number_of_rows INT COMMENT 'some comment')
 COMMENT 'table comment'
 ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
@@ -6,14 +5,12 @@ LOCATION '{{ s3_staging_dir }}{{ schema }}/one_row/';
 
 CREATE OR REPLACE VIEW {{ schema }}.view_one_row AS SELECT * FROM {{ schema }}.one_row;
 
-DROP TABLE IF EXISTS {{ schema }}.many_rows;
 CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.many_rows (
     a INT
 )
 ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
 LOCATION '{{ s3_staging_dir }}{{ schema }}/many_rows/';
 
-DROP TABLE IF EXISTS {{ schema }}.one_row_complex;
 CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.one_row_complex (
     col_boolean BOOLEAN,
     col_tinyint TINYINT,
@@ -35,7 +32,6 @@ CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.one_row_complex (
 ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
 LOCATION '{{ s3_staging_dir }}{{ schema }}/one_row_complex/';
 
-DROP TABLE IF EXISTS {{ schema }}.partition_table;
 CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.partition_table (
     a STRING
 )
@@ -43,7 +39,6 @@ PARTITIONED BY (b INT)
 ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
 LOCATION '{{ s3_staging_dir }}{{ schema }}/partition_table/';
 
-DROP TABLE IF EXISTS {{ schema }}.integer_na_values;
 CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.integer_na_values (
     a INT,
     b INT
@@ -51,7 +46,6 @@ CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.integer_na_values (
 ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
 LOCATION '{{ s3_staging_dir }}{{ schema }}/integer_na_values/';
 
-DROP TABLE IF EXISTS {{ schema }}.boolean_na_values;
 CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.boolean_na_values (
     a BOOLEAN,
     b BOOLEAN
@@ -59,79 +53,6 @@ CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.boolean_na_values (
 ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
 LOCATION '{{ s3_staging_dir }}{{ schema }}/boolean_na_values/';
 
-DROP TABLE IF EXISTS {{ schema }}.execute_many;
-CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.execute_many (
-    a INT,
-    b STRING
-)
-ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
-LOCATION '{{ s3_staging_dir }}{{ schema }}/execute_many/';
-
-DROP TABLE IF EXISTS {{ schema }}.execute_many_aio;
-CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.execute_many_aio (
-    a INT,
-    b STRING
-)
-ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
-LOCATION '{{ s3_staging_dir }}{{ schema }}/execute_many_aio/';
-
-DROP TABLE IF EXISTS {{ schema }}.execute_many_pandas;
-CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.execute_many_pandas (
-    a INT,
-    b STRING
-)
-ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
-LOCATION '{{ s3_staging_dir }}{{ schema }}/execute_many_pandas/';
-
-DROP TABLE IF EXISTS {{ schema }}.execute_many_pandas_unload_auto;
-CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.execute_many_pandas_unload_auto (
-  a INT,
-  b STRING
-)
-ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
-LOCATION '{{ s3_staging_dir }}{{ schema }}/execute_many_pandas_unload_auto/';
-
-DROP TABLE IF EXISTS {{ schema }}.execute_many_pandas_unload_pyarrow;
-CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.execute_many_pandas_unload_pyarrow (
-    a INT,
-    b STRING
-)
-ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
-LOCATION '{{ s3_staging_dir }}{{ schema }}/execute_many_pandas_unload_pyarrow/';
-
-DROP TABLE IF EXISTS {{ schema }}.execute_many_arrow;
-CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.execute_many_arrow (
-    a INT,
-    b STRING
-)
-ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
-LOCATION '{{ s3_staging_dir }}{{ schema }}/execute_many_arrow/';
-
-DROP TABLE IF EXISTS {{ schema }}.execute_many_arrow_unload;
-CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.execute_many_arrow_unload (
-    a INT,
-    b STRING
-)
-ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
-LOCATION '{{ s3_staging_dir }}{{ schema }}/execute_many_arrow_unload/';
-
-DROP TABLE IF EXISTS {{ schema }}.execute_many_polars;
-CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.execute_many_polars (
-    a INT,
-    b STRING
-)
-ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
-LOCATION '{{ s3_staging_dir }}{{ schema }}/execute_many_polars/';
-
-DROP TABLE IF EXISTS {{ schema }}.execute_many_polars_unload;
-CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.execute_many_polars_unload (
-    a INT,
-    b STRING
-)
-ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
-LOCATION '{{ s3_staging_dir }}{{ schema }}/execute_many_polars_unload/';
-
-DROP TABLE IF EXISTS {{ schema }}.parquet_with_compression;
 CREATE EXTERNAL TABLE IF NOT EXISTS {{ schema }}.parquet_with_compression (
     a INT
 )

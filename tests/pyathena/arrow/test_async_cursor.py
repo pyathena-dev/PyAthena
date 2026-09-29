@@ -16,6 +16,22 @@ from tests.pyathena.conftest import connect
 
 
 class TestAsyncArrowCursor:
+    def test_binary_null_vs_empty(self, async_arrow_cursor):
+        query = """SELECT * FROM (VALUES
+                    (1, CAST(NULL AS VARBINARY), 'null', CAST(NULL AS VARCHAR)),
+                    (2, X'', 'empty', ''),
+                    (3, X'00ff275c25', 'comma, quote" and' || chr(10) || 'newline', 'NULL')
+                ) AS t(id, value, label, text_value) ORDER BY id"""
+        _, future = async_arrow_cursor.execute(query)
+        result = future.result()
+        rows = result.fetchall()
+        assert [row[:3] for row in rows] == [
+            (1, None, "null"),
+            (2, b"", "empty"),
+            (3, b"\x00\xff'\\%", 'comma, quote" and\nnewline'),
+        ]
+        assert [row[3] for row in rows] == ["", "", "NULL"]
+
     @pytest.mark.parametrize(
         "async_arrow_cursor",
         [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],

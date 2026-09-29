@@ -1,4 +1,6 @@
 import contextlib
+import functools
+import uuid
 from io import BytesIO
 from pathlib import Path
 
@@ -12,16 +14,97 @@ from tests.pyathena.util import read_query
 
 
 def pytest_sessionstart(session):
-    _upload_rows()
-    with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
-        _create_database(cursor)
-        _create_table(cursor)
+    # The pytest-xdist controller runs no tests, so it sets up nothing.
+    if not _is_test_process(session.config):
+        return
+    _create_s3tables_namespace()
+    # pytest skips pytest_sessionfinish after a failed pytest_sessionstart, so
+    # a failure after the namespace is created deletes it here.
+    try:
+        _upload_rows()
+        with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
+            _create_database(cursor)
+            _create_table(cursor)
+    except BaseException:
+        _delete_s3tables_namespace()
+        raise
 
 
 def pytest_sessionfinish(session):
-    with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
-        _drop_database(cursor)
-    _delete_rows()
+    if not _is_test_process(session.config):
+        return
+    # Each cleanup step runs even if an earlier one fails.
+    try:
+        with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
+            _drop_database(cursor)
+    finally:
+        try:
+            _delete_rows()
+        finally:
+            _delete_s3tables_namespace()
+
+
+def _is_test_process(config):
+    """Whether this process runs tests, rather than only controlling xdist workers.
+
+    Args:
+        config: The pytest config.
+
+    Returns:
+        False for the pytest-xdist controller, True for a worker or a run without
+        workers.
+    """
+    return hasattr(config, "workerinput") or not getattr(config.option, "numprocesses", None)
+
+
+@functools.cache
+def _s3tables():
+    """Return an S3 Tables client and the ARN of ``ENV.s3tables_catalog``'s table bucket.
+
+    The ARN uses the client's region, so the two always agree.
+
+    Returns:
+        The client and the table bucket's ARN.
+
+    Raises:
+        ValueError: If ``AWS_ATHENA_S3_TABLES_CATALOG`` is not
+            ``s3tablescatalog/<table-bucket>``.
+    """
+    prefix, _, bucket = ENV.s3tables_catalog.partition("/")
+    if prefix != "s3tablescatalog" or not bucket:
+        raise ValueError(
+            "AWS_ATHENA_S3_TABLES_CATALOG must be s3tablescatalog/<table-bucket>, "
+            f"not {ENV.s3tables_catalog!r}."
+        )
+    client = boto3.client("s3tables")
+    account = boto3.client("sts").get_caller_identity()["Account"]
+    region = client.meta.region_name
+    return client, f"arn:aws:s3tables:{region}:{account}:bucket/{bucket}"
+
+
+def _create_s3tables_namespace():
+    """Create this process's S3 Tables namespace when S3 Tables are configured."""
+    if not ENV.s3tables_catalog:
+        return
+    client, arn = _s3tables()
+    client.create_namespace(tableBucketARN=arn, namespace=[ENV.s3tables_namespace])
+
+
+def _delete_s3tables_namespace():
+    """Delete this process's S3 Tables namespace and any table left in it."""
+    if not ENV.s3tables_catalog:
+        return
+    client, arn = _s3tables()
+    tables = [
+        table["name"]
+        for page in client.get_paginator("list_tables").paginate(
+            tableBucketARN=arn, namespace=ENV.s3tables_namespace
+        )
+        for table in page["tables"]
+    ]
+    for table in tables:
+        client.delete_table(tableBucketARN=arn, namespace=ENV.s3tables_namespace, name=table)
+    client.delete_namespace(tableBucketARN=arn, namespace=ENV.s3tables_namespace)
 
 
 def _upload_rows():
@@ -89,6 +172,7 @@ def create_engine(**kwargs):
         "row_format",
         "serdeproperties",
         "tblproperties",
+        "unload",
         "verify",
     ]:
         if arg in kwargs:
@@ -107,6 +191,8 @@ def create_engine(**kwargs):
 def create_async_engine(**kwargs):
     driver = kwargs.pop("driver", "aiorest")
     conn_str = ASYNC_SQLALCHEMY_CONNECTION_STRING.replace("+aiorest", f"+{driver}")
+    if "unload" in kwargs:
+        conn_str += "&unload={unload}"
     return _create_async_engine(
         conn_str.format(
             region_name=ENV.region_name,
@@ -135,6 +221,33 @@ def cursor(request):
     from pyathena.cursor import Cursor
 
     yield from _cursor(Cursor, request)
+
+
+@pytest.fixture
+def empty_table():
+    """Create an empty ``(a INT, b STRING)`` text table for one test and drop it on teardown.
+
+    The table has its own connection, so a test with any cursor type, including
+    the aio cursors, can write to it.
+
+    Yields:
+        The table name qualified with ``ENV.schema``.
+    """
+    table_name = f"empty_{uuid.uuid4().hex}"
+    table = f"{ENV.schema}.{table_name}"
+    with contextlib.closing(connect(schema_name=ENV.schema)) as conn, conn.cursor() as cursor:
+        try:
+            cursor.execute(
+                f"""
+                CREATE EXTERNAL TABLE {table} (a INT, b STRING)
+                ROW FORMAT DELIMITED FIELDS TERMINATED BY '\\t' LINES TERMINATED BY '\\n'
+                STORED AS TEXTFILE
+                LOCATION '{ENV.s3_staging_dir}{ENV.schema}/{table_name}/'
+                """
+            )
+            yield table
+        finally:
+            cursor.execute(f"DROP TABLE IF EXISTS {table}")
 
 
 @pytest.fixture

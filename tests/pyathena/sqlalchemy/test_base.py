@@ -26,27 +26,60 @@ from pyathena.sqlalchemy.types import (
 )
 from tests.pyathena.conftest import ENV
 
-# Amazon S3 Tables tests need a pre-provisioned table-bucket catalog and namespace.
-# Skip them unless AWS_ATHENA_S3_TABLES_CATALOG / AWS_ATHENA_S3_TABLES_NAMESPACE are set.
+# Amazon S3 Tables tests need a pre-provisioned table-bucket catalog; the session
+# creates its own namespace in it.
+# Skip them unless AWS_ATHENA_S3_TABLES_CATALOG is set.
 requires_s3_tables = pytest.mark.skipif(
-    not ENV.s3tables_catalog or not ENV.s3tables_namespace,
-    reason="AWS_ATHENA_S3_TABLES_CATALOG / AWS_ATHENA_S3_TABLES_NAMESPACE are not configured",
+    not ENV.s3tables_catalog,
+    reason="AWS_ATHENA_S3_TABLES_CATALOG is not configured",
 )
 
 
 def unique_s3tables_table_name(base: str) -> str:
-    """Return a per-run-unique S3 Tables table name.
+    """Return a unique S3 Tables table name.
 
-    Other integration tests isolate themselves with a random per-process
-    ``ENV.schema``, but the S3 Tables tests share one fixed namespace
-    (``ENV.s3tables_namespace``). The CI matrix runs ``tests/pyathena`` once per
-    Python version in parallel against the same account, so a fixed table name
-    would collide across those concurrent jobs; a random suffix keeps them apart.
+    The session's namespace (``ENV.s3tables_namespace``) is its own, but a
+    rerun of a failed test would find the table an earlier attempt left there.
+
+    Args:
+        base: The name to extend.
+
+    Returns:
+        ``base`` with a random suffix.
     """
     return f"{base}_{uuid.uuid4().hex[:8]}"
 
 
 class TestSQLAlchemyAthena:
+    @pytest.mark.parametrize(
+        "engine",
+        [{"driver": driver} for driver in ("rest", "pandas", "arrow", "polars", "s3fs")],
+        indirect=True,
+    )
+    def test_native_array_results_across_cursors(self, engine):
+        engine, _ = engine
+        modes = (
+            (False, True) if engine.dialect.driver in ("pandas", "arrow", "polars") else (False,)
+        )
+        for unload in modes:
+            url = engine.url.update_query_dict({"unload": str(unload).lower()})
+            array_engine = sqlalchemy.create_engine(url)
+            try:
+                with array_engine.connect() as conn:
+                    result = conn.execute(
+                        select(
+                            sqlalchemy.literal(
+                                [["001", "a,b", "null", ""], [], None],
+                                AthenaArray(types.String, dimensions=2),
+                            ).label("nested"),
+                            sqlalchemy.literal([], AthenaArray(types.Integer)).label("empty"),
+                            sqlalchemy.literal(None, AthenaArray(types.Integer)).label("missing"),
+                        )
+                    ).one()
+                    assert tuple(result) == ([["001", "a,b", "null", ""], [], None], [], None)
+            finally:
+                array_engine.dispose()
+
     @pytest.mark.parametrize(
         "engine",
         [
@@ -549,7 +582,8 @@ class TestSQLAlchemyAthena:
         assert isinstance(one_row_complex.c.col_timestamp.type, types.TIMESTAMP)
         assert isinstance(one_row_complex.c.col_date.type, types.DATE)
         assert isinstance(one_row_complex.c.col_binary.type, types.BINARY)
-        assert isinstance(one_row_complex.c.col_array.type, types.String)
+        assert isinstance(one_row_complex.c.col_array.type, AthenaArray)
+        assert isinstance(one_row_complex.c.col_array.type.item_type, types.INTEGER)
         assert isinstance(one_row_complex.c.col_map.type, types.String)
         # With struct support, col_struct should now be recognized as AthenaStruct
 
@@ -602,7 +636,7 @@ class TestSQLAlchemyAthena:
         assert isinstance(dialect._get_column_type("timestamp"), types.TIMESTAMP)
         assert isinstance(dialect._get_column_type("date"), types.DATE)
         assert isinstance(dialect._get_column_type("binary"), types.BINARY)
-        assert isinstance(dialect._get_column_type("array<integer>"), types.String)
+        assert isinstance(dialect._get_column_type("array<integer>"), AthenaArray)
         assert isinstance(dialect._get_column_type("map<int, int>"), types.String)
         # With struct support, struct types should be recognized as AthenaStruct
 
@@ -1507,6 +1541,65 @@ OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat'
         ).scalar()
         assert actual == "1"
 
+    @pytest.mark.parametrize(
+        "engine",
+        [{"driver": driver} for driver in ("rest", "pandas", "arrow", "polars", "s3fs")],
+        indirect=True,
+    )
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (b"", b""),
+            (b"\x00\xff'\\%", b"\x00\xff'\\%"),
+            (bytes(range(256)), bytes(range(256))),
+            (bytearray(b"\x00\xff"), b"\x00\xff"),
+            (memoryview(b"\x00\xff"), b"\x00\xff"),
+        ],
+        ids=["empty", "special", "all_bytes", "bytearray", "memoryview"],
+    )
+    def test_binary_parameters_and_literals(self, engine, value, expected):
+        _, conn = engine
+        columns = [
+            expression.cast(
+                expression.literal(value, type_=type_, literal_execute=literal_execute), type_
+            )
+            for type_ in (types.LargeBinary, types.BINARY, types.VARBINARY)
+            for literal_execute in (False, True)
+        ]
+        statement = select(*columns)
+        assert conn.execute(statement).one() == (expected,) * len(columns)
+        compiled = statement.compile(dialect=conn.dialect, compile_kwargs={"literal_binds": True})
+        assert conn.exec_driver_sql(str(compiled)).one() == (expected,) * len(columns)
+
+    @pytest.mark.parametrize(
+        "engine",
+        [
+            {"driver": "rest"},
+            {"driver": "pandas"},
+            {"driver": "arrow"},
+            {"driver": "polars"},
+            {"driver": "s3fs"},
+            {"driver": "pandas", "unload": True},
+            {"driver": "arrow", "unload": True},
+        ],
+        indirect=["engine"],
+        ids=["rest", "pandas_csv", "arrow_csv", "polars", "s3fs", "pandas_unload", "arrow_unload"],
+    )
+    def test_binary_null_vs_empty(self, engine):
+        _, conn = engine
+        columns = [
+            expression.cast(
+                expression.literal(value, type_=type_, literal_execute=literal_execute), type_
+            )
+            for type_ in (types.LargeBinary, types.BINARY, types.VARBINARY)
+            for value in (None, b"")
+            for literal_execute in (False, True)
+        ]
+        statement = select(*columns)
+        assert conn.execute(statement).one() == (None, None, b"", b"") * 3
+        compiled = statement.compile(dialect=conn.dialect, compile_kwargs={"literal_binds": True})
+        assert conn.exec_driver_sql(str(compiled)).one() == (None, None, b"", b"") * 3
+
     def test_cast_as_binary(self, engine):
         engine, conn = engine
         one_row_complex = Table("one_row_complex", MetaData(schema=ENV.schema), autoload_with=conn)
@@ -1514,10 +1607,12 @@ OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat'
             sqlalchemy.select(
                 expression.cast(one_row_complex.c.col_string, types.BINARY),
                 expression.cast(one_row_complex.c.col_varchar, types.VARBINARY),
+                expression.cast(one_row_complex.c.col_string, types.LargeBinary),
             )
         ).one()
         assert actual[0] == b"a string"
         assert actual[1] == b"varchar"
+        assert actual[2] == b"a string"
 
     def test_create_table_with_partition(self, engine):
         engine, conn = engine
@@ -2075,8 +2170,8 @@ OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat'
             assert tblproperties["table_type"] == "ICEBERG"
         finally:
             # Idempotent unquoted drop: tolerates a table that was never created
-            # while still surfacing systematic DROP failures, which would
-            # otherwise leak tables into the shared fixed namespace.
+            # while still surfacing systematic DROP failures; the session's
+            # namespace cleanup removes anything left behind.
             conn.execute(text(f"DROP TABLE IF EXISTS {schema}.{table_name}"))
 
     @requires_s3_tables
@@ -2387,9 +2482,9 @@ SELECT {ENV.schema}.{table_name}.id, {ENV.schema}.{table_name}.name \n\
 
         # Verify ARRAY types are correctly compiled
         assert "tags ARRAY<STRING>" in ddl_string
-        assert "scores ARRAY<INTEGER>" in ddl_string
+        assert "scores ARRAY<INT>" in ddl_string
         assert "nested_arrays ARRAY<ARRAY<STRING>>" in ddl_string
-        assert "struct_array ARRAY<ROW(name STRING, age INTEGER)>" in ddl_string
+        assert "struct_array ARRAY<STRUCT<name:STRING, age:INT>>" in ddl_string
 
     def test_create_table_with_map_types(self, engine):
         """Test DDL compilation for MAP types."""
@@ -2418,8 +2513,8 @@ SELECT {ENV.schema}.{table_name}.id, {ENV.schema}.{table_name}.name \n\
 
         # Verify MAP types are correctly compiled
         assert "attributes MAP<STRING, STRING>" in ddl_string
-        assert "metrics MAP<STRING, INTEGER>" in ddl_string
-        assert "complex_map MAP<STRING, ROW(value STRING, count INTEGER)>" in ddl_string
+        assert "metrics MAP<STRING, INT>" in ddl_string
+        assert "complex_map MAP<STRING, STRUCT<value:STRING, count:INT>>" in ddl_string
         assert "nested_map MAP<STRING, ARRAY<STRING>>" in ddl_string
 
     def test_create_table_with_struct_types(self, engine):
@@ -2461,12 +2556,12 @@ SELECT {ENV.schema}.{table_name}.id, {ENV.schema}.{table_name}.name \n\
         ddl_string = str(create_ddl)
 
         # Verify STRUCT types are correctly compiled
-        assert "user_info ROW(name STRING, age INTEGER, email STRING)" in ddl_string
+        assert "user_info STRUCT<name:STRING, age:INT, email:STRING>" in ddl_string
         assert (
-            "nested_struct ROW(personal ROW(first_name STRING, last_name STRING), "
-            "preferences MAP<STRING, STRING>)" in ddl_string
+            "nested_struct STRUCT<personal:STRUCT<first_name:STRING, last_name:STRING>, "
+            "preferences:MAP<STRING, STRING>>" in ddl_string
         )
-        assert "struct_with_array ROW(tags ARRAY<STRING>, scores ARRAY<INTEGER>)" in ddl_string
+        assert "struct_with_array STRUCT<tags:ARRAY<STRING>, scores:ARRAY<INT>>" in ddl_string
 
     def test_create_table_with_complex_nested_types(self, engine):
         """Test DDL compilation for complex nested combinations of ARRAY, MAP, and STRUCT."""
@@ -2499,10 +2594,61 @@ SELECT {ENV.schema}.{table_name}.id, {ENV.schema}.{table_name}.name \n\
 
         # Verify complex nested type is correctly compiled
         expected_type = (
-            "data ARRAY<MAP<STRING, ROW(value STRING, metadata MAP<STRING, STRING>, "
-            "tags ARRAY<STRING>)>>"
+            "data ARRAY<MAP<STRING, STRUCT<value:STRING, metadata:MAP<STRING, STRING>, "
+            "tags:ARRAY<STRING>>>>"
         )
         assert expected_type in ddl_string
+
+    def test_external_parquet_struct_columns_round_trip(self, engine):
+        """Create a Parquet table of top-level and MAP-nested STRUCTs and read the fields back."""
+        _, conn = engine
+        table_name = "test_external_parquet_struct_columns"
+        location = f"{ENV.s3_staging_dir}{ENV.schema}/{table_name}/"
+        table = Table(
+            table_name,
+            MetaData(schema=ENV.schema),
+            Column(
+                "profile",
+                AthenaStruct(
+                    ("name", types.String),
+                    ("age", types.Integer),
+                    (
+                        "address",
+                        AthenaStruct(("city", types.String), ("zip", types.Integer)),
+                    ),
+                ),
+            ),
+            Column(
+                "labels",
+                AthenaMap(
+                    types.String,
+                    AthenaStruct(("value", types.String), ("count", types.Integer)),
+                ),
+            ),
+            awsathena_location=location,
+            awsathena_file_format="PARQUET",
+        )
+        ddl = str(CreateTable(table).compile(dialect=conn.dialect))
+        assert "profile STRUCT<name:STRING, age:INT, address:STRUCT<city:STRING, zip:INT>>" in ddl
+        assert "labels MAP<STRING, STRUCT<value:STRING, count:INT>>" in ddl
+        table.create(bind=conn)
+        conn.execute(
+            text(
+                f"INSERT INTO {ENV.schema}.{table_name} VALUES ("
+                "CAST(ROW('Ada', 36, ROW('London', 12345)) AS "
+                "ROW(name VARCHAR, age INTEGER, address ROW(city VARCHAR, zip INTEGER))), "
+                "MAP(ARRAY['home'], ARRAY[CAST(ROW('Lovelace', 2) AS "
+                "ROW(value VARCHAR, count INTEGER))]))"
+            )
+        )
+        row = conn.execute(
+            text(
+                "SELECT profile.name, profile.age, profile.address.city, "
+                "profile.address.zip, labels['home'].value, labels['home'].count "
+                f"FROM {ENV.schema}.{table_name}"
+            )
+        ).one()
+        assert tuple(row) == ("Ada", 36, "London", 12345, "Lovelace", 2)
 
     def test_sqlalchemy_execute_with_execution_options_callback(self, engine):
         """Test callback functionality through SQLAlchemy execution_options."""

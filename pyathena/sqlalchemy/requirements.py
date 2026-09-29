@@ -8,7 +8,7 @@ unsupported = exclusions.closed
 class Requirements(SuiteRequirements):
     @property
     def array_type(self):
-        return unsupported()
+        return supported()
 
     @property
     def uuid_data_type(self):
@@ -72,7 +72,8 @@ class Requirements(SuiteRequirements):
 
     @property
     def update_where_target_in_subquery(self):
-        return unsupported()
+        # Verified with Iceberg tables on Athena engine version 3.
+        return supported()
 
     @property
     def recursive_fk_cascade(self):
@@ -88,12 +89,18 @@ class Requirements(SuiteRequirements):
 
     @property
     def precision_generic_float_type(self):
-        # TODO: AssertionError:
-        #  {Decimal('15.7563820'), Decimal('15.7563830')} != {Decimal('15.7563827')}
-        return unsupported()
+        return exclusions.skip_if(
+            lambda _: True,
+            "Generic Float maps to Athena REAL, a 32-bit type with about seven "
+            "significant digits; use Double for 64-bit values.",
+        )
 
     @property
     def precision_numerics_many_significant_digits(self):
+        return supported()
+
+    @property
+    def precision_numerics_retains_significant_digits(self):
         return supported()
 
     @property
@@ -102,7 +109,34 @@ class Requirements(SuiteRequirements):
 
     @property
     def ctes(self):
+        # Recursive CTEs require Athena engine version 3 and have a maximum depth of 10.
         return supported()
+
+    @property
+    def ctes_with_values(self):
+        return supported()
+
+    @property
+    def ctes_with_update_delete(self):
+        return exclusions.skip_if(
+            lambda _: True, "Athena does not support WITH preceding UPDATE or DELETE."
+        )
+
+    @property
+    def ctes_on_dml(self):
+        return exclusions.skip_if(
+            lambda _: True, "Athena does not support INSERT, UPDATE, or DELETE inside a CTE."
+        )
+
+    @property
+    def update_from(self):
+        return exclusions.skip_if(lambda _: True, "Athena does not support UPDATE ... FROM.")
+
+    @property
+    def delete_from(self):
+        return exclusions.skip_if(
+            lambda _: True, "Athena does not support DELETE ... USING or multi-table DELETE."
+        )
 
     @property
     def views(self):

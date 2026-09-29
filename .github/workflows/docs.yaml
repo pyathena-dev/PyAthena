@@ -24,6 +24,23 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0  # Fetch all history for sphinx-multiversion
+      # sphinx-multiversion builds every version tag in the checkout. A tag
+      # gets its GitHub release only after the Release workflow's tests and
+      # PyPI upload succeed, so drop tags without one: a release still in
+      # progress or refused by its tests is not documented.
+      - name: Drop unreleased version tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          released=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft | not) | .tag_name')
+          if [[ -z "$released" ]]; then
+            echo "::error::No published GitHub releases found"
+            exit 1
+          fi
+          git tag --list 'v*' | while read -r tag; do
+            grep -qxF "$tag" <<< "$released" || git tag --delete "$tag"
+          done
       - name: Setup Pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0

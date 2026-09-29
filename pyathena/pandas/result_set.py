@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import csv
 import logging
 from collections import abc
 from collections.abc import Callable, Iterable, Iterator
+from contextlib import ExitStack
+from functools import partial
+from io import BufferedReader, StringIO, TextIOWrapper
 from multiprocessing import cpu_count
 from typing import (
     TYPE_CHECKING,
@@ -10,10 +14,13 @@ from typing import (
     ClassVar,
 )
 
+from fsspec import open as filesystem_open
+
 from pyathena import OperationalError
 from pyathena.converter import Converter
 from pyathena.error import ProgrammingError
 from pyathena.model import AthenaQueryExecution
+from pyathena.pandas.reader import _BINARY_NULL, BinaryCSVReader
 from pyathena.result_set import AthenaResultSet
 from pyathena.util import RetryConfig, parse_output_location
 
@@ -24,6 +31,10 @@ if TYPE_CHECKING:
     from pyathena.connection import Connection
 
 _logger = logging.getLogger(__name__)
+
+
+def _convert_binary_csv(converter: Callable[[str | None], Any], value: str) -> Any:
+    return converter(None if value == _BINARY_NULL else value)
 
 
 def _no_trunc_date(df: DataFrame) -> DataFrame:
@@ -59,12 +70,14 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         self,
         reader: TextFileReader | DataFrame,
         trunc_date: Callable[[DataFrame], DataFrame],
+        csv_stream: TextIOWrapper | None = None,
     ) -> None:
         """Initialize the iterator.
 
         Args:
             reader: Either a TextFileReader (for chunked) or a single DataFrame.
             trunc_date: Function to apply date truncation to each chunk.
+            csv_stream: Optional CSV stream owned and closed by this iterator.
         """
         from pandas import DataFrame
 
@@ -73,6 +86,7 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         else:
             self._reader = reader
         self._trunc_date = trunc_date
+        self._csv_stream = csv_stream
 
     def __next__(self) -> DataFrame:
         """Get the next DataFrame chunk.
@@ -86,7 +100,7 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         try:
             df = next(self._reader)
             return self._trunc_date(df)
-        except StopIteration:
+        except BaseException:
             self.close()
             raise
 
@@ -106,8 +120,14 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         """Close the iterator and release resources."""
         from pandas.io.parsers import TextFileReader
 
-        if isinstance(self._reader, TextFileReader):
-            self._reader.close()
+        reader = self._reader
+        self._reader = iter(())
+        try:
+            if isinstance(reader, TextFileReader):
+                reader.close()
+        finally:
+            if self._csv_stream is not None:
+                self._csv_stream.close()
 
     def iterrows(self) -> Iterator[tuple[int, dict[str, Any]]]:
         """Iterate over rows as (index, row_dict) tuples.
@@ -137,9 +157,13 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         """
         from pandas.io.parsers import TextFileReader
 
-        if isinstance(self._reader, TextFileReader):
-            return self._reader.get_chunk(size)
-        return next(self._reader)
+        try:
+            if isinstance(self._reader, TextFileReader):
+                return self._reader.get_chunk(size)
+            return next(self._reader)
+        except BaseException:
+            self.close()
+            raise
 
     def as_pandas(self) -> DataFrame:
         """Collect all chunks into a single DataFrame.
@@ -281,6 +305,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         self._data_manifest: list[str] = []
         self._kwargs = kwargs
         self._fs = self.__s3_file_system()
+        self._csv_stream: TextIOWrapper | None = None
 
         # Cache time column names for efficient _trunc_date processing
         description = self.description if self.description else []
@@ -291,7 +316,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
             df = self._as_pandas()
             trunc_date = _no_trunc_date if self.is_unload else self._trunc_date
-            self._df_iter = PandasDataFrameIterator(df, trunc_date)
+            self._df_iter = PandasDataFrameIterator(df, trunc_date, self._csv_stream)
         elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
             df = self._as_pandas_from_api()
             self._df_iter = PandasDataFrameIterator(df, self._trunc_date)
@@ -504,18 +529,6 @@ class AthenaPandasResultSet(AthenaResultSet):
         if length == 0:
             return pd.DataFrame()
 
-        if self.output_location.endswith(".txt"):
-            sep = "\t"
-            header = None
-            description = self.description if self.description else []
-            names = [d[0] for d in description]
-        elif self.output_location.endswith(".csv"):
-            sep = ","
-            header = 0
-            names = None
-        else:
-            return pd.DataFrame()
-
         # Chunksize determination with user preference priority
         effective_chunksize = self._chunksize
 
@@ -529,7 +542,50 @@ class AthenaPandasResultSet(AthenaResultSet):
                 )
 
         csv_engine = self._get_csv_engine(length, effective_chunksize)
-        read_csv_kwargs = {
+        read_csv_kwargs = self._get_csv_read_options(csv_engine, effective_chunksize)
+
+        try:
+            with ExitStack() as stack:
+                source: str | TextIOWrapper = self.output_location
+                binary_columns = self._configure_binary_csv_read(read_csv_kwargs, pd.read_csv)
+                if binary_columns:
+                    storage_options = read_csv_kwargs.pop("storage_options", None) or {}
+                    self._csv_stream = stack.enter_context(
+                        self._open_binary_csv_stream(binary_columns, storage_options)
+                    )
+                    source = self._csv_stream
+                result = pd.read_csv(source, **read_csv_kwargs)
+                if not isinstance(result, pd.DataFrame):
+                    # The chunk iterator takes ownership of the stream.
+                    stack.pop_all()
+
+            # Log performance information for large files
+            if length > self.LARGE_FILE_THRESHOLD_BYTES:
+                mode = "chunked" if effective_chunksize else "full"
+                chunksize = f" with chunksize={effective_chunksize}" if effective_chunksize else ""
+                _logger.info(
+                    f"Reading {length} bytes from S3 in {mode} mode "
+                    f"using {csv_engine} engine{chunksize}"
+                )
+
+            return result
+
+        except Exception as e:
+            _logger.exception(f"Failed to read {self.output_location}.")
+            raise OperationalError(*e.args) from e
+
+    def _get_csv_read_options(self, csv_engine: str, chunksize: int | None) -> dict[str, Any]:
+        """Build pandas options for Athena CSV or tab-separated results."""
+        if self.output_location and self.output_location.endswith(".txt"):
+            sep = "\t"
+            header = None
+            names = [d[0] for d in self.description or []]
+        else:
+            sep = ","
+            header = 0
+            names = None
+
+        read_csv_kwargs: dict[str, Any] = {
             "sep": sep,
             "header": header,
             "names": names,
@@ -546,7 +602,7 @@ class AthenaPandasResultSet(AthenaResultSet):
                 "default_cache_type": self._cache_type,
                 "max_workers": self._max_workers,
             },
-            "chunksize": effective_chunksize,
+            "chunksize": chunksize,
             "engine": csv_engine,
         }
 
@@ -558,23 +614,134 @@ class AthenaPandasResultSet(AthenaResultSet):
 
         read_csv_kwargs.update(self._kwargs)
 
-        try:
-            result = pd.read_csv(self.output_location, **read_csv_kwargs)
+        return read_csv_kwargs
 
-            # Log performance information for large files
-            if length > self.LARGE_FILE_THRESHOLD_BYTES:
-                mode = "chunked" if effective_chunksize else "full"
-                chunksize = f" with chunksize={effective_chunksize}" if effective_chunksize else ""
-                _logger.info(
-                    f"Reading {length} bytes from S3 in {mode} mode "
-                    f"using {csv_engine} engine{chunksize}"
+    @staticmethod
+    def _resolve_csv_column_names(
+        column_names: list[Any],
+        read_csv_kwargs: dict[str, Any],
+        read_csv: Callable[..., DataFrame],
+    ) -> tuple[list[Any], set[Any]]:
+        """Resolve customized or duplicate column names with pandas' header parser."""
+        header_buffer = StringIO()
+        csv.writer(header_buffer, quoting=csv.QUOTE_ALL).writerow(column_names)
+        header_options = {
+            key: read_csv_kwargs[key]
+            for key in (
+                "sep",
+                "delimiter",
+                "names",
+                "engine",
+                "quoting",
+                "quotechar",
+                "doublequote",
+                "escapechar",
+                "skipinitialspace",
+            )
+            if key in read_csv_kwargs
+        }
+        column_names = read_csv(
+            StringIO(header_buffer.getvalue()), header=0, nrows=0, **header_options
+        ).columns.tolist()
+        selected_names = set(column_names)
+        if read_csv_kwargs.get("usecols") is not None:
+            selected_names = set(
+                read_csv(
+                    StringIO(header_buffer.getvalue()),
+                    header=0,
+                    nrows=0,
+                    usecols=read_csv_kwargs["usecols"],
+                    **header_options,
+                ).columns
+            )
+        return column_names, selected_names
+
+    def _can_preserve_binary_csv_nulls(self, read_csv_kwargs: dict[str, Any]) -> bool:
+        """Whether CSV settings support distinguishing binary NULL from empty values."""
+        return not (
+            "varbinary" not in self._converter.mappings
+            or "converters" in self._kwargs
+            or not self.output_location
+            or not self.output_location.endswith(".csv")
+            or read_csv_kwargs.get("header") != 0
+            or read_csv_kwargs.get("skiprows") is not None
+            or read_csv_kwargs.get("dialect") is not None
+            or read_csv_kwargs.get("quoting") == csv.QUOTE_NONE
+            or read_csv_kwargs.get("quotechar", '"') != '"'
+        )
+
+    def _needs_csv_column_name_resolution(self, column_names: list[Any]) -> bool:
+        """Whether pandas must resolve column names instead of using Athena metadata."""
+        return (
+            len(set(column_names)) != len(column_names)
+            or not all(column_names)
+            or bool(
+                self._kwargs.keys()
+                & {
+                    "names",
+                    "usecols",
+                    "sep",
+                    "delimiter",
+                    "doublequote",
+                    "escapechar",
+                    "skipinitialspace",
+                }
+            )
+        )
+
+    def _configure_binary_csv_read(
+        self, read_csv_kwargs: dict[str, Any], read_csv: Callable[..., DataFrame]
+    ) -> set[int]:
+        """Wrap binary converters and return column positions needing NULL preservation."""
+        if not self._can_preserve_binary_csv_nulls(read_csv_kwargs):
+            return set()
+
+        description = self.description or []
+        binary_columns = {i for i, d in enumerate(description) if d[1] == "varbinary"}
+        if not binary_columns:
+            return set()
+
+        column_names = [d[0] for d in description]
+        converters = read_csv_kwargs["converters"]
+        if self._needs_csv_column_name_resolution(column_names):
+            column_names, selected_names = self._resolve_csv_column_names(
+                column_names, read_csv_kwargs, read_csv
+            )
+            if len(column_names) != len(description):
+                return set()
+            converters = {
+                name: self._converter.get(d[1])
+                for name, d in zip(column_names, description, strict=True)
+                if d[1] in self._converter.mappings and name in selected_names
+            }
+            binary_columns = {i for i in binary_columns if column_names[i] in selected_names}
+
+        if binary_columns:
+            for index in binary_columns:
+                name = column_names[index]
+                converters[name] = partial(_convert_binary_csv, converters[name])
+            read_csv_kwargs["converters"] = converters
+        return binary_columns
+
+    def _open_binary_csv_stream(
+        self, binary_columns: set[int], storage_options: dict[str, Any]
+    ) -> TextIOWrapper:
+        """Open a stream that preserves binary NULL fields and original CSV newlines."""
+        with ExitStack() as stack:
+            source = stack.enter_context(
+                filesystem_open(
+                    self.output_location,
+                    mode="rt",
+                    encoding="utf-8",
+                    newline="",
+                    **storage_options,
                 )
-
-            return result
-
-        except Exception as e:
-            _logger.exception(f"Failed to read {self.output_location}.")
-            raise OperationalError(*e.args) from e
+            )
+            reader = stack.enter_context(BinaryCSVReader(source, binary_columns))
+            buffer = stack.enter_context(BufferedReader(reader))
+            stream = TextIOWrapper(buffer, encoding="utf-8", newline="")
+            stack.pop_all()
+            return stream
 
     def _read_parquet(self, engine) -> DataFrame:
         import pandas as pd
@@ -695,6 +862,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         import pandas as pd
 
         super().close()
+        self._df_iter.close()
         self._df_iter = PandasDataFrameIterator(pd.DataFrame(), _no_trunc_date)
         self._iterrows = enumerate([])
         self._data_manifest = []

@@ -276,6 +276,7 @@ class AthenaArrowResultSet(AthenaResultSet):
         ):
             return pa.Table.from_pydict({})
         length = self._get_content_length()
+        binary_columns = {d[0] for d in self.description or [] if d[1] == "varbinary"}
         if length and self.output_location.endswith(".txt"):
             description = self.description if self.description else []
             column_names = [d[0] for d in description]
@@ -296,6 +297,7 @@ class AthenaArrowResultSet(AthenaResultSet):
             parse_opts = csv.ParseOptions(
                 delimiter=",",
                 quote_char='"',
+                ignore_empty_lines=not binary_columns,
                 double_quote=True,
                 escape_char=False,
             )
@@ -304,16 +306,25 @@ class AthenaArrowResultSet(AthenaResultSet):
 
         bucket, key = parse_output_location(self.output_location)
         try:
-            return csv.read_csv(
+            table = csv.read_csv(
                 self._fs.open_input_stream(f"{bucket}/{key}"),
                 read_options=read_opts,
                 parse_options=parse_opts,
                 convert_options=csv.ConvertOptions(
+                    strings_can_be_null=bool(binary_columns),
                     quoted_strings_can_be_null=False,
                     timestamp_parsers=self.timestamp_parsers,
                     column_types=self.column_types,
                 ),
             )
+            if binary_columns:
+                for index, field in enumerate(table.schema):
+                    if field.name not in binary_columns and (
+                        pa.types.is_string(field.type) or pa.types.is_binary(field.type)
+                    ):
+                        # Preserve the existing CSV behavior for non-binary Athena columns.
+                        table = table.set_column(index, field, table.column(index).fill_null(""))
+            return table
         except Exception as e:
             _logger.exception(f"Failed to read {bucket}/{key}.")
             raise OperationalError(*e.args) from e

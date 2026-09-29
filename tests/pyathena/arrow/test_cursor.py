@@ -19,6 +19,26 @@ from tests.pyathena.conftest import connect
 
 
 class TestArrowCursor:
+    def test_binary_null_vs_empty(self, arrow_cursor):
+        query = """SELECT * FROM (VALUES
+                    (1, CAST(NULL AS VARBINARY), 'null', CAST(NULL AS VARCHAR)),
+                    (2, X'', 'empty', ''),
+                    (3, X'00ff275c25', 'comma, quote" and' || chr(10) || 'newline', 'NULL')
+                ) AS t(id, value, label, text_value) ORDER BY id"""
+        arrow_cursor.execute(query)
+        assert arrow_cursor.as_arrow().column("value").to_pylist() == [None, "", "00 ff 27 5c 25"]
+        rows = arrow_cursor.fetchall()
+        assert [row[:3] for row in rows] == [
+            (1, None, "null"),
+            (2, b"", "empty"),
+            (3, b"\x00\xff'\\%", 'comma, quote" and\nnewline'),
+        ]
+        assert [row[3] for row in rows] == ["", "", "NULL"]
+
+    def test_binary_single_null(self, arrow_cursor):
+        arrow_cursor.execute("SELECT CAST(NULL AS VARBINARY) AS value")
+        assert arrow_cursor.fetchall() == [(None,)]
+
     @pytest.mark.parametrize(
         "arrow_cursor",
         [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
@@ -705,14 +725,13 @@ class TestArrowCursor:
         [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
         indirect=["arrow_cursor"],
     )
-    def test_executemany(self, arrow_cursor):
+    def test_executemany(self, arrow_cursor, empty_table):
         rows = [(1, "foo"), (2, "bar"), (3, "jim o'rourke")]
-        table_name = f"execute_many_arrow{'_unload' if arrow_cursor._unload else ''}"
         arrow_cursor.executemany(
-            f"INSERT INTO {table_name} (a, b) VALUES (%(a)d, %(b)s)",
+            f"INSERT INTO {empty_table} (a, b) VALUES (%(a)d, %(b)s)",
             [{"a": a, "b": b} for a, b in rows],
         )
-        arrow_cursor.execute(f"SELECT * FROM {table_name}")
+        arrow_cursor.execute(f"SELECT * FROM {empty_table}")
         assert sorted(arrow_cursor.fetchall()) == list(rows)
 
     @pytest.mark.parametrize(

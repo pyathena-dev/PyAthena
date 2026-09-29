@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pyathena import ExecuteOptions
+from pyathena import BINARY, Binary, ExecuteOptions
 from pyathena.aio.cursor import AioCursor
 from pyathena.error import DatabaseError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
@@ -15,6 +15,24 @@ from tests.pyathena.aio.conftest import _aio_connect
 
 
 class TestAioCursor:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (b"", b""),
+            (b"\x00\xff'\\%", b"\x00\xff'\\%"),
+            (bytes(range(256)), bytes(range(256))),
+            (bytearray(b"\x00\xff"), b"\x00\xff"),
+            (memoryview(b"\x00\xff"), b"\x00\xff"),
+            (Binary(bytearray(b"abc")), b"abc"),
+            (None, None),
+        ],
+        ids=["empty", "special", "all_bytes", "bytearray", "memoryview", "dbapi_binary", "null"],
+    )
+    async def test_binary_parameter(self, aio_cursor, value, expected):
+        await aio_cursor.execute("SELECT CAST(%(value)s AS VARBINARY)", {"value": value})
+        assert await aio_cursor.fetchone() == (expected,)
+        assert aio_cursor.description[0][1] == BINARY
+
     async def test_fetchone(self, aio_cursor):
         await aio_cursor.execute("SELECT * FROM one_row")
         assert aio_cursor.rowcount == -1
@@ -270,14 +288,14 @@ class TestAioCursor:
         with pytest.raises(ProgrammingError):
             await aio_cursor.cancel()
 
-    async def test_executemany(self, aio_cursor):
+    async def test_executemany(self, aio_cursor, empty_table):
         rows = [(1, "foo"), (2, "bar"), (3, "jim o'rourke")]
         await aio_cursor.executemany(
-            "INSERT INTO execute_many_aio (a, b) VALUES (%(a)d, %(b)s)",
+            f"INSERT INTO {empty_table} (a, b) VALUES (%(a)d, %(b)s)",
             [{"a": a, "b": b} for a, b in rows],
         )
         assert aio_cursor.rowcount == -1
-        await aio_cursor.execute("SELECT * FROM execute_many_aio")
+        await aio_cursor.execute(f"SELECT * FROM {empty_table}")
         assert sorted(await aio_cursor.fetchall()) == list(rows)
 
     async def test_executemany_fetch(self, aio_cursor):

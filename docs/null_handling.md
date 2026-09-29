@@ -60,6 +60,17 @@ which correctly interprets unquoted empty values as NULL, while `S3FSCursor` use
 `AthenaCSVReader` that respects CSV quoting rules.
 ```
 
+## Binary Values
+
+The string comparison above does not apply to `VARBINARY` columns.
+With the default CSV settings and converters, pandas and Arrow cursors distinguish SQL NULL from empty binary
+values when reading CSV results: `fetchone()`, `fetchmany()`, and `fetchall()` return `None`
+for NULL and `b''` for an empty binary value.
+This also applies to their asynchronous variants and pandas chunked reads.
+Pandas DataFrames preserve the same values.
+Arrow Tables retain the CSV hexadecimal strings, with NULL represented as an Arrow null;
+fetch methods convert the hexadecimal strings to Python bytes.
+
 ## Default Cursor (API-based)
 
 The default `Cursor` and `DictCursor` fetch results directly from the Athena API,

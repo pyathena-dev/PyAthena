@@ -46,9 +46,8 @@ def _awsathena_create_db(cfg, eng, ident):
 @drop_db.for_db("awsathena")
 def _awsathena_drop_db(cfg, eng, ident):
     with eng.begin() as conn:
-        conn.exec_driver_sql(f"DROP DATABASE {ident} CASCADE")
-        conn.exec_driver_sql(f"DROP DATABASE {ident}_test_schema CASCADE")
-        conn.exec_driver_sql(f"DROP DATABASE {ident}_test_schema_2 CASCADE")
+        for name in (ident, f"{ident}_test_schema", f"{ident}_test_schema_2"):
+            conn.exec_driver_sql(f"DROP DATABASE IF EXISTS {name} CASCADE")
 
 
 @configure_follower.for_db("awsathena")

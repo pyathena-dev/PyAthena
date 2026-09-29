@@ -1,12 +1,70 @@
 import pytest
 import sqlalchemy
-from sqlalchemy import text
+from sqlalchemy import cast, literal, select, text, types
 from sqlalchemy.sql.schema import MetaData, Table
 
 from tests import ENV
 
 
 class TestAsyncSQLAlchemyAthena:
+    @pytest.mark.parametrize(
+        "async_engine",
+        [
+            {"driver": driver}
+            for driver in ("aiorest", "aiopandas", "aioarrow", "aiopolars", "aios3fs")
+        ],
+        indirect=True,
+    )
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (b"", b""),
+            (b"\x00\xff'\\%", b"\x00\xff'\\%"),
+            (bytes(range(256)), bytes(range(256))),
+            (bytearray(b"\x00\xff"), b"\x00\xff"),
+            (memoryview(b"\x00\xff"), b"\x00\xff"),
+        ],
+        ids=["empty", "special", "all_bytes", "bytearray", "memoryview"],
+    )
+    async def test_binary_parameters_and_literals(self, async_engine, value, expected):
+        _, conn = async_engine
+        columns = [
+            cast(literal(value, type_=type_, literal_execute=literal_execute), type_)
+            for type_ in (types.LargeBinary, types.BINARY, types.VARBINARY)
+            for literal_execute in (False, True)
+        ]
+        statement = select(*columns)
+        assert (await conn.execute(statement)).one() == (expected,) * len(columns)
+        compiled = statement.compile(dialect=conn.dialect, compile_kwargs={"literal_binds": True})
+        assert (await conn.exec_driver_sql(str(compiled))).one() == (expected,) * len(columns)
+
+    @pytest.mark.parametrize(
+        "async_engine",
+        [
+            {"driver": "aiorest"},
+            {"driver": "aiopandas"},
+            {"driver": "aioarrow"},
+            {"driver": "aiopolars"},
+            {"driver": "aios3fs"},
+            {"driver": "aiopandas", "unload": True},
+            {"driver": "aioarrow", "unload": True},
+        ],
+        indirect=["async_engine"],
+        ids=["rest", "pandas_csv", "arrow_csv", "polars", "s3fs", "pandas_unload", "arrow_unload"],
+    )
+    async def test_binary_null_vs_empty(self, async_engine):
+        _, conn = async_engine
+        columns = [
+            cast(literal(value, type_=type_, literal_execute=literal_execute), type_)
+            for type_ in (types.LargeBinary, types.BINARY, types.VARBINARY)
+            for value in (None, b"")
+            for literal_execute in (False, True)
+        ]
+        statement = select(*columns)
+        assert (await conn.execute(statement)).one() == (None, None, b"", b"") * 3
+        compiled = statement.compile(dialect=conn.dialect, compile_kwargs={"literal_binds": True})
+        assert (await conn.exec_driver_sql(str(compiled))).one() == (None, None, b"", b"") * 3
+
     @pytest.mark.parametrize(
         "async_engine",
         [

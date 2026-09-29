@@ -663,6 +663,17 @@ engine_arrow = create_engine(
 )
 ```
 
+## Floating-point types
+
+| SQLAlchemy type | Table DDL | CAST |
+|---|---|---|
+| `Float`, `FLOAT`, `REAL` | `FLOAT` | `REAL` |
+| `Double`, `DOUBLE`, `DOUBLE_PRECISION` | `DOUBLE` | `DOUBLE` |
+
+Athena `FLOAT` and `REAL` are the same 32-bit floating-point type, which keeps about seven significant digits.
+Use `Double` (SQLAlchemy 2.0+) for 64-bit values.
+`Float(precision)` does not change the Athena type.
+
 ## Complex data types
 
 ### STRUCT type support
@@ -697,11 +708,16 @@ This generates the following SQL structure:
 
 ```sql
 CREATE TABLE users (
-    id INTEGER,
-    profile ROW(name STRING, age INTEGER, email STRING),
-    settings ROW(theme STRING, notifications ROW(email STRING, push STRING))
+    id INT,
+    profile STRUCT<name:STRING, age:INT, email:STRING>,
+    settings STRUCT<theme:STRING, notifications:STRUCT<email:STRING, push:STRING>>
 )
 ```
+
+`CREATE TABLE` renders `AthenaStruct` columns with Hive `STRUCT<name:type, ...>` syntax at every nesting depth.
+That includes top-level columns, fields of a STRUCT, STRUCT values inside MAP, and STRUCT values inside ARRAY.
+Integer fields, and integer MAP keys and values, use `INT` in that DDL.
+`CAST` and other SQL expressions keep `ROW(...)`, `MAP(...)`, and `ARRAY(...)`, and spell integers as `INTEGER`.
 
 #### Querying STRUCT data
 
@@ -842,12 +858,15 @@ This generates the following SQL structure:
 
 ```sql
 CREATE TABLE products (
-    id INTEGER,
+    id INT,
     attributes MAP<STRING, STRING>,
-    metrics MAP<STRING, INTEGER>,
-    categories MAP<INTEGER, STRING>
+    metrics MAP<STRING, INT>,
+    categories MAP<INT, STRING>
 )
 ```
+
+`CREATE TABLE` renders integer MAP keys and values as `INT`.
+`CAST` still spells those integers as `INTEGER`.
 
 #### Querying MAP data
 
@@ -952,7 +971,60 @@ value = map_data['key1']  # Direct access
 
 ### ARRAY type support
 
-PyAthena provides comprehensive support for Amazon Athena's ARRAY data types, enabling you to work with ordered collections of data in your Python applications.
+PyAthena supports SQLAlchemy's `ARRAY` type and the dialect-specific `AthenaArray` type.
+Both store native Athena arrays and return typed Python collections.
+Reflected ARRAY columns use `AthenaArray` and preserve their element types, including nested arrays, maps, rows, decimal precision, and string length where Athena retains it.
+
+```python
+from sqlalchemy import ARRAY, Column, Integer, MetaData, String, Table, select
+
+metadata = MetaData()
+events = Table(
+    "events",
+    metadata,
+    Column("id", Integer),
+    Column("numbers", ARRAY(Integer)),
+    Column("labels", ARRAY(String, dimensions=2)),
+)
+
+connection.execute(
+    events.insert(),
+    {"id": 1, "numbers": [1, None, 3], "labels": [["one", "two"], ["a,b", "001"]]},
+)
+row = connection.execute(select(events.c.numbers, events.c.labels)).one()
+assert row.numbers == [1, None, 3]
+assert row.labels == [["one", "two"], ["a,b", "001"]]
+```
+
+Use `dimensions=N` for a fixed number of dimensions with the standard SQLAlchemy type.
+Without it, the table column has one dimension.
+The existing `AthenaArray(AthenaArray(Integer))` spelling also remains supported; do not combine nested ARRAY types with `dimensions`.
+`AthenaArray()` still defaults to string elements, and the uppercase `pyathena.sqlalchemy.types.ARRAY` alias remains available.
+Set `as_tuple=True` to return tuples at each array dimension instead of lists.
+
+Bound parameters, multiple parameter sets, and SQLAlchemy literals use Athena's `ARRAY[...]` constructors.
+An empty list represents an empty array, `None` represents SQL NULL, and individual elements can also be NULL.
+Ordinary DB API list and tuple parameters retain their existing `IN (...)` formatting.
+For decimal binds, specify `Numeric(precision, scale)`; a precision-free `Numeric()` raises a compilation error because Athena's bare DECIMAL cast would round fractional values to scale zero.
+Athena `Float` uses 32-bit REAL values; use `Double` for 64-bit floating-point elements.
+
+Typed SQLAlchemy SELECT expressions use a JSON transport projection to preserve nested values and strings containing commas, quotes, whitespace, or the word `null`.
+Scalar leaves for supported Athena table types are decoded according to the declared type, preserving decimal precision, dates, timestamps, and binary values.
+SQL predicates and intermediate subqueries still operate on native arrays.
+Arrays with unknown (`NullType`) elements keep the cursor's native conversion instead of using typed transport.
+For ordered typed ARRAY results, use SQLAlchemy column expressions.
+Textual ORDER BY clauses may name selected columns (including comma-separated names and direction/null placement); other textual expressions raise a compilation error to prevent ordering serialized values or referring to columns outside their scope.
+String label references such as `.order_by("id")` also resolve FROM-table columns using SQLAlchemy's normal rules.
+For DISTINCT and compound queries, ordering expressions must refer to selected columns.
+Ordered, DISTINCT, and compound ARRAY queries require explicit SELECT columns: use SQLAlchemy column expressions or `literal_column()` instead of `text()` projections, and `select(table)` instead of a wildcard.
+Literal SQL expressions need an explicit label, for example `literal_column("cardinality(items)").label("size")`.
+This avoids dropping unnamed columns or exposing internal ordering columns when the result is wrapped.
+An outer `TypeDecorator` retains its result processor as well as native ARRAY ordering.
+Raw `text()` queries and direct DB API queries retain the cursor's existing conversion behavior described below; they do not receive this projection automatically.
+
+Compared with earlier releases, reflected ARRAY columns are no longer reported as `String`.
+ARRAY DDL now renders integer elements as `INT` and row elements as `STRUCT<...>`, which Athena requires for nested DDL types.
+Code that inspects reflected types or compares compiled SQL strings should account for these changes.
 
 #### Basic Usage
 
@@ -974,89 +1046,149 @@ This creates a table definition equivalent to:
 ```sql
 CREATE TABLE orders (
     id INTEGER,
-    item_ids ARRAY<INTEGER>,
+    item_ids ARRAY<INT>,
     tags ARRAY<STRING>,
     categories ARRAY<STRING>
 )
 ```
 
+#### ARRAY expressions
+
+Use SQLAlchemy expressions to index, slice, concatenate, or compare array values in SELECT and WHERE clauses.
+Indices are one-based by default.
+`AthenaArray(Integer, zero_indexes=True)` translates explicit indices and slice boundaries by adding one.
+Reads return NULL when the resulting SQL index is NULL, below one, or out of range; negative indices do not count from the end.
+
+```python
+from sqlalchemy import any_, select
+
+item_ids = orders.c.item_ids
+statement = select(item_ids[1], item_ids[2:4], item_ids.concat([5])).where(
+    any_(item_ids) == 3
+)
+```
+
+Slice stops are inclusive, following SQLAlchemy's SQL array convention.
+Omitted boundaries mean the beginning or end of the array; explicit boundaries are clipped to the array.
+A reversed slice returns an empty array, and slicing a NULL array returns NULL.
+Only `step=None` and `step=1` are supported.
+Slice SQL can evaluate the array and boundary expressions more than once; use deterministic expressions rather than volatile functions such as `random()` in slices.
+Use `AthenaArray` for open-ended slices with `zero_indexes=True`; SQLAlchemy's generic `ARRAY` comparator requires explicit bounds in that mode.
+Indexing a multidimensional array retains the remaining dimensions, while slicing retains its array type.
+
+`any_(array)` and `all_(array)`, and the legacy `array.any(value)` and `array.all(value)` methods, compile to Athena's `any_match` and `all_match` functions.
+Comparisons use SQL three-valued logic: NULL elements can produce NULL when no decisive true or false result exists.
+For an empty array, ANY is false and ALL is true.
+A NULL array produces NULL for both.
+SQLAlchemy comparison flipping is preserved.
+SQLAlchemy can rewrite negation into an element-wise comparison before dialect compilation, depending on the version and operand types.
+For example, `~(any_(flags) == True)` can become an element-wise `!= True` comparison; older SQLAlchemy 2.0 releases also rewrite non-boolean comparisons this way.
+To negate the whole match, always explicitly group the comparison first: `~(any_(flags) == True).self_group()`.
+Quantifiers over subqueries retain their usual SQL compilation.
+
+#### Partial ARRAY updates
+
+Use indexed or sliced columns as UPDATE assignment keys on Iceberg tables.
+PyAthena compiles each assignment into a single server-side UPDATE of the whole array.
+Other columns can be assigned in the same statement.
+
+For an existing Iceberg table named `orders` with an ARRAY column `item_ids`:
+
+```python
+from sqlalchemy import MetaData, Table
+
+orders = Table("orders", MetaData(), autoload_with=engine)
+item_ids = orders.c.item_ids
+with engine.begin() as conn:
+    conn.execute(orders.update().values({item_ids[2]: 10}))
+    conn.execute(orders.update().values({item_ids[2:3]: [20, 30, 40]}))
+```
+
+Element assignment beyond the end extends the array and fills intervening positions with NULL.
+NULL padding uses Athena's `repeat()` function and follows its size limits.
+A NULL destination array is treated as empty for partial updates.
+Assigning `None` to an element stores NULL.
+Nested indices rebuild the corresponding inner arrays, including missing inner arrays.
+The same one-based default and `zero_indexes=True` translation apply to reads and writes.
+
+Slice assignment replaces an inclusive range with any number of elements.
+An empty replacement array deletes the range; a longer or shorter replacement resizes the array.
+A reversed range inserts before its start position.
+A start beyond the end pads with NULL before inserting, and a stop beyond the end only removes existing elements.
+Omitted boundaries mean the beginning or end.
+These resize rules are PyAthena-specific and do not promise full PostgreSQL array-assignment compatibility.
+
+Write indices and explicit slice boundaries must be non-NULL positive integers after normalization.
+A slice replacement must be a non-NULL array; use `[]` to delete elements.
+Decimal partial updates require a declared `Numeric` precision, including SQL-expression assignments; specify a scale to retain fractional values.
+Validation can raise `CompileError` during compilation, `StatementError` during binding, or `DBAPIError` from Athena; the exception class can differ when a compiled statement is reused.
+Only `step=None` and `step=1` are supported, and only the final component of a nested update path may be a slice.
+PyAthena rejects multiple partial assignments to the same array column, or a partial assignment combined with a whole-column assignment to that column.
+Use one whole-array expression when an update needs several changes to the same array.
+Partial updates can evaluate indices, boundaries, and replacement SQL expressions more than once; use deterministic expressions.
+
 #### Querying ARRAY data
 
-PyAthena automatically converts ARRAY data between different formats:
+Use `select()` with `ARRAY` or `AthenaArray` columns whose element types are known, either declared explicitly or reflected from Athena, to receive typed Python collections.
+For example, the `events` table above returns `numbers` as a list of integers and `labels` as nested lists of strings.
+PyAthena projects these result columns as JSON in the generated SQL and converts the returned values according to the column types.
+You do not need to call `json.loads()` on these results.
+This preserves strings such as `"a,b"`, `"001"`, and `"null"` as strings, including within nested arrays.
+
+#### Direct cursor and textual SQL results
+
+Direct `cursor.execute()` calls and untyped SQLAlchemy `text()` queries use the cursor's existing conversion behavior.
+The examples in this section use a standard REST `cursor` created as in [Usage](usage.md), with its default converter and no result type hints or custom converters.
+Other cursor implementations have their own conversion behavior.
+
+The standard converter already converts simple ARRAY values to Python lists:
 
 ```python
-from sqlalchemy import create_engine, select
+result = cursor.execute("SELECT ARRAY[1, 2, 3] AS numbers").fetchone()
+numbers = result[0]  # [1, 2, 3]
+```
 
-# Query ARRAY data using ARRAY constructor
-result = connection.execute(
-    select().from_statement(
-        text("SELECT ARRAY[1, 2, 3, 4, 5] as item_ids")
-    )
+This conversion predates the typed SQLAlchemy ARRAY support described above.
+Typed SQLAlchemy ARRAY support does not change the behavior of direct cursor queries or untyped `text()` queries.
+
+The standard ARRAY converter first tries JSON parsing, then a limited parser for Athena's native text representation.
+The following examples show its behavior for strings received as ARRAY values:
+
+| ARRAY text | Python result |
+|---|---|
+| `[1, 2, 3]` | `[1, 2, 3]` (`list`) |
+| `[one, two]` | `["one", "two"]` (`list`) |
+| `[[1, 2], [3, 4]]` | `[[1, 2], [3, 4]]` (nested `list`) |
+| `[[one, two], [three]]` | `"[[one, two], [three]]"` (`str`) |
+| `[a, b=1]` | `"[a, b=1]"` (`str`) |
+
+The numeric examples are valid JSON.
+The unquoted nested string array is not valid JSON, and the native parser does not support nested arrays.
+In the last example, `b=1` is outside a `{...}` ROW element, so the native parser rejects it.
+For these unsupported representations, the converter returns the original string rather than dropping unparsed elements.
+A string result therefore does not necessarily mean the stored ARRAY is invalid.
+Calling `json.loads()` on that native text will not resolve these cases because it is not JSON.
+
+A list result alone does not guarantee that the original elements were preserved.
+For example, the native text `[a,b, null]` becomes `["a", "b", None]`, which would be incorrect for an original array of two strings, `["a,b", "null"]`.
+The native representation does not distinguish commas within strings from element separators, or the string `"null"` from a NULL element.
+Use typed SQLAlchemy SELECT expressions for string elements or nested arrays, or explicitly request JSON when writing SQL directly, as shown below.
+
+#### Requesting JSON in direct SQL
+
+Use `CAST(... AS JSON)` to have Athena return JSON instead of its native ARRAY text representation.
+With the standard REST cursor and default converter, JSON results are already decoded into Python values:
+
+```python
+result = cursor.execute(
+    "SELECT CAST(ARRAY[ARRAY['one', 'two'], ARRAY['three']] AS JSON) AS labels"
 ).fetchone()
-
-# Access ARRAY data as Python list
-item_ids = result.item_ids  # [1, 2, 3, 4, 5]
+labels = result[0]  # [["one", "two"], ["three"]]
 ```
 
-#### Complex ARRAY operations
-
-For arrays containing complex data types:
-
-```python
-# Arrays with STRUCT elements
-result = connection.execute(
-    select().from_statement(
-        text("SELECT ARRAY[ROW('Alice', 25), ROW('Bob', 30)] as users")
-    )
-).fetchone()
-
-users = result.users  # [{"0": "Alice", "1": 25}, {"0": "Bob", "1": 30}]
-
-# Using CAST AS JSON for complex ARRAY operations
-result = connection.execute(
-    select().from_statement(
-        text("SELECT CAST(ARRAY[1, 2, 3] AS JSON) as data")
-    )
-).fetchone()
-
-# Parse JSON result
-import json
-if isinstance(result.data, str):
-    array_data = json.loads(result.data)  # [1, 2, 3]
-else:
-    array_data = result.data  # Already converted to list
-```
-
-#### Data format support
-
-PyAthena supports multiple ARRAY data formats:
-
-**Athena Native Format:**
-
-```python
-# Input: '[1, 2, 3]'
-# Output: [1, 2, 3]
-
-# Input: '[apple, banana, cherry]'
-# Output: ["apple", "banana", "cherry"]
-```
-
-**JSON Format:**
-
-```python
-# Input: '[1, 2, 3]'
-# Output: [1, 2, 3]
-
-# Input: '["apple", "banana", "cherry"]'
-# Output: ["apple", "banana", "cherry"]
-```
-
-**Complex Nested Arrays:**
-
-```python
-# Input: '[{name=John, age=30}, {name=Jane, age=25}]'
-# Output: [{"name": "John", "age": 30}, {"name": "Jane", "age": 25}]
-```
+The same applies to an untyped SQLAlchemy `text()` query using `awsathena+rest` with the default converter.
+No additional `json.loads()` call is needed in these examples.
+This path returns JSON-derived Python values; use typed SQLAlchemy ARRAY columns when you need conversion according to declared element types such as `Numeric` or `Date`.
 
 #### Type definitions
 
@@ -1067,58 +1199,26 @@ from pyathena.sqlalchemy.types import AthenaArray, AthenaStruct, AthenaMap
 
 # Simple arrays
 AthenaArray(String)      # ARRAY<STRING>
-AthenaArray(Integer)     # ARRAY<INTEGER>
+AthenaArray(Integer)     # ARRAY<INT>
 
 # Arrays of complex types
 AthenaArray(AthenaStruct(...))  # ARRAY<STRUCT<...>>
 AthenaArray(AthenaMap(...))     # ARRAY<MAP<...>>
 
 # Nested arrays
-AthenaArray(AthenaArray(Integer))  # ARRAY<ARRAY<INTEGER>>
+AthenaArray(AthenaArray(Integer))  # ARRAY<ARRAY<INT>>
 ```
 
 #### Best practices
 
-1. **Use appropriate item types** in AthenaArray definitions:
+1. Declare the ARRAY element type and use typed SQLAlchemy SELECT expressions to preserve nested values and scalar types.
+2. For direct cursor or untyped `text()` queries, request `CAST(... AS JSON)` to preserve string elements and nested arrays.
+3. Handle SQL NULL and empty arrays before accessing an element:
 
    ```python
-   AthenaArray(Integer)  # For numeric arrays
-   AthenaArray(String)   # For string arrays
-   AthenaArray(AthenaStruct(...))  # For arrays of structs
+   # A result from a typed ARRAY SELECT or the JSON query above
+   first_label = labels[0] if labels else None
    ```
-
-2. **Use CAST AS JSON** for complex array operations:
-
-   ```sql
-   SELECT CAST(complex_array AS JSON) FROM table_name
-   ```
-
-3. **Handle NULL values** appropriately in your application logic:
-
-   ```python
-   if result.array_column is not None:
-       # Process array data
-       first_item = result.array_column[0] if result.array_column else None
-   ```
-
-#### Migration from RAW strings
-
-**Before (raw string handling):**
-
-```python
-result = cursor.execute("SELECT array_column FROM table").fetchone()
-raw_data = result[0]  # "[1, 2, 3]"
-import json
-parsed_data = json.loads(raw_data)
-```
-
-**After (automatic conversion):**
-
-```python
-result = cursor.execute("SELECT array_column FROM table").fetchone()
-array_data = result[0]  # [1, 2, 3] - automatically converted
-first_item = array_data[0]  # Direct access
-```
 
 ### JSON type support
 
