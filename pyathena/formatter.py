@@ -22,7 +22,7 @@ _logger = logging.getLogger(__name__)
 class _ComplexParameter:
     """Typed complex value supplied by the SQLAlchemy dialect."""
 
-    constructor: Literal["ARRAY", "MAP", "ROW", "JSON_PARSE"]
+    constructor: Literal["ARRAY", "MAP", "ROW", "JSON_PARSE", "FROM_HEX"]
     values: tuple[Any, ...]
 
 

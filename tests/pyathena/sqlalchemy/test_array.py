@@ -18,17 +18,21 @@ from sqlalchemy import (
     bindparam,
     cast,
     column,
+    func,
     literal,
     literal_column,
     select,
     text,
     types,
+    update,
 )
 from sqlalchemy import exc as sa_exc
+from sqlalchemy.orm import declarative_base
 from sqlalchemy.sql import sqltypes
 
 import pyathena
 from pyathena.formatter import DefaultParameterFormatter
+from pyathena.sqlalchemy.array import _ArrayWriteIndexType
 from pyathena.sqlalchemy.base import AthenaDialect
 from pyathena.sqlalchemy.types import (
     ARRAY,
@@ -81,6 +85,26 @@ class TupleArray(types.TypeDecorator):
 
     def process_result_value(self, value, dialect):
         return tuple(value) if value is not None else None
+
+
+class PrefixString(types.TypeDecorator):
+    impl = types.String
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        return f"prefix:{value}"
+
+    def bind_expression(self, bindvalue):
+        return func.upper(bindvalue)
+
+
+def _array_update_table(type_=None):
+    return Table(
+        "arrays",
+        MetaData(),
+        Column("id", Integer),
+        Column("items", type_ or AthenaArray(Integer)),
+    )
 
 
 class TestAthenaArray:
@@ -659,3 +683,216 @@ class TestArrayJSONProjection:
             .compile(dialect=AthenaDialect())
         )
         assert sql.startswith("SELECT anon_1.value, json_format(")
+
+
+class TestArrayAssignmentType:
+    def test_binary_element_assignment_uses_native_hex_parameter(self):
+        table = _array_update_table(AthenaArray(types.BINARY))
+        compiled = (
+            table.update()
+            .values({table.c["items"][1]: b"\x00\xff"})
+            .compile(dialect=AthenaDialect())
+        )
+        params = {
+            name: compiled._bind_processors.get(name, lambda value: value)(value)
+            for name, value in compiled.params.items()
+        }
+        assert "FROM_HEX('00ff')" in DefaultParameterFormatter().format(str(compiled), params)
+
+    def test_explicit_assignment_type_and_callable_value(self):
+        table = _array_update_table(AthenaArray(types.String))
+        stmt = table.update().values(
+            {table.c["items"][1]: bindparam("value", type_=PrefixString(), callable_=lambda: "a")}
+        )
+        compiled = stmt.compile(dialect=AthenaDialect())
+        assert compiled._bind_processors["value"]("a") == "prefix:a"
+        assert "upper(%(value)s)" in str(compiled)
+        assert compiled.params["value"] == "a"
+
+
+class TestArrayWriteIndexType:
+    @pytest.mark.parametrize("processor_name", ["bind_processor", "literal_processor"])
+    @pytest.mark.parametrize("value", [None, True, 1.5, "1"])
+    def test_rejects_non_integer_values(self, processor_name, value):
+        processor = getattr(_ArrayWriteIndexType(), processor_name)(AthenaDialect())
+        with pytest.raises(ValueError, match="non-NULL integers"):
+            processor(value)
+
+    def test_bind_and_literal_processors(self):
+        type_ = _ArrayWriteIndexType()
+        assert type_.bind_processor(AthenaDialect())(2) == 2
+        assert type_.literal_processor(AthenaDialect())(2) == "2"
+
+
+class TestArrayUpdate:
+    def test_multiple_updates_to_one_array_are_rejected(self):
+        table = _array_update_table()
+        values = table.c["items"]
+        for assignments in (
+            {values[1]: 2, values[2]: 3},
+            {values: [], values[1]: 2},
+            {values[1]: 2, "items": []},
+        ):
+            with pytest.raises(sa_exc.CompileError, match="one assignment"):
+                table.update().values(assignments).compile(dialect=AthenaDialect())
+
+    def test_only_final_index_may_be_a_slice(self):
+        table = _array_update_table(AthenaArray(Integer, dimensions=2))
+        with pytest.raises(sa_exc.CompileError, match="final"):
+            table.update().values({table.c["items"][1:2][1]: [2]}).compile(dialect=AthenaDialect())
+
+    def test_bound_indices_and_values_are_reused_without_mutation(self):
+        table = _array_update_table()
+        expression = table.c["items"][bindparam("index")]
+        statement = table.update().values({expression: bindparam("value"), table.c.id: 2})
+        compiled = statement.compile(dialect=AthenaDialect())
+        assert set(compiled.params) == {"index", "value", "id"}
+        assert str(statement.compile(dialect=AthenaDialect())) == str(compiled)
+
+    def test_partial_update_requires_target_table_column(self):
+        table = _array_update_table()
+        for column_ in (Column("items", AthenaArray(Integer)), _array_update_table().c["items"]):
+            with pytest.raises(sa_exc.CompileError, match="target table"):
+                table.update().values({column_[1]: 2}).compile(dialect=AthenaDialect())
+
+    def test_ordered_partial_update_with_sql_expression(self):
+        table = _array_update_table()
+        items = table.c["items"]
+        statement = table.update().ordered_values((items[2], items[1] + 1), (table.c.id, 2))
+        compiled = str(statement.compile(dialect=AthenaDialect()))
+        assert compiled.index("SET items=") < compiled.index(", id=")
+        assert "element_at(arrays.items" in compiled
+
+    def test_orm_partial_update_and_renamed_attribute_conflicts(self):
+        base = declarative_base()
+
+        class Model(base):
+            __tablename__ = "arrays"
+            id = Column(Integer, primary_key=True)
+            values = Column("stored", AthenaArray(Integer), key="db_key")
+
+        sql = str(update(Model).values({Model.values[1]: 2}).compile(dialect=AthenaDialect()))
+        assert "UPDATE arrays SET stored=concat(" in sql
+        for whole in (Model.values, "values"):
+            with pytest.raises(sa_exc.CompileError, match="one assignment"):
+                update(Model).values({Model.values[1]: 2, whole: []}).compile(
+                    dialect=AthenaDialect()
+                )
+
+
+class TestArrayUpdateCompiler:
+    def test_bound_index_uses_write_index_processor(self):
+        table = _array_update_table()
+        compiled = (
+            table.update()
+            .values({table.c["items"][bindparam("index")]: 9})
+            .compile(dialect=AthenaDialect())
+        )
+        assert compiled._bind_processors["index"](2) == 2
+        for value in (1.5, True, None):
+            with pytest.raises(ValueError, match="non-NULL integers"):
+                compiled._bind_processors["index"](value)
+
+    def test_callable_index_and_slice_value(self):
+        table = _array_update_table(AthenaArray(types.String))
+        compiled = (
+            table.update()
+            .values({table.c["items"][bindparam("index", callable_=lambda: 1)]: "a"})
+            .compile(dialect=AthenaDialect())
+        )
+        assert compiled.params["index"] == 1
+        table.update().values(
+            {table.c["items"][1:2]: bindparam("values", callable_=lambda: ["a"])}
+        ).compile(dialect=AthenaDialect())
+
+    @pytest.mark.parametrize(
+        ("target", "value"),
+        [(1, 2), (4, None), (slice(2, 3), [4]), (slice(2, 2), []), (slice(None), [])],
+    )
+    def test_partial_update_compiles_to_one_whole_column_assignment(self, target, value):
+        table = _array_update_table()
+        statement = table.update().values({table.c["items"][target]: value}).where(table.c.id == 1)
+        original_key = statement._generate_cache_key().key
+        compiled = statement.compile(dialect=AthenaDialect())
+        sql = str(compiled)
+        assert sql.startswith("UPDATE arrays SET items=")
+        assert "SET element_at" not in sql
+        assert "SELECT" not in sql
+        assert "WHERE arrays.id =" in sql
+        assert statement._generate_cache_key().key == original_key
+        parameters = {
+            name: compiled._bind_processors.get(name, lambda v: v)(value)
+            for name, value in compiled.params.items()
+        }
+        formatted = DefaultParameterFormatter().format(sql, parameters)
+        assert "ARRAY[" in formatted
+
+    @pytest.mark.parametrize("index", [0, -1, None, 1.5, True])
+    def test_invalid_partial_update_index(self, index):
+        table = _array_update_table()
+        with pytest.raises(sa_exc.CompileError, match="indices"):
+            table.update().values({table.c["items"][index]: 1}).compile(dialect=AthenaDialect())
+
+    def test_nested_and_zero_indexed_update(self):
+        table = _array_update_table(AthenaArray(Integer, dimensions=2, zero_indexes=True))
+        statement = table.update().values({table.c["items"][0][2]: 7})
+        sql = str(
+            statement.compile(dialect=AthenaDialect(), compile_kwargs={"literal_binds": True})
+        )
+        assert "ARRAY[concat(" in sql
+        assert "sequence(" not in sql
+        assert "IF(1 > 0, 1," in sql
+        assert "IF(3 > 0, 3," in sql
+
+    @pytest.mark.parametrize(
+        "array_type",
+        [
+            types.ARRAY(Integer),
+            TupleArray(),
+            AthenaArray(Integer).with_variant(AthenaArray(Integer), "awsathena"),
+        ],
+    )
+    @pytest.mark.parametrize("index", [1, bindparam("index")])
+    def test_array_implementations_partial_update(self, array_type, index):
+        table = _array_update_table(array_type)
+        sql = str(
+            table.update().values({table.c["items"][index]: 2}).compile(dialect=AthenaDialect())
+        )
+        assert "SET items=concat(" in sql
+
+    @pytest.mark.parametrize("target", [1, slice(1, 2)])
+    @pytest.mark.parametrize("expression", [False, True])
+    def test_decimal_assignment_requires_precision(self, target, expression):
+        value = [Decimal("1.23")] if isinstance(target, slice) else Decimal("1.23")
+        table = _array_update_table(AthenaArray(types.Numeric()))
+        if expression:
+            value = table.c["items"][target]
+        with pytest.raises(sa_exc.CompileError, match="precision"):
+            table.update().values({table.c["items"][target]: value}).compile(
+                dialect=AthenaDialect()
+            )
+        table = _array_update_table(AthenaArray(types.Numeric(8, 2)))
+        if expression:
+            value = table.c["items"][target]
+        sql = str(
+            table.update()
+            .values({table.c["items"][target]: value})
+            .compile(dialect=AthenaDialect())
+        )
+        assert "DECIMAL(8, 2)" in sql
+
+    def test_write_index_expression_keeps_its_argument_types(self):
+        table = _array_update_table()
+        index = func.length("abc")
+        statement = table.update().values({table.c["items"][index]: 9})
+        compiled = statement.compile(dialect=AthenaDialect())
+        params = {
+            name: compiled._bind_processors.get(name, lambda value: value)(value)
+            for name, value in compiled.params.items()
+        }
+        assert "length('abc')" in DefaultParameterFormatter().format(str(compiled), params)
+
+    def test_null_slice_assignment_rejected(self):
+        table = _array_update_table()
+        with pytest.raises(sa_exc.CompileError, match="non-NULL array"):
+            table.update().values({table.c["items"][1:2]: None}).compile(dialect=AthenaDialect())
