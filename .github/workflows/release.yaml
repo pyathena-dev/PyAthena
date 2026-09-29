@@ -5,13 +5,24 @@ on:
     tags:
       - 'v*'
 
-permissions:
-  id-token: write
-  contents: write
+permissions: {}
 
 jobs:
+  # Runs every suite on every supported Python version for the tagged commit;
+  # nothing is built or published unless all of them pass.
+  test:
+    uses: ./.github/workflows/test.yaml
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: read
+
   release:
+    needs: test
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
 
     env:
       PYTHON_VERSION: '3.12'

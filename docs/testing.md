@@ -75,7 +75,9 @@ It runs the offline checks (`just lint`) on each of them, including Drafts and e
 | --- | --- | --- | --- | --- |
 | Draft pull request | No | No | No | None |
 | Ready pull request from a branch of this repository | Yes | When related files change | When related files change | Newest supported |
-| Weekly schedule and manual dispatch | Yes | Yes | Yes | All supported |
+| Weekly schedule | Yes | Yes | Yes | Newest supported |
+| Manual dispatch | Yes | Yes | Yes | Requested, or all supported |
+| Release tag (Release workflow) | Yes | Yes | Yes | All supported |
 
 The SQLAlchemy tests are the compliance suites and the PyAthena suite's `tests/pyathena/sqlalchemy/` and `tests/pyathena/aio/sqlalchemy/`.
 The Spark tests are the PyAthena suite's `tests/pyathena/spark/` and `tests/pyathena/aio/spark/`.
@@ -84,11 +86,15 @@ For the SQLAlchemy tests, the related files are `pyathena/sqlalchemy/`, `pyathen
 For the Spark tests, they are `pyathena/spark/`, `pyathena/aio/spark/`, and their PyAthena suite test directories.
 Changes to `pyproject.toml`, `uv.lock`, `justfile`, or the Test workflows run both.
 For a pull request from a branch of this repository that still changes files other than `docs/` and Markdown, marking the Draft ready for review starts the AWS jobs, and converting it back to Draft cancels AWS jobs still running.
-To run every suite on every supported Python version on a branch, dispatch the workflow:
+To run every suite on a branch, dispatch the workflow; it tests every supported Python version unless `python-versions` lists some of them:
 
 ```bash
 gh workflow run test.yaml --ref <branch>
+gh workflow run test.yaml --ref <branch> -f python-versions=3.11,3.14
 ```
+
+The Release workflow runs the same suites on every supported Python version for the tagged commit before building, and publishes nothing unless all of them pass.
+If they fail, nothing is published, and the documentation leaves out the tag because it only lists tags with a GitHub release; delete the tag, fix the failure, and push the tag again.
 
 GitHub Actions uses OpenID Connect (OIDC) to access AWS resources. You will need to refer to the [GitHub Actions documentation](https://docs.github.com/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services) to configure it.
 
