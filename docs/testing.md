@@ -71,11 +71,11 @@ $ just lint
 The Test workflow runs for pull requests that change files other than `docs/` and Markdown.
 It runs the offline checks (`just lint`) on each of them, including Drafts and external forks, and runs the AWS suites as follows:
 
-| Trigger | PyAthena suite | SQLAlchemy tests | Spark tests |
-| --- | --- | --- | --- |
-| Draft pull request | No | No | No |
-| Ready pull request from a branch of this repository | Yes | When related files change | When related files change |
-| Weekly schedule and manual dispatch | Yes | Yes | Yes |
+| Trigger | PyAthena suite | SQLAlchemy tests | Spark tests | Python versions |
+| --- | --- | --- | --- | --- |
+| Draft pull request | No | No | No | None |
+| Ready pull request from a branch of this repository | Yes | When related files change | When related files change | Newest supported |
+| Weekly schedule and manual dispatch | Yes | Yes | Yes | All supported |
 
 The SQLAlchemy tests are the compliance suites and the PyAthena suite's `tests/pyathena/sqlalchemy/` and `tests/pyathena/aio/sqlalchemy/`.
 The Spark tests are the PyAthena suite's `tests/pyathena/spark/` and `tests/pyathena/aio/spark/`.
@@ -84,7 +84,7 @@ For the SQLAlchemy tests, the related files are `pyathena/sqlalchemy/`, `pyathen
 For the Spark tests, they are `pyathena/spark/`, `pyathena/aio/spark/`, and their PyAthena suite test directories.
 Changes to `pyproject.toml`, `uv.lock`, `justfile`, or the Test workflows run both.
 For a pull request from a branch of this repository that still changes files other than `docs/` and Markdown, marking the Draft ready for review starts the AWS jobs, and converting it back to Draft cancels AWS jobs still running.
-To run every suite on a branch, dispatch the workflow:
+To run every suite on every supported Python version on a branch, dispatch the workflow:
 
 ```bash
 gh workflow run test.yaml --ref <branch>
