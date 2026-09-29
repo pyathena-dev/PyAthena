@@ -13,23 +13,25 @@ from tests.pyathena.util import read_query
 
 
 def pytest_sessionstart(session):
+    # The pytest-xdist controller runs no tests, so it sets up nothing.
+    if not _is_test_process(session.config):
+        return
+    _create_s3tables_namespace()
     # pytest skips pytest_sessionfinish after a failed pytest_sessionstart, so
     # a failure after the namespace is created deletes it here.
-    is_test_process = _is_test_process(session.config)
-    if is_test_process:
-        _create_s3tables_namespace()
     try:
         _upload_rows()
         with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
             _create_database(cursor)
             _create_table(cursor)
     except BaseException:
-        if is_test_process:
-            _delete_s3tables_namespace()
+        _delete_s3tables_namespace()
         raise
 
 
 def pytest_sessionfinish(session):
+    if not _is_test_process(session.config):
+        return
     # Each cleanup step runs even if an earlier one fails.
     try:
         with contextlib.closing(connect()) as conn, conn.cursor() as cursor:
@@ -38,8 +40,7 @@ def pytest_sessionfinish(session):
         try:
             _delete_rows()
         finally:
-            if _is_test_process(session.config):
-                _delete_s3tables_namespace()
+            _delete_s3tables_namespace()
 
 
 def _is_test_process(config):
