@@ -708,11 +708,16 @@ This generates the following SQL structure:
 
 ```sql
 CREATE TABLE users (
-    id INTEGER,
-    profile ROW(name STRING, age INTEGER, email STRING),
-    settings ROW(theme STRING, notifications ROW(email STRING, push STRING))
+    id INT,
+    profile STRUCT<name:STRING, age:INT, email:STRING>,
+    settings STRUCT<theme:STRING, notifications:STRUCT<email:STRING, push:STRING>>
 )
 ```
+
+`CREATE TABLE` renders `AthenaStruct` columns with Hive `STRUCT<name:type, ...>` syntax at every nesting depth.
+That includes top-level columns, fields of a STRUCT, STRUCT values inside MAP, and STRUCT values inside ARRAY.
+Integer fields, and integer MAP keys and values, use `INT` in that DDL.
+`CAST` and other SQL expressions keep `ROW(...)`, `MAP(...)`, and `ARRAY(...)`, and spell integers as `INTEGER`.
 
 #### Querying STRUCT data
 
@@ -853,12 +858,15 @@ This generates the following SQL structure:
 
 ```sql
 CREATE TABLE products (
-    id INTEGER,
+    id INT,
     attributes MAP<STRING, STRING>,
-    metrics MAP<STRING, INTEGER>,
-    categories MAP<INTEGER, STRING>
+    metrics MAP<STRING, INT>,
+    categories MAP<INT, STRING>
 )
 ```
+
+`CREATE TABLE` renders integer MAP keys and values as `INT`.
+`CAST` still spells those integers as `INTEGER`.
 
 #### Querying MAP data
 
