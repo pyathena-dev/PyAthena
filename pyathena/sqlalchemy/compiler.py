@@ -718,7 +718,7 @@ class AthenaStatementCompiler(SQLCompiler):
                 "ARRAY decimal values require explicit Numeric precision; "
                 "specify precision and scale to avoid implicit rounding"
             )
-        return self.dialect.type_compiler_instance.process(type_)
+        return self.dialect.type_compiler.process(type_)
 
     def visit_athena_array_json_projection(self, expression, **kw):
         value = self.process(expression.element, **kw)

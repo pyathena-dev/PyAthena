@@ -32,7 +32,7 @@ from sqlalchemy.sql import sqltypes
 
 import pyathena
 from pyathena.formatter import DefaultParameterFormatter
-from pyathena.sqlalchemy.array import _ArrayWriteIndexType
+from pyathena.sqlalchemy.array import _ArrayWriteIndexType, _variant_mapping
 from pyathena.sqlalchemy.base import AthenaDialect
 from pyathena.sqlalchemy.types import (
     ARRAY,
@@ -297,6 +297,18 @@ class TestAthenaArrayComparator:
             .result_processor(AthenaDialect(), None)
         )
         assert processor('{"_pyathena_array":["1","2"]}') == (1, 2)
+
+
+def test_variant_mapping():
+    variant = _variant_mapping(types.String().with_variant(Integer(), "awsathena"))
+    assert list(variant) == ["awsathena"]
+    assert isinstance(variant["awsathena"], Integer)
+    assert _variant_mapping(types.String()) == {}
+    # SQLAlchemy 1.x types have no _variant_mapping; its Variant keeps them in mapping.
+    integer = Integer()
+    assert _variant_mapping(SimpleNamespace(mapping={"awsathena": integer})) == {
+        "awsathena": integer
+    }
 
 
 class TestArrayTypeInspector:

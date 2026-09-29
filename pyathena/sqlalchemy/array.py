@@ -166,6 +166,25 @@ class _ArrayJSONProjection(ColumnElement[Any]):
         self.array_type = type_
 
 
+def _variant_mapping(type_: TypeEngine[Any]) -> Mapping[str, TypeEngine[Any]]:
+    """Return the dialect-specific variants of a type.
+
+    SQLAlchemy 2.0 stores ``with_variant()`` variants in ``_variant_mapping``.
+    SQLAlchemy 1.x returns a ``Variant`` type decorator that keeps them in
+    ``mapping`` instead.
+
+    Args:
+        type_: The type to inspect.
+
+    Returns:
+        The variants keyed by dialect name, empty when the type has none.
+    """
+    mapping = getattr(type_, "_variant_mapping", None)
+    if mapping is None:
+        mapping = getattr(type_, "mapping", None)
+    return mapping or {}
+
+
 class _ArrayTypeInspector:
     """Interpret nested ARRAY element types for SQL compilation and value conversion.
 
@@ -196,8 +215,9 @@ class _ArrayTypeInspector:
         return type_.item_type
 
     def decorator_impl(self, type_: types.TypeDecorator[Any]) -> TypeEngine[Any]:
-        if self.dialect.name in type_._variant_mapping:
-            return type_._variant_mapping[self.dialect.name]
+        variant = _variant_mapping(type_).get(self.dialect.name)
+        if variant is not None:
+            return variant
         implementation = type_.load_dialect_impl(self.dialect)
         if isinstance(implementation, AthenaTimestamp):
             return types.TIMESTAMP()
@@ -286,12 +306,12 @@ class _ArrayValueProcessor:
     def _bind(self, value: Any, type_: TypeEngine[Any]) -> Any:
         if isinstance(type_, types.TypeDecorator):
             if (
-                self.dialect.name not in type_._variant_mapping
+                self.dialect.name not in _variant_mapping(type_)
                 and type(type_).bind_processor is not types.TypeDecorator.bind_processor
             ):
                 processor = type_.bind_processor(self.dialect)
                 return processor(value) if processor else value
-            if self.dialect.name not in type_._variant_mapping and type_._has_bind_processor:
+            if self.dialect.name not in _variant_mapping(type_) and type_._has_bind_processor:
                 value = type_.process_bind_param(value, self.dialect)
             return self._bind(value, self._type_inspector.decorator_impl(type_))
         if value is None:
@@ -317,13 +337,13 @@ class _ArrayValueProcessor:
     def _literal(self, value: Any, type_: TypeEngine[Any]) -> str:
         if isinstance(type_, types.TypeDecorator):
             if (
-                self.dialect.name not in type_._variant_mapping
+                self.dialect.name not in _variant_mapping(type_)
                 and type(type_).literal_processor is not types.TypeDecorator.literal_processor
             ):
                 literal_override = type_.literal_processor(self.dialect)
                 if literal_override is not None:
                     return literal_override(value)
-            if self.dialect.name not in type_._variant_mapping:
+            if self.dialect.name not in _variant_mapping(type_):
                 if type_._has_literal_processor:
                     value = type_.process_literal_param(value, self.dialect)
                 elif type_._has_bind_processor:
@@ -358,12 +378,12 @@ class _ArrayValueProcessor:
         if isinstance(type_, types.TypeDecorator):
             value = self._decode(value, self._type_inspector.decorator_impl(type_), as_tuple)
             if (
-                self.dialect.name not in type_._variant_mapping
+                self.dialect.name not in _variant_mapping(type_)
                 and type(type_).result_processor is not types.TypeDecorator.result_processor
             ):
                 processor = type_.result_processor(self.dialect, None)
                 return processor(value) if processor else value
-            if self.dialect.name not in type_._variant_mapping and type_._has_result_processor:
+            if self.dialect.name not in _variant_mapping(type_) and type_._has_result_processor:
                 return type_.process_result_value(value, self.dialect)
             return value
         if value is None:
