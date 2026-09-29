@@ -1,9 +1,12 @@
 import pytest
+from sqlalchemy import func, select, testing
+from sqlalchemy.testing import eq_
 from sqlalchemy.testing.suite import *  # noqa: F403
 from sqlalchemy.testing.suite import FetchLimitOffsetTest as _FetchLimitOffsetTest
 from sqlalchemy.testing.suite import HasTableTest as _HasTableTest
 from sqlalchemy.testing.suite import InsertBehaviorTest as _InsertBehaviorTest
 from sqlalchemy.testing.suite import IntegerTest as _IntegerTest
+from sqlalchemy.testing.suite import SimpleUpdateDeleteTest as _SimpleUpdateDeleteTest
 from sqlalchemy.testing.suite import StringTest as _StringTest
 
 del BinaryTest  # noqa: F821
@@ -24,6 +27,33 @@ del TimeMicrosecondsTest  # noqa: F821
 del TimeTest  # noqa: F821
 del TimestampMicrosecondsTest  # noqa: F821
 del UuidTest  # noqa: F821
+
+
+class SimpleUpdateDeleteTest(_SimpleUpdateDeleteTest):
+    @testing.variation("criteria", ["rows", "norows", "aggregate"])
+    @testing.requires.update_where_target_in_subquery
+    def test_update_where_target_in_subquery(self, connection, criteria):
+        t = self.tables.plain_pk
+        if criteria.rows:
+            subquery = select(t.c.id).where(t.c.id < 3)
+            expected = [(1, "updated"), (2, "updated"), (3, "d3")]
+            rowcount = 2
+        elif criteria.norows:
+            subquery = select(t.c.id).where(t.c.id < 0)
+            expected = [(1, "d1"), (2, "d2"), (3, "d3")]
+            rowcount = 0
+        elif criteria.aggregate:
+            subquery = select(func.max(t.c.id))
+            expected = [(1, "d1"), (2, "d2"), (3, "updated")]
+            rowcount = 1
+        else:
+            criteria.fail()
+
+        r = connection.execute(t.update().where(t.c.id.in_(subquery)), {"data": "updated"})
+        assert not r.is_insert
+        assert not r.returns_rows
+        assert r.rowcount == rowcount
+        eq_(connection.execute(t.select().order_by(t.c.id)).fetchall(), expected)
 
 
 class HasTableTest(_HasTableTest):
