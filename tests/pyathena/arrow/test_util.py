@@ -6,8 +6,9 @@
 # SPDX-License-Identifier: MIT
 
 import pyarrow as pa
+import pytest
 
-from pyathena.arrow.util import to_column_info
+from pyathena.arrow.util import get_athena_type, to_column_info
 
 
 def test_to_column_info():
@@ -148,3 +149,16 @@ def test_to_column_info():
             "Type": "decimal",
         },
     )
+
+
+@pytest.mark.parametrize(
+    ("type_", "expected"),
+    [
+        (pa.decimal32(9, 2), ("decimal", 9, 2)),
+        (pa.decimal64(18, 3), ("decimal", 18, 3)),
+        (pa.decimal128(38, 4), ("decimal", 38, 4)),
+        (pa.decimal256(40, 5), ("decimal", 40, 5)),
+    ],
+)
+def test_get_athena_type_decimal(type_, expected):
+    assert get_athena_type(type_) == expected
