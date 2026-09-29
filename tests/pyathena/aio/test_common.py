@@ -31,7 +31,6 @@ class TestWithAsyncFetch:
         cursor = cursor_class(
             connection=MagicMock(), converter=None, formatter=None, retry_config=None
         )
-        cursor._result_set = MagicMock()  # stands in for the result set of an executed query
         with pytest.raises(
             TypeError, match=rf"'{cursor_class.__name__}' object is not iterable; use 'async for'"
         ):
