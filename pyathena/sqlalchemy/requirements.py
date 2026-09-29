@@ -103,7 +103,34 @@ class Requirements(SuiteRequirements):
 
     @property
     def ctes(self):
+        # Recursive CTEs require Athena engine version 3 and have a maximum depth of 10.
         return supported()
+
+    @property
+    def ctes_with_values(self):
+        return supported()
+
+    @property
+    def ctes_with_update_delete(self):
+        return exclusions.skip_if(
+            lambda _: True, "Athena does not support WITH preceding UPDATE or DELETE."
+        )
+
+    @property
+    def ctes_on_dml(self):
+        return exclusions.skip_if(
+            lambda _: True, "Athena does not support INSERT, UPDATE, or DELETE inside a CTE."
+        )
+
+    @property
+    def update_from(self):
+        return exclusions.skip_if(lambda _: True, "Athena does not support UPDATE ... FROM.")
+
+    @property
+    def delete_from(self):
+        return exclusions.skip_if(
+            lambda _: True, "Athena does not support DELETE ... USING or multi-table DELETE."
+        )
 
     @property
     def views(self):
