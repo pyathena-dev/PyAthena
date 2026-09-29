@@ -40,6 +40,9 @@ $ just test sqla
 $ just test sqla-async
 ```
 
+The `just test` recipes rerun a failed test once when its failure message is an Athena internal error or `Invalid S3 request`, and report the first attempt's traceback.
+Failures in the session setup hooks are not rerun, and a direct `pytest` invocation does not rerun.
+
 ## Run test multiple Python versions
 
 ```bash
