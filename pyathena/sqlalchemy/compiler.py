@@ -171,22 +171,47 @@ class AthenaTypeCompiler(GenericTypeCompiler):
     def visit_enum(self, type_, **kw):
         return self.visit_string(type_, **kw)
 
+    def _enable_hive_column_ddl(self, kw: dict[str, Any]) -> bool:
+        """Enable Hive type syntax for a CREATE TABLE column type.
+
+        ``get_column_specification`` passes the column as ``type_expression``.
+        The flag set here is passed to nested types, so STRUCT at any depth
+        of a column type uses ``STRUCT<name:type>``. Direct type compilation
+        and CAST leave it unset.
+
+        Args:
+            kw: Type-compiler keyword arguments. When Hive syntax applies,
+                ``_athena_hive_ddl`` is set so nested types keep it.
+
+        Returns:
+            True when the type should use Hive DDL syntax.
+        """
+        if kw.get("_athena_hive_ddl") or isinstance(kw.get("type_expression"), Column):
+            kw["_athena_hive_ddl"] = True
+            return True
+        return False
+
     def visit_struct(self, type_, **kw):
-        if isinstance(type_, AthenaStruct):
-            if type_.fields:
-                field_specs = []
-                for field_name, field_type in type_.fields.items():
-                    field_type_str = self.process(field_type, **kw)
-                    field_specs.append(f"{field_name} {field_type_str}")
-                return f"ROW({', '.join(field_specs)})"
+        if not isinstance(type_, AthenaStruct) or not type_.fields:
             return "ROW()"
-        return "ROW()"
+        if self._enable_hive_column_ddl(kw):
+            preparer = AthenaDDLIdentifierPreparer(self.dialect)
+            fields = ", ".join(
+                f"{preparer.quote(name)}:{self.process(field_type, **kw)}"
+                for name, field_type in type_.fields.items()
+            )
+            return f"STRUCT<{fields}>"
+        fields = ", ".join(
+            f"{name} {self.process(field_type, **kw)}" for name, field_type in type_.fields.items()
+        )
+        return f"ROW({fields})"
 
     def visit_STRUCT(self, type_, **kw):
         return self.visit_struct(type_, **kw)
 
     def visit_map(self, type_, **kw):
         if isinstance(type_, AthenaMap):
+            self._enable_hive_column_ddl(kw)
             key_type_str = self.process(type_.key_type, **kw)
             value_type_str = self.process(type_.value_type, **kw)
             return f"MAP<{key_type_str}, {value_type_str}>"
@@ -197,6 +222,7 @@ class AthenaTypeCompiler(GenericTypeCompiler):
 
     def visit_array(self, type_, **kw):
         if isinstance(type_, AthenaArray):
+            self._enable_hive_column_ddl(kw)
             item_type_str = self.process(type_.item_type, **kw)
             return f"ARRAY<{item_type_str}>"
         return "ARRAY<STRING>"

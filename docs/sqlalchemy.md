@@ -697,11 +697,13 @@ This generates the following SQL structure:
 
 ```sql
 CREATE TABLE users (
-    id INTEGER,
-    profile ROW(name STRING, age INTEGER, email STRING),
-    settings ROW(theme STRING, notifications ROW(email STRING, push STRING))
+    id INT,
+    profile STRUCT<name:STRING, age:INTEGER, email:STRING>,
+    settings STRUCT<theme:STRING, notifications:STRUCT<email:STRING, push:STRING>>
 )
 ```
+
+`CREATE TABLE` renders `AthenaStruct` columns with Hive `STRUCT<name:type, ...>` syntax at every nesting depth, including STRUCT values inside MAP and ARRAY.
 
 #### Querying STRUCT data
 
