@@ -29,12 +29,22 @@ from sqlalchemy.testing import eq_, fixtures
 from sqlalchemy.testing.schema import Column, Table
 from sqlalchemy.testing.suite import *  # noqa: F403
 from sqlalchemy.testing.suite import BinaryTest as _BinaryTest
+from sqlalchemy.testing.suite import CollateTest as _CollateTest
+from sqlalchemy.testing.suite import CompoundSelectTest as _CompoundSelectTest
 from sqlalchemy.testing.suite import CTETest as _CTETest
+from sqlalchemy.testing.suite import DeprecatedCompoundSelectTest as _DeprecatedCompoundSelectTest
 from sqlalchemy.testing.suite import DifficultParametersTest as _DifficultParametersTest
+from sqlalchemy.testing.suite import ExistsTest as _ExistsTest
+from sqlalchemy.testing.suite import ExpandingBoundInTest as _ExpandingBoundInTest
 from sqlalchemy.testing.suite import FetchLimitOffsetTest as _FetchLimitOffsetTest
 from sqlalchemy.testing.suite import HasTableTest as _HasTableTest
 from sqlalchemy.testing.suite import InsertBehaviorTest as _InsertBehaviorTest
+from sqlalchemy.testing.suite import OrderByLabelTest as _OrderByLabelTest
+from sqlalchemy.testing.suite import PostCompileParamsTest as _PostCompileParamsTest
+from sqlalchemy.testing.suite import RowFetchTest as _RowFetchTest
+from sqlalchemy.testing.suite import SameNamedSchemaTableTest as _SameNamedSchemaTableTest
 from sqlalchemy.testing.suite import SimpleUpdateDeleteTest as _SimpleUpdateDeleteTest
+from sqlalchemy.testing.suite import WindowFunctionTest as _WindowFunctionTest
 
 from pyathena.sqlalchemy.types import (
     AthenaArray,
@@ -59,6 +69,35 @@ del TimeMicrosecondsTest  # noqa: F821
 del TimeTest  # noqa: F821
 del TimestampMicrosecondsTest  # noqa: F821
 del UuidTest  # noqa: F821
+
+
+class _InsertFixtureRowsOnce:
+    """Insert a compliance class's fixture rows once instead of around every test.
+
+    SQLAlchemy's ``TablesTest`` inserts the fixture rows before each test and
+    deletes them after it; on Athena each of those statements is an Iceberg
+    commit. Mix this into classes whose tests only read their fixture rows.
+    """
+
+    run_inserts = "once"
+    run_deletes = None
+
+    @classmethod
+    def _setup_once_inserts(cls):
+        """Insert the fixture rows, dropping the class's tables if that fails.
+
+        SQLAlchemy registers the class teardown that drops the tables only after
+        the inserts succeed. A table left behind would break a later class on the
+        same worker that defines a table of the same name differently.
+
+        Raises:
+            BaseException: Whatever the inserts raised, after the tables are dropped.
+        """
+        try:
+            super()._setup_once_inserts()  # type: ignore[misc]
+        except BaseException:
+            cls._teardown_once_metadata_bind()  # type: ignore[attr-defined]
+            raise
 
 
 class BinaryTest(_BinaryTest):
@@ -756,7 +795,7 @@ class InsertBehaviorTest(_InsertBehaviorTest):
         pass
 
 
-class FetchLimitOffsetTest(_FetchLimitOffsetTest):
+class FetchLimitOffsetTest(_InsertFixtureRowsOnce, _FetchLimitOffsetTest):
     @pytest.mark.skip("Athena does not support expressions in the offset clause.")
     def test_simple_limit_expr_offset(self, connection):
         pass
@@ -776,3 +815,43 @@ class FetchLimitOffsetTest(_FetchLimitOffsetTest):
     @pytest.mark.skip("Athena does not support expressions in the offset clause.")
     def test_expr_offset(self, connection):
         pass
+
+
+class CollateTest(_InsertFixtureRowsOnce, _CollateTest):
+    pass
+
+
+class CompoundSelectTest(_InsertFixtureRowsOnce, _CompoundSelectTest):
+    pass
+
+
+class DeprecatedCompoundSelectTest(_InsertFixtureRowsOnce, _DeprecatedCompoundSelectTest):
+    pass
+
+
+class ExistsTest(_InsertFixtureRowsOnce, _ExistsTest):
+    pass
+
+
+class ExpandingBoundInTest(_InsertFixtureRowsOnce, _ExpandingBoundInTest):
+    pass
+
+
+class OrderByLabelTest(_InsertFixtureRowsOnce, _OrderByLabelTest):
+    pass
+
+
+class PostCompileParamsTest(_InsertFixtureRowsOnce, _PostCompileParamsTest):
+    pass
+
+
+class RowFetchTest(_InsertFixtureRowsOnce, _RowFetchTest):
+    pass
+
+
+class SameNamedSchemaTableTest(_InsertFixtureRowsOnce, _SameNamedSchemaTableTest):
+    pass
+
+
+class WindowFunctionTest(_InsertFixtureRowsOnce, _WindowFunctionTest):
+    pass
