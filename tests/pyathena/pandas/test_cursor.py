@@ -1,4 +1,5 @@
 import contextlib
+import csv
 import math
 import random
 import string
@@ -13,6 +14,7 @@ import pandas as pd
 import pytest
 
 from pyathena.error import DatabaseError, ProgrammingError
+from pyathena.pandas.converter import DefaultPandasTypeConverter
 from pyathena.pandas.cursor import PandasCursor
 from pyathena.pandas.result_set import AthenaPandasResultSet, PandasDataFrameIterator
 from tests import ENV
@@ -20,6 +22,195 @@ from tests.pyathena.conftest import connect
 
 
 class TestPandasCursor:
+    @pytest.mark.parametrize(
+        ("engine", "chunksize"), [("auto", None), ("c", 2), ("python", 2), ("pyarrow", None)]
+    )
+    def test_binary_null_vs_empty(self, pandas_cursor, engine, chunksize):
+        query = """SELECT * FROM (VALUES
+                    (1, CAST(NULL AS VARBINARY), 'null', CAST(NULL AS VARCHAR)),
+                    (2, X'', 'empty', ''),
+                    (3, X'00ff275c25',
+                     'comma, quote" and' || chr(13) || chr(10) || 'newline', 'NULL')
+                ) AS t(id, value, label, text_value) ORDER BY id"""
+        pandas_cursor.execute(query, engine=engine, chunksize=chunksize)
+        rows = pandas_cursor.fetchall()
+        assert pandas_cursor.result_set._csv_stream.closed
+        assert [row[:3] for row in rows] == [
+            (1, None, "null"),
+            (2, b"", "empty"),
+            (3, b"\x00\xff'\\%", 'comma, quote" and\r\nnewline'),
+        ]
+
+        assert pd.isna(rows[0][3])
+        assert pd.isna(rows[1][3])
+        assert rows[2][3] == "NULL"
+
+    @pytest.mark.parametrize("chunksize", [None, 2])
+    def test_binary_as_pandas(self, pandas_cursor, chunksize):
+        pandas_cursor.execute(
+            "SELECT * FROM (VALUES (1, CAST(NULL AS VARBINARY)), (2, X''), (3, X'00ff')) "
+            "AS t(id, value) ORDER BY id",
+            chunksize=chunksize,
+            storage_options={"connection": pandas_cursor.connection, "default_cache_type": "none"},
+        )
+        result = pandas_cursor.as_pandas()
+        df = pd.concat(list(result), ignore_index=True) if chunksize else result
+        assert df["value"].tolist() == [None, b"", b"\x00\xff"]
+        assert pandas_cursor.result_set._csv_stream.closed
+
+    @pytest.mark.parametrize("engine", ["c", "python"])
+    @pytest.mark.parametrize(
+        "close_method",
+        ["iterator", "generator", "context", "exhaust", "nrows", "get_chunk", "cursor", "execute"],
+    )
+    def test_binary_csv_stream_close(self, pandas_cursor, engine, close_method):
+        pandas_cursor.execute(
+            "SELECT X'00' AS value, rpad('x', 4096, 'x') AS padding "
+            "FROM UNNEST(sequence(1, 100)) AS t(id)",
+            engine=engine,
+            chunksize=1,
+            nrows=2 if close_method == "nrows" else None,
+        )
+        stream = pandas_cursor.result_set._csv_stream
+        source = stream.buffer.raw._reader._file
+        dataframe_iterator = pandas_cursor.as_pandas()
+        chunks = pandas_cursor.iter_chunks() if close_method == "generator" else dataframe_iterator
+        assert next(chunks)["value"].tolist() == [b"\x00"]
+        assert not stream.closed
+        assert not source.closed
+
+        if close_method in ("iterator", "generator"):
+            chunks.close()
+        elif close_method == "context":
+            with chunks:
+                assert next(chunks)["value"].tolist() == [b"\x00"]
+        elif close_method == "exhaust":
+            assert sum(len(chunk) for chunk in chunks) == 99
+        elif close_method == "nrows":
+            assert sum(len(chunk) for chunk in chunks) == 1
+        elif close_method == "get_chunk":
+            assert len(chunks.get_chunk(99)) == 99
+            with pytest.raises(StopIteration):
+                chunks.get_chunk(1)
+        elif close_method == "cursor":
+            pandas_cursor.close()
+        else:
+            pandas_cursor.execute("SELECT 1")
+
+        assert stream.closed
+        assert source.closed
+        chunks.close()
+        with pytest.raises(StopIteration):
+            next(dataframe_iterator)
+        with pytest.raises(StopIteration):
+            dataframe_iterator.get_chunk()
+        if close_method != "execute":
+            assert pandas_cursor.fetchone() is None
+
+    @pytest.mark.parametrize("engine", ["c", "python"])
+    @pytest.mark.parametrize("read_method", ["next", "get_chunk"])
+    def test_binary_csv_stream_close_on_read_error(self, pandas_cursor, engine, read_method):
+        pandas_cursor.execute(
+            "SELECT X'00' AS value, rpad('x', 4096, 'x') AS padding "
+            "FROM UNNEST(sequence(1, 100)) AS t(id)",
+            engine=engine,
+            chunksize=1,
+            dtype={"padding": "int64"},
+        )
+        stream = pandas_cursor.result_set._csv_stream
+        source = stream.buffer.raw._reader._file
+        chunks = pandas_cursor.as_pandas()
+        assert not stream.closed
+        assert not source.closed
+        read_chunk = chunks.__next__ if read_method == "next" else chunks.get_chunk
+        with pytest.raises(ValueError, match=r"invalid literal|Unable to convert column"):
+            read_chunk()
+        assert stream.closed
+        assert source.closed
+        with pytest.raises(StopIteration):
+            next(chunks)
+        with pytest.raises(StopIteration):
+            chunks.get_chunk()
+        assert pandas_cursor.fetchone() is None
+
+    def test_binary_converter_override(self, pandas_cursor):
+        pandas_cursor.execute(
+            "SELECT CAST(NULL AS VARBINARY) AS value, X'' AS empty_value",
+            converters={"value": bytes.fromhex, "empty_value": bytes.fromhex},
+        )
+        assert pandas_cursor.fetchone() == (b"", b"")
+        pandas_cursor.execute("SELECT X'00ff' AS value", converters={})
+        assert pandas_cursor.fetchone() == ("00 ff",)
+        pandas_cursor.execute("SELECT X'00ff' AS value", converters=None)
+        assert pandas_cursor.fetchone() == ("00 ff",)
+
+    @pytest.mark.parametrize("engine", ["c", "pyarrow"])
+    def test_binary_without_converter(self, engine):
+        converter = DefaultPandasTypeConverter()
+        for type_ in list(converter.mappings):
+            converter.remove(type_)
+        with (
+            connect(cursor_class=PandasCursor, converter=converter) as conn,
+            conn.cursor() as cursor,
+        ):
+            cursor.execute(
+                "SELECT X'00ff' AS value, %(padding)s AS padding",
+                {"padding": "x" * 200},
+                engine=engine,
+            )
+            assert cursor.fetchone() == ("00 ff", "x" * 200)
+
+    @pytest.mark.parametrize("engine", ["c", "python"])
+    @pytest.mark.parametrize(
+        ("read_options", "expected"),
+        [
+            ({}, [None, b"", b"\x00\xff"]),
+            ({"names": ["null_value", "empty_value", "value"]}, [None, b"", b"\x00\xff"]),
+            ({"usecols": [1, 2]}, [b"", b"\x00\xff"]),
+            ({"names": [0, 1, 2], "usecols": [1, 2]}, [b"", b"\x00\xff"]),
+        ],
+        ids=["duplicate_names", "renamed", "selected", "integer_names_selected"],
+    )
+    def test_binary_dataframe_column_names(self, pandas_cursor, engine, read_options, expected):
+        pandas_cursor.execute(
+            "SELECT CAST(NULL AS VARBINARY) AS value, X'' AS value, X'00ff' AS value",
+            engine=engine,
+            **read_options,
+        )
+        assert pandas_cursor.as_pandas().iloc[0].tolist() == expected
+
+    @pytest.mark.parametrize("read_options", [{"quoting": 3}, {"quotechar": "'"}])
+    def test_binary_custom_quoting(self, pandas_cursor, read_options):
+        pandas_cursor.execute("SELECT X'00ff' AS value", **read_options)
+        assert pandas_cursor.as_pandas().iloc[0].tolist() == ['"00 ff"']
+
+    @pytest.mark.parametrize("engine", ["c", "python"])
+    def test_binary_custom_dialect(self, pandas_cursor, engine):
+        dialect = csv.excel()
+        dialect.quoting = csv.QUOTE_NONE
+        pandas_cursor.execute(
+            "SELECT CAST(NULL AS VARBINARY) AS value, 'text' AS label",
+            engine=engine,
+            dialect=dialect,
+        )
+        row = pandas_cursor.as_pandas().iloc[0].tolist()
+        assert pd.isna(row[0])
+        assert row[1] == '"text"'
+
+    def test_binary_duplicate_name_without_converter(self):
+        converter = DefaultPandasTypeConverter()
+        converter.remove("varbinary")
+        with (
+            connect(cursor_class=PandasCursor, converter=converter) as conn,
+            conn.cursor() as cursor,
+        ):
+            cursor.execute("SELECT true AS value, X'00ff' AS value")
+            assert cursor.as_pandas().iloc[0].tolist() == [True, "00 ff"]
+
+    def test_binary_single_null(self, pandas_cursor):
+        pandas_cursor.execute("SELECT CAST(NULL AS VARBINARY) AS value")
+        assert pandas_cursor.fetchall() == [(None,)]
+
     @pytest.mark.parametrize(
         ("pandas_cursor", "parquet_engine", "chunksize"),
         [

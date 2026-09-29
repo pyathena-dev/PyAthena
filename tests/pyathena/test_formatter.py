@@ -275,6 +275,24 @@ class TestDefaultParameterFormatter:
         )
         assert actual == expected
 
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (b"", "X''"),
+            (b"abc", "X'616263'"),
+            (b"\x00\xff'\\%", "X'00ff275c25'"),
+            (bytearray(b"\x00\xff"), "X'00ff'"),
+            (memoryview(b"\x00\xff"), "X'00ff'"),
+        ],
+    )
+    def test_format_binary(self, formatter, value, expected):
+        assert formatter.format("SELECT %(value)s", {"value": value}) == f"SELECT {expected}"
+
+    def test_format_binary_sequence(self, formatter):
+        assert formatter.format("SELECT X'00' IN %(values)s", {"values": [b"\x00", b"\xff"]}) == (
+            "SELECT X'00' IN (X'00', X'ff')"
+        )
+
     def test_format_unicode(self, formatter):
         expected = textwrap.dedent(
             """

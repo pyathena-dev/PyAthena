@@ -89,6 +89,7 @@ def create_engine(**kwargs):
         "row_format",
         "serdeproperties",
         "tblproperties",
+        "unload",
         "verify",
     ]:
         if arg in kwargs:
@@ -107,6 +108,8 @@ def create_engine(**kwargs):
 def create_async_engine(**kwargs):
     driver = kwargs.pop("driver", "aiorest")
     conn_str = ASYNC_SQLALCHEMY_CONNECTION_STRING.replace("+aiorest", f"+{driver}")
+    if "unload" in kwargs:
+        conn_str += "&unload={unload}"
     return _create_async_engine(
         conn_str.format(
             region_name=ENV.region_name,

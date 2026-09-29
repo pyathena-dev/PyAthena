@@ -27,6 +27,16 @@ def get_double_type() -> type[Any]:
     return types.FLOAT
 
 
+class AthenaBinary(types.LargeBinary):
+    """SQLAlchemy binary type with Athena hexadecimal literals."""
+
+    def literal_processor(self, dialect: Dialect) -> _LiteralProcessorType[bytes]:
+        def process(value: bytes) -> str:
+            return f"X'{value.hex()}'"
+
+        return process
+
+
 class AthenaTimestamp(TypeEngine[datetime]):
     """SQLAlchemy type for Athena TIMESTAMP values.
 

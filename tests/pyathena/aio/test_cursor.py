@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pyathena import ExecuteOptions
+from pyathena import BINARY, Binary, ExecuteOptions
 from pyathena.aio.cursor import AioCursor
 from pyathena.error import DatabaseError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
@@ -15,6 +15,24 @@ from tests.pyathena.aio.conftest import _aio_connect
 
 
 class TestAioCursor:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (b"", b""),
+            (b"\x00\xff'\\%", b"\x00\xff'\\%"),
+            (bytes(range(256)), bytes(range(256))),
+            (bytearray(b"\x00\xff"), b"\x00\xff"),
+            (memoryview(b"\x00\xff"), b"\x00\xff"),
+            (Binary(bytearray(b"abc")), b"abc"),
+            (None, None),
+        ],
+        ids=["empty", "special", "all_bytes", "bytearray", "memoryview", "dbapi_binary", "null"],
+    )
+    async def test_binary_parameter(self, aio_cursor, value, expected):
+        await aio_cursor.execute("SELECT CAST(%(value)s AS VARBINARY)", {"value": value})
+        assert await aio_cursor.fetchone() == (expected,)
+        assert aio_cursor.description[0][1] == BINARY
+
     async def test_fetchone(self, aio_cursor):
         await aio_cursor.execute("SELECT * FROM one_row")
         assert aio_cursor.rowcount == -1

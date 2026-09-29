@@ -251,6 +251,12 @@ def _format_str(formatter: Formatter, escaper: Callable[[str], str], val: Any) -
     return escaper(val)
 
 
+def _format_binary(
+    formatter: Formatter, escaper: Callable[[str], str], val: bytes | bytearray | memoryview
+) -> str:
+    return f"X'{val.hex()}'"
+
+
 def _format_seq(formatter: Formatter, escaper: Callable[[str], str], val: Any) -> Any:
     results = []
     for v in val:
@@ -291,6 +297,9 @@ _DEFAULT_FORMATTERS: dict[type[Any], Callable[[Formatter, Callable[[str], str], 
     Decimal: _format_decimal,
     bool: _format_bool,
     str: _format_str,
+    bytes: _format_binary,
+    bytearray: _format_binary,
+    memoryview: _format_binary,
     list: _format_seq,
     set: _format_seq,
     tuple: _format_seq,
@@ -307,6 +316,7 @@ class DefaultParameterFormatter(Formatter):
     Supported types:
         - None: Converts to SQL NULL
         - Strings: Properly escaped and quoted
+        - Binary data: bytes, bytearray, memoryview as hexadecimal literals
         - Numbers: int, float, Decimal
         - Dates and times: date, datetime, time
         - Booleans: Converted to SQL boolean literals

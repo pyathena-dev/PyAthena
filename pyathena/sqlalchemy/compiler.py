@@ -294,7 +294,7 @@ class AthenaStatementCompiler(SQLCompiler):
             type_clause = "VARCHAR"
         elif isinstance(cast.type, types.CHAR) and cast.type.length is None:
             type_clause = "CHAR"
-        elif isinstance(cast.type, (types.BINARY, types.VARBINARY)):
+        elif isinstance(cast.type, (types.LargeBinary, types.BINARY, types.VARBINARY)):
             type_clause = "VARBINARY"
         elif hasattr(types, "DOUBLE") and isinstance(cast.type, types.DOUBLE):
             type_clause = "DOUBLE"

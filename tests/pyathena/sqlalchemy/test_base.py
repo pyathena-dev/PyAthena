@@ -1507,6 +1507,65 @@ OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat'
         ).scalar()
         assert actual == "1"
 
+    @pytest.mark.parametrize(
+        "engine",
+        [{"driver": driver} for driver in ("rest", "pandas", "arrow", "polars", "s3fs")],
+        indirect=True,
+    )
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (b"", b""),
+            (b"\x00\xff'\\%", b"\x00\xff'\\%"),
+            (bytes(range(256)), bytes(range(256))),
+            (bytearray(b"\x00\xff"), b"\x00\xff"),
+            (memoryview(b"\x00\xff"), b"\x00\xff"),
+        ],
+        ids=["empty", "special", "all_bytes", "bytearray", "memoryview"],
+    )
+    def test_binary_parameters_and_literals(self, engine, value, expected):
+        _, conn = engine
+        columns = [
+            expression.cast(
+                expression.literal(value, type_=type_, literal_execute=literal_execute), type_
+            )
+            for type_ in (types.LargeBinary, types.BINARY, types.VARBINARY)
+            for literal_execute in (False, True)
+        ]
+        statement = select(*columns)
+        assert conn.execute(statement).one() == (expected,) * len(columns)
+        compiled = statement.compile(dialect=conn.dialect, compile_kwargs={"literal_binds": True})
+        assert conn.exec_driver_sql(str(compiled)).one() == (expected,) * len(columns)
+
+    @pytest.mark.parametrize(
+        "engine",
+        [
+            {"driver": "rest"},
+            {"driver": "pandas"},
+            {"driver": "arrow"},
+            {"driver": "polars"},
+            {"driver": "s3fs"},
+            {"driver": "pandas", "unload": True},
+            {"driver": "arrow", "unload": True},
+        ],
+        indirect=["engine"],
+        ids=["rest", "pandas_csv", "arrow_csv", "polars", "s3fs", "pandas_unload", "arrow_unload"],
+    )
+    def test_binary_null_vs_empty(self, engine):
+        _, conn = engine
+        columns = [
+            expression.cast(
+                expression.literal(value, type_=type_, literal_execute=literal_execute), type_
+            )
+            for type_ in (types.LargeBinary, types.BINARY, types.VARBINARY)
+            for value in (None, b"")
+            for literal_execute in (False, True)
+        ]
+        statement = select(*columns)
+        assert conn.execute(statement).one() == (None, None, b"", b"") * 3
+        compiled = statement.compile(dialect=conn.dialect, compile_kwargs={"literal_binds": True})
+        assert conn.exec_driver_sql(str(compiled)).one() == (None, None, b"", b"") * 3
+
     def test_cast_as_binary(self, engine):
         engine, conn = engine
         one_row_complex = Table("one_row_complex", MetaData(schema=ENV.schema), autoload_with=conn)
@@ -1514,10 +1573,12 @@ OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat'
             sqlalchemy.select(
                 expression.cast(one_row_complex.c.col_string, types.BINARY),
                 expression.cast(one_row_complex.c.col_varchar, types.VARBINARY),
+                expression.cast(one_row_complex.c.col_string, types.LargeBinary),
             )
         ).one()
         assert actual[0] == b"a string"
         assert actual[1] == b"varchar"
+        assert actual[2] == b"a string"
 
     def test_create_table_with_partition(self, engine):
         engine, conn = engine

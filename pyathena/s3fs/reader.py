@@ -120,9 +120,13 @@ class AthenaCSVReader(Iterator[list[str | None]]):
         Raises:
             StopIteration: When end of file is reached or reader is closed.
         """
+        return self._parse_line(self._read_record().rstrip("\r\n"))
+
+    def _read_record(self) -> str:
+        """Read a complete CSV record, retaining its original text and line endings."""
         if self._file is None:
             raise StopIteration
-        line = self._file.readline()
+        line: str = self._file.readline()
         if not line:
             raise StopIteration
 
@@ -138,7 +142,7 @@ class AthenaCSVReader(Iterator[list[str | None]]):
             # Only scan the new line, passing current quote state
             in_quotes = self._check_quote_state(next_line, in_quotes)
 
-        return self._parse_line(line.rstrip("\r\n"))
+        return line
 
     def _check_quote_state(self, text: str, starting_state: bool = False) -> bool:
         """Check quote state after processing text.
@@ -150,17 +154,8 @@ class AthenaCSVReader(Iterator[list[str | None]]):
         Returns:
             True if we end inside an unclosed quote.
         """
-        in_quotes = starting_state
-        i = 0
-        while i < len(text):
-            if text[i] == '"':
-                if in_quotes and i + 1 < len(text) and text[i + 1] == '"':
-                    # Escaped quote inside quoted field, skip both
-                    i += 2
-                    continue
-                in_quotes = not in_quotes
-            i += 1
-        return in_quotes
+        # Escaped quotes occur in pairs and do not change the quote state.
+        return starting_state != bool(text.count('"') % 2)
 
     def _parse_line(self, line: str) -> list[str | None]:
         """Parse a single CSV line preserving NULL vs empty string distinction.

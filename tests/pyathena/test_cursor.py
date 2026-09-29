@@ -15,7 +15,18 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pyathena import BINARY, BOOLEAN, DATE, DATETIME, JSON, NUMBER, STRING, TIME, ExecuteOptions
+from pyathena import (
+    BINARY,
+    BOOLEAN,
+    DATE,
+    DATETIME,
+    JSON,
+    NUMBER,
+    STRING,
+    TIME,
+    Binary,
+    ExecuteOptions,
+)
 from pyathena.converter import _to_array, _to_map, _to_struct
 from pyathena.cursor import Cursor
 from pyathena.error import DatabaseError, NotSupportedError, ProgrammingError
@@ -391,6 +402,24 @@ class TestCursor:
     def test_null_param(self, cursor):
         cursor.execute("SELECT %(param)s FROM one_row", {"param": None})
         assert cursor.fetchall() == [(None,)]
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (b"", b""),
+            (b"\x00\xff'\\%", b"\x00\xff'\\%"),
+            (bytes(range(256)), bytes(range(256))),
+            (bytearray(b"\x00\xff"), b"\x00\xff"),
+            (memoryview(b"\x00\xff"), b"\x00\xff"),
+            (Binary(bytearray(b"abc")), b"abc"),
+            (None, None),
+        ],
+        ids=["empty", "special", "all_bytes", "bytearray", "memoryview", "dbapi_binary", "null"],
+    )
+    def test_binary_parameter(self, cursor, value, expected):
+        cursor.execute("SELECT CAST(%(value)s AS VARBINARY)", {"value": value})
+        assert cursor.fetchone() == (expected,)
+        assert cursor.description[0][1] == BINARY
 
     def test_no_params(self, cursor):
         pytest.raises(DatabaseError, lambda: cursor.execute("SELECT %(param)s FROM one_row"))

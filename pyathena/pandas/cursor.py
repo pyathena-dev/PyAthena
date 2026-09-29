@@ -294,9 +294,10 @@ class PandasCursor(WithFetch):
 
         import gc
 
-        for chunk_count, chunk in enumerate(result_set.iter_chunks(), 1):
-            yield chunk
+        with result_set.iter_chunks() as chunks:
+            for chunk_count, chunk in enumerate(chunks, 1):
+                yield chunk
 
-            # Suggest garbage collection every 10 chunks for large datasets
-            if chunk_count % 10 == 0:
-                gc.collect()
+                # Suggest garbage collection every 10 chunks for large datasets
+                if chunk_count % 10 == 0:
+                    gc.collect()

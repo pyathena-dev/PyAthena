@@ -31,6 +31,7 @@ from pyathena.sqlalchemy.compiler import (
 from pyathena.sqlalchemy.preparer import AthenaDMLIdentifierPreparer
 from pyathena.sqlalchemy.types import (
     TINYINT,
+    AthenaBinary,
     AthenaDate,
     AthenaStruct,
     AthenaTimestamp,
@@ -174,6 +175,9 @@ class AthenaDialect(DefaultDialect):
     ]
 
     colspecs: dict[type[Any], type[Any]] = {  # noqa: RUF012
+        types.LargeBinary: AthenaBinary,
+        types.BINARY: AthenaBinary,
+        types.VARBINARY: AthenaBinary,
         types.DATE: AthenaDate,
         types.DATETIME: AthenaTimestamp,
         types.TIMESTAMP: AthenaTimestamp,

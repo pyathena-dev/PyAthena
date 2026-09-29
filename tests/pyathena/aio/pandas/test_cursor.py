@@ -7,6 +7,21 @@ from tests.pyathena.aio.conftest import _aio_connect
 
 
 class TestAioPandasCursor:
+    async def test_binary_null_vs_empty(self, aio_pandas_cursor):
+        query = """SELECT * FROM (VALUES
+                    (1, CAST(NULL AS VARBINARY), 'null', CAST(NULL AS VARCHAR)),
+                    (2, X'', 'empty', ''),
+                    (3, X'00ff275c25', 'comma, quote" and' || chr(10) || 'newline', 'NULL')
+                ) AS t(id, value, label, text_value) ORDER BY id"""
+        await aio_pandas_cursor.execute(query, chunksize=2)
+        result = aio_pandas_cursor
+        rows = await result.fetchall()
+        assert [row[:3] for row in rows] == [
+            (1, None, "null"),
+            (2, b"", "empty"),
+            (3, b"\x00\xff'\\%", 'comma, quote" and\nnewline'),
+        ]
+
     async def test_fetchone(self, aio_pandas_cursor):
         await aio_pandas_cursor.execute("SELECT * FROM one_row")
         assert aio_pandas_cursor.rownumber == 0
