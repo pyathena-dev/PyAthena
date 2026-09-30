@@ -1,9 +1,12 @@
 import contextlib
+import importlib.metadata
 import re
+import runpy
 import textwrap
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import quote_plus
 
@@ -18,6 +21,7 @@ from sqlalchemy.sql import expression, type_coerce
 from sqlalchemy.sql.ddl import CreateTable
 from sqlalchemy.sql.schema import Column, MetaData, Table
 from sqlalchemy.sql.selectable import TextualSelect
+from sqlalchemy.util import PluginLoader
 
 from pyathena.aio.sqlalchemy.base import AthenaAioDialect
 from pyathena.converter import DefaultTypeConverter
@@ -121,6 +125,20 @@ class TestAthenaDialect:
         assert bare.driver == "rest"
         assert bare.url.get_driver_name() == "rest"
         assert bare.dialect.dialect_description == "awsathena+rest"
+
+    def test_compliance_suite_registry_matches_entry_points(self, monkeypatch):
+        # tests/sqlalchemy registers the dialects for the compliance suite, and a
+        # registration overrides the installed entry point in that process.
+        loader = PluginLoader("sqlalchemy.dialects")
+        monkeypatch.setattr("sqlalchemy.dialects.registry", loader)
+        runpy.run_path(str(Path(__file__).parents[2] / "sqlalchemy" / "__init__.py"))
+        entry_points = {
+            entry_point.name: entry_point.load()
+            for entry_point in importlib.metadata.entry_points(group="sqlalchemy.dialects")
+            if entry_point.value.startswith("pyathena.")
+        }
+        assert entry_points
+        assert {name: load() for name, load in loader.impls.items()} == entry_points
 
     @pytest.mark.parametrize("dialect_class", [AthenaDialect, AthenaAioDialect])
     def test_type_compiler(self, dialect_class):
