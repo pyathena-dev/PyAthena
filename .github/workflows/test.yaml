@@ -124,8 +124,8 @@ jobs:
           files=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename')
           printf 'Changed files:\n%s\n' "$files"
           shared='^(\.github/workflows/test(-suite)?\.yaml|justfile|pyproject\.toml|uv\.lock)$'
-          # The top-level modules and the shared test fixtures, which both the
-          # SQLAlchemy and the Spark code and tests import.
+          # The SQLAlchemy and Spark packages load the top-level modules,
+          # directly or transitively, and their tests use the shared fixtures.
           core='^pyathena/(aio/)?[^/]+\.py$|^tests/(__init__|pyathena/(conftest|tables|util)|pyathena/aio/conftest)\.py$|^tests/resources/'
           sqla="$shared|$core|^pyathena/(aio/)?sqlalchemy/|^tests/sqlalchemy/|^tests/pyathena/(aio/)?sqlalchemy/|^setup\.cfg$"
           spark="$shared|$core|^pyathena/(aio/)?spark/|^tests/pyathena/(aio/)?spark/"
