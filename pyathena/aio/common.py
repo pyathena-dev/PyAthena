@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any, TypeVar
+from typing import Any, NoReturn, TypeVar
 
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -622,7 +622,8 @@ class WithAsyncFetch(AioBaseCursor, WithResultSet):
 
     Overrides ``executemany`` and ``cancel`` of ``WithResultSet`` with async
     versions and adds async iteration and the async context manager protocol.
-    Subclasses override the fetch methods with async versions.
+    Synchronous iteration raises ``TypeError``. Subclasses override the fetch
+    methods with async versions.
 
     Subclasses override ``execute()`` and optionally ``__init__`` and
     format-specific helpers.
@@ -674,6 +675,14 @@ class WithAsyncFetch(AioBaseCursor, WithResultSet):
         if not self.query_id:
             raise ProgrammingError("QueryExecutionId is none or empty.")
         await self._cancel(self.query_id)
+
+    def __iter__(self) -> NoReturn:
+        """Reject synchronous iteration; use ``async for`` instead.
+
+        Raises:
+            TypeError: Always, because the fetch methods are coroutines.
+        """
+        raise TypeError(f"'{type(self).__name__}' object is not iterable; use 'async for' instead.")
 
     def __aiter__(self):
         return self
