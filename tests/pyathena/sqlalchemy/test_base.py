@@ -26,6 +26,7 @@ from pyathena.error import DatabaseError, OperationalError
 from pyathena.formatter import DefaultParameterFormatter
 from pyathena.sqlalchemy.base import AthenaDialect
 from pyathena.sqlalchemy.compiler import AthenaTypeCompiler
+from pyathena.sqlalchemy.rest import AthenaRestDialect
 from pyathena.sqlalchemy.types import (
     TINYINT,
     AthenaArray,
@@ -110,6 +111,17 @@ def recording_engine(rowcounts=None, query="", config=None, **kwargs):
 
 
 class TestAthenaDialect:
+    def test_bare_scheme_uses_rest_driver(self):
+        # The bare awsathena entry point resolves to the REST dialect, like
+        # awsathena+rest. Requires the package to be reinstalled (uv sync) so the
+        # installed entry point metadata matches pyproject.toml.
+        url = "awsathena://athena.us-west-2.amazonaws.com:443/default?s3_staging_dir=s3://bucket/path/"
+        bare = create_engine(url)
+        assert type(bare.dialect) is AthenaRestDialect
+        assert bare.driver == "rest"
+        assert bare.url.get_driver_name() == "rest"
+        assert bare.dialect.dialect_description == "awsathena+rest"
+
     @pytest.mark.parametrize("dialect_class", [AthenaDialect, AthenaAioDialect])
     def test_type_compiler(self, dialect_class):
         # SQLAlchemy 2.0 builds the type compiler from type_compiler_cls. A legacy

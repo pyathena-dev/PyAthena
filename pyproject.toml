@@ -38,7 +38,7 @@ documentation = "https://pyathena.dev/"
 issues = "https://github.com/pyathena-dev/PyAthena/issues"
 
 [project.entry-points."sqlalchemy.dialects"]
-awsathena = "pyathena.sqlalchemy.base:AthenaDialect"
+awsathena = "pyathena.sqlalchemy.rest:AthenaRestDialect"
 "awsathena.rest" = "pyathena.sqlalchemy.rest:AthenaRestDialect"
 "awsathena.pandas" = "pyathena.sqlalchemy.pandas:AthenaPandasDialect"
 "awsathena.arrow" = "pyathena.sqlalchemy.arrow:AthenaArrowDialect"

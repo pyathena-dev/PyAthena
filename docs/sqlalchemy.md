@@ -180,7 +180,7 @@ Column definitions in `CREATE TABLE` render `TIMESTAMP` for `DateTime` and for `
 
 | Dialect   | Driver | Schema           | Cursor                 |
 |-----------|--------|------------------|------------------------|
-| awsathena |        | awsathena        | DefaultCursor          |
+| awsathena | rest   | awsathena        | DefaultCursor          |
 | awsathena | rest   | awsathena+rest   | DefaultCursor          |
 | awsathena | pandas | awsathena+pandas | {ref}`pandas-cursor`   |
 | awsathena | arrow  | awsathena+arrow  | {ref}`arrow-cursor`    |
