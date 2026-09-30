@@ -19,7 +19,7 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE", "NOTICE"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Topic :: Database :: Front-Ends",
