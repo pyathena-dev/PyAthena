@@ -99,7 +99,7 @@ awsathena+aiorest://:@athena.{region_name}.amazonaws.com:443/{schema_name}?s3_st
 
 | Dialect   | Driver | Schema           | Cursor                 |
 |-----------|--------|------------------|------------------------|
-| awsathena |        | awsathena        | DefaultCursor          |
+| awsathena | rest   | awsathena        | DefaultCursor          |
 | awsathena | rest   | awsathena+rest   | DefaultCursor          |
 | awsathena | pandas | awsathena+pandas | {ref}`pandas-cursor`   |
 | awsathena | arrow  | awsathena+arrow  | {ref}`arrow-cursor`    |

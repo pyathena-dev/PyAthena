@@ -1,8 +1,11 @@
+import importlib.metadata
 import re
+import runpy
 import textwrap
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 from urllib.parse import quote_plus
 
 import numpy as np
@@ -15,7 +18,9 @@ from sqlalchemy.sql import expression, type_coerce
 from sqlalchemy.sql.ddl import CreateTable
 from sqlalchemy.sql.schema import Column, MetaData, Table
 from sqlalchemy.sql.selectable import TextualSelect
+from sqlalchemy.util import PluginLoader
 
+from pyathena.sqlalchemy.rest import AthenaRestDialect
 from pyathena.sqlalchemy.types import (
     TINYINT,
     AthenaArray,
@@ -48,6 +53,33 @@ def unique_s3tables_table_name(base: str) -> str:
         ``base`` with a random suffix.
     """
     return f"{base}_{uuid.uuid4().hex[:8]}"
+
+
+class TestAthenaDialect:
+    def test_bare_scheme_uses_rest_driver(self):
+        # The bare awsathena entry point resolves to the REST dialect, like
+        # awsathena+rest. Requires the package to be reinstalled (uv sync) so the
+        # installed entry point metadata matches pyproject.toml.
+        url = "awsathena://athena.us-west-2.amazonaws.com:443/default?s3_staging_dir=s3://bucket/path/"
+        bare = create_engine(url)
+        assert type(bare.dialect) is AthenaRestDialect
+        assert bare.driver == "rest"
+        assert bare.url.get_driver_name() == "rest"
+        assert bare.dialect.dialect_description == "awsathena+rest"
+
+    def test_compliance_suite_registry_matches_entry_points(self, monkeypatch):
+        # tests/sqlalchemy registers the dialects for the compliance suite, and a
+        # registration overrides the installed entry point in that process.
+        loader = PluginLoader("sqlalchemy.dialects")
+        monkeypatch.setattr("sqlalchemy.dialects.registry", loader)
+        runpy.run_path(str(Path(__file__).parents[2] / "sqlalchemy" / "__init__.py"))
+        entry_points = {
+            entry_point.name: entry_point.load()
+            for entry_point in importlib.metadata.entry_points(group="sqlalchemy.dialects")
+            if entry_point.value.startswith("pyathena.")
+        }
+        assert entry_points
+        assert {name: load() for name, load in loader.impls.items()} == entry_points
 
 
 class TestSQLAlchemyAthena:
