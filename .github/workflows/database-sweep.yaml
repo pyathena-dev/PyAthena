@@ -8,10 +8,8 @@
 name: Sweep test databases
 
 on:
-  workflow_run:
-    workflows: [Test]
-    branches: [master]
-    types: [completed]
+  schedule:
+    - cron:  '0 3 * * *'
   workflow_dispatch:
     inputs:
       dry-run:
@@ -28,15 +26,10 @@ concurrency:
 
 jobs:
   sweep:
-    # A separate completion workflow also runs after failed or cancelled tests.
-    if: >-
-      github.repository == 'pyathena-dev/PyAthena' &&
-      ((github.event_name == 'workflow_run' &&
-        github.event.workflow_run.event == 'schedule' &&
-        github.event.workflow_run.head_repository.full_name == github.repository) ||
-       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'))
+    # Scheduled runs use the default branch; manual dispatch must choose it.
+    if: github.repository == 'pyathena-dev/PyAthena' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 60
     permissions:
       contents: read
       id-token: write
@@ -49,11 +42,8 @@ jobs:
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run && 'true' || 'false' }}
 
     steps:
-      # Never execute code or consume artifacts from the triggering test run.
-      - name: Checkout default branch
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: master
           persist-credentials: false
 
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
