@@ -9,10 +9,34 @@ from typing import Any
 
 import pytest
 
+from pyathena.arrow.async_cursor import AsyncArrowCursor
+from pyathena.arrow.cursor import ArrowCursor
+from pyathena.async_cursor import AsyncCursor, AsyncDictCursor
 from pyathena.connection import Connection
 from pyathena.converter import DefaultTypeConverter
-from pyathena.cursor import Cursor
+from pyathena.cursor import Cursor, DictCursor
+from pyathena.error import ProgrammingError
+from pyathena.pandas.async_cursor import AsyncPandasCursor
+from pyathena.pandas.cursor import PandasCursor
+from pyathena.polars.async_cursor import AsyncPolarsCursor
+from pyathena.polars.cursor import PolarsCursor
+from pyathena.s3fs.async_cursor import AsyncS3FSCursor
+from pyathena.s3fs.cursor import S3FSCursor
 from pyathena.util import RetryConfig
+
+# Cursors whose arraysize is the GetQueryResults page size, capped at 1000.
+PAGED_CURSORS = [Cursor, DictCursor, AsyncCursor, AsyncDictCursor]
+# Cursors whose arraysize only sets the fetchmany() batch, with no upper limit.
+UNCAPPED_CURSORS = [
+    ArrowCursor,
+    PandasCursor,
+    PolarsCursor,
+    S3FSCursor,
+    AsyncArrowCursor,
+    AsyncPandasCursor,
+    AsyncPolarsCursor,
+    AsyncS3FSCursor,
+]
 
 
 class RecordingCursor(Cursor):
@@ -64,3 +88,30 @@ class TestConnection:
 
         assert cursor.kwargs["schema_name"] == "configured"
         assert cursor.kwargs["kill_on_interrupt"] is False
+
+    @pytest.mark.parametrize("cursor_class", PAGED_CURSORS + UNCAPPED_CURSORS)
+    def test_cursor_arraysize(self, cursor_class):
+        conn = _connection(cursor_kwargs={"arraysize": 25})
+
+        assert conn.cursor(cursor_class).arraysize == 25
+        assert conn.cursor(cursor_class, arraysize=50).arraysize == 50
+
+    def test_cursor_arraysize_default_fetch_size(self):
+        class SmallPageCursor(Cursor):
+            DEFAULT_FETCH_SIZE = 500
+
+        assert _connection().cursor(SmallPageCursor).arraysize == 500
+
+    @pytest.mark.parametrize("cursor_class", PAGED_CURSORS)
+    def test_cursor_arraysize_over_page_size(self, cursor_class):
+        with pytest.raises(ProgrammingError):
+            _connection().cursor(cursor_class, arraysize=1001)
+
+    @pytest.mark.parametrize("cursor_class", UNCAPPED_CURSORS)
+    def test_cursor_arraysize_uncapped(self, cursor_class):
+        assert _connection().cursor(cursor_class, arraysize=1001).arraysize == 1001
+
+    @pytest.mark.parametrize("cursor_class", PAGED_CURSORS + UNCAPPED_CURSORS)
+    def test_cursor_arraysize_not_positive(self, cursor_class):
+        with pytest.raises(ProgrammingError):
+            _connection().cursor(cursor_class, arraysize=0)

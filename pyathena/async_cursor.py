@@ -80,9 +80,9 @@ class AsyncCursor(BaseCursor):
             result_reuse_minutes=result_reuse_minutes,
             **kwargs,
         )
+        self.arraysize = arraysize
         self._max_workers = max_workers
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
-        self._arraysize = arraysize
         self._result_set_class = AthenaResultSet
 
     @property

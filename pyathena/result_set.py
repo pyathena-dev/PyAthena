@@ -804,13 +804,22 @@ class WithResultSet(BaseCursor, CursorIterator):
     subclasses override the fetch methods.
     """
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, arraysize: int | None = None, **kwargs) -> None:
         """Initialize the cursor with no query ID and no result set.
 
         Args:
+            arraysize: Default number of rows per ``fetchmany()`` call,
+                validated by the ``arraysize`` setter. If None,
+                ``DEFAULT_FETCH_SIZE`` is used.
             **kwargs: Arguments passed to ``BaseCursor.__init__``.
+
+        Raises:
+            ProgrammingError: If ``arraysize`` is outside the range the
+                cursor's ``arraysize`` setter accepts.
         """
         super().__init__(**kwargs)
+        if arraysize is not None:
+            self.arraysize = arraysize
         self._query_id: str | None = None
         self._result_set: AthenaResultSet | None = None
 
