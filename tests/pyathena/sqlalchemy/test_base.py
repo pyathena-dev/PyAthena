@@ -16,6 +16,7 @@ from sqlalchemy.sql.ddl import CreateTable
 from sqlalchemy.sql.schema import Column, MetaData, Table
 from sqlalchemy.sql.selectable import TextualSelect
 
+from pyathena.sqlalchemy.rest import AthenaRestDialect
 from pyathena.sqlalchemy.types import (
     TINYINT,
     AthenaArray,
@@ -48,6 +49,19 @@ def unique_s3tables_table_name(base: str) -> str:
         ``base`` with a random suffix.
     """
     return f"{base}_{uuid.uuid4().hex[:8]}"
+
+
+class TestAthenaDialect:
+    def test_bare_scheme_uses_rest_driver(self):
+        # The bare awsathena entry point resolves to the REST dialect, like
+        # awsathena+rest. Requires the package to be reinstalled (uv sync) so the
+        # installed entry point metadata matches pyproject.toml.
+        url = "awsathena://athena.us-west-2.amazonaws.com:443/default?s3_staging_dir=s3://bucket/path/"
+        bare = create_engine(url)
+        assert type(bare.dialect) is AthenaRestDialect
+        assert bare.driver == "rest"
+        assert bare.url.get_driver_name() == "rest"
+        assert bare.dialect.dialect_description == "awsathena+rest"
 
 
 class TestSQLAlchemyAthena:
