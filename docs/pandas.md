@@ -520,23 +520,20 @@ cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                  region_name="us-west-2",
                  cursor_class=PandasCursor).cursor()
 
-# High-performance reading with PyArrow engine
+# PyArrow engine (reads the whole result; not used with chunksize)
 cursor.execute("SELECT * FROM large_table",
-               engine="pyarrow",
-               chunksize=100_000,
-               use_threads=True)
+               engine="pyarrow")
 
-# Memory-conscious reading with Python engine
+# Python engine with chunked reading
 cursor.execute("SELECT * FROM huge_table",
                engine="python",
-               chunksize=25_000,
-               low_memory=True)
+               chunksize=25_000)
 
-# Fine-tuned C engine with custom buffer
+# C engine with chunked reading, parsing each chunk at once
 cursor.execute("SELECT * FROM data_table",
                engine="c",
                chunksize=50_000,
-               buffer_lines=100_000)
+               low_memory=False)
 
 # Custom data types for better performance
 cursor.execute("SELECT * FROM typed_table",
@@ -546,12 +543,16 @@ cursor.execute("SELECT * FROM typed_table",
 
 Common performance options:
 
-- `engine`: CSV parsing engine ('c', 'python', 'pyarrow')
-- `use_threads`: Enable threading for PyArrow engine
-- `low_memory`: Use low memory mode for Python engine
-- `buffer_lines`: Buffer size for C engine
+- `engine`: CSV parsing engine ('auto', 'c', 'python', 'pyarrow'); 'auto' uses the C engine
+- `low_memory`: Parse the file in internal chunks to reduce memory use (C engine only; pandas default `True`)
 - `dtype`: Explicit column data types
 - `parse_dates`: Columns to parse as dates
+
+With `engine="pyarrow"`, PandasCursor uses the PyArrow engine only when pyarrow is installed, no chunksize is set (explicitly or by `auto_optimize_chunksize`), `quoting` is the default, the result has no columns that need a converter (`boolean`, `decimal`, `varbinary`, and `json` with the default converter), and the result file is at least `AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES` bytes.
+Otherwise, it falls back to the C engine.
+
+Apart from PandasCursor's own options such as `engine` and `chunksize`, an option passed here replaces the value PyAthena sets for the same pandas.read_csv() argument.
+For example, `dtype` replaces the whole column type mapping, and `parse_dates` replaces the list of date, time, and timestamp columns.
 
 ### Unload options
 
