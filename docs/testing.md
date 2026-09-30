@@ -96,6 +96,7 @@ AWS_ATHENA_S3_TABLES_CATALOG=s3tablescatalog/your-table-bucket
 Each test process creates its own namespace in the table bucket, named like its schema, and deletes it with any remaining tables at the end; with pytest-xdist that is each worker, not the controller.
 The test identity needs `s3tables:CreateNamespace`, `s3tables:DeleteNamespace`, `s3tables:ListTables`, and `s3tables:DeleteTable` on the table bucket.
 A session that stops early leaves its namespace behind; `scripts/sweep_databases.py` removes such namespaces once they are more than one day old.
+It also removes the databases and namespaces of a local session against the same account that stays open that long.
 
 The S3 Tables tests live in `tests/pyathena/sqlalchemy/test_base.py` and `tests/pyathena/test_glue.py` and run under `just test pyathena`, not the SQLAlchemy compliance-suite commands.
 Managed storage and S3 Tables tests skip when their respective optional configuration is absent.

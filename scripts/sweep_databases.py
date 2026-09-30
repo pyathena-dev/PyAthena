@@ -13,11 +13,13 @@
 # AWS_PROFILE and AWS_DEFAULT_REGION can select the account and region.
 #
 # Eligible databases must exactly match a PyAthena or SQLAlchemy fixture name
-# and have a creation time more than one day old, longer than any test session
-# runs; a GitHub-hosted job stops after six hours. Resource links and federated
-# databases are excluded. The script completes inventory before deleting and
-# rechecks eligibility and creation time immediately before each deletion.
-# Only missing-database errors are ignored; other API failures stop the sweep.
+# and have a creation time more than one day old, longer than a CI test session
+# can run (a GitHub-hosted job stops after six hours). A local session against
+# the same account that stays open longer can lose its database. Resource
+# links and federated databases are excluded. The script completes inventory
+# before deleting and rechecks eligibility and creation time immediately
+# before each deletion. Only missing-database errors are ignored; other API
+# failures stop the sweep.
 # Deletion removes Glue database and table metadata, not S3 objects.
 #
 # With AWS_ATHENA_S3_TABLES_CATALOG set (s3tablescatalog/<table-bucket>), the
@@ -31,9 +33,10 @@
 # under the same name right after the last recheck would still be deleted.
 #
 # .github/workflows/database-sweep.yaml runs this script daily on master, so
-# cancelled test runs leave at most about two days of leftovers. Manual sweep
-# dispatch on master defaults to preview. The job has a 60-minute timeout; a
-# timeout or API failure can leave eligible databases for a later run.
+# while those runs succeed, a cancelled test run's leftovers are removed within
+# about two days. Manual sweep dispatch on master defaults to preview. The job
+# has a 60-minute timeout; a timeout or API failure can leave eligible databases
+# for a later run.
 
 import argparse
 import contextlib
