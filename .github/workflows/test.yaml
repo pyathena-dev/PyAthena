@@ -68,9 +68,10 @@ jobs:
   # requests run none. A ready pull request always runs the PyAthena suite; it
   # runs the SQLAlchemy tests (the compliance suites and the PyAthena suite's
   # SQLAlchemy tests) and the Spark tests only when their code, tests,
-  # dependencies, or this workflow change. Pull requests and the schedule test
-  # the newest Python version; a dispatch tests the requested versions or
-  # every version, and the Release workflow every version.
+  # dependencies, this workflow, the top-level modules of pyathena and
+  # pyathena.aio, or the shared test fixtures change. Pull requests and the
+  # schedule test the newest Python version; a dispatch tests the requested
+  # versions or every version, and the Release workflow every version.
   changes:
     if: >-
       github.event_name != 'pull_request' ||
@@ -123,8 +124,11 @@ jobs:
           files=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename')
           printf 'Changed files:\n%s\n' "$files"
           shared='^(\.github/workflows/test(-suite)?\.yaml|justfile|pyproject\.toml|uv\.lock)$'
-          sqla="$shared|^pyathena/(aio/)?sqlalchemy/|^tests/sqlalchemy/|^tests/pyathena/(aio/)?sqlalchemy/|^setup\.cfg$"
-          spark="$shared|^pyathena/(aio/)?spark/|^tests/pyathena/(aio/)?spark/"
+          # The top-level modules and the shared test fixtures, which both the
+          # SQLAlchemy and the Spark code and tests import.
+          core='^pyathena/(aio/)?[^/]+\.py$|^tests/(__init__|pyathena/(conftest|tables|util)|pyathena/aio/conftest)\.py$|^tests/resources/'
+          sqla="$shared|$core|^pyathena/(aio/)?sqlalchemy/|^tests/sqlalchemy/|^tests/pyathena/(aio/)?sqlalchemy/|^setup\.cfg$"
+          spark="$shared|$core|^pyathena/(aio/)?spark/|^tests/pyathena/(aio/)?spark/"
           if grep -qE "$sqla" <<< "$files"; then
             echo "sqla=true" >> "$GITHUB_OUTPUT"
           else
