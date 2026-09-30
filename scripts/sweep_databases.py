@@ -57,7 +57,7 @@ _TEST_DATABASE = re.compile(
     rf"(?:{_PYATHENA_TEST_SCHEMA}|test_[0-9a-f]{{12}}(?:_test_schema(?:_2)?)?)"
 )
 _TEST_NAMESPACE = re.compile(_PYATHENA_TEST_SCHEMA)
-# Test databases and namespaces older than this are no longer in use.
+# Longer than a CI test session can run; see the module comment.
 _RETENTION = timedelta(days=1)
 
 
