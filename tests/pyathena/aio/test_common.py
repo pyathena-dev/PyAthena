@@ -4,6 +4,7 @@
 # See LICENSE or https://opensource.org/licenses/MIT.
 #
 # SPDX-License-Identifier: MIT
+import threading
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -45,15 +46,27 @@ class TestWithAsyncFetch:
         cursor = cursor_class(
             connection=MagicMock(), converter=None, formatter=None, retry_config=None
         )
+        threads = []
+
+        def fetch(rows):
+            def record(*args):
+                threads.append(threading.get_ident())
+                return rows
+
+            return record
+
         cursor.result_set = MagicMock()
-        cursor.result_set.fetchone.return_value = (1,)
-        cursor.result_set.fetchmany.return_value = [(2,), (3,)]
-        cursor.result_set.fetchall.return_value = [(4,)]
+        cursor.result_set.fetchone.side_effect = fetch((1,))
+        cursor.result_set.fetchmany.side_effect = fetch([(2,), (3,)])
+        cursor.result_set.fetchall.side_effect = fetch([(4,)])
 
         assert await cursor.fetchone() == (1,)
         assert await cursor.fetchmany(2) == [(2,), (3,)]
         assert await cursor.fetchall() == [(4,)]
         cursor.result_set.fetchmany.assert_called_once_with(2)
+        # The synchronous fetches run off the event loop's thread.
+        assert len(threads) == 3
+        assert threading.get_ident() not in threads
 
     @pytest.mark.parametrize(
         "cursor_class",
