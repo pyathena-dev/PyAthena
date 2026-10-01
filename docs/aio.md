@@ -146,7 +146,7 @@ Cancelling the task again during the cancellation request or these waits raises 
 With `kill_on_interrupt=False`, `asyncio.CancelledError` is raised immediately and the query keeps running.
 
 A timeout from `asyncio.wait_for()` therefore cancels the query and raises `asyncio.TimeoutError`.
-`query_id` is `None` if the timeout expires before the start request is sent, for example while looking up a cached result.
+`query_id` is `None` if the timeout expires before `execute()` begins the start request, for example while looking up a cached result.
 
 ```python
 import asyncio
