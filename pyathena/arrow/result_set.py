@@ -14,7 +14,7 @@ from pyathena.converter import Converter
 from pyathena.error import ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet
-from pyathena.util import RetryConfig, parse_output_location
+from pyathena.util import RetryConfig, override, parse_output_location
 
 if TYPE_CHECKING:
     import polars as pl
@@ -213,6 +213,7 @@ class AthenaArrowResultSet(AthenaResultSet):
         description = self.description if self.description else []
         return {d[0]: self._converter.get(d[1]) for d in description}
 
+    @override
     def _fetch(self) -> None:
         try:
             rows = next(self._batches)
@@ -227,6 +228,7 @@ class AthenaArrowResultSet(AthenaResultSet):
             ]
             self._rows.extend(processed_rows)
 
+    @override
     def fetchone(
         self,
     ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
@@ -383,6 +385,7 @@ class AthenaArrowResultSet(AthenaResultSet):
                 "polars is required for as_polars(). Install it with: pip install polars"
             ) from e
 
+    @override
     def close(self) -> None:
         import pyarrow as pa
 

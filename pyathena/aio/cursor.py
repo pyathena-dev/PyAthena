@@ -66,7 +66,8 @@ class AioCursor(WithAsyncFetch):
         self._result_set: AthenaAioResultSet | None = None
         self._result_set_class = AthenaAioResultSet
 
-    @property
+    @property  # type: ignore[explicit-override]  # python/mypy#15900
+    @override
     def arraysize(self) -> int:
         return self._arraysize
 

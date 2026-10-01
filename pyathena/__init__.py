@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, overload
 
 from pyathena.error import *  # noqa: F403
 from pyathena.options import ExecuteOptions as ExecuteOptions
+from pyathena.util import override
 
 if TYPE_CHECKING:
     from pyathena.aio.connection import AioConnection
@@ -34,16 +35,19 @@ class DBAPITypeObject(frozenset[str]):
     https://www.python.org/dev/peps/pep-0249/#type-objects-and-constructors
     """
 
+    @override
     def __eq__(self, other: object):
         if isinstance(other, frozenset):
             return frozenset.__eq__(self, other)
         return other in self
 
+    @override
     def __ne__(self, other: object):
         if isinstance(other, frozenset):
             return frozenset.__ne__(self, other)
         return other not in self
 
+    @override
     def __hash__(self):
         return frozenset.__hash__(self)
 

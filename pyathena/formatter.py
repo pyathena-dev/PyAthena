@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 from pyathena.error import ProgrammingError
 from pyathena.model import AthenaCompression, AthenaFileFormat
+from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
 
@@ -396,6 +397,7 @@ class DefaultParameterFormatter(Formatter):
     def __init__(self) -> None:
         super().__init__(mappings=deepcopy(_DEFAULT_FORMATTERS), default=None)
 
+    @override
     def format(self, operation: str, parameters: dict[str, Any] | None = None) -> str:
         if not operation or not operation.strip():
             raise ProgrammingError("Query is none or empty.")

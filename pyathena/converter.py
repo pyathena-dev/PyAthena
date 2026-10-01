@@ -19,7 +19,7 @@ from pyathena.parser import (
     TypeSignatureParser,
     _split_array_items,
 )
-from pyathena.util import strtobool
+from pyathena.util import override, strtobool
 
 _logger = logging.getLogger(__name__)
 
@@ -657,6 +657,7 @@ class DefaultTypeConverter(Converter):
             lambda m: DefaultTypeConverter._HIVE_REPLACEMENTS[m.group()], type_str
         )
 
+    @override
     def convert(self, type_: str, value: str | None, type_hint: str | None = None) -> Any | None:
         """Convert a string value to the appropriate Python type.
 

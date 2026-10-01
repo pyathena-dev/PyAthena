@@ -9,6 +9,7 @@ from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.options import ExecuteOptions
 from pyathena.result_set import AthenaDictResultSet, AthenaResultSet, WithFetch
+from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
 
@@ -70,7 +71,8 @@ class Cursor(WithFetch):
         )
         self._result_set_class = AthenaResultSet
 
-    @property
+    @property  # type: ignore[explicit-override]  # python/mypy#15900
+    @override
     def arraysize(self) -> int:
         return self._arraysize
 
@@ -82,6 +84,7 @@ class Cursor(WithFetch):
             )
         self._arraysize = value
 
+    @override
     def execute(
         self,
         operation: str,

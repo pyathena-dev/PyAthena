@@ -11,6 +11,7 @@ from pyathena.options import ExecuteOptions
 from pyathena.result_set import WithFetch
 from pyathena.s3fs.converter import DefaultS3FSTypeConverter
 from pyathena.s3fs.result_set import AthenaS3FSResultSet, CSVReaderType
+from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
 
@@ -106,6 +107,7 @@ class S3FSCursor(WithFetch):
         self._csv_reader = csv_reader
 
     @staticmethod
+    @override
     def get_default_converter(
         unload: bool = False,
     ) -> DefaultS3FSTypeConverter:
@@ -119,6 +121,7 @@ class S3FSCursor(WithFetch):
         """
         return DefaultS3FSTypeConverter()
 
+    @override
     def execute(
         self,
         operation: str,

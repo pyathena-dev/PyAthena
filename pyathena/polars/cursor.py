@@ -19,6 +19,7 @@ from pyathena.polars.converter import (
 )
 from pyathena.polars.result_set import AthenaPolarsResultSet
 from pyathena.result_set import WithFetch
+from pyathena.util import override
 
 if TYPE_CHECKING:
     import polars as pl
@@ -128,6 +129,7 @@ class PolarsCursor(WithFetch):
         self._chunksize = chunksize
 
     @staticmethod
+    @override
     def get_default_converter(
         unload: bool = False,
     ) -> DefaultPolarsTypeConverter | DefaultPolarsUnloadTypeConverter | Any:
@@ -143,6 +145,7 @@ class PolarsCursor(WithFetch):
             return DefaultPolarsUnloadTypeConverter()
         return DefaultPolarsTypeConverter()
 
+    @override
     def execute(
         self,
         operation: str,

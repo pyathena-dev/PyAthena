@@ -31,7 +31,7 @@ from pyathena.error import (
     ProgrammingError,
 )
 from pyathena.sqlalchemy.base import AthenaDialect
-from pyathena.util import RetryConfig
+from pyathena.util import RetryConfig, override
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -140,6 +140,7 @@ class AsyncAdapt_pyathena_connection(AdaptedConnection):
         self._connection = connection  # type: ignore[assignment]
 
     @property
+    @override
     def driver_connection(self) -> AioConnection:
         return self._connection  # type: ignore[return-value]
 
@@ -225,21 +226,26 @@ class AthenaAioDialect(AthenaDialect):
     supports_statement_cache = True
 
     @classmethod
+    @override
     def get_pool_class(cls, url: URL) -> type:
         return pool.AsyncAdaptedQueuePool
 
     @classmethod
+    @override
     def import_dbapi(cls) -> ModuleType:
         return AsyncAdapt_pyathena_dbapi()  # type: ignore[return-value]
 
     @classmethod
+    @override
     def dbapi(cls) -> ModuleType:  # type: ignore[override]
         return AsyncAdapt_pyathena_dbapi()  # type: ignore[return-value]
 
+    @override
     def create_connect_args(self, url: URL) -> tuple[tuple[str], MutableMapping[str, Any]]:
         opts = self._create_connect_args(url)
         self._connect_options = opts
         return cast(tuple[str], ()), opts
 
+    @override
     def get_driver_connection(self, connection: Any) -> Any:
         return connection

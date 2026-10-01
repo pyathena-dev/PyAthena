@@ -14,6 +14,8 @@ from concurrent.futures import Future
 from concurrent.futures.thread import ThreadPoolExecutor
 from typing import Any, TypeVar
 
+from pyathena.util import override
+
 T = TypeVar("T")
 
 
@@ -53,9 +55,11 @@ class S3ThreadPoolExecutor(S3Executor):
     def __init__(self, max_workers: int) -> None:
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
 
+    @override
     def submit(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> Future[T]:
         return self._executor.submit(fn, *args, **kwargs)
 
+    @override
     def shutdown(self, wait: bool = True) -> None:
         self._executor.shutdown(wait=wait)
 
@@ -81,6 +85,7 @@ class S3AioExecutor(S3Executor):
     def __init__(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
         self._loop = loop
 
+    @override
     def submit(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> Future[T]:
         if self._loop is not None and self._loop.is_running():
             return asyncio.run_coroutine_threadsafe(
@@ -91,6 +96,7 @@ class S3AioExecutor(S3Executor):
             "Use S3ThreadPoolExecutor for synchronous usage."
         )
 
+    @override
     def shutdown(self, wait: bool = True) -> None:
         # No resources to release — work is dispatched to the event loop.
         pass

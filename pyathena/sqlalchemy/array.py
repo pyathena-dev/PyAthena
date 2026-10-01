@@ -19,6 +19,7 @@ from pyathena.formatter import _ComplexParameter
 from pyathena.sqlalchemy.map import AthenaMap
 from pyathena.sqlalchemy.struct import AthenaStruct
 from pyathena.sqlalchemy.temporal import AthenaDate, AthenaTimestamp
+from pyathena.util import override
 
 # SQLAlchemy 2.0.0's ARRAY comparator is not generic at runtime.
 if TYPE_CHECKING:
@@ -56,6 +57,7 @@ class AthenaArray(sqltypes.ARRAY[Any]):
     class Comparator(_ArrayComparatorBase):
         """Build array indexing expressions with inclusive SQL slice bounds."""
 
+        @override
         def _setup_getitem(self, index):
             if isinstance(index, slice):
                 if index.step is not None and (type(index.step) is not int or index.step != 1):
@@ -92,19 +94,23 @@ class AthenaArray(sqltypes.ARRAY[Any]):
         else:
             super().__init__(item_type or sqltypes.String(), as_tuple, dimensions, zero_indexes)
 
+    @override
     def bind_expression(self, bindvalue):
         """Cast a bound ARRAY value to its declared Athena element type."""
         # The cast also gives empty arrays and NULL-only arrays their element type.
         return cast(bindvalue, self)._annotate({"_pyathena_array_bind": True})
 
+    @override
     def bind_processor(self, dialect):
         """Return a processor that marks native ARRAY, MAP, and ROW parameters."""
         return _ArrayValueProcessor(self, dialect).bind
 
+    @override
     def literal_processor(self, dialect):
         """Return a processor that renders typed Athena array literals."""
         return _ArrayValueProcessor(self, dialect).literal
 
+    @override
     def column_expression(self, colexpr):
         """Project the outer ARRAY result as JSON while retaining its Python type."""
         return (
@@ -113,6 +119,7 @@ class AthenaArray(sqltypes.ARRAY[Any]):
             else _ArrayJSONProjection(colexpr, self)
         )
 
+    @override
     def result_processor(self, dialect, coltype):
         """Return a processor that restores the declared Python element types."""
         return _ArrayValueProcessor(self, dialect).result
@@ -124,11 +131,13 @@ class _ArraySliceStepType(types.TypeDecorator[int]):
     impl = types.Integer
     cache_ok = True
 
+    @override
     def process_bind_param(self, value, dialect):
         if type(value) is not int or value != 1:
             raise ValueError("Athena ARRAY slices support only step=None or step=1")
         return value
 
+    @override
     def process_literal_param(self, value, dialect):
         return self.process_bind_param(value, dialect)
 
@@ -418,6 +427,7 @@ class _ArrayAssignmentType(types.TypeDecorator[Any]):
         super().__init__()
         self.item_type = item_type
 
+    @override
     def bind_processor(self, dialect):
         processor = _ArrayValueProcessor(self.item_type, dialect)
 
@@ -429,9 +439,11 @@ class _ArrayAssignmentType(types.TypeDecorator[Any]):
 
         return process
 
+    @override
     def literal_processor(self, dialect):
         return _ArrayValueProcessor(self.item_type, dialect).literal
 
+    @override
     def bind_expression(self, bindvalue):
         expression = self.item_type.bind_expression(bindvalue)
         return bindvalue if expression is None else expression
@@ -443,11 +455,13 @@ class _ArrayWriteIndexType(types.TypeDecorator[int]):
     impl = types.Integer
     cache_ok = True
 
+    @override
     def process_bind_param(self, value, dialect):
         if type(value) is not int:
             raise ValueError("ARRAY write indices must be non-NULL integers")
         return value
 
+    @override
     def process_literal_param(self, value, dialect):
         return self.process_bind_param(value, dialect)
 
@@ -478,6 +492,7 @@ class _ArrayUpdate(ColumnElement[Any]):
         )
 
     @property
+    @override
     def _from_objects(self):
         return self.column._from_objects + self.value._from_objects
 

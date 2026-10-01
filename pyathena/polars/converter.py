@@ -20,6 +20,7 @@ from pyathena.converter import (
     _to_json,
     _to_time,
 )
+from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
 
@@ -93,6 +94,7 @@ class DefaultPolarsTypeConverter(Converter):
             }
         return self.__dtypes
 
+    @override
     def get_dtype(self, type_: str, precision: int = 0, scale: int = 0) -> Any:
         """Get the Polars data type for a given Athena type.
 
@@ -110,6 +112,7 @@ class DefaultPolarsTypeConverter(Converter):
             return pl.Decimal(precision=precision, scale=scale)
         return self._types.get(type_)
 
+    @override
     def convert(self, type_: str, value: str | None, type_hint: str | None = None) -> Any | None:
         converter = self.get(type_)
         return converter(value)
@@ -134,6 +137,7 @@ class DefaultPolarsUnloadTypeConverter(Converter):
             default=_to_default,
         )
 
+    @override
     def convert(self, type_: str, value: str | None, type_hint: str | None = None) -> Any | None:
         converter = self.get(type_)
         return converter(value)

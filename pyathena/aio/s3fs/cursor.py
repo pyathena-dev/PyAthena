@@ -72,6 +72,7 @@ class AioS3FSCursor(WithAsyncFetch):
         self._result_set: AthenaS3FSResultSet | None = None
 
     @staticmethod
+    @override
     def get_default_converter(
         unload: bool = False,
     ) -> DefaultS3FSTypeConverter:

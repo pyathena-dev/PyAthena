@@ -22,7 +22,7 @@ from pyathena.error import ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.pandas.reader import _BINARY_NULL, BinaryCSVReader
 from pyathena.result_set import AthenaResultSet
-from pyathena.util import RetryConfig, parse_output_location
+from pyathena.util import RetryConfig, override, parse_output_location
 
 if TYPE_CHECKING:
     from pandas import DataFrame
@@ -88,6 +88,7 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         self._trunc_date = trunc_date
         self._csv_stream = csv_stream
 
+    @override
     def __next__(self) -> DataFrame:
         """Get the next DataFrame chunk.
 
@@ -104,6 +105,7 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
             self.close()
             raise
 
+    @override
     def __iter__(self) -> PandasDataFrameIterator:
         """Return self as iterator."""
         return self
@@ -478,6 +480,7 @@ class AthenaPandasResultSet(AthenaResultSet):
                 df.isetitem(df.columns.get_loc(time_col), truncated[time_col])
         return df
 
+    @override
     def fetchone(
         self,
     ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
@@ -837,6 +840,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         """
         return self._df_iter
 
+    @override
     def close(self) -> None:
         import pandas as pd
 

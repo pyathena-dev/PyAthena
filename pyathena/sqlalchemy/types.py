@@ -15,6 +15,7 @@ from pyathena.sqlalchemy.array import ARRAY, AthenaArray
 from pyathena.sqlalchemy.map import MAP, AthenaMap
 from pyathena.sqlalchemy.struct import STRUCT, AthenaStruct
 from pyathena.sqlalchemy.temporal import AthenaDate, AthenaTimestamp
+from pyathena.util import override
 
 if TYPE_CHECKING:
     from sqlalchemy import Dialect
@@ -38,6 +39,7 @@ __all__ = [
 class AthenaBinary(types.LargeBinary):
     """SQLAlchemy binary type with Athena hexadecimal literals."""
 
+    @override
     def literal_processor(self, dialect: Dialect) -> _LiteralProcessorType[bytes]:
         def process(value: bytes) -> str:
             return f"X'{value.hex()}'"

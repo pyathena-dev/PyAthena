@@ -11,6 +11,8 @@ import csv
 from collections.abc import Iterator
 from typing import Any
 
+from pyathena.util import override
+
 
 class DefaultCSVReader(Iterator[list[str]]):
     """CSV reader using Python's standard csv module.
@@ -43,10 +45,12 @@ class DefaultCSVReader(Iterator[list[str]]):
         self._file: Any | None = file_obj
         self._reader = csv.reader(file_obj, delimiter=delimiter)
 
+    @override
     def __iter__(self) -> DefaultCSVReader:
         """Iterate over rows in the CSV file."""
         return self
 
+    @override
     def __next__(self) -> list[str]:
         """Read and parse the next line.
 
@@ -114,10 +118,12 @@ class AthenaCSVReader(Iterator[list[str | None]]):
         self._file: Any | None = file_obj
         self._delimiter = delimiter
 
+    @override
     def __iter__(self) -> AthenaCSVReader:
         """Iterate over rows in the CSV file."""
         return self
 
+    @override
     def __next__(self) -> list[str | None]:
         """Read and parse the next line.
 

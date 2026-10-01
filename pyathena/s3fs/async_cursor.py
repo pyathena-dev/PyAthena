@@ -12,6 +12,7 @@ from pyathena.model import AthenaQueryExecution
 from pyathena.options import ExecuteOptions
 from pyathena.s3fs.converter import DefaultS3FSTypeConverter
 from pyathena.s3fs.result_set import AthenaS3FSResultSet, CSVReaderType
+from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
 
@@ -108,6 +109,7 @@ class AsyncS3FSCursor(AsyncCursor):
         self._csv_reader = csv_reader
 
     @staticmethod
+    @override
     def get_default_converter(
         unload: bool = False,
     ) -> DefaultS3FSTypeConverter:
@@ -121,7 +123,8 @@ class AsyncS3FSCursor(AsyncCursor):
         """
         return DefaultS3FSTypeConverter()
 
-    @property
+    @property  # type: ignore[explicit-override]  # python/mypy#15900
+    @override
     def arraysize(self) -> int:
         """Get the number of rows to fetch at a time."""
         return self._arraysize
@@ -140,6 +143,7 @@ class AsyncS3FSCursor(AsyncCursor):
             raise ProgrammingError("arraysize must be a positive integer value.")
         self._arraysize = value
 
+    @override
     def _collect_result_set(
         self,
         query_id: str,
@@ -172,6 +176,7 @@ class AsyncS3FSCursor(AsyncCursor):
             **kwargs,
         )
 
+    @override
     def execute(
         self,
         operation: str,

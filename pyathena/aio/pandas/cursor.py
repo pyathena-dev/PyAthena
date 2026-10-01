@@ -86,6 +86,7 @@ class AioPandasCursor(WithAsyncFetch):
         self._result_set: AthenaPandasResultSet | None = None
 
     @staticmethod
+    @override
     def get_default_converter(
         unload: bool = False,
     ) -> DefaultPandasTypeConverter | Any:

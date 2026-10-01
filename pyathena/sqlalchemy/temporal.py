@@ -11,6 +11,7 @@ from sqlalchemy import types
 from sqlalchemy.sql.type_api import TypeEngine
 
 from pyathena.formatter import _date_literal, _escape_trino, _timestamp_literal
+from pyathena.util import override
 
 if TYPE_CHECKING:
     from sqlalchemy import Dialect
@@ -61,6 +62,7 @@ class AthenaTimestamp(TypeEngine[datetime]):
         self.precision = precision
 
     @property
+    @override
     def python_type(self) -> type[datetime]:
         """The Python type of TIMESTAMP values.
 
@@ -69,6 +71,7 @@ class AthenaTimestamp(TypeEngine[datetime]):
         """
         return datetime
 
+    @override
     def bind_processor(self, dialect: Dialect) -> _BindProcessorType[datetime] | None:
         """Return a processor truncating bound datetimes to the precision.
 
@@ -89,6 +92,7 @@ class AthenaTimestamp(TypeEngine[datetime]):
 
         return process
 
+    @override
     def coerce_compared_value(self, op: OperatorType | None, value: Any) -> TypeEngine[Any]:
         """Keep this type for a datetime compared with a column of it.
 
@@ -124,6 +128,7 @@ class AthenaTimestamp(TypeEngine[datetime]):
             return _timestamp_literal(value, precision)
         return f"TIMESTAMP {quote(str(value))}"
 
+    @override
     def literal_processor(self, dialect: Dialect) -> _LiteralProcessorType[datetime] | None:
         """Return the literal renderer for the dialect.
 
@@ -155,6 +160,7 @@ class AthenaDate(TypeEngine[date]):
     __visit_name__ = "DATE"
 
     @property
+    @override
     def python_type(self) -> type[date]:
         """The Python type of DATE values.
 
@@ -180,6 +186,7 @@ class AthenaDate(TypeEngine[date]):
             return _date_literal(value)
         return f"DATE {quote(str(value))}"
 
+    @override
     def literal_processor(self, dialect: Dialect) -> _LiteralProcessorType[date] | None:
         """Return the literal renderer for the dialect.
 

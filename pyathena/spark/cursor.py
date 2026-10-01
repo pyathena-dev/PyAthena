@@ -13,6 +13,7 @@ from typing import Any, cast
 from pyathena import OperationalError, ProgrammingError
 from pyathena.model import AthenaCalculationExecution, AthenaCalculationExecutionStatus
 from pyathena.spark.common import SparkBaseCursor, WithCalculationExecution
+from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
 
@@ -64,6 +65,7 @@ class SparkCursor(SparkBaseCursor, WithCalculationExecution):
     """
 
     @property
+    @override
     def calculation_execution(self) -> AthenaCalculationExecution | None:
         return self._calculation_execution
 
@@ -96,6 +98,7 @@ class SparkCursor(SparkBaseCursor, WithCalculationExecution):
             return None
         return self._read_s3_file_as_text(self._calculation_execution.std_error_s3_uri)
 
+    @override
     def execute(
         self,
         operation: str,

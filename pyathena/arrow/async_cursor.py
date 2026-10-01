@@ -15,6 +15,7 @@ from pyathena.async_cursor import AsyncCursor
 from pyathena.common import CursorIterator
 from pyathena.model import AthenaQueryExecution
 from pyathena.options import ExecuteOptions
+from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
 
@@ -130,6 +131,7 @@ class AsyncArrowCursor(AsyncCursor):
         self._request_timeout = request_timeout
 
     @staticmethod
+    @override
     def get_default_converter(
         unload: bool = False,
     ) -> DefaultArrowTypeConverter | DefaultArrowUnloadTypeConverter | Any:
@@ -137,7 +139,8 @@ class AsyncArrowCursor(AsyncCursor):
             return DefaultArrowUnloadTypeConverter()
         return DefaultArrowTypeConverter()
 
-    @property
+    @property  # type: ignore[explicit-override]  # python/mypy#15900
+    @override
     def arraysize(self) -> int:
         return self._arraysize
 
@@ -147,6 +150,7 @@ class AsyncArrowCursor(AsyncCursor):
             raise ProgrammingError("arraysize must be a positive integer value.")
         self._arraysize = value
 
+    @override
     def _collect_result_set(
         self,
         query_id: str,
@@ -171,6 +175,7 @@ class AsyncArrowCursor(AsyncCursor):
             **kwargs,
         )
 
+    @override
     def execute(
         self,
         operation: str,

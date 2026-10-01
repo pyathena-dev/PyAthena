@@ -15,6 +15,7 @@ from pyathena.polars.converter import (
     DefaultPolarsUnloadTypeConverter,
 )
 from pyathena.polars.result_set import AthenaPolarsResultSet
+from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
 
@@ -125,6 +126,7 @@ class AsyncPolarsCursor(AsyncCursor):
         self._chunksize = chunksize
 
     @staticmethod
+    @override
     def get_default_converter(
         unload: bool = False,
     ) -> DefaultPolarsTypeConverter | DefaultPolarsUnloadTypeConverter | Any:
@@ -140,7 +142,8 @@ class AsyncPolarsCursor(AsyncCursor):
             return DefaultPolarsUnloadTypeConverter()
         return DefaultPolarsTypeConverter()
 
-    @property
+    @property  # type: ignore[explicit-override]  # python/mypy#15900
+    @override
     def arraysize(self) -> int:
         """Get the number of rows to fetch per batch."""
         return self._arraysize
@@ -159,6 +162,7 @@ class AsyncPolarsCursor(AsyncCursor):
             raise ProgrammingError("arraysize must be a positive integer value.")
         self._arraysize = value
 
+    @override
     def _collect_result_set(
         self,
         query_id: str,
@@ -185,6 +189,7 @@ class AsyncPolarsCursor(AsyncCursor):
             **kwargs,
         )
 
+    @override
     def execute(
         self,
         operation: str,

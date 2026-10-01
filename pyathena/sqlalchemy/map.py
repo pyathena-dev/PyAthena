@@ -14,6 +14,8 @@ from typing import Any
 from sqlalchemy.sql import sqltypes
 from sqlalchemy.sql.type_api import TypeEngine
 
+from pyathena.util import override
+
 
 class AthenaMap(TypeEngine[dict[str, Any]]):
     """SQLAlchemy type for Athena MAP complex type.
@@ -58,6 +60,7 @@ class AthenaMap(TypeEngine[dict[str, Any]]):
             self.value_type = value_type()
 
     @property
+    @override
     def python_type(self) -> type:
         return dict
 

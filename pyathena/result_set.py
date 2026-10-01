@@ -13,7 +13,7 @@ from pyathena.common import BaseCursor, CursorIterator
 from pyathena.converter import Converter, DefaultTypeConverter
 from pyathena.error import DataError, OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
-from pyathena.util import RetryConfig, parse_output_location, retry_api_call
+from pyathena.util import RetryConfig, override, parse_output_location, retry_api_call
 
 if TYPE_CHECKING:
     from pyathena.connection import Connection
@@ -429,6 +429,7 @@ class AthenaResultSet(CursorIterator):
         offset = 1 if rows and self._is_first_row_column_labels(rows) else 0
         self._process_rows(rows, offset)
 
+    @override
     def fetchone(
         self,
     ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
@@ -441,6 +442,7 @@ class AthenaResultSet(CursorIterator):
         self._rownumber += 1
         return self._rows.popleft()
 
+    @override
     def fetchmany(
         self, size: int | None = None
     ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
@@ -464,6 +466,7 @@ class AthenaResultSet(CursorIterator):
                 break
         return rows
 
+    @override
     def fetchall(
         self,
     ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
@@ -753,6 +756,7 @@ class AthenaDictResultSet(AthenaResultSet):
     # You can override this to use OrderedDict or other dict-like types.
     dict_type: type[Any] = dict
 
+    @override
     def _get_rows(
         self,
         offset: int,
@@ -1137,6 +1141,7 @@ class WithFetch(WithResultSet, BaseCursor, CursorIterator):
     format-specific helpers.
     """
 
+    @override
     def fetchone(
         self,
     ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
@@ -1153,6 +1158,7 @@ class WithFetch(WithResultSet, BaseCursor, CursorIterator):
         result_set = cast(AthenaResultSet, self.result_set)
         return result_set.fetchone()
 
+    @override
     def fetchmany(
         self, size: int | None = None
     ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
@@ -1172,6 +1178,7 @@ class WithFetch(WithResultSet, BaseCursor, CursorIterator):
         result_set = cast(AthenaResultSet, self.result_set)
         return result_set.fetchmany(size)
 
+    @override
     def fetchall(
         self,
     ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
@@ -1188,6 +1195,7 @@ class WithFetch(WithResultSet, BaseCursor, CursorIterator):
         result_set = cast(AthenaResultSet, self.result_set)
         return result_set.fetchall()
 
+    @override
     def executemany(
         self,
         operation: str,
