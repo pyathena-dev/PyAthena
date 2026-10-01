@@ -18,7 +18,7 @@ from pyathena.pandas.converter import (
     DefaultPandasUnloadTypeConverter,
 )
 from pyathena.pandas.result_set import AthenaPandasResultSet, PandasDataFrameIterator
-from pyathena.result_set import WithResultSet
+from pyathena.result_set import WithFetch
 
 if TYPE_CHECKING:
     from pandas import DataFrame
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 
-class PandasCursor(WithResultSet):
+class PandasCursor(WithFetch):
     """Cursor for handling pandas DataFrame results from Athena queries.
 
     This cursor returns query results as pandas DataFrames with memory-efficient

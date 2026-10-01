@@ -18,7 +18,7 @@ from pyathena.polars.converter import (
     DefaultPolarsUnloadTypeConverter,
 )
 from pyathena.polars.result_set import AthenaPolarsResultSet
-from pyathena.result_set import WithResultSet
+from pyathena.result_set import WithFetch
 
 if TYPE_CHECKING:
     import polars as pl
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 
-class PolarsCursor(WithResultSet):
+class PolarsCursor(WithFetch):
     """Cursor for handling Polars DataFrame results from Athena queries.
 
     This cursor returns query results as Polars DataFrames using Polars' native

@@ -8,14 +8,14 @@ from pyathena.common import CursorIterator
 from pyathena.error import OperationalError
 from pyathena.model import AthenaQueryExecution
 from pyathena.options import ExecuteOptions
-from pyathena.result_set import WithResultSet
+from pyathena.result_set import WithFetch
 from pyathena.s3fs.converter import DefaultS3FSTypeConverter
 from pyathena.s3fs.result_set import AthenaS3FSResultSet, CSVReaderType
 
 _logger = logging.getLogger(__name__)
 
 
-class S3FSCursor(WithResultSet):
+class S3FSCursor(WithFetch):
     """Cursor for reading CSV results via S3FileSystem without pandas/pyarrow.
 
     This cursor uses Python's standard csv module and PyAthena's S3FileSystem

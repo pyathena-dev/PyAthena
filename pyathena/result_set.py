@@ -794,14 +794,13 @@ class AthenaDictResultSet(AthenaResultSet):
         ]
 
 
-class WithResultSet(BaseCursor, CursorIterator):
-    """Base class of the SQL cursors that keep a result set.
+class WithResultSet:
+    """Mixin that keeps a cursor's query ID and result set.
 
-    Provides the result set and its properties, fetch, ``close``,
-    ``executemany``, ``cancel``, and sync iteration. The sync SQL cursors
-    subclass it directly. For the asyncio cursors, ``WithAsyncFetch``
-    overrides ``executemany`` and ``cancel`` with async versions, and its
-    subclasses override the fetch methods.
+    Provides the query ID, the result set and its properties, ``arraysize``,
+    ``rownumber``, ``rowcount``, and ``close``. ``WithFetch`` and
+    ``WithAsyncFetch`` list it before ``BaseCursor`` / ``AioBaseCursor`` and
+    ``CursorIterator``, so that these members take precedence over theirs.
     """
 
     def __init__(self, arraysize: int | None = None, **kwargs) -> None:
@@ -811,7 +810,7 @@ class WithResultSet(BaseCursor, CursorIterator):
             arraysize: Default number of rows per ``fetchmany()`` call,
                 validated by the ``arraysize`` setter. If None,
                 ``DEFAULT_FETCH_SIZE`` is used.
-            **kwargs: Arguments passed to ``BaseCursor.__init__``.
+            **kwargs: Arguments passed to the next ``__init__`` in the MRO.
 
         Raises:
             ProgrammingError: If ``arraysize`` is outside the range the
@@ -1107,6 +1106,23 @@ class WithResultSet(BaseCursor, CursorIterator):
         """
         return self.result_set.rownumber if self.result_set else None
 
+    def close(self) -> None:
+        """Close the cursor and release associated resources."""
+        self._rowcount = -1
+        if self.result_set and not self.result_set.is_closed:
+            self.result_set.close()
+
+
+class WithFetch(WithResultSet, BaseCursor, CursorIterator):
+    """Base class of the sync SQL cursors.
+
+    Combines ``WithResultSet`` with ``BaseCursor`` and ``CursorIterator``, and
+    provides sync fetch, ``executemany``, ``cancel``, and sync iteration.
+
+    Subclasses override ``execute()`` and optionally ``__init__`` and
+    format-specific helpers.
+    """
+
     def fetchone(
         self,
     ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
@@ -1157,12 +1173,6 @@ class WithResultSet(BaseCursor, CursorIterator):
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaResultSet, self.result_set)
         return result_set.fetchall()
-
-    def close(self) -> None:
-        """Close the cursor and release associated resources."""
-        self._rowcount = -1
-        if self.result_set and not self.result_set.is_closed:
-            self.result_set.close()
 
     def executemany(
         self,
