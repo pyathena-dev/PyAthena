@@ -13,7 +13,7 @@ from pyathena.common import CursorIterator
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.options import ExecuteOptions
-from pyathena.result_set import WithResultSet
+from pyathena.result_set import WithFetch
 
 if TYPE_CHECKING:
     import polars as pl
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 
-class ArrowCursor(WithResultSet):
+class ArrowCursor(WithFetch):
     """Cursor for handling Apache Arrow Table results from Athena queries.
 
     This cursor returns query results as Apache Arrow Tables, which provide

@@ -8,7 +8,7 @@ from typing import Any, NoReturn, TypeVar
 from botocore.exceptions import BotoCoreError, ClientError
 
 from pyathena.aio.util import async_retry_api_call
-from pyathena.common import BaseCursor
+from pyathena.common import BaseCursor, CursorIterator
 from pyathena.error import DatabaseError, OperationalError, ProgrammingError
 from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaDatabase, AthenaQueryExecution, AthenaTableMetadata
@@ -617,13 +617,13 @@ class AioBaseCursor(BaseCursor):
         )
 
 
-class WithAsyncFetch(AioBaseCursor, WithResultSet):
+class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
     """Base class of the asyncio SQL cursors.
 
-    Overrides ``executemany`` and ``cancel`` of ``WithResultSet`` with async
-    versions and adds async iteration and the async context manager protocol.
-    Synchronous iteration raises ``TypeError``. Subclasses override the fetch
-    methods with async versions.
+    Combines ``WithResultSet`` with ``AioBaseCursor`` and ``CursorIterator``,
+    and provides async ``executemany`` and ``cancel``, async iteration, and the
+    async context manager protocol. Synchronous iteration raises
+    ``TypeError``. Subclasses implement the fetch methods as coroutines.
 
     Subclasses override ``execute()`` and optionally ``__init__`` and
     format-specific helpers.

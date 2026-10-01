@@ -8,12 +8,12 @@ from pyathena.common import CursorIterator
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.options import ExecuteOptions
-from pyathena.result_set import AthenaDictResultSet, AthenaResultSet, WithResultSet
+from pyathena.result_set import AthenaDictResultSet, AthenaResultSet, WithFetch
 
 _logger = logging.getLogger(__name__)
 
 
-class Cursor(WithResultSet):
+class Cursor(WithFetch):
     """A DB API 2.0 compliant cursor for executing SQL queries on Amazon Athena.
 
     The Cursor class provides methods for executing SQL queries against Amazon Athena
