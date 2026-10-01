@@ -1188,31 +1188,6 @@ class BaseCursor(metaclass=ABCMeta):
                 raise DatabaseError(*e.args) from e
         return query_id
 
-    def _calculate(
-        self,
-        session_id: str,
-        code_block: str,
-        description: str | None = None,
-        client_request_token: str | None = None,
-    ) -> str:
-        request = self._build_start_calculation_execution_request(
-            session_id=session_id,
-            code_block=code_block,
-            description=description,
-            client_request_token=client_request_token,
-        )
-        try:
-            calculation_id = retry_api_call(
-                self._connection.client.start_calculation_execution,
-                config=self._retry_config,
-                logger=_logger,
-                **request,
-            ).get("CalculationExecutionId")
-        except Exception as e:
-            _logger.exception("Failed to execute calculation.")
-            raise DatabaseError(*e.args) from e
-        return cast(str, calculation_id)
-
     @abstractmethod
     def execute(
         self,
