@@ -58,11 +58,12 @@ jobs:
       - run: just lint
 
   # Selects the AWS suites and Python versions. Draft and external-fork pull
-  # requests run none. A ready pull request always runs the PyAthena suite; it
-  # runs the SQLAlchemy tests (the compliance suites and the PyAthena suite's
-  # SQLAlchemy tests) and the Spark tests only when their code, tests,
-  # dependencies, this workflow, the top-level modules of pyathena and
-  # pyathena.aio, or the shared test fixtures change. Pull requests and the
+  # requests run none. A ready pull request runs the PyAthena suite only when
+  # the package, the tests, setup.cfg, the dependencies, or this workflow
+  # change; it runs the SQLAlchemy tests (the compliance suites and the
+  # PyAthena suite's SQLAlchemy tests) and the Spark tests only when their
+  # code, tests, dependencies, this workflow, the top-level modules of pyathena
+  # and pyathena.aio, or the shared test fixtures change. Pull requests and the
   # schedule test the newest Python version; a dispatch tests the requested
   # versions or every version, and the Release workflow every version.
   changes:
@@ -74,6 +75,7 @@ jobs:
     permissions:
       pull-requests: read
     outputs:
+      pyathena: ${{ github.event_name != 'pull_request' || steps.paths.outputs.pyathena == 'true' }}
       sqla: ${{ github.event_name != 'pull_request' || steps.paths.outputs.sqla == 'true' }}
       spark: ${{ github.event_name != 'pull_request' || steps.paths.outputs.spark == 'true' }}
       python-versions: ${{ steps.versions.outputs.python-versions }}
@@ -118,6 +120,13 @@ jobs:
               - pyathena/aio/spark/**
               - tests/pyathena/spark/**
               - tests/pyathena/aio/spark/**
+            # A superset of sqla and spark, so their tests never run without
+            # the PyAthena suite.
+            pyathena:
+              - *shared
+              - setup.cfg
+              - pyathena/**
+              - tests/**
       - id: versions
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -149,6 +158,7 @@ jobs:
   # parallel; each is still a separate job for "Re-run failed jobs".
   test:
     needs: changes
+    if: needs.changes.outputs.pyathena == 'true'
     uses: ./.github/workflows/test-suite.yaml
     with:
       test-type: pyathena
