@@ -17,6 +17,7 @@ from pyathena.common import CursorIterator
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.options import ExecuteOptions
+from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
 
@@ -77,7 +78,8 @@ class AioCursor(WithAsyncFetch):
             )
         self._arraysize = value
 
-    async def execute(  # type: ignore[override]
+    @override
+    async def execute(
         self,
         operation: str,
         parameters: dict[str, Any] | list[str] | None = None,
@@ -154,7 +156,8 @@ class AioCursor(WithAsyncFetch):
             raise OperationalError(query_execution.state_change_reason)
         return self
 
-    async def fetchone(  # type: ignore[override]
+    @override
+    async def fetchone(
         self,
     ) -> Any | dict[Any, Any | None] | None:
         """Fetch the next row of a query result set.
@@ -171,9 +174,8 @@ class AioCursor(WithAsyncFetch):
         result_set = cast(AthenaAioResultSet, self.result_set)
         return await result_set.fetchone()
 
-    async def fetchmany(  # type: ignore[override]
-        self, size: int | None = None
-    ) -> list[Any | dict[Any, Any | None]]:
+    @override
+    async def fetchmany(self, size: int | None = None) -> list[Any | dict[Any, Any | None]]:
         """Fetch multiple rows from a query result set.
 
         Args:
@@ -191,7 +193,8 @@ class AioCursor(WithAsyncFetch):
         result_set = cast(AthenaAioResultSet, self.result_set)
         return await result_set.fetchmany(size)
 
-    async def fetchall(  # type: ignore[override]
+    @override
+    async def fetchall(
         self,
     ) -> list[Any | dict[Any, Any | None]]:
         """Fetch all remaining rows from a query result set.

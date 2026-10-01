@@ -13,7 +13,7 @@ from pyathena.converter import Converter
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaDictResultSet, AthenaResultSet
-from pyathena.util import RetryConfig
+from pyathena.util import RetryConfig, override
 
 if TYPE_CHECKING:
     from pyathena.connection import Connection
@@ -148,6 +148,7 @@ class AthenaAioResultSet(AthenaResultSet):
         offset = 1 if rows and self._is_first_row_column_labels(rows) else 0
         self._process_rows(rows, offset)
 
+    @override
     async def fetchone(  # type: ignore[override]
         self,
     ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
@@ -168,6 +169,7 @@ class AthenaAioResultSet(AthenaResultSet):
         self._rownumber += 1
         return self._rows.popleft()
 
+    @override
     async def fetchmany(  # type: ignore[override]
         self, size: int | None = None
     ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
@@ -191,6 +193,7 @@ class AthenaAioResultSet(AthenaResultSet):
                 break
         return rows
 
+    @override
     async def fetchall(  # type: ignore[override]
         self,
     ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
@@ -208,6 +211,7 @@ class AthenaAioResultSet(AthenaResultSet):
                 break
         return rows
 
+    @override
     def __iter__(self) -> NoReturn:
         """Reject synchronous iteration; use ``async for`` instead.
 

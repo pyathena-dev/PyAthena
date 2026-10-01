@@ -15,6 +15,7 @@ from pyathena.common import CursorIterator
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.options import ExecuteOptions
+from pyathena.util import override
 
 if TYPE_CHECKING:
     import polars as pl
@@ -79,7 +80,8 @@ class AioArrowCursor(WithAsyncFetch):
             return DefaultArrowUnloadTypeConverter()
         return DefaultArrowTypeConverter()
 
-    async def execute(  # type: ignore[override]
+    @override
+    async def execute(
         self,
         operation: str,
         parameters: dict[str, Any] | list[str] | None = None,
