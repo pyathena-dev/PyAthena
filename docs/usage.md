@@ -514,7 +514,8 @@ A `KeyboardInterrupt` while `execute()` is still starting the query first waits 
 request to finish, and then cancels the query it started in the same way.
 The `query_id` property returns that query's ID.
 If the request has not been sent yet when the interrupt is handled, it is never sent.
-`AsyncCursor` and its variants also stop a query whose start is interrupted in `execute()`.
+`AsyncCursor` and its variants also stop a query whose start is interrupted in `execute()`,
+but they have no `query_id` property, so the ID of that query is not available.
 They wait for queries on worker threads, which do not receive `KeyboardInterrupt`.
 
 A second `KeyboardInterrupt` during the cancellation request or these waits propagates immediately, and the query can keep running.
