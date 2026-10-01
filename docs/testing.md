@@ -162,7 +162,7 @@ It runs the offline checks (`just lint`) on each of them, including Drafts and e
 
 The SQLAlchemy tests are the compliance suites and the PyAthena suite's `tests/pyathena/sqlalchemy/` and `tests/pyathena/aio/sqlalchemy/`.
 The Spark tests are the PyAthena suite's `tests/pyathena/spark/` and `tests/pyathena/aio/spark/`.
-When the SQLAlchemy or Spark tests do not run, the PyAthena suite runs without them.
+When the PyAthena suite runs but the SQLAlchemy or Spark tests do not, it runs without them.
 For the PyAthena suite, the related files are `pyathena/`, `tests/`, and `setup.cfg`.
 For the SQLAlchemy tests, they are `pyathena/sqlalchemy/`, `pyathena/aio/sqlalchemy/`, `tests/sqlalchemy/`, their PyAthena suite test directories, and `setup.cfg`.
 For the Spark tests, they are `pyathena/spark/`, `pyathena/aio/spark/`, and their PyAthena suite test directories.
