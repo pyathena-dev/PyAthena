@@ -208,12 +208,6 @@ class AioCursor(WithAsyncFetch):
         result_set = cast(AthenaAioResultSet, self.result_set)
         return await result_set.fetchall()
 
-    async def __anext__(self):
-        row = await self.fetchone()
-        if row is None:
-            raise StopAsyncIteration
-        return row
-
 
 class AioDictCursor(AioCursor):
     """Native asyncio cursor that returns rows as dictionaries.

@@ -444,6 +444,15 @@ class AthenaResultSet(CursorIterator):
     def fetchmany(
         self, size: int | None = None
     ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
+        """Fetch the next set of rows of the query result.
+
+        Args:
+            size: Maximum number of rows to fetch. If None or not positive,
+                ``arraysize`` is used.
+
+        Returns:
+            The rows, fewer than ``size`` when the result is exhausted.
+        """
         if not size or size <= 0:
             size = self._arraysize
         rows = []
@@ -458,6 +467,11 @@ class AthenaResultSet(CursorIterator):
     def fetchall(
         self,
     ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
+        """Fetch all remaining rows of the query result.
+
+        Returns:
+            The remaining rows.
+        """
         rows = []
         while True:
             row = self.fetchone()

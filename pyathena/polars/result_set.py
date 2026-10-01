@@ -371,45 +371,6 @@ class AthenaPolarsResultSet(AthenaResultSet):
             self._rownumber = row[0] + 1
             return tuple([row[1][col] for col in self._column_names_cache])
 
-    def fetchmany(
-        self, size: int | None = None
-    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
-        """Fetch the next set of rows of the query result.
-
-        Args:
-            size: Number of rows to fetch. Defaults to arraysize.
-
-        Returns:
-            A list of rows as tuples.
-        """
-        if not size or size <= 0:
-            size = self._arraysize
-        rows = []
-        for _ in range(size):
-            row = self.fetchone()
-            if row:
-                rows.append(row)
-            else:
-                break
-        return rows
-
-    def fetchall(
-        self,
-    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
-        """Fetch all remaining rows of the query result.
-
-        Returns:
-            A list of all remaining rows as tuples.
-        """
-        rows = []
-        while True:
-            row = self.fetchone()
-            if row:
-                rows.append(row)
-            else:
-                break
-        return rows
-
     def _is_csv_readable(self) -> bool:
         """Check if CSV output is available and can be read.
 
