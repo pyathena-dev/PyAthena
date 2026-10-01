@@ -155,18 +155,19 @@ It runs the offline checks (`just lint`) on each of them, including Drafts and e
 | Trigger | PyAthena suite | SQLAlchemy tests | Spark tests | Python versions |
 | --- | --- | --- | --- | --- |
 | Draft pull request | No | No | No | None |
-| Ready pull request from a branch of this repository | Yes | When related files change | When related files change | Newest supported |
+| Ready pull request from a branch of this repository | When related files change | When related files change | When related files change | Newest supported |
 | Weekly schedule | Yes | Yes | Yes | Newest supported |
 | Manual dispatch | Yes | Yes | Yes | Requested, or all supported |
 | Release tag (Release workflow) | Yes | Yes | Yes | All supported |
 
 The SQLAlchemy tests are the compliance suites and the PyAthena suite's `tests/pyathena/sqlalchemy/` and `tests/pyathena/aio/sqlalchemy/`.
 The Spark tests are the PyAthena suite's `tests/pyathena/spark/` and `tests/pyathena/aio/spark/`.
-When the SQLAlchemy or Spark tests do not run, the PyAthena suite runs without them.
-For the SQLAlchemy tests, the related files are `pyathena/sqlalchemy/`, `pyathena/aio/sqlalchemy/`, `tests/sqlalchemy/`, their PyAthena suite test directories, and `setup.cfg`.
+When the PyAthena suite runs but the SQLAlchemy or Spark tests do not, it runs without them.
+For the PyAthena suite, the related files are `pyathena/`, `tests/`, and `setup.cfg`.
+For the SQLAlchemy tests, they are `pyathena/sqlalchemy/`, `pyathena/aio/sqlalchemy/`, `tests/sqlalchemy/`, their PyAthena suite test directories, and `setup.cfg`.
 For the Spark tests, they are `pyathena/spark/`, `pyathena/aio/spark/`, and their PyAthena suite test directories.
-Changes to `pyproject.toml`, `uv.lock`, `justfile`, or the Test workflows run both.
-For a pull request from a branch of this repository that still changes files other than `docs/` and Markdown, marking the Draft ready for review starts the AWS jobs, and converting it back to Draft cancels AWS jobs still running.
+Changes to the modules directly under `pyathena/` and `pyathena/aio/`, the shared test fixtures such as `tests/pyathena/conftest.py` and `tests/resources/`, `pyproject.toml`, `uv.lock`, `justfile`, or the Test workflows run all three.
+For a pull request from a branch of this repository that still changes files other than `docs/` and Markdown, marking the Draft ready for review starts any AWS jobs its changed files select, and converting it back to Draft cancels AWS jobs still running.
 To run every suite on a branch, dispatch the workflow; it tests every supported Python version unless `python-versions` lists some of them:
 
 ```bash
