@@ -221,7 +221,11 @@ class TestSparkCursor:
         cursor._poll_interval = 0
         cursor._kill_on_interrupt = True
         cursor._on_poll = None
-        cursor._calculation_execution = None
+        # Left by a previous calculation on the same cursor.
+        cursor._calculation_id = "previous_calculation_id"
+        cursor._calculation_execution = MagicMock(
+            state=AthenaCalculationExecutionStatus.STATE_COMPLETED
+        )
 
         with (
             patch.object(SparkCursor, "_calculate", return_value="calculation_id"),
@@ -239,6 +243,7 @@ class TestSparkCursor:
 
         assert exc_info.value.__cause__ is error
         cancel.assert_called_once_with("calculation_id")
+        assert cursor.calculation_id == "calculation_id"
         assert cursor.calculation_execution is None
 
     def test_execute_interrupt_without_kill_on_interrupt(self):

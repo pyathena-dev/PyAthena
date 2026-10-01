@@ -340,6 +340,9 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
         Returns:
             Self reference for method chaining.
         """
+        # A failure below must not leave the previous calculation on the cursor.
+        self._calculation_id = None
+        self._calculation_execution = None
         self._calculation_id = await self._calculate(
             session_id=session_id if session_id else self._session_id,
             code_block=operation,

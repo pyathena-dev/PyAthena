@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, NoReturn, TypeVar, cast
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -64,6 +64,8 @@ class AioBaseCursor(BaseCursor):
             The query execution ID.
 
         Raises:
+            asyncio.CancelledError: If the task is cancelled while starting the
+                query; see ``_start_execution()``.
             ProgrammingError: If the formatter rejects the query or its parameters.
             DatabaseError: If the ``StartQueryExecution`` request fails.
         """
@@ -88,18 +90,74 @@ class AioBaseCursor(BaseCursor):
             cache_expiration_time=options.cache_expiration_time,
         )
         if query_id is None:
-            try:
-                response = await async_retry_api_call(
-                    self._connection.client.start_query_execution,
-                    config=self._retry_config,
-                    logger=_logger,
-                    **request,
-                )
-                query_id = response.get("QueryExecutionId")
-            except Exception as e:
-                _logger.exception("Failed to execute query.")
-                raise DatabaseError(*e.args) from e
+            query_id = await self._start_execution(self._start_query_execution(request))
         return query_id
+
+    @override
+    async def _start_query_execution(self, request: dict[str, Any]) -> str:  # type: ignore[override]
+        """Send a ``StartQueryExecution`` request.
+
+        Args:
+            request: The request parameters.
+
+        Returns:
+            The query execution ID.
+
+        Raises:
+            DatabaseError: If the request fails.
+        """
+        try:
+            response = await async_retry_api_call(
+                self._connection.client.start_query_execution,
+                config=self._retry_config,
+                logger=_logger,
+                **request,
+            )
+        except Exception as e:
+            _logger.exception("Failed to execute query.")
+            raise DatabaseError(*e.args) from e
+        return cast(str, response.get("QueryExecutionId"))
+
+    @override
+    async def _start_execution(  # type: ignore[override]
+        self, start: Coroutine[Any, Any, str]
+    ) -> str:
+        """Send a start request so that task cancellation stops the execution it starts.
+
+        With ``kill_on_interrupt`` enabled, the request is shielded from task
+        cancellation. On cancellation, the cursor waits for the request to finish,
+        records the execution ID with ``_set_interrupted_execution_id()``, requests
+        cancellation with ``_cancel_and_wait()``, and re-raises
+        ``asyncio.CancelledError``. Another cancellation during that wait
+        propagates at once.
+
+        Args:
+            start: Sends the start request and returns the execution ID.
+
+        Returns:
+            The execution ID.
+
+        Raises:
+            asyncio.CancelledError: If the task is cancelled while starting. A
+                failure to start, cancel, or wait for the execution becomes its
+                ``__cause__``.
+            DatabaseError: If the request fails.
+        """
+        if not self._kill_on_interrupt:
+            return await start
+
+        task = asyncio.ensure_future(start)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError as cancellation:
+            _logger.warning("Query canceled by user.")
+            try:
+                execution_id = await task
+                self._set_interrupted_execution_id(execution_id)
+                await self._cancel_and_wait(execution_id)
+            except Exception as e:
+                raise cancellation from e
+            raise
 
     @override
     async def _get_query_execution(self, query_id: str) -> AthenaQueryExecution:  # type: ignore[override]
@@ -154,10 +212,12 @@ class AioBaseCursor(BaseCursor):
 
     @override
     async def _poll(self, query_id: str) -> AthenaQueryExecution:  # type: ignore[override]
-        """Wait for a query execution to finish.
+        """Wait for a query execution to reach a terminal state.
 
-        On ``asyncio.CancelledError`` with ``kill_on_interrupt`` enabled, stops the
-        query and returns its final execution instead of re-raising.
+        On task cancellation with ``kill_on_interrupt`` enabled, requests
+        cancellation with ``_cancel_and_wait()`` and re-raises
+        ``asyncio.CancelledError``. Cancellation is a best-effort request, so the
+        query can still end as ``SUCCEEDED`` or ``FAILED`` instead of ``CANCELLED``.
 
         Args:
             query_id: The query execution ID.
@@ -166,19 +226,34 @@ class AioBaseCursor(BaseCursor):
             The query execution in a terminal state.
 
         Raises:
-            asyncio.CancelledError: If cancelled and ``kill_on_interrupt`` is disabled.
-            OperationalError: If a status or stop request fails.
+            asyncio.CancelledError: If the task is cancelled while waiting. A failure
+                to cancel or wait for the query becomes its ``__cause__``.
+            OperationalError: If a status request fails.
         """
         try:
-            query_execution = await self._poll_until_terminal(query_id)
-        except asyncio.CancelledError:
-            if self._kill_on_interrupt:
-                _logger.warning("Query canceled by user.")
-                await self._cancel(query_id)
-                query_execution = await self._poll_until_terminal(query_id)
-            else:
+            return await self._poll_until_terminal(query_id)
+        except asyncio.CancelledError as cancellation:
+            if not self._kill_on_interrupt:
                 raise
-        return query_execution
+            _logger.warning("Query canceled by user.")
+            try:
+                await self._cancel_and_wait(query_id)
+            except Exception as e:
+                raise cancellation from e
+            raise
+
+    @override
+    async def _cancel_and_wait(self, query_id: str) -> None:  # type: ignore[override]
+        """Request cancellation of a query and wait for a terminal state.
+
+        Args:
+            query_id: The query execution ID.
+
+        Raises:
+            OperationalError: If the cancellation or a status request fails.
+        """
+        await self._cancel(query_id)
+        await self._poll_until_terminal(query_id)
 
     @override
     async def _cancel(self, query_id: str) -> None:  # type: ignore[override]

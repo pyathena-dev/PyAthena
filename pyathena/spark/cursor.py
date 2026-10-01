@@ -109,6 +109,9 @@ class SparkCursor(SparkBaseCursor, WithCalculationExecution):
         work_group: str | None = None,
         **kwargs,
     ) -> SparkCursor:
+        # A failure below must not leave the previous calculation on the cursor.
+        self._calculation_id = None
+        self._calculation_execution = None
         self._calculation_id = self._calculate(
             session_id=session_id if session_id else self._session_id,
             code_block=operation,

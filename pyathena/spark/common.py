@@ -9,11 +9,9 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import threading
 import time
 import uuid
 from abc import ABCMeta, abstractmethod
-from concurrent.futures import Future, wait
 from datetime import datetime
 from typing import Any, cast
 
@@ -30,11 +28,6 @@ from pyathena.model import (
 from pyathena.util import override, parse_output_location, retry_api_call
 
 _logger = logging.getLogger(__name__)
-
-# How often a wait for the start request wakes up to check for Ctrl-C, so that
-# a KeyboardInterrupt is raised promptly where an untimed lock wait cannot be
-# interrupted by signals (Windows before Python 3.14).
-_INTERRUPT_CHECK_INTERVAL = 0.1
 
 
 class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
@@ -336,38 +329,6 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             time.sleep(self._poll_interval)
 
     @override
-    def _poll(self, query_id: str) -> AthenaQueryExecution | AthenaCalculationExecution:
-        """Wait for a calculation execution to reach a terminal state.
-
-        On ``KeyboardInterrupt`` with ``kill_on_interrupt`` enabled, requests
-        cancellation, waits for the calculation to reach a terminal state, stores
-        it as the cursor's calculation execution, and re-raises the interrupt.
-        Cancellation is a best-effort request, so the terminal state can be
-        ``COMPLETED`` or ``FAILED`` instead of ``CANCELED``.
-
-        Args:
-            query_id: The calculation execution ID.
-
-        Returns:
-            The calculation execution in a terminal state.
-
-        Raises:
-            KeyboardInterrupt: If interrupted while waiting. A failure to cancel or
-                wait for the calculation becomes its ``__cause__``.
-            OperationalError: If a status request fails.
-        """
-        try:
-            return self._poll_until_terminal(query_id)
-        except KeyboardInterrupt as interrupt:
-            if not self._kill_on_interrupt:
-                raise
-            _logger.warning("Query canceled by user.")
-            try:
-                self._cancel_and_wait(query_id)
-            except Exception as e:
-                raise interrupt from e
-            raise
-
     def _cancel_and_wait(self, calculation_id: str) -> None:
         """Request cancellation and store the calculation's terminal state.
 
@@ -425,34 +386,16 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             description=description,
             client_request_token=client_request_token or str(uuid.uuid4()),
         )
-        if not self._kill_on_interrupt:
-            return self._start_calculation_execution(request)
+        return self._start_execution(lambda: self._start_calculation_execution(request))
 
-        future: Future[str] = Future()
+    @override
+    def _set_interrupted_execution_id(self, execution_id: str) -> None:
+        """Keep the ID of a calculation started by an interrupted start request.
 
-        def start() -> None:
-            # Begin the request only if no interrupt has given up on it yet.
-            if not future.set_running_or_notify_cancel():
-                return
-            try:
-                future.set_result(self._start_calculation_execution(request))
-            except BaseException as e:
-                future.set_exception(e)
-
-        try:
-            threading.Thread(target=start, name="pyathena-spark-start", daemon=True).start()
-            return self._wait_for_calculation_start(future)
-        except KeyboardInterrupt as interrupt:
-            if future.cancel():
-                # The helper has not begun the request and never will.
-                raise
-            _logger.warning("Query canceled by user.")
-            try:
-                self._calculation_id = self._wait_for_calculation_start(future)
-                self._cancel_and_wait(self._calculation_id)
-            except Exception as e:
-                raise interrupt from e
-            raise
+        Args:
+            execution_id: The calculation execution ID.
+        """
+        self._calculation_id = execution_id
 
     def _start_calculation_execution(self, request: dict[str, Any]) -> str:
         """Send a ``StartCalculationExecution`` request.
@@ -477,23 +420,6 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             _logger.exception("Failed to execute calculation.")
             raise DatabaseError(*e.args) from e
         return cast(str, response.get("CalculationExecutionId"))
-
-    @staticmethod
-    def _wait_for_calculation_start(future: Future[str]) -> str:
-        """Wait for the start request on a helper thread to finish.
-
-        Args:
-            future: The future of the start request.
-
-        Returns:
-            The calculation execution ID.
-
-        Raises:
-            DatabaseError: If the request failed.
-        """
-        while not future.done():
-            wait((future,), timeout=_INTERRUPT_CHECK_INTERVAL)
-        return future.result()
 
     @override
     def _cancel(self, query_id: str) -> None:

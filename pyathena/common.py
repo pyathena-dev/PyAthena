@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 import time
 from abc import ABCMeta, abstractmethod
 from collections.abc import Callable
+from concurrent.futures import Future, wait
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
@@ -38,6 +40,11 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
+
+# How often a wait for a start request wakes up to check for Ctrl-C, so that
+# a KeyboardInterrupt is raised promptly where an untimed lock wait cannot be
+# interrupted by signals (Windows before Python 3.14).
+_INTERRUPT_CHECK_INTERVAL = 0.1
 
 OnPollCallback = Callable[[AthenaQueryExecution | AthenaCalculationExecutionStatus], None]
 """Type of the optional ``on_poll`` callback.
@@ -888,31 +895,126 @@ class BaseCursor(metaclass=ABCMeta):
             time.sleep(self._poll_interval)
 
     def _poll(self, query_id: str) -> AthenaQueryExecution | AthenaCalculationExecution:
-        """Wait for a query execution to finish.
+        """Wait for an execution to reach a terminal state.
 
-        On ``KeyboardInterrupt`` with ``kill_on_interrupt`` enabled, stops the query
-        and returns its final execution instead of re-raising.
+        On ``KeyboardInterrupt`` with ``kill_on_interrupt`` enabled, requests
+        cancellation with ``_cancel_and_wait()`` and re-raises the interrupt.
+        Cancellation is a best-effort request, so the execution can still end in
+        another terminal state.
 
         Args:
-            query_id: The query execution ID.
+            query_id: The execution ID.
 
         Returns:
-            The query execution in a terminal state.
+            The execution in a terminal state.
 
         Raises:
-            KeyboardInterrupt: If interrupted and ``kill_on_interrupt`` is disabled.
-            OperationalError: If a status or stop request fails.
+            KeyboardInterrupt: If interrupted while waiting. A failure to cancel or
+                wait for the execution becomes its ``__cause__``.
+            OperationalError: If a status request fails.
         """
         try:
-            query_execution = self._poll_until_terminal(query_id)
-        except KeyboardInterrupt as e:
-            if self._kill_on_interrupt:
-                _logger.warning("Query canceled by user.")
-                self._cancel(query_id)
-                query_execution = self._poll_until_terminal(query_id)
-            else:
-                raise e
-        return query_execution
+            return self._poll_until_terminal(query_id)
+        except KeyboardInterrupt as interrupt:
+            if not self._kill_on_interrupt:
+                raise
+            _logger.warning("Query canceled by user.")
+            try:
+                self._cancel_and_wait(query_id)
+            except Exception as e:
+                raise interrupt from e
+            raise
+
+    def _cancel_and_wait(self, query_id: str) -> None:
+        """Request cancellation of an execution and wait for a terminal state.
+
+        Args:
+            query_id: The execution ID.
+
+        Raises:
+            OperationalError: If the cancellation or a status request fails.
+        """
+        self._cancel(query_id)
+        self._poll_until_terminal(query_id)
+
+    def _start_execution(self, start: Callable[[], str]) -> str:
+        """Send a start request so that an interrupt stops the execution it starts.
+
+        With ``kill_on_interrupt`` enabled, the request runs on a helper thread.
+        On ``KeyboardInterrupt``, the cursor first tries to abandon the request.
+        This succeeds only if the helper has not begun the request by then; the
+        helper then never sends it, and the interrupt propagates. Otherwise the
+        cursor waits for the request to finish, records the execution ID with
+        ``_set_interrupted_execution_id()``, requests cancellation with
+        ``_cancel_and_wait()``, and re-raises the interrupt. Another
+        ``KeyboardInterrupt`` during that wait propagates at once.
+
+        Args:
+            start: Sends the start request and returns the execution ID.
+
+        Returns:
+            The execution ID.
+
+        Raises:
+            KeyboardInterrupt: If interrupted while starting. A failure to start,
+                cancel, or wait for the execution becomes its ``__cause__``.
+            DatabaseError: If the request fails.
+        """
+        if not self._kill_on_interrupt:
+            return start()
+
+        future: Future[str] = Future()
+
+        def run() -> None:
+            # Begin the request only if no interrupt has given up on it yet.
+            if not future.set_running_or_notify_cancel():
+                return
+            try:
+                future.set_result(start())
+            except BaseException as e:
+                future.set_exception(e)
+
+        try:
+            threading.Thread(target=run, name="pyathena-start", daemon=True).start()
+            return self._wait_for_start(future)
+        except KeyboardInterrupt as interrupt:
+            if future.cancel():
+                # The helper has not begun the request and never will.
+                raise
+            _logger.warning("Query canceled by user.")
+            try:
+                execution_id = self._wait_for_start(future)
+                self._set_interrupted_execution_id(execution_id)
+                self._cancel_and_wait(execution_id)
+            except Exception as e:
+                raise interrupt from e
+            raise
+
+    @staticmethod
+    def _wait_for_start(future: Future[str]) -> str:
+        """Wait for a start request on a helper thread to finish.
+
+        Args:
+            future: The future of the start request.
+
+        Returns:
+            The execution ID.
+
+        Raises:
+            DatabaseError: If the request failed.
+        """
+        while not future.done():
+            wait((future,), timeout=_INTERRUPT_CHECK_INTERVAL)
+        return future.result()
+
+    def _set_interrupted_execution_id(self, execution_id: str) -> None:  # noqa: B027
+        """Record the ID of an execution started by an interrupted start request.
+
+        Does nothing by default; cursors that expose the execution ID override this.
+
+        Args:
+            execution_id: The execution ID.
+        """
 
     def _cache_search_limits(
         self, cache_size: int, cache_expiration_time: int
@@ -1152,6 +1254,8 @@ class BaseCursor(metaclass=ABCMeta):
             The query execution ID.
 
         Raises:
+            KeyboardInterrupt: If interrupted while starting the query; see
+                ``_start_execution()``.
             ProgrammingError: If the formatter rejects the query or its parameters.
             DatabaseError: If the ``StartQueryExecution`` request fails.
         """
@@ -1176,17 +1280,32 @@ class BaseCursor(metaclass=ABCMeta):
             cache_expiration_time=options.cache_expiration_time,
         )
         if query_id is None:
-            try:
-                query_id = retry_api_call(
-                    self._connection.client.start_query_execution,
-                    config=self._retry_config,
-                    logger=_logger,
-                    **request,
-                ).get("QueryExecutionId")
-            except Exception as e:
-                _logger.exception("Failed to execute query.")
-                raise DatabaseError(*e.args) from e
+            query_id = self._start_execution(lambda: self._start_query_execution(request))
         return query_id
+
+    def _start_query_execution(self, request: dict[str, Any]) -> str:
+        """Send a ``StartQueryExecution`` request.
+
+        Args:
+            request: The request parameters.
+
+        Returns:
+            The query execution ID.
+
+        Raises:
+            DatabaseError: If the request fails.
+        """
+        try:
+            response = retry_api_call(
+                self._connection.client.start_query_execution,
+                config=self._retry_config,
+                logger=_logger,
+                **request,
+            )
+        except Exception as e:
+            _logger.exception("Failed to execute query.")
+            raise DatabaseError(*e.args) from e
+        return cast(str, response.get("QueryExecutionId"))
 
     @abstractmethod
     def execute(
