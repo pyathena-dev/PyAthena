@@ -395,6 +395,23 @@ class TestAioSparkCursor:
         assert cursor.calculation_id == "calculation_id"
         assert cursor.state == AthenaCalculationExecutionStatus.STATE_CANCELED
 
+    async def test_execute_cancelled_before_request_is_sent(self):
+        """Cancellation before the start task begins sends no request (no AWS)."""
+        cursor, cancel, started, release = _starting_cursor()
+        release.set()
+        task = asyncio.create_task(cursor.execute("code"))
+        # The task runs until it awaits the start task, which has not begun yet.
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert task.cancelled()
+        assert not started.is_set()
+        cursor._connection.client.start_calculation_execution.assert_not_called()
+        cancel.assert_not_awaited()
+        assert cursor.calculation_id is None
+
     async def test_execute_timeout_while_starting(self):
         cursor, cancel, started, release = _starting_cursor()
         task = asyncio.create_task(asyncio.wait_for(cursor.execute("code"), timeout=0.05))

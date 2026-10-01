@@ -90,7 +90,7 @@ class AioBaseCursor(BaseCursor):
             cache_expiration_time=options.cache_expiration_time,
         )
         if query_id is None:
-            query_id = await self._start_execution(self._start_query_execution(request))
+            query_id = await self._start_execution(lambda: self._start_query_execution(request))
         return query_id
 
     @override
@@ -120,19 +120,22 @@ class AioBaseCursor(BaseCursor):
 
     @override
     async def _start_execution(  # type: ignore[override]
-        self, start: Coroutine[Any, Any, str]
+        self, start: Callable[[], Coroutine[Any, Any, str]]
     ) -> str:
         """Send a start request so that task cancellation stops the execution it starts.
 
-        With ``kill_on_interrupt`` enabled, the request is shielded from task
-        cancellation. On cancellation, the cursor waits for the request to finish,
-        records the execution ID with ``_set_interrupted_execution_id()``, requests
+        With ``kill_on_interrupt`` enabled, the request runs in a task shielded
+        from task cancellation. On cancellation, the request is abandoned if that
+        task has not begun it by then; it is never sent, and the cancellation
+        propagates. Otherwise the cursor waits for the request to finish, records
+        the execution ID with ``_set_interrupted_execution_id()``, requests
         cancellation with ``_cancel_and_wait()``, and re-raises
         ``asyncio.CancelledError``. Another cancellation during that wait
         propagates at once.
 
         Args:
-            start: Sends the start request and returns the execution ID.
+            start: Returns a coroutine that sends the start request and returns the
+                execution ID.
 
         Returns:
             The execution ID.
@@ -144,15 +147,27 @@ class AioBaseCursor(BaseCursor):
             DatabaseError: If the request fails.
         """
         if not self._kill_on_interrupt:
-            return await start
+            return await start()
 
-        task = asyncio.ensure_future(start)
+        caller = asyncio.current_task()
+        cancel_requests = caller.cancelling() if caller else 0
+
+        async def run() -> str | None:
+            # Begin the request only if the caller has not been cancelled since.
+            if caller and caller.cancelling() > cancel_requests:
+                return None
+            return await start()
+
+        task = asyncio.ensure_future(run())
         try:
-            return await asyncio.shield(task)
+            return cast(str, await asyncio.shield(task))
         except asyncio.CancelledError as cancellation:
-            _logger.warning("Query canceled by user.")
             try:
                 execution_id = await task
+                if execution_id is None:
+                    # The task did not begin the request, so it was never sent.
+                    raise cancellation
+                _logger.warning("Query canceled by user.")
                 self._set_interrupted_execution_id(execution_id)
                 await self._cancel_and_wait(execution_id)
             except Exception as e:

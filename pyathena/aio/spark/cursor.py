@@ -106,8 +106,10 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
         retried request returns the calculation an earlier attempt started instead
         of starting another one.
 
-        With ``kill_on_interrupt`` enabled, the request is shielded from task
-        cancellation. On cancellation, waits for the request to finish, requests
+        With ``kill_on_interrupt`` enabled, the request runs in a task shielded
+        from task cancellation. On cancellation, the request is abandoned if that
+        task has not begun it by then; it is never sent, and the cancellation
+        propagates. Otherwise the cursor waits for the request to finish, requests
         cancellation of the calculation it started, waits for a terminal state,
         stores the calculation ID and execution on the cursor, and re-raises
         ``asyncio.CancelledError``. Another cancellation during that wait
@@ -137,14 +139,27 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
         if not self._kill_on_interrupt:
             return await self._start_calculation_execution(request)
 
-        start = asyncio.ensure_future(self._start_calculation_execution(request))
+        caller = asyncio.current_task()
+        cancel_requests = caller.cancelling() if caller else 0
+
+        async def run() -> str | None:
+            # Begin the request only if the caller has not been cancelled since.
+            if caller and caller.cancelling() > cancel_requests:
+                return None
+            return await self._start_calculation_execution(request)
+
+        start = asyncio.ensure_future(run())
         try:
-            return await asyncio.shield(start)
+            return cast(str, await asyncio.shield(start))
         except asyncio.CancelledError as cancellation:
-            _logger.warning("Query canceled by user.")
             try:
-                self._calculation_id = await start
-                await self._cancel_and_wait(self._calculation_id)
+                calculation_id = await start
+                if calculation_id is None:
+                    # The task did not begin the request, so it was never sent.
+                    raise cancellation
+                _logger.warning("Query canceled by user.")
+                self._calculation_id = calculation_id
+                await self._cancel_and_wait(calculation_id)
             except Exception as e:
                 raise cancellation from e
             raise
