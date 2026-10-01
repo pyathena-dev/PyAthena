@@ -512,5 +512,5 @@ With `kill_on_interrupt` enabled, which is the default, cancelling the task whil
 requests cancellation of the calculation, waits until it reaches a terminal state, and then raises `asyncio.CancelledError`.
 Cancelling the task while `execute()` is still starting the calculation first waits for the start request to finish,
 and then cancels the calculation it started in the same way.
-If the request has not been sent yet when the cancellation is handled, it is never sent.
+If the task is cancelled before `execute()` begins the request, the request is never sent.
 Cancelling the task again during this wait raises `asyncio.CancelledError` at once without cancelling the calculation.
