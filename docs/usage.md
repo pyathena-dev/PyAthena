@@ -519,7 +519,7 @@ but they have no `query_id` property, so the ID of that query is not available.
 They wait for queries on worker threads, which do not receive `KeyboardInterrupt`.
 
 A second `KeyboardInterrupt` during the cancellation request or these waits propagates immediately, and the query can keep running.
-With `kill_on_interrupt=False`, the `KeyboardInterrupt` propagates immediately and the query keeps running.
+With `kill_on_interrupt=False`, the `KeyboardInterrupt` propagates immediately, and a query that has already started keeps running.
 
 ```python
 from pyathena import connect

@@ -143,9 +143,9 @@ Cancelling the task while `execute()` is still starting the query first waits fo
 and then cancels the query it started in the same way.
 If the task is cancelled before `execute()` begins the request, the request is never sent.
 Cancelling the task again during the cancellation request or these waits raises `asyncio.CancelledError` immediately, and the query can keep running.
-With `kill_on_interrupt=False`, `asyncio.CancelledError` is raised immediately and the query keeps running.
+With `kill_on_interrupt=False`, `asyncio.CancelledError` is raised immediately, and a query that has already started keeps running.
 
-A timeout from `asyncio.wait_for()` therefore cancels the query and raises `asyncio.TimeoutError`.
+With `kill_on_interrupt` enabled, a timeout from `asyncio.wait_for()` therefore cancels a query that has started and raises `asyncio.TimeoutError`.
 If the timeout expires while `execute()` is still looking up a cached result, no query is started and `query_id` is `None`.
 
 ```python
