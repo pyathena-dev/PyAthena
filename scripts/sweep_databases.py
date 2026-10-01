@@ -13,15 +13,18 @@
 # AWS_PROFILE and AWS_DEFAULT_REGION can select the account and region.
 #
 # Eligible databases must exactly match a PyAthena or SQLAlchemy fixture name
-# and have a creation time more than seven days old. Resource links and federated
-# databases are excluded. The script completes inventory before deleting and
-# rechecks eligibility and creation time immediately before each deletion.
-# Only missing-database errors are ignored; other API failures stop the sweep.
+# and have a creation time more than one day old, longer than a CI test session
+# can run (a GitHub-hosted job stops after six hours). A local session against
+# the same account that stays open longer can lose its database. Resource
+# links and federated databases are excluded. The script completes inventory
+# before deleting and rechecks eligibility and creation time immediately
+# before each deletion. Only missing-database errors are ignored; other API
+# failures stop the sweep.
 # Deletion removes Glue database and table metadata, not S3 objects.
 #
 # With AWS_ATHENA_S3_TABLES_CATALOG set (s3tablescatalog/<table-bucket>), the
 # script also sweeps that table bucket's namespaces named like PyAthena test
-# schemas and more than seven days old, deleting their tables first. Test
+# schemas and more than one day old, deleting their tables first. Test
 # sessions create and delete such a namespace; a session that stops early
 # leaves it behind. The namespace ID is rechecked before its tables are deleted
 # and again before the namespace is deleted. Each table is deleted only if it
@@ -29,11 +32,11 @@
 # skipped. DeleteNamespace takes only a name, so an empty namespace recreated
 # under the same name right after the last recheck would still be deleted.
 #
-# .github/workflows/database-sweep.yaml runs this script after scheduled Test
-# runs complete on master, including failures and cancellations. It does not run
-# after PR tests or manually dispatched tests. Manual sweep dispatch on master
-# defaults to preview. The job has a 15-minute timeout; a timeout or API failure
-# can leave eligible databases for a later run.
+# .github/workflows/database-sweep.yaml runs this script daily on master, so
+# while those runs succeed, a cancelled test run's leftovers are removed within
+# about two days. Manual sweep dispatch on master defaults to preview. The job
+# has a 60-minute timeout; a timeout or API failure can leave eligible databases
+# for a later run.
 
 import argparse
 import contextlib
@@ -54,6 +57,8 @@ _TEST_DATABASE = re.compile(
     rf"(?:{_PYATHENA_TEST_SCHEMA}|test_[0-9a-f]{{12}}(?:_test_schema(?:_2)?)?)"
 )
 _TEST_NAMESPACE = re.compile(_PYATHENA_TEST_SCHEMA)
+# Longer than a CI test session can run; see the module comment.
+_RETENTION = timedelta(days=1)
 
 
 def _eligible(database: dict[str, Any], cutoff: datetime) -> bool:
@@ -69,13 +74,21 @@ def _eligible(database: dict[str, Any], cutoff: datetime) -> bool:
 
 
 def sweep_databases(client: Any, catalog_id: str, *, dry_run: bool = True) -> dict[str, int]:
-    """Preview or delete test databases older than seven days.
+    """Preview or delete test databases older than one day.
 
     Fixtures generate fresh database names for each session or worker.
-    Databases younger than seven days are retained, including concurrent CI runs.
+    Databases younger than one day are retained, including concurrent CI runs.
     Only Glue metadata is deleted; S3 objects and child catalogs are untouched.
+
+    Args:
+        client: A boto3 Glue client.
+        catalog_id: The ID of the Data Catalog to sweep.
+        dry_run: Only count eligible databases.
+
+    Returns:
+        The numbers of eligible, deleted and skipped databases.
     """
-    cutoff = datetime.now(UTC) - timedelta(days=7)
+    cutoff = datetime.now(UTC) - _RETENTION
     # Finish pagination before deleting anything from the catalog.
     candidates = [
         database
@@ -127,11 +140,11 @@ def _eligible_namespace(namespace: dict[str, Any], cutoff: datetime) -> bool:
 def sweep_s3tables_namespaces(
     client: Any, table_bucket_arn: str, *, dry_run: bool = True
 ) -> dict[str, int]:
-    """Preview or delete test S3 Tables namespaces older than seven days.
+    """Preview or delete test S3 Tables namespaces older than one day.
 
     Test sessions create a namespace named like their schema and delete it when
     they finish; this removes the ones a session left behind. Namespaces younger
-    than seven days are retained, including those of running sessions.
+    than one day are retained, including those of running sessions.
 
     Args:
         client: A boto3 S3 Tables client.
@@ -141,7 +154,7 @@ def sweep_s3tables_namespaces(
     Returns:
         The numbers of eligible, deleted and skipped namespaces.
     """
-    cutoff = datetime.now(UTC) - timedelta(days=7)
+    cutoff = datetime.now(UTC) - _RETENTION
     # Finish pagination before deleting anything from the table bucket.
     candidates = [
         namespace

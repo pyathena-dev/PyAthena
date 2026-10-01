@@ -105,6 +105,14 @@ def test_preview_and_apply_finish_pagination_before_mutating(glue):
         }
 
 
+@pytest.mark.parametrize(("age", "eligible"), [(timedelta(days=2), 1), (timedelta(hours=12), 0)])
+def test_databases_expire_after_one_day(glue, age, eligible):
+    client, stubber = glue
+    database = {**DATABASE, "CreateTime": datetime.now(UTC) - age}
+    stubber.add_response("get_databases", {"DatabaseList": [database]}, {"CatalogId": CATALOG})
+    assert sweep_databases(client, CATALOG)["eligible"] == eligible
+
+
 @pytest.mark.parametrize(
     "current",
     [
@@ -253,6 +261,18 @@ def s3tables(monkeypatch):
 )
 def test_only_expired_session_namespaces_are_eligible(properties, expected):
     assert _eligible_namespace({**NAMESPACE, **properties}, OLD + timedelta(days=1)) is expected
+
+
+@pytest.mark.parametrize(("age", "eligible"), [(timedelta(days=2), 1), (timedelta(hours=12), 0)])
+def test_namespaces_expire_after_one_day(s3tables, age, eligible):
+    client, stubber = s3tables
+    namespace = {**NAMESPACE, "createdAt": datetime.now(UTC) - age}
+    stubber.add_response(
+        "list_namespaces",
+        {"namespaces": [namespace]},
+        {"tableBucketARN": BUCKET_ARN, "prefix": "pyathena_test_"},
+    )
+    assert sweep_s3tables_namespaces(client, BUCKET_ARN)["eligible"] == eligible
 
 
 def test_namespace_sweep_deletes_tables_then_namespace(s3tables):
