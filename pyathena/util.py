@@ -17,6 +17,7 @@ from tenacity import (
 
 from pyathena import DataError
 
+# Replace with ``from typing import override`` when Python 3.11 support ends.
 if TYPE_CHECKING:
     from typing_extensions import override
 else:
