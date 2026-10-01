@@ -20,6 +20,7 @@ from pyathena.model import AthenaQueryExecution
 from pyathena.options import ExecuteOptions
 from pyathena.s3fs.converter import DefaultS3FSTypeConverter
 from pyathena.s3fs.result_set import AthenaS3FSResultSet, CSVReaderType
+from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
 
@@ -84,7 +85,8 @@ class AioS3FSCursor(WithAsyncFetch):
         """
         return DefaultS3FSTypeConverter()
 
-    async def execute(  # type: ignore[override]
+    @override
+    async def execute(
         self,
         operation: str,
         parameters: dict[str, Any] | list[str] | None = None,

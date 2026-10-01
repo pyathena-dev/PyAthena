@@ -4,7 +4,7 @@ import logging
 import re
 from collections.abc import Callable, Iterable
 from re import Pattern
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import tenacity
 from tenacity import (
@@ -16,6 +16,27 @@ from tenacity import (
 )
 
 from pyathena import DataError
+
+# Replace with ``from typing import override`` when Python 3.11 support ends.
+if TYPE_CHECKING:
+    from typing_extensions import override
+else:
+
+    def override(func):
+        """Mark a method as overriding a base class method (PEP 698).
+
+        Type checkers use ``typing_extensions.override`` and report a marked
+        method whose base class method does not exist. At runtime this
+        decorator does nothing.
+
+        Args:
+            func: The overriding method.
+
+        Returns:
+            The method unchanged.
+        """
+        return func
+
 
 _logger = logging.getLogger(__name__)
 

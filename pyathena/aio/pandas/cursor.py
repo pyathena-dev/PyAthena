@@ -20,6 +20,7 @@ from pyathena.pandas.converter import (
     DefaultPandasUnloadTypeConverter,
 )
 from pyathena.pandas.result_set import AthenaPandasResultSet, PandasDataFrameIterator
+from pyathena.util import override
 
 if TYPE_CHECKING:
     from pandas import DataFrame
@@ -92,7 +93,8 @@ class AioPandasCursor(WithAsyncFetch):
             return DefaultPandasUnloadTypeConverter()
         return DefaultPandasTypeConverter()
 
-    async def execute(  # type: ignore[override]
+    @override
+    async def execute(
         self,
         operation: str,
         parameters: dict[str, Any] | list[str] | None = None,

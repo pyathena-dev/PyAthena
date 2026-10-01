@@ -14,7 +14,7 @@ from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaDatabase, AthenaQueryExecution, AthenaTableMetadata
 from pyathena.options import ExecuteOptions
 from pyathena.result_set import AthenaResultSet, WithResultSet
-from pyathena.util import _is_throttling_error
+from pyathena.util import _is_throttling_error, override
 
 _logger = logging.getLogger(__name__)
 
@@ -29,6 +29,7 @@ class AioBaseCursor(BaseCursor):
     to use ``asyncio.to_thread`` / ``asyncio.sleep``.
     """
 
+    @override
     async def _execute(  # type: ignore[override]
         self,
         operation: str,
@@ -100,6 +101,7 @@ class AioBaseCursor(BaseCursor):
                 raise DatabaseError(*e.args) from e
         return query_id
 
+    @override
     async def _get_query_execution(self, query_id: str) -> AthenaQueryExecution:  # type: ignore[override]
         """Get a query execution with ``GetQueryExecution``.
 
@@ -126,6 +128,7 @@ class AioBaseCursor(BaseCursor):
         else:
             return AthenaQueryExecution(response)
 
+    @override
     async def _poll_until_terminal(self, query_id: str) -> AthenaQueryExecution:  # type: ignore[override]
         """Poll a query execution until it reaches a terminal state.
 
@@ -149,6 +152,7 @@ class AioBaseCursor(BaseCursor):
                 return query_execution
             await asyncio.sleep(self._poll_interval)
 
+    @override
     async def _poll(self, query_id: str) -> AthenaQueryExecution:  # type: ignore[override]
         """Wait for a query execution to finish.
 
@@ -176,6 +180,7 @@ class AioBaseCursor(BaseCursor):
                 raise
         return query_execution
 
+    @override
     async def _cancel(self, query_id: str) -> None:  # type: ignore[override]
         """Stop a query execution with ``StopQueryExecution``.
 
@@ -197,6 +202,7 @@ class AioBaseCursor(BaseCursor):
             _logger.exception("Failed to cancel query.")
             raise OperationalError(*e.args) from e
 
+    @override
     async def _batch_get_query_execution(  # type: ignore[override]
         self, query_ids: list[str]
     ) -> list[AthenaQueryExecution]:
@@ -216,6 +222,7 @@ class AioBaseCursor(BaseCursor):
                 for r in response.get("QueryExecutions", [])
             ]
 
+    @override
     async def _list_query_executions(  # type: ignore[override]
         self,
         work_group: str | None = None,
@@ -242,6 +249,7 @@ class AioBaseCursor(BaseCursor):
                 return next_token, []
             return next_token, await self._batch_get_query_execution(query_ids)
 
+    @override
     async def _find_previous_query_id(  # type: ignore[override]
         self,
         query: str,
@@ -331,6 +339,7 @@ class AioBaseCursor(BaseCursor):
             self._glue_request_failed(e, description, absence_is_final)
         return await athena_request(None, logging_)
 
+    @override
     async def _list_databases(  # type: ignore[override]
         self,
         catalog_name: str | None,
@@ -377,6 +386,7 @@ class AioBaseCursor(BaseCursor):
                 AthenaDatabase({"Database": r}) for r in response.get("DatabaseList", [])
             ]
 
+    @override
     async def list_databases(  # type: ignore[override]
         self,
         catalog_name: str | None,
@@ -421,6 +431,7 @@ class AioBaseCursor(BaseCursor):
             catalog_name, athena_request, GlueMetadataClient.list_databases, "list databases"
         )
 
+    @override
     async def _get_table_metadata(  # type: ignore[override]
         self,
         table_name: str,
@@ -465,6 +476,7 @@ class AioBaseCursor(BaseCursor):
         else:
             return AthenaTableMetadata(response)
 
+    @override
     async def get_table_metadata(  # type: ignore[override]
         self,
         table_name: str,
@@ -506,6 +518,7 @@ class AioBaseCursor(BaseCursor):
             absence_is_final=True,
         )
 
+    @override
     async def _list_table_metadata(  # type: ignore[override]
         self,
         catalog_name: str | None = None,
@@ -559,6 +572,7 @@ class AioBaseCursor(BaseCursor):
                 for r in response.get("TableMetadataList", [])
             ]
 
+    @override
     async def list_table_metadata(  # type: ignore[override]
         self,
         catalog_name: str | None = None,
@@ -631,6 +645,7 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
     format-specific helpers.
     """
 
+    @override
     async def executemany(  # type: ignore[override]
         self,
         operation: str,
@@ -668,7 +683,7 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
         self._reset_state()
         self._rowcount = rowcount
 
-    async def cancel(self) -> None:  # type: ignore[override]
+    async def cancel(self) -> None:
         """Cancel the currently executing query.
 
         Raises:
@@ -678,7 +693,8 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
             raise ProgrammingError("QueryExecutionId is none or empty.")
         await self._cancel(self.query_id)
 
-    async def fetchone(  # type: ignore[override]
+    @override
+    async def fetchone(
         self,
     ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
         """Fetch the next row of the result set.
@@ -697,7 +713,8 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
         result_set = cast(AthenaResultSet, self.result_set)
         return await asyncio.to_thread(result_set.fetchone)
 
-    async def fetchmany(  # type: ignore[override]
+    @override
+    async def fetchmany(
         self, size: int | None = None
     ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         """Fetch multiple rows from the result set.
@@ -719,7 +736,8 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
         result_set = cast(AthenaResultSet, self.result_set)
         return await asyncio.to_thread(result_set.fetchmany, size)
 
-    async def fetchall(  # type: ignore[override]
+    @override
+    async def fetchall(
         self,
     ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         """Fetch all remaining rows from the result set.
@@ -738,6 +756,7 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
         result_set = cast(AthenaResultSet, self.result_set)
         return await asyncio.to_thread(result_set.fetchall)
 
+    @override
     def __iter__(self) -> NoReturn:
         """Reject synchronous iteration; use ``async for`` instead.
 

@@ -16,6 +16,7 @@ from pyathena.polars.converter import (
     DefaultPolarsUnloadTypeConverter,
 )
 from pyathena.polars.result_set import AthenaPolarsResultSet
+from pyathena.util import override
 
 if TYPE_CHECKING:
     import polars as pl
@@ -85,7 +86,8 @@ class AioPolarsCursor(WithAsyncFetch):
             return DefaultPolarsUnloadTypeConverter()
         return DefaultPolarsTypeConverter()
 
-    async def execute(  # type: ignore[override]
+    @override
+    async def execute(
         self,
         operation: str,
         parameters: dict[str, Any] | list[str] | None = None,

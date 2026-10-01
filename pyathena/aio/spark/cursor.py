@@ -20,7 +20,7 @@ from pyathena.model import (
     AthenaQueryExecution,
 )
 from pyathena.spark.common import SparkBaseCursor, WithCalculationExecution
-from pyathena.util import parse_output_location
+from pyathena.util import override, parse_output_location
 
 _logger = logging.getLogger(__name__)
 
@@ -55,6 +55,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
 
     # --- async overrides of SparkBaseCursor I/O methods ---
 
+    @override
     async def _get_calculation_execution_status(  # type: ignore[override]
         self, query_id: str
     ) -> AthenaCalculationExecutionStatus:
@@ -72,6 +73,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
         else:
             return AthenaCalculationExecutionStatus(response)
 
+    @override
     async def _get_calculation_execution(  # type: ignore[override]
         self, query_id: str
     ) -> AthenaCalculationExecution:
@@ -89,6 +91,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
         else:
             return AthenaCalculationExecution(response)
 
+    @override
     async def _calculate(  # type: ignore[override]
         self,
         session_id: str,
@@ -145,6 +148,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
                 raise cancellation from e
             raise
 
+    @override
     async def _start_calculation_execution(  # type: ignore[override]
         self, request: dict[str, Any]
     ) -> str:
@@ -171,6 +175,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
             raise DatabaseError(*e.args) from e
         return cast(str, response.get("CalculationExecutionId"))
 
+    @override
     async def _poll_until_terminal(  # type: ignore[override]
         self, query_id: str
     ) -> AthenaQueryExecution | AthenaCalculationExecution:
@@ -196,6 +201,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
                 return await self._get_calculation_execution(query_id)
             await asyncio.sleep(self._poll_interval)
 
+    @override
     async def _poll(  # type: ignore[override]
         self, query_id: str
     ) -> AthenaQueryExecution | AthenaCalculationExecution:
@@ -231,6 +237,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
                 raise cancellation from e
             raise
 
+    @override
     async def _cancel_and_wait(self, calculation_id: str) -> None:  # type: ignore[override]
         """Request cancellation and store the calculation's terminal state.
 
@@ -245,6 +252,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
             AthenaCalculationExecution, await self._poll_until_terminal(calculation_id)
         )
 
+    @override
     async def _cancel(self, query_id: str) -> None:  # type: ignore[override]
         request: dict[str, Any] = {"CalculationExecutionId": query_id}
         try:
@@ -258,6 +266,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
             _logger.exception("Failed to cancel calculation.")
             raise OperationalError(*e.args) from e
 
+    @override
     async def _terminate_session(self) -> None:  # type: ignore[override]
         request: dict[str, Any] = {"SessionId": self._session_id}
         try:
@@ -271,6 +280,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
             _logger.exception(f"Failed to terminate session: {self._session_id}.")
             raise OperationalError(*e.args) from e
 
+    @override
     async def _read_s3_file_as_text(self, uri) -> str:  # type: ignore[override]
         bucket, key = parse_output_location(uri)
         response = await async_retry_api_call(
@@ -304,7 +314,8 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
             return None
         return await self._read_s3_file_as_text(self._calculation_execution.std_error_s3_uri)
 
-    async def execute(  # type: ignore[override]
+    @override
+    async def execute(
         self,
         operation: str,
         parameters: dict[str, Any] | list[str] | None = None,
@@ -352,6 +363,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
             raise ProgrammingError("CalculationExecutionId is none or empty.")
         await self._cancel(self.calculation_id)
 
+    @override
     async def close(self) -> None:  # type: ignore[override]
         """Close the cursor, terminating its Spark session if configured to.
 
@@ -367,6 +379,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
             # Terminated; later calls do nothing.
             self._terminate_session_on_close = False
 
+    @override
     async def executemany(  # type: ignore[override]
         self,
         operation: str,
