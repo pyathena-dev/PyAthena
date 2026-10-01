@@ -1572,13 +1572,26 @@ class TestCursor:
             cursor.get_table_metadata("one_row")
         assert calls == ["get_table_metadata"] * 2
 
-    def test_listing_reads_every_page(self, cursor):
+    # Without the Glue fallback, a throttled page is retried, so Athena serves every page.
+    @pytest.mark.parametrize("cursor", [{"glue_metadata_fallback": False}], indirect=["cursor"])
+    def test_listing_reads_every_page(self, cursor, monkeypatch):
+        client = cursor.connection.client
+        list_table_metadata = client.list_table_metadata
+        tokens = []
+
+        def record_token(**kwargs):
+            tokens.append(kwargs.get("NextToken"))
+            return list_table_metadata(**kwargs)
+
+        monkeypatch.setattr(client, "list_table_metadata", record_token)
         # Other tests add and drop their own tables, so only the session's are compared.
-        # At four per page, the session's tables and views span several pages.
         session_tables = sorted(t.name for t in (*TABLES, *VIEWS))
+
         names = [m.name for m in cursor.list_table_metadata(max_results=4)]
 
         assert sorted(n for n in names if n in session_tables) == session_tables
+        # At four per page, the session's tables and views span three pages or more.
+        assert len(set(tokens)) >= 3
 
     @pytest.mark.parametrize(
         "cursor", [{"retry_config": RetryConfig(attempt=1)}], indirect=["cursor"]
