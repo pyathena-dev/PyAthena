@@ -490,32 +490,6 @@ class AthenaPandasResultSet(AthenaResultSet):
             description = self.description if self.description else []
             return tuple([row[1][d[0]] for d in description])
 
-    def fetchmany(
-        self, size: int | None = None
-    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
-        if not size or size <= 0:
-            size = self._arraysize
-        rows = []
-        for _ in range(size):
-            row = self.fetchone()
-            if row:
-                rows.append(row)
-            else:
-                break
-        return rows
-
-    def fetchall(
-        self,
-    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
-        rows = []
-        while True:
-            row = self.fetchone()
-            if row:
-                rows.append(row)
-            else:
-                break
-        return rows
-
     def _read_csv(self) -> TextFileReader | DataFrame:
         import pandas as pd
 

@@ -10,11 +10,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
 from pyathena.aio.common import WithAsyncFetch
 from pyathena.common import CursorIterator
-from pyathena.error import OperationalError, ProgrammingError
+from pyathena.error import OperationalError
 from pyathena.filesystem.s3_async import AioS3FileSystem
 from pyathena.model import AthenaQueryExecution
 from pyathena.options import ExecuteOptions
@@ -164,69 +164,3 @@ class AioS3FSCursor(WithAsyncFetch):
         else:
             raise OperationalError(query_execution.state_change_reason)
         return self
-
-    async def fetchone(  # type: ignore[override]
-        self,
-    ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
-        """Fetch the next row of the result set.
-
-        Wraps the synchronous fetch in ``asyncio.to_thread`` because
-        ``AthenaS3FSResultSet`` reads rows lazily from S3.
-
-        Returns:
-            A tuple representing the next row, or None if no more rows.
-
-        Raises:
-            ProgrammingError: If no result set is available.
-        """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaS3FSResultSet, self.result_set)
-        return await asyncio.to_thread(result_set.fetchone)
-
-    async def fetchmany(  # type: ignore[override]
-        self, size: int | None = None
-    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
-        """Fetch multiple rows from the result set.
-
-        Wraps the synchronous fetch in ``asyncio.to_thread`` because
-        ``AthenaS3FSResultSet`` reads rows lazily from S3.
-
-        Args:
-            size: Maximum number of rows to fetch. Defaults to arraysize.
-
-        Returns:
-            List of tuples representing the fetched rows.
-
-        Raises:
-            ProgrammingError: If no result set is available.
-        """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaS3FSResultSet, self.result_set)
-        return await asyncio.to_thread(result_set.fetchmany, size)
-
-    async def fetchall(  # type: ignore[override]
-        self,
-    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
-        """Fetch all remaining rows from the result set.
-
-        Wraps the synchronous fetch in ``asyncio.to_thread`` because
-        ``AthenaS3FSResultSet`` reads rows lazily from S3.
-
-        Returns:
-            List of tuples representing all remaining rows.
-
-        Raises:
-            ProgrammingError: If no result set is available.
-        """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaS3FSResultSet, self.result_set)
-        return await asyncio.to_thread(result_set.fetchall)
-
-    async def __anext__(self):
-        row = await self.fetchone()
-        if row is None:
-            raise StopAsyncIteration
-        return row

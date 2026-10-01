@@ -220,45 +220,6 @@ class AthenaS3FSResultSet(AthenaResultSet):
         self._rownumber += 1
         return self._rows.popleft()
 
-    def fetchmany(
-        self, size: int | None = None
-    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
-        """Fetch the next set of rows of the result set.
-
-        Args:
-            size: Maximum number of rows to fetch. Defaults to arraysize.
-
-        Returns:
-            A list of tuples representing the rows.
-        """
-        if not size or size <= 0:
-            size = self._arraysize
-        rows = []
-        for _ in range(size):
-            row = self.fetchone()
-            if row:
-                rows.append(row)
-            else:
-                break
-        return rows
-
-    def fetchall(
-        self,
-    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
-        """Fetch all remaining rows of the result set.
-
-        Returns:
-            A list of tuples representing all remaining rows.
-        """
-        rows = []
-        while True:
-            row = self.fetchone()
-            if row:
-                rows.append(row)
-            else:
-                break
-        return rows
-
     def close(self) -> None:
         """Close the result set and release resources."""
         super().close()
