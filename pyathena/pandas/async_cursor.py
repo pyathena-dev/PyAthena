@@ -16,6 +16,7 @@ from pyathena.pandas.converter import (
     DefaultPandasUnloadTypeConverter,
 )
 from pyathena.pandas.result_set import AthenaPandasResultSet
+from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
 
@@ -99,6 +100,7 @@ class AsyncPandasCursor(AsyncCursor):
         self._chunksize = chunksize
 
     @staticmethod
+    @override
     def get_default_converter(
         unload: bool = False,
     ) -> DefaultPandasTypeConverter | Any:
@@ -106,7 +108,8 @@ class AsyncPandasCursor(AsyncCursor):
             return DefaultPandasUnloadTypeConverter()
         return DefaultPandasTypeConverter()
 
-    @property
+    @property  # type: ignore[explicit-override]  # python/mypy#15900
+    @override
     def arraysize(self) -> int:
         return self._arraysize
 
@@ -116,6 +119,7 @@ class AsyncPandasCursor(AsyncCursor):
             raise ProgrammingError("arraysize must be a positive integer value.")
         self._arraysize = value
 
+    @override
     def _collect_result_set(
         self,
         query_id: str,
@@ -146,6 +150,7 @@ class AsyncPandasCursor(AsyncCursor):
             **kwargs,
         )
 
+    @override
     def execute(
         self,
         operation: str,

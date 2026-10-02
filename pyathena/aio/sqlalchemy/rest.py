@@ -8,6 +8,7 @@
 from typing import TYPE_CHECKING
 
 from pyathena.aio.sqlalchemy.base import AthenaAioDialect
+from pyathena.util import override
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -39,5 +40,6 @@ class AthenaAioRestDialect(AthenaAioDialect):
     supports_statement_cache = True
 
     @classmethod
+    @override
     def import_dbapi(cls) -> "ModuleType":
         return super().import_dbapi()

@@ -19,6 +19,7 @@ from pyathena.pandas.converter import (
 )
 from pyathena.pandas.result_set import AthenaPandasResultSet, PandasDataFrameIterator
 from pyathena.result_set import WithFetch
+from pyathena.util import override
 
 if TYPE_CHECKING:
     from pandas import DataFrame
@@ -129,6 +130,7 @@ class PandasCursor(WithFetch):
         self._auto_optimize_chunksize = auto_optimize_chunksize
 
     @staticmethod
+    @override
     def get_default_converter(
         unload: bool = False,
     ) -> DefaultPandasTypeConverter | Any:
@@ -136,6 +138,7 @@ class PandasCursor(WithFetch):
             return DefaultPandasUnloadTypeConverter()
         return DefaultPandasTypeConverter()
 
+    @override
     def execute(
         self,
         operation: str,

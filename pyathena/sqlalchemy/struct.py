@@ -14,6 +14,8 @@ from typing import Any
 from sqlalchemy.sql import sqltypes
 from sqlalchemy.sql.type_api import TypeEngine
 
+from pyathena.util import override
+
 
 class AthenaStruct(TypeEngine[dict[str, Any]]):
     """SQLAlchemy type for Athena STRUCT/ROW complex type.
@@ -66,6 +68,7 @@ class AthenaStruct(TypeEngine[dict[str, Any]]):
         return self.fields[key]
 
     @property
+    @override
     def _static_cache_key(self):
         return (
             type(self),
@@ -73,6 +76,7 @@ class AthenaStruct(TypeEngine[dict[str, Any]]):
         )
 
     @property
+    @override
     def python_type(self) -> type:
         return dict
 

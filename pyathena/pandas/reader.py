@@ -12,6 +12,7 @@ from io import RawIOBase
 from typing import Any
 
 from pyathena.s3fs.reader import AthenaCSVReader
+from pyathena.util import override
 
 _BINARY_NULL = "__PYATHENA_BINARY_NULL__"
 _CSV_FIELD = re.compile(r'(?:^|,)(?P<value>"[^"]*(?:""[^"]*)*"|[^,]*)')
@@ -32,9 +33,11 @@ class BinaryCSVReader(RawIOBase):
         self._header = True
         self._buffer = b""
 
+    @override
     def readable(self) -> bool:
         return True
 
+    @override
     def readinto(self, buffer: Any) -> int:
         if self.closed:
             raise ValueError("I/O operation on closed file.")
@@ -64,6 +67,7 @@ class BinaryCSVReader(RawIOBase):
         self._buffer = self._buffer[size:]
         return size
 
+    @override
     def close(self) -> None:
         try:
             self._reader.close()

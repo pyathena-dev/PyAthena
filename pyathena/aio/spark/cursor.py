@@ -50,6 +50,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
     """
 
     @property
+    @override
     def calculation_execution(self) -> AthenaCalculationExecution | None:
         return self._calculation_execution
 

@@ -13,6 +13,7 @@ from pyathena.converter import (
     _to_default,
     _to_json,
 )
+from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
 
@@ -80,6 +81,7 @@ class DefaultPandasTypeConverter(Converter):
             }
         return self.__dtypes
 
+    @override
     def convert(self, type_: str, value: str | None, type_hint: str | None = None) -> Any | None:
         converter = self.get(type_)
         return converter(value)
@@ -104,6 +106,7 @@ class DefaultPandasUnloadTypeConverter(Converter):
             default=_to_default,
         )
 
+    @override
     def convert(self, type_: str, value: str | None, type_hint: str | None = None) -> Any | None:
         converter = self.get(type_)
         return converter(value)

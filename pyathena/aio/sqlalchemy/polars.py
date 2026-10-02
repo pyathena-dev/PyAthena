@@ -8,7 +8,7 @@
 from typing import TYPE_CHECKING
 
 from pyathena.aio.sqlalchemy.base import AthenaAioDialect
-from pyathena.util import strtobool
+from pyathena.util import override, strtobool
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -43,6 +43,7 @@ class AthenaAioPolarsDialect(AthenaAioDialect):
     driver = "aiopolars"
     supports_statement_cache = True
 
+    @override
     def create_connect_args(self, url):
         from pyathena.aio.polars.cursor import AioPolarsCursor
 
@@ -57,5 +58,6 @@ class AthenaAioPolarsDialect(AthenaAioDialect):
         return [[], opts]
 
     @classmethod
+    @override
     def import_dbapi(cls) -> "ModuleType":
         return super().import_dbapi()

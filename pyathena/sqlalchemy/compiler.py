@@ -47,6 +47,7 @@ from pyathena.sqlalchemy.types import (
     AthenaTimestamp,
 )
 from pyathena.sqlalchemy.util import _split_type_arguments
+from pyathena.util import override
 
 if TYPE_CHECKING:
     from sqlalchemy import (
@@ -98,21 +99,27 @@ class AthenaTypeCompiler(GenericTypeCompiler):
         https://docs.aws.amazon.com/athena/latest/ug/data-types.html
     """
 
+    @override
     def visit_FLOAT(self, type_: types.Float[Any], **kw: Any) -> str:
         return self.visit_REAL(type_, **kw)  # type: ignore[arg-type]
 
+    @override
     def visit_REAL(self, type_: types.REAL[Any], **kw: Any) -> str:
         return "FLOAT"
 
+    @override
     def visit_DOUBLE(self, type_, **kw) -> str:
         return "DOUBLE"
 
+    @override
     def visit_DOUBLE_PRECISION(self, type_, **kw) -> str:
         return "DOUBLE"
 
+    @override
     def visit_NUMERIC(self, type_: types.Numeric[Any], **kw: Any) -> str:
         return self.visit_DECIMAL(type_, **kw)  # type: ignore[arg-type]
 
+    @override
     def visit_DECIMAL(self, type_: types.DECIMAL[Any], **kw: Any) -> str:
         if type_.precision is None:
             return "DECIMAL"
@@ -123,82 +130,105 @@ class AthenaTypeCompiler(GenericTypeCompiler):
     def visit_TINYINT(self, type_: types.Integer, **kw: Any) -> str:
         return "TINYINT"
 
+    @override
     def visit_INTEGER(self, type_: types.Integer, **kw: Any) -> str:
         return "INT" if kw.get("_athena_hive_ddl") else "INTEGER"
 
+    @override
     def visit_SMALLINT(self, type_: types.SmallInteger, **kw: Any) -> str:
         return "SMALLINT"
 
+    @override
     def visit_BIGINT(self, type_: types.BigInteger, **kw: Any) -> str:
         return "BIGINT"
 
+    @override
     def visit_TIMESTAMP(self, type_: types.TIMESTAMP, **kw: Any) -> str:
         return "TIMESTAMP"
 
+    @override
     def visit_DATETIME(self, type_: types.DateTime, **kw: Any) -> str:
         return self.visit_TIMESTAMP(type_, **kw)  # type: ignore[arg-type]
 
+    @override
     def visit_DATE(self, type_: types.Date, **kw: Any) -> str:
         return "DATE"
 
+    @override
     def visit_TIME(self, type_: types.Time, **kw: Any) -> str:
         raise exc.CompileError(f"Data type `{type_}` is not supported")
 
+    @override
     def visit_CLOB(self, type_: types.CLOB, **kw: Any) -> str:
         return self.visit_BINARY(type_, **kw)  # type: ignore[arg-type]
 
+    @override
     def visit_NCLOB(self, type_: types.Text, **kw: Any) -> str:
         return self.visit_BINARY(type_, **kw)  # type: ignore[arg-type]
 
+    @override
     def visit_CHAR(self, type_: types.CHAR, **kw: Any) -> str:
         if type_.length:
             return self._render_string_type("CHAR", type_.length, type_.collation)
         return "STRING"
 
+    @override
     def visit_NCHAR(self, type_: types.NCHAR, **kw: Any) -> str:
         return self.visit_CHAR(type_, **kw)  # type: ignore[arg-type]
 
+    @override
     def visit_VARCHAR(self, type_: types.String, **kw: Any) -> str:
         if type_.length:
             return self._render_string_type("VARCHAR", type_.length, type_.collation)
         return "STRING"
 
+    @override
     def visit_NVARCHAR(self, type_: types.NVARCHAR, **kw: Any) -> str:
         return self.visit_VARCHAR(type_, **kw)  # type: ignore[arg-type]
 
+    @override
     def visit_TEXT(self, type_: types.Text, **kw: Any) -> str:
         return "STRING"
 
+    @override
     def visit_BLOB(self, type_: types.LargeBinary, **kw: Any) -> str:
         return self.visit_BINARY(type_, **kw)  # type: ignore[arg-type]
 
+    @override
     def visit_BINARY(self, type_: types.BINARY, **kw: Any) -> str:
         return "BINARY"
 
+    @override
     def visit_VARBINARY(self, type_: types.VARBINARY, **kw: Any) -> str:
         return self.visit_BINARY(type_, **kw)  # type: ignore[arg-type]
 
+    @override
     def visit_BOOLEAN(self, type_: types.Boolean, **kw: Any) -> str:
         return "BOOLEAN"
 
     def visit_JSON(self, type_: types.JSON, **kw: Any) -> str:
         return "JSON"
 
+    @override
     def visit_string(self, type_, **kw):
         return "STRING"
 
+    @override
     def visit_unicode(self, type_, **kw):
         return "STRING"
 
+    @override
     def visit_unicode_text(self, type_, **kw):
         return "STRING"
 
+    @override
     def visit_null(self, type_, **kw):
         return "NULL"
 
     def visit_tinyint(self, type_, **kw):
         return self.visit_TINYINT(type_, **kw)
 
+    @override
     def visit_enum(self, type_, **kw):
         return self.visit_string(type_, **kw)
 
@@ -300,6 +330,7 @@ class AthenaStatementCompiler(SQLCompiler):
                 element = element._is_clone_of
             yield element
 
+    @override
     def visit_update(self, update_stmt, visiting_cte=None, **kw):
         """Rewrite partial array assignments into one native Athena UPDATE."""
         return super().visit_update(
@@ -323,6 +354,7 @@ class AthenaStatementCompiler(SQLCompiler):
         self._array_lambda_index = index + 1
         return f"_pyathena_element_{index}"
 
+    @override
     def visit_binary(
         self,
         binary,
@@ -435,6 +467,7 @@ class AthenaStatementCompiler(SQLCompiler):
         )
         return f"IF({step_sql} = 1, {sql}, slice({empty}, {failure}, 0))"
 
+    @override
     def translate_select_structure(self, select_stmt, **kw):
         """Keep DISTINCT and ordering on native arrays before result serialization."""
         if (
@@ -447,6 +480,7 @@ class AthenaStatementCompiler(SQLCompiler):
             return self._array_result_select(select_stmt)
         return select_stmt
 
+    @override
     def visit_compound_select(self, cs, asfrom=False, compound_index=None, **kw):
         if (
             not self.stack
@@ -624,6 +658,7 @@ class AthenaStatementCompiler(SQLCompiler):
 
         return f"filter({array_sql}, {lambda_sql})"
 
+    @override
     def visit_truediv_binary(self, binary, operator, **kw):
         """Render true division with explicit Athena numeric coercions."""
         left_type = binary.left.type
@@ -656,6 +691,7 @@ class AthenaStatementCompiler(SQLCompiler):
 
         return super().visit_truediv_binary(binary, operator, **kw)
 
+    @override
     def visit_cast(self, cast: Cast[Any], **kwargs):
         """Render a CAST with the Athena DML name of the target type.
 
@@ -828,6 +864,7 @@ class AthenaStatementCompiler(SQLCompiler):
             return f"CAST(to_hex({value}) AS JSON)"
         return f"CAST(CAST({value} AS VARCHAR) AS JSON)"
 
+    @override
     def limit_clause(self, select: GenerativeSelect, **kw):
         text = []
         if select._offset_clause is not None:
@@ -836,9 +873,11 @@ class AthenaStatementCompiler(SQLCompiler):
             text.append(" LIMIT " + self.process(select._limit_clause, **kw))
         return "\n".join(text)
 
+    @override
     def get_from_hint_text(self, table, text):
         return text
 
+    @override
     def format_from_hint_text(self, sqltext, table, hint, iscrud):
         hint_upper = hint.upper()
         if (
@@ -899,7 +938,8 @@ class AthenaDDLCompiler(DDLCompiler):
         https://docs.aws.amazon.com/athena/latest/ug/create-table.html
     """
 
-    @property
+    @property  # type: ignore[explicit-override]  # python/mypy#15900
+    @override
     def preparer(self) -> IdentifierPreparer:
         return self._preparer
 
@@ -1174,6 +1214,7 @@ class AthenaDDLCompiler(DDLCompiler):
             text.append(")")
         return "\n".join(text)
 
+    @override
     def get_column_specification(self, column: Column[Any], **kwargs) -> str:
         if type(column.type) in [types.Integer, types.INTEGER, types.INT]:
             # https://docs.aws.amazon.com/athena/latest/ug/create-table.html
@@ -1188,18 +1229,23 @@ class AthenaDDLCompiler(DDLCompiler):
             text.append(f"{self._get_comment_specification(column.comment)}")
         return " ".join(text)
 
+    @override
     def visit_check_constraint(self, constraint: CheckConstraint, **kw: Any) -> str:
         return ""
 
+    @override
     def visit_column_check_constraint(self, constraint: CheckConstraint, **kw: Any) -> str:
         return ""
 
+    @override
     def visit_foreign_key_constraint(self, constraint: ForeignKeyConstraint, **kw: Any) -> str:
         return ""
 
+    @override
     def visit_primary_key_constraint(self, constraint: PrimaryKeyConstraint, **kw: Any) -> str:
         return ""
 
+    @override
     def visit_unique_constraint(self, constraint: UniqueConstraint, **kw: Any) -> str:
         return ""
 
@@ -1290,6 +1336,7 @@ class AthenaDDLCompiler(DDLCompiler):
                 ) from e
         return columns, partitions, buckets
 
+    @override
     def visit_create_table(self, create: CreateTable, **kwargs) -> str:
         table = create.element
         dialect_opts = table.dialect_options["awsathena"]
@@ -1330,6 +1377,7 @@ class AthenaDDLCompiler(DDLCompiler):
         text.append(f"{self.post_create_table(table)}\n")
         return "\n".join(text)
 
+    @override
     def post_create_table(self, table: Table) -> str:
         dialect_opts: _DialectArgDict = table.dialect_options["awsathena"]
         dialect = cast("AthenaDialect", self.dialect)

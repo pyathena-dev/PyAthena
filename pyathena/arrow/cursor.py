@@ -14,6 +14,7 @@ from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.options import ExecuteOptions
 from pyathena.result_set import WithFetch
+from pyathena.util import override
 
 if TYPE_CHECKING:
     import polars as pl
@@ -116,6 +117,7 @@ class ArrowCursor(WithFetch):
         self._request_timeout = request_timeout
 
     @staticmethod
+    @override
     def get_default_converter(
         unload: bool = False,
     ) -> DefaultArrowTypeConverter | DefaultArrowUnloadTypeConverter | Any:
@@ -123,6 +125,7 @@ class ArrowCursor(WithFetch):
             return DefaultArrowUnloadTypeConverter()
         return DefaultArrowTypeConverter()
 
+    @override
     def execute(
         self,
         operation: str,

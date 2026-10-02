@@ -188,6 +188,8 @@ warn_no_return = true
 warn_return_any = true
 warn_unreachable = true
 warn_unused_configs = true
+# Overrides are marked with pyathena.util.override (PEP 698).
+enable_error_code = ["explicit-override"]
 exclude = [
     "benchmarks.*",
     "tests.*",

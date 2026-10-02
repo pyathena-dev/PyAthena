@@ -73,6 +73,7 @@ class AioArrowCursor(WithAsyncFetch):
         self._result_set: AthenaArrowResultSet | None = None
 
     @staticmethod
+    @override
     def get_default_converter(
         unload: bool = False,
     ) -> DefaultArrowTypeConverter | DefaultArrowUnloadTypeConverter | Any:

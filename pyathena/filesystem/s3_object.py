@@ -6,6 +6,8 @@ from collections.abc import Iterator, Mapping, MutableMapping
 from datetime import datetime
 from typing import Any
 
+from pyathena.util import override
+
 _logger = logging.getLogger(__name__)
 
 _API_FIELD_TO_S3_OBJECT_PROPERTY = {
@@ -135,30 +137,38 @@ class S3Object(MutableMapping[str, Any]):
         else:
             self.name = f"{self.get('bucket')}/{self.get('key')}"
 
+    @override
     def get(self, key: str, default: Any = None) -> Any:
         return super().get(key, default)
 
+    @override
     def __getitem__(self, item: str) -> Any:
         return self.__dict__.get(item)
 
     def __getattr__(self, item: str):
         return self.get(item)
 
+    @override
     def __setitem__(self, key: str, value: Any) -> None:
         self.__dict__[key] = value
 
+    @override
     def __setattr__(self, attr: str, value: Any) -> None:
         self[attr] = value
 
+    @override
     def __delitem__(self, key: str) -> None:
         del self.__dict__[key]
 
+    @override
     def __iter__(self) -> Iterator[str]:
         return iter(self.__dict__.keys())
 
+    @override
     def __len__(self) -> int:
         return len(self.__dict__)
 
+    @override
     def __str__(self):
         return str(self.__dict__)
 
@@ -227,15 +237,19 @@ class S3Metadata(Mapping[str, str]):
         self._version_id: str | None = response.get("VersionId")
         self._user_metadata: dict[str, str] = response.get("Metadata", {})
 
+    @override
     def __getitem__(self, key: str) -> str:
         return self._user_metadata[key]
 
+    @override
     def __iter__(self) -> Iterator[str]:
         return iter(self._user_metadata)
 
+    @override
     def __len__(self) -> int:
         return len(self._user_metadata)
 
+    @override
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({self._user_metadata!r})"
 

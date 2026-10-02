@@ -19,7 +19,7 @@ from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet
 from pyathena.s3fs.reader import AthenaCSVReader, DefaultCSVReader
-from pyathena.util import RetryConfig, parse_output_location
+from pyathena.util import RetryConfig, override, parse_output_location
 
 if TYPE_CHECKING:
     from pyathena.connection import Connection
@@ -151,6 +151,7 @@ class AthenaS3FSResultSet(AthenaResultSet):
             _logger.exception(f"Failed to open {path}.")
             raise OperationalError(*e.args) from e
 
+    @override
     def _fetch(self) -> None:
         """Fetch next batch of rows from CSV."""
         if not self._csv_reader:
@@ -203,6 +204,7 @@ class AthenaS3FSResultSet(AthenaResultSet):
             self._rows.append(converted_row)
             rows_fetched += 1
 
+    @override
     def fetchone(
         self,
     ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
@@ -220,6 +222,7 @@ class AthenaS3FSResultSet(AthenaResultSet):
         self._rownumber += 1
         return self._rows.popleft()
 
+    @override
     def close(self) -> None:
         """Close the result set and release resources."""
         super().close()

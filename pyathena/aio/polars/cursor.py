@@ -79,6 +79,7 @@ class AioPolarsCursor(WithAsyncFetch):
         self._result_set: AthenaPolarsResultSet | None = None
 
     @staticmethod
+    @override
     def get_default_converter(
         unload: bool = False,
     ) -> DefaultPolarsTypeConverter | DefaultPolarsUnloadTypeConverter | Any:

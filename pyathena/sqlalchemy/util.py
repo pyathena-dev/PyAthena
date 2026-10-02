@@ -7,6 +7,8 @@
 
 """Utility classes for PyAthena SQLAlchemy dialect."""
 
+from pyathena.util import override
+
 
 def _split_type_arguments(value: str) -> list[str]:
     """Split type arguments without splitting nested types or quoted field names."""
@@ -48,5 +50,6 @@ class _HashableDict(dict):  # type: ignore[type-arg]
     making them hashable through tuple conversion.
     """
 
-    def __hash__(self):  # type: ignore[override]
+    @override
+    def __hash__(self):
         return hash(tuple(sorted(self.items())))

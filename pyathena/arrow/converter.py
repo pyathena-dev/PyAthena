@@ -14,6 +14,7 @@ from pyathena.converter import (
     _to_json,
     _to_time,
 )
+from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
 
@@ -90,6 +91,7 @@ class DefaultArrowTypeConverter(Converter):
             }
         return self.__dtypes
 
+    @override
     def convert(self, type_: str, value: str | None, type_hint: str | None = None) -> Any | None:
         converter = self.get(type_)
         return converter(value)
@@ -114,6 +116,7 @@ class DefaultArrowUnloadTypeConverter(Converter):
             default=_to_default,
         )
 
+    @override
     def convert(self, type_: str, value: str | None, type_hint: str | None = None) -> Any | None:
         converter = self.get(type_)
         return converter(value)

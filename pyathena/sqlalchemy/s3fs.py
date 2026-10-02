@@ -8,6 +8,7 @@
 from typing import TYPE_CHECKING
 
 from pyathena.sqlalchemy.base import AthenaDialect
+from pyathena.util import override
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -30,6 +31,7 @@ class AthenaS3FSDialect(AthenaDialect):
     driver = "s3fs"
     supports_statement_cache = True
 
+    @override
     def create_connect_args(self, url):
         from pyathena.s3fs.cursor import S3FSCursor
 
@@ -38,5 +40,6 @@ class AthenaS3FSDialect(AthenaDialect):
         return [[], opts]
 
     @classmethod
+    @override
     def import_dbapi(cls) -> "ModuleType":
         return super().import_dbapi()

@@ -46,6 +46,7 @@ from pyathena.util import (
     RetryConfig,
     _get_error_code,
     _without_retries,
+    override,
     strtobool,
 )
 
@@ -236,10 +237,12 @@ class AthenaDialect(DefaultDialect):
         )
 
     @classmethod
+    @override
     def import_dbapi(cls) -> ModuleType:
         return pyathena
 
     @classmethod
+    @override
     def dbapi(cls) -> ModuleType:  # type: ignore[override]
         return pyathena
 
@@ -248,6 +251,7 @@ class AthenaDialect(DefaultDialect):
             return connection.raw_connection()
         return connection.connection
 
+    @override
     def create_connect_args(self, url: URL) -> tuple[tuple[str], MutableMapping[str, Any]]:
         # Connection string format:
         #   awsathena+rest://
@@ -588,10 +592,12 @@ class AthenaDialect(DefaultDialect):
             info_cache.setdefault(("pyathena_table_metadata", catalog, schema, name), metadata)
         return tables
 
+    @override
     def get_schema_names(self, connection, **kw):
         schemas = self._get_schemas(connection, **kw)
         return [s.name for s in schemas]
 
+    @override
     def get_table_names(self, connection: Connection, schema: str | None = None, **kw):
         # Tables created by Athena are always classified as `EXTERNAL_TABLE`,
         # but Athena can also query tables classified as `MANAGED_TABLE`, `EXTERNAL`, or `customer`.
@@ -606,10 +612,12 @@ class AthenaDialect(DefaultDialect):
             if t.table_type in ["EXTERNAL_TABLE", "MANAGED_TABLE", "EXTERNAL", "customer"]
         ]
 
+    @override
     def get_view_names(self, connection: Connection, schema: str | None = None, **kw):
         tables = self._get_tables(connection, schema, **kw)
         return [t.name for t in tables if t.table_type == "VIRTUAL_VIEW"]
 
+    @override
     def get_table_comment(
         self, connection: Connection, table_name: str, schema: str | None = None, **kw
     ):
@@ -617,6 +625,7 @@ class AthenaDialect(DefaultDialect):
         # An empty comment is no comment here too; the DDL compiler skips one.
         return {"text": metadata.comment or None}
 
+    @override
     def get_table_options(
         self, connection: Connection, table_name: str, schema: str | None = None, **kw
     ):
@@ -631,6 +640,7 @@ class AthenaDialect(DefaultDialect):
             "awsathena_tblproperties": _HashableDict(metadata.table_properties),
         }
 
+    @override
     @reflection.cache
     def has_table(self, connection: Connection, table_name: str, schema: str | None = None, **kw):
         try:
@@ -638,6 +648,7 @@ class AthenaDialect(DefaultDialect):
         except exc.NoSuchTableError:
             return False
 
+    @override
     @reflection.cache
     def get_view_definition(
         self, connection: Connection, view_name: str, schema: str | None = None, **kw
@@ -665,6 +676,7 @@ class AthenaDialect(DefaultDialect):
         # empty values, which are part of the definition.
         return "\n".join(row[0] or "" for row in rows)
 
+    @override
     @reflection.cache
     def get_columns(self, connection: Connection, table_name: str, schema: str | None = None, **kw):
         return self._get_columns(connection, table_name, schema=schema, **kw)
@@ -728,24 +740,28 @@ class AthenaDialect(DefaultDialect):
 
         return col_type(*args)
 
+    @override
     def get_foreign_keys(
         self, connection: Connection, table_name: str, schema: str | None = None, **kw
     ) -> list[ReflectedForeignKeyConstraint]:
         # Athena has no support for foreign keys.
         return []  # pragma: no cover
 
+    @override
     def get_pk_constraint(
         self, connection: Connection, table_name: str, schema: str | None = None, **kw
     ) -> ReflectedPrimaryKeyConstraint:
         # Athena has no support for primary keys.
         return {"name": None, "constrained_columns": []}  # pragma: no cover
 
+    @override
     def get_indexes(
         self, connection: Connection, table_name: str, schema: str | None = None, **kw
     ) -> list[ReflectedIndex]:
         # Athena has no support for indexes.
         return []  # pragma: no cover
 
+    @override
     def do_execute(self, cursor, statement, parameters, context=None):
         """Execute a statement with the DB API cursor.
 
@@ -781,6 +797,7 @@ class AthenaDialect(DefaultDialect):
             else:
                 context._rowcount = total + count if total >= 0 and count >= 0 else -1
 
+    @override
     def do_rollback(self, dbapi_connection: PoolProxiedConnection) -> None:
         # No transactions for Athena
         pass  # pragma: no cover

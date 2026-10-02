@@ -11,6 +11,7 @@ from pyathena.error import NotSupportedError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.options import ExecuteOptions
 from pyathena.result_set import AthenaDictResultSet, AthenaResultSet
+from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
 
@@ -98,6 +99,7 @@ class AsyncCursor(BaseCursor):
             )
         self._arraysize = value
 
+    @override
     def close(self, wait: bool = False) -> None:
         self._executor.shutdown(wait=wait)
 
@@ -160,6 +162,7 @@ class AsyncCursor(BaseCursor):
             result_set_type_hints=result_set_type_hints,
         )
 
+    @override
     def execute(
         self,
         operation: str,
@@ -231,6 +234,7 @@ class AsyncCursor(BaseCursor):
             self._collect_result_set, query_id, options.result_set_type_hints
         )
 
+    @override
     def executemany(
         self,
         operation: str,

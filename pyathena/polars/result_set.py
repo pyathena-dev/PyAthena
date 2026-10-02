@@ -23,7 +23,7 @@ from pyathena.error import ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.polars.util import to_column_info
 from pyathena.result_set import AthenaResultSet
-from pyathena.util import RetryConfig
+from pyathena.util import RetryConfig, override
 
 if TYPE_CHECKING:
     import polars as pl
@@ -86,6 +86,7 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         self._converters = converters
         self._column_names = column_names
 
+    @override
     def __next__(self) -> pl.DataFrame:
         """Get the next DataFrame chunk.
 
@@ -101,6 +102,7 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
             self.close()
             raise
 
+    @override
     def __iter__(self) -> PolarsDataFrameIterator:
         """Return self as iterator."""
         return self
@@ -355,6 +357,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
 
         return PolarsDataFrameIterator(reader, self.converters, self._get_column_names())
 
+    @override
     def fetchone(
         self,
     ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
@@ -684,6 +687,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """
         return self._df_iter
 
+    @override
     def close(self) -> None:
         """Close the result set and release resources."""
         import polars as pl

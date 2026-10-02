@@ -27,7 +27,7 @@ from pyathena.model import (
     AthenaQueryExecution,
     AthenaSessionStatus,
 )
-from pyathena.util import parse_output_location, retry_api_call
+from pyathena.util import override, parse_output_location, retry_api_call
 
 _logger = logging.getLogger(__name__)
 
@@ -309,6 +309,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             _logger.exception(f"Failed to terminate session: {session_id}.")
             raise OperationalError(*e.args) from e
 
+    @override
     def _poll_until_terminal(
         self, query_id: str
     ) -> AthenaQueryExecution | AthenaCalculationExecution:
@@ -334,6 +335,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
                 return self._get_calculation_execution(query_id)
             time.sleep(self._poll_interval)
 
+    @override
     def _poll(self, query_id: str) -> AthenaQueryExecution | AthenaCalculationExecution:
         """Wait for a calculation execution to reach a terminal state.
 
@@ -493,6 +495,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             wait((future,), timeout=_INTERRUPT_CHECK_INTERVAL)
         return future.result()
 
+    @override
     def _cancel(self, query_id: str) -> None:
         """Stop a calculation execution with ``StopCalculationExecution``.
 
@@ -514,6 +517,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             _logger.exception("Failed to cancel calculation.")
             raise OperationalError(*e.args) from e
 
+    @override
     def close(self) -> None:
         """Close the cursor, terminating its Spark session if configured to.
 
@@ -529,6 +533,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             # Terminated; later calls do nothing.
             self._terminate_session_on_close = False
 
+    @override
     def executemany(
         self,
         operation: str,

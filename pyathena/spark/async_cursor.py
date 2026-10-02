@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from pyathena.model import AthenaCalculationExecution
 from pyathena.spark.common import SparkBaseCursor
+from pyathena.util import override
 
 if TYPE_CHECKING:
     from pyathena.model import AthenaQueryExecution
@@ -117,6 +118,7 @@ class AsyncSparkCursor(SparkBaseCursor):
             **kwargs,
         )
 
+    @override
     def close(self, wait: bool = False) -> None:
         """Close the cursor, then shut down the executor.
 
@@ -161,6 +163,7 @@ class AsyncSparkCursor(SparkBaseCursor):
             "Future[AthenaCalculationExecution]", self._executor.submit(self._poll, query_id)
         )
 
+    @override
     def execute(
         self,
         operation: str,
