@@ -193,7 +193,7 @@ ignore-decorators = ["pyathena.util.override"]
     "D102",
     "D107",
 ]
-# Missing docstrings (#882). Remove an entry once its file is documented.
+# Missing docstrings (#882). Remove a file's D codes once it is documented.
 "pyathena/__init__.py" = ["D104"]
 "pyathena/aio/__init__.py" = ["D104"]
 "pyathena/aio/arrow/__init__.py" = ["D104"]

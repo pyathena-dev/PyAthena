@@ -85,10 +85,11 @@ Code under `pyathena/` uses [Google-style docstrings](https://google.github.io/s
   It needs a docstring only when its behavior differs from the base method; otherwise the API reference shows the base method's docstring.
   mypy reports a missing decorator, except on an unannotated property.
 - Overrides of fsspec methods are not decorated, because fsspec has no type information, so they need a docstring.
-- New or changed private functions and methods use the same style, although ruff does not check them.
+- New or changed private functions and methods use the same style.
+  ruff does not require them to have a docstring, but checks the format of the docstrings they have.
 
-`per-file-ignores` in `pyproject.toml` lists the files that still lack docstrings.
-Remove a file's entry when its docstrings are complete.
+`per-file-ignores` in `pyproject.toml` lists the `D` codes that each file still has findings for.
+Remove a file's `D` codes when its docstrings are complete, and keep its other codes.
 
 ## Open a pull request
 
