@@ -30,7 +30,7 @@ paramstyle: str = "pyformat"
 
 
 class DBAPITypeObject(frozenset[str]):
-    """Type Objects and Constructors
+    """A DB API type object that compares equal to each of its Athena type names.
 
     https://www.python.org/dev/peps/pep-0249/#type-objects-and-constructors
     """
@@ -89,6 +89,8 @@ def connect(*args, **kwargs) -> Connection[Any]:
     SQL queries.
 
     Args:
+        *args: Positional arguments passed to the Connection constructor, in the
+            order of its parameters (``s3_staging_dir``, ``region_name``, ...).
         s3_staging_dir: S3 location to store query results. Required if not
             using workgroups or if the workgroup doesn't have a result location.
             Pass an empty string to explicitly disable S3 staging and skip
@@ -144,6 +146,8 @@ async def aio_connect(*args, **kwargs) -> AioConnection:
     and API calls, keeping the event loop free.
 
     Args:
+        *args: Forwarded to ``AioConnection.create()``, which accepts keyword
+            arguments only.
         **kwargs: Arguments forwarded to ``AioConnection.create()``.
             See :func:`connect` for the full list of supported arguments.
 

@@ -15,6 +15,8 @@ unsupported = exclusions.closed
 
 
 class Requirements(SuiteRequirements):
+    """Features of the Athena dialect for the SQLAlchemy test suite."""
+
     @property
     @override
     def comment_reflection(self):

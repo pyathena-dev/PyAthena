@@ -190,7 +190,7 @@ class AsyncCursor(BaseCursor):
             parameters: Query parameters (optional).
             work_group: Athena workgroup to use (optional).
             s3_staging_dir: S3 location for query results (optional).
-            cache_size: Query result cache size in MB (optional).
+            cache_size: Number of queries to check for result caching (optional).
             cache_expiration_time: Cache expiration time in seconds (optional).
             result_reuse_enable: Enable result reuse for identical queries (optional).
             result_reuse_minutes: Result reuse duration in minutes (optional).

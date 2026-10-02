@@ -753,6 +753,8 @@ class AthenaResultSet(CursorIterator):
 
 
 class AthenaDictResultSet(AthenaResultSet):
+    """A result set that returns each row as a dictionary keyed by column name."""
+
     # You can override this to use OrderedDict or other dict-like types.
     dict_type: type[Any] = dict
 

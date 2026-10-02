@@ -1964,6 +1964,11 @@ class S3FileSystem(AbstractFileSystem):
 
 
 class S3File(AbstractBufferedFile):
+    """A buffered file object for reading and writing an S3 object.
+
+    Instances are returned by ``S3FileSystem.open()``.
+    """
+
     fs: S3FileSystem
 
     def __init__(

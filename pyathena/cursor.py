@@ -107,6 +107,13 @@ class Cursor(WithFetch):
         Args:
             operation: SQL query string to execute.
             parameters: Query parameters (optional).
+            work_group: Athena workgroup to use for this query.
+            s3_staging_dir: S3 location for query results.
+            cache_size: Number of queries to check for result caching.
+            cache_expiration_time: Cache expiration time in seconds.
+            result_reuse_enable: Enable Athena result reuse for this query.
+            result_reuse_minutes: Minutes to reuse cached results.
+            paramstyle: Parameter style ('qmark' or 'pyformat').
             on_start_query_execution: Callback function called immediately after
                 start_query_execution API is called.
                 Function signature: (query_id: str) -> None

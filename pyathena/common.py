@@ -1351,10 +1351,20 @@ class BaseCursor(metaclass=ABCMeta):
             raise OperationalError(*e.args) from e
 
     def setinputsizes(self, sizes):  # noqa: B027
-        """Does nothing by default"""
+        """Accept input sizes as DB API 2.0 requires, and ignore them.
+
+        Args:
+            sizes: Sequence of parameter types or sizes.
+        """
 
     def setoutputsize(self, size, column=None):  # noqa: B027
-        """Does nothing by default"""
+        """Accept a column buffer size as DB API 2.0 requires, and ignore it.
+
+        Args:
+            size: Buffer size for large columns.
+            column: Index of the column the size applies to, or None for all
+                large columns.
+        """
 
     def __enter__(self):
         return self

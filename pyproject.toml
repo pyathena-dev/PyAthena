@@ -159,22 +159,122 @@ select = [
     "PGH",  # pygrep-hooks
     "G",  # flake8-logging-format
     "PT",  # flake8-pytest-style
+    "D",  # pydocstyle
 ]
 ignore = [
     "RUF059",  # unused-unpacked-variable (too noisy for interface-heavy code)
     "G004",  # logging-f-string (f-strings are preferred for log messages)
+    "D105",  # undocumented-magic-method (protocol methods need no docstring)
 ]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+# Overrides marked with @override inherit the base method's documentation.
+ignore-decorators = ["pyathena.util.override"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = [
     "RUF012",  # mutable-class-default (test classes often use mutable defaults)
 ]
+"!pyathena/**" = [
+    "D",  # docstring rules apply to the package only
+]
 "pyathena/sqlalchemy/compiler.py" = [
     "N802",  # SQLAlchemy TypeCompiler requires visit_UPPERCASE method names
+    # Missing docstrings (#882)
+    "D100",
+    "D102",
+    "D107",
 ]
 "pyathena/aio/sqlalchemy/base.py" = [
     "N801",  # SQLAlchemy async adapter naming convention (AsyncAdapt_*)
+    # Missing docstrings (#882)
+    "D100",
+    "D102",
+    "D107",
 ]
+# Missing docstrings (#882). Remove an entry once its file is documented.
+"pyathena/__init__.py" = ["D104"]
+"pyathena/aio/__init__.py" = ["D104"]
+"pyathena/aio/arrow/__init__.py" = ["D104"]
+"pyathena/aio/arrow/cursor.py" = ["D100", "D107"]
+"pyathena/aio/common.py" = ["D100"]
+"pyathena/aio/connection.py" = ["D100", "D107"]
+"pyathena/aio/cursor.py" = ["D100", "D107"]
+"pyathena/aio/pandas/__init__.py" = ["D104"]
+"pyathena/aio/pandas/cursor.py" = ["D100", "D107"]
+"pyathena/aio/polars/__init__.py" = ["D104"]
+"pyathena/aio/polars/cursor.py" = ["D100", "D107"]
+"pyathena/aio/result_set.py" = ["D100", "D107"]
+"pyathena/aio/s3fs/__init__.py" = ["D104"]
+"pyathena/aio/s3fs/cursor.py" = ["D100", "D107"]
+"pyathena/aio/spark/__init__.py" = ["D104"]
+"pyathena/aio/spark/cursor.py" = ["D100"]
+"pyathena/aio/sqlalchemy/__init__.py" = ["D104"]
+"pyathena/aio/sqlalchemy/arrow.py" = ["D100"]
+"pyathena/aio/sqlalchemy/pandas.py" = ["D100"]
+"pyathena/aio/sqlalchemy/polars.py" = ["D100"]
+"pyathena/aio/sqlalchemy/rest.py" = ["D100"]
+"pyathena/aio/sqlalchemy/s3fs.py" = ["D100"]
+"pyathena/aio/util.py" = ["D100"]
+"pyathena/arrow/__init__.py" = ["D104"]
+"pyathena/arrow/async_cursor.py" = ["D100"]
+"pyathena/arrow/converter.py" = ["D100", "D107"]
+"pyathena/arrow/cursor.py" = ["D100"]
+"pyathena/arrow/result_set.py" = ["D100", "D102", "D107"]
+"pyathena/async_cursor.py" = ["D100", "D102", "D107"]
+"pyathena/common.py" = ["D100", "D102", "D107"]
+"pyathena/connection.py" = ["D100"]
+"pyathena/converter.py" = ["D100", "D102", "D107"]
+"pyathena/cursor.py" = ["D100", "D107"]
+"pyathena/error.py" = ["D100"]
+"pyathena/filesystem/__init__.py" = ["D104"]
+"pyathena/filesystem/s3.py" = ["D100", "D102", "D107"]
+"pyathena/filesystem/s3_async.py" = ["D100", "D102", "D107"]
+"pyathena/filesystem/s3_errors.py" = ["D107"]
+"pyathena/filesystem/s3_executor.py" = ["D100", "D107"]
+"pyathena/filesystem/s3_object.py" = ["D100", "D102", "D107"]
+"pyathena/formatter.py" = ["D100", "D102", "D107"]
+"pyathena/glue.py" = ["D107"]
+"pyathena/model.py" = ["D100", "D102", "D107"]
+"pyathena/options.py" = ["D100"]
+"pyathena/pandas/__init__.py" = ["D104"]
+"pyathena/pandas/async_cursor.py" = ["D100", "D107"]
+"pyathena/pandas/converter.py" = ["D100", "D107"]
+"pyathena/pandas/cursor.py" = ["D100"]
+"pyathena/pandas/reader.py" = ["D100", "D107"]
+"pyathena/pandas/result_set.py" = ["D100", "D102"]
+"pyathena/pandas/util.py" = ["D100"]
+"pyathena/parser.py" = ["D100", "D107"]
+"pyathena/polars/__init__.py" = ["D104"]
+"pyathena/polars/async_cursor.py" = ["D100"]
+"pyathena/polars/converter.py" = ["D100", "D107"]
+"pyathena/polars/cursor.py" = ["D100"]
+"pyathena/polars/result_set.py" = ["D100"]
+"pyathena/result_set.py" = ["D100", "D102", "D107"]
+"pyathena/s3fs/__init__.py" = ["D104"]
+"pyathena/s3fs/async_cursor.py" = ["D100"]
+"pyathena/s3fs/converter.py" = ["D100", "D107"]
+"pyathena/s3fs/cursor.py" = ["D100"]
+"pyathena/s3fs/reader.py" = ["D100"]
+"pyathena/s3fs/result_set.py" = ["D100", "D107"]
+"pyathena/spark/__init__.py" = ["D104"]
+"pyathena/spark/async_cursor.py" = ["D100", "D102"]
+"pyathena/spark/common.py" = ["D100", "D102", "D107"]
+"pyathena/spark/cursor.py" = ["D100", "D102"]
+"pyathena/sqlalchemy/__init__.py" = ["D104"]
+"pyathena/sqlalchemy/array.py" = ["D107"]
+"pyathena/sqlalchemy/arrow.py" = ["D100"]
+"pyathena/sqlalchemy/base.py" = ["D100", "D107"]
+"pyathena/sqlalchemy/map.py" = ["D107"]
+"pyathena/sqlalchemy/pandas.py" = ["D100"]
+"pyathena/sqlalchemy/polars.py" = ["D100"]
+"pyathena/sqlalchemy/preparer.py" = ["D100", "D107"]
+"pyathena/sqlalchemy/requirements.py" = ["D100"]
+"pyathena/sqlalchemy/rest.py" = ["D100"]
+"pyathena/sqlalchemy/s3fs.py" = ["D100"]
+"pyathena/sqlalchemy/struct.py" = ["D107"]
+"pyathena/util.py" = ["D100", "D107"]
 
 [tool.mypy]
 follow_imports = "silent"
