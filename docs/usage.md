@@ -614,6 +614,8 @@ the synchronous cursors, the `Async*` cursors, the native-async `Aio*` cursors, 
 cursors. For Spark cursors the callback receives the per-poll
 `AthenaCalculationExecutionStatus` rather than an `AthenaQueryExecution`.
 
+(usage-type-hints)=
+
 ## Type hints for complex types
 
 *New in version 3.30.0.*
