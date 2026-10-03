@@ -747,6 +747,20 @@ class TestS3FileSystem:
             assert len(actual) == len(data)
             assert actual == data
 
+    def test_write_multiple_blocks_then_more(self, fs):
+        # GH-942: a single write() of more than two blocks with a short tail,
+        # followed by more data, must not leave a part smaller than the
+        # minimum part size before the last part.
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_write_multiple_blocks_then_more/{uuid.uuid4()}"
+        )
+        size = 2 * fs.default_block_size + 2**20
+        with fs.open(path, "wb") as f:
+            f.write(b"a" * size)
+            f.write(b"b")
+        assert fs.info(path).get("size") == size + 1
+
     @pytest.mark.parametrize(
         "size",
         [
@@ -1776,8 +1790,8 @@ class TestS3File:
     @staticmethod
     def _make_append_fs(existing: bytes):
         # A mocked filesystem holding an existing object, with a minimum part
-        # size of 4 bytes so that the append paths can be exercised with tiny
-        # data and no AWS access.
+        # size of 4 bytes so that the write and append paths can be exercised
+        # with tiny data and no AWS access.
         fs = mock.MagicMock(spec=S3FileSystem)
         fs.MULTIPART_UPLOAD_MIN_PART_SIZE = 4
         fs.MULTIPART_UPLOAD_MAX_PART_SIZE = 64
@@ -1839,6 +1853,35 @@ class TestS3File:
         assert fs._create_multipart_upload.called is multipart
         assert fs._upload_part_copy.called is part_copy
         fs.touch.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("writes", "block_size"),
+        [
+            # GH-942: a single write() that leaves more than two blocks with a
+            # short tail in the buffer, followed by more data.
+            ([b"a" * 11, b"b"], 4),
+            ([b"a" * 9, b"b"], 4),
+            ([b"a" * 11], 4),
+            ([b"a" * 12, b"b" * 3], 4),
+            ([b"a" * 3, b"b" * 10, b"c" * 2, b"d"], 4),
+            # A merged tail that reaches the maximum part size is split in half.
+            ([b"a" * 127, b"b"], 62),
+        ],
+    )
+    def test_write_part_sizes(self, writes, block_size):
+        fs = self._make_append_fs(b"")
+
+        with S3File(fs, "s3://bucket/key.txt", mode="wb", block_size=block_size) as f:
+            for data in writes:
+                f.write(data)
+
+        assert self._uploaded_object(fs, b"") == b"".join(writes)
+        parts = sorted(
+            (c.kwargs["part_number"], len(c.kwargs["body"])) for c in fs._upload_part.call_args_list
+        )
+        sizes = [size for _, size in parts]
+        assert all(size >= fs.MULTIPART_UPLOAD_MIN_PART_SIZE for size in sizes[:-1])
+        assert all(size <= fs.MULTIPART_UPLOAD_MAX_PART_SIZE for size in sizes)
 
     def test_append_discard(self):
         # Rolling back an append aborts its multipart upload without the
