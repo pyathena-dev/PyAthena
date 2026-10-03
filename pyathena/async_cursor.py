@@ -351,6 +351,9 @@ class AsyncDictCursor(AsyncCursor):
                 type(
                     AthenaDictResultSet.__name__,
                     (AthenaDictResultSet,),
-                    {"dict_type": kwargs["dict_type"]},
+                    {
+                        "__module__": AthenaDictResultSet.__module__,
+                        "dict_type": kwargs["dict_type"],
+                    },
                 ),
             )

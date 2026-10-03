@@ -262,6 +262,9 @@ class AioDictCursor(AioCursor):
                 type(
                     AthenaAioDictResultSet.__name__,
                     (AthenaAioDictResultSet,),
-                    {"dict_type": kwargs["dict_type"]},
+                    {
+                        "__module__": AthenaAioDictResultSet.__module__,
+                        "dict_type": kwargs["dict_type"],
+                    },
                 ),
             )
