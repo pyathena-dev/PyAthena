@@ -3914,10 +3914,9 @@ class S3File(AbstractBufferedFile):
                 )
             except BaseException:
                 # discard() keeps the upload if the abort fails or is
-                # interrupted, so that a later discard(), as a transaction
-                # calls after a failed commit(), retries the abort. An abort
-                # failure is logged so that it does not mask the original
-                # error.
+                # interrupted, so that a later discard(), such as a
+                # transaction rollback, retries the abort. An abort failure
+                # is logged so that it does not mask the original error.
                 try:
                     self.discard()
                 except Exception:

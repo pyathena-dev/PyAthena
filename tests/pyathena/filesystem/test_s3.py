@@ -5550,9 +5550,9 @@ class TestS3File:
     @pytest.mark.parametrize("error", [RuntimeError, KeyboardInterrupt])
     def test_commit_failure_and_discard(self, error, abort_fails):
         # GH-1014: a failed or interrupted completion is aborted by commit(),
-        # so a later discard(), as a transaction calls after a failed
-        # commit(), does not abort the upload again. GH-945: if the abort
-        # also fails, the upload is kept so that discard() aborts it.
+        # so a later discard(), such as a transaction rollback, does not
+        # abort the upload again. GH-945: if the abort also fails, the upload
+        # is kept so that discard() retries the abort.
         file = self._make_multipart_write_file(b"x" * 16, autocommit=False)
         file._upload_chunk(final=True)
         file.fs._finish_multipart_upload.side_effect = functools.partial(
