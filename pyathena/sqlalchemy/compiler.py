@@ -1,3 +1,5 @@
+"""SQLAlchemy type, statement, and DDL compilers for Amazon Athena."""
+
 from __future__ import annotations
 
 import re
@@ -128,6 +130,15 @@ class AthenaTypeCompiler(GenericTypeCompiler):
         return f"DECIMAL({type_.precision}, {type_.scale})"
 
     def visit_TINYINT(self, type_: types.Integer, **kw: Any) -> str:
+        """Render a TINYINT type.
+
+        Args:
+            type_: The type to render.
+            **kw: Type-compiler keyword arguments.
+
+        Returns:
+            ``TINYINT``.
+        """
         return "TINYINT"
 
     @override
@@ -207,6 +218,15 @@ class AthenaTypeCompiler(GenericTypeCompiler):
         return "BOOLEAN"
 
     def visit_JSON(self, type_: types.JSON, **kw: Any) -> str:
+        """Render a JSON type.
+
+        Args:
+            type_: The type to render.
+            **kw: Type-compiler keyword arguments.
+
+        Returns:
+            ``JSON``.
+        """
         return "JSON"
 
     @override
@@ -226,6 +246,15 @@ class AthenaTypeCompiler(GenericTypeCompiler):
         return "NULL"
 
     def visit_tinyint(self, type_, **kw):
+        """Render a tinyint type through ``visit_TINYINT``.
+
+        Args:
+            type_: The type to render.
+            **kw: Type-compiler keyword arguments.
+
+        Returns:
+            ``TINYINT``.
+        """
         return self.visit_TINYINT(type_, **kw)
 
     @override
@@ -253,6 +282,20 @@ class AthenaTypeCompiler(GenericTypeCompiler):
         return False
 
     def visit_struct(self, type_, **kw):
+        """Render a STRUCT type.
+
+        CREATE TABLE column types and types nested in an ARRAY render Hive
+        ``STRUCT<name:type, ...>``; other contexts render ``ROW(name type, ...)``.
+        A type that is not an ``AthenaStruct``, or one without fields, renders
+        ``ROW()``.
+
+        Args:
+            type_: The type to render.
+            **kw: Type-compiler keyword arguments.
+
+        Returns:
+            The STRUCT or ROW type clause.
+        """
         # Empty structs keep the existing ROW() rendering in every context.
         if not isinstance(type_, AthenaStruct) or not type_.fields:
             return "ROW()"
@@ -272,9 +315,29 @@ class AthenaTypeCompiler(GenericTypeCompiler):
         return f"ROW({', '.join(field_specs)})"
 
     def visit_STRUCT(self, type_, **kw):
+        """Render a STRUCT type through ``visit_struct``.
+
+        Args:
+            type_: The type to render.
+            **kw: Type-compiler keyword arguments.
+
+        Returns:
+            The STRUCT or ROW type clause.
+        """
         return self.visit_struct(type_, **kw)
 
     def visit_map(self, type_, **kw):
+        """Render a MAP type as ``MAP<key, value>``.
+
+        A type that is not an ``AthenaMap`` renders ``MAP<STRING, STRING>``.
+
+        Args:
+            type_: The type to render.
+            **kw: Type-compiler keyword arguments.
+
+        Returns:
+            The MAP type clause.
+        """
         if isinstance(type_, AthenaMap):
             self._enable_hive_column_ddl(kw)
             key_type_str = self.process(type_.key_type, **kw)
@@ -283,9 +346,30 @@ class AthenaTypeCompiler(GenericTypeCompiler):
         return "MAP<STRING, STRING>"
 
     def visit_MAP(self, type_, **kw):
+        """Render a MAP type through ``visit_map``.
+
+        Args:
+            type_: The type to render.
+            **kw: Type-compiler keyword arguments.
+
+        Returns:
+            The MAP type clause.
+        """
         return self.visit_map(type_, **kw)
 
     def visit_array(self, type_, **kw):
+        """Render an ARRAY type as ``ARRAY<item>``.
+
+        Nested types of an ARRAY use Hive DDL syntax. A type that is not an
+        ARRAY renders ``ARRAY<STRING>``.
+
+        Args:
+            type_: The type to render.
+            **kw: Type-compiler keyword arguments.
+
+        Returns:
+            The ARRAY type clause.
+        """
         if isinstance(type_, types.ARRAY):
             kw["_athena_hive_ddl"] = True
             item_type_str = self.process(_ArrayTypeInspector.item_type(type_), **kw)
@@ -293,6 +377,15 @@ class AthenaTypeCompiler(GenericTypeCompiler):
         return "ARRAY<STRING>"
 
     def visit_ARRAY(self, type_, **kw):
+        """Render an ARRAY type through ``visit_array``.
+
+        Args:
+            type_: The type to render.
+            **kw: Type-compiler keyword arguments.
+
+        Returns:
+            The ARRAY type clause.
+        """
         return self.visit_array(type_, **kw)
 
 
@@ -321,6 +414,15 @@ class AthenaStatementCompiler(SQLCompiler):
         return _ArrayTypeInspector(self.dialect)
 
     def visit_char_length_func(self, fn: Function[Any], **kw: Any) -> str:
+        """Render ``char_length()`` as Athena ``length()``.
+
+        Args:
+            fn: The function expression.
+            **kw: Compiler keyword arguments.
+
+        Returns:
+            The ``length()`` function call.
+        """
         return f"length{self.function_argspec(fn, **kw)}"
 
     @staticmethod
@@ -338,6 +440,15 @@ class AthenaStatementCompiler(SQLCompiler):
         )
 
     def visit_athena_array_update(self, expression, **kw):
+        """Render the whole-column expression of a partial ARRAY assignment.
+
+        Args:
+            expression: The ``_ArrayUpdate`` expression created by ``visit_update``.
+            **kw: Compiler keyword arguments.
+
+        Returns:
+            The SQL expression assigned to the ARRAY column.
+        """
         return _ArrayUpdateCompiler(self).process(expression, **kw)
 
     def _array_lambda_name(self):
@@ -418,6 +529,23 @@ class AthenaStatementCompiler(SQLCompiler):
         return super().visit_binary(binary, override_operator=override_operator, **kw)
 
     def visit_getitem_binary(self, binary, operator, **kw):
+        """Render an ARRAY index as ``element_at()`` and an ARRAY slice as ``slice()``.
+
+        Slice bounds are inclusive and clamped to the array. An index below 1 is
+        passed to ``element_at()`` as NULL.
+
+        Args:
+            binary: The index or slice expression.
+            operator: The getitem operator.
+            **kw: Compiler keyword arguments.
+
+        Returns:
+            The rendered index or slice expression.
+
+        Raises:
+            CompileError: If the indexed expression is not an ARRAY, or if a slice
+                step is not None or 1.
+        """
         array_type = self._array_type_inspector.array_type(binary.left.type)
         if array_type is None:
             raise exc.CompileError("Athena indexing requires an ARRAY expression")
@@ -828,6 +956,15 @@ class AthenaStatementCompiler(SQLCompiler):
         return self.dialect.type_compiler_instance.process(type_)
 
     def visit_athena_array_json_projection(self, expression, **kw):
+        """Render an ARRAY result column as a JSON envelope string.
+
+        Args:
+            expression: The ``_ArrayJSONProjection`` expression.
+            **kw: Compiler keyword arguments.
+
+        Returns:
+            The SQL expression that serializes the ARRAY value as JSON.
+        """
         value = self.process(expression.element, **kw)
         encoded = self._array_json(value, expression.array_type)
         # An object envelope keeps SQL NULL and CSV null markers out of the transport.
@@ -955,6 +1092,18 @@ class AthenaDDLCompiler(DDLCompiler):
         render_schema_translate: bool = False,
         compile_kwargs: dict[str, Any] | None = None,
     ):
+        """Initialize the DDL compiler with an ``AthenaDDLIdentifierPreparer``.
+
+        Args:
+            dialect: The Athena dialect.
+            statement: The DDL statement to compile.
+            schema_translate_map: Schema translation map forwarded to
+                ``DDLCompiler``.
+            render_schema_translate: Whether to render schema translation,
+                forwarded to ``DDLCompiler``.
+            compile_kwargs: Compiler keyword arguments. ``None`` is replaced with
+                an empty mapping.
+        """
         self._preparer = AthenaDDLIdentifierPreparer(dialect)
         super().__init__(
             dialect=dialect,

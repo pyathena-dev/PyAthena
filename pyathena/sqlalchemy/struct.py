@@ -49,6 +49,17 @@ class AthenaStruct(TypeEngine[dict[str, Any]]):
     __visit_name__ = "struct"
 
     def __init__(self, *fields: str | tuple[str, Any]) -> None:
+        """Initialize the STRUCT type.
+
+        Args:
+            *fields: Field specifications. A string is a field name of type
+                ``String``. A ``(field_name, field_type)`` tuple names a field and
+                its SQLAlchemy type or type class; a type class is instantiated.
+
+        Raises:
+            ValueError: If a field specification is neither a string nor a
+                two-element tuple.
+        """
         self.fields: dict[str, TypeEngine[Any]] = {}
 
         for field in fields:

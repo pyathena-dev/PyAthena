@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""SQLAlchemy test suite requirements for the Athena dialect."""
+
 from sqlalchemy.testing import exclusions
 from sqlalchemy.testing.requirements import SuiteRequirements
 

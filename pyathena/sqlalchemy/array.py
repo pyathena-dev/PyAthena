@@ -80,6 +80,20 @@ class AthenaArray(sqltypes.ARRAY[Any]):
         dimensions: int | None = None,
         zero_indexes: bool = False,
     ) -> None:
+        """Initialize the ARRAY type.
+
+        Args:
+            item_type: SQLAlchemy type or type class of the array elements. A type
+                class is instantiated. Defaults to ``String``.
+            as_tuple: Return tuples instead of lists.
+            dimensions: Fixed number of array dimensions, a positive integer.
+            zero_indexes: Translate zero-based SQLAlchemy indexes to one-based SQL
+                indexes.
+
+        Raises:
+            ValueError: If ``dimensions`` is not a positive integer, or if both a
+                nested ARRAY ``item_type`` and ``dimensions`` are given.
+        """
         if dimensions is not None and (
             isinstance(dimensions, bool) or not isinstance(dimensions, int) or dimensions < 1
         ):
