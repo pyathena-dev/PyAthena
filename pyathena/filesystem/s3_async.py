@@ -381,8 +381,7 @@ class AioS3FileSystem(AsyncFileSystem):
             self._sync_fs._create_multipart_upload,
             bucket=bucket2,
             key=key2,
-            # See S3FileSystem._copy_object_with_multipart_upload.
-            **self._sync_fs._get_operation_kwargs("create_multipart_upload", kwargs),
+            **kwargs,
         )
 
         semaphore = asyncio.Semaphore(max_workers)

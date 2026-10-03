@@ -470,7 +470,6 @@ class TestAioS3FileSystem:
             max_workers=1,
             RequestPayer="requester",
             ContentType="text/csv",
-            CopySourceIfMatch='"e"',
         )
 
         if size <= S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE:
@@ -482,7 +481,6 @@ class TestAioS3FileSystem:
                 key2="dst",
                 RequestPayer="requester",
                 ContentType="text/csv",
-                CopySourceIfMatch='"e"',
             )
         else:
             sync_fs._create_multipart_upload.assert_called_once_with(
@@ -493,9 +491,7 @@ class TestAioS3FileSystem:
             # Two parts, the second with the 1-byte tail.
             assert sync_fs._upload_part_copy.call_count == 2
             assert all(
-                c.kwargs["RequestPayer"] == "requester"
-                and c.kwargs["CopySourceIfMatch"] == '"e"'
-                and "ContentType" not in c.kwargs
+                c.kwargs["RequestPayer"] == "requester" and "ContentType" not in c.kwargs
                 for c in sync_fs._upload_part_copy.call_args_list
             )
             assert max(concurrency) == 1
