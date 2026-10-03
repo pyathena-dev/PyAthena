@@ -2498,9 +2498,9 @@ class S3FileSystem(AbstractFileSystem):
 
         Lookups (``info()`` and ``exists()``) send only the parameters on
         which their authorization depends, which also select their cached
-        results. Other parameters, such as ``IfMatch`` or
-        ``ResponseContentType``, are not sent: they would change the result
-        that is cached for the path.
+        results. Other parameters that HeadObject accepts, such as
+        ``IfMatch``, ``PartNumber`` or ``ResponseContentType``, are not sent,
+        because the result would depend on them.
 
         Args:
             kwargs: The parameters to select from.

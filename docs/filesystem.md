@@ -136,7 +136,7 @@ parameters of the file or the write. A lookup with them uses only the cached res
 lookups with the same values, not cached listings.
 
 ```python
-sse_c = {"SSECustomerAlgorithm": "AES256", "SSECustomerKey": key}
+sse_c = {"SSECustomerAlgorithm": "AES256", "SSECustomerKey": YOUR_32_BYTE_KEY}
 with fs.open("s3://YOUR_S3_BUCKET/path/to/encrypted.csv", "rb", **sse_c) as f:
     data = f.read()
 ```
