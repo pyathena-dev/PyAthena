@@ -1296,7 +1296,7 @@ class S3FileSystem(AbstractFileSystem):
                 FileExistsError when the object already exists.
             **kwargs: Additional parameters passed to the PutObject API
                 (e.g., ContentType, StorageClass) on the single-request
-                path. The ``block_size``, ``max_worker``, and
+                path. The ``block_size``, ``max_workers``, and
                 ``s3_additional_kwargs`` parameters of the ``open()`` path
                 are also accepted.
 
@@ -1326,7 +1326,7 @@ class S3FileSystem(AbstractFileSystem):
             value = bytes(value)
 
         kwargs.pop("block_size", None)
-        kwargs.pop("max_worker", None)
+        kwargs.pop("max_workers", None)
         request_kwargs = {
             **self.s3_additional_kwargs,
             **kwargs.pop("s3_additional_kwargs", {}),
@@ -1964,7 +1964,7 @@ class S3FileSystem(AbstractFileSystem):
             block_size = self.default_block_size
         if cache_type is None:
             cache_type = self.default_cache_type
-        max_workers = kwargs.pop("max_worker", self.max_workers)
+        max_workers = kwargs.pop("max_workers", self.max_workers)
         s3_additional_kwargs = kwargs.pop("s3_additional_kwargs", {})
         s3_additional_kwargs.update(self.s3_additional_kwargs)
 

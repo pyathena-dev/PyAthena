@@ -7,6 +7,7 @@ import uuid
 from datetime import UTC, datetime
 from itertools import chain
 from pathlib import Path
+from unittest import mock
 
 import fsspec
 import pytest
@@ -894,6 +895,12 @@ class TestAioS3FileSystem:
 
 
 class TestAioS3File:
+    def test_open_max_workers(self):
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        with fs.open("s3://bucket/key", "wb", max_workers=2) as f:
+            assert isinstance(f, AioS3File)
+            assert f.max_workers == 2
+
     @pytest.mark.parametrize(
         ("objects", "target"),
         [
