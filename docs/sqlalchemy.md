@@ -846,6 +846,9 @@ CREATE TABLE users (
 `CREATE TABLE` renders `AthenaStruct` columns with Hive `STRUCT<name:type, ...>` syntax at every nesting depth, and `CAST` renders them as `ROW(name type, ...)`.
 See [DDL and CAST types](#ddl-and-cast-types).
 
+Reflected STRUCT and ROW columns use `AthenaStruct` with their field names and types.
+Selecting such a column returns the value from the cursor, as described under Data format support below; SQLAlchemy does not convert it to the reflected field types.
+
 #### Querying STRUCT data
 
 PyAthena automatically converts STRUCT data between different formats:
@@ -990,6 +993,9 @@ CREATE TABLE products (
 
 `CREATE TABLE` renders integer MAP keys and values as `INT`.
 `CAST` still spells those integers as `INTEGER`.
+
+Reflected MAP columns use `AthenaMap` with their key and value types.
+Selecting such a column returns the value from the cursor, as described under Data format support below; SQLAlchemy does not convert it to the reflected key and value types.
 
 #### Querying MAP data
 

@@ -695,6 +695,26 @@ class AthenaDialect(DefaultDialect):
         return self._get_columns(connection, table_name, schema=schema, **kw)
 
     def _get_column_type(self, type_: str, _nested: bool = False):
+        """Map an Athena column type string to a SQLAlchemy type.
+
+        Accepts both the Hive (``struct<a:int>``, ``map<int,int>``) and the
+        Trino (``row(a integer)``, ``map(integer, integer)``) spellings, and
+        parses the element, key, value, and field types of ARRAY, MAP, and
+        STRUCT/ROW types.
+
+        Args:
+            type_: The column type reported by Athena.
+            _nested: Whether ``type_`` is nested in another type. A nested MAP
+                or STRUCT/ROW that cannot be parsed raises, so that the
+                enclosing type is reported as unrecognized.
+
+        Returns:
+            The SQLAlchemy type, or ``NullType`` with a warning for a type that
+            is not recognized.
+
+        Raises:
+            ValueError: If a nested MAP or STRUCT/ROW cannot be parsed.
+        """
         type_ = type_.strip()
         match = self._pattern_column_type.match(type_)
         if match:
@@ -707,6 +727,12 @@ class AthenaDialect(DefaultDialect):
         if name == "array":
             try:
                 return AthenaArray(self._get_column_type(length, _nested=True) if length else None)
+            except (TypeError, ValueError):
+                util.warn(f"Did not recognize type '{type_}'")
+                return types.NullType()
+        if not _nested and name in ("map", "row", "struct") and length:
+            try:
+                return self._get_column_type(type_, _nested=True)
             except (TypeError, ValueError):
                 util.warn(f"Did not recognize type '{type_}'")
                 return types.NullType()
