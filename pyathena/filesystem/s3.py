@@ -1287,8 +1287,10 @@ class S3FileSystem(AbstractFileSystem):
 
         Args:
             size: The size of the source object in bytes.
-            block_size: The maximum size of a range in bytes, between
+            block_size: The size in bytes to split the object by, between
                 ``MULTIPART_UPLOAD_MIN_PART_SIZE`` and
+                ``MULTIPART_UPLOAD_MAX_PART_SIZE``. The range that a short
+                last range is merged into can be longer, up to
                 ``MULTIPART_UPLOAD_MAX_PART_SIZE``.
 
         Returns:
