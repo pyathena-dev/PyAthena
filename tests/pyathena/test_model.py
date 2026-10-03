@@ -1,6 +1,8 @@
 import copy
 from datetime import datetime
 
+import pytest
+
 from pyathena.model import (
     AthenaCalculationExecution,
     AthenaCalculationExecutionStatus,
@@ -269,7 +271,7 @@ class TestAthenaTableMetadata:
             "inputformat": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat",
             "location": "s3://bucket/path/to",
             "outputformat": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat",
-            "parquet.compress": "SNAPPY",
+            "parquet.compression": "SNAPPY",
             "serde.param.serialization.format": "1",
             "serde.serialization.lib": (
                 "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"
@@ -431,6 +433,15 @@ class TestAthenaTableMetadata:
             == "INPUTFORMAT 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat' "
             "OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat'"
         )
+
+    @pytest.mark.parametrize("key", ["parquet.compress", "write.compress"])
+    def test_compression_ignores_properties_not_applied_on_write(self, key):
+        # Athena ignores these spellings when writing, so the table data does
+        # not use the codec they name.
+        response = copy.deepcopy(self._create_table_metadata())
+        response["TableMetadata"]["Parameters"] = {key: "ZSTD"}
+        actual = AthenaTableMetadata(response)
+        assert actual.compression is None
 
     def test_init_orc(self):
         response = copy.deepcopy(self._create_table_metadata())

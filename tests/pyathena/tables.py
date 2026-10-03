@@ -236,7 +236,7 @@ TABLES = (
     Table(
         "parquet_with_compression",
         (Column("a", "INT", pa.int32()),),
-        tblproperties=(("parquet.compress", "SNAPPY"),),
+        tblproperties=(("parquet.compression", "SNAPPY"),),
     ),
 )
 

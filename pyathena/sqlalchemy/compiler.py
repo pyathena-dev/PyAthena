@@ -1170,7 +1170,7 @@ class AthenaDDLCompiler(DDLCompiler):
             )
             STORED AS PARQUET
             LOCATION 's3://my-bucket/my-table/'
-            TBLPROPERTIES ('parquet.compress' = 'SNAPPY')
+            TBLPROPERTIES ('parquet.compression' = 'SNAPPY')
 
     See Also:
         AWS Athena CREATE TABLE:
@@ -1432,8 +1432,12 @@ class AthenaDDLCompiler(DDLCompiler):
     ) -> str:
         """Build the TBLPROPERTIES clause, including the compression property.
 
-        The compression property name follows the file format, matched
-        case-insensitively, or the row format's SerDe when no file format is set.
+        The compression property is ``parquet.compression`` for Parquet,
+        ``orc.compress`` for ORC, and ``write.compression`` for other formats.
+        The format comes from the file format keyword, matched case-insensitively,
+        and otherwise from the row format's SerDe, so a file format given as
+        ``INPUTFORMAT '...' OUTPUTFORMAT '...'``, as reflection returns it, uses
+        the SerDe. No compression property is added when neither is set.
 
         Args:
             dialect_opts: The table's ``awsathena_*`` dialect options.
@@ -1455,20 +1459,17 @@ class AthenaDDLCompiler(DDLCompiler):
         if compression:
             file_format = self._get_file_format(dialect_opts, connect_opts)
             row_format = self._get_row_format(dialect_opts, connect_opts)
-            if file_format:
-                if AthenaFileFormat.is_parquet(file_format):
-                    table_properties.append(f"\t'parquet.compress' = '{compression}'")
-                elif AthenaFileFormat.is_orc(file_format):
+            if file_format or row_format:
+                if file_format and AthenaFileFormat.is_parquet(file_format):
+                    table_properties.append(f"\t'parquet.compression' = '{compression}'")
+                elif file_format and AthenaFileFormat.is_orc(file_format):
+                    table_properties.append(f"\t'orc.compress' = '{compression}'")
+                elif row_format and AthenaRowFormatSerde.is_parquet(row_format):
+                    table_properties.append(f"\t'parquet.compression' = '{compression}'")
+                elif row_format and AthenaRowFormatSerde.is_orc(row_format):
                     table_properties.append(f"\t'orc.compress' = '{compression}'")
                 else:
-                    table_properties.append(f"\t'write.compress' = '{compression}'")
-            elif row_format:
-                if AthenaRowFormatSerde.is_parquet(row_format):
-                    table_properties.append(f"\t'parquet.compress' = '{compression}'")
-                elif AthenaRowFormatSerde.is_orc(row_format):
-                    table_properties.append(f"\t'orc.compress' = '{compression}'")
-                else:
-                    table_properties.append(f"\t'write.compress' = '{compression}'")
+                    table_properties.append(f"\t'write.compression' = '{compression}'")
 
         text = []
         if table_properties:

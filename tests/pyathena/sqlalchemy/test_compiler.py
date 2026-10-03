@@ -1005,11 +1005,11 @@ class TestAthenaDDLCompiler:
     @pytest.mark.parametrize(
         ("file_format", "expected"),
         [
-            ("PARQUET", "'parquet.compress' = 'SNAPPY'"),
-            ("parquet", "'parquet.compress' = 'SNAPPY'"),
+            ("PARQUET", "'parquet.compression' = 'SNAPPY'"),
+            ("parquet", "'parquet.compression' = 'SNAPPY'"),
             ("ORC", "'orc.compress' = 'SNAPPY'"),
             ("orc", "'orc.compress' = 'SNAPPY'"),
-            ("TEXTFILE", "'write.compress' = 'SNAPPY'"),
+            ("TEXTFILE", "'write.compression' = 'SNAPPY'"),
         ],
     )
     def test_create_table_compression_follows_file_format_case_insensitively(
@@ -1026,12 +1026,12 @@ class TestAthenaDDLCompiler:
         ddl = str(CreateTable(table).compile(dialect=AthenaDialect()))
         assert f"STORED AS {file_format}" in ddl
         assert expected in ddl
-        assert ddl.count(".compress'") == 1
+        assert ddl.count("compress") == 1
 
     @pytest.mark.parametrize(
         ("file_format", "expected"),
         [
-            ("parquet", "'parquet.compress' = 'snappy'"),
+            ("parquet", "'parquet.compression' = 'snappy'"),
             ("orc", "'orc.compress' = 'snappy'"),
         ],
     )
@@ -1048,7 +1048,49 @@ class TestAthenaDDLCompiler:
         )
         ddl = str(CreateTable(table).compile(dialect=dialect))
         assert expected in ddl
-        assert ddl.count(".compress'") == 1
+        assert ddl.count("compress") == 1
+
+    @pytest.mark.parametrize(
+        ("input_format", "output_format", "serde", "expected"),
+        [
+            (
+                "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat",
+                "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat",
+                "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
+                "'parquet.compression' = 'SNAPPY'",
+            ),
+            (
+                "org.apache.hadoop.hive.ql.io.orc.OrcInputFormat",
+                "org.apache.hadoop.hive.ql.io.orc.OrcOutputFormat",
+                "org.apache.hadoop.hive.ql.io.orc.OrcSerde",
+                "'orc.compress' = 'SNAPPY'",
+            ),
+            (
+                "org.apache.hadoop.mapred.TextInputFormat",
+                "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+                "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe",
+                "'write.compression' = 'SNAPPY'",
+            ),
+        ],
+        ids=["parquet", "orc", "text"],
+    )
+    def test_create_table_compression_from_reflected_formats(
+        self, input_format, output_format, serde, expected
+    ):
+        # Reflection returns the file format as an INPUTFORMAT/OUTPUTFORMAT
+        # clause and the row format as a SERDE clause.
+        table = Table(
+            "tbl",
+            MetaData(schema="pyathena"),
+            Column("id", Integer),
+            awsathena_location="s3://bucket/path/to/",
+            awsathena_file_format=f"INPUTFORMAT '{input_format}' OUTPUTFORMAT '{output_format}'",
+            awsathena_row_format=f"SERDE '{serde}'",
+            awsathena_compression="SNAPPY",
+        )
+        ddl = str(CreateTable(table).compile(dialect=AthenaDialect()))
+        assert expected in ddl
+        assert ddl.count("compress") == 1
 
     def test_create_table_renders_hive_struct_syntax(self):
         ddl = self._ddl(
