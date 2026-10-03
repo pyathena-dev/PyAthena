@@ -1955,6 +1955,45 @@ class TestS3File:
         assert file.multipart_upload is None
         assert file.multipart_upload_parts == []
 
+    @pytest.mark.parametrize(
+        ("abort_fails", "keeps_upload_id"),
+        [(True, True), (False, False)],
+    )
+    def test_commit_failed_completion_upload_id(self, abort_fails, keeps_upload_id):
+        # When CompleteMultipartUpload fails, the abort runs. If the abort
+        # also fails, the upload still exists, so commit() must keep the upload
+        # ID for discard() to retry. Otherwise the upload ID is cleared, so a
+        # later discard() does not abort an upload that is already gone.
+        file = self._make_multipart_write_file(b"x" * 8, autocommit=False)
+        part = Future()
+        part.set_result(SimpleNamespace(etag='"e1"', part_number=1))
+        file.multipart_upload_parts = [part]
+        real_fs = S3FileSystem.__new__(S3FileSystem)
+        real_fs._client = mock.MagicMock()
+        real_fs._call = mock.MagicMock(
+            side_effect=RuntimeError("abort failed") if abort_fails else None
+        )
+        real_fs._complete_multipart_upload = mock.MagicMock(
+            side_effect=RuntimeError("complete failed")
+        )
+        file.fs._finish_multipart_upload.side_effect = lambda **kw: (
+            S3FileSystem._finish_multipart_upload(real_fs, **kw)
+        )
+        file.fs.invalidate_cache = mock.MagicMock()
+
+        with pytest.raises(RuntimeError, match="complete failed"):
+            file.commit()
+
+        assert (file.multipart_upload is not None) is keeps_upload_id
+        assert (file.multipart_upload_parts != []) is keeps_upload_id
+
+        file.discard()
+        if keeps_upload_id:
+            assert file.fs._call.call_args.args[0] == "abort_multipart_upload"
+            assert file.fs._call.call_args.kwargs["UploadId"] == "uploadid"
+        else:
+            file.fs._call.assert_not_called()
+
     @pytest.mark.parametrize("autocommit", [True, False])
     def test_upload_chunk_multipart(self, autocommit):
         # Multipart upload (CompleteMultipartUpload), completed from the uploaded

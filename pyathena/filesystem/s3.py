@@ -1367,7 +1367,7 @@ class S3FileSystem(AbstractFileSystem):
                 upload_id=upload_id,
                 parts=parts,
             )
-        except Exception:
+        except Exception as error:
             for future in futures:
                 future.cancel()
             try:
@@ -1381,6 +1381,9 @@ class S3FileSystem(AbstractFileSystem):
                 _logger.exception(
                     f"Failed to abort multipart upload {upload_id} to s3://{bucket}/{key}."
                 )
+                # The upload still exists, so the caller must keep its upload ID
+                # for a later discard() to retry the abort.
+                error.multipart_abort_failed = True  # type: ignore[attr-defined]
             raise
 
     def cat_file(
@@ -2391,11 +2394,13 @@ class S3File(AbstractBufferedFile):
                     upload_id=cast(str, self.multipart_upload.upload_id),
                     futures=self.multipart_upload_parts,
                 )
-            except Exception:
-                # The multipart upload has been aborted by the helper;
-                # prevent discard() from aborting it again.
-                self.multipart_upload = None
-                self.multipart_upload_parts = []
+            except Exception as error:
+                # Unless the abort failed, the helper has aborted the upload;
+                # clear it so discard() does not abort it again. If the abort
+                # failed, keep the upload ID so discard() can retry the abort.
+                if not getattr(error, "multipart_abort_failed", False):
+                    self.multipart_upload = None
+                    self.multipart_upload_parts = []
                 raise
 
         self.fs.invalidate_cache(self.path)
