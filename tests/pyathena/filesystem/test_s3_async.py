@@ -1437,6 +1437,23 @@ class TestAioS3File:
             assert f.size == 4
         fs._sync_fs.info.assert_called_once_with("bucket/key?versionId=v1", version_id="v1")
 
+    def test_open_lookup_parameters(self):
+        # GH-1004: the lookup of the file sends its lookup parameters.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs._sync_fs.info = mock.MagicMock(
+            return_value=S3Object(
+                init={"ContentLength": 4},
+                type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+                bucket="bucket",
+                key="key",
+            )
+        )
+        sse_c = {"SSECustomerAlgorithm": "AES256", "SSECustomerKey": "k" * 32}
+
+        with fs.open("s3://bucket/key", "rb", ContentType="text/plain", **sse_c) as f:
+            assert isinstance(f, AioS3File)
+        fs._sync_fs.info.assert_called_once_with("bucket/key", version_id=None, **sse_c)
+
     @pytest.mark.parametrize(
         ("objects", "target"),
         [

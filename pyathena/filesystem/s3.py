@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 import math
 import mimetypes
@@ -45,6 +46,21 @@ from pyathena.filesystem.s3_object import (
 from pyathena.util import RetryConfig, retry_api_call
 
 _logger = logging.getLogger(__name__)
+
+# The request parameters on which the authorization of a lookup (HeadObject,
+# HeadBucket, or ListObjectsV2) depends.
+_LOOKUP_REQUEST_PARAMETERS = frozenset(
+    {
+        "ExpectedBucketOwner",
+        "RequestPayer",
+        "SSECustomerAlgorithm",
+        "SSECustomerKey",
+        "SSECustomerKeyMD5",
+    }
+)
+# The second element of the dircache key, ``(path, _LOOKUPS_CACHE_KEY)``, of
+# the lookup results of a path made with lookup request parameters.
+_LOOKUPS_CACHE_KEY = "lookups"
 
 
 class S3FileSystem(AbstractFileSystem):
@@ -315,28 +331,41 @@ class S3FileSystem(AbstractFileSystem):
             is_latest=version.get("IsLatest", False),
         )
 
-    def _head_bucket(self, bucket, refresh: bool = False) -> S3Object | None:
+    def _head_bucket(
+        self,
+        bucket,
+        refresh: bool = False,
+        lookup_kwargs: Mapping[str, Any] | None = None,
+    ) -> S3Object | None:
         """Get the bucket as a directory object with HeadBucket.
 
-        The result is cached under the bucket name. A missing bucket evicts
-        its entry and the cached bucket listing that still lists it.
+        The result is cached under the bucket name, apart for each set of
+        lookup parameters (see ``_get_cached_lookup``). A missing bucket
+        evicts its entries and the cached bucket listing that still lists it.
 
         Args:
             bucket: The bucket name.
             refresh: If True, bypass the cache and call HeadBucket.
+            lookup_kwargs: The lookup parameters (see ``_get_lookup_kwargs``)
+                to send with the request.
 
         Returns:
             The bucket object, or None if the bucket does not exist.
         """
-        file = None if refresh else self.dircache.get(bucket)
+        lookup_kwargs = lookup_kwargs or {}
+        file = None if refresh else self._get_cached_lookup(bucket, lookup_kwargs)
         if file is None:
             try:
                 self._call(
                     self._client.head_bucket,
-                    Bucket=bucket,
+                    **{
+                        **self._get_operation_kwargs("head_bucket", lookup_kwargs),
+                        "Bucket": bucket,
+                    },
                 )
             except FileNotFoundError:
                 self._evict_cache(bucket)
+                self._evict_cache((bucket, _LOOKUPS_CACHE_KEY))
                 # Evict the cached bucket listing only if it still lists the bucket.
                 buckets = self.dircache.get("")
                 if buckets and any(b.name == bucket for b in buckets):
@@ -355,24 +384,31 @@ class S3FileSystem(AbstractFileSystem):
                 key=None,
                 version_id=None,
             )
-            self.dircache[bucket] = file
+            self._cache_lookup(bucket, lookup_kwargs, file)
         return file
 
     def _head_object(
-        self, path: str, version_id: str | None = None, refresh: bool = False
+        self,
+        path: str,
+        version_id: str | None = None,
+        refresh: bool = False,
+        lookup_kwargs: Mapping[str, Any] | None = None,
     ) -> S3Object | None:
         """Get the object with HeadObject.
 
         The result is cached under the path, or under the version-qualified
-        path for an explicit version. An explicitly requested ``"null"``
-        version is not cached. A missing object evicts its entry and, unless
-        a version was requested, the cached listing of its parent that still
-        lists it.
+        path for an explicit version, apart for each set of lookup parameters
+        (see ``_get_cached_lookup``). An explicitly requested ``"null"``
+        version is not cached. A missing object evicts its entries and,
+        unless a version was requested, the cached listing of its parent that
+        still lists it.
 
         Args:
             path: The object path, optionally with a versionId query.
             version_id: The version to get when the path has no version.
             refresh: If True, bypass the cache and call HeadObject.
+            lookup_kwargs: The lookup parameters (see ``_get_lookup_kwargs``)
+                to send with the request.
 
         Returns:
             The object, or None if it does not exist.
@@ -387,7 +423,8 @@ class S3FileSystem(AbstractFileSystem):
         # overwrite replaces the "null" version of a bucket without
         # versioning, so that version is looked up every time.
         cacheable = version_id != "null"
-        file = None if refresh else self.dircache.get(path)
+        lookup_kwargs = lookup_kwargs or {}
+        file = None if refresh else self._get_cached_lookup(path, lookup_kwargs)
         if file is None:
             try:
                 request = {
@@ -398,10 +435,11 @@ class S3FileSystem(AbstractFileSystem):
                     request.update({"VersionId": version_id})
                 response = self._call(
                     self._client.head_object,
-                    **request,
+                    **{**self._get_operation_kwargs("head_object", lookup_kwargs), **request},
                 )
             except FileNotFoundError:
                 self._evict_cache(path)
+                self._evict_cache((path, _LOOKUPS_CACHE_KEY))
                 if not version_id:
                     # Evict the cached listing of the parent only if it still
                     # lists the path.
@@ -422,7 +460,7 @@ class S3FileSystem(AbstractFileSystem):
                 version_id=version_id,
             )
             if cacheable:
-                self.dircache[path] = file
+                self._cache_lookup(path, lookup_kwargs, file)
         return file
 
     def _ls_buckets(self, refresh: bool = False) -> list[S3Object]:
@@ -659,13 +697,22 @@ class S3FileSystem(AbstractFileSystem):
         version, the cached entries of the path are skipped, and the
         HeadObject result is cached under the version-qualified path apart
         from other versions, except for the ``null`` version, which an
-        overwrite replaces.
+        overwrite replaces. With request parameters on which the
+        authorization of the requests depends (``ExpectedBucketOwner``,
+        ``RequestPayer``, and the ``SSECustomer*`` parameters of an object
+        encrypted with a customer-provided key), each request receives those
+        that its operation accepts, and only the cached HeadObject or
+        HeadBucket results of lookups with the same values of these
+        parameters are used.
 
         Args:
             path: S3 path (e.g., "s3://bucket" or "s3://bucket/key").
             **kwargs: Additional arguments including:
                 refresh: If True, bypass the cache and query S3.
                 version_id: The version ID to look up when the path has none.
+                ExpectedBucketOwner, RequestPayer, SSECustomerAlgorithm,
+                SSECustomerKey, SSECustomerKeyMD5: The request parameters
+                described above. Other request parameters are ignored.
 
         Returns:
             S3Object describing the bucket, directory, or file. The root path
@@ -693,9 +740,12 @@ class S3FileSystem(AbstractFileSystem):
             )
         bucket, key, path_version_id = self.parse_path(path)
         version_id = path_version_id if path_version_id else kwargs.pop("version_id", None)
-        # Cached entries describe the current version of a path, so an
-        # explicit version uses only the HeadObject cache of that version.
-        if not refresh and not version_id:
+        lookup_kwargs = self._get_lookup_kwargs(kwargs)
+        # Cached entries describe the current version of a path as looked up
+        # without lookup parameters, so an explicit version or lookup
+        # parameters use only the HeadObject cache of that version and those
+        # parameters.
+        if not refresh and not version_id and not lookup_kwargs:
             caches: list[S3Object] | S3Object | None = self._ls_from_cache(path)
             if caches is not None:
                 if isinstance(caches, list):
@@ -727,21 +777,26 @@ class S3FileSystem(AbstractFileSystem):
                         bucket, key.rstrip("/") if key else None, version_id
                     )
         if key:
-            object_info = self._head_object(path, refresh=refresh, version_id=version_id)
+            object_info = self._head_object(
+                path, refresh=refresh, version_id=version_id, lookup_kwargs=lookup_kwargs
+            )
             if object_info:
                 return object_info
         else:
-            bucket_info = self._head_bucket(path, refresh=refresh)
+            bucket_info = self._head_bucket(path, refresh=refresh, lookup_kwargs=lookup_kwargs)
             if bucket_info:
                 return bucket_info
             raise FileNotFoundError(path)
 
         response = self._call(
             self._client.list_objects_v2,
-            Bucket=bucket,
-            Prefix=f"{key.rstrip('/')}/" if key else "",
-            Delimiter="/",
-            MaxKeys=1,
+            **{
+                **self._get_operation_kwargs("list_objects_v2", lookup_kwargs),
+                "Bucket": bucket,
+                "Prefix": f"{key.rstrip('/')}/" if key else "",
+                "Delimiter": "/",
+                "MaxKeys": 1,
+            },
         )
         if (
             response.get("KeyCount", 0) > 0
@@ -927,6 +982,11 @@ class S3FileSystem(AbstractFileSystem):
             path: S3 path to check (e.g., "s3://bucket" or "s3://bucket/key").
             **kwargs: Additional arguments including:
                 refresh: If True, bypass the cache and query S3.
+                ExpectedBucketOwner, RequestPayer, SSECustomerAlgorithm,
+                SSECustomerKey, SSECustomerKeyMD5: The request parameters
+                on which the authorization of the requests depends, as
+                described in :meth:`info`. With them, cached listings are
+                not used. Other request parameters are ignored.
 
         Returns:
             True if the path exists, False otherwise. A bucket that HeadBucket
@@ -943,18 +1003,21 @@ class S3FileSystem(AbstractFileSystem):
             # The root always exists.
             return True
         bucket, key, _ = self.parse_path(path)
+        lookup_kwargs = self._get_lookup_kwargs(kwargs)
+        # The cached listings are made without lookup parameters.
+        use_listings = not refresh and not lookup_kwargs
         if key:
             try:
-                if not refresh and self._ls_from_cache(path):
+                if use_listings and self._ls_from_cache(path):
                     return True
-                info = self.info(path, refresh=refresh)
+                info = self.info(path, refresh=refresh, **lookup_kwargs)
                 return bool(info)
             except FileNotFoundError:
                 return False
-        if not refresh and self._ls_from_cache(bucket):
+        if use_listings and self._ls_from_cache(bucket):
             return True
         try:
-            file = self._head_bucket(bucket, refresh=refresh)
+            file = self._head_bucket(bucket, refresh=refresh, lookup_kwargs=lookup_kwargs)
         except PermissionError:
             # HeadBucket answers 403 for a bucket that exists but that the
             # caller may not access.
@@ -1651,17 +1714,6 @@ class S3FileSystem(AbstractFileSystem):
             raise ValueError("Cannot write to the file with the version specified.")
         if not key:
             raise ValueError("Cannot write to a bucket.")
-        if mode == "create":
-            # Checked up front, as open() does in "xb" mode, and with
-            # IfNoneMatch for an object created since.
-            if self.exists(path):
-                raise FileExistsError(path)
-            kwargs["IfNoneMatch"] = "*"
-        if not isinstance(value, bytes):
-            # Accept bytes-like values (bytearray, memoryview) as the
-            # buffered path does.
-            value = bytes(value)
-
         kwargs.pop("block_size", None)
         kwargs.pop("max_workers", None)
         request_kwargs = {
@@ -1669,6 +1721,17 @@ class S3FileSystem(AbstractFileSystem):
             **kwargs.pop("s3_additional_kwargs", {}),
             **kwargs,
         }
+        if mode == "create":
+            # Checked up front, as open() does in "xb" mode, and with
+            # IfNoneMatch for an object created since.
+            if self.exists(path, **self._get_lookup_kwargs(request_kwargs)):
+                raise FileExistsError(path)
+            request_kwargs["IfNoneMatch"] = "*"
+        if not isinstance(value, bytes):
+            # Accept bytes-like values (bytearray, memoryview) as the
+            # buffered path does.
+            value = bytes(value)
+
         self._put_object(bucket=bucket, key=key, body=value, **request_kwargs)
         self.invalidate_cache(path)
 
@@ -1744,7 +1807,7 @@ class S3FileSystem(AbstractFileSystem):
         ``start`` without an ``end``, as a suffix range of the last bytes.
         Other negative offsets are resolved against the size from
         :meth:`info`, which also checks that the object exists for an empty
-        range.
+        range and receives the lookup parameters among ``kwargs``.
 
         Args:
             path: S3 path (s3://bucket/key) of the object.
@@ -1781,7 +1844,7 @@ class S3FileSystem(AbstractFileSystem):
                 # A negative offset needs the size of the object, and an
                 # empty range sends no GetObject request that would report a
                 # missing object.
-                info = self.info(path, version_id=version_id)
+                info = self.info(path, version_id=version_id, **self._get_lookup_kwargs(kwargs))
                 if info.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY or info.key != key:
                     # There is no object to read, as GetObject reports for
                     # the other ranges, or info() describes the key without
@@ -2399,8 +2462,15 @@ class S3FileSystem(AbstractFileSystem):
                         for name in ("versionId", "versionID", "versionid", "version_id")
                     )
                 for cache_path in cache_paths:
-                    # _ls_dirs caches listings under (path, delimiter).
-                    for cache_key in (cache_path, (cache_path, "/"), (cache_path, "")):
+                    # _ls_dirs caches listings under (path, delimiter), and
+                    # lookups with parameters are cached under
+                    # (path, _LOOKUPS_CACHE_KEY).
+                    for cache_key in (
+                        cache_path,
+                        (cache_path, "/"),
+                        (cache_path, ""),
+                        (cache_path, _LOOKUPS_CACHE_KEY),
+                    ):
                         self._evict_cache(cache_key)
                 # A version-qualified path continues with the path without
                 # the version.
@@ -2416,11 +2486,94 @@ class S3FileSystem(AbstractFileSystem):
         already gone, which this ignores.
 
         Args:
-            key: The dircache key, a path or a ``(path, delimiter)`` listing
-                key.
+            key: The dircache key, a path, a ``(path, delimiter)`` listing
+                key, or a ``(path, _LOOKUPS_CACHE_KEY)`` key.
         """
         with contextlib.suppress(KeyError):
             del self.dircache[key]
+
+    @staticmethod
+    def _get_lookup_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
+        """Select the request parameters that lookups send.
+
+        Lookups (``info()`` and ``exists()``) send only the parameters on
+        which their authorization depends, which also select their cached
+        results. Other parameters, such as ``IfMatch`` or
+        ``ResponseContentType``, are not sent: they would change the result
+        that is cached for the path.
+
+        Args:
+            kwargs: The parameters to select from.
+
+        Returns:
+            The lookup parameters.
+        """
+        return {k: v for k, v in kwargs.items() if k in _LOOKUP_REQUEST_PARAMETERS}
+
+    def _get_cached_lookup(self, path: str, lookup_kwargs: Mapping[str, Any]) -> S3Object | None:
+        """Get the cached HeadObject or HeadBucket result of a lookup.
+
+        A lookup without lookup parameters uses the entry under the path. A
+        lookup with them uses only the result of a lookup with the same
+        values, cached under ``(path, _LOOKUPS_CACHE_KEY)``, because the
+        authorization of the request depends on them.
+
+        Args:
+            path: The path of the object, optionally version-qualified, or
+                the bucket name.
+            lookup_kwargs: The lookup parameters (see ``_get_lookup_kwargs``).
+
+        Returns:
+            The cached object, or None if there is none.
+        """
+        if not lookup_kwargs:
+            return cast("S3Object | None", self.dircache.get(path))
+        lookups = self.dircache.get((path, _LOOKUPS_CACHE_KEY))
+        return lookups.get(self._get_lookup_cache_id(lookup_kwargs)) if lookups else None
+
+    def _cache_lookup(self, path: str, lookup_kwargs: Mapping[str, Any], file: S3Object) -> None:
+        """Cache the HeadObject or HeadBucket result of a lookup.
+
+        Args:
+            path: The path of the object, optionally version-qualified, or
+                the bucket name.
+            lookup_kwargs: The lookup parameters (see ``_get_lookup_kwargs``)
+                that the request was made with.
+            file: The object to cache.
+        """
+        if not lookup_kwargs:
+            self.dircache[path] = file
+            return
+        key = (path, _LOOKUPS_CACHE_KEY)
+        # A new dictionary, so that a concurrent reader does not see it
+        # change.
+        self.dircache[key] = {
+            **(self.dircache.get(key) or {}),
+            self._get_lookup_cache_id(lookup_kwargs): file,
+        }
+
+    @staticmethod
+    def _get_lookup_cache_id(lookup_kwargs: Mapping[str, Any]) -> tuple[tuple[str, Any], ...]:
+        """Identify a set of lookup parameters in the cache.
+
+        Args:
+            lookup_kwargs: The lookup parameters (see ``_get_lookup_kwargs``).
+
+        Returns:
+            The sorted parameters, with ``SSECustomerKey`` replaced by its
+            SHA-256 digest so that the cache does not keep the key.
+        """
+        return tuple(
+            sorted(
+                (
+                    k,
+                    hashlib.sha256(v if isinstance(v, bytes) else str(v).encode()).hexdigest()
+                    if k == "SSECustomerKey"
+                    else v,
+                )
+                for k, v in lookup_kwargs.items()
+            )
+        )
 
     def _ls_from_cache(self, path: str) -> list[S3Object] | S3Object | None:
         """Check the dircache for a cached entry of the path.
@@ -2820,10 +2973,13 @@ class S3File(AbstractBufferedFile):
         self._details: S3Object | dict[str, Any] = {}
         append_info: S3Object | None = None
         append_data: bytes | None = None
+        # The lookups need the parameters of the file on which their
+        # authorization depends, such as the customer-provided key.
+        lookup_kwargs = fs._get_lookup_kwargs(self.s3_additional_kwargs)
         if "r" in mode:
             # Looked up before the base class initializer, which would
             # otherwise take the size from the latest version of the object.
-            info = fs.info(path, version_id=self.version_id)
+            info = fs.info(path, version_id=self.version_id, **lookup_kwargs)
             if info.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
                 # A prefix has no object to read.
                 raise FileNotFoundError(path)
@@ -2841,18 +2997,20 @@ class S3File(AbstractBufferedFile):
             # The rewritten object keeps the metadata of the existing one,
             # which a cached listing entry lacks, so look up the object.
             with contextlib.suppress(FileNotFoundError):
-                append_info = fs.info(path, refresh=True)
+                append_info = fs.info(path, refresh=True, **lookup_kwargs)
             if (
                 append_info is not None
                 and append_info.get("size", 0) < fs.MULTIPART_UPLOAD_MIN_PART_SIZE
             ):
                 # Too small to be a part of a multipart upload: rewritten
                 # from the buffer.
-                append_data = fs.cat(path)
+                append_data = fs.cat_file(
+                    path, **fs._get_operation_kwargs("get_object", self.s3_additional_kwargs)
+                )
         elif "x" in mode:
             # Checked up front so that no data is uploaded for an existing
             # object, and on commit with IfNoneMatch for one created since.
-            if fs.exists(path):
+            if fs.exists(path, **lookup_kwargs):
                 raise FileExistsError(path)
             self.s3_additional_kwargs.update({"IfNoneMatch": "*"})
 
@@ -2937,7 +3095,11 @@ class S3File(AbstractBufferedFile):
         )
         if self.append_block:
             if self.tell() > self.fs.MULTIPART_UPLOAD_MAX_PART_SIZE:
-                info = self.fs.info(self.path, version_id=self.version_id)
+                info = self.fs.info(
+                    self.path,
+                    version_id=self.version_id,
+                    **self.fs._get_lookup_kwargs(self.s3_additional_kwargs),
+                )
                 ranges = self.fs._get_copy_ranges(
                     # Set copy source file byte size
                     info.get("size", 0),
