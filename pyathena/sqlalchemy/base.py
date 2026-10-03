@@ -709,11 +709,14 @@ class AthenaDialect(DefaultDialect):
                 enclosing type is reported as unrecognized.
 
         Returns:
-            The SQLAlchemy type, or ``NullType`` with a warning for a type that
-            is not recognized.
+            The SQLAlchemy type. A type name that is not recognized becomes
+            ``NullType`` with a warning, in place when it is an element, key,
+            value, or field type. An ARRAY, MAP, or STRUCT/ROW whose arguments
+            cannot be parsed becomes ``NullType`` as a whole, with a warning.
 
         Raises:
-            ValueError: If a nested MAP or STRUCT/ROW cannot be parsed.
+            ValueError: If the arguments of a nested MAP or STRUCT/ROW cannot be
+                parsed.
         """
         type_ = type_.strip()
         match = self._pattern_column_type.match(type_)
