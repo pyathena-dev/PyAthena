@@ -1334,6 +1334,65 @@ class TestS3FileSystem:
             RequestPayer="requester",
         )
 
+    def test_cp_file_directory(self):
+        # GH-1008: recursive copy() passes the directories, which used to be
+        # sent to CopyObject and fail with NoSuchKey.
+        fs = self._make_fs()
+        fs.info = mock.MagicMock(return_value=S3FileSystem._directory_object("bucket", "src"))
+        fs._copy_object = mock.MagicMock()
+
+        fs.cp_file("s3://bucket/src", "s3://bucket/dst")
+        fs._copy_object.assert_not_called()
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("path1", "path2"),
+        [
+            # Several sources with the same destination.
+            (["s3://bucket/a", "s3://bucket/b"], ["s3://bucket/c", "s3a://bucket/c"]),
+            # A destination that is another source.
+            (["s3://bucket/a", "s3://bucket/b"], ["s3://bucket/b", "s3://bucket/a"]),
+        ],
+    )
+    def test_mv_conflicting_destinations(self, path1, path2):
+        fs = self._make_fs()
+        fs.info = mock.MagicMock()
+
+        with pytest.raises(ValueError, match="Cannot move"):
+            fs.mv(path1, path2, recursive=True)
+        fs.info.assert_not_called()
+        fs._call.assert_not_called()
+
+    def test_mv_conflicting_destinations_of_listed_sources(self):
+        # A list of sources is mapped without looking up the destination.
+        fs = self._make_fs()
+        fs.expand_path = mock.MagicMock(return_value=["bucket/x/a", "bucket/y/a"])
+        fs.isdir = mock.MagicMock()
+
+        with pytest.raises(ValueError, match="same destination"):
+            fs.mv(["s3://bucket/x/a", "s3://bucket/y/a"], "s3://bucket/out", recursive=True)
+        fs.isdir.assert_not_called()
+        fs._call.assert_not_called()
+
+    def test_mv_keeps_given_paths(self):
+        # The destination keeps its trailing slash, as with copy().
+        fs = self._make_fs()
+        fs._copy_file = mock.MagicMock(return_value=True)
+        fs._delete_objects = mock.MagicMock()
+
+        fs.mv(["s3://bucket/src"], ["s3://bucket/dst/"])
+        fs._copy_file.assert_called_once_with("s3://bucket/src", "s3://bucket/dst/")
+        fs._delete_objects.assert_called_once_with(["s3://bucket/src"])
+
+    def test_mv_nothing_within_maxdepth(self):
+        # Only directories within maxdepth: nothing is moved, as with copy().
+        fs = self._make_fs()
+        fs.expand_path = mock.MagicMock(return_value=["bucket/src/sub"])
+        fs.isdir = mock.MagicMock(return_value=True)
+
+        fs.mv("s3://bucket/src", "s3://bucket/dst/", recursive=True, maxdepth=1)
+        fs._call.assert_not_called()
+
     @pytest.mark.parametrize("size", [10, 5 * 2**30 + 1])
     def test_cp_file_multipart_parameters(self, size):
         # GH-967: block_size and max_workers control a multipart copy and are
@@ -3439,25 +3498,62 @@ class TestS3FileSystem:
         assert fs.cat(path2) == data
         assert not fs.exists(path1)
 
-    # TODO Recursive directory traversal currently requires wildcards,
-    #  but with the recursive option, recursive directory traversal
-    #  must be possible without wildcards.
-    # def test_move_recursive(self, fs):
-    #     dir1 = (
-    #         f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-    #         f"filesystem/test_move_recursive/"
-    #     )
-    #     dir2 = (
-    #         f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-    #         f"filesystem/test_move_recursive_copy/"
-    #     )
-    #
-    #     for i in range(10):
-    #         fs.pipe(f"{dir1}test_{i}", bytes(i))
-    #     fs.move(dir1, dir2, recursive=True)
-    #     for i in range(10):
-    #         assert fs.cat(f"{dir2}test_{i}") == bytes(i)
-    #         assert not fs.exists(f"{dir1}test_{i}")
+    @pytest.mark.parametrize(
+        ("files", "path1", "path2", "expected", "kwargs"),
+        [
+            # GH-974: the directory entries used to make mv() fail.
+            (
+                ["src/a", "src/sub/b"],
+                "src",
+                "dst",
+                {"dst/a": "src/a", "dst/sub/b": "src/sub/b"},
+                {},
+            ),
+            # GH-1008: mv() removed the source by expanding it again, which
+            # also removed the copies made under it.
+            (
+                ["src/a", "src/sub/b"],
+                "src",
+                "src/archive",
+                {"src/archive/a": "src/a", "src/archive/sub/b": "src/sub/b"},
+                {},
+            ),
+            (
+                ["src/a", "src/b"],
+                "src/*",
+                "src/archive/",
+                {"src/archive/a": "src/a", "src/archive/b": "src/b"},
+                {},
+            ),
+            # Files whose destination is the file itself are kept.
+            (
+                ["data/x.csv", "data/y.csv"],
+                "data/*.csv",
+                "data/",
+                {"data/x.csv": "data/x.csv", "data/y.csv": "data/y.csv"},
+                {},
+            ),
+            # Files below maxdepth are neither copied nor deleted.
+            (
+                ["src/a", "src/sub/b"],
+                "src",
+                "dst/",
+                {"dst/a": "src/a", "src/sub/b": "src/sub/b"},
+                {"maxdepth": 1},
+            ),
+        ],
+    )
+    def test_move_recursive(self, fs, files, path1, path2, expected, kwargs):
+        base = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_move_recursive/{uuid.uuid4()}"
+        )
+        for f in files:
+            fs.pipe(f"{base}/{f}", f.encode())
+        fs.mv(f"{base}/{path1}", f"{base}/{path2}", recursive=True, **kwargs)
+        fs.invalidate_cache(base)
+        prefix = f"{fs._strip_protocol(base)}/"
+        assert {p.removeprefix(prefix): fs.cat(p).decode() for p in fs.find(base)} == expected
 
     def test_get_recursive(self, fs, tmp_path):
         # GH-974: the directory entries used to be written as empty files.

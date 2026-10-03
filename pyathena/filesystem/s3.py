@@ -12,6 +12,7 @@ from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import Future, as_completed, wait
 from copy import deepcopy
 from datetime import datetime
+from glob import has_magic
 from io import BytesIO
 from multiprocessing import cpu_count
 from re import Pattern
@@ -24,8 +25,9 @@ from botocore import UNSIGNED
 from botocore.client import BaseClient, Config
 from fsspec import AbstractFileSystem
 from fsspec.callbacks import _DEFAULT_CALLBACK
+from fsspec.implementations.local import trailing_sep
 from fsspec.spec import AbstractBufferedFile
-from fsspec.utils import isfilelike, tokenize
+from fsspec.utils import isfilelike, other_paths, tokenize
 
 import pyathena
 from pyathena.connection import Connection
@@ -1368,6 +1370,93 @@ class S3FileSystem(AbstractFileSystem):
         self.invalidate_cache(path)
         return object_.to_dict()
 
+    def mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs) -> None:
+        """Move files from one S3 location to another.
+
+        Copies the files to the destinations that ``copy()`` gives them, and
+        then deletes only the source objects that were copied. fsspec's
+        ``AbstractFileSystem.mv()`` instead removes ``path1`` by expanding it
+        again, which also deletes copies placed where ``path1`` matches them
+        and files that ``maxdepth`` kept from being copied. A file whose
+        destination is the file itself is left in place, and directories,
+        which S3 does not store as objects, are not copied.
+
+        Args:
+            path1: Source S3 path, glob pattern, or list of paths.
+            path2: Destination S3 path, or list of paths when ``path1`` is a
+                list.
+            recursive: Whether to move the directories with their contents.
+            maxdepth: Maximum depth of a recursive move.
+            **kwargs: Additional S3 copy parameters passed to ``cp_file()``.
+
+        Raises:
+            ValueError: If two sources have the same destination, or a
+                destination is another source, which is checked before
+                anything is copied.
+        """
+        if path1 == path2:
+            return
+        copied = [
+            p1
+            for p1, p2 in self._move_paths(path1, path2, recursive=recursive, maxdepth=maxdepth)
+            if self._copy_file(p1, p2, **kwargs)
+        ]
+        self._delete_objects(copied)
+
+    def _move_paths(
+        self, path1, path2, recursive: bool = False, maxdepth: int | None = None
+    ) -> list[tuple[str, str]]:
+        """Pair the sources and destinations of a move as fsspec's ``copy()`` does.
+
+        Args:
+            path1: Source S3 path, glob pattern, or list of paths.
+            path2: Destination S3 path, or list of paths when ``path1`` is a
+                list.
+            recursive: Whether to include the contents of the directories.
+            maxdepth: Maximum depth of the expansion.
+
+        Returns:
+            The source and destination paths, except the sources whose
+            destination is the source itself.
+
+        Raises:
+            ValueError: If two sources have the same destination, or a
+                destination is another source.
+        """
+        if isinstance(path1, list) and isinstance(path2, list):
+            paths1, paths2 = path1, path2
+        else:
+            source_is_str = isinstance(path1, str)
+            paths1 = self.expand_path(path1, recursive=recursive, maxdepth=maxdepth)
+            if source_is_str and (not recursive or maxdepth is not None):
+                # Non-recursive glob does not copy directories.
+                paths1 = [p for p in paths1 if not (trailing_sep(p) or self.isdir(p))]
+                if not paths1:
+                    return []
+            # The destination is looked up only when it decides the mapping.
+            exists = source_is_str and (
+                (has_magic(path1) and len(paths1) == 1)
+                or (
+                    not has_magic(path1)
+                    and not trailing_sep(path1)
+                    and isinstance(path2, str)
+                    and (trailing_sep(path2) or self.isdir(path2))
+                )
+            )
+            paths2 = other_paths(paths1, path2, exists=exists, flatten=not source_is_str)
+        # The paths are copied as given, and compared without the protocol.
+        pairs = [
+            (p1, p2)
+            for p1, p2 in zip(paths1, paths2, strict=False)
+            if self._strip_protocol(p1) != self._strip_protocol(p2)
+        ]
+        destinations = [self._strip_protocol(p2) for _, p2 in pairs]
+        if len(set(destinations)) != len(destinations):
+            raise ValueError("Cannot move several paths to the same destination.")
+        if {self._strip_protocol(p1) for p1, _ in pairs}.intersection(destinations):
+            raise ValueError("Cannot move a path onto another path that is moved.")
+        return pairs
+
     def cp_file(
         self, path1: str, path2: str, recursive=False, maxdepth=None, on_error=None, **kwargs
     ):
@@ -1394,6 +1483,25 @@ class S3FileSystem(AbstractFileSystem):
             Uses multipart copy for objects larger than the maximum part size
             to optimize performance for large files. The copy operation is
             performed entirely on the S3 service without data transfer.
+            A directory ``path1``, which recursive ``copy()`` passes along
+            with the files under it, is skipped.
+        """
+        self._copy_file(path1, path2, **kwargs)
+
+    def _copy_file(self, path1: str, path2: str, **kwargs) -> bool:
+        """Copy an S3 object as :meth:`cp_file` does.
+
+        Args:
+            path1: Source S3 path (s3://bucket/key).
+            path2: Destination S3 path (s3://bucket/key).
+            **kwargs: Additional S3 copy parameters, as for :meth:`cp_file`.
+
+        Returns:
+            False if ``path1`` is a directory, which is skipped; True if the
+            object was copied.
+
+        Raises:
+            ValueError: If trying to copy to a versioned file or copy buckets.
         """
         # fsspec < 2026.6.0: AbstractFileSystem.mv() passed the typo'd
         # "onerror" keyword (instead of "on_error", which copy() consumes),
@@ -1413,6 +1521,10 @@ class S3FileSystem(AbstractFileSystem):
             raise ValueError("Cannot copy buckets.")
 
         info1 = self.info(path1)
+        if info1.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
+            # Recursive copy() passes the directories too; S3 has no object
+            # to copy for them.
+            return False
         size1 = info1.get("size", 0)
         if size1 <= self.MULTIPART_UPLOAD_MAX_PART_SIZE:
             self._copy_object(
@@ -1436,6 +1548,7 @@ class S3FileSystem(AbstractFileSystem):
                 **kwargs,
             )
         self.invalidate_cache(path2)
+        return True
 
     def _copy_object(
         self,

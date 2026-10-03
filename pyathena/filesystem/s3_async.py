@@ -16,7 +16,7 @@ import os
 from multiprocessing import cpu_count
 from typing import TYPE_CHECKING, Any, cast
 
-from fsspec.asyn import AsyncFileSystem
+from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.callbacks import _DEFAULT_CALLBACK
 
 from pyathena.filesystem.s3 import S3File, S3FileSystem
@@ -25,6 +25,7 @@ from pyathena.filesystem.s3_object import (
     S3Metadata,
     S3MultipartUpload,
     S3Object,
+    S3ObjectType,
     S3ObjectVersion,
 )
 
@@ -315,6 +316,18 @@ class AioS3FileSystem(AsyncFileSystem):
         paths = await asyncio.to_thread(
             self._sync_fs._expand_delete_paths, path, recursive=recursive, maxdepth=maxdepth
         )
+        await self._delete_objects(paths, **kwargs)
+
+    async def _delete_objects(self, paths: list[str], **kwargs) -> None:
+        """Delete objects with DeleteObjects requests run with ``asyncio.gather``.
+
+        Args:
+            paths: Paths of the objects to delete. Bucket paths are skipped.
+            **kwargs: Additional parameters passed to the DeleteObjects API.
+
+        Raises:
+            OSError: If S3 could not delete some of the objects.
+        """
         requests = self._sync_fs._delete_objects_requests(paths, **kwargs)
         results = await asyncio.gather(
             *[
@@ -325,8 +338,89 @@ class AioS3FileSystem(AsyncFileSystem):
         )
         self._sync_fs._raise_delete_objects_errors(requests, results)
 
+    async def _mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs) -> None:
+        """Move files from one S3 location to another.
+
+        See :meth:`S3FileSystem.mv`. The copies and the deletions run in
+        parallel with ``asyncio.gather``.
+
+        Args:
+            path1: Source S3 path, glob pattern, or list of paths.
+            path2: Destination S3 path, or list of paths when ``path1`` is a
+                list.
+            recursive: Whether to move the directories with their contents.
+            maxdepth: Maximum depth of a recursive move.
+            **kwargs: Additional S3 copy parameters, as for ``_cp_file()``.
+
+        Raises:
+            ValueError: If two sources have the same destination, or a
+                destination is another source, which is checked before
+                anything is copied.
+        """
+        if path1 == path2:
+            return
+        pairs = await asyncio.to_thread(
+            self._sync_fs._move_paths, path1, path2, recursive=recursive, maxdepth=maxdepth
+        )
+        # Every copy finishes before a failure is raised, as in fsspec's
+        # _copy(), and nothing is deleted after a failure.
+        results = await asyncio.gather(
+            *[self._copy_file(p1, p2, **kwargs) for p1, p2 in pairs], return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+        await self._delete_objects(
+            [p1 for (p1, _), copied in zip(pairs, results, strict=True) if copied]
+        )
+
+    def mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs) -> None:
+        """Move files from one S3 location to another.
+
+        Runs :meth:`_mv`; fsspec does not provide the synchronous wrapper of
+        ``_mv``.
+
+        Args:
+            path1: Source S3 path, glob pattern, or list of paths.
+            path2: Destination S3 path, or list of paths when ``path1`` is a
+                list.
+            recursive: Whether to move the directories with their contents.
+            maxdepth: Maximum depth of a recursive move.
+            **kwargs: Additional S3 copy parameters.
+        """
+        sync(self.loop, self._mv, path1, path2, recursive=recursive, maxdepth=maxdepth, **kwargs)
+
     async def _cp_file(self, path1: str, path2: str, **kwargs) -> None:
-        """Copy an S3 object, using async parallel multipart upload for large files."""
+        """Copy an S3 object, using async parallel multipart upload for large files.
+
+        A directory ``path1``, which recursive ``copy()`` passes along with
+        the files under it, is skipped.
+
+        Args:
+            path1: Source S3 path (s3://bucket/key).
+            path2: Destination S3 path (s3://bucket/key).
+            **kwargs: Additional S3 copy parameters.
+
+        Raises:
+            ValueError: If trying to copy to a versioned file or copy buckets.
+        """
+        await self._copy_file(path1, path2, **kwargs)
+
+    async def _copy_file(self, path1: str, path2: str, **kwargs) -> bool:
+        """Copy an S3 object as :meth:`_cp_file` does.
+
+        Args:
+            path1: Source S3 path (s3://bucket/key).
+            path2: Destination S3 path (s3://bucket/key).
+            **kwargs: Additional S3 copy parameters, as for :meth:`_cp_file`.
+
+        Returns:
+            False if ``path1`` is a directory, which is skipped; True if the
+            object was copied.
+
+        Raises:
+            ValueError: If trying to copy to a versioned file or copy buckets.
+        """
         # fsspec < 2026.6.0 leaks the typo'd "onerror" keyword from mv();
         # see S3FileSystem.cp_file.
         kwargs.pop("onerror", None)
@@ -341,6 +435,10 @@ class AioS3FileSystem(AsyncFileSystem):
             raise ValueError("Cannot copy buckets.")
 
         info1 = await self._info(path1)
+        if info1.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
+            # Recursive copy() passes the directories too; see
+            # S3FileSystem.cp_file.
+            return False
         size1 = info1.get("size", 0)
         if size1 <= S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE:
             await asyncio.to_thread(
@@ -365,6 +463,7 @@ class AioS3FileSystem(AsyncFileSystem):
                 **kwargs,
             )
         self._sync_fs.invalidate_cache(path2)
+        return True
 
     async def _copy_object_with_multipart_upload(
         self,
