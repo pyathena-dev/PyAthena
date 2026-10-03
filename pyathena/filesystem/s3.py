@@ -69,7 +69,8 @@ def _compress(
     """Compress a value with the codec that ``open()`` uses for a compression.
 
     Args:
-        path: Path of the file, from which ``"infer"`` takes the codec.
+        path: Path of the file without the protocol, as ``open()`` strips
+            it, from which ``"infer"`` takes the codec.
         value: The bytes to compress.
         compression: Name of a codec in ``fsspec.compression.compr``, or
             ``"infer"`` to take it from the extension of the path.
@@ -1821,7 +1822,7 @@ class S3FileSystem(AbstractFileSystem):
         if compression is not None:
             # Compressed up front, so that every path uploads the compressed
             # bytes, and open() returns the file instead of a wrapper.
-            value = _compress(path, value, compression)
+            value = _compress(self._strip_protocol(path), value, compression)
         block_size = kwargs.get("block_size") or self.default_block_size
         # The size in bytes; the length of a memoryview counts its items.
         self._check_multipart_upload_size(path, memoryview(value).nbytes, block_size)

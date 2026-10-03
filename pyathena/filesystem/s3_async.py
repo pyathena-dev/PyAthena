@@ -200,7 +200,7 @@ class AioS3FileSystem(AsyncFileSystem):
         compression = kwargs.pop("compression", None)
         if compression is not None:
             # See S3FileSystem.pipe_file.
-            value = _compress(path, value, compression)
+            value = _compress(self._strip_protocol(path), value, compression)
         block_size = kwargs.get("block_size") or self._sync_fs.default_block_size
         # The size in bytes; the length of a memoryview counts its items.
         self._sync_fs._check_multipart_upload_size(path, memoryview(value).nbytes, block_size)

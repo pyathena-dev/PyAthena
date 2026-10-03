@@ -1539,7 +1539,14 @@ class TestS3FileSystem:
         fs._call.assert_not_called()
 
     @pytest.mark.parametrize(
-        ("path", "compression"), [("s3://bucket/key", "gzip"), ("s3://bucket/key.gz", "infer")]
+        ("path", "compression"),
+        [
+            ("s3://bucket/key", "gzip"),
+            ("s3://bucket/key.gz", "infer"),
+            # Inferred from the path without the trailing slash, as open()
+            # does.
+            ("s3://bucket/key.gz/", "infer"),
+        ],
     )
     @pytest.mark.parametrize("intrans", [False, True])
     @pytest.mark.parametrize("size", [1, S3FileSystem.DEFAULT_BLOCK_SIZE + 1])
@@ -1560,6 +1567,38 @@ class TestS3FileSystem:
         ((_, kwargs),) = fs._put_object.call_args_list
         assert "compression" not in kwargs
         assert gzip.decompress(kwargs["body"]) == value
+
+    @pytest.mark.parametrize("intrans", [False, True])
+    def test_pipe_file_compression_multipart(self, intrans):
+        # Compressed data larger than the block size is uploaded as a
+        # multipart upload.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs._transaction = None
+        fs._create_multipart_upload = mock.MagicMock(
+            return_value=SimpleNamespace(upload_id="uploadid")
+        )
+        fs._upload_part = mock.MagicMock(
+            side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
+        )
+        fs._finish_multipart_upload = mock.MagicMock()
+        # Random bytes stay larger than the block size when compressed.
+        value = os.urandom(S3FileSystem.DEFAULT_BLOCK_SIZE + 1)
+
+        with fs.transaction if intrans else contextlib.nullcontext():
+            fs.pipe_file("s3://bucket/key", value, compression="gzip")
+
+        body = b"".join(c.kwargs["body"] for c in fs._upload_part.call_args_list)
+        assert gzip.decompress(body) == value
+        fs._finish_multipart_upload.assert_called_once()
+
+    def test_pipe_file_compression_non_contiguous_memoryview(self):
+        fs = self._make_fs()
+        fs._put_object = mock.MagicMock()
+
+        fs.pipe_file("s3://bucket/key", memoryview(b"ab" * 4)[::2], compression="gzip")
+
+        assert gzip.decompress(fs._put_object.call_args.kwargs["body"]) == b"aaaa"
 
     def test_pipe_file_compression_inferred_none(self):
         # "infer" uploads the value as it is for a path without the
