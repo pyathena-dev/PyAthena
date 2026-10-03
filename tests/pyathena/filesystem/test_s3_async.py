@@ -531,6 +531,28 @@ class TestAioS3FileSystem:
             Delete={"Objects": [{"Key": "a"}, {"Key": "c"}], "Quiet": True},
         )
 
+    @pytest.mark.asyncio
+    async def test_mv_copy_failure(self):
+        # A failed copy is raised after the other copies have finished, and
+        # nothing is deleted.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        finished = []
+
+        async def copy_file(path1, path2, **kwargs):
+            if path1 == "s3://bucket/a":
+                raise OSError("copy failed")
+            await asyncio.sleep(0.1)
+            finished.append(path1)
+            return True
+
+        fs._copy_file = copy_file
+        fs._sync_fs._call = mock.MagicMock()
+
+        with pytest.raises(OSError, match="copy failed"):
+            await fs._mv(["s3://bucket/a", "s3://bucket/b"], ["s3://bucket/x/a", "s3://bucket/x/b"])
+        assert finished == ["s3://bucket/b"]
+        fs._sync_fs._call.assert_not_called()
+
     @pytest.mark.parametrize("size", [10, 5 * 2**30 + 1])
     @pytest.mark.asyncio
     async def test_cp_file_multipart_parameters(self, size):

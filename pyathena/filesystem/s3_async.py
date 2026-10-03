@@ -362,9 +362,16 @@ class AioS3FileSystem(AsyncFileSystem):
         pairs = await asyncio.to_thread(
             self._sync_fs._move_paths, path1, path2, recursive=recursive, maxdepth=maxdepth
         )
-        copied = await asyncio.gather(*[self._copy_file(p1, p2, **kwargs) for p1, p2 in pairs])
+        # Every copy finishes before a failure is raised, as in fsspec's
+        # _copy(), and nothing is deleted after a failure.
+        results = await asyncio.gather(
+            *[self._copy_file(p1, p2, **kwargs) for p1, p2 in pairs], return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
         await self._delete_objects(
-            [p1 for (p1, _), copied_ in zip(pairs, copied, strict=True) if copied_]
+            [p1 for (p1, _), copied in zip(pairs, results, strict=True) if copied]
         )
 
     def mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs) -> None:
