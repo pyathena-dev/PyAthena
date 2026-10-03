@@ -733,6 +733,18 @@ class TestAthenaStatementCompiler:
         with pytest.raises(exc.CompileError, match="explicit Numeric precision"):
             self._compile_sql(select(literal([Decimal("1.23")], AthenaArray(_Amount()))))
 
+    def test_array_bind_rejects_numeric_subclass_without_precision(self):
+        class _Money(types.Numeric):
+            __visit_name__ = "pyathena_money"
+            cache_ok = True
+
+        @compiles(_Money, "awsathena")
+        def _compile_money(type_, compiler, **kw):
+            return "DECIMAL"
+
+        with pytest.raises(exc.CompileError, match="explicit Numeric precision"):
+            self._compile_sql(select(literal([Decimal("1.23")], AthenaArray(_Money()))))
+
     def test_array_assignment_rejects_unknown_value_type(self):
         items = Table(
             "items",
@@ -1064,10 +1076,12 @@ class TestAthenaDDLCompiler:
         ddl = self._ddl(
             Column("decorated", decorated(Integer())),
             Column("subclassed", type("MyInteger", (Integer,), {})()),
+            Column("variant", Integer().with_variant(types.BigInteger(), "awsathena")),
             Column("text_value", types.CLOB),
         )
         assert "decorated INT,\n" in ddl
         assert "subclassed INT,\n" in ddl
+        assert "variant BIGINT,\n" in ddl
         assert "text_value STRING\n" in ddl
         assert "INTEGER" not in ddl
 

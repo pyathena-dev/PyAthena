@@ -415,6 +415,15 @@ class AthenaDMLTypeCompiler(GenericTypeCompiler):
             return "REAL"
         if isinstance(resolved, (types.DateTime, AthenaTimestamp)):
             return self.visit_TIMESTAMP(resolved, **kw)  # type: ignore[arg-type]
+        if (
+            kw.get("require_precision")
+            and isinstance(resolved, types.Numeric)
+            and resolved.precision is None
+        ):
+            raise exc.CompileError(
+                "ARRAY decimal values require explicit Numeric precision; "
+                "specify precision and scale to avoid implicit rounding"
+            )
         # Dispatch the declared type so a compilation rule registered for a
         # TypeDecorator still applies.
         return super().process(type_, **kw)
@@ -443,15 +452,6 @@ class AthenaDMLTypeCompiler(GenericTypeCompiler):
     @override
     def visit_NUMERIC(self, type_: types.Numeric[Any], **kw: Any) -> str:
         return self.visit_DECIMAL(type_, **kw)  # type: ignore[arg-type]
-
-    @override
-    def visit_DECIMAL(self, type_: types.DECIMAL[Any], **kw: Any) -> str:
-        if kw.get("require_precision") and type_.precision is None:
-            raise exc.CompileError(
-                "ARRAY decimal values require explicit Numeric precision; "
-                "specify precision and scale to avoid implicit rounding"
-            )
-        return super().visit_DECIMAL(type_, **kw)
 
     def visit_tinyint(self, type_, **kw):
         """Render a tinyint type.
