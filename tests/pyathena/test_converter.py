@@ -9,6 +9,7 @@ from pyathena.converter import (
     _to_array,
     _to_datetime,
     _to_datetime_with_tz,
+    _to_json,
     _to_map,
     _to_struct,
     _to_time,
@@ -629,3 +630,18 @@ def test_to_time_with_tz(input_value, expected):
     assert result == expected
     if expected is not None:
         assert result.utcoffset() == expected.utcoffset()
+
+
+@pytest.mark.parametrize(
+    ("input_value", "expected"),
+    [
+        (None, None),
+        ("", None),
+        ('""', ""),
+        ('{"a": 1}', {"a": 1}),
+        ("[1, 2]", [1, 2]),
+        ("null", None),
+    ],
+)
+def test_to_json(input_value, expected):
+    assert _to_json(input_value) == expected

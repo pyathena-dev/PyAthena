@@ -23,7 +23,7 @@ from pyathena.pandas.result_set import AthenaPandasResultSet, PandasDataFrameIte
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
-from tests.pyathena.util import TIME_VALUES_QUERY, TIME_VALUES_ROW, cached_file_systems
+from tests.pyathena.util import CONVERTED_VALUES_QUERY, CONVERTED_VALUES_ROW, cached_file_systems
 
 
 class TestPandasCursor:
@@ -1617,8 +1617,8 @@ class TestPandasCursor:
             (2, datetime(2017, 1, 1, 12, 34, 56).time(), b"\x00\x01", [1, "x"], "s", None),
         ]
 
-        pandas_cursor.execute(TIME_VALUES_QUERY)
-        assert pandas_cursor.fetchall() == [TIME_VALUES_ROW]
+        pandas_cursor.execute(CONVERTED_VALUES_QUERY)
+        assert pandas_cursor.fetchall() == [CONVERTED_VALUES_ROW]
 
     @pytest.mark.parametrize(
         "execute_kwargs",

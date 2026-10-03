@@ -108,9 +108,9 @@ def unreachable_glue(connection):
     )
 
 
-# TIME values of several precisions, with and without a time zone, and the row that
-# every cursor should fetch for them.
-TIME_VALUES_QUERY = """
+# TIME values of several precisions, with and without a time zone, a NULL JSON value,
+# and the row that every cursor should fetch for them.
+CONVERTED_VALUES_QUERY = """
 SELECT
   1 AS col
   ,CAST('12:34:56' AS TIME(0)) AS col_time_0
@@ -118,13 +118,15 @@ SELECT
   ,CAST('12:34:56.789 +09:00' AS TIME WITH TIME ZONE) AS col_time_tz
   ,CAST('12:34:56 -05:30' AS TIME(0) WITH TIME ZONE) AS col_time_tz_0
   ,CAST(NULL AS TIME WITH TIME ZONE) AS col_time_tz_null
+  ,CAST(NULL AS JSON) AS col_json_null
 """
-TIME_VALUES_ROW = (
+CONVERTED_VALUES_ROW = (
     1,
     datetime(2000, 1, 1, 12, 34, 56).time(),
     datetime(2000, 1, 1, 12, 34, 56, 123456).time(),
     datetime(2000, 1, 1, 12, 34, 56, 789000, tzinfo=timezone(timedelta(hours=9))).timetz(),
     datetime(2000, 1, 1, 12, 34, 56, tzinfo=timezone(-timedelta(hours=5, minutes=30))).timetz(),
+    None,
     None,
 )
 
