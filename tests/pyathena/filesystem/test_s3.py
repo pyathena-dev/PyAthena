@@ -220,6 +220,22 @@ class TestS3FileSystem:
         fs.invalidate_cache("s3://bucket/a/b/c.txt")
         assert list(fs.dircache) == kept
 
+    def test_invalidate_cache_version_drops_object_path(self):
+        fs = self._make_fs()
+        invalidated = [
+            "bucket/a/c.txt?versionId=v1",
+            "bucket/a/c.txt",
+            ("bucket/a", "/"),
+            ("bucket", "/"),
+        ]
+        # Other versions of the object do not change.
+        kept = ["bucket/a/c.txt?versionId=v2"]
+        for cache_key in invalidated + kept:
+            fs.dircache[cache_key] = []
+
+        fs.invalidate_cache("s3://bucket/a/c.txt?versionId=v1")
+        assert list(fs.dircache) == kept
+
     @pytest.mark.parametrize(
         ("prefix", "next_token"),
         [
@@ -1675,6 +1691,21 @@ class TestS3FileSystem:
         assert version.size == 4
         # An unversioned bucket reports the "null" version.
         assert version.version_id
+
+    def test_rm_file_version_invalidates_object_cache(self, fs):
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_rm_file_version/{uuid.uuid4()}"
+        )
+        fs.pipe(path, b"data")
+        # Cache the HeadObject result of the object path.
+        assert fs.info(path)["size"] == 4
+        # An unversioned bucket reports the "null" version, and deleting it
+        # deletes the object.
+        version_id = fs.object_version_info(path)[0].version_id
+
+        fs.rm_file(f"{path}?versionId={version_id}")
+        assert not fs.exists(path)
 
     @pytest.mark.parametrize("fs", [{"version_aware": True}], indirect=True)
     def test_version_aware_read(self, fs):

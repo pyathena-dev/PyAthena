@@ -1908,13 +1908,21 @@ class S3FileSystem(AbstractFileSystem):
     def invalidate_cache(self, path: str | None = None) -> None:
         """Remove the cached entries of the path and its parent paths.
 
+        A version-qualified path also invalidates the object path without the
+        version, because deleting or copying a version can change the current
+        version of the object.
+
         Args:
             path: The path to invalidate. If None, clear the whole cache.
         """
         if path is None:
             self.dircache.clear()
         else:
-            path = self._strip_protocol(path)
+            stripped = self._strip_protocol(path)
+            # _head_object caches a version-qualified path under its own name.
+            self.dircache.pop(stripped, None)
+            # Keys cannot contain "?", so it starts the versionId query.
+            path = stripped.split("?", 1)[0]
             while path:
                 self.dircache.pop(path, None)
                 # _ls_dirs caches listings under (path, delimiter).
