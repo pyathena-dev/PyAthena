@@ -2433,6 +2433,27 @@ class TestS3File:
         fs._finish_multipart_upload.assert_not_called()
         fs._put_object.assert_not_called()
 
+    @pytest.mark.parametrize("autocommit", [True, False])
+    def test_write_exceeding_max_parts_abort_failure(self, autocommit):
+        # An abort failure is logged; the part limit error propagates, and
+        # neither closing the file nor committing a deferred write retries
+        # the upload or completes it.
+        fs = self._make_append_fs(b"")
+        fs.MULTIPART_UPLOAD_MAX_PARTS = 3
+        fs._call.side_effect = PermissionError("abort failed")
+
+        f = S3File(fs, "s3://bucket/key.txt", mode="wb", block_size=4, autocommit=autocommit)
+        with pytest.raises(ValueError, match="block_size"):
+            self._write_and_close(f, [b"a" * 4] * 4)
+        if not autocommit:
+            f.commit()
+
+        assert f.closed
+        assert fs._upload_part.call_count == 3
+        fs._call.assert_called_once()
+        fs._finish_multipart_upload.assert_not_called()
+        fs._put_object.assert_not_called()
+
     def test_append_discard(self):
         # Rolling back an append aborts its multipart upload without the
         # existing object's metadata, which AbortMultipartUpload rejects,

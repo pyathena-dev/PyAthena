@@ -2465,12 +2465,20 @@ class S3File(AbstractBufferedFile):
 
             for upload in uploads:
                 if part_number >= self.fs.MULTIPART_UPLOAD_MAX_PARTS:
-                    # Abort the upload and close the file without the
-                    # buffered data, so that neither close() nor commit()
-                    # uploads it.
-                    self.discard()
+                    # Close the file without the buffered data, so that
+                    # neither close() nor commit() uploads it, and abort the
+                    # upload. An abort failure does not mask this error, and
+                    # commit() does not complete the upload afterwards.
                     self.buffer = None
                     self.closed = True
+                    try:
+                        self.discard()
+                    except Exception:
+                        _logger.exception(
+                            f"Failed to abort multipart upload to s3://{self.bucket}/{self.key}."
+                        )
+                        self.multipart_upload = None
+                        self.multipart_upload_parts = []
                     raise ValueError(
                         f"Cannot upload more than {self.fs.MULTIPART_UPLOAD_MAX_PARTS} "
                         f"parts to s3://{self.bucket}/{self.key} with a block size of "
