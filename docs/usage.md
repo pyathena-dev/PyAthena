@@ -285,8 +285,8 @@ cursor.execute("SELECT * FROM one_row", cache_size=100, cache_expiration_time=36
 ```
 
 Results will only be re-used from a succeeded DML query (the assumption being that you always want to re-run queries like `CREATE TABLE` and `DROP TABLE`)
-whose query string matches *exactly* after parameters are substituted, and that ran with the same schema and catalog as the cursor.
-With `unload=True` on the pandas, Arrow, and Polars cursors, each query is written to a new `UNLOAD` location, so the cache never matches.
+whose query string (with `pyformat` parameters substituted) matches *exactly*, and that ran with the same schema and catalog as the cursor.
+With `unload=True` on the pandas, Arrow, and Polars cursors, a query that is wrapped in `UNLOAD` is written to a new location each time, so the cache never matches it.
 
 The S3 staging directory is not checked, so it's possible that the location of the results is not in your provided `s3_staging_dir`.
 
@@ -425,7 +425,7 @@ def cancel_long_running_query():
     )
     SELECT
         segment,
-        COUNT(DISTINCT user_id) as users,
+        COUNT(DISTINCT dm.user_id) as users,
         AVG(events) as avg_daily_events
     FROM daily_metrics dm
     JOIN user_segments us ON dm.user_id = us.user_id

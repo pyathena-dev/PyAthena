@@ -4,7 +4,8 @@
 
 PyAthena provides native asyncio cursor implementations under `pyathena.aio`.
 These cursors use `asyncio.sleep` for polling and `asyncio.to_thread` for boto3 calls,
-keeping the event loop free without relying on thread pools for concurrency.
+keeping the event loop free. Concurrency comes from asyncio tasks rather than a
+`ThreadPoolExecutor` owned by the cursor; the boto3 calls run on the event loop's default executor.
 
 ## Why native asyncio?
 
@@ -213,22 +214,25 @@ All aio cursors use `await` for fetch operations, so fetching does not block the
 
 - `AioCursor` and `AioDictCursor` page through `GetQueryResults` as rows are fetched.
 - `AioPandasCursor`, `AioArrowCursor`, and `AioPolarsCursor` download the result file (CSV or
-  Parquet) inside `execute()`, wrapped in `asyncio.to_thread()`. With `chunksize` (pandas and
-  Polars), fetch calls read S3 lazily instead. The fetch methods are also wrapped in
-  `asyncio.to_thread()`.
+  Parquet) inside `execute()`, wrapped in `asyncio.to_thread()`. With `chunksize` on CSV results
+  (pandas and Polars) or on Polars UNLOAD results, fetch calls read S3 lazily instead. The fetch
+  methods are also wrapped in `asyncio.to_thread()`.
 - `AioS3FSCursor` streams rows from S3 as they are fetched.
 
 ```python
 await cursor.execute("SELECT * FROM many_rows")
 row = await cursor.fetchone()
 rows = await cursor.fetchall()
+
+await cursor.execute("SELECT * FROM many_rows")
 df = cursor.as_pandas()  # In-memory conversion, no await needed
 ```
 
 The `as_pandas()`, `as_arrow()`, and `as_polars()` convenience methods are synchronous.
-Without `chunksize`, they return data that `execute()` has already loaded.
-With `chunksize`, `as_pandas()` returns an iterator that reads S3 as it is iterated, and
-`as_polars()` reads every remaining chunk; both read on the calling thread and block the event loop.
+When `execute()` has loaded the whole result, they return that data.
+When the result is read in chunks (`chunksize`, or `auto_optimize_chunksize` with pandas), they read
+S3 on the calling thread and block the event loop: `as_pandas()` returns or reads chunks as it is
+iterated, and `as_polars()` reads every remaining chunk.
 
 See each cursor's documentation page for detailed usage examples.
 
@@ -305,7 +309,7 @@ await fs._rm("s3://my-bucket/data/old/", recursive=True)
 ```
 
 fsspec also generates synchronous wrappers such as `ls()`.
-Call them on an instance created without `asynchronous=True`, outside a running event loop:
+Call them on an instance created without `asynchronous=True`; each call blocks the caller until it completes:
 
 ```python
 from pyathena.filesystem.s3_async import AioS3FileSystem

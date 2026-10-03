@@ -127,7 +127,7 @@ The following type mappings are used:
 | time | datetime.time |
 | varbinary | bytes |
 | array, map, row (struct) | Parsed into Python list/dict (see {ref}`usage-type-hints` for the types of nested values); values too complex to parse are returned as the original string |
-| json | Parsed JSON (dict or list) |
+| json | Parsed JSON value (dict, list, or scalar) |
 
 If you want to customize type conversion, create a converter class like this:
 

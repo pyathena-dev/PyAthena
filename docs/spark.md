@@ -411,8 +411,12 @@ conn = connect(work_group="YOUR_SPARK_WORKGROUP", cursor_class=AsyncSparkCursor)
 with conn.cursor() as cursor:
     calculation_id, future = cursor.execute("""spark.sql("SELECT * FROM many_rows")""")
     calculation_execution = future.result()
-    print(cursor.get_std_out(calculation_execution).result())
-    print(cursor.get_std_error(calculation_execution).result())
+    std_out = cursor.get_std_out(calculation_execution)
+    if std_out:
+        print(std_out.result())
+    std_error = cursor.get_std_error(calculation_execution)
+    if std_error:
+        print(std_error.result())
 ```
 
 As with AsyncCursor, you need a calculation ID to cancel a calculation.

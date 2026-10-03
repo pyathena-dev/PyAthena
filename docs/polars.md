@@ -349,7 +349,8 @@ cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 df = cursor.execute("SELECT * FROM many_rows").as_polars()  # All chunks in a single DataFrame
 ```
 
-This is equivalent to using [polars.concat](https://docs.pola.rs/api/python/stable/reference/api/polars.concat.html) on the chunks from `iter_chunks()`:
+Apart from returning an empty DataFrame when there are no chunks, this is equivalent to using
+[polars.concat](https://docs.pola.rs/api/python/stable/reference/api/polars.concat.html) on the chunks from `iter_chunks()`:
 
 ```python
 import polars as pl
