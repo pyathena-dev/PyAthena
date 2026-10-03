@@ -27,6 +27,13 @@ class S3Path:
     ``?version_id=``). The root path, which names no bucket, is not an
     ``S3Path``.
 
+    Attributes:
+        bucket: The name of the bucket.
+        key: The key, or None for a bucket path. A trailing slash is kept,
+            and a key of only slashes (``bucket//``) names the bucket (see
+            ``is_bucket``).
+        version_id: The version ID, or None for a path without a version.
+
     Example:
         >>> path = S3Path.parse("s3://bucket/dir/key?versionId=v1")
         >>> path.bucket, path.key, path.version_id
