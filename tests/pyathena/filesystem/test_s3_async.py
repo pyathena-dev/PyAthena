@@ -535,6 +535,20 @@ class TestAioS3FileSystem:
                 sync_fs._complete_multipart_upload.call_args.kwargs["RequestPayer"] == "requester"
             )
 
+    def test_internal_file_system_not_cached(self):
+        # GH-978: the internal S3FileSystem was kept in the fsspec instance
+        # cache, so skip_instance_cache=True instances shared it.
+        connection = mock.MagicMock()
+        fs1 = AioS3FileSystem(connection=connection, skip_instance_cache=True)
+        fs2 = AioS3FileSystem(connection=connection, skip_instance_cache=True)
+        assert fs1._sync_fs is not fs2._sync_fs
+        assert fs1.dircache is not fs2.dircache
+
+        fs3 = AioS3FileSystem(connection=connection)
+        assert AioS3FileSystem(connection=connection) is fs3
+        for fs in (fs1, fs2, fs3):
+            assert fs._sync_fs not in S3FileSystem._cache.values()
+
     @pytest.fixture(scope="class")
     def fs(self, request):
         if not hasattr(request, "param"):

@@ -14,6 +14,7 @@ from pyathena.s3fs.reader import AthenaCSVReader, DefaultCSVReader
 from pyathena.s3fs.result_set import AthenaS3FSResultSet
 from tests import ENV
 from tests.pyathena.conftest import connect
+from tests.pyathena.util import cached_file_systems
 
 
 class TestS3FSCursor:
@@ -23,6 +24,13 @@ class TestS3FSCursor:
         assert s3fs_cursor.fetchone() == (1,)
         assert s3fs_cursor.rownumber == 1
         assert s3fs_cursor.fetchone() is None
+
+    def test_result_set_file_system_not_cached(self, s3fs_cursor):
+        # GH-978: the filesystem that read the results was kept in the fsspec
+        # instance cache with the connection, so the connection was never freed.
+        s3fs_cursor.execute("SELECT * FROM one_row")
+        assert s3fs_cursor.fetchall() == [(1,)]
+        assert not cached_file_systems(s3fs_cursor.connection)
 
     def test_fetchmany(self, s3fs_cursor):
         s3fs_cursor.execute("SELECT * FROM many_rows LIMIT 15")

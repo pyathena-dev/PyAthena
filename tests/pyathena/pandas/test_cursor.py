@@ -15,11 +15,13 @@ import pytest
 from pandas.io.parsers import TextFileReader
 
 from pyathena.error import DatabaseError, ProgrammingError
+from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.pandas.converter import DefaultPandasTypeConverter
 from pyathena.pandas.cursor import PandasCursor
 from pyathena.pandas.result_set import AthenaPandasResultSet, PandasDataFrameIterator
 from tests import ENV
 from tests.pyathena.conftest import connect
+from tests.pyathena.util import cached_file_systems
 
 
 class TestPandasCursor:
@@ -229,6 +231,65 @@ class TestPandasCursor:
         assert pandas_cursor.fetchone() == (1,)
         assert pandas_cursor.rownumber == 1
         assert pandas_cursor.fetchone() is None
+
+    @pytest.mark.parametrize(
+        ("pandas_cursor", "chunksize"),
+        [
+            ({"cursor_kwargs": {"unload": False}}, None),
+            ({"cursor_kwargs": {"unload": False}}, 1_000),
+            ({"cursor_kwargs": {"unload": True}}, None),
+        ],
+        indirect=["pandas_cursor"],
+    )
+    def test_result_set_file_system(self, pandas_cursor, chunksize):
+        # GH-978: the filesystems that read the results were kept in the fsspec
+        # instance cache with the connection, so the connection was never freed.
+        # The result set reads through its own filesystem instead of creating
+        # another one from storage_options.
+        with patch.object(
+            S3FileSystem, "__init__", autospec=True, side_effect=S3FileSystem.__init__
+        ) as init:
+            pandas_cursor.execute("SELECT * FROM one_row", chunksize=chunksize)
+            assert pandas_cursor.fetchall() == [(1,)]
+        assert init.call_count == 1
+        assert not cached_file_systems(pandas_cursor.connection)
+        if not pandas_cursor.result_set.is_unload:
+            assert pandas_cursor.result_set._csv_stream.closed
+
+    @pytest.mark.parametrize(
+        ("query", "expected", "binary"),
+        [
+            ("SELECT * FROM one_row", [(1,)], False),
+            ("SELECT X'01' AS value", [(b"\x01",)], True),
+        ],
+        ids=["plain", "binary"],
+    )
+    @pytest.mark.parametrize("with_options", [False, True], ids=["none", "options"])
+    def test_csv_storage_options(self, pandas_cursor, query, expected, binary, with_options):
+        # Given storage_options, even None, the CSV output is opened through fsspec
+        # with them, as pandas does, instead of the result set's filesystem.
+        storage_options = (
+            {
+                "connection": pandas_cursor.connection,
+                "default_cache_type": "none",
+                "skip_instance_cache": True,
+            }
+            if with_options
+            else None
+        )
+        with patch.object(
+            S3FileSystem, "open", autospec=True, side_effect=S3FileSystem.open
+        ) as open_:
+            pandas_cursor.execute(query, storage_options=storage_options)
+            assert pandas_cursor.fetchall() == expected
+        file_systems = [c.args[0] for c in open_.call_args_list]
+        assert not [fs for fs in file_systems if fs is pandas_cursor.result_set._fs]
+        if with_options:
+            assert file_systems
+            assert all(fs.default_cache_type == "none" for fs in file_systems)
+        if not binary:
+            # pandas opens and closes the file itself.
+            assert pandas_cursor.result_set._csv_stream is None
 
     @pytest.mark.parametrize(
         ("pandas_cursor", "parquet_engine", "chunksize"),

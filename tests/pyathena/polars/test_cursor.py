@@ -21,6 +21,7 @@ from pyathena.polars.cursor import PolarsCursor
 from pyathena.polars.result_set import AthenaPolarsResultSet
 from tests import ENV
 from tests.pyathena.conftest import connect
+from tests.pyathena.util import cached_file_systems
 
 
 class TestPolarsCursor:
@@ -35,6 +36,13 @@ class TestPolarsCursor:
         assert polars_cursor.fetchone() == (1,)
         assert polars_cursor.rownumber == 1
         assert polars_cursor.fetchone() is None
+
+    def test_result_set_file_system_not_cached(self, polars_cursor):
+        # GH-978: the filesystem that read the CSV results was kept in the fsspec
+        # instance cache with the connection, so the connection was never freed.
+        polars_cursor.execute("SELECT * FROM one_row")
+        assert polars_cursor.fetchall() == [(1,)]
+        assert not cached_file_systems(polars_cursor.connection)
 
     @pytest.mark.parametrize(
         "polars_cursor",

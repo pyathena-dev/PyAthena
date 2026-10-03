@@ -15,6 +15,8 @@ from botocore.exceptions import ClientError
 from jinja2 import Environment, FileSystemLoader
 from sqlalchemy import types
 
+from pyathena.filesystem.s3 import S3FileSystem
+from pyathena.filesystem.s3_async import AioS3FileSystem
 from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaCalculationExecutionStatus, AthenaQueryExecution
 
@@ -26,6 +28,16 @@ _queries = Environment(
 def read_query(name, **kwargs):
     template = _queries.get_template(name)
     return [q.strip() for q in template.render(**kwargs).split(";") if q and q.strip()]
+
+
+def cached_file_systems(connection):
+    """Return the filesystems in the fsspec instance cache that hold the connection."""
+    return [
+        fs
+        for cls in (S3FileSystem, AioS3FileSystem)
+        for fs in cls._cache.values()
+        if fs.storage_options.get("connection") is connection
+    ]
 
 
 METADATA_OPERATIONS = ("get_table_metadata", "list_table_metadata", "list_databases")

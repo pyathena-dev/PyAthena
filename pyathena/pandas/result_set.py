@@ -8,7 +8,7 @@ from collections import abc
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack
 from functools import partial
-from io import BufferedReader, StringIO, TextIOWrapper
+from io import BufferedReader, IOBase, StringIO, TextIOWrapper
 from multiprocessing import cpu_count
 from typing import (
     TYPE_CHECKING,
@@ -72,7 +72,7 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         self,
         reader: TextFileReader | DataFrame,
         trunc_date: Callable[[DataFrame], DataFrame],
-        csv_stream: TextIOWrapper | None = None,
+        csv_stream: IOBase | None = None,
     ) -> None:
         """Initialize the iterator.
 
@@ -335,7 +335,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         self._data_manifest: list[str] = []
         self._kwargs = kwargs
         self._fs = self._create_s3_file_system()
-        self._csv_stream: TextIOWrapper | None = None
+        self._csv_stream: IOBase | None = None
 
         # Cache time column names for efficient _trunc_date processing
         description = self.description if self.description else []
@@ -465,11 +465,14 @@ class AthenaPandasResultSet(AthenaResultSet):
         """
         from pyathena.filesystem.s3 import S3FileSystem
 
+        # Not cached by fsspec so that the connection and the dircache are
+        # released with the result set.
         return S3FileSystem(
             connection=self.connection,
             default_block_size=self._block_size,
             default_cache_type=self._cache_type,
             max_workers=self._max_workers,
+            skip_instance_cache=True,
         )
 
     @property
@@ -558,14 +561,22 @@ class AthenaPandasResultSet(AthenaResultSet):
 
         try:
             with ExitStack() as stack:
-                source: str | TextIOWrapper = self.output_location
+                source: str | IOBase = self.output_location
                 binary_columns = self._configure_binary_csv_read(read_csv_kwargs, pd.read_csv)
                 if binary_columns:
-                    storage_options = read_csv_kwargs.pop("storage_options", None) or {}
-                    self._csv_stream = stack.enter_context(
+                    # Given storage_options, even None, open the file through fsspec
+                    # as pandas does.
+                    storage_options = None
+                    if "storage_options" in read_csv_kwargs:
+                        storage_options = read_csv_kwargs.pop("storage_options") or {}
+                    source = self._csv_stream = stack.enter_context(
                         self._open_binary_csv_stream(binary_columns, storage_options)
                     )
-                    source = self._csv_stream
+                elif "storage_options" not in read_csv_kwargs:
+                    # With storage_options, pandas opens the file through fsspec.
+                    source = self._csv_stream = stack.enter_context(
+                        self._fs.open(self.output_location, mode="rb")
+                    )
                 result = pd.read_csv(source, **read_csv_kwargs)
                 if not isinstance(result, pd.DataFrame):
                     # The chunk iterator takes ownership of the stream.
@@ -608,12 +619,6 @@ class AthenaPandasResultSet(AthenaResultSet):
             "keep_default_na": self._keep_default_na,
             "na_values": self._na_values,
             "quoting": self._quoting,
-            "storage_options": {
-                "connection": self.connection,
-                "default_block_size": self._block_size,
-                "default_cache_type": self._cache_type,
-                "max_workers": self._max_workers,
-            },
             "chunksize": chunksize,
             "engine": csv_engine,
         }
@@ -736,19 +741,17 @@ class AthenaPandasResultSet(AthenaResultSet):
         return binary_columns
 
     def _open_binary_csv_stream(
-        self, binary_columns: set[int], storage_options: dict[str, Any]
+        self, binary_columns: set[int], storage_options: dict[str, Any] | None
     ) -> TextIOWrapper:
         """Open a stream that preserves binary NULL fields and original CSV newlines."""
+        text_options: dict[str, Any] = {"mode": "rt", "encoding": "utf-8", "newline": ""}
         with ExitStack() as stack:
-            source = stack.enter_context(
-                filesystem_open(
-                    self.output_location,
-                    mode="rt",
-                    encoding="utf-8",
-                    newline="",
-                    **storage_options,
+            if storage_options is None:
+                source = stack.enter_context(self._fs.open(self.output_location, **text_options))
+            else:
+                source = stack.enter_context(
+                    filesystem_open(self.output_location, **text_options, **storage_options)
                 )
-            )
             reader = stack.enter_context(BinaryCSVReader(source, binary_columns))
             buffer = stack.enter_context(BufferedReader(reader))
             stream = TextIOWrapper(buffer, encoding="utf-8", newline="")
@@ -765,7 +768,9 @@ class AthenaPandasResultSet(AthenaResultSet):
             self._unload_location = "/".join(self._data_manifest[0].split("/")[:-1]) + "/"
 
         if engine == "pyarrow":
-            unload_location = self._unload_location
+            # pyarrow takes the path without the scheme with an fsspec filesystem.
+            bucket, key = parse_output_location(self._unload_location)
+            unload_location = f"{bucket}/{key}"
             kwargs = {
                 "use_threads": True,
             }
@@ -777,12 +782,7 @@ class AthenaPandasResultSet(AthenaResultSet):
             return pd.read_parquet(
                 unload_location,
                 engine=self._engine,
-                storage_options={
-                    "connection": self.connection,
-                    "default_block_size": self._block_size,
-                    "default_cache_type": self._cache_type,
-                    "max_workers": self._max_workers,
-                },
+                filesystem=self._fs,
                 **kwargs,
             )
         except Exception as e:
