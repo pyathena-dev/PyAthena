@@ -62,8 +62,8 @@ class AioCursor(WithAsyncFetch):
             poll_interval: Query status polling interval in seconds.
             encryption_option: S3 encryption option (SSE_S3, SSE_KMS, CSE_KMS).
             kms_key: KMS key for encryption.
-            kill_on_interrupt: Stop the running query when polling is cancelled
-                with ``asyncio.CancelledError``.
+            kill_on_interrupt: Cancel the query when the task is cancelled while
+                ``execute()`` starts or waits for the query.
             result_reuse_enable: Enable Athena query result reuse.
             result_reuse_minutes: Maximum age in minutes of a reused result.
             **kwargs: Arguments forwarded to ``WithResultSet.__init__`` and

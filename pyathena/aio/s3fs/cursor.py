@@ -67,8 +67,8 @@ class AioS3FSCursor(WithAsyncFetch):
             poll_interval: Query status polling interval in seconds.
             encryption_option: S3 encryption option for query results.
             kms_key: KMS key for encrypting query results.
-            kill_on_interrupt: Whether to stop the running query when the waiting
-                task is cancelled.
+            kill_on_interrupt: Cancel the query when the task is cancelled while
+                ``execute()`` starts or waits for the query.
             result_reuse_enable: Whether to enable Athena query result reuse.
             result_reuse_minutes: Maximum age of a reused query result in minutes.
             csv_reader: CSV reader class for parsing the result files. If None,

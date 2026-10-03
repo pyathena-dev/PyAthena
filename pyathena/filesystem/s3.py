@@ -552,7 +552,9 @@ class S3FileSystem(AbstractFileSystem):
     def info(self, path: str, **kwargs) -> S3Object:
         """Return information about an S3 path.
 
-        Returns a matching entry from the directory cache when one exists.
+        Uses the directory cache first: a cached entry for the path is
+        returned, a cached listing of the path itself makes it a directory,
+        and a cached listing of its parent without it means it does not exist.
         Otherwise, a key path is looked up with HeadObject and, if no object
         exists, with a ListObjectsV2 request (``Delimiter="/"``,
         ``MaxKeys=1``) that checks whether it is a key prefix; a bucket path
@@ -2109,8 +2111,8 @@ class S3File(AbstractBufferedFile):
         In read mode, the object is looked up with ``info()`` and the reads
         are made conditional on its ETag (``IfMatch``). In append mode, an
         existing object smaller than ``MULTIPART_UPLOAD_MIN_PART_SIZE`` is
-        read into the write buffer, and a larger one is copied as the first
-        parts of the multipart upload.
+        read into the write buffer; a larger one is copied as the first parts
+        once a multipart upload starts.
 
         Args:
             fs: The filesystem that the file belongs to.

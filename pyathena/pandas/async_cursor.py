@@ -92,7 +92,9 @@ class AsyncPandasCursor(AsyncCursor):
             poll_interval: Query status polling interval in seconds.
             encryption_option: S3 encryption option for query results.
             kms_key: KMS key for encrypting query results.
-            kill_on_interrupt: Whether to stop the running query on ``KeyboardInterrupt``.
+            kill_on_interrupt: Cancel a query whose start in ``execute()`` is interrupted by
+                ``KeyboardInterrupt``. Waiting runs on worker threads, which do not
+                receive the interrupt.
             max_workers: Maximum number of threads that run queries concurrently.
             arraysize: Number of rows to fetch per batch. Must be a positive integer.
             unload: Whether to wrap queries in ``UNLOAD`` and read the Parquet output.
