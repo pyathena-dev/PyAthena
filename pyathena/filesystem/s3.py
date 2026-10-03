@@ -406,8 +406,9 @@ class S3FileSystem(AbstractFileSystem):
     ) -> list[S3Object]:
         """List the objects and common prefixes under a path.
 
-        A complete listing of the path is cached under ``(path, delimiter)``,
-        which ``invalidate_cache`` drops for the path and its parents.
+        A complete listing of the path is cached under ``(path, delimiter)``.
+        ``invalidate_cache`` drops it when the path or a path under it is
+        invalidated.
 
         Args:
             path: The bucket or directory path to list.
