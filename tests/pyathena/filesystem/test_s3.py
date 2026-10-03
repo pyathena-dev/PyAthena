@@ -888,9 +888,10 @@ class TestS3FileSystem:
 
     def _make_object_fs(self, data):
         # A filesystem holding one object at s3://bucket/key whose client
-        # answers GetObject like S3: InvalidRange when the range starts at
-        # or past the end of the object, and a failure on a range that S3
-        # would answer with the whole object (last byte before the first).
+        # answers GetObject like S3: the last bytes for a suffix range,
+        # InvalidRange when the range starts at or past the end of the
+        # object, and a failure on a range that S3 would answer with the
+        # whole object (last byte before the first).
         # info() reports the given size, and the requested ranges are
         # recorded.
         fs = self._make_fs()
@@ -905,6 +906,8 @@ class TestS3FileSystem:
             ranges.append(range_)
             if range_ is None:
                 return {"Body": io.BytesIO(data)}
+            if suffix := re.fullmatch(r"bytes=-(\d+)", range_):
+                return {"Body": io.BytesIO(data[-int(suffix[1]) :])}
             match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_)
             assert match, range_
             first = int(match[1])
@@ -930,6 +933,8 @@ class TestS3FileSystem:
             (5, None),
             (1, -1),
             (-5, None),
+            (-10, None),
+            (-100, None),
             (5, 100),
             (-100, 5),
             # Empty ranges.
@@ -949,10 +954,14 @@ class TestS3FileSystem:
 
         # The range selects bytes like a slice.
         assert fs.cat_file("s3://bucket/key", start=start, end=end) == data[start:end]
+        suffix = (start or 0) < 0 and end is None
         negative = (start or 0) < 0 or (end or 0) < 0
         empty = end is not None and 0 <= end <= (start or 0)
-        # Only a negative offset or an empty range looks up the object.
-        assert fs.info.called == (negative or empty)
+        # Only a negative offset with an end, a negative end, or an empty
+        # range looks up the object.
+        assert fs.info.called == ((negative and not suffix) or empty)
+        if suffix:
+            assert ranges == [f"bytes={start}"]
         if empty:
             assert ranges == []
 
@@ -963,7 +972,17 @@ class TestS3FileSystem:
 
         assert fs.cat_file("s3://bucket/key", start=10, end=20) == b"abcdefghij"
         assert fs.cat_file("s3://bucket/key", start=15) == b"fghij"
-        assert ranges == ["bytes=10-19", "bytes=15-"]
+        assert fs.cat_file("s3://bucket/key", start=-5) == b"fghij"
+        assert ranges == ["bytes=10-19", "bytes=15-", "bytes=-5"]
+
+    def test_cat_file_suffix_range_key_ending_in_slash(self):
+        fs, _ = self._make_object_fs(b"abc")
+        # info() reports a key ending in "/" as a directory.
+        fs.info.return_value = S3FileSystem._directory_object("bucket", "dir")
+
+        assert fs.cat_file("s3://bucket/dir/", start=-2) == b"bc"
+        fs._client.get_object.assert_called_once_with(Bucket="bucket", Key="dir/", Range="bytes=-2")
+        fs.info.assert_not_called()
 
     def test_cat_file_range_errors(self):
         fs = self._make_fs()
@@ -996,7 +1015,7 @@ class TestS3FileSystem:
             fs.cat_file("s3://bucket/missing", start=start, end=end)
         fs._call.assert_not_called()
 
-    @pytest.mark.parametrize(("start", "end"), [(-5, None), (0, -1), (5, 5)])
+    @pytest.mark.parametrize(("start", "end"), [(-5, 3), (0, -1), (5, 5)])
     def test_cat_file_range_directory(self, start, end):
         fs = self._make_fs()
         fs.info = mock.MagicMock(return_value=S3FileSystem._directory_object("bucket", "dir"))
@@ -1005,6 +1024,25 @@ class TestS3FileSystem:
         with pytest.raises(FileNotFoundError):
             fs.cat_file("s3://bucket/dir", start=start, end=end)
         fs._call.assert_not_called()
+
+    @pytest.mark.parametrize(("start", "end"), [(None, None), (-1, None), (0, 5)])
+    def test_cat_file_bucket(self, start, end):
+        fs = self._make_fs()
+
+        with pytest.raises(FileNotFoundError):
+            fs.cat_file("s3://bucket/", start=start, end=end)
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize(("start", "end"), [(-2, -1), (0, -1), (5, 5)])
+    def test_cat_file_range_key_ending_in_slash(self, start, end):
+        fs, ranges = self._make_object_fs(b"0123456789")
+        # info() of "dir/" describes the object "dir" when both exist.
+        fs.info.return_value = self._file_object("dir")
+
+        # The size of "dir" is not used for the range of "dir/".
+        with pytest.raises(FileNotFoundError):
+            fs.cat_file("s3://bucket/dir/", start=start, end=end)
+        assert ranges == []
 
     def test_get_file_directory(self, tmp_path):
         fs = self._make_fs()
@@ -2982,6 +3020,7 @@ class TestS3File:
     def test_format_ranges(self):
         assert S3File._format_ranges((0, 100)) == "bytes=0-99"
         assert S3File._format_ranges((100, None)) == "bytes=100-"
+        assert S3File._format_ranges((-8, None)) == "bytes=-8"
 
     @pytest.mark.parametrize("autocommit", [True, False])
     def test_upload_chunk_small_file(self, autocommit):

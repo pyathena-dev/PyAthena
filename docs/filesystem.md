@@ -98,6 +98,17 @@ the existing object also count toward the limit. A write with `open` that reache
 limit raises `ValueError` and aborts its multipart upload. Multipart copies with `cp`
 use parts large enough to stay within the limit.
 
+Paths are normalized as in fsspec, which drops a trailing slash, so `info`, `isfile`,
+and `open` treat `s3://YOUR_S3_BUCKET/dir/` as `s3://YOUR_S3_BUCKET/dir`: the object
+`dir` if it exists, and otherwise the directory `dir`. An object whose key ends in a
+slash, such as a folder marker, is therefore not a file for these methods. Opening
+`dir/` for reading reads the object `dir` or raises `FileNotFoundError`, and opening it
+for writing writes the object `dir`. A path with a `?versionId=` suffix keeps the slash
+and refers to the object. `find`, and `ls` of the directory, list the object as a file
+entry. `cat_file` uses the key as written. Without a `?versionId=` suffix, it reads
+such an object without a range, with a non-empty range of non-negative offsets, or with
+a negative `start` and no `end`, and raises `FileNotFoundError` for other ranges.
+
 ## Error translation
 
 S3 error responses are translated into standard Python exceptions, so filesystem
