@@ -17,6 +17,7 @@ from unittest import mock
 import boto3
 import fsspec
 import pytest
+from botocore.stub import Stubber
 from fsspec import Callback
 
 from pyathena.filesystem.s3 import S3File, S3FileSystem
@@ -29,6 +30,7 @@ from pyathena.filesystem.s3_object import (
 )
 from tests import ENV
 from tests.pyathena.conftest import connect
+from tests.pyathena.util import MULTIPART_COPY_KWARGS, MULTIPART_COPY_SIZE, stub_multipart_copy
 
 
 @pytest.fixture(scope="class")
@@ -165,6 +167,11 @@ class TestAioS3FileSystem:
             size1=5 * 2**30 + 2**20,
             bucket2="bucket",
             key2="dst",
+            # Copy without reading the metadata, tags and annotations of the
+            # source (GH-973).
+            MetadataDirective="REPLACE",
+            TaggingDirective="REPLACE",
+            AnnotationDirective="EXCLUDE",
         )
 
         parts = sorted(
@@ -175,6 +182,97 @@ class TestAioS3FileSystem:
             (1, (0, 5 * 2**29 + 2**19)),
             (2, (5 * 2**29 + 2**19, 5 * 2**30 + 2**20)),
         ]
+
+    @staticmethod
+    async def _multipart_copy(fail_part=False, fail_annotation=False):
+        # max_workers=1 runs the stubbed requests in a deterministic order.
+        fs = AioS3FileSystem(
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            max_workers=1,
+            skip_instance_cache=True,
+        )
+        with Stubber(fs._sync_fs._client) as stubber:
+            stub_multipart_copy(stubber, fail_part=fail_part, fail_annotation=fail_annotation)
+            try:
+                await fs._copy_object_with_multipart_upload(
+                    bucket1="bucket",
+                    key1="src",
+                    size1=MULTIPART_COPY_SIZE,
+                    bucket2="bucket",
+                    key2="dst",
+                    block_size=S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE,
+                    **MULTIPART_COPY_KWARGS,
+                )
+            finally:
+                stubber.assert_no_pending_responses()
+
+    @pytest.mark.asyncio
+    async def test_copy_object_with_multipart_upload_copies_source(self):
+        # GH-973: the same requests as S3FileSystem; see
+        # TestS3FileSystem.test_copy_object_with_multipart_upload_copies_source.
+        await self._multipart_copy()
+
+    @pytest.mark.asyncio
+    async def test_copy_object_with_multipart_upload_failed_part(self):
+        # GH-973: a failed part copy aborts the upload, as in S3FileSystem.
+        with pytest.raises(OSError, match="part failed"):
+            await self._multipart_copy(fail_part=True)
+
+    @pytest.mark.asyncio
+    async def test_copy_object_with_multipart_upload_failed_annotation(self):
+        # GH-973: a failed annotation copy is raised; the completed
+        # destination is neither aborted nor deleted.
+        with pytest.raises(PermissionError):
+            await self._multipart_copy(fail_annotation=True)
+
+    @pytest.mark.asyncio
+    async def test_copy_object_with_multipart_upload_waits_for_running_parts(self):
+        # GH-973: the abort waits for the part copies that are running when
+        # one fails, and no part starts after the failure.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), max_workers=2, skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        sync_fs._create_multipart_upload = mock.MagicMock(
+            return_value=SimpleNamespace(upload_id="uploadid")
+        )
+        events = []
+        failed = threading.Event()
+
+        def upload_part_copy(**kw):
+            part_number = kw["part_number"]
+            events.append(f"start {part_number}")
+            if part_number == 1:
+                failed.wait(5)
+                time.sleep(0.05)
+                events.append("end 1")
+                return SimpleNamespace(etag='"e"', part_number=part_number)
+            failed.set()
+            raise OSError("part failed")
+
+        sync_fs._upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
+        sync_fs._complete_multipart_upload = mock.MagicMock()
+        sync_fs._abort_multipart_upload = mock.MagicMock(
+            side_effect=lambda *args: events.append("abort")
+        )
+
+        with pytest.raises(OSError, match="part failed"):
+            await fs._copy_object_with_multipart_upload(
+                bucket1="bucket",
+                key1="src",
+                size1=3 * S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE,
+                bucket2="bucket",
+                key2="dst",
+                block_size=S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE,
+                MetadataDirective="REPLACE",
+                TaggingDirective="REPLACE",
+                AnnotationDirective="EXCLUDE",
+            )
+
+        # Part 3 waits for a worker and is not started after the failure.
+        assert sorted(events[:2]) == ["start 1", "start 2"]
+        assert events[2:] == ["end 1", "abort"]
+        sync_fs._complete_multipart_upload.assert_not_called()
 
     @pytest.mark.parametrize(
         "block_size",
@@ -641,6 +739,11 @@ class TestAioS3FileSystem:
 
         sync_fs._upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
         sync_fs._complete_multipart_upload = mock.MagicMock()
+        directives = {
+            "MetadataDirective": "REPLACE",
+            "TaggingDirective": "REPLACE",
+            "AnnotationDirective": "EXCLUDE",
+        }
 
         await fs._cp_file(
             "s3://bucket/src",
@@ -649,6 +752,9 @@ class TestAioS3FileSystem:
             max_workers=1,
             RequestPayer="requester",
             ContentType="text/csv",
+            # Copy without reading the metadata, tags and annotations of the
+            # source (GH-973).
+            **directives,
         )
 
         if size <= S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE:
@@ -660,6 +766,7 @@ class TestAioS3FileSystem:
                 key2="dst",
                 RequestPayer="requester",
                 ContentType="text/csv",
+                **directives,
             )
         else:
             sync_fs._create_multipart_upload.assert_called_once_with(

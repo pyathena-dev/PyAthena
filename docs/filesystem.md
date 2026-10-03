@@ -104,6 +104,21 @@ the existing object also count toward the limit. A write with `open` that reache
 limit raises `ValueError` and aborts its multipart upload. Multipart copies with `cp`
 use parts large enough to stay within the limit.
 
+`cp` copies an object larger than 5 GiB with a multipart upload instead of a single
+CopyObject request, with the same result as CopyObject. CopyObject parameters given as
+keyword arguments are sent to the multipart requests that accept them, such as
+`CopySourceIfMatch` to each part copy. With the default `COPY` value of
+`MetadataDirective`, `TaggingDirective`, and `AnnotationDirective`, the content headers
+(such as `ContentType`) and user-defined metadata, the tags, and the annotations of the
+source are copied, and the values given for them are ignored, as CopyObject does. A
+`REPLACE` directive uses the given values instead, and `AnnotationDirective="EXCLUDE"`
+skips the annotations. Copying the tags needs `s3:GetObjectTagging` on the source, and
+copying the annotations needs `s3:ListObjectAnnotations` and `s3:GetObjectAnnotation` on
+the source and `s3:PutObjectAnnotation` on the destination. The annotations
+are copied after the upload completes, so the destination exists without them until the
+last one is written. If an annotation fails to copy, the error is raised and the
+destination is kept. A failed part copy aborts the multipart upload.
+
 Paths are normalized as in fsspec, which drops a trailing slash, so `info`, `isfile`,
 and `open` treat `s3://YOUR_S3_BUCKET/dir/` as `s3://YOUR_S3_BUCKET/dir`: the object
 `dir` if it exists, and otherwise the directory `dir`. An object whose key ends in a

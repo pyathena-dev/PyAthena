@@ -41,6 +41,7 @@ from pyathena.filesystem.s3_object import S3Object, S3ObjectType, S3StorageClass
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
+from tests.pyathena.util import MULTIPART_COPY_KWARGS, MULTIPART_COPY_SIZE, stub_multipart_copy
 
 # A client that sends no requests; its service model selects the parameters
 # that each S3 operation accepts.
@@ -1714,7 +1715,14 @@ class TestS3FileSystem:
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
         )
         fs._finish_multipart_upload = mock.MagicMock()
-        kwargs = {"ContentType": "text/csv", "RequestPayer": "requester"}
+        # The directives make the copy use the given values without reading
+        # the source (GH-973).
+        directives = {
+            "MetadataDirective": "REPLACE",
+            "TaggingDirective": "REPLACE",
+            "AnnotationDirective": "EXCLUDE",
+        }
+        kwargs = {"ContentType": "text/csv", "RequestPayer": "requester", **directives}
 
         fs._copy_object_with_multipart_upload(
             bucket1="bucket",
@@ -1725,12 +1733,166 @@ class TestS3FileSystem:
             **kwargs,
         )
 
-        fs._create_multipart_upload.assert_called_once_with(bucket="bucket", key="dst", **kwargs)
+        fs._create_multipart_upload.assert_called_once_with(
+            bucket="bucket", key="dst", ContentType="text/csv", RequestPayer="requester"
+        )
+        fs._call.assert_not_called()
         assert all(
             c.kwargs["RequestPayer"] == "requester" and "ContentType" not in c.kwargs
             for c in fs._upload_part_copy.call_args_list
         )
         assert fs._finish_multipart_upload.call_args.kwargs["request_kwargs"] == kwargs
+
+    @staticmethod
+    def _stubbed_fs(**kwargs):
+        return S3FileSystem(
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            skip_instance_cache=True,
+            max_workers=1,
+            **kwargs,
+        )
+
+    @staticmethod
+    def _multipart_copy(fs, bucket1="bucket", **kwargs):
+        fs._copy_object_with_multipart_upload(
+            bucket1=bucket1,
+            key1="src",
+            size1=MULTIPART_COPY_SIZE,
+            bucket2="bucket",
+            key2="dst",
+            block_size=S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE,
+            **kwargs,
+        )
+
+    def test_copy_object_with_multipart_upload_copies_source(self):
+        # GH-973: as CopyObject does by default, the multipart copy copies
+        # the content headers, the user-defined metadata, the tags and the
+        # annotations of the source, ignoring the values of the copy; the
+        # source condition goes to the part copies, and the source's lookups
+        # get the source's expected bucket owner.
+        fs = self._stubbed_fs()
+        with Stubber(fs._client) as stubber:
+            stub_multipart_copy(stubber)
+            self._multipart_copy(fs, **MULTIPART_COPY_KWARGS)
+            stubber.assert_no_pending_responses()
+
+    def test_copy_object_with_multipart_upload_failed_part(self):
+        fs = self._stubbed_fs()
+        with Stubber(fs._client) as stubber:
+            stub_multipart_copy(stubber, fail_part=True)
+            with pytest.raises(OSError, match="part failed"):
+                self._multipart_copy(fs, **MULTIPART_COPY_KWARGS)
+            stubber.assert_no_pending_responses()
+
+    def test_copy_object_with_multipart_upload_failed_annotation(self):
+        # GH-973: a failed annotation copy is raised; the completed
+        # destination is neither aborted nor deleted.
+        fs = self._stubbed_fs()
+        with Stubber(fs._client) as stubber:
+            stub_multipart_copy(stubber, fail_annotation=True)
+            with pytest.raises(PermissionError):
+                self._multipart_copy(fs, **MULTIPART_COPY_KWARGS)
+            stubber.assert_no_pending_responses()
+
+    def test_copy_object_with_multipart_upload_replace_directives(self):
+        # GH-973: REPLACE uses the values of the copy without reading the
+        # source, and EXCLUDE skips the annotations.
+        fs = self._stubbed_fs()
+        with Stubber(fs._client) as stubber:
+            stubber.add_response(
+                "create_multipart_upload",
+                {"UploadId": "u"},
+                {"Bucket": "bucket", "Key": "dst", "ContentType": "text/plain", "Tagging": "a=1"},
+            )
+            for _ in (1, 2):
+                stubber.add_response("upload_part_copy", {"CopyPartResult": {"ETag": '"p"'}}, None)
+            stubber.add_response("complete_multipart_upload", {"ETag": '"dst"'}, None)
+            self._multipart_copy(
+                fs,
+                ContentType="text/plain",
+                Tagging="a=1",
+                MetadataDirective="REPLACE",
+                TaggingDirective="REPLACE",
+                AnnotationDirective="EXCLUDE",
+            )
+            stubber.assert_no_pending_responses()
+
+    @pytest.mark.parametrize(
+        "directive",
+        [
+            {"MetadataDirective": "EXCLUDE"},
+            {"TaggingDirective": "copy"},
+            {"AnnotationDirective": "REPLACE"},
+        ],
+    )
+    def test_copy_object_with_multipart_upload_invalid_directive(self, directive):
+        fs = self._stubbed_fs()
+        with Stubber(fs._client), pytest.raises(ValueError, match="Invalid"):
+            self._multipart_copy(fs, **directive)
+
+    def test_copy_object_with_multipart_upload_unknown_parameter(self):
+        # A parameter that CopyObject does not accept is still rejected by
+        # botocore's validation of CreateMultipartUpload, before any request
+        # is sent.
+        fs = self._stubbed_fs()
+        with pytest.raises(botocore.exceptions.ParamValidationError, match="ContentTyp"):
+            self._multipart_copy(
+                fs,
+                ContentTyp="text/csv",
+                MetadataDirective="REPLACE",
+                TaggingDirective="REPLACE",
+                AnnotationDirective="EXCLUDE",
+            )
+
+    def test_copy_object_with_multipart_upload_sse_c_source(self):
+        # GH-973: the source's SSE-C key reaches its HeadObject, and an SSE-C
+        # object, which cannot have annotations, is not listed for them.
+        fs = self._stubbed_fs()
+        sse_c = {"CopySourceSSECustomerAlgorithm": "AES256", "CopySourceSSECustomerKey": "k" * 32}
+        with Stubber(fs._client) as stubber:
+            stubber.add_response(
+                "head_object",
+                {"ContentType": "text/csv"},
+                {
+                    "Bucket": "bucket",
+                    "Key": "src",
+                    "SSECustomerAlgorithm": "AES256",
+                    "SSECustomerKey": "k" * 32,
+                },
+            )
+            stubber.add_response(
+                "create_multipart_upload",
+                {"UploadId": "u"},
+                {"Bucket": "bucket", "Key": "dst", "ContentType": "text/csv", "Metadata": {}},
+            )
+            for _ in (1, 2):
+                stubber.add_response("upload_part_copy", {"CopyPartResult": {"ETag": '"p"'}}, None)
+            stubber.add_response("complete_multipart_upload", {"ETag": '"dst"'}, None)
+            self._multipart_copy(fs, TaggingDirective="REPLACE", **sse_c)
+            stubber.assert_no_pending_responses()
+
+    def test_copy_object_with_multipart_upload_directory_bucket_source(self):
+        # GH-973: objects in a directory bucket have neither tags nor
+        # annotations, and the bucket supports neither GetObjectTagging nor
+        # ListObjectAnnotations.
+        fs = self._stubbed_fs()
+        bucket = "bucket--usw2-az1--x-s3"
+        with Stubber(fs._client) as stubber:
+            stubber.add_response(
+                "head_object", {"ContentType": "text/csv"}, {"Bucket": bucket, "Key": "src"}
+            )
+            stubber.add_response(
+                "create_multipart_upload",
+                {"UploadId": "u"},
+                {"Bucket": "bucket", "Key": "dst", "ContentType": "text/csv", "Metadata": {}},
+            )
+            for _ in (1, 2):
+                stubber.add_response("upload_part_copy", {"CopyPartResult": {"ETag": '"p"'}}, None)
+            stubber.add_response("complete_multipart_upload", {"ETag": '"dst"'}, None)
+            self._multipart_copy(fs, bucket1=bucket)
+            stubber.assert_no_pending_responses()
 
     def test_pipe_file_invalid_path_raises(self):
         fs = self._make_fs()
@@ -3001,6 +3163,11 @@ class TestS3FileSystem:
             bucket2="bucket",
             key2="dst",
             max_workers=max_workers,
+            # Copy without reading the metadata, tags and annotations of the
+            # source (GH-973).
+            MetadataDirective="REPLACE",
+            TaggingDirective="REPLACE",
+            AnnotationDirective="EXCLUDE",
         )
 
         parts = sorted(

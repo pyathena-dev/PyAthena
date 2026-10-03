@@ -20,7 +20,7 @@ from io import BytesIO
 from multiprocessing import cpu_count
 from re import Pattern
 from typing import Any, BinaryIO, cast
-from urllib.parse import unquote_plus
+from urllib.parse import unquote_plus, urlencode
 
 import botocore.exceptions
 from boto3 import Session
@@ -199,6 +199,18 @@ class S3FileSystem(AbstractFileSystem):
             "SSECustomerKey",
             "SSECustomerKeyMD5",
         }
+    )
+    # https://docs.aws.amazon.com/AmazonS3/latest/API/API_CopyObject.html
+    # The metadata that CopyObject copies from the source with the COPY
+    # metadata directive, which ignores the values given in the request.
+    _COPY_METADATA_PARAMS: tuple[str, ...] = (
+        "CacheControl",
+        "ContentDisposition",
+        "ContentEncoding",
+        "ContentLanguage",
+        "ContentType",
+        "Expires",
+        "Metadata",
     )
     PATTERN_PATH: Pattern[str] = re.compile(
         r"(^s3://|^s3a://|^)(?P<bucket>[a-zA-Z0-9.\-_]+)(/(?P<key>[^?]+)|/)?"
@@ -1661,12 +1673,15 @@ class S3FileSystem(AbstractFileSystem):
                 control a multipart copy and are not sent to S3.
 
         Raises:
-            ValueError: If trying to copy to a versioned file or copy buckets.
+            ValueError: If trying to copy to a versioned file or copy buckets,
+                or if a directive of a multipart copy has an invalid value.
 
         Note:
             Uses multipart copy for objects larger than the maximum part size
             to optimize performance for large files. The copy operation is
             performed entirely on the S3 service without data transfer.
+            The multipart copy applies the metadata, tagging and annotation
+            directives as CopyObject does (default ``COPY``).
             A directory ``path1``, which recursive ``copy()`` passes along
             with the files under it, is skipped.
         """
@@ -1773,6 +1788,31 @@ class S3FileSystem(AbstractFileSystem):
         version_id1: str | None = None,
         **kwargs,
     ) -> None:
+        """Copy an object with a multipart upload of its byte ranges.
+
+        The parts are copied in parallel with UploadPartCopy. The upload
+        gets the metadata and tags that CopyObject would copy (see
+        :meth:`_get_multipart_copy_kwargs`), and the annotations of the
+        source are copied onto the destination after the upload completes.
+        A failed part or completion aborts the upload; a failed annotation
+        copy is raised and leaves the destination in place.
+
+        Args:
+            bucket1: Source S3 bucket name.
+            key1: Source object key.
+            size1: Size of the source object in bytes.
+            bucket2: Destination S3 bucket name.
+            key2: Destination object key.
+            max_workers: Maximum number of parallel requests.
+            block_size: Size in bytes of the copied ranges.
+            version_id1: Source version ID, if any.
+            **kwargs: The CopyObject parameters of the copy; each request
+                receives those that it accepts.
+
+        Raises:
+            ValueError: If ``block_size`` is out of the part size limits or a
+                directive has an invalid value.
+        """
         max_workers = max_workers if max_workers else self.max_workers
         block_size = block_size if block_size else self.MULTIPART_UPLOAD_MAX_PART_SIZE
         if (
@@ -1796,7 +1836,7 @@ class S3FileSystem(AbstractFileSystem):
         multipart_upload = self._create_multipart_upload(
             bucket=bucket2,
             key=key2,
-            **kwargs,
+            **self._get_multipart_copy_kwargs(bucket1, key1, version_id1, kwargs),
         )
         with self._create_executor(max_workers=max_workers) as executor:
             futures = [
@@ -1812,13 +1852,249 @@ class S3FileSystem(AbstractFileSystem):
                 )
                 for i, range_ in enumerate(ranges)
             ]
-            self._finish_multipart_upload(
+            completed = self._finish_multipart_upload(
                 bucket=bucket2,
                 key=key2,
                 upload_id=cast(str, multipart_upload.upload_id),
                 futures=futures,
                 request_kwargs=kwargs,
             )
+        if self._copies_annotations(bucket1, kwargs):
+            for name in self._list_object_annotations(bucket1, key1, version_id1, kwargs):
+                self._copy_object_annotation(
+                    name, bucket1, key1, version_id1, bucket2, key2, completed.etag, kwargs
+                )
+
+    @staticmethod
+    def _is_directory_bucket(bucket: str) -> bool:
+        """Return whether the bucket is a directory bucket (S3 Express One Zone).
+
+        Directory bucket names end with ``--x-s3``.
+
+        Args:
+            bucket: S3 bucket name.
+
+        Returns:
+            True if the bucket is a directory bucket.
+        """
+        return bucket.endswith("--x-s3")
+
+    @staticmethod
+    def _get_copy_source_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
+        """Map the parameters of a copy to those of the requests that read its source.
+
+        Args:
+            kwargs: The CopyObject parameters of the copy.
+
+        Returns:
+            ``RequestPayer``, and the source's expected bucket owner and SSE-C
+            parameters under the names of the requests that read the source
+            (``ExpectedBucketOwner`` and ``SSECustomer*``), where given.
+        """
+        source_kwargs = {
+            "RequestPayer": kwargs.get("RequestPayer"),
+            "ExpectedBucketOwner": kwargs.get("ExpectedSourceBucketOwner"),
+            "SSECustomerAlgorithm": kwargs.get("CopySourceSSECustomerAlgorithm"),
+            "SSECustomerKey": kwargs.get("CopySourceSSECustomerKey"),
+            "SSECustomerKeyMD5": kwargs.get("CopySourceSSECustomerKeyMD5"),
+        }
+        return {k: v for k, v in source_kwargs.items() if v is not None}
+
+    def _get_multipart_copy_kwargs(
+        self, bucket: str, key: str, version_id: str | None, kwargs: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Build the CreateMultipartUpload parameters of a multipart copy.
+
+        No multipart request accepts the directives of CopyObject, so they
+        are implemented here as CopyObject applies them. With the COPY
+        metadata directive (the default), the content headers and the
+        user-defined metadata are read from the source with HeadObject, and
+        the values of the copy are ignored. With the COPY tagging directive
+        (the default), the tags are read with GetObjectTagging, and the
+        ``Tagging`` of the copy is ignored. REPLACE uses the values of the
+        copy instead. CopyObject parameters that CreateMultipartUpload does
+        not accept, such as the source conditions, which go to the part
+        copies, are left out.
+
+        Args:
+            bucket: Source S3 bucket name.
+            key: Source object key.
+            version_id: Source version ID, if any.
+            kwargs: The CopyObject parameters of the copy.
+
+        Returns:
+            The parameters for CreateMultipartUpload.
+
+        Raises:
+            ValueError: If a directive has a value that CopyObject does not
+                accept.
+        """
+        metadata_directive = kwargs.get("MetadataDirective", "COPY")
+        tagging_directive = kwargs.get("TaggingDirective", "COPY")
+        annotation_directive = kwargs.get("AnnotationDirective", "COPY")
+        if metadata_directive not in ("COPY", "REPLACE"):
+            raise ValueError(f"Invalid MetadataDirective: {metadata_directive}.")
+        if tagging_directive not in ("COPY", "REPLACE"):
+            raise ValueError(f"Invalid TaggingDirective: {tagging_directive}.")
+        if annotation_directive not in ("COPY", "EXCLUDE"):
+            raise ValueError(f"Invalid AnnotationDirective: {annotation_directive}.")
+
+        request = dict(kwargs)
+        source_kwargs = self._get_copy_source_kwargs(kwargs)
+        source = {"Bucket": bucket, "Key": key}
+        if version_id:
+            source.update({"VersionId": version_id})
+        if metadata_directive == "COPY":
+            _logger.debug(f"Head object to copy: s3://{bucket}/{key}?versionId={version_id}")
+            head = S3Metadata(
+                self._call(
+                    self._client.head_object,
+                    **self._get_operation_kwargs("head_object", source_kwargs),
+                    **source,
+                )
+            )
+            for name in self._COPY_METADATA_PARAMS:
+                request.pop(name, None)
+            copied = {
+                "CacheControl": head.cache_control,
+                "ContentDisposition": head.content_disposition,
+                "ContentEncoding": head.content_encoding,
+                "ContentLanguage": head.content_language,
+                "ContentType": head.content_type,
+                "Expires": head.expires,
+                "Metadata": head.user_metadata,
+            }
+            request.update({k: v for k, v in copied.items() if v is not None})
+        if tagging_directive == "COPY":
+            request.pop("Tagging", None)
+            # Directory buckets do not support GetObjectTagging, and their
+            # objects have no tags.
+            if not self._is_directory_bucket(bucket):
+                _logger.debug(f"Get tags to copy: s3://{bucket}/{key}?versionId={version_id}")
+                response = self._call(
+                    self._client.get_object_tagging,
+                    **self._get_operation_kwargs("get_object_tagging", source_kwargs),
+                    **source,
+                )
+                tags = [(t["Key"], t["Value"]) for t in response["TagSet"]]
+                if tags:
+                    request.update({"Tagging": urlencode(tags)})
+        copy_members = self._client.meta.service_model.operation_model(
+            "CopyObject"
+        ).input_shape.members
+        return {
+            **self._get_operation_kwargs("create_multipart_upload", request),
+            # A parameter that CopyObject does not accept either is sent as
+            # is, so that botocore rejects it as it does for CopyObject.
+            **{k: v for k, v in request.items() if k not in copy_members},
+        }
+
+    def _copies_annotations(self, bucket: str, kwargs: Mapping[str, Any]) -> bool:
+        """Return whether a multipart copy copies the annotations of its source.
+
+        Args:
+            bucket: Source S3 bucket name.
+            kwargs: The CopyObject parameters of the copy.
+
+        Returns:
+            True unless the ``AnnotationDirective`` is EXCLUDE or the source
+            cannot have annotations: an object encrypted with SSE-C, or an
+            object in a directory bucket.
+        """
+        return (
+            kwargs.get("AnnotationDirective", "COPY") == "COPY"
+            and "CopySourceSSECustomerAlgorithm" not in kwargs
+            and not self._is_directory_bucket(bucket)
+        )
+
+    def _list_object_annotations(
+        self, bucket: str, key: str, version_id: str | None, kwargs: Mapping[str, Any]
+    ) -> list[str]:
+        """List the names of the annotations of the source of a copy.
+
+        Args:
+            bucket: Source S3 bucket name.
+            key: Source object key.
+            version_id: Source version ID, if any.
+            kwargs: The CopyObject parameters of the copy.
+
+        Returns:
+            The annotation names, across all pages of ListObjectAnnotations.
+        """
+        request: dict[str, Any] = {
+            **self._get_operation_kwargs(
+                "list_object_annotations", self._get_copy_source_kwargs(kwargs)
+            ),
+            "Bucket": bucket,
+            "Key": key,
+        }
+        if version_id:
+            request.update({"VersionId": version_id})
+        names: list[str] = []
+        while True:
+            _logger.debug(f"List object annotations: s3://{bucket}/{key}?versionId={version_id}")
+            response = self._call(self._client.list_object_annotations, **request)
+            names.extend(a["AnnotationName"] for a in response.get("Annotations", []))
+            token = response.get("NextContinuationToken")
+            if not token:
+                return names
+            request.update({"ContinuationToken": token})
+
+    def _copy_object_annotation(
+        self,
+        name: str,
+        bucket1: str,
+        key1: str,
+        version_id1: str | None,
+        bucket2: str,
+        key2: str,
+        etag2: str | None,
+        kwargs: Mapping[str, Any],
+    ) -> None:
+        """Copy an annotation of the source of a copy onto its destination.
+
+        The annotation is written only if the destination is still the
+        object that the copy created, so that it is not attached to an
+        object written over the copy.
+
+        Args:
+            name: The annotation name.
+            bucket1: Source S3 bucket name.
+            key1: Source object key.
+            version_id1: Source version ID, if any.
+            bucket2: Destination S3 bucket name.
+            key2: Destination object key.
+            etag2: ETag of the destination that the copy created.
+            kwargs: The CopyObject parameters of the copy.
+        """
+        source: dict[str, Any] = {"Bucket": bucket1, "Key": key1, "AnnotationName": name}
+        if version_id1:
+            source.update({"VersionId": version_id1})
+        _logger.debug(
+            f"Copy object annotation {name} from s3://{bucket1}/{key1}?versionId={version_id1} "
+            f"to s3://{bucket2}/{key2}."
+        )
+        response = self._call(
+            self._client.get_object_annotation,
+            **self._get_operation_kwargs(
+                "get_object_annotation", self._get_copy_source_kwargs(kwargs)
+            ),
+            **source,
+        )
+        destination: dict[str, Any] = {
+            "Bucket": bucket2,
+            "Key": key2,
+            "AnnotationName": name,
+            "AnnotationPayload": response["AnnotationPayload"].read(),
+        }
+        if etag2:
+            destination.update({"ObjectIfMatch": etag2})
+        self._call(
+            self._client.put_object_annotation,
+            # The fields of the request take precedence over inherited
+            # parameters of the same name.
+            **{**self._get_operation_kwargs("put_object_annotation", kwargs), **destination},
+        )
 
     def _get_copy_ranges(self, size: int, block_size: int) -> list[tuple[int, int]]:
         """Split an object into the source ranges of a multipart copy.
@@ -2050,21 +2326,38 @@ class S3FileSystem(AbstractFileSystem):
             # be stored after the abort, so wait for the parts that could not
             # be cancelled first.
             wait([future for future in futures if not future.cancel()])
-            try:
-                self._call(
-                    self._client.abort_multipart_upload,
-                    **{
-                        **self._get_operation_kwargs("abort_multipart_upload", request_kwargs),
-                        "Bucket": bucket,
-                        "Key": key,
-                        "UploadId": upload_id,
-                    },
-                )
-            except Exception:
-                _logger.exception(
-                    f"Failed to abort multipart upload {upload_id} to s3://{bucket}/{key}."
-                )
+            self._abort_multipart_upload(bucket, key, upload_id, request_kwargs)
             raise
+
+    def _abort_multipart_upload(
+        self, bucket: str, key: str, upload_id: str, request_kwargs: Mapping[str, Any]
+    ) -> None:
+        """Abort a failed multipart upload, logging an error of the abort.
+
+        The error of the abort is logged instead of raised, so that the
+        caller can re-raise the error that made the upload fail.
+
+        Args:
+            bucket: S3 bucket name.
+            key: Object key being uploaded.
+            upload_id: Unique identifier for the multipart upload.
+            request_kwargs: Parameters of the upload; the abort receives
+                those that it accepts.
+        """
+        try:
+            self._call(
+                self._client.abort_multipart_upload,
+                **{
+                    **self._get_operation_kwargs("abort_multipart_upload", request_kwargs),
+                    "Bucket": bucket,
+                    "Key": key,
+                    "UploadId": upload_id,
+                },
+            )
+        except Exception:
+            _logger.exception(
+                f"Failed to abort multipart upload {upload_id} to s3://{bucket}/{key}."
+            )
 
     def cat_file(
         self, path: str, start: int | None = None, end: int | None = None, **kwargs

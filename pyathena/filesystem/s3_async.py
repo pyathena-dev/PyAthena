@@ -485,6 +485,28 @@ class AioS3FileSystem(AsyncFileSystem):
         version_id1: str | None = None,
         **kwargs,
     ) -> None:
+        """Copy an object with a multipart upload of its byte ranges.
+
+        See :meth:`S3FileSystem._copy_object_with_multipart_upload`. The part
+        and annotation copies run in parallel with ``asyncio.gather`` and
+        ``asyncio.to_thread``.
+
+        Args:
+            bucket1: Source S3 bucket name.
+            key1: Source object key.
+            size1: Size of the source object in bytes.
+            bucket2: Destination S3 bucket name.
+            key2: Destination object key.
+            max_workers: Maximum number of parallel requests.
+            block_size: Size in bytes of the copied ranges.
+            version_id1: Source version ID, if any.
+            **kwargs: The CopyObject parameters of the copy; each request
+                receives those that it accepts.
+
+        Raises:
+            ValueError: If ``block_size`` is out of the part size limits or a
+                directive has an invalid value.
+        """
         max_workers = max_workers if max_workers else self._sync_fs.max_workers
         block_size = block_size if block_size else S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE
         if (
@@ -506,44 +528,95 @@ class AioS3FileSystem(AsyncFileSystem):
             copy_source["VersionId"] = version_id1
 
         ranges = self._sync_fs._get_copy_ranges(size1, block_size)
+        create_kwargs = await asyncio.to_thread(
+            self._sync_fs._get_multipart_copy_kwargs, bucket1, key1, version_id1, kwargs
+        )
         multipart_upload = await asyncio.to_thread(
             self._sync_fs._create_multipart_upload,
             bucket=bucket2,
             key=key2,
-            **kwargs,
+            **create_kwargs,
         )
+        upload_id = cast(str, multipart_upload.upload_id)
 
         semaphore = asyncio.Semaphore(max_workers)
         part_kwargs = self._sync_fs._get_operation_kwargs("upload_part_copy", kwargs)
+        failed = False
 
-        async def _upload_part(i: int, range_: tuple[int, int]) -> dict[str, Any]:
+        async def _upload_part(i: int, range_: tuple[int, int]) -> dict[str, Any] | None:
+            nonlocal failed
             async with semaphore:
-                result = await asyncio.to_thread(
-                    self._sync_fs._upload_part_copy,
-                    bucket=bucket2,
-                    key=key2,
-                    copy_source=copy_source,
-                    upload_id=cast(str, multipart_upload.upload_id),
-                    part_number=i + 1,
-                    copy_source_ranges=range_,
-                    **part_kwargs,
-                )
+                if failed:
+                    # The upload is being aborted; do not start more parts.
+                    return None
+                try:
+                    result = await asyncio.to_thread(
+                        self._sync_fs._upload_part_copy,
+                        bucket=bucket2,
+                        key=key2,
+                        copy_source=copy_source,
+                        upload_id=upload_id,
+                        part_number=i + 1,
+                        copy_source_ranges=range_,
+                        **part_kwargs,
+                    )
+                except Exception:
+                    # Set before the semaphore lets a waiting part start.
+                    failed = True
+                    raise
             return {
                 "ETag": result.etag,
                 "PartNumber": result.part_number,
             }
 
-        parts = await asyncio.gather(*[_upload_part(i, r) for i, r in enumerate(ranges)])
-        parts_list = sorted(parts, key=lambda x: x["PartNumber"])
+        tasks = [asyncio.ensure_future(_upload_part(i, r)) for i, r in enumerate(ranges)]
+        try:
+            # gather keeps the part-number order of the tasks.
+            parts = await asyncio.gather(*tasks)
+            completed = await asyncio.to_thread(
+                self._sync_fs._complete_multipart_upload,
+                bucket=bucket2,
+                key=key2,
+                upload_id=upload_id,
+                parts=cast(list[dict[str, Any]], parts),
+                **self._sync_fs._get_operation_kwargs("complete_multipart_upload", kwargs),
+            )
+        except Exception:
+            failed = True
+            # A part that is still copying when the upload is aborted may be
+            # stored after the abort, so wait for the running parts first.
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.to_thread(
+                self._sync_fs._abort_multipart_upload, bucket2, key2, upload_id, kwargs
+            )
+            raise
 
-        await asyncio.to_thread(
-            self._sync_fs._complete_multipart_upload,
-            bucket=bucket2,
-            key=key2,
-            upload_id=cast(str, multipart_upload.upload_id),
-            parts=parts_list,
-            **self._sync_fs._get_operation_kwargs("complete_multipart_upload", kwargs),
+        if not self._sync_fs._copies_annotations(bucket1, kwargs):
+            return
+        names = await asyncio.to_thread(
+            self._sync_fs._list_object_annotations, bucket1, key1, version_id1, kwargs
         )
+
+        async def _copy_annotation(name: str) -> None:
+            async with semaphore:
+                await asyncio.to_thread(
+                    self._sync_fs._copy_object_annotation,
+                    name,
+                    bucket1,
+                    key1,
+                    version_id1,
+                    bucket2,
+                    key2,
+                    completed.etag,
+                    kwargs,
+                )
+
+        results = await asyncio.gather(
+            *[_copy_annotation(name) for name in names], return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
 
     async def _find(
         self,

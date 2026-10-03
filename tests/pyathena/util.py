@@ -5,14 +5,16 @@
 #
 # SPDX-License-Identifier: MIT
 
+import io
 import time
 from concurrent.futures import wait
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 from botocore.config import Config
 from botocore.exceptions import ClientError
+from botocore.response import StreamingBody
 from dateutil.tz import gettz
 from jinja2 import Environment, FileSystemLoader
 from sqlalchemy import types
@@ -240,3 +242,136 @@ def interrupt_start_waits(started, release, interrupts=1):
         return wait(futures, timeout)
 
     return patch("pyathena.common.wait", side_effect=interrupting_wait), raised
+
+
+# A source object of two minimum-size parts, copied from bucket/src to
+# bucket/dst by a multipart copy with the minimum block size (GH-973).
+MULTIPART_COPY_SIZE = 2 * S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE
+MULTIPART_COPY_EXPIRES = datetime(2030, 1, 1, tzinfo=UTC)
+MULTIPART_COPY_KWARGS = {
+    # Ignored with the default COPY directives, as CopyObject ignores them.
+    "ContentType": "text/plain",
+    "Tagging": "ignored=1",
+    # Not metadata: sent to CreateMultipartUpload.
+    "StorageClass": "STANDARD_IA",
+    "RequestPayer": "requester",
+    "ExpectedBucketOwner": "111111111111",
+    "ExpectedSourceBucketOwner": "222222222222",
+    # A source condition: sent to the part copies only.
+    "CopySourceIfMatch": '"src"',
+}
+
+
+def _annotation(name):
+    return {"AnnotationName": name, "LastModified": MULTIPART_COPY_EXPIRES, "Size": 1}
+
+
+def stub_multipart_copy(stubber, fail_part=False, fail_annotation=False):
+    """Queue the requests of a multipart copy with MULTIPART_COPY_KWARGS.
+
+    The source has user-defined metadata, a tag and two annotations listed
+    on two pages, which are copied with the default COPY directives.
+
+    Args:
+        stubber: The Stubber of the S3 client.
+        fail_part: Fail the second part copy; the upload is then aborted.
+        fail_annotation: Fail the write of the first annotation.
+    """
+    source = {
+        "Bucket": "bucket",
+        "Key": "src",
+        "RequestPayer": "requester",
+        "ExpectedBucketOwner": "222222222222",
+    }
+    destination = {
+        "Bucket": "bucket",
+        "Key": "dst",
+        "RequestPayer": "requester",
+        "ExpectedBucketOwner": "111111111111",
+    }
+    stubber.add_response(
+        "head_object",
+        {
+            "ContentLength": MULTIPART_COPY_SIZE,
+            "ContentType": "text/csv",
+            "CacheControl": "max-age=60",
+            "Expires": MULTIPART_COPY_EXPIRES,
+            "StorageClass": "GLACIER_IR",
+            "Metadata": {"owner": "etl"},
+        },
+        source,
+    )
+    stubber.add_response("get_object_tagging", {"TagSet": [{"Key": "t 1", "Value": "v1"}]}, source)
+    stubber.add_response(
+        "create_multipart_upload",
+        {"Bucket": "bucket", "Key": "dst", "UploadId": "u"},
+        {
+            **destination,
+            "CacheControl": "max-age=60",
+            "ContentType": "text/csv",
+            "Expires": MULTIPART_COPY_EXPIRES,
+            "Metadata": {"owner": "etl"},
+            "Tagging": "t+1=v1",
+            "StorageClass": "STANDARD_IA",
+        },
+    )
+    size = S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE
+    for part_number in (1, 2):
+        part = {
+            **destination,
+            "CopySource": {"Bucket": "bucket", "Key": "src"},
+            "UploadId": "u",
+            "PartNumber": part_number,
+            "CopySourceRange": f"bytes={(part_number - 1) * size}-{part_number * size - 1}",
+            "CopySourceIfMatch": '"src"',
+            "ExpectedSourceBucketOwner": "222222222222",
+        }
+        if fail_part and part_number == 2:
+            stubber.add_client_error(
+                "upload_part_copy", "InternalError", "part failed", 500, expected_params=part
+            )
+            stubber.add_response("abort_multipart_upload", {}, {**destination, "UploadId": "u"})
+            return
+        stubber.add_response(
+            "upload_part_copy", {"CopyPartResult": {"ETag": f'"p{part_number}"'}}, part
+        )
+    stubber.add_response(
+        "complete_multipart_upload",
+        {"ETag": '"dst"'},
+        {
+            **destination,
+            "UploadId": "u",
+            "MultipartUpload": {
+                "Parts": [{"ETag": '"p1"', "PartNumber": 1}, {"ETag": '"p2"', "PartNumber": 2}]
+            },
+        },
+    )
+    stubber.add_response(
+        "list_object_annotations",
+        {"Annotations": [_annotation("a1")], "NextContinuationToken": "next"},
+        source,
+    )
+    stubber.add_response(
+        "list_object_annotations",
+        {"Annotations": [_annotation("a2")]},
+        {**source, "ContinuationToken": "next"},
+    )
+    for name in ("a1", "a2"):
+        payload = f"payload of {name}".encode()
+        stubber.add_response(
+            "get_object_annotation",
+            {"AnnotationPayload": StreamingBody(io.BytesIO(payload), len(payload))},
+            {**source, "AnnotationName": name},
+        )
+        put = {
+            **destination,
+            "AnnotationName": name,
+            "AnnotationPayload": payload,
+            "ObjectIfMatch": '"dst"',
+        }
+        if fail_annotation:
+            stubber.add_client_error(
+                "put_object_annotation", "AccessDenied", 403, expected_params=put
+            )
+            return
+        stubber.add_response("put_object_annotation", {}, put)
