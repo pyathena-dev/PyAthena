@@ -210,8 +210,9 @@ class AsyncPolarsCursor(AsyncCursor):
     ) -> tuple[str, Future[AthenaPolarsResultSet | Any]]:
         """Execute a SQL query asynchronously and return results as Polars DataFrames.
 
-        Executes the SQL query on Amazon Athena asynchronously and returns a
-        future that resolves to a result set for Polars DataFrame output.
+        Executes the SQL query on Amazon Athena asynchronously and returns the
+        query ID with a future that resolves to a result set for Polars
+        DataFrame output.
 
         Args:
             operation: SQL query string to execute.

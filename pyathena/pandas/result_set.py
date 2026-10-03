@@ -214,6 +214,8 @@ class AthenaPandasResultSet(AthenaResultSet):
         >>> df = cursor.as_pandas()
         >>>
         >>> # Or iterate through chunks for memory efficiency
+        >>> cursor = connection.cursor(PandasCursor, chunksize=50_000)
+        >>> cursor.execute("SELECT * FROM large_table")
         >>> for chunk_df in cursor.iter_chunks():
         ...     process_chunk(chunk_df)
 
