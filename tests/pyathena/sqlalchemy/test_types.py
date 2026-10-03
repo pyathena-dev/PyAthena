@@ -20,7 +20,7 @@ class TestAthenaJSON:
     @staticmethod
     def _process(type_, value, coltype, dialect=None):
         dialect = dialect or AthenaRestDialect()
-        processor = type_.dialect_impl(dialect)._cached_result_processor(dialect, coltype)
+        processor = type_.dialect_impl(dialect).result_processor(dialect, coltype)
         return processor(value) if processor else value
 
     @pytest.mark.parametrize("type_", [types.JSON(), _JSONText()])
