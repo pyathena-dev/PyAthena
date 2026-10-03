@@ -2313,37 +2313,42 @@ class S3File(AbstractBufferedFile):
         if not self.multipart_upload:
             raise RuntimeError("Multipart upload is not initialized.")
 
-        self.buffer.seek(0)
-        uploads = []
-        while data := self.buffer.read(self.blocksize):
-            uploads.append(data)
-        # Only the last part of a multipart upload may be smaller than the
-        # minimum part size, and more data may follow a mid-stream chunk.
-        # A single write() can leave several blocks in the buffer, so merge
-        # a short trailing block into the previous one.
-        if len(uploads) > 1 and len(uploads[-1]) < self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE:
-            tail = uploads.pop()
-            upload_data = uploads.pop() + tail
-            upload_data_size = len(upload_data)
-            if upload_data_size < self.fs.MULTIPART_UPLOAD_MAX_PART_SIZE:
-                uploads.append(upload_data)
-            else:
-                split_size = upload_data_size // 2
-                uploads.extend([upload_data[:split_size], upload_data[split_size:]])
-
         part_number = len(self.multipart_upload_parts)
-        for upload in uploads:
-            part_number += 1
-            self.multipart_upload_parts.append(
-                self._executor.submit(
-                    self.fs._upload_part,
-                    bucket=self.bucket,
-                    key=self.key,
-                    upload_id=cast(str, self.multipart_upload.upload_id),
-                    part_number=part_number,
-                    body=upload,
+        self.buffer.seek(0)
+        data = self.buffer.read(self.blocksize)
+        while data:
+            # Only the last part of a multipart upload may be smaller than the
+            # minimum part size, and more data may follow a mid-stream chunk.
+            # A single write() can leave several blocks in the buffer, so look
+            # ahead one block and merge a short last block into this one.
+            next_data = self.buffer.read(self.blocksize)
+            next_data_size = len(next_data)
+            if 0 < next_data_size < self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE:
+                upload_data = data + next_data
+                upload_data_size = len(upload_data)
+                if upload_data_size < self.fs.MULTIPART_UPLOAD_MAX_PART_SIZE:
+                    uploads = [upload_data]
+                else:
+                    split_size = upload_data_size // 2
+                    uploads = [upload_data[:split_size], upload_data[split_size:]]
+                next_data = b""
+            else:
+                uploads = [data]
+
+            for upload in uploads:
+                part_number += 1
+                self.multipart_upload_parts.append(
+                    self._executor.submit(
+                        self.fs._upload_part,
+                        bucket=self.bucket,
+                        key=self.key,
+                        upload_id=cast(str, self.multipart_upload.upload_id),
+                        part_number=part_number,
+                        body=upload,
+                    )
                 )
-            )
+
+            data = next_data
 
         if self.autocommit and final:
             self.commit()
