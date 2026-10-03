@@ -254,6 +254,115 @@ class TestAioS3FileSystem:
         with pytest.raises(ValueError, match="Cannot touch the existing file"):
             fs.touch("s3://bucket/key", truncate=False)
 
+    @pytest.mark.asyncio
+    async def test_rm_requests(self):
+        # GH-971: _rm() sent the keys of every bucket to the bucket of the
+        # first path, dropped the DeleteObjects parameters, ignored per-key
+        # errors and emptied a bucket path.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        sync_fs._call = mock.MagicMock(return_value={})
+
+        await fs._rm(["s3://b1/a", "s3://b2/b"], ExpectedBucketOwner="111122223333")
+        assert sorted(
+            (c.kwargs["Bucket"], c.kwargs["Delete"]["Objects"], c.kwargs["ExpectedBucketOwner"])
+            for c in sync_fs._call.call_args_list
+        ) == [
+            ("b1", [{"Key": "a"}], "111122223333"),
+            ("b2", [{"Key": "b"}], "111122223333"),
+        ]
+
+        sync_fs._call.reset_mock()
+        with pytest.raises(ValueError, match="Cannot delete the bucket"):
+            await fs._rm("s3://bucket", recursive=True)
+        sync_fs._call.assert_not_called()
+
+        sync_fs._call.return_value = {
+            "Errors": [{"Key": "locked", "Code": "AccessDenied", "Message": "Access Denied"}]
+        }
+        with pytest.raises(OSError, match=r"bucket/locked \(AccessDenied: Access Denied\)"):
+            await fs._rm("s3://bucket/locked")
+
+        sync_fs._call.side_effect = PermissionError("Access Denied")
+        sync_fs.dircache["bucket/a"] = []
+        with pytest.raises(PermissionError, match="Access Denied"):
+            await fs._rm("s3://bucket/a")
+        assert "bucket/a" not in sync_fs.dircache
+
+    @pytest.mark.asyncio
+    async def test_rm_request_error_keeps_errors(self):
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+
+        def call(method, **request):
+            if request["Bucket"] == "b1":
+                raise PermissionError("Access Denied")
+            return {"Errors": [{"Key": "b", "Code": "AccessDenied", "Message": "Access Denied"}]}
+
+        fs._sync_fs._call = call
+        with pytest.raises(PermissionError, match="Access Denied") as exc_info:
+            await fs._rm(["s3://b1/a", "s3://b2/b"])
+        assert exc_info.value.__notes__ == [
+            "Failed to delete objects: b2/b (AccessDenied: Access Denied)"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_rm_cancel_invalidates_cache_after_each_request(self):
+        # The request threads keep running after _rm() is cancelled, so each
+        # request invalidates the cache of its objects when it finishes.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        started = {"b1": threading.Event(), "b2": threading.Event()}
+        release = {"b1": threading.Event(), "b2": threading.Event()}
+
+        def call(method, **request):
+            started[request["Bucket"]].set()
+            release[request["Bucket"]].wait(10)
+            return {}
+
+        async def wait_invalidated(path):
+            for _ in range(100):
+                if path not in fs.dircache:
+                    return
+                await asyncio.sleep(0.01)
+
+        fs._sync_fs._call = call
+        task = asyncio.create_task(fs._rm(["s3://b1/a", "s3://b2/b"]))
+        for event in started.values():
+            await asyncio.to_thread(event.wait, 10)
+        # Cancel every other task, as asyncio.run() does at shutdown, so the
+        # request tasks are cancelled directly, not only through _rm().
+        for other in asyncio.all_tasks():
+            if other is not asyncio.current_task():
+                other.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # Cached while the requests still run, e.g. by a concurrent info().
+        fs.dircache["b1/a"] = []
+        fs.dircache["b2/b"] = []
+
+        release["b1"].set()
+        await wait_invalidated("b1/a")
+        assert "b1/a" not in fs.dircache
+        assert "b2/b" in fs.dircache
+
+        release["b2"].set()
+        await wait_invalidated("b2/b")
+        assert "b2/b" not in fs.dircache
+
+    @pytest.mark.asyncio
+    async def test_rm_maxdepth(self):
+        # GH-962: _rm() did not pass maxdepth when expanding the path.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        sync_fs._call = mock.MagicMock(return_value={})
+        sync_fs.find = mock.MagicMock(return_value=["bucket/dir/a"])
+        sync_fs.exists = mock.MagicMock(return_value=True)
+
+        # batch_size is part of fsspec's async _rm() signature.
+        await fs._rm("s3://bucket/dir", recursive=True, maxdepth=1, batch_size=10)
+        sync_fs.find.assert_called_once_with("bucket/dir", maxdepth=1, withdirs=True, detail=False)
+        (call,) = sync_fs._call.call_args_list
+        assert call.kwargs["Delete"]["Objects"] == [{"Key": "dir"}, {"Key": "dir/a"}]
+
     @pytest.fixture(scope="class")
     def fs(self, request):
         if not hasattr(request, "param"):

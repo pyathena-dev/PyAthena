@@ -21,6 +21,7 @@ from unittest import mock
 import botocore.exceptions
 import pytest
 from fsspec import Callback
+from fsspec.dircache import DirCache
 
 import pyathena
 from pyathena.filesystem import register_s3_filesystem
@@ -270,6 +271,150 @@ class TestS3FileSystem:
         # listing find nothing, instead of the cached object answering.
         fs._call.side_effect = [FileNotFoundError("bucket/a/c.txt"), {}]
         assert not fs.exists("s3://bucket/a/c.txt")
+
+    @staticmethod
+    def _sent_delete_objects(fs):
+        return sorted(
+            (c.kwargs["Bucket"], c.kwargs["Delete"]["Objects"])
+            for c in fs._call.call_args_list
+            if c.args == (fs._client.delete_objects,)
+        )
+
+    def test_rm_paths_across_buckets(self):
+        # GH-971: a list of paths was rejected, and every request went to the
+        # bucket of one path.
+        fs = self._make_fs()
+        fs._call.return_value = {}
+
+        fs.rm(["s3://b1/a", "s3://b2/b", "s3://b1/c"], ExpectedBucketOwner="111122223333")
+        assert self._sent_delete_objects(fs) == [
+            ("b1", [{"Key": "a"}, {"Key": "c"}]),
+            ("b2", [{"Key": "b"}]),
+        ]
+        for c in fs._call.call_args_list:
+            assert c.kwargs["ExpectedBucketOwner"] == "111122223333"
+            assert c.kwargs["Delete"]["Quiet"] is True
+
+    def test_rm_version(self):
+        # GH-971: expand_path treated "?" in the version query as a wildcard.
+        fs = self._make_fs()
+        fs._call.return_value = {}
+        fs.dircache["bucket/a.csv"] = self._file_object("a.csv")
+
+        fs.rm("s3://bucket/a.csv?versionId=v1", recursive=True)
+        assert self._sent_delete_objects(fs) == [
+            ("bucket", [{"Key": "a.csv", "VersionId": "v1"}]),
+        ]
+        assert "bucket/a.csv" not in fs.dircache
+
+        fs._call.reset_mock()
+        fs.rm(["s3://bucket/a.csv?versionId=v1", "s3://bucket/b.csv"])
+        assert self._sent_delete_objects(fs) == [
+            ("bucket", [{"Key": "a.csv", "VersionId": "v1"}, {"Key": "b.csv"}]),
+        ]
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "s3://bucket",
+            "s3://bucket/",
+            "s3://bucket?versionId=v1",
+            # expand_path strips the slashes to the bucket.
+            "s3://bucket//",
+            ["s3://bucket/a", "s3://bucket"],
+        ],
+    )
+    def test_rm_bucket(self, path):
+        fs = self._make_fs()
+        fs._call.return_value = {}
+
+        with pytest.raises(ValueError, match="Cannot delete the bucket"):
+            fs.rm(path, recursive=True)
+        fs._call.assert_not_called()
+
+    def test_rm_errors(self):
+        # GH-971: S3 reports the objects it could not delete in a successful
+        # response, which rm() ignored.
+        fs = self._make_fs()
+        fs._call.return_value = {
+            "Errors": [{"Key": "locked", "Code": "AccessDenied", "Message": "Access Denied"}]
+        }
+        with pytest.raises(OSError, match=r"bucket/locked \(AccessDenied: Access Denied\)"):
+            fs.rm("s3://bucket/locked")
+
+        fs._call.return_value = {
+            "Errors": [
+                {"Key": "locked", "Code": "AccessDenied", "Message": "Access Denied"},
+                {"Key": "a", "VersionId": "v1", "Code": "InternalError", "Message": "Error"},
+            ]
+        }
+        fs.dircache["bucket/b"] = self._file_object("b")
+
+        with pytest.raises(OSError, match="Failed to delete objects: ") as exc_info:
+            fs.rm(["s3://bucket/locked", "s3://bucket/a?versionId=v1", "s3://bucket/b"])
+        assert str(exc_info.value) == (
+            "Failed to delete objects: "
+            "bucket/a?versionId=v1 (InternalError: Error), "
+            "bucket/locked (AccessDenied: Access Denied)"
+        )
+        # The deleted object is not left in the cache.
+        assert "bucket/b" not in fs.dircache
+
+    @pytest.mark.parametrize("name", ["Bucket", "Delete"])
+    def test_rm_request_target_kwargs(self, name):
+        fs = self._make_fs()
+
+        with pytest.raises(TypeError, match=f"unexpected keyword argument '{name}'"):
+            fs.rm("s3://bucket/a", **{name: "other"})
+        fs._call.assert_not_called()
+
+    def test_rm_request_error_keeps_errors(self):
+        fs = self._make_fs()
+
+        def call(method, **request):
+            if request["Bucket"] == "b1":
+                raise PermissionError("Access Denied")
+            return {"Errors": [{"Key": "b", "Code": "AccessDenied", "Message": "Access Denied"}]}
+
+        fs._call.side_effect = call
+        with pytest.raises(PermissionError, match="Access Denied") as exc_info:
+            fs.rm(["s3://b1/a", "s3://b2/b"])
+        assert exc_info.value.__notes__ == [
+            "Failed to delete objects: b2/b (AccessDenied: Access Denied)"
+        ]
+
+    def test_rm_requests_invalidate_shared_parent(self):
+        # The request threads invalidate the shared parent "bucket/dir" at
+        # once. DirCache.pop() reads before it deletes, so the second delete
+        # raised KeyError when both threads had read the entry.
+        class BarrierDirCache(DirCache):
+            barrier = threading.Barrier(2, timeout=5)
+
+            def __getitem__(self, item):
+                value = super().__getitem__(item)
+                if item == "bucket/dir":
+                    # Both threads have read the entry before either deletes.
+                    self.barrier.wait()
+                return value
+
+        fs = self._make_fs()
+        fs._call.return_value = {}
+        fs.DELETE_OBJECTS_MAX_KEYS = 1
+        fs.dircache = BarrierDirCache()
+        fs.dircache["bucket/dir"] = []
+
+        fs.rm(["s3://bucket/dir/a", "s3://bucket/dir/b"])
+        assert fs._call.call_count == 2
+        assert "bucket/dir" not in fs.dircache._cache
+
+    def test_rm_request_error_invalidates_cache(self):
+        fs = self._make_fs()
+        fs._call.side_effect = PermissionError("Access Denied")
+        fs.dircache["bucket/a"] = self._file_object("a")
+
+        with pytest.raises(PermissionError, match="Access Denied"):
+            fs.rm("s3://bucket/a")
+        assert "bucket/a" not in fs.dircache
 
     @pytest.mark.parametrize(
         ("prefix", "next_token"),
