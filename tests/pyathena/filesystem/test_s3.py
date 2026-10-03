@@ -1,3 +1,4 @@
+import functools
 import io
 import os
 import tempfile
@@ -491,6 +492,63 @@ class TestS3FileSystem:
             fs._finish_multipart_upload(
                 bucket="bucket", key="key", upload_id="uploadid", futures=[future]
             )
+
+    @pytest.mark.parametrize(
+        ("size", "block_size", "ranges"),
+        [
+            # A single range.
+            (5 * 2**20, 5 * 2**20, [(0, 5 * 2**20)]),
+            # The size is an exact multiple of the block size.
+            (10 * 2**30, 5 * 2**30, [(0, 5 * 2**30), (5 * 2**30, 10 * 2**30)]),
+            # A last range of the minimum part size is kept.
+            (
+                5 * 2**30 + 5 * 2**20,
+                5 * 2**30,
+                [(0, 5 * 2**30), (5 * 2**30, 5 * 2**30 + 5 * 2**20)],
+            ),
+            # GH-951: a last range shorter than the minimum part size is
+            # merged into the previous one,
+            (15 * 2**20 - 1, 5 * 2**20, [(0, 5 * 2**20), (5 * 2**20, 15 * 2**20 - 1)]),
+            # which is split in half if it exceeds the maximum part size.
+            (
+                5 * 2**30 + 2**20,
+                5 * 2**30,
+                [(0, 5 * 2**29 + 2**19), (5 * 2**29 + 2**19, 5 * 2**30 + 2**20)],
+            ),
+        ],
+    )
+    def test_get_copy_ranges(self, size, block_size, ranges):
+        assert self._make_fs()._get_copy_ranges(size, block_size) == ranges
+
+    @pytest.mark.parametrize("max_workers", [1, 4])
+    def test_copy_object_with_multipart_upload_part_sizes(self, max_workers):
+        # GH-951: the parts are within the S3 part size limits whatever the
+        # number of workers; a single worker used to copy the whole object
+        # as one part larger than 5 GiB.
+        fs = self._make_fs()
+        fs._create_multipart_upload = mock.MagicMock(
+            return_value=SimpleNamespace(upload_id="uploadid")
+        )
+        fs._upload_part_copy = mock.MagicMock()
+        fs._finish_multipart_upload = mock.MagicMock()
+
+        fs._copy_object_with_multipart_upload(
+            bucket1="bucket",
+            key1="src",
+            size1=5 * 2**30 + 2**20,
+            bucket2="bucket",
+            key2="dst",
+            max_workers=max_workers,
+        )
+
+        parts = sorted(
+            (c.kwargs["part_number"], c.kwargs["copy_source_ranges"])
+            for c in fs._upload_part_copy.call_args_list
+        )
+        assert parts == [
+            (1, (0, 5 * 2**29 + 2**19)),
+            (2, (5 * 2**29 + 2**19, 5 * 2**30 + 2**20)),
+        ]
 
     def test_head_object_version_aware(self):
         fs = self._make_fs()
@@ -1810,6 +1868,7 @@ class TestS3File:
 
         fs._upload_part.side_effect = part
         fs._upload_part_copy.side_effect = part
+        fs._get_copy_ranges.side_effect = functools.partial(S3FileSystem._get_copy_ranges, fs)
         return fs
 
     @staticmethod
@@ -1820,7 +1879,10 @@ class TestS3File:
             fs._create_multipart_upload.assert_not_called()
             return fs._put_object.call_args.kwargs["body"]
         fs._finish_multipart_upload.assert_called_once()
-        parts = [(c.kwargs["part_number"], existing) for c in fs._upload_part_copy.call_args_list]
+        parts = []
+        for c in fs._upload_part_copy.call_args_list:
+            start, end = c.kwargs.get("copy_source_ranges", (0, len(existing)))
+            parts.append((c.kwargs["part_number"], existing[start:end]))
         parts += [
             (c.kwargs["part_number"], c.kwargs["body"]) for c in fs._upload_part.call_args_list
         ]
@@ -1853,6 +1915,27 @@ class TestS3File:
         assert fs._create_multipart_upload.called is multipart
         assert fs._upload_part_copy.called is part_copy
         fs.touch.assert_not_called()
+
+    @pytest.mark.parametrize("max_workers", [1, 4])
+    def test_append_part_copy_ranges(self, max_workers):
+        # GH-951: an existing object larger than the maximum part size is
+        # copied in parts within the part size limits whatever the number of
+        # workers. A short remainder used to be copied as its own part,
+        # which is not the last one when data is appended.
+        existing = b"a" * 129
+        fs = self._make_append_fs(existing)
+
+        with S3File(
+            fs, "s3://bucket/key.txt", mode="ab", block_size=16, max_workers=max_workers
+        ) as f:
+            f.write(b"b")
+
+        assert self._uploaded_object(fs, existing) == existing + b"b"
+        ranges = sorted(
+            (c.kwargs["part_number"], c.kwargs["copy_source_ranges"])
+            for c in fs._upload_part_copy.call_args_list
+        )
+        assert ranges == [(1, (0, 64)), (2, (64, 96)), (3, (96, 129))]
 
     @pytest.mark.parametrize(
         ("writes", "block_size"),

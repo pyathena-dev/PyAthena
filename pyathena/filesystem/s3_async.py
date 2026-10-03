@@ -290,12 +290,7 @@ class AioS3FileSystem(AsyncFileSystem):
         if version_id1:
             copy_source["VersionId"] = version_id1
 
-        ranges = S3File._get_ranges(
-            0,
-            size1,
-            self._sync_fs.max_workers,
-            block_size,
-        )
+        ranges = self._sync_fs._get_copy_ranges(size1, block_size)
         multipart_upload = await asyncio.to_thread(
             self._sync_fs._create_multipart_upload,
             bucket=bucket2,

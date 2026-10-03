@@ -1247,12 +1247,7 @@ class S3FileSystem(AbstractFileSystem):
         if version_id1:
             copy_source.update({"VersionId": version_id1})
 
-        ranges = S3File._get_ranges(
-            0,
-            size1,
-            max_workers,
-            block_size,
-        )
+        ranges = self._get_copy_ranges(size1, block_size)
         multipart_upload = self._create_multipart_upload(
             bucket=bucket2,
             key=key2,
@@ -1277,6 +1272,35 @@ class S3FileSystem(AbstractFileSystem):
                 upload_id=cast(str, multipart_upload.upload_id),
                 futures=futures,
             )
+
+    def _get_copy_ranges(self, size: int, block_size: int) -> list[tuple[int, int]]:
+        """Split an object into the source ranges of a multipart copy.
+
+        The object is split into ranges of ``block_size`` bytes, whatever the
+        number of workers. A last range shorter than
+        ``MULTIPART_UPLOAD_MIN_PART_SIZE`` is merged into the previous one,
+        which is split in half if the result exceeds
+        ``MULTIPART_UPLOAD_MAX_PART_SIZE``. Every range is then within the
+        S3 part size limits, including the last one unless the whole object
+        is smaller than the minimum part size, so that more parts can follow
+        the copied ones, as in an append.
+
+        Args:
+            size: The size of the source object in bytes.
+            block_size: The maximum size of a range in bytes, between
+                ``MULTIPART_UPLOAD_MIN_PART_SIZE`` and
+                ``MULTIPART_UPLOAD_MAX_PART_SIZE``.
+
+        Returns:
+            The ``(start, end)`` byte ranges, with an exclusive end, that
+            cover the whole object in order.
+        """
+        starts = list(range(0, size, block_size))
+        if len(starts) > 1 and size - starts[-1] < self.MULTIPART_UPLOAD_MIN_PART_SIZE:
+            starts.pop()
+            if size - starts[-1] > self.MULTIPART_UPLOAD_MAX_PART_SIZE:
+                starts.append(starts[-1] + (size - starts[-1]) // 2)
+        return list(zip(starts, [*starts[1:], size], strict=True))
 
     def pipe_file(
         self, path: str, value: bytes | bytearray | memoryview, mode: str = "overwrite", **kwargs
@@ -2263,14 +2287,12 @@ class S3File(AbstractBufferedFile):
             **self.s3_additional_kwargs,
         )
         if self.append_block:
-            if self.tell() > S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE:
+            if self.tell() > self.fs.MULTIPART_UPLOAD_MAX_PART_SIZE:
                 info = self.fs.info(self.path, version_id=self.version_id)
-                ranges = self._get_ranges(
-                    0,
+                ranges = self.fs._get_copy_ranges(
                     # Set copy source file byte size
                     info.get("size", 0),
-                    self.max_workers,
-                    S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE,
+                    self.fs.MULTIPART_UPLOAD_MAX_PART_SIZE,
                 )
                 for i, range_ in enumerate(ranges):
                     self.multipart_upload_parts.append(
