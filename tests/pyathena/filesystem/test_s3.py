@@ -407,6 +407,79 @@ class TestS3FileSystem:
         assert fs._call.call_count == 2
         assert "bucket/dir" not in fs.dircache._cache
 
+    @pytest.mark.parametrize(
+        ("key", "listing", "read"),
+        [
+            ("bucket", False, lambda fs: fs._head_bucket("bucket")),
+            ("bucket/key", False, lambda fs: fs._head_object("bucket/key")),
+            ("", True, lambda fs: fs._ls_buckets()),
+            (("bucket/dir", "/"), True, lambda fs: fs._ls_dirs("bucket/dir")),
+        ],
+    )
+    def test_cache_read_with_concurrent_invalidation(self, key, listing, read):
+        # Another thread invalidates the entry right after this thread looks
+        # it up. Checking the key and then reading it raised KeyError.
+        class InvalidatingDirCache(DirCache):
+            def __getitem__(self, item):
+                value = super().__getitem__(item)
+                if item == key:
+                    thread = threading.Thread(target=lambda: self._cache.pop(item, None))
+                    thread.start()
+                    thread.join()
+                return value
+
+        fs = self._make_fs()
+        fs.dircache = InvalidatingDirCache()
+        cached = [self._file_object("dir/a")] if listing else self._file_object("key")
+        fs.dircache[key] = cached
+
+        assert read(fs) is cached
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("key", "response", "evict"),
+        [
+            (
+                "bucket",
+                FileNotFoundError("bucket"),
+                lambda fs: fs._head_bucket("bucket", refresh=True),
+            ),
+            (
+                "bucket/key",
+                FileNotFoundError("bucket/key"),
+                lambda fs: fs._head_object("bucket/key", refresh=True),
+            ),
+            (("bucket/dir", "/"), {}, lambda fs: fs._ls_dirs("bucket/dir", refresh=True)),
+        ],
+    )
+    def test_cache_eviction_with_concurrent_invalidation(self, key, response, evict):
+        # Two threads evict the same entry at once. DirCache.pop() reads
+        # before it deletes, so the second delete raised KeyError when both
+        # threads had read the entry.
+        class BarrierDirCache(DirCache):
+            barrier = threading.Barrier(2, timeout=5)
+
+            def __getitem__(self, item):
+                value = super().__getitem__(item)
+                if item == key:
+                    # Both threads have read the entry before either deletes.
+                    self.barrier.wait()
+                return value
+
+        fs = self._make_fs()
+        if isinstance(response, Exception):
+            fs._call.side_effect = response
+        else:
+            fs._call.return_value = response
+        fs.dircache = BarrierDirCache()
+        fs.dircache[key] = []
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(evict, fs) for _ in range(2)]
+            for future in futures:
+                future.result()
+        assert key not in fs.dircache._cache
+
     def test_rm_request_error_invalidates_cache(self):
         fs = self._make_fs()
         fs._call.side_effect = PermissionError("Access Denied")

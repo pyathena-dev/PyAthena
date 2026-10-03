@@ -310,18 +310,31 @@ class S3FileSystem(AbstractFileSystem):
         )
 
     def _head_bucket(self, bucket, refresh: bool = False) -> S3Object | None:
-        if bucket not in self.dircache or refresh:
+        """Get the bucket as a directory object with HeadBucket.
+
+        The result is cached under the bucket name. A missing bucket evicts
+        its entry and the cached bucket listing that still lists it.
+
+        Args:
+            bucket: The bucket name.
+            refresh: If True, bypass the cache and call HeadBucket.
+
+        Returns:
+            The bucket object, or None if the bucket does not exist.
+        """
+        file = None if refresh else self.dircache.get(bucket)
+        if file is None:
             try:
                 self._call(
                     self._client.head_bucket,
                     Bucket=bucket,
                 )
             except FileNotFoundError:
-                self.dircache.pop(bucket, None)
+                self._evict_cache(bucket)
                 # Evict the cached bucket listing only if it still lists the bucket.
                 buckets = self.dircache.get("")
                 if buckets and any(b.name == bucket for b in buckets):
-                    self.dircache.pop("", None)
+                    self._evict_cache("")
                 return None
             file = S3Object(
                 init={
@@ -337,13 +350,25 @@ class S3FileSystem(AbstractFileSystem):
                 version_id=None,
             )
             self.dircache[bucket] = file
-        else:
-            file = self.dircache[bucket]
         return file
 
     def _head_object(
         self, path: str, version_id: str | None = None, refresh: bool = False
     ) -> S3Object | None:
+        """Get the object with HeadObject.
+
+        The result is cached under the path, or under the version-qualified
+        path for an explicit version. The ``"null"`` version is not cached.
+        A missing object evicts its entry.
+
+        Args:
+            path: The object path, optionally with a versionId query.
+            version_id: The version to get when the path has no version.
+            refresh: If True, bypass the cache and call HeadObject.
+
+        Returns:
+            The object, or None if it does not exist.
+        """
         bucket, key, path_version_id = self.parse_path(path)
         version_id = path_version_id if path_version_id else version_id
         if version_id and not path_version_id:
@@ -354,7 +379,8 @@ class S3FileSystem(AbstractFileSystem):
         # overwrite replaces the "null" version of a bucket without
         # versioning, so that version is looked up every time.
         cacheable = version_id != "null"
-        if path not in self.dircache or refresh:
+        file = None if refresh else self.dircache.get(path)
+        if file is None:
             try:
                 request = {
                     "Bucket": bucket,
@@ -367,7 +393,7 @@ class S3FileSystem(AbstractFileSystem):
                     **request,
                 )
             except FileNotFoundError:
-                self.dircache.pop(path, None)
+                self._evict_cache(path)
                 return None
             if self.version_aware and not version_id:
                 # Pin the version of the object so that subsequent reads see
@@ -382,12 +408,21 @@ class S3FileSystem(AbstractFileSystem):
             )
             if cacheable:
                 self.dircache[path] = file
-        else:
-            file = self.dircache[path]
         return file
 
     def _ls_buckets(self, refresh: bool = False) -> list[S3Object]:
-        if "" not in self.dircache or refresh:
+        """List the buckets with ListBuckets.
+
+        The listing is cached under ``""``.
+
+        Args:
+            refresh: If True, bypass the cache and call ListBuckets.
+
+        Returns:
+            The buckets as directory objects.
+        """
+        buckets = None if refresh else self.dircache.get("")
+        if buckets is None:
             response = self._call(
                 self._client.list_buckets,
             )
@@ -408,8 +443,6 @@ class S3FileSystem(AbstractFileSystem):
                 for b in response["Buckets"]
             ]
             self.dircache[""] = buckets
-        else:
-            buckets = self.dircache[""]
         return buckets
 
     def _ls_dirs(
@@ -448,8 +481,10 @@ class S3FileSystem(AbstractFileSystem):
             prefix = f"{key}/{prefix if prefix else ''}"
 
         cache_key = (path, delimiter)
-        if use_cache and cache_key in self.dircache and not refresh:
-            return cast(list[S3Object], self.dircache[cache_key])
+        if use_cache and not refresh:
+            cached = self.dircache.get(cache_key)
+            if cached is not None:
+                return cast(list[S3Object], cached)
 
         files: list[S3Object] = []
         while True:
@@ -486,7 +521,7 @@ class S3FileSystem(AbstractFileSystem):
             if files:
                 self.dircache[cache_key] = files
             else:
-                self.dircache.pop(cache_key, None)
+                self._evict_cache(cache_key)
         return files
 
     def ls(
@@ -1199,7 +1234,7 @@ class S3FileSystem(AbstractFileSystem):
                 raise ValueError(f"Bucket create failed {bucket!r}: {e}") from e
             # invalidate_cache walks parent paths and never pops the root
             # entry itself, so evict the cached bucket listing directly.
-            self.dircache.pop("", None)
+            self._evict_cache("")
             self.invalidate_cache(bucket)
         else:
             # exists() has already confirmed the bucket does not exist,
@@ -1272,7 +1307,7 @@ class S3FileSystem(AbstractFileSystem):
         self.invalidate_cache(bucket)
         # invalidate_cache walks parent paths and never pops the root
         # entry itself, so evict the cached bucket listing directly.
-        self.dircache.pop("", None)
+        self._evict_cache("")
 
     def touch(self, path: str, truncate: bool = True, **kwargs) -> dict[str, Any]:
         """Create an empty object with PutObject.
@@ -2204,14 +2239,25 @@ class S3FileSystem(AbstractFileSystem):
                 for cache_path in cache_paths:
                     # _ls_dirs caches listings under (path, delimiter).
                     for cache_key in (cache_path, (cache_path, "/"), (cache_path, "")):
-                        # DirCache.pop() reads and then deletes the entry, so
-                        # it raises KeyError when the request threads of rm()
-                        # invalidate a shared parent at once; del does not.
-                        with contextlib.suppress(KeyError):
-                            del self.dircache[cache_key]
+                        self._evict_cache(cache_key)
                 # A version-qualified path continues with the path without
                 # the version.
                 path = self._strip_protocol(base) if query else self._parent(path)
+
+    def _evict_cache(self, key: str | tuple[str, str]) -> None:
+        """Remove a dircache entry if it exists.
+
+        ``DirCache.pop()`` reads and then deletes the entry, so it raises
+        KeyError when another thread removes the same entry in between,
+        such as the request threads of ``rm()`` invalidating a shared parent
+        at once. A single ``del`` does not.
+
+        Args:
+            key: The dircache key, a path or a ``(path, delimiter)`` listing
+                key.
+        """
+        with contextlib.suppress(KeyError):
+            del self.dircache[key]
 
     def _ls_from_cache(self, path: str) -> list[S3Object] | S3Object | None:
         """Check the dircache for a cached entry of the path.
