@@ -566,8 +566,16 @@ class TestS3FileSystem:
             "s3://bucket/key", "wb", block_size=8, s3_additional_kwargs={}
         )
 
-    @pytest.mark.parametrize("kwargs", [{"block_size": 4}, {}])
-    def test_pipe_file_exceeding_max_parts(self, kwargs):
+    @pytest.mark.parametrize(
+        ("value", "kwargs"),
+        [
+            (b"a" * 13, {"block_size": 4}),
+            (b"a" * 13, {}),
+            # The size of a memoryview is counted in bytes, not items.
+            (memoryview(b"a" * 16).cast("I"), {}),
+        ],
+    )
+    def test_pipe_file_exceeding_max_parts(self, value, kwargs):
         # GH-953: data that does not fit in the maximum number of parts is
         # rejected before anything is uploaded.
         fs = self._make_fs()
@@ -577,7 +585,7 @@ class TestS3FileSystem:
         fs._put_object = mock.MagicMock()
 
         with pytest.raises(ValueError, match="block_size"):
-            fs.pipe_file("s3://bucket/key", b"a" * 13, **kwargs)
+            fs.pipe_file("s3://bucket/key", value, **kwargs)
         fs.open.assert_not_called()
         fs._put_object.assert_not_called()
         fs._call.assert_not_called()
@@ -2504,7 +2512,7 @@ class TestS3File:
         assert f.closed
         # The submitted parts, some of which the abort may have cancelled.
         assert [c.kwargs["part_number"] for c in executor.submit.call_args_list] == [1, 2, 3]
-        executor.shutdown.assert_called_once()
+        executor.shutdown.assert_called()
         fs._call.assert_called_once_with(
             "abort_multipart_upload", Bucket="bucket", Key="key.txt", UploadId="uploadid"
         )
@@ -2536,10 +2544,26 @@ class TestS3File:
 
         assert f.closed
         assert [c.kwargs["part_number"] for c in executor.submit.call_args_list] == [1, 2, 3]
-        executor.shutdown.assert_called_once()
+        executor.shutdown.assert_called()
         fs._call.assert_called_once()
         fs._finish_multipart_upload.assert_not_called()
         fs._put_object.assert_not_called()
+
+    def test_write_exceeding_max_parts_without_close(self):
+        # The executor of the closed file is shut down, as fsspec does not
+        # close it again when it is garbage collected.
+        fs = self._make_append_fs(b"")
+        fs.MULTIPART_UPLOAD_MAX_PARTS = 3
+        executor = mock.MagicMock(wraps=S3ThreadPoolExecutor(max_workers=1))
+        f = S3File(fs, "s3://bucket/key.txt", mode="wb", block_size=4, executor=executor)
+
+        for _ in range(3):
+            f.write(b"a" * 4)
+        with pytest.raises(ValueError, match="block_size"):
+            f.write(b"a" * 4)
+
+        assert f.closed
+        executor.shutdown.assert_called_once()
 
     def test_append_discard(self):
         # Rolling back an append aborts its multipart upload without the

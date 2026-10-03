@@ -1408,8 +1408,10 @@ class S3FileSystem(AbstractFileSystem):
                 ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
         """
         block_size = kwargs.get("block_size") or self.default_block_size
-        self._check_multipart_upload_size(path, len(value), block_size)
-        if self._intrans or len(value) > min(block_size, self.MULTIPART_UPLOAD_MAX_PART_SIZE):
+        # The size in bytes; the length of a memoryview counts its items.
+        size = memoryview(value).nbytes
+        self._check_multipart_upload_size(path, size, block_size)
+        if self._intrans or size > min(block_size, self.MULTIPART_UPLOAD_MAX_PART_SIZE):
             # Defer to the buffered open() path, which keeps the
             # deferred-commit semantics of fsspec transactions and uploads
             # large data as a parallel multipart upload.
@@ -2505,7 +2507,9 @@ class S3File(AbstractBufferedFile):
                     # Close the file without the buffered data, so that
                     # neither close() nor commit() uploads it, and abort the
                     # upload. An abort failure does not mask this error, and
-                    # commit() does not complete the upload afterwards.
+                    # commit() does not complete the upload afterwards. The
+                    # executor is shut down here, as fsspec does not close a
+                    # closed file again when it is garbage collected.
                     self.buffer = None
                     self.closed = True
                     try:
@@ -2516,6 +2520,7 @@ class S3File(AbstractBufferedFile):
                         )
                         self.multipart_upload = None
                         self.multipart_upload_parts = []
+                    self._executor.shutdown()
                     raise ValueError(
                         f"Cannot upload more than {self.fs.MULTIPART_UPLOAD_MAX_PARTS} "
                         f"parts to s3://{self.bucket}/{self.key} with a block size of "
