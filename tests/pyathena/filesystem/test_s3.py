@@ -167,6 +167,21 @@ class TestS3FileSystem:
             key=key,
         )
 
+    @staticmethod
+    def _barrier_dircache(key):
+        # Build a DirCache that holds every reader of the key until two
+        # threads have read it, so that both read before either deletes.
+        barrier = threading.Barrier(2, timeout=5)
+
+        class BarrierDirCache(DirCache):
+            def __getitem__(self, item):
+                value = super().__getitem__(item)
+                if item == key:
+                    barrier.wait()
+                return value
+
+        return BarrierDirCache()
+
     def test_get_client_compatible_with_s3fs(self):
         # Only constructs a boto3 client; no AWS access.
         fs = S3FileSystem(
@@ -387,20 +402,10 @@ class TestS3FileSystem:
         # The request threads invalidate the shared parent "bucket/dir" at
         # once. DirCache.pop() reads before it deletes, so the second delete
         # raised KeyError when both threads had read the entry.
-        class BarrierDirCache(DirCache):
-            barrier = threading.Barrier(2, timeout=5)
-
-            def __getitem__(self, item):
-                value = super().__getitem__(item)
-                if item == "bucket/dir":
-                    # Both threads have read the entry before either deletes.
-                    self.barrier.wait()
-                return value
-
         fs = self._make_fs()
         fs._call.return_value = {}
         fs.DELETE_OBJECTS_MAX_KEYS = 1
-        fs.dircache = BarrierDirCache()
+        fs.dircache = self._barrier_dircache("bucket/dir")
         fs.dircache["bucket/dir"] = []
 
         fs.rm(["s3://bucket/dir/a", "s3://bucket/dir/b"])
@@ -423,9 +428,7 @@ class TestS3FileSystem:
             def __getitem__(self, item):
                 value = super().__getitem__(item)
                 if item == key:
-                    thread = threading.Thread(target=lambda: self._cache.pop(item, None))
-                    thread.start()
-                    thread.join()
+                    self._cache.pop(item, None)
                 return value
 
         fs = self._make_fs()
@@ -437,41 +440,32 @@ class TestS3FileSystem:
         fs._call.assert_not_called()
 
     @pytest.mark.parametrize(
-        ("key", "response", "evict"),
+        ("key", "call", "evict"),
         [
             (
                 "bucket",
-                FileNotFoundError("bucket"),
+                {"side_effect": FileNotFoundError("bucket")},
                 lambda fs: fs._head_bucket("bucket", refresh=True),
             ),
             (
                 "bucket/key",
-                FileNotFoundError("bucket/key"),
+                {"side_effect": FileNotFoundError("bucket/key")},
                 lambda fs: fs._head_object("bucket/key", refresh=True),
             ),
-            (("bucket/dir", "/"), {}, lambda fs: fs._ls_dirs("bucket/dir", refresh=True)),
+            (
+                ("bucket/dir", "/"),
+                {"return_value": {}},
+                lambda fs: fs._ls_dirs("bucket/dir", refresh=True),
+            ),
         ],
     )
-    def test_cache_eviction_with_concurrent_invalidation(self, key, response, evict):
+    def test_cache_eviction_with_concurrent_invalidation(self, key, call, evict):
         # Two threads evict the same entry at once. DirCache.pop() reads
         # before it deletes, so the second delete raised KeyError when both
         # threads had read the entry.
-        class BarrierDirCache(DirCache):
-            barrier = threading.Barrier(2, timeout=5)
-
-            def __getitem__(self, item):
-                value = super().__getitem__(item)
-                if item == key:
-                    # Both threads have read the entry before either deletes.
-                    self.barrier.wait()
-                return value
-
         fs = self._make_fs()
-        if isinstance(response, Exception):
-            fs._call.side_effect = response
-        else:
-            fs._call.return_value = response
-        fs.dircache = BarrierDirCache()
+        fs._call.configure_mock(**call)
+        fs.dircache = self._barrier_dircache(key)
         fs.dircache[key] = []
 
         with ThreadPoolExecutor(max_workers=2) as executor:

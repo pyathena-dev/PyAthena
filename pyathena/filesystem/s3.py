@@ -481,10 +481,9 @@ class S3FileSystem(AbstractFileSystem):
             prefix = f"{key}/{prefix if prefix else ''}"
 
         cache_key = (path, delimiter)
-        if use_cache and not refresh:
-            cached = self.dircache.get(cache_key)
-            if cached is not None:
-                return cast(list[S3Object], cached)
+        cached = self.dircache.get(cache_key) if use_cache and not refresh else None
+        if cached is not None:
+            return cast(list[S3Object], cached)
 
         files: list[S3Object] = []
         while True:
