@@ -251,10 +251,17 @@ class AioDictCursor(AioCursor):
 
         Args:
             **kwargs: Arguments forwarded to ``AioCursor.__init__``. If they include
-                ``dict_type``, it is also assigned to the class attribute
-                ``AthenaAioDictResultSet.dict_type``, the type used to build each row.
+                ``dict_type``, it is the type used to build each row of this
+                cursor's result sets; other cursors are not affected.
         """
         super().__init__(**kwargs)
         self._result_set_class = AthenaAioDictResultSet
         if "dict_type" in kwargs:
-            AthenaAioDictResultSet.dict_type = kwargs["dict_type"]
+            self._result_set_class = cast(
+                type[AthenaAioDictResultSet],
+                type(
+                    AthenaAioDictResultSet.__name__,
+                    (AthenaAioDictResultSet,),
+                    {"dict_type": kwargs["dict_type"]},
+                ),
+            )

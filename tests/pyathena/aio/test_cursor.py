@@ -1,6 +1,7 @@
 import asyncio
 import re
 import threading
+from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
@@ -896,3 +897,11 @@ class TestAioDictCursor:
         assert await aio_dict_cursor.fetchall() == [{"number_of_rows": 1}]
         await aio_dict_cursor.execute("SELECT a FROM many_rows ORDER BY a")
         assert await aio_dict_cursor.fetchall() == [{"a": i} for i in range(10000)]
+
+    async def test_dict_type(self, aio_dict_cursor):
+        async with aio_dict_cursor.connection.cursor(dict_type=OrderedDict) as ordered_cursor:
+            await ordered_cursor.execute("SELECT * FROM one_row")
+            assert type(await ordered_cursor.fetchone()) is OrderedDict
+        # dict_type of another cursor does not change the row type of this one.
+        await aio_dict_cursor.execute("SELECT * FROM one_row")
+        assert type(await aio_dict_cursor.fetchone()) is dict

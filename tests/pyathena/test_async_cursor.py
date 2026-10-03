@@ -1,5 +1,6 @@
 import contextlib
 import time
+from collections import OrderedDict
 from datetime import datetime
 from random import randint
 
@@ -246,3 +247,11 @@ class TestAsyncDictCursor:
         query_id, future = async_dict_cursor.execute("SELECT a FROM many_rows ORDER BY a")
         result_set = future.result()
         assert result_set.fetchall() == [{"a": i} for i in range(10000)]
+
+    def test_dict_type(self, async_dict_cursor):
+        with async_dict_cursor.connection.cursor(dict_type=OrderedDict) as ordered_cursor:
+            _, future = ordered_cursor.execute("SELECT * FROM one_row")
+            assert type(future.result().fetchone()) is OrderedDict
+        # dict_type of another cursor does not change the row type of this one.
+        _, future = async_dict_cursor.execute("SELECT * FROM one_row")
+        assert type(future.result().fetchone()) is dict

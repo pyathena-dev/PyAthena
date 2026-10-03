@@ -221,10 +221,17 @@ class DictCursor(Cursor):
 
         Args:
             **kwargs: Arguments forwarded to ``Cursor.__init__``. If they include
-                ``dict_type``, it is also assigned to the class attribute
-                ``AthenaDictResultSet.dict_type``, the type used to build each row.
+                ``dict_type``, it is the type used to build each row of this
+                cursor's result sets; other cursors are not affected.
         """
         super().__init__(**kwargs)
         self._result_set_class = AthenaDictResultSet
         if "dict_type" in kwargs:
-            AthenaDictResultSet.dict_type = kwargs["dict_type"]
+            self._result_set_class = cast(
+                type[AthenaDictResultSet],
+                type(
+                    AthenaDictResultSet.__name__,
+                    (AthenaDictResultSet,),
+                    {"dict_type": kwargs["dict_type"]},
+                ),
+            )

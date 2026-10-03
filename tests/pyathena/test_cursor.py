@@ -7,6 +7,7 @@ import string
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from concurrent import futures
 from concurrent.futures.thread import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
@@ -1875,6 +1876,14 @@ class TestDictCursor:
         assert dict_cursor.fetchall() == [{"number_of_rows": 1}]
         dict_cursor.execute("SELECT a FROM many_rows ORDER BY a")
         assert dict_cursor.fetchall() == [{"a": i} for i in range(10000)]
+
+    def test_dict_type(self, dict_cursor):
+        with dict_cursor.connection.cursor(dict_type=OrderedDict) as ordered_cursor:
+            ordered_cursor.execute("SELECT * FROM one_row")
+            assert type(ordered_cursor.fetchone()) is OrderedDict
+        # dict_type of another cursor does not change the row type of this one.
+        dict_cursor.execute("SELECT * FROM one_row")
+        assert type(dict_cursor.fetchone()) is dict
 
     def test_null_vs_empty_string(self, dict_cursor):
         """
