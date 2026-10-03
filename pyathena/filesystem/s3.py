@@ -1517,9 +1517,12 @@ class S3FileSystem(AbstractFileSystem):
             The bytes read from the object.
 
         Raises:
-            FileNotFoundError: If the key does not exist.
+            FileNotFoundError: If the path has no key or the key does not
+                exist.
         """
         bucket, key, path_version_id = self.parse_path(path)
+        if not key:
+            raise FileNotFoundError(path)
         version_id = kwargs.pop("version_id", None)
         if path_version_id:
             version_id = path_version_id
@@ -1536,9 +1539,10 @@ class S3FileSystem(AbstractFileSystem):
                 # empty range sends no GetObject request that would report a
                 # missing object.
                 info = self.info(path, version_id=version_id)
-                if info.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
+                if info.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY or info.key != key:
                     # There is no object to read, as GetObject reports for
-                    # the other ranges.
+                    # the other ranges, or info() describes the key without
+                    # the trailing slash of this one.
                     raise FileNotFoundError(path)
                 start, end, _ = slice(start, end).indices(info.get("size", 0))
             if start is not None or end is not None:
@@ -1550,7 +1554,7 @@ class S3FileSystem(AbstractFileSystem):
         try:
             return self._get_object(
                 bucket=bucket,
-                key=cast(str, key),
+                key=key,
                 ranges=ranges,
                 version_id=version_id,
                 **kwargs,

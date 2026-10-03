@@ -880,6 +880,25 @@ class TestS3FileSystem:
             fs.cat_file("s3://bucket/dir", start=start, end=end)
         fs._call.assert_not_called()
 
+    @pytest.mark.parametrize(("start", "end"), [(None, None), (-1, None), (0, 5)])
+    def test_cat_file_bucket(self, start, end):
+        fs = self._make_fs()
+
+        with pytest.raises(FileNotFoundError):
+            fs.cat_file("s3://bucket/", start=start, end=end)
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize(("start", "end"), [(-2, -1), (0, -1), (5, 5)])
+    def test_cat_file_range_key_ending_in_slash(self, start, end):
+        fs, ranges = self._make_object_fs(b"0123456789")
+        # info() of "dir/" describes the object "dir" when both exist.
+        fs.info.return_value = self._file_object("dir")
+
+        # The size of "dir" is not used for the range of "dir/".
+        with pytest.raises(FileNotFoundError):
+            fs.cat_file("s3://bucket/dir/", start=start, end=end)
+        assert ranges == []
+
     def test_get_file_directory(self, tmp_path):
         fs = self._make_fs()
         fs.default_cache_type = "bytes"

@@ -98,12 +98,15 @@ the existing object also count toward the limit. A write with `open` that reache
 limit raises `ValueError` and aborts its multipart upload. Multipart copies with `cp`
 use parts large enough to stay within the limit.
 
-Paths follow fsspec, which drops a trailing slash: `s3://YOUR_S3_BUCKET/dir/` and
-`s3://YOUR_S3_BUCKET/dir` are the same path. An object whose key ends in a slash, such
-as a folder marker, is therefore a directory for `info`, `isfile`, and `open`, and
-`open` raises `FileNotFoundError` for it. `find`, and `ls` of that directory, list the
-object as a file entry. `cat_file` reads it without a range, with a non-empty range of
-non-negative offsets, or with a negative `start` and no `end`.
+Paths are normalized as in fsspec, which drops a trailing slash, so `info`, `isfile`,
+and `open` treat `s3://YOUR_S3_BUCKET/dir/` as `s3://YOUR_S3_BUCKET/dir`. An object
+whose key ends in a slash, such as a folder marker, is therefore a directory for `info`
+and `isfile`. Opening it for reading raises `FileNotFoundError`, and opening `dir/` for
+writing writes the object `dir`. A path with a `?versionId=` suffix keeps the slash and
+refers to the object. `find`, and `ls` of that directory, list the object as a file
+entry. `cat_file` uses the key as written: it reads the object without a range, with a
+non-empty range of non-negative offsets, or with a negative `start` and no `end`, and
+raises `FileNotFoundError` for other ranges.
 
 ## Error translation
 
