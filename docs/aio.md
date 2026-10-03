@@ -220,6 +220,9 @@ All aio cursors use `await` for fetch operations, so fetching does not block the
   The fetch methods are also wrapped in `asyncio.to_thread()`.
 - `AioS3FSCursor` streams rows from the result file in S3 as they are fetched.
 
+With managed query result storage, where the query has no S3 output location, the pandas, Arrow,
+Polars, and S3FS cursors instead read every row through `GetQueryResults` inside `execute()`.
+
 ```python
 await cursor.execute("SELECT * FROM many_rows")
 row = await cursor.fetchone()
