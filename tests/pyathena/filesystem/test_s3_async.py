@@ -261,8 +261,8 @@ class TestAioS3FileSystem:
         fs._sync_fs._call.assert_not_called()
 
     def test_transaction_put_file_block_size(self, tmp_path):
-        # In a transaction, put_file() passes block_size to open() instead of
-        # the S3 API, as outside one.
+        # In a transaction, put_file() passes block_size and max_workers to
+        # open() instead of the S3 API, as outside one.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
         fs.open = mock.MagicMock()
         fs.open.return_value.__enter__.return_value.blocksize = 8
@@ -273,7 +273,11 @@ class TestAioS3FileSystem:
             fs.put_file(str(local), "s3://bucket/key", block_size=8)
 
         fs.open.assert_called_once_with(
-            "s3://bucket/key", "wb", block_size=8, s3_additional_kwargs={}
+            "s3://bucket/key",
+            "wb",
+            block_size=8,
+            max_workers=fs._sync_fs.max_workers,
+            s3_additional_kwargs={},
         )
 
     def test_touch_sync_wrapper(self):
