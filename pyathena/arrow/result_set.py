@@ -1,3 +1,5 @@
+"""Result set that reads Athena query results into Apache Arrow Tables."""
+
 from __future__ import annotations
 
 import logging
@@ -94,6 +96,31 @@ class AthenaArrowResultSet(AthenaResultSet):
         result_set_type_hints: dict[str | int, str] | None = None,
         **kwargs,
     ) -> None:
+        """Initialize the result set and load the query results into an Arrow Table.
+
+        Args:
+            connection: The connection that ran the query.
+            converter: The converter for result values.
+            query_execution: The query execution whose results to read.
+            arraysize: The default ``fetchmany()`` size and the maximum number of rows per
+                record batch that the fetch methods read from the table.
+            retry_config: The retry configuration for API calls.
+            block_size: The block size in bytes for reading CSV results. If not set,
+                ``DEFAULT_BLOCK_SIZE`` is used.
+            unload: Whether the query is an ``UNLOAD`` whose Parquet output is read
+                instead of the CSV results.
+            unload_location: The S3 location of the ``UNLOAD`` output. If None, it is
+                derived from the first file in the data manifest.
+            connect_timeout: The connect timeout in seconds for the pyarrow S3 filesystem.
+            request_timeout: The request timeout in seconds for the pyarrow S3 filesystem.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
+            **kwargs: Additional keyword arguments, stored but not used.
+
+        Raises:
+            ProgrammingError: If ``query_execution`` is not given.
+            OperationalError: If reading the query results fails.
+        """
         super().__init__(
             connection=connection,
             converter=converter,
@@ -195,12 +222,14 @@ class AthenaArrowResultSet(AthenaResultSet):
 
     @property
     def timestamp_parsers(self) -> list[str]:
+        """The timestamp formats for reading CSV results, starting with pyarrow's ``ISO8601``."""
         from pyarrow.csv import ISO8601
 
         return [ISO8601, *self._timestamp_parsers]
 
     @property
     def column_types(self) -> dict[str, type[Any]]:
+        """The converter's types for the result columns it maps, keyed by column name."""
         description = self.description if self.description else []
         return {
             d[0]: dtype
@@ -210,6 +239,7 @@ class AthenaArrowResultSet(AthenaResultSet):
 
     @property
     def converters(self) -> dict[str, Callable[[str | None], Any | None]]:
+        """The conversion functions for the result columns, keyed by column name."""
         description = self.description if self.description else []
         return {d[0]: self._converter.get(d[1]) for d in description}
 
@@ -356,6 +386,11 @@ class AthenaArrowResultSet(AthenaResultSet):
         return pa.table(self._rows_to_columnar(rows, columns))
 
     def as_arrow(self) -> Table:
+        """Return the query results as an Apache Arrow Table.
+
+        Returns:
+            The Arrow Table that holds the query results.
+        """
         return self._table
 
     def as_polars(self) -> pl.DataFrame:

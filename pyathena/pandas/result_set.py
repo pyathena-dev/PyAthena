@@ -1,3 +1,5 @@
+"""Result set that reads Athena query results into pandas DataFrames."""
+
 from __future__ import annotations
 
 import csv
@@ -463,6 +465,7 @@ class AthenaPandasResultSet(AthenaResultSet):
     def converters(
         self,
     ) -> dict[Any | None, Callable[[str | None], Any | None]]:
+        """The conversion functions for the result columns the converter maps, keyed by name."""
         description = self.description if self.description else []
         return {
             d[0]: self._converter.get(d[1]) for d in description if d[1] in self._converter.mappings
@@ -470,6 +473,7 @@ class AthenaPandasResultSet(AthenaResultSet):
 
     @property
     def parse_dates(self) -> list[Any | None]:
+        """The names of the result columns with date, time, or timestamp types."""
         description = self.description if self.description else []
         return [d[0] for d in description if d[1] in self._PARSE_DATES]
 
@@ -809,6 +813,13 @@ class AthenaPandasResultSet(AthenaResultSet):
         return pd.DataFrame(self._rows_to_columnar(rows, columns))
 
     def as_pandas(self) -> PandasDataFrameIterator | DataFrame:
+        """Return the query results as a DataFrame or an iterator of DataFrame chunks.
+
+        Returns:
+            If ``chunksize`` is None, the next DataFrame from the result iterator, which
+            holds the whole result unless ``auto_optimize_chunksize`` chose a chunk size;
+            otherwise the ``PandasDataFrameIterator`` that yields DataFrame chunks.
+        """
         if self._chunksize is None:
             return next(self._df_iter)
         return self._df_iter
