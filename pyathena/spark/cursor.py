@@ -34,8 +34,7 @@ class SparkCursor(SparkBaseCursor, WithCalculationExecution):
 
     Attributes:
         session_id: The Athena Spark session ID.
-        description: Optional description for the Spark session.
-        engine_configuration: Spark engine configuration settings.
+        description: The description of the current calculation.
         calculation_id: ID of the current calculation being executed.
 
     Example:
@@ -49,7 +48,7 @@ class SparkCursor(SparkBaseCursor, WithCalculationExecution):
         ... result.show()
         ... '''
         >>> cursor.execute(spark_code)
-        >>> result = cursor.fetchall()
+        >>> output = cursor.get_std_out()
 
         # Configure Spark session
         >>> cursor = connection.cursor(

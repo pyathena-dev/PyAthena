@@ -148,6 +148,16 @@ class TestS3FileSystem:
         fs.version_aware = False
         return fs
 
+    @staticmethod
+    def _file_object(key):
+        # Build a listed file entry in the bucket named "bucket".
+        return S3Object(
+            init={"Key": key},
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket="bucket",
+            key=key,
+        )
+
     def test_get_client_compatible_with_s3fs(self):
         # Only constructs a boto3 client; no AWS access.
         fs = S3FileSystem(
@@ -191,6 +201,137 @@ class TestS3FileSystem:
         # through to the S3 API instead (fsspec's implementation assumes
         # every cache value is a listing and raises TypeError here).
         assert fs._ls_from_cache("bucket/key/child") is None
+
+    def test_invalidate_cache_drops_listings_of_path_and_parents(self):
+        fs = self._make_fs()
+        invalidated = [
+            "bucket/a/b/c.txt",
+            ("bucket/a/b", "/"),
+            ("bucket/a/b", ""),
+            ("bucket/a", "/"),
+            ("bucket/a", ""),
+            ("bucket", "/"),
+            ("bucket", ""),
+        ]
+        kept = ["", ("bucket/a/x", "/")]
+        for cache_key in invalidated + kept:
+            fs.dircache[cache_key] = []
+
+        fs.invalidate_cache("s3://bucket/a/b/c.txt")
+        assert list(fs.dircache) == kept
+
+    @pytest.mark.parametrize(
+        ("prefix", "next_token"),
+        [
+            ("test_", None),
+            ("", "token"),
+        ],
+    )
+    def test_ls_dirs_partial_listing_bypasses_cache(self, prefix, next_token):
+        fs = self._make_fs()
+        cached = self._file_object("dir/cached")
+        fs.dircache[("bucket/dir", "")] = [cached]
+        fs._call.return_value = {"Contents": [{"Key": "dir/test_1"}]}
+
+        files = fs._ls_dirs("bucket/dir", prefix=prefix, delimiter="", next_token=next_token)
+        assert [f.name for f in files] == ["bucket/dir/test_1"]
+        assert fs.dircache[("bucket/dir", "")] == [cached]
+
+        # A complete listing of the path is still served from the cache.
+        fs._call.reset_mock()
+        assert fs._ls_dirs("bucket/dir", delimiter="") == [cached]
+        fs._call.assert_not_called()
+
+    def test_ls_dirs_empty_refresh_evicts_cached_listing(self):
+        fs = self._make_fs()
+        fs.dircache[("bucket/dir", "/")] = [self._file_object("dir/deleted")]
+        fs._call.return_value = {}
+
+        assert fs._ls_dirs("bucket/dir", refresh=True) == []
+        # The next listing must not return the deleted object from the cache.
+        fs._call.reset_mock()
+        assert fs._ls_dirs("bucket/dir") == []
+        fs._call.assert_called_once()
+
+    def test_find_withdirs_does_not_modify_cached_listing(self):
+        fs = self._make_fs()
+        fs.dircache[("bucket/dir", "")] = [self._file_object("dir/sub/file")]
+
+        expected = ["bucket/dir/sub", "bucket/dir/sub/file"]
+        assert sorted(fs.find("s3://bucket/dir", withdirs=True)) == expected
+        assert sorted(fs.find("s3://bucket/dir", withdirs=True)) == expected
+        assert fs.find("s3://bucket/dir") == ["bucket/dir/sub/file"]
+        fs._call.assert_not_called()
+
+    def test_find_refresh_bypasses_cached_listings(self):
+        fs = self._make_fs()
+        fs.dircache[("bucket/dir", "")] = [self._file_object("dir/old")]
+        fs.dircache[("bucket/dir", "/")] = [self._file_object("dir/old")]
+        fs.dircache[("bucket/dir/sub", "/")] = [self._file_object("dir/sub/old")]
+        responses = {
+            ("dir/", ""): {"Contents": [{"Key": "dir/sub/new"}]},
+            ("dir/", "/"): {"CommonPrefixes": [{"Prefix": "dir/sub/"}]},
+            ("dir/sub/", "/"): {"Contents": [{"Key": "dir/sub/new"}]},
+        }
+        fs._call.side_effect = lambda method, **kwargs: responses[
+            (kwargs["Prefix"], kwargs["Delimiter"])
+        ]
+
+        assert fs.find("s3://bucket/dir", refresh=True) == ["bucket/dir/sub/new"]
+        # The subdirectory listings of maxdepth are refreshed as well.
+        assert fs.find("s3://bucket/dir", maxdepth=1, refresh=True) == ["bucket/dir/sub/new"]
+
+    def test_refresh_evicts_cached_object_and_bucket_not_found(self):
+        fs = self._make_fs()
+        fs.dircache["bucket/key"] = self._file_object("key")
+        fs.dircache["bucket"] = fs._directory_object("bucket", None)
+        fs.dircache[""] = [fs._directory_object("bucket", None)]
+
+        def call(method, **kwargs):
+            if method in (fs._client.head_object, fs._client.head_bucket):
+                raise FileNotFoundError
+            return {}
+
+        fs._call.side_effect = call
+
+        assert fs.ls("s3://bucket/key", refresh=True) == []
+        # The next lookups must not return the deleted object and bucket from the cache.
+        assert fs.ls("s3://bucket/key") == []
+        assert not fs.exists("s3://bucket/key")
+        with pytest.raises(FileNotFoundError):
+            fs.info("s3://bucket", refresh=True)
+        assert not fs.exists("s3://bucket")
+
+    def test_exists_refresh_bypasses_cache(self):
+        fs = self._make_fs()
+        fs.dircache["bucket/key"] = self._file_object("key")
+        fs.dircache["bucket"] = fs._directory_object("bucket", None)
+        fs.dircache[""] = [fs._directory_object("bucket", None)]
+
+        def call(method, **kwargs):
+            if method in (fs._client.head_object, fs._client.head_bucket):
+                raise FileNotFoundError
+            return {}
+
+        fs._call.side_effect = call
+
+        assert fs.exists("s3://bucket/key")
+        assert fs.exists("s3://bucket")
+        fs._call.assert_not_called()
+
+        assert not fs.exists("s3://bucket/key", refresh=True)
+        assert not fs.exists("s3://bucket", refresh=True)
+
+    def test_missing_bucket_keeps_bucket_listing_without_it(self):
+        fs = self._make_fs()
+        fs.dircache[""] = [fs._directory_object("bucket", None)]
+        fs._call.side_effect = FileNotFoundError
+
+        assert not fs.exists("s3://missing")
+        # Other buckets are still answered from the cached bucket listing.
+        fs._call.reset_mock()
+        assert fs.exists("s3://bucket")
+        fs._call.assert_not_called()
 
     def test_mkdir_creates_bucket(self):
         fs = self._make_fs()
@@ -676,6 +817,65 @@ class TestS3FileSystem:
             assert len(actual) == len(data + extra)
             assert actual == data + extra
 
+    @pytest.mark.parametrize(
+        ("size", "extra_size", "block_size"),
+        [
+            # GH-921: an existing object of at least 5 MiB, appended within a
+            # larger block size, is copied with UploadPartCopy.
+            (6 * 2**20, 5, 16 * 2**20),
+            # An existing object smaller than 5 MiB is rewritten from the
+            # buffer, not copied as well, when the append crosses the block size.
+            (2**10, 5 * 2**20, None),
+        ],
+    )
+    def test_append_with_block_size(self, fs, size, extra_size, block_size):
+        data = b"a" * size
+        extra = b"b" * extra_size
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_append_with_block_size/{uuid.uuid4()}"
+        )
+        fs.pipe_file(path, data)
+        with fs.open(path, "ab", block_size=block_size) as f:
+            f.write(extra)
+        # Check the size and the bytes at the ends and around the boundary
+        # instead of reading the whole object back, to keep the transfer small.
+        assert fs.info(path, refresh=True).size == size + extra_size
+        assert fs.cat_file(path, start=0, end=1) == b"a"
+        assert fs.cat_file(path, start=size - 1, end=size + 1) == b"ab"
+        assert fs.cat_file(path, start=-1) == b"b"
+
+    @pytest.mark.parametrize("block_size", [None, 16 * 2**20])
+    def test_append_transaction_rollback(self, fs, block_size):
+        # Raising inside the transaction aborts the multipart upload that
+        # copies the existing object and leaves the object unchanged.
+        data = b"a" * (6 * 2**20)
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_append_transaction_rollback/{uuid.uuid4()}"
+        )
+        fs.pipe_file(path, data)
+        before = fs.info(path, refresh=True)
+
+        def append_then_fail():
+            with fs.transaction:
+                f = fs.open(path, "ab", block_size=block_size)
+                f.write(b"b" * 5)
+                f.close()
+                raise RuntimeError("rollback")
+
+        with pytest.raises(RuntimeError):
+            append_then_fail()
+        # A committed append (a multipart upload, or the appended bytes alone)
+        # would change the ETag and the size, so the object is not read back.
+        after = fs.info(path, refresh=True)
+        assert (after.etag, after.last_modified, after.size) == (
+            before.etag,
+            before.last_modified,
+            before.size,
+        )
+        assert not fs.list_multipart_uploads(path)
+
     def test_ls_buckets(self, fs):
         fs.invalidate_cache()
         actual = fs.ls("s3://")
@@ -718,6 +918,29 @@ class TestS3FileSystem:
         assert len(test_1_detail) == 1
         assert test_1_detail[0].name == fs._strip_protocol(f"{dir_}/prefix/test_1")
         assert test_1_detail[0].size == 1
+
+    def test_ls_and_find_reflect_changes_through_the_filesystem(self, fs):
+        dir_ = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_ls_and_find_reflect_changes/{uuid.uuid4()}"
+        )
+        path = fs._strip_protocol(dir_)
+        fs.touch(f"{dir_}/a.txt")
+        fs.touch(f"{dir_}/b.txt")
+        assert sorted(fs.ls(dir_)) == [f"{path}/a.txt", f"{path}/b.txt"]
+        assert sorted(fs.find(dir_)) == [f"{path}/a.txt", f"{path}/b.txt"]
+
+        fs.rm(f"{dir_}/a.txt")
+        assert fs.ls(dir_) == [f"{path}/b.txt"]
+        assert fs.find(dir_) == [f"{path}/b.txt"]
+
+        fs.touch(f"{dir_}/c.txt")
+        assert sorted(fs.ls(dir_)) == [f"{path}/b.txt", f"{path}/c.txt"]
+        assert sorted(fs.find(dir_)) == [f"{path}/b.txt", f"{path}/c.txt"]
+        # A prefixed find must not be served from the unprefixed listing.
+        assert fs.find(dir_, prefix="c") == [f"{path}/c.txt"]
+
+        fs.rm(dir_, recursive=True)
 
     def test_info_bucket(self, fs):
         dir_ = f"s3://{ENV.s3_staging_bucket}"
@@ -1511,6 +1734,7 @@ class TestS3File:
         file.s3_additional_kwargs = {}
         file.autocommit = autocommit
         file.blocksize = S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE
+        file.append_block = False
         file.multipart_upload = None
         file.multipart_upload_parts = []
         file.buffer = io.BytesIO(data)
@@ -1533,6 +1757,102 @@ class TestS3File:
             etag=f'"e{kw["part_number"]}"', part_number=kw["part_number"]
         )
         return file
+
+    @staticmethod
+    def _make_append_fs(existing: bytes):
+        # A mocked filesystem holding an existing object, with a minimum part
+        # size of 4 bytes so that the append paths can be exercised with tiny
+        # data and no AWS access.
+        fs = mock.MagicMock(spec=S3FileSystem)
+        fs.MULTIPART_UPLOAD_MIN_PART_SIZE = 4
+        fs.MULTIPART_UPLOAD_MAX_PART_SIZE = 64
+        fs.exists.return_value = True
+        fs.info.return_value = S3Object(
+            init={"ContentLength": len(existing)},
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket="bucket",
+            key="key.txt",
+        )
+        fs.cat.return_value = existing
+        fs._create_multipart_upload.return_value = SimpleNamespace(upload_id="uploadid")
+
+        def part(**kw):
+            return SimpleNamespace(etag=f'"e{kw["part_number"]}"', part_number=kw["part_number"])
+
+        fs._upload_part.side_effect = part
+        fs._upload_part_copy.side_effect = part
+        return fs
+
+    @staticmethod
+    def _uploaded_object(fs, existing: bytes) -> bytes:
+        # Rebuild the object S3 would store from the mocked upload calls.
+        # A part copy without a range copies the whole existing object.
+        if fs._put_object.called:
+            fs._create_multipart_upload.assert_not_called()
+            return fs._put_object.call_args.kwargs["body"]
+        fs._finish_multipart_upload.assert_called_once()
+        parts = [(c.kwargs["part_number"], existing) for c in fs._upload_part_copy.call_args_list]
+        parts += [
+            (c.kwargs["part_number"], c.kwargs["body"]) for c in fs._upload_part.call_args_list
+        ]
+        part_numbers = sorted(n for n, _ in parts)
+        assert part_numbers == list(range(1, len(parts) + 1))
+        return b"".join(body for _, body in sorted(parts))
+
+    @pytest.mark.parametrize(
+        ("existing", "appended", "multipart", "part_copy"),
+        [
+            # Smaller than the minimum part size: read into the buffer.
+            (b"aa", b"bb", False, False),
+            # GH-921: an existing object of at least the minimum part size is
+            # copied with UploadPartCopy even when the block size is larger
+            # than the whole object.
+            (b"a" * 6, b"bb", True, True),
+            (b"a" * 6, b"", True, True),
+            # An existing object read into the buffer is not copied again
+            # when the append crosses the block size.
+            (b"aa", b"b" * 16, True, False),
+        ],
+    )
+    def test_append(self, existing, appended, multipart, part_copy):
+        fs = self._make_append_fs(existing)
+
+        with S3File(fs, "s3://bucket/key.txt", mode="ab", block_size=16) as f:
+            f.write(appended)
+
+        assert self._uploaded_object(fs, existing) == existing + appended
+        assert fs._create_multipart_upload.called is multipart
+        assert fs._upload_part_copy.called is part_copy
+        fs.touch.assert_not_called()
+
+    def test_append_discard(self):
+        # Rolling back an append aborts its multipart upload without the
+        # existing object's metadata, which AbortMultipartUpload rejects,
+        # but with the request parameters it accepts.
+        fs = self._make_append_fs(b"a" * 6)
+        f = S3File(
+            fs,
+            "s3://bucket/key.txt",
+            mode="ab",
+            block_size=16,
+            autocommit=False,
+            s3_additional_kwargs={"RequestPayer": "requester", "ExpectedBucketOwner": "123"},
+        )
+        f.write(b"bb")
+        f.close()
+
+        f.discard()
+
+        fs._call.assert_called_once_with(
+            "abort_multipart_upload",
+            Bucket="bucket",
+            Key="key.txt",
+            UploadId="uploadid",
+            RequestPayer="requester",
+            ExpectedBucketOwner="123",
+        )
+        fs._finish_multipart_upload.assert_not_called()
+        fs._put_object.assert_not_called()
 
     @pytest.mark.parametrize(
         ("objects", "target"),

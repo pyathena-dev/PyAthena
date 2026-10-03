@@ -42,10 +42,11 @@ class DefaultPolarsTypeConverter(Converter):
     optimized type conversion for Polars DataFrames.
 
     The converter focuses on:
-        - Converting date/time types to appropriate Python objects
-        - Handling decimal and binary types
-        - Preserving JSON and complex types
-        - Maintaining high performance for columnar operations
+        - Mapping Athena types to Polars dtypes when reading CSV results,
+          including ``decimal`` as ``pl.Decimal(precision, scale)``
+        - Converting date, time, and varbinary values, and parsing JSON values,
+          in rows returned by fetchone(), fetchmany(), and fetchall()
+        - Keeping array, map, and row values as strings
 
     Example:
         >>> from pyathena.polars.converter import DefaultPolarsTypeConverter

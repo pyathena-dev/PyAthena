@@ -818,6 +818,19 @@ class AthenaDictResultSet(AthenaResultSet):
     # You can override this to use OrderedDict or other dict-like types.
     dict_type: type[Any] = dict
 
+    def __init__(self, *args: Any, dict_type: type[Any] | None = None, **kwargs: Any) -> None:
+        """Initialize the result set with an optional row type for this instance.
+
+        Args:
+            *args: Positional arguments passed to the next ``__init__`` in the MRO.
+            dict_type: The type used to build each row of this result set. If
+                None, the class attribute ``dict_type`` is used.
+            **kwargs: Keyword arguments passed to the next ``__init__`` in the MRO.
+        """
+        if dict_type is not None:
+            self.dict_type = dict_type
+        super().__init__(*args, **kwargs)
+
     @override
     def _get_rows(
         self,
@@ -1252,7 +1265,8 @@ class WithFetch(WithResultSet, BaseCursor, CursorIterator):
         """Fetch the next row of the result set.
 
         Returns:
-            A tuple representing the next row, or None if no more rows.
+            The next row (a tuple, or a dict for dict cursors), or None if no
+            more rows.
 
         Raises:
             ProgrammingError: If no result set is available.
@@ -1269,10 +1283,11 @@ class WithFetch(WithResultSet, BaseCursor, CursorIterator):
         """Fetch multiple rows from the result set.
 
         Args:
-            size: Maximum number of rows to fetch. Defaults to arraysize.
+            size: Maximum number of rows to fetch. If None or not positive,
+                ``arraysize`` is used.
 
         Returns:
-            List of tuples representing the fetched rows.
+            The fetched rows.
 
         Raises:
             ProgrammingError: If no result set is available.
@@ -1289,7 +1304,7 @@ class WithFetch(WithResultSet, BaseCursor, CursorIterator):
         """Fetch all remaining rows from the result set.
 
         Returns:
-            List of tuples representing all remaining rows.
+            The remaining rows.
 
         Raises:
             ProgrammingError: If no result set is available.

@@ -1,6 +1,7 @@
 import asyncio
 import re
 import threading
+from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
@@ -8,7 +9,8 @@ import pytest
 from botocore.exceptions import ClientError
 
 from pyathena import BINARY, Binary, ExecuteOptions
-from pyathena.aio.cursor import AioCursor
+from pyathena.aio.cursor import AioCursor, AioDictCursor
+from pyathena.aio.result_set import AthenaAioDictResultSet
 from pyathena.error import DatabaseError, OperationalError, ProgrammingError
 from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaQueryExecution
@@ -896,3 +898,27 @@ class TestAioDictCursor:
         assert await aio_dict_cursor.fetchall() == [{"number_of_rows": 1}]
         await aio_dict_cursor.execute("SELECT a FROM many_rows ORDER BY a")
         assert await aio_dict_cursor.fetchall() == [{"a": i} for i in range(10000)]
+
+    async def test_dict_type(self, aio_dict_cursor):
+        async with aio_dict_cursor.connection.cursor(dict_type=OrderedDict) as ordered_cursor:
+            await ordered_cursor.execute("SELECT * FROM one_row")
+            assert type(await ordered_cursor.fetchone()) is OrderedDict
+        # dict_type of another cursor does not change the row type of this one.
+        await aio_dict_cursor.execute("SELECT * FROM one_row")
+        assert type(await aio_dict_cursor.fetchone()) is dict
+
+    async def test_dict_type_custom_result_set(self, aio_dict_cursor):
+        class CustomResultSet(AthenaAioDictResultSet):
+            pass
+
+        class CustomDictCursor(AioDictCursor):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self._result_set_class = CustomResultSet
+
+        async with aio_dict_cursor.connection.cursor(
+            CustomDictCursor, dict_type=OrderedDict
+        ) as cursor:
+            await cursor.execute("SELECT * FROM one_row")
+            assert isinstance(cursor.result_set, CustomResultSet)
+            assert type(await cursor.fetchone()) is OrderedDict

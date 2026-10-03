@@ -75,6 +75,7 @@ class AthenaAioResultSet(AthenaResultSet):
         arraysize: int,
         retry_config: RetryConfig,
         result_set_type_hints: dict[str | int, str] | None = None,
+        **kwargs: Any,
     ) -> AthenaAioResultSet:
         """Async factory method.
 
@@ -86,8 +87,10 @@ class AthenaAioResultSet(AthenaResultSet):
             query_execution: Query execution metadata.
             arraysize: Number of rows to fetch per request.
             retry_config: Retry configuration for API calls.
-            result_set_type_hints: Optional dictionary mapping column names to
-                Athena DDL type signatures for precise type conversion.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
+            **kwargs: Additional arguments passed to the constructor of ``cls``,
+                such as ``dict_type`` for ``AthenaAioDictResultSet``.
 
         Returns:
             A fully initialized ``AthenaAioResultSet``.
@@ -99,6 +102,7 @@ class AthenaAioResultSet(AthenaResultSet):
             arraysize,
             retry_config,
             result_set_type_hints=result_set_type_hints,
+            **kwargs,
         )
         if result_set.state == AthenaQueryExecution.STATE_SUCCEEDED:
             await result_set._async_pre_fetch()
@@ -175,7 +179,8 @@ class AthenaAioResultSet(AthenaResultSet):
         page is exhausted and more pages are available.
 
         Returns:
-            A tuple representing the next row, or None if no more rows.
+            The next row (a tuple, or a dict for ``AthenaAioDictResultSet``), or
+            None if no more rows.
         """
         if not self._rows and self._next_token:
             await self._async_fetch()
@@ -193,11 +198,11 @@ class AthenaAioResultSet(AthenaResultSet):
         """Fetch multiple rows from the result set.
 
         Args:
-            size: Maximum number of rows to fetch. If None, uses arraysize.
+            size: Maximum number of rows to fetch. If None or not positive,
+                ``arraysize`` is used.
 
         Returns:
-            List of row tuples. May contain fewer rows than requested if
-            fewer are available.
+            The rows, fewer than ``size`` when the result is exhausted.
         """
         if not size or size <= 0:
             size = self._arraysize
@@ -217,7 +222,7 @@ class AthenaAioResultSet(AthenaResultSet):
         """Fetch all remaining rows from the result set.
 
         Returns:
-            List of all remaining row tuples.
+            The remaining rows.
         """
         rows = []
         while True:

@@ -1,14 +1,15 @@
 import contextlib
 import time
+from collections import OrderedDict
 from datetime import datetime
 from random import randint
 
 import pytest
 
-from pyathena.async_cursor import AsyncCursor
+from pyathena.async_cursor import AsyncCursor, AsyncDictCursor
 from pyathena.error import NotSupportedError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
-from pyathena.result_set import AthenaResultSet
+from pyathena.result_set import AthenaDictResultSet, AthenaResultSet
 from tests import ENV
 from tests.pyathena.conftest import connect
 
@@ -246,3 +247,26 @@ class TestAsyncDictCursor:
         query_id, future = async_dict_cursor.execute("SELECT a FROM many_rows ORDER BY a")
         result_set = future.result()
         assert result_set.fetchall() == [{"a": i} for i in range(10000)]
+
+    def test_dict_type(self, async_dict_cursor):
+        with async_dict_cursor.connection.cursor(dict_type=OrderedDict) as ordered_cursor:
+            _, future = ordered_cursor.execute("SELECT * FROM one_row")
+            assert type(future.result().fetchone()) is OrderedDict
+        # dict_type of another cursor does not change the row type of this one.
+        _, future = async_dict_cursor.execute("SELECT * FROM one_row")
+        assert type(future.result().fetchone()) is dict
+
+    def test_dict_type_custom_result_set(self, async_dict_cursor):
+        class CustomResultSet(AthenaDictResultSet):
+            pass
+
+        class CustomDictCursor(AsyncDictCursor):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self._result_set_class = CustomResultSet
+
+        with async_dict_cursor.connection.cursor(CustomDictCursor, dict_type=OrderedDict) as cursor:
+            _, future = cursor.execute("SELECT * FROM one_row")
+            result_set = future.result()
+            assert isinstance(result_set, CustomResultSet)
+            assert type(result_set.fetchone()) is OrderedDict

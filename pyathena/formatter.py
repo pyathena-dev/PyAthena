@@ -41,7 +41,6 @@ class Formatter(metaclass=ABCMeta):
 
     Attributes:
         mappings: Dictionary mapping Python types to formatting functions.
-        default: Default formatting function for unmapped types.
     """
 
     def __init__(
@@ -139,8 +138,9 @@ class Formatter(metaclass=ABCMeta):
         for large datasets and preserves data types more accurately.
 
         Args:
-            operation: SQL query to wrap. Must be a SELECT or WITH statement.
-            s3_staging_dir: Base S3 directory for storing UNLOAD results.
+            operation: SQL query to wrap. Only SELECT and WITH statements are wrapped.
+            s3_staging_dir: Base S3 directory for storing UNLOAD results, ending
+                with ``/``.
             format_: Output file format. Defaults to Parquet for optimal performance.
             compression: Compression algorithm. Defaults to Snappy for balanced
                        compression ratio and speed.
@@ -159,11 +159,14 @@ class Formatter(metaclass=ABCMeta):
             UNLOAD (
                 SELECT * FROM sales WHERE year = 2023
             )
-            TO 's3://my-bucket/results/unload/20231215/uuid//'
+            TO 's3://my-bucket/results/unload/20231215/<uuid>/'
             WITH (
                 format = 'PARQUET',
                 compression = 'SNAPPY'
             )
+
+        Raises:
+            ProgrammingError: If the query is None, empty, or only whitespace.
 
         Note:
             Only SELECT and WITH statements are wrapped. Other statement types
@@ -413,7 +416,7 @@ class DefaultParameterFormatter(Formatter):
         - Strings: Properly escaped and quoted
         - Binary data: bytes, bytearray, memoryview as hexadecimal literals
         - Numbers: int, float, Decimal
-        - Dates and times: date, datetime, time
+        - Dates and timestamps: date (DATE literal), datetime (TIMESTAMP literal)
         - Booleans: Converted to SQL boolean literals
         - Sequences: list, tuple, set (for IN clauses)
 

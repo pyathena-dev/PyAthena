@@ -32,7 +32,7 @@ class AioCursor(WithAsyncFetch):
     calls, keeping the event loop free.
 
     Example:
-        >>> async with AioConnection.create(...) as conn:
+        >>> async with await AioConnection.create(...) as conn:
         ...     async with conn.cursor() as cursor:
         ...         await cursor.execute("SELECT * FROM my_table")
         ...         rows = await cursor.fetchall()
@@ -85,6 +85,7 @@ class AioCursor(WithAsyncFetch):
         )
         self._result_set: AthenaAioResultSet | None = None
         self._result_set_class = AthenaAioResultSet
+        self._result_set_kwargs: dict[str, Any] = {}
 
     @property  # type: ignore[explicit-override]  # python/mypy#15900
     @override
@@ -132,9 +133,8 @@ class AioCursor(WithAsyncFetch):
             on_start_query_execution: Callback invoked with the query ID before ``execute()``
                 waits for the query: after the ``StartQueryExecution`` call, or after a
                 reusable query ID is found through ``cache_size``.
-            result_set_type_hints: Optional dictionary mapping column names to
-                Athena DDL type signatures for precise type conversion within
-                complex types.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
             options: Shared execution options as an
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.
@@ -174,6 +174,7 @@ class AioCursor(WithAsyncFetch):
                 self.arraysize,
                 self._retry_config,
                 result_set_type_hints=options.result_set_type_hints,
+                **self._result_set_kwargs,
             )
         else:
             raise OperationalError(query_execution.state_change_reason)
@@ -186,7 +187,8 @@ class AioCursor(WithAsyncFetch):
         """Fetch the next row of a query result set.
 
         Returns:
-            A tuple representing the next row, or None if no more rows.
+            The next row (a tuple, or a dict for ``AioDictCursor``), or None if
+            no more rows.
 
         Raises:
             ProgrammingError: If called before executing a query that
@@ -202,10 +204,11 @@ class AioCursor(WithAsyncFetch):
         """Fetch multiple rows from a query result set.
 
         Args:
-            size: Maximum number of rows to fetch. If None, uses arraysize.
+            size: Maximum number of rows to fetch. If None or not positive,
+                ``arraysize`` is used.
 
         Returns:
-            List of tuples representing the fetched rows.
+            The fetched rows.
 
         Raises:
             ProgrammingError: If called before executing a query that
@@ -223,7 +226,7 @@ class AioCursor(WithAsyncFetch):
         """Fetch all remaining rows from a query result set.
 
         Returns:
-            List of tuples representing all remaining rows in the result set.
+            The remaining rows.
 
         Raises:
             ProgrammingError: If called before executing a query that
@@ -239,22 +242,22 @@ class AioDictCursor(AioCursor):
     """Native asyncio cursor that returns rows as dictionaries.
 
     Example:
-        >>> async with AioConnection.create(...) as conn:
+        >>> async with await AioConnection.create(...) as conn:
         ...     cursor = conn.cursor(AioDictCursor)
         ...     await cursor.execute("SELECT id, name FROM users")
         ...     row = await cursor.fetchone()
         ...     print(row["name"])
     """
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, dict_type: type[Any] | None = None, **kwargs) -> None:
         """Initialize an AioDictCursor.
 
         Args:
-            **kwargs: Arguments forwarded to ``AioCursor.__init__``. If they include
-                ``dict_type``, it is also assigned to the class attribute
-                ``AthenaAioDictResultSet.dict_type``, the type used to build each row.
+            dict_type: The type used to build each row of this cursor's result
+                sets. If None, the result set class's ``dict_type`` is used.
+            **kwargs: Arguments forwarded to ``AioCursor.__init__``.
         """
         super().__init__(**kwargs)
         self._result_set_class = AthenaAioDictResultSet
-        if "dict_type" in kwargs:
-            AthenaAioDictResultSet.dict_type = kwargs["dict_type"]
+        if dict_type is not None:
+            self._result_set_kwargs = {"dict_type": dict_type}

@@ -141,9 +141,8 @@ class AioS3FSCursor(WithAsyncFetch):
             on_start_query_execution: Callback invoked with the query ID before ``execute()``
                 waits for the query: after the ``StartQueryExecution`` call, or after a
                 reusable query ID is found through ``cache_size``.
-            result_set_type_hints: Optional dictionary mapping column names to
-                Athena DDL type signatures for precise type conversion within
-                complex types.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
             options: Shared execution options as an
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.

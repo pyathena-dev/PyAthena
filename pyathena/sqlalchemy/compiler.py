@@ -85,8 +85,10 @@ class AthenaTypeCompiler(GenericTypeCompiler):
     SQLAlchemy's portable types and Athena's specific type syntax.
 
     Athena has specific requirements for type names that differ from standard
-    SQL. For example, FLOAT maps to REAL in CAST expressions, and various
-    string types (TEXT, NCHAR, NVARCHAR) all map to STRING.
+    SQL. For example, FLOAT and REAL render as FLOAT here, while the statement
+    compiler renders them as REAL in CAST expressions. TEXT, and CHAR, NCHAR,
+    VARCHAR, or NVARCHAR without a length, render as STRING; with a length,
+    they render as CHAR(n) or VARCHAR(n).
 
     The compiler also supports Athena-specific complex types:
     - STRUCT/ROW: Nested record types with named fields
