@@ -154,7 +154,7 @@ class TestS3FileSystem:
         # Build a minimal S3FileSystem without touching AWS, bypassing
         # __init__ which would require a boto3 client.
         fs = S3FileSystem.__new__(S3FileSystem)
-        fs.dircache = {}
+        fs.dircache = DirCache()
         fs._client = mock.MagicMock()
         fs._client.meta.method_to_api_mapping = S3_CLIENT.meta.method_to_api_mapping
         fs._client.meta.service_model = S3_CLIENT.meta.service_model
@@ -1091,8 +1091,9 @@ class TestS3FileSystem:
         )
 
     @staticmethod
-    def _record_requests(fs, precondition_failed=False):
-        # Record the S3 requests of the filesystem by operation name. With
+    def _record_requests(fs, precondition_failed=False, exists=True):
+        # Record the S3 requests of the filesystem by operation name, with an
+        # object of 2 bytes at every key if it exists. With
         # precondition_failed, the conditional writes fail as S3 fails them
         # when an object exists.
         requests = []
@@ -1101,6 +1102,12 @@ class TestS3FileSystem:
             name = method if isinstance(method, str) else method._extract_mock_name()
             name = name.split(".")[-1]
             requests.append((name, request))
+            if name == "head_object":
+                if not exists:
+                    raise FileNotFoundError(request["Key"])
+                return {"ContentLength": 2, "ETag": '"e"'}
+            if name == "get_object":
+                return {"Body": io.BytesIO(b"aa")}
             if precondition_failed and name in {"put_object", "complete_multipart_upload"}:
                 error = botocore.exceptions.ClientError(
                     {
@@ -1805,7 +1812,7 @@ class TestS3FileSystem:
             "ContentType": "text/plain",
             "Metadata": {"k": "v"},
         }
-        fs.cat = mock.MagicMock(return_value=b"aa")
+        fs.cat_file = mock.MagicMock(return_value=b"aa")
         fs._put_object = mock.MagicMock()
 
         with fs.open("s3://bucket/key", "ab") as f:
@@ -1839,6 +1846,211 @@ class TestS3FileSystem:
 
         assert unraisable == []
         fs._call.assert_not_called()
+
+    LOOKUP_KWARGS = {
+        "ExpectedBucketOwner": "111122223333",
+        "RequestPayer": "requester",
+        "SSECustomerAlgorithm": "AES256",
+        "SSECustomerKey": "k" * 32,
+    }
+
+    @pytest.mark.parametrize("mode", ["rb", "ab", "xb"])
+    def test_open_lookup_parameters(self, mode):
+        # GH-1004: the lookups made while opening a file did not send its
+        # parameters, so an object encrypted with a customer-provided key, or
+        # in a requester-pays bucket, could not be opened.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        requests = self._record_requests(fs, exists=mode != "xb")
+
+        with fs.open(
+            "s3://bucket/key",
+            mode,
+            ContentType="text/plain",
+            Range="bytes=0-0",
+            **self.LOOKUP_KWARGS,
+        ) as f:
+            if mode == "rb":
+                assert f.read() == b"aa"
+            else:
+                f.write(b"bb")
+
+        lookups = {name: request for name, request in requests if name != "put_object"}
+        # Only the parameters on which the authorization of a lookup depends.
+        assert lookups.pop("head_object") == {
+            "Bucket": "bucket",
+            "Key": "key",
+            **self.LOOKUP_KWARGS,
+        }
+        if mode == "xb":
+            assert lookups.pop("list_objects_v2") == {
+                "Bucket": "bucket",
+                "Prefix": "key/",
+                "Delimiter": "/",
+                "MaxKeys": 1,
+                "ExpectedBucketOwner": "111122223333",
+                "RequestPayer": "requester",
+            }
+        else:
+            get_object = lookups.pop("get_object")
+            assert self.LOOKUP_KWARGS.items() <= get_object.items()
+            if mode == "ab":
+                # The whole existing object is read.
+                assert "Range" not in get_object
+        assert lookups == {}
+
+    def test_cache_lookup_concurrent_parameters(self):
+        # GH-1004: caching a lookup with some parameters does not replace a
+        # result cached in the meantime for other parameters.
+        fs = self._make_fs()
+        path = "bucket/key"
+        lookup_kwargs = self.LOOKUP_KWARGS
+        other_key = {**lookup_kwargs, "SSECustomerKey": "j" * 32}
+        stale, fresh, other = (fs._directory_object("bucket", "key") for _ in range(3))
+        fs._cache_lookup(path, lookup_kwargs, stale)
+
+        class InterleavedDirCache(DirCache):
+            interleaved = False
+
+            def get(self, key, default=None):
+                value = super().get(key, default)
+                if not self.interleaved:
+                    # Another thread refreshes the lookup in between.
+                    self.interleaved = True
+                    fs._cache_lookup(path, lookup_kwargs, fresh)
+                return value
+
+        cache = InterleavedDirCache()
+        cache.update(fs.dircache)
+        fs.dircache = cache
+        fs._cache_lookup(path, other_key, other)
+
+        assert fs._get_cached_lookup(path, lookup_kwargs) is fresh
+        assert fs._get_cached_lookup(path, other_key) is other
+
+    def test_cache_lookup_expiry(self, monkeypatch):
+        # GH-1004: the cached lookups with parameters expire after the
+        # listings_expiry_time of the dircache, each on its own.
+        fs = self._make_fs()
+        fs.dircache = DirCache(listings_expiry_time=60)
+        now = [0.0]
+        monkeypatch.setattr("fsspec.dircache.time.time", lambda: now[0])
+        path = "bucket/key"
+        stale, fresh = (fs._directory_object("bucket", "key") for _ in range(2))
+
+        other_key = {**self.LOOKUP_KWARGS, "SSECustomerKey": "j" * 32}
+
+        fs._cache_lookup(path, self.LOOKUP_KWARGS, stale)
+        now[0] = 59.0
+        fs._cache_lookup(path, self.LOOKUP_KWARGS, fresh)
+        now[0] = 61.0
+        assert fs._get_cached_lookup(path, self.LOOKUP_KWARGS) is fresh
+
+        # Each result expires on its own, also while the results of other
+        # parameters keep renewing the entry of the path.
+        fs._cache_lookup(path, other_key, stale)
+        now[0] = 120.0
+        assert fs._get_cached_lookup(path, other_key) is stale
+        assert fs._get_cached_lookup(path, self.LOOKUP_KWARGS) is None
+
+    def test_info_lookup_parameters_cache(self):
+        # GH-1004: a cached result serves only lookups with the same lookup
+        # parameters, on which the authorization of the requests depends.
+        fs = self._make_fs()
+        fs._call.return_value = {"ContentLength": 2, "ETag": '"e"'}
+        fs.dircache[("bucket", "/")] = [self._file_object("key")]
+        path = "s3://bucket/key"
+        other_key = {**self.LOOKUP_KWARGS, "SSECustomerKey": "j" * 32}
+
+        for _ in range(2):
+            assert fs.info(path).size == 0
+            assert fs.info(path, **self.LOOKUP_KWARGS).size == 2
+            assert fs.info(path, IfMatch='"x"', **other_key).size == 2
+            assert fs.exists(path, **self.LOOKUP_KWARGS)
+        # The listing serves only the lookups without the parameters, and the
+        # other parameters are not sent.
+        assert [c.kwargs for c in fs._call.call_args_list] == [
+            {"Bucket": "bucket", "Key": "key", **self.LOOKUP_KWARGS},
+            {"Bucket": "bucket", "Key": "key", **other_key},
+        ]
+        # The cache does not keep the customer-provided keys.
+        assert "k" * 32 not in repr(dict(fs.dircache))
+        assert "j" * 32 not in repr(dict(fs.dircache))
+
+        fs.invalidate_cache(path)
+        fs.info(path, **self.LOOKUP_KWARGS)
+        assert fs._call.call_count == 3
+
+    def test_info_lookup_parameters_missing_object(self):
+        # GH-1004: a missing object evicts the cached results of the lookups
+        # with parameters, and the request that checks for a key prefix
+        # receives those that ListObjectsV2 accepts.
+        fs = self._make_fs()
+        fs._call.side_effect = [
+            {"ContentLength": 2, "ETag": '"e"'},
+            FileNotFoundError("key"),
+            {"KeyCount": 0},
+        ]
+        path = "s3://bucket/key"
+
+        fs.info(path, **self.LOOKUP_KWARGS)
+        with pytest.raises(FileNotFoundError):
+            fs.info(path, refresh=True, **self.LOOKUP_KWARGS)
+
+        assert fs.dircache == {}
+        assert fs._call.call_args.kwargs == {
+            "Bucket": "bucket",
+            "Prefix": "key/",
+            "Delimiter": "/",
+            "MaxKeys": 1,
+            "ExpectedBucketOwner": "111122223333",
+            "RequestPayer": "requester",
+        }
+
+    def test_exists_bucket_lookup_parameters(self):
+        # GH-1004: a bucket lookup with parameters uses neither the cached
+        # bucket listing nor the result of a lookup without them.
+        fs = self._make_fs()
+        fs._call.return_value = {}
+        fs.dircache[""] = [fs._directory_object("bucket", None)]
+
+        for _ in range(2):
+            assert fs.exists("s3://bucket")
+            assert fs.exists("s3://bucket", **self.LOOKUP_KWARGS)
+            assert fs.info("s3://bucket", **self.LOOKUP_KWARGS).type == (
+                S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
+            )
+        fs._call.assert_called_once_with(
+            fs._client.head_bucket, Bucket="bucket", ExpectedBucketOwner="111122223333"
+        )
+
+    def test_pipe_file_create_lookup_parameters(self):
+        # GH-1004: the existence check of pipe_file(mode="create") sends the
+        # lookup parameters of the write, as open() does in "xb" mode.
+        fs = self._make_fs()
+        requests = self._record_requests(fs, exists=False)
+
+        fs.pipe_file("s3://bucket/key", b"a", mode="create", **self.LOOKUP_KWARGS)
+
+        assert requests[0] == (
+            "head_object",
+            {"Bucket": "bucket", "Key": "key", **self.LOOKUP_KWARGS},
+        )
+        assert requests[-1][0] == "put_object"
+        assert requests[-1][1]["IfNoneMatch"] == "*"
+
+    def test_cat_file_range_lookup_parameters(self):
+        # GH-1004: the lookup that resolves negative offsets sends the lookup
+        # parameters of the read.
+        fs = self._make_fs()
+        requests = self._record_requests(fs)
+
+        assert fs.cat_file("s3://bucket/key", start=-2, end=-1, **self.LOOKUP_KWARGS) == b"aa"
+
+        assert [(name, self.LOOKUP_KWARGS.items() <= r.items()) for name, r in requests] == [
+            ("head_object", True),
+            ("get_object", True),
+        ]
 
     @pytest.mark.parametrize(
         "block_size",
@@ -2445,6 +2657,30 @@ class TestS3FileSystem:
             assert fs.info("s3://bucket/key").size == 3
         # The second round is served from the cache.
         assert fs._call.call_count == 3
+
+    @pytest.mark.parametrize("lookup", [False, True])
+    def test_info_version_spellings_share_cache(self, lookup):
+        # A version looked up with any spelling of the query is cached once,
+        # so a missing version evicts it for every spelling.
+        fs = self._make_fs()
+        kwargs = self.LOOKUP_KWARGS if lookup else {}
+        fs._call.side_effect = [
+            {"ContentLength": 4, "ETag": '"etag"', "VersionId": "v1"},
+            FileNotFoundError("key"),
+            {"KeyCount": 0},
+            FileNotFoundError("key"),
+            {"KeyCount": 0},
+        ]
+
+        assert fs.info("s3://bucket/key?versionId=v1", **kwargs).size == 4
+        assert fs.info("s3://bucket/key?version_id=v1", **kwargs).size == 4
+        assert fs.info("s3://bucket/key", version_id="v1", **kwargs).size == 4
+        assert fs._call.call_count == 1
+        with pytest.raises(FileNotFoundError):
+            fs.info("s3://bucket/key?version_id=v1", refresh=True, **kwargs)
+        with pytest.raises(FileNotFoundError):
+            fs.info("s3://bucket/key?versionId=v1", **kwargs)
+        assert fs._call.call_count == 5
 
     def test_info_does_not_cache_null_version(self):
         fs = self._make_fs()
@@ -4084,6 +4320,7 @@ class TestS3File:
         fs._get_operation_kwargs.side_effect = functools.partial(
             S3FileSystem._get_operation_kwargs, fs
         )
+        fs._get_lookup_kwargs.side_effect = S3FileSystem._get_lookup_kwargs
         return fs
 
     @staticmethod
@@ -4138,7 +4375,7 @@ class TestS3File:
             bucket="bucket",
             key="key.txt",
         )
-        fs.cat.return_value = existing
+        fs.cat_file.return_value = existing
         fs._create_multipart_upload.return_value = SimpleNamespace(upload_id="uploadid")
 
         def part(**kw):

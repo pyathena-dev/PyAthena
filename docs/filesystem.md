@@ -128,6 +128,19 @@ with fs.open("s3://YOUR_S3_BUCKET/path/to/data.csv", "wb", ContentType="text/csv
     f.write(b"col1\n1\n")
 ```
 
+`info` and `exists` accept `ExpectedBucketOwner`, `RequestPayer`, and the
+`SSECustomer*` parameters of an object encrypted with a customer-provided key (SSE-C)
+as keyword arguments, and ignore other request parameters. The lookups of the object
+by `open`, and the existence check of `pipe` with `mode="create"`, send these
+parameters of the file or the write. A lookup with them uses only the cached results of
+lookups with the same values, not cached listings.
+
+```python
+sse_c = {"SSECustomerAlgorithm": "AES256", "SSECustomerKey": YOUR_32_BYTE_KEY}
+with fs.open("s3://YOUR_S3_BUCKET/path/to/encrypted.csv", "rb", **sse_c) as f:
+    data = f.read()
+```
+
 ## Error translation
 
 S3 error responses are translated into standard Python exceptions, so filesystem
