@@ -216,7 +216,8 @@ class AioS3FileSystem(AsyncFileSystem):
             rpath: S3 destination path (s3://bucket/key).
             callback: Progress callback for tracking upload progress.
             **kwargs: Additional S3 parameters (e.g., ContentType, StorageClass).
-                The ``block_size`` parameter of ``open()`` is also accepted.
+                The ``block_size``, ``max_workers``, and ``s3_additional_kwargs``
+                parameters of ``open()`` are also accepted.
 
         Raises:
             ValueError: If the file takes more than
@@ -230,15 +231,24 @@ class AioS3FileSystem(AsyncFileSystem):
 
         size = os.path.getsize(lpath)
         block_size = kwargs.pop("block_size", None) or self._sync_fs.default_block_size
+        max_workers = kwargs.pop("max_workers", self._sync_fs.max_workers)
+        # The other parameters are S3 request parameters, as in pipe_file().
+        s3_additional_kwargs = {**kwargs.pop("s3_additional_kwargs", {}), **kwargs}
         self._sync_fs._check_multipart_upload_size(rpath, size, block_size)
         callback.set_size(size)
-        if "ContentType" not in kwargs:
+        if "ContentType" not in {**self._sync_fs.s3_additional_kwargs, **s3_additional_kwargs}:
             content_type, _ = mimetypes.guess_type(lpath)
             if content_type is not None:
-                kwargs["ContentType"] = content_type
+                s3_additional_kwargs["ContentType"] = content_type
 
         with (
-            self.open(rpath, "wb", block_size=block_size, s3_additional_kwargs=kwargs) as remote,
+            self.open(
+                rpath,
+                "wb",
+                block_size=block_size,
+                max_workers=max_workers,
+                s3_additional_kwargs=s3_additional_kwargs,
+            ) as remote,
             open(lpath, "rb") as local,
         ):
             while data := local.read(remote.blocksize):
@@ -298,6 +308,9 @@ class AioS3FileSystem(AsyncFileSystem):
         # fsspec < 2026.6.0 leaks the typo'd "onerror" keyword from mv();
         # see S3FileSystem.cp_file.
         kwargs.pop("onerror", None)
+        # Parameters of the multipart copy, not of the S3 requests.
+        block_size = kwargs.pop("block_size", None)
+        max_workers = kwargs.pop("max_workers", None)
         bucket1, key1, version_id1 = self.parse_path(path1)
         bucket2, key2, version_id2 = self.parse_path(path2)
         if version_id2:
@@ -325,6 +338,8 @@ class AioS3FileSystem(AsyncFileSystem):
                 size1=size1,
                 bucket2=bucket2,
                 key2=key2,
+                max_workers=max_workers,
+                block_size=block_size,
                 **kwargs,
             )
         self._sync_fs.invalidate_cache(path2)
@@ -336,10 +351,12 @@ class AioS3FileSystem(AsyncFileSystem):
         size1: int,
         bucket2: str,
         key2: str,
+        max_workers: int | None = None,
         block_size: int | None = None,
         version_id1: str | None = None,
         **kwargs,
     ) -> None:
+        max_workers = max_workers if max_workers else self._sync_fs.max_workers
         block_size = block_size if block_size else S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE
         if (
             block_size < S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE
@@ -367,16 +384,21 @@ class AioS3FileSystem(AsyncFileSystem):
             **kwargs,
         )
 
+        semaphore = asyncio.Semaphore(max_workers)
+        part_kwargs = self._sync_fs._get_operation_kwargs("upload_part_copy", kwargs)
+
         async def _upload_part(i: int, range_: tuple[int, int]) -> dict[str, Any]:
-            result = await asyncio.to_thread(
-                self._sync_fs._upload_part_copy,
-                bucket=bucket2,
-                key=key2,
-                copy_source=copy_source,
-                upload_id=cast(str, multipart_upload.upload_id),
-                part_number=i + 1,
-                copy_source_ranges=range_,
-            )
+            async with semaphore:
+                result = await asyncio.to_thread(
+                    self._sync_fs._upload_part_copy,
+                    bucket=bucket2,
+                    key=key2,
+                    copy_source=copy_source,
+                    upload_id=cast(str, multipart_upload.upload_id),
+                    part_number=i + 1,
+                    copy_source_ranges=range_,
+                    **part_kwargs,
+                )
             return {
                 "ETag": result.etag,
                 "PartNumber": result.part_number,
@@ -391,6 +413,7 @@ class AioS3FileSystem(AsyncFileSystem):
             key=key2,
             upload_id=cast(str, multipart_upload.upload_id),
             parts=parts_list,
+            **self._sync_fs._get_operation_kwargs("complete_multipart_upload", kwargs),
         )
 
     async def _find(
@@ -440,8 +463,12 @@ class AioS3FileSystem(AsyncFileSystem):
         if cache_type is None:
             cache_type = self._sync_fs.default_cache_type
         max_workers = kwargs.pop("max_workers", self._sync_fs.max_workers)
-        s3_additional_kwargs = kwargs.pop("s3_additional_kwargs", {})
-        s3_additional_kwargs.update(self._sync_fs.s3_additional_kwargs)
+        # The parameters of the call take precedence over those of the
+        # filesystem; the caller's dictionary is not modified.
+        s3_additional_kwargs = {
+            **self._sync_fs.s3_additional_kwargs,
+            **kwargs.pop("s3_additional_kwargs", {}),
+        }
 
         return AioS3File(
             self._sync_fs,
