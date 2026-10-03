@@ -788,6 +788,47 @@ class TestPolarsCursor:
         ]
 
     @pytest.mark.parametrize(
+        "polars_cursor",
+        [
+            pytest.param({}, id="default"),
+            pytest.param(
+                {"work_group": ENV.managed_work_group, "s3_staging_dir": ""},
+                id="managed",
+                marks=pytest.mark.skipif(
+                    not ENV.managed_work_group,
+                    reason="AWS_ATHENA_MANAGED_WORKGROUP not set",
+                ),
+            ),
+        ],
+        indirect=["polars_cursor"],
+    )
+    def test_duplicate_column_names(self, polars_cursor):
+        polars_cursor.execute(
+            "SELECT 1 AS x, 2 AS x, 'a' AS y, json_parse('[1]') AS j, json_parse('[2]') AS j, "
+            "CAST('12:34:56' AS TIME) AS t, CAST('01:02:03' AS TIME) AS t"
+        )
+        assert polars_cursor.fetchall() == [
+            (
+                1,
+                2,
+                "a",
+                [1],
+                [2],
+                datetime(2017, 1, 1, 12, 34, 56).time(),
+                datetime(2017, 1, 1, 1, 2, 3).time(),
+            )
+        ]
+        assert polars_cursor.as_polars().columns == [
+            "x",
+            "x_duplicated_0",
+            "y",
+            "j",
+            "j_duplicated_0",
+            "t",
+            "t_duplicated_0",
+        ]
+
+    @pytest.mark.parametrize(
         "execute_kwargs",
         [{}, {"block_size": 2048, "cache_type": "none", "max_workers": 3, "chunksize": 20}],
     )

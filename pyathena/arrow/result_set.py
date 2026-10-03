@@ -254,23 +254,23 @@ class AthenaArrowResultSet(AthenaResultSet):
         except StopIteration:
             return
         else:
-            dict_rows = rows.to_pydict()
+            # Read the columns by position; to_pydict() keeps one column per name.
+            columns = [column.to_pylist() for column in rows.columns]
             converters = (
                 self.converters
                 if self._convert_rows
                 else self._text_value_converters(self.converters)
             )
             if converters:
-                column_names = dict_rows.keys()
+                column_converters = [
+                    converters.get(name, _to_default) for name in rows.schema.names
+                ]
                 processed_rows = [
-                    tuple(
-                        converters.get(k, _to_default)(v)
-                        for k, v in zip(column_names, row, strict=False)
-                    )
-                    for row in zip(*dict_rows.values(), strict=False)
+                    tuple(convert(v) for convert, v in zip(column_converters, row, strict=False))
+                    for row in zip(*columns, strict=False)
                 ]
             else:
-                processed_rows = list(zip(*dict_rows.values(), strict=False))
+                processed_rows = list(zip(*columns, strict=False))
             self._rows.extend(processed_rows)
 
     @override
@@ -400,8 +400,8 @@ class AthenaArrowResultSet(AthenaResultSet):
         if not rows:
             return pa.Table.from_pydict({})
         description = self.description if self.description else []
-        columns = [d[0] for d in description]
-        return pa.table(self._rows_to_columnar(rows, columns))
+        columns = [list(column) for column in zip(*rows, strict=True)]
+        return pa.table(columns, names=[d[0] for d in description])
 
     def as_arrow(self) -> Table:
         """Return the query results as an Apache Arrow Table.
@@ -444,4 +444,4 @@ class AthenaArrowResultSet(AthenaResultSet):
 
         super().close()
         self._table = pa.Table.from_pydict({})
-        self._batches = []
+        self._batches = iter([])
