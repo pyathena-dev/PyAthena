@@ -715,8 +715,14 @@ class AthenaDialect(DefaultDialect):
             cannot be parsed becomes ``NullType`` as a whole, with a warning.
 
         Raises:
-            ValueError: If the arguments of a nested MAP or STRUCT/ROW cannot be
-                parsed.
+            ValueError: If the length, precision, or scale of a CHAR, VARCHAR,
+                or DECIMAL type is not an integer, or if the arguments of a
+                nested MAP or STRUCT/ROW cannot be parsed. Inside a top-level
+                ARRAY, MAP, or STRUCT/ROW, these errors make that type
+                ``NullType`` instead.
+            TypeError: If a DECIMAL type has more arguments than SQLAlchemy's
+                ``DECIMAL`` accepts, with the same exception for a top-level
+                ARRAY, MAP, or STRUCT/ROW.
         """
         type_ = type_.strip()
         match = self._pattern_column_type.match(type_)
