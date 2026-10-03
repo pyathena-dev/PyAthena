@@ -312,7 +312,8 @@ class AthenaPandasResultSet(AthenaResultSet):
             **kwargs: Additional arguments passed to pandas.read_csv/read_parquet.
                 A given ``storage_options``, even None, replaces PyAthena's S3 filesystem
                 for reading the result files, and so does ``filesystem`` for UNLOAD results.
-                The UNLOAD manifest and schema are still read with PyAthena's filesystem.
+                The UNLOAD manifest is still read with the connection's S3 client, and the
+                schema with PyAthena's filesystem.
         """
         super().__init__(
             connection=connection,
