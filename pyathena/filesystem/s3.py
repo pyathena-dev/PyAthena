@@ -1626,10 +1626,12 @@ class S3FileSystem(AbstractFileSystem):
             try:
                 self._call(
                     self._client.abort_multipart_upload,
-                    Bucket=bucket,
-                    Key=key,
-                    UploadId=upload_id,
-                    **self._get_operation_kwargs("abort_multipart_upload", request_kwargs),
+                    **{
+                        **self._get_operation_kwargs("abort_multipart_upload", request_kwargs),
+                        "Bucket": bucket,
+                        "Key": key,
+                        "UploadId": upload_id,
+                    },
                 )
             except Exception:
                 _logger.exception(
@@ -2358,8 +2360,9 @@ class S3FileSystem(AbstractFileSystem):
         _logger.debug(f"Get object: s3://{bucket}/{key}?versionId={version_id}&range={range_}")
         response = self._call(
             self._client.get_object,
-            **request,
-            **kwargs,
+            # The fields of the request take precedence over inherited
+            # parameters of the same name.
+            **{**kwargs, **request},
         )
         return ranges[0], cast(bytes, response["Body"].read())
 
@@ -2371,8 +2374,9 @@ class S3FileSystem(AbstractFileSystem):
         _logger.debug(f"Put object: s3://{bucket}/{key}")
         response = self._call(
             self._client.put_object,
-            **request,
-            **kwargs,
+            # The fields of the request take precedence over inherited
+            # parameters of the same name.
+            **{**kwargs, **request},
         )
         return S3PutObject(response)
 
@@ -2385,8 +2389,9 @@ class S3FileSystem(AbstractFileSystem):
         _logger.debug(f"Create multipart upload to s3://{bucket}/{key}.")
         response = self._call(
             self._client.create_multipart_upload,
-            **request,
-            **kwargs,
+            # The fields of the request take precedence over inherited
+            # parameters of the same name.
+            **{**kwargs, **request},
         )
         return S3MultipartUpload(response)
 
@@ -2415,8 +2420,9 @@ class S3FileSystem(AbstractFileSystem):
         )
         response = self._call(
             self._client.upload_part_copy,
-            **request,
-            **kwargs,
+            # The fields of the request take precedence over inherited
+            # parameters of the same name.
+            **{**kwargs, **request},
         )
         return S3MultipartUploadPart(part_number, response)
 
@@ -2440,8 +2446,9 @@ class S3FileSystem(AbstractFileSystem):
         _logger.debug(f"Upload part of {upload_id} to s3://{bucket}/{key} as part {part_number}.")
         response = self._call(
             self._client.upload_part,
-            **request,
-            **kwargs,
+            # The fields of the request take precedence over inherited
+            # parameters of the same name.
+            **{**kwargs, **request},
         )
         return S3MultipartUploadPart(part_number, response)
 
@@ -2458,8 +2465,9 @@ class S3FileSystem(AbstractFileSystem):
         _logger.debug(f"Complete multipart upload {upload_id} to s3://{bucket}/{key}.")
         response = self._call(
             self._client.complete_multipart_upload,
-            **request,
-            **kwargs,
+            # The fields of the request take precedence over inherited
+            # parameters of the same name.
+            **{**kwargs, **request},
         )
         return S3CompleteMultipartUpload(response)
 
@@ -2878,10 +2886,12 @@ class S3File(AbstractBufferedFile):
             wait([f for f in self.multipart_upload_parts if not f.cancel()])
             self.fs._call(
                 "abort_multipart_upload",
-                Bucket=self.bucket,
-                Key=self.key,
-                UploadId=self.multipart_upload.upload_id,
-                **self._get_request_kwargs("abort_multipart_upload"),
+                **{
+                    **self._get_request_kwargs("abort_multipart_upload"),
+                    "Bucket": self.bucket,
+                    "Key": self.key,
+                    "UploadId": self.multipart_upload.upload_id,
+                },
             )
 
         self.multipart_upload = None

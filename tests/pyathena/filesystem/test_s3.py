@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import functools
 import gc
 import io
@@ -817,6 +818,48 @@ class TestS3FileSystem:
             max_workers=2,
             s3_additional_kwargs={"StorageClass": "STANDARD_IA", "ContentType": "text/csv"},
         )
+
+    @pytest.mark.parametrize("fail", [False, True])
+    def test_open_parameters_named_as_request_fields(self, fail):
+        # Parameters of a file named like the fields that a request sets
+        # itself do not replace them, so the parts, the completion and the
+        # abort use the upload of the file.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        requests = []
+
+        def call(method, **request):
+            name = method if isinstance(method, str) else method._extract_mock_name()
+            name = name.split(".")[-1]
+            requests.append((name, request))
+            if name == "upload_part" and fail:
+                raise OSError("upload failed")
+            return {"UploadId": "uploadid", "ETag": '"e"'}
+
+        fs._call.side_effect = call
+        block_size = fs.MULTIPART_UPLOAD_MIN_PART_SIZE
+
+        with (
+            pytest.raises(OSError, match="upload failed") if fail else contextlib.nullcontext(),
+            fs.open(
+                "s3://bucket/key",
+                "wb",
+                block_size=block_size,
+                Key="other",
+                UploadId="other",
+                PartNumber=99,
+            ) as f,
+        ):
+            f.write(b"x" * (block_size + 1))
+
+        names = [name for name, _ in requests]
+        expected = "abort_multipart_upload" if fail else "complete_multipart_upload"
+        assert names == ["create_multipart_upload", "upload_part", expected]
+        for name, request in requests:
+            assert request["Key"] == "key"
+            if name != "create_multipart_upload":
+                assert request["UploadId"] == "uploadid"
+        assert requests[1][1]["PartNumber"] == 1
 
     def test_finish_multipart_upload_request_parameters(self):
         # GH-946: the completion and the abort receive the parameters of the
