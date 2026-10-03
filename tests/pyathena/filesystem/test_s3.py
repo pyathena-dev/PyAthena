@@ -272,6 +272,175 @@ class TestS3FileSystem:
         # every cache value is a listing and raises TypeError here).
         assert fs._ls_from_cache("bucket/key/child") is None
 
+    def test_info_uses_cached_listings(self):
+        # GH-965: listings cached under (path, delimiter) answer info() and
+        # exists() without HeadObject or ListObjectsV2 requests.
+        fs = self._make_fs()
+        fs._call.return_value = {
+            "CommonPrefixes": [{"Prefix": "d/sub/"}],
+            "Contents": [{"Key": "d/direct", "Size": 4, "ETag": '"etag"'}],
+        }
+        fs.ls("s3://bucket/d")
+        fs._call.reset_mock()
+
+        file = fs.info("s3://bucket/d/direct")
+        assert (file.type, file.size, file.etag) == (S3ObjectType.S3_OBJECT_TYPE_FILE, 4, '"etag"')
+        assert fs.isdir("s3://bucket/d/sub")
+        with pytest.raises(FileNotFoundError):
+            fs.info("s3://bucket/d/missing")
+        assert not fs.exists("s3://bucket/d/missing")
+        fs._call.assert_not_called()
+
+    def test_info_prefers_listed_object_to_prefix_of_same_name(self):
+        # A key that is both an object and a key prefix is an object, as the
+        # uncached lookup with HeadObject finds.
+        fs = self._make_fs()
+        fs.dircache[("bucket", "/")] = [
+            fs._directory_object("bucket", "d"),
+            self._file_object("d"),
+        ]
+
+        assert fs.isfile("s3://bucket/d")
+        fs._call.assert_not_called()
+
+    def test_info_does_not_use_listing_of_path(self):
+        # The listing of the path cannot tell whether an object of the same
+        # name exists.
+        fs = self._make_fs()
+        fs.dircache[("bucket/d", "/")] = [self._file_object("d/direct")]
+        fs._call.return_value = {"ContentLength": 4}
+
+        assert fs.isfile("s3://bucket/d")
+        fs._call.assert_called_once_with(fs._client.head_object, Bucket="bucket", Key="d")
+
+    @pytest.mark.parametrize(
+        ("version_aware", "lookup"),
+        [
+            pytest.param(
+                False, lambda fs: fs.exists("s3://bucket/d/key", refresh=True), id="exists"
+            ),
+            pytest.param(False, lambda fs: fs.ls("s3://bucket/d/key", refresh=True), id="ls"),
+            # The listed entry has no version, so it is looked up again.
+            pytest.param(True, lambda fs: fs.isfile("s3://bucket/d/key"), id="version_aware"),
+        ],
+    )
+    def test_missing_object_drops_cached_parent_listing(self, version_aware, lookup):
+        # A lookup that finds a listed object deleted is not contradicted by
+        # the listing afterwards.
+        fs = self._make_fs()
+        fs.version_aware = version_aware
+        fs.dircache[("bucket/d", "/")] = [self._file_object("d/key")]
+
+        def call(method, **kwargs):
+            if method == fs._client.head_object:
+                raise FileNotFoundError
+            return {}
+
+        fs._call.side_effect = call
+
+        lookup(fs)
+        assert ("bucket/d", "/") not in fs.dircache
+        assert not fs.exists("s3://bucket/d/key")
+
+    def test_refreshed_prefix_drops_cached_parent_listing(self):
+        # A key prefix created after the parent was listed is not reported
+        # missing by the listing after a refreshed lookup finds it.
+        fs = self._make_fs()
+        fs.dircache[("bucket/d", "/")] = [self._file_object("d/key")]
+
+        def call(method, **kwargs):
+            if method == fs._client.head_object:
+                raise FileNotFoundError
+            return {"KeyCount": 1}
+
+        fs._call.side_effect = call
+
+        assert fs.isdir("s3://bucket/d/new") is False
+        assert (
+            fs.info("s3://bucket/d/new", refresh=True).type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
+        )
+        assert fs.isdir("s3://bucket/d/new")
+
+    def test_missing_object_keeps_cached_parent_listing_without_it(self):
+        fs = self._make_fs()
+        fs.dircache[("bucket/d", "/")] = [self._file_object("d/key")]
+        fs._call.side_effect = FileNotFoundError
+
+        assert fs._head_object("bucket/d/other", refresh=True) is None
+        assert ("bucket/d", "/") in fs.dircache
+
+    def test_info_version_aware_heads_listed_file(self):
+        fs = self._make_fs()
+        fs.version_aware = True
+        fs.dircache[("bucket/d", "/")] = [self._file_object("d/direct")]
+        fs._call.return_value = {"ContentLength": 4, "VersionId": "v1"}
+
+        # The listed entry has no version to pin.
+        assert fs.info("s3://bucket/d/direct").version_id == "v1"
+        fs._call.assert_called_once_with(fs._client.head_object, Bucket="bucket", Key="d/direct")
+
+    def test_exists_version_ignores_cached_parent_listing(self):
+        # The listing describes the current versions, so a version missing
+        # from it is looked up with HeadObject.
+        fs = self._make_fs()
+        fs.dircache[("bucket/d", "/")] = [self._file_object("d/other")]
+        fs._call.return_value = {"ContentLength": 4}
+
+        assert fs.exists("s3://bucket/d/direct?versionId=v1")
+        fs._call.assert_called_once_with(
+            fs._client.head_object, Bucket="bucket", Key="d/direct", VersionId="v1"
+        )
+
+    def test_info_bucket_missing_from_bucket_listing(self):
+        # GH-980: the bucket listing holds only the buckets of the caller.
+        fs = self._make_fs()
+        fs.dircache[""] = [fs._directory_object("mine", None)]
+        fs._call.return_value = {}
+
+        info = fs.info("s3://other-account-bucket")
+        assert info.storage_class == S3StorageClass.S3_STORAGE_CLASS_BUCKET
+        fs._call.assert_called_once_with(fs._client.head_bucket, Bucket="other-account-bucket")
+        fs._call.reset_mock()
+        assert fs.isdir("s3://other-account-bucket")
+        assert fs.isdir("s3://mine")
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize("path", ["", "/", "s3://"])
+    def test_info_root(self, path):
+        fs = self._make_fs()
+
+        info = fs.info(path)
+        assert (info.name, info.type, info.size) == ("", S3ObjectType.S3_OBJECT_TYPE_DIRECTORY, 0)
+        assert fs.isdir(path)
+        assert not fs.isfile(path)
+        assert fs.size(path) == 0
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize("path", ["", "/", "s3://"])
+    def test_invalidate_cache_root_drops_bucket_listing(self, path):
+        fs = self._make_fs()
+        fs.dircache[""] = [fs._directory_object("bucket", None)]
+        fs.dircache["bucket"] = fs._directory_object("bucket", None)
+
+        fs.invalidate_cache(path)
+        assert list(fs.dircache) == ["bucket"]
+
+    def test_exists_bucket_access_denied(self):
+        # GH-980: HeadBucket answers 403 for a bucket that exists but that
+        # the caller may not access.
+        fs = self._make_fs()
+        fs._call.side_effect = PermissionError
+
+        assert fs.exists("s3://not-my-bucket")
+        fs.makedirs("s3://not-my-bucket/prefix", exist_ok=True)
+        assert (
+            fs._call.call_args_list
+            == [
+                mock.call(fs._client.head_bucket, Bucket="not-my-bucket"),
+            ]
+            * 2
+        )
+
     def test_invalidate_cache_drops_listings_of_path_and_parents(self):
         fs = self._make_fs()
         invalidated = [
@@ -1505,18 +1674,42 @@ class TestS3FileSystem:
 
         assert unraisable == []
 
+    def test_open_append_keeps_metadata_of_listed_object(self):
+        # A cached listing entry lacks the metadata that the rewritten object
+        # keeps, so the append looks up the object.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs.dircache[("bucket", "/")] = [self._file_object("key")]
+        fs._call.return_value = {
+            "ContentLength": 2,
+            "ContentType": "text/plain",
+            "Metadata": {"k": "v"},
+        }
+        fs.cat = mock.MagicMock(return_value=b"aa")
+        fs._put_object = mock.MagicMock()
+
+        with fs.open("s3://bucket/key", "ab") as f:
+            f.write(b"bb")
+        fs._call.assert_called_once_with(fs._client.head_object, Bucket="bucket", Key="key")
+        request = fs._put_object.call_args.kwargs
+        assert (request["body"], request["ContentType"], request["Metadata"]) == (
+            b"aabb",
+            "text/plain",
+            {"k": "v"},
+        )
+
     def test_open_append_lookup_failure(self, monkeypatch):
         # GH-976: an append whose lookup of the existing object fails leaves
         # no half-initialized file, whose garbage collection would close it.
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
 
-        def exists(path):
+        def info(path, **kwargs):
             # A new exception each time: one kept by a mock would keep its
             # traceback, and the file, alive.
             raise PermissionError("denied")
 
-        fs.exists = exists
+        fs.info = info
         unraisable = []
         monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
 
@@ -2323,14 +2516,11 @@ class TestS3FileSystem:
     def test_dir_filesystem(self):
         # DirFileSystem copies every entry with copy() before renaming it.
         fs = self._make_fs()
-        fs._call.side_effect = [
-            {
-                "CommonPrefixes": [{"Prefix": "path/dir/"}],
-                "Contents": [{"Key": "path/key", "Size": 4}],
-                "IsTruncated": False,
-            },
-            {"ContentLength": 4, "ETag": '"etag"'},
-        ]
+        fs._call.return_value = {
+            "CommonPrefixes": [{"Prefix": "path/dir/"}],
+            "Contents": [{"Key": "path/key", "Size": 4}],
+            "IsTruncated": False,
+        }
         dir_fs = DirFileSystem(path="bucket/path", fs=fs)
 
         actual = dir_fs.ls("", detail=True)
@@ -2345,7 +2535,8 @@ class TestS3FileSystem:
             "bucket/path/key",
         ]
         assert fs.info("bucket/path/key").name == "bucket/path/key"
-        assert fs._call.call_count == 2
+        # info() answers from the cached listing.
+        fs._call.assert_called_once()
 
     def test_metadata_with_version_id(self):
         fs = self._make_fs()
@@ -3663,7 +3854,6 @@ class TestS3File:
         fs.MULTIPART_UPLOAD_MIN_PART_SIZE = 4
         fs.MULTIPART_UPLOAD_MAX_PART_SIZE = 64
         fs.MULTIPART_UPLOAD_MAX_PARTS = S3FileSystem.MULTIPART_UPLOAD_MAX_PARTS
-        fs.exists.return_value = True
         fs.info.return_value = S3Object(
             init={"ContentLength": len(existing)},
             type=S3ObjectType.S3_OBJECT_TYPE_FILE,

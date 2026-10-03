@@ -365,7 +365,9 @@ class S3FileSystem(AbstractFileSystem):
 
         The result is cached under the path, or under the version-qualified
         path for an explicit version. An explicitly requested ``"null"``
-        version is not cached. A missing object evicts its entry.
+        version is not cached. A missing object evicts its entry and, unless
+        a version was requested, the cached listing of its parent that still
+        lists it.
 
         Args:
             path: The object path, optionally with a versionId query.
@@ -400,6 +402,13 @@ class S3FileSystem(AbstractFileSystem):
                 )
             except FileNotFoundError:
                 self._evict_cache(path)
+                if not version_id:
+                    # Evict the cached listing of the parent only if it still
+                    # lists the path.
+                    parent_key = (self._parent(path), "/")
+                    files = self.dircache.get(parent_key)
+                    if files and any(f.name == path for f in files):
+                        self._evict_cache(parent_key)
                 return None
             if self.version_aware and not version_id:
                 # Pin the version of the object so that subsequent reads see
@@ -634,12 +643,18 @@ class S3FileSystem(AbstractFileSystem):
         """Return information about an S3 path.
 
         Uses the directory cache first: a cached entry for the path is
-        returned, a cached listing of the path itself makes it a directory,
-        and a cached listing of its parent without it means it does not exist.
+        returned, the entry of the path in a cached listing of its parent is
+        returned, preferring an object to a key prefix of the same name as
+        HeadObject does, and a cached listing of its parent without it means
+        it does not exist.
+        The cached bucket listing holds only the buckets that the caller owns,
+        so a bucket missing from it is looked up with HeadBucket.
         Otherwise, a key path is looked up with HeadObject and, if no object
         exists, with a ListObjectsV2 request (``Delimiter="/"``,
         ``MaxKeys=1``) that checks whether it is a key prefix; a bucket path
-        is looked up with HeadBucket. With ``version_aware``, a cached file
+        is looked up with HeadBucket. If these requests find a listed object
+        missing, or find a key prefix, the cached listing of the parent is
+        removed. With ``version_aware``, a cached file
         entry without a version ID is looked up again. With an explicit
         version, the cached entries of the path are skipped, and the
         HeadObject result is cached under the version-qualified path apart
@@ -653,16 +668,16 @@ class S3FileSystem(AbstractFileSystem):
                 version_id: The version ID to look up when the path has none.
 
         Returns:
-            S3Object describing the bucket, directory, or file.
+            S3Object describing the bucket, directory, or file. The root path
+            (``""``, ``"/"`` or ``"s3://"``) is a directory.
 
         Raises:
             FileNotFoundError: If the path does not exist.
         """
         refresh = kwargs.pop("refresh", False)
         path = self._strip_protocol(path)
-        bucket, key, path_version_id = self.parse_path(path)
-        version_id = path_version_id if path_version_id else kwargs.pop("version_id", None)
         if path in ["/", ""]:
+            # parse_path rejects the root path.
             return S3Object(
                 init={
                     "ContentLength": 0,
@@ -672,17 +687,24 @@ class S3FileSystem(AbstractFileSystem):
                     "LastModified": None,
                 },
                 type=S3ObjectType.S3_OBJECT_TYPE_DIRECTORY,
-                bucket=bucket,
+                bucket="",
                 key=None,
                 version_id=None,
             )
+        bucket, key, path_version_id = self.parse_path(path)
+        version_id = path_version_id if path_version_id else kwargs.pop("version_id", None)
         # Cached entries describe the current version of a path, so an
         # explicit version uses only the HeadObject cache of that version.
         if not refresh and not version_id:
             caches: list[S3Object] | S3Object | None = self._ls_from_cache(path)
             if caches is not None:
                 if isinstance(caches, list):
-                    cache = next((c for c in caches if c.name == path), None)
+                    matches = [c for c in caches if c.name == path]
+                    # A key can be both an object and a key prefix.
+                    cache = next(
+                        (c for c in matches if c.type == S3ObjectType.S3_OBJECT_TYPE_FILE),
+                        next(iter(matches), None),
+                    )
                 elif caches.name == path:
                     cache = caches
                 else:
@@ -726,6 +748,9 @@ class S3FileSystem(AbstractFileSystem):
             or response.get("Contents", [])
             or response.get("CommonPrefixes", [])
         ):
+            # Nothing caches the key prefix, and the cached listing of the
+            # parent may predate it.
+            self._evict_cache((self._parent(path), "/"))
             return self._directory_object(bucket, key.rstrip("/") if key else None, version_id)
         raise FileNotFoundError(path)
 
@@ -904,7 +929,8 @@ class S3FileSystem(AbstractFileSystem):
                 refresh: If True, bypass the cache and query S3.
 
         Returns:
-            True if the path exists, False otherwise.
+            True if the path exists, False otherwise. A bucket that HeadBucket
+            denies access to (403) exists.
 
         Example:
             >>> fs = S3FileSystem()
@@ -925,15 +951,14 @@ class S3FileSystem(AbstractFileSystem):
                 return bool(info)
             except FileNotFoundError:
                 return False
-        if not refresh:
-            if self.dircache.get(bucket, False):
-                return True
-            try:
-                if self._ls_from_cache(bucket):
-                    return True
-            except FileNotFoundError:
-                pass
-        file = self._head_bucket(bucket, refresh=refresh)
+        if not refresh and self._ls_from_cache(bucket):
+            return True
+        try:
+            file = self._head_bucket(bucket, refresh=refresh)
+        except PermissionError:
+            # HeadBucket answers 403 for a bucket that exists but that the
+            # caller may not access.
+            return True
         return bool(file)
 
     def rm_file(self, path: str, **kwargs) -> None:
@@ -1237,8 +1262,8 @@ class S3FileSystem(AbstractFileSystem):
                 )
             except botocore.exceptions.ParamValidationError as e:
                 raise ValueError(f"Bucket create failed {bucket!r}: {e}") from e
-            # invalidate_cache walks parent paths and never pops the root
-            # entry itself, so evict the cached bucket listing directly.
+            # invalidate_cache of the bucket keeps the cached bucket
+            # listing, so evict it directly.
             self._evict_cache("")
             self.invalidate_cache(bucket)
         else:
@@ -1310,8 +1335,8 @@ class S3FileSystem(AbstractFileSystem):
             Bucket=bucket,
         )
         self.invalidate_cache(bucket)
-        # invalidate_cache walks parent paths and never pops the root
-        # entry itself, so evict the cached bucket listing directly.
+        # invalidate_cache of the bucket keeps the cached bucket listing,
+        # so evict it directly.
         self._evict_cache("")
 
     def touch(self, path: str, truncate: bool = True, **kwargs) -> dict[str, Any]:
@@ -2346,6 +2371,8 @@ class S3FileSystem(AbstractFileSystem):
     def invalidate_cache(self, path: str | None = None) -> None:
         """Remove the cached entries of the path and its parent paths.
 
+        The cached bucket listing is removed only by the root path (``""``,
+        ``"/"`` or ``"s3://"``), not by the paths of buckets or keys.
         A version-qualified path invalidates the version under every query
         spelling that ``parse_path`` accepts, and also the object path without
         the version, because deleting or copying a version can change the
@@ -2358,6 +2385,8 @@ class S3FileSystem(AbstractFileSystem):
             self.dircache.clear()
         else:
             path = self._strip_protocol(path)
+            if not path:
+                self._evict_cache("")
             while path:
                 # parse_path does not accept "?" in keys, so it starts the
                 # versionId query.
@@ -2396,17 +2425,38 @@ class S3FileSystem(AbstractFileSystem):
     def _ls_from_cache(self, path: str) -> list[S3Object] | S3Object | None:
         """Check the dircache for a cached entry of the path.
 
-        fsspec's implementation assumes every dircache value is a listing,
-        but S3FileSystem also caches a single S3Object under the object's own
-        path (HeadObject/HeadBucket results). Guard the parent lookup so that
-        looking up a child path of a cached object does not fail, and fall
-        through to the S3 API instead.
+        fsspec's implementation looks up listings under the path itself, but
+        S3FileSystem caches a single S3Object under the path of an object or
+        a bucket (HeadObject/HeadBucket results), the bucket listing under
+        ``""``, and the other listings under ``(path, delimiter)`` (see
+        ``_ls_dirs``).
+
+        Args:
+            path: The path without the protocol.
+
+        Returns:
+            The cached entry of the path, the entries of a cached parent
+            listing named as the path, or None if no cached entry describes
+            the path. A listing of the path itself is not used, because it
+            cannot tell whether an object of the same name exists. A
+            version-qualified path uses only its own entry, because listings
+            describe the current versions.
+
+        Raises:
+            FileNotFoundError: If a cached listing of the parent directory of
+                a key path does not contain the path.
         """
         cache = self.dircache.get(path.rstrip("/"))
         if cache is not None:
             return cast("list[S3Object] | S3Object", cache)
-        parent_cache = self.dircache.get(self._parent(path))
-        if isinstance(parent_cache, list):
+        _, key, version_id = self.parse_path(path)
+        if version_id:
+            return None
+        if key:
+            parent_cache = self.dircache.get((self._parent(path), "/"))
+        else:
+            parent_cache = self.dircache.get("")
+        if parent_cache is not None:
             files = [
                 f
                 for f in parent_cache
@@ -2418,7 +2468,10 @@ class S3FileSystem(AbstractFileSystem):
             ]
             if files:
                 return files
-            raise FileNotFoundError(path)
+            if key:
+                raise FileNotFoundError(path)
+            # The bucket listing holds only the buckets that the caller owns,
+            # so a bucket missing from it is looked up with HeadBucket.
         return None
 
     def _open(
@@ -2784,9 +2837,15 @@ class S3File(AbstractBufferedFile):
             self._details = info
             if size is None:
                 size = info.get("size")
-        elif "a" in mode and fs.exists(path):
-            append_info = fs.info(path)
-            if append_info.get("size", 0) < fs.MULTIPART_UPLOAD_MIN_PART_SIZE:
+        elif "a" in mode:
+            # The rewritten object keeps the metadata of the existing one,
+            # which a cached listing entry lacks, so look up the object.
+            with contextlib.suppress(FileNotFoundError):
+                append_info = fs.info(path, refresh=True)
+            if (
+                append_info is not None
+                and append_info.get("size", 0) < fs.MULTIPART_UPLOAD_MIN_PART_SIZE
+            ):
                 # Too small to be a part of a multipart upload: rewritten
                 # from the buffer.
                 append_data = fs.cat(path)
