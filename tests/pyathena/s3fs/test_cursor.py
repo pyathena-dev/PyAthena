@@ -19,7 +19,7 @@ from tests.pyathena.conftest import connect
 from tests.pyathena.util import cached_file_systems
 
 
-def _json_text_converter():
+def _s3fs_converter_with_json_text():
     converter = DefaultS3FSTypeConverter()
     converter.set("json", _to_default)
     return converter
@@ -540,12 +540,12 @@ class TestS3FSCursor:
     @pytest.mark.parametrize(
         "s3fs_cursor",
         [
-            pytest.param({"converter": _json_text_converter()}, id="default"),
+            pytest.param({"converter": _s3fs_converter_with_json_text()}, id="default"),
             pytest.param(
                 {
                     "work_group": ENV.managed_work_group,
                     "s3_staging_dir": "",
-                    "converter": _json_text_converter(),
+                    "converter": _s3fs_converter_with_json_text(),
                 },
                 id="managed",
                 marks=pytest.mark.skipif(
