@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import gzip
 import os
 import tempfile
 import threading
@@ -268,6 +269,20 @@ class TestAioS3FileSystem:
         (call,) = fs._sync_fs._call.call_args_list
         assert "mode" not in call.kwargs
         assert call.kwargs.get("IfNoneMatch") == ("*" if mode == "create" else None)
+
+    @pytest.mark.parametrize("intrans", [False, True])
+    def test_pipe_file_compression(self, intrans):
+        # GH-1037: the value is compressed before it is uploaded, also in a
+        # transaction of this filesystem.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        put_object = fs._sync_fs._put_object = mock.MagicMock()
+
+        with fs.transaction if intrans else contextlib.nullcontext():
+            fs.pipe_file("s3://bucket/key", b"data", compression="gzip")
+
+        ((_, kwargs),) = put_object.call_args_list
+        assert "compression" not in kwargs
+        assert gzip.decompress(kwargs["body"]) == b"data"
 
     def test_transaction_pipe_file_write(self):
         # GH-997: in a transaction, a non-contiguous memoryview is written,

@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import functools
 import gc
+import gzip
 import io
 import os
 import re
@@ -1532,6 +1533,73 @@ class TestS3FileSystem:
             pytest.raises(RuntimeError, match="write failed"),
         ):
             fs.pipe_file("s3://bucket/key", b"a" * (S3FileSystem.DEFAULT_BLOCK_SIZE + 1))
+
+        fs._put_object.assert_not_called()
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("path", "compression"), [("s3://bucket/key", "gzip"), ("s3://bucket/key.gz", "infer")]
+    )
+    @pytest.mark.parametrize("intrans", [False, True])
+    @pytest.mark.parametrize("size", [1, S3FileSystem.DEFAULT_BLOCK_SIZE + 1])
+    def test_pipe_file_compression(self, path, compression, intrans, size):
+        # GH-1037: the value is compressed before it is uploaded, on every
+        # path. The single-request path used to send compression to
+        # PutObject, which botocore rejects.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs._transaction = None
+        fs._put_object = mock.MagicMock()
+        value = b"a" * size
+
+        with fs.transaction if intrans else contextlib.nullcontext():
+            fs.pipe_file(path, value, compression=compression)
+
+        # The compressed value fits in one block.
+        ((_, kwargs),) = fs._put_object.call_args_list
+        assert "compression" not in kwargs
+        assert gzip.decompress(kwargs["body"]) == value
+
+    def test_pipe_file_compression_inferred_none(self):
+        # "infer" uploads the value as it is for a path without the
+        # extension of a codec, as open() does.
+        fs = self._make_fs()
+        fs._put_object = mock.MagicMock()
+
+        fs.pipe_file("s3://bucket/key.txt", b"a", compression="infer")
+
+        ((_, kwargs),) = fs._put_object.call_args_list
+        assert "compression" not in kwargs
+        assert kwargs["body"] == b"a"
+
+    def test_pipe_file_unsupported_compression(self):
+        fs = self._make_fs()
+
+        with pytest.raises(ValueError, match="not supported"):
+            fs.pipe_file("s3://bucket/key", b"a", compression="unknown")
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize("intrans", [False, True])
+    def test_pipe_file_compression_failed_write(self, intrans):
+        # GH-1037: a failed write of a compressed value leaves the existing
+        # object unchanged. open() used to return a compression wrapper,
+        # without _close_without_commit(), and the object was replaced with
+        # an empty compressed one.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs._transaction = None
+        fs._put_object = mock.MagicMock()
+        # Random bytes stay larger than the block size when compressed, so
+        # that the buffered path also writes them outside a transaction.
+        value = b"a" if intrans else os.urandom(S3FileSystem.DEFAULT_BLOCK_SIZE + 1)
+
+        with (
+            mock.patch.object(S3File, "write", side_effect=RuntimeError("write failed")),
+            fs.transaction if intrans else contextlib.nullcontext(),
+            pytest.raises(RuntimeError, match="write failed"),
+        ):
+            fs.pipe_file("s3://bucket/key", value, compression="gzip")
+        gc.collect()
 
         fs._put_object.assert_not_called()
         fs._call.assert_not_called()

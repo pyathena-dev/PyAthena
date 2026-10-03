@@ -25,6 +25,8 @@ from botocore import UNSIGNED
 from botocore.client import BaseClient, Config
 from fsspec import AbstractFileSystem
 from fsspec.callbacks import _DEFAULT_CALLBACK, Callback
+from fsspec.compression import compr
+from fsspec.core import get_compression
 from fsspec.implementations.local import trailing_sep
 from fsspec.spec import AbstractBufferedFile
 from fsspec.utils import isfilelike, other_paths, tokenize
@@ -47,6 +49,36 @@ from pyathena.filesystem.s3_object import (
 from pyathena.util import RetryConfig, retry_api_call
 
 _logger = logging.getLogger(__name__)
+
+
+def _compress(
+    path: str, value: bytes | bytearray | memoryview, compression: str
+) -> bytes | bytearray | memoryview:
+    """Compress a value with the codec that ``open()`` uses for a compression.
+
+    Args:
+        path: Path of the file, from which ``"infer"`` takes the codec.
+        value: The bytes to compress.
+        compression: Name of a codec in ``fsspec.compression.compr``, or
+            ``"infer"`` to take it from the extension of the path.
+
+    Returns:
+        The compressed bytes, or the value itself when ``"infer"`` finds no
+        codec for the path.
+
+    Raises:
+        ValueError: If the codec is not supported.
+    """
+    compression = get_compression(path, compression)
+    if compression is None:
+        return value
+    if isinstance(value, memoryview) and not value.c_contiguous:
+        # Codecs cannot compress a non-contiguous memoryview.
+        value = value.tobytes()
+    buffer = BytesIO()
+    with compr[compression](buffer, mode="w") as f:
+        f.write(value)
+    return buffer.getvalue()
 
 
 class S3FileSystem(AbstractFileSystem):
@@ -1760,16 +1792,24 @@ class S3FileSystem(AbstractFileSystem):
                 (e.g., ContentType, StorageClass) on the single-request
                 path. The ``block_size``, ``max_workers``, and
                 ``s3_additional_kwargs`` parameters of the ``open()`` path
-                are also accepted.
+                are also accepted, and so is ``compression``: the codec of
+                ``open()`` to compress the value with before it is
+                uploaded, or ``"infer"`` to take it from the extension of
+                the path.
 
         Raises:
             FileExistsError: If the mode is "create" and the path already
                 exists, or an object is created at it before the write is
                 committed.
             ValueError: If the path does not contain a key or specifies a
-                version, or if the data takes more than
-                ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
+                version, if the compression is not supported, or if the data
+                takes more than ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
         """
+        compression = kwargs.pop("compression", None)
+        if compression is not None:
+            # Compressed up front, so that every path uploads the compressed
+            # bytes, and open() returns the file instead of a wrapper.
+            value = _compress(path, value, compression)
         block_size = kwargs.get("block_size") or self.default_block_size
         # The size in bytes; the length of a memoryview counts its items.
         self._check_multipart_upload_size(path, memoryview(value).nbytes, block_size)
