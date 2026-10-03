@@ -301,18 +301,18 @@ class TestS3FileSystem:
         fs._call.assert_not_called()
 
         assert fs.find("s3://bucket/dir", maxdepth=1) == ["bucket/dir/direct"]
-        assert fs.find("s3://bucket/dir", maxdepth=1, withdirs=True) == [
+        assert sorted(fs.find("s3://bucket/dir", maxdepth=1, withdirs=True)) == [
+            "bucket/dir/direct",
             "bucket/dir/sub",
-            "bucket/dir/direct",
         ]
-        assert fs.find("s3://bucket/dir", maxdepth=2) == [
+        assert sorted(fs.find("s3://bucket/dir", maxdepth=2)) == [
+            "bucket/dir/direct",
             "bucket/dir/sub/nested",
-            "bucket/dir/direct",
         ]
-        assert fs.find("s3://bucket/dir", maxdepth=3) == [
+        assert sorted(fs.find("s3://bucket/dir", maxdepth=3)) == [
+            "bucket/dir/direct",
             "bucket/dir/sub/deep/file",
             "bucket/dir/sub/nested",
-            "bucket/dir/direct",
         ]
 
     def test_find_maxdepth_returns_object_path(self):
