@@ -7,6 +7,7 @@
 
 import warnings
 from datetime import date, datetime
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import (
@@ -715,9 +716,22 @@ class TestAthenaStatementCompiler:
             return "BIGINT"
 
         assert self._compile_sql(cast(column("col"), _Wide())) == "CAST(col AS BIGINT)"
+        # Element types render their resolved implementation.
         assert self._compile_sql(cast(column("col"), types.ARRAY(_Wide()))) == (
-            "CAST(col AS ARRAY(BIGINT))"
+            "CAST(col AS ARRAY(INTEGER))"
         )
+
+    def test_array_bind_rejects_decorated_numeric_without_precision(self):
+        class _Amount(types.TypeDecorator):
+            impl = types.Numeric
+            cache_ok = True
+
+        @compiles(_Amount, "awsathena")
+        def _compile_amount(type_, compiler, **kw):
+            return "DECIMAL"
+
+        with pytest.raises(exc.CompileError, match="explicit Numeric precision"):
+            self._compile_sql(select(literal([Decimal("1.23")], AthenaArray(_Amount()))))
 
     def test_array_assignment_rejects_unknown_value_type(self):
         items = Table(

@@ -373,7 +373,10 @@ class AthenaDMLTypeCompiler(GenericTypeCompiler):
     binary types as VARBINARY; Double types as DOUBLE; other Float types as
     REAL; and DateTime types as ``TIMESTAMP(6)`` or ``TIMESTAMP(precision)``.
     Subclasses of these types render the same way whatever their visit name.
-    Other types render through their visit methods.
+    Other types render through their visit methods; ``process()`` dispatches
+    the declared type, so a compilation rule registered for a TypeDecorator
+    applies to it, while ``process_element()`` and the elements of ARRAY,
+    MAP, and ROW types dispatch the resolved type.
 
     Two keyword arguments of ``process()`` adjust the rendering:
 
@@ -417,7 +420,10 @@ class AthenaDMLTypeCompiler(GenericTypeCompiler):
         return super().process(type_, **kw)
 
     def process_element(self, type_: TypeEngine[Any], **kw: Any) -> str:
-        """Render a type that must be known, such as an ARRAY, MAP, or ROW element.
+        """Render a resolved type that must be known, such as an ARRAY, MAP, or ROW element.
+
+        Unlike ``process()``, a TypeDecorator is always rendered as its
+        implementation, so a compilation rule registered for it does not apply.
 
         Args:
             type_: The type to render.
@@ -429,9 +435,10 @@ class AthenaDMLTypeCompiler(GenericTypeCompiler):
         Raises:
             CompileError: If the type is unknown.
         """
-        if isinstance(self._type_inspector.dialect_type(type_), types.NullType):
+        resolved = self._type_inspector.dialect_type(type_)
+        if isinstance(resolved, types.NullType):
             raise exc.CompileError("Bound ARRAY values require an explicit element type")
-        return self.process(type_, **kw)
+        return self.process(resolved, **kw)
 
     @override
     def visit_NUMERIC(self, type_: types.Numeric[Any], **kw: Any) -> str:
