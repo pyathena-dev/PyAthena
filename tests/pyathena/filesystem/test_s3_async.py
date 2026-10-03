@@ -1057,6 +1057,7 @@ class TestAioS3FileSystem:
         assert fs._strip_protocol(path) in fs.glob(f"{dir_}/nested/*")
         assert fs._strip_protocol(path) in fs.glob(f"{dir_}/nested/test_*")
         assert fs._strip_protocol(path) in fs.glob(f"{dir_}/*/*")
+        assert fs._strip_protocol(f"{dir_}/nested") in fs.glob(f"{dir_}/nested/**")
 
         with pytest.raises(ValueError):  # noqa: PT011
             fs.glob("*")

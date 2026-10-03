@@ -26,6 +26,7 @@ from botocore.stub import Stubber
 from fsspec import Callback
 from fsspec.dircache import DirCache
 from fsspec.implementations.dirfs import DirFileSystem
+from fsspec.implementations.memory import MemoryFileSystem
 
 import pyathena
 from pyathena.filesystem import register_s3_filesystem
@@ -735,7 +736,7 @@ class TestS3FileSystem:
         fs = self._make_fs()
         fs.dircache[("bucket/dir", "")] = [self._file_object("dir/sub/file")]
 
-        expected = ["bucket/dir/sub", "bucket/dir/sub/file"]
+        expected = ["bucket/dir", "bucket/dir/sub", "bucket/dir/sub/file"]
         assert sorted(fs.find("s3://bucket/dir", withdirs=True)) == expected
         assert sorted(fs.find("s3://bucket/dir", withdirs=True)) == expected
         assert fs.find("s3://bucket/dir") == ["bucket/dir/sub/file"]
@@ -759,30 +760,65 @@ class TestS3FileSystem:
         # The subdirectory listings of maxdepth are refreshed as well.
         assert fs.find("s3://bucket/dir", maxdepth=2, refresh=True) == ["bucket/dir/sub/new"]
 
+    FIND_KEYS = ("dir/direct", "dir/sub/nested", "dir/sub/deep/file")
+
+    @staticmethod
+    def _serve_keys(fs, keys):
+        # Answer the ListObjectsV2, HeadObject, CopyObject, and DeleteObjects
+        # requests of "bucket" from a set of the given keys, which is returned.
+        keys = set(keys)
+
+        def call(method, **kwargs):
+            if method is fs._client.head_object:
+                if kwargs["Key"] not in keys:
+                    raise FileNotFoundError(kwargs["Key"])
+                return {"ContentLength": 0}
+            if method is fs._client.copy_object:
+                if kwargs["CopySource"]["Key"] not in keys:
+                    raise FileNotFoundError(kwargs["CopySource"]["Key"])
+                keys.add(kwargs["Key"])
+                return {}
+            if method is fs._client.delete_objects:
+                keys.difference_update(o["Key"] for o in kwargs["Delete"]["Objects"])
+                return {}
+            prefix, delimiter = kwargs["Prefix"], kwargs["Delimiter"]
+            contents, prefixes = [], set()
+            for key in sorted(keys):
+                if not key.startswith(prefix):
+                    continue
+                rest = key[len(prefix) :]
+                if delimiter and delimiter in rest:
+                    prefixes.add(prefix + rest.split(delimiter)[0] + delimiter)
+                else:
+                    contents.append({"Key": key})
+            return {
+                "Contents": contents,
+                "CommonPrefixes": [{"Prefix": p} for p in sorted(prefixes)],
+                "KeyCount": len(contents) + len(prefixes),
+            }
+
+        fs._call.side_effect = call
+        return keys
+
+    @staticmethod
+    def _memory_fs(keys):
+        # Build an fsspec MemoryFileSystem with the keys under "/bucket".
+        memory = MemoryFileSystem(skip_instance_cache=True)
+        memory.store = {}
+        memory.pseudo_dirs = [""]
+        for key in keys:
+            memory.pipe(f"/bucket/{key}", b"")
+        return memory
+
     def test_find_maxdepth_counts_levels_like_fsspec(self):
         fs = self._make_fs()
-        responses = {
-            "dir/": {
-                "Contents": [{"Key": "dir/direct"}],
-                "CommonPrefixes": [{"Prefix": "dir/sub/"}],
-            },
-            "dir/sub/": {
-                "Contents": [{"Key": "dir/sub/nested"}],
-                "CommonPrefixes": [{"Prefix": "dir/sub/deep/"}],
-            },
-            "dir/sub/deep/": {"Contents": [{"Key": "dir/sub/deep/file"}]},
-        }
-        fs._call.side_effect = lambda method, **kwargs: responses[kwargs["Prefix"]]
+        self._serve_keys(fs, self.FIND_KEYS)
 
         with pytest.raises(ValueError, match="maxdepth must be at least 1"):
             fs.find("s3://bucket/dir", maxdepth=0)
         fs._call.assert_not_called()
 
         assert fs.find("s3://bucket/dir", maxdepth=1) == ["bucket/dir/direct"]
-        assert sorted(fs.find("s3://bucket/dir", maxdepth=1, withdirs=True)) == [
-            "bucket/dir/direct",
-            "bucket/dir/sub",
-        ]
         assert sorted(fs.find("s3://bucket/dir", maxdepth=2)) == [
             "bucket/dir/direct",
             "bucket/dir/sub/nested",
@@ -791,6 +827,128 @@ class TestS3FileSystem:
             "bucket/dir/direct",
             "bucket/dir/sub/deep/file",
             "bucket/dir/sub/nested",
+        ]
+
+    @pytest.mark.parametrize(
+        ("path", "maxdepth", "withdirs"),
+        [
+            ("dir", None, True),
+            ("dir", None, False),
+            ("dir", 1, True),
+            ("dir", 2, True),
+            ("dir", 1, False),
+            ("dir/sub", 1, True),
+            ("dir/direct", None, True),
+            ("dir/direct", 1, True),
+            ("dir/direct", 1, False),
+            ("missing", None, True),
+            ("missing", 1, True),
+        ],
+    )
+    def test_find_matches_fsspec(self, path, maxdepth, withdirs):
+        fs = self._make_fs()
+        self._serve_keys(fs, self.FIND_KEYS)
+        memory = self._memory_fs(self.FIND_KEYS)
+
+        expected = [p.lstrip("/") for p in memory.find(f"/bucket/{path}", maxdepth, withdirs)]
+        assert sorted(fs.find(f"s3://bucket/{path}", maxdepth, withdirs)) == expected
+
+    @pytest.mark.parametrize(
+        ("pattern", "maxdepth"),
+        [
+            ("dir/**", None),
+            ("dir/**", 1),
+            ("dir/**", 2),
+            ("dir/*", None),
+            ("dir/*/*", None),
+            ("dir/s*", None),
+            ("dir/**/file", None),
+            ("missing/*", None),
+        ],
+    )
+    def test_glob_matches_fsspec(self, pattern, maxdepth):
+        fs = self._make_fs()
+        self._serve_keys(fs, self.FIND_KEYS)
+        memory = self._memory_fs(self.FIND_KEYS)
+
+        expected = [p.lstrip("/") for p in memory.glob(f"/bucket/{pattern}", maxdepth=maxdepth)]
+        assert sorted(fs.glob(f"s3://bucket/{pattern}", maxdepth=maxdepth)) == expected
+
+    def test_find_withdirs_omits_bucket(self):
+        fs = self._make_fs()
+        self._serve_keys(fs, self.FIND_KEYS)
+
+        # A recursive copy of the expanded paths cannot copy a bucket.
+        assert "bucket" not in fs.find("s3://bucket", withdirs=True)
+        assert "bucket" not in fs.find("s3://bucket", maxdepth=1, withdirs=True)
+        assert "bucket" not in fs.expand_path("s3://bucket/**", recursive=True)
+
+    def test_find_directory_without_extra_requests(self):
+        fs = self._make_fs()
+        self._serve_keys(fs, self.FIND_KEYS)
+
+        assert "bucket/dir" in fs.find("s3://bucket/dir", withdirs=True)
+        assert fs._call.call_count == 1
+        fs._call.reset_mock()
+        assert "bucket/dir" in fs.find("s3://bucket/dir", maxdepth=1, withdirs=True)
+        assert fs._call.call_count == 1
+        # Only a subdirectory is listed; it is dropped without withdirs, but
+        # the path is a directory, so it is not looked up as an object.
+        fs._call.reset_mock()
+        assert fs.find("s3://bucket/dir", maxdepth=1, prefix="s") == []
+        assert fs._call.call_count == 1
+
+    def test_find_maxdepth_listings_follow_invalidation(self):
+        fs = self._make_fs()
+        self._serve_keys(fs, ("dir/direct", "dir/sub/nested"))
+        assert sorted(fs.find("s3://bucket/dir", maxdepth=2)) == [
+            "bucket/dir/direct",
+            "bucket/dir/sub/nested",
+        ]
+
+        # A write below the subdirectory invalidates its cached listing.
+        self._serve_keys(fs, ("dir/direct", "dir/sub/nested", "dir/sub/new"))
+        fs.invalidate_cache("s3://bucket/dir/sub/new")
+        assert sorted(fs.find("s3://bucket/dir", maxdepth=2)) == [
+            "bucket/dir/direct",
+            "bucket/dir/sub/nested",
+            "bucket/dir/sub/new",
+        ]
+
+    def test_find_prefix_counts_levels_from_path(self):
+        fs = self._make_fs()
+        self._serve_keys(fs, self.FIND_KEYS)
+
+        # Nothing directly under dir/ starts with "sub/deep/".
+        assert fs.find("s3://bucket/dir", maxdepth=1, prefix="sub/deep/") == []
+        assert fs.find("s3://bucket/dir", maxdepth=2, prefix="sub/deep/") == []
+        assert fs.find("s3://bucket/dir", maxdepth=3, prefix="sub/deep/") == [
+            "bucket/dir/sub/deep/file"
+        ]
+        assert sorted(fs.find("s3://bucket/dir", maxdepth=2, prefix="sub/")) == [
+            "bucket/dir/sub/nested"
+        ]
+        # The directories above the prefix do not start with it, with or
+        # without maxdepth.
+        expected = [
+            "bucket/dir",
+            "bucket/dir/sub/deep",
+            "bucket/dir/sub/deep/file",
+            "bucket/dir/sub/nested",
+        ]
+        assert sorted(fs.find("s3://bucket/dir", maxdepth=3, prefix="sub/", withdirs=True)) == (
+            expected
+        )
+        assert sorted(fs.find("s3://bucket/dir", prefix="sub/", withdirs=True)) == expected
+
+    @pytest.mark.parametrize("maxdepth", [None, 1])
+    def test_find_object_path_ignores_prefix(self, maxdepth):
+        fs = self._make_fs()
+        self._serve_keys(fs, self.FIND_KEYS)
+
+        # As in fsspec, the object itself is returned when nothing is listed.
+        assert fs.find("s3://bucket/dir/direct", maxdepth=maxdepth, prefix="x") == [
+            "bucket/dir/direct"
         ]
 
     def test_refresh_evicts_cached_object_and_bucket_not_found(self):
@@ -1359,6 +1517,13 @@ class TestS3FileSystem:
             (["s3://bucket/a", "s3://bucket/b"], ["s3://bucket/c", "s3a://bucket/c"]),
             # A destination that is another source.
             (["s3://bucket/a", "s3://bucket/b"], ["s3://bucket/b", "s3://bucket/a"]),
+            # A destination that is a source left in place.
+            (["s3://bucket/a", "s3://bucket/b"], ["s3://bucket/b", "s3://bucket/b"]),
+            # A destination whose "null" version is another source.
+            (
+                ["s3://bucket/a", "s3://bucket/b?versionId=null"],
+                ["s3://bucket/b", "s3://bucket/out"],
+            ),
         ],
     )
     def test_mv_conflicting_destinations(self, path1, path2):
@@ -1390,6 +1555,94 @@ class TestS3FileSystem:
         fs.mv(["s3://bucket/src"], ["s3://bucket/dst/"])
         fs._copy_file.assert_called_once_with("s3://bucket/src", "s3://bucket/dst/")
         fs._delete_objects.assert_called_once_with(["s3://bucket/src"])
+
+    @pytest.mark.parametrize(
+        ("keys", "path1", "path2", "expected"),
+        [
+            # The directory itself, which find() includes, is not copied.
+            ({"d/a", "d/b"}, "s3://bucket/d/**", "s3://bucket/out/", {"out/a", "out/b"}),
+            # The directory moved onto an existing subdirectory is no conflict.
+            (
+                {"src/a", "src/archive/x"},
+                "s3://bucket/src/**",
+                "s3://bucket/src/archive/",
+                {"src/archive/a", "src/archive/archive/x"},
+            ),
+            # A directory shares its destination with an object.
+            (
+                {"d/x", "e/y"},
+                ["s3://bucket/d", "s3://bucket/d/x", "s3://bucket/e/y"],
+                ["s3://bucket/e", "s3://bucket/e", "s3://bucket/out"],
+                {"e", "out"},
+            ),
+        ],
+    )
+    def test_mv_glob_with_directories(self, keys, path1, path2, expected):
+        fs = self._make_fs()
+        store = self._serve_keys(fs, keys)
+
+        fs.mv(path1, path2, recursive=True)
+        assert store == expected
+
+    @pytest.mark.parametrize(
+        ("keys", "path2"),
+        [
+            # Onto another source that is only an object.
+            ({"d", "d/x", "e"}, ["e", "o/x", "o/e"]),
+            # Onto another source that also has keys below it.
+            ({"d", "d/x", "d/x/y"}, ["d/x", "o", "o/y"]),
+        ],
+    )
+    def test_mv_objects_with_keys_below_conflict(self, keys, path2):
+        # An object that also has keys below it is copied, so moving it onto
+        # another source raises before anything is copied.
+        fs = self._make_fs()
+        store = self._serve_keys(fs, keys)
+
+        with pytest.raises(ValueError, match="another path that is moved"):
+            fs.mv(
+                [f"s3://bucket/{k}" for k in sorted(keys)],
+                [f"s3://bucket/{k}" for k in path2],
+                recursive=True,
+            )
+        assert store == keys
+        methods = {c.args[0] for c in fs._call.call_args_list}
+        assert fs._client.copy_object not in methods
+        assert fs._client.delete_objects not in methods
+
+    def test_mv_version_with_keys_below_conflicts(self):
+        # A version names an object even with keys below its key, so it is
+        # not taken for a directory when no current object exists at the key.
+        fs = self._make_fs()
+        self._serve_keys(fs, {"d/x", "a"})
+
+        with pytest.raises(ValueError, match="same destination"):
+            fs.mv(
+                ["s3://bucket/d?versionId=null", "s3://bucket/d/x", "s3://bucket/a"],
+                ["s3://bucket/out", "s3://bucket/x", "s3://bucket/out"],
+            )
+        methods = {c.args[0] for c in fs._call.call_args_list}
+        assert fs._client.copy_object not in methods
+        assert fs._client.delete_objects not in methods
+
+    def test_mv_versions_onto_their_key(self):
+        fs = self._make_fs()
+        self._serve_keys(fs, {"b"})
+
+        # The "null" version is the object at the key, so it stays in place.
+        fs.mv(["s3://bucket/b?versionId=null"], ["s3://bucket/b"])
+        fs._call.assert_not_called()
+
+        # Another version is copied onto the key, and then deleted.
+        fs.mv(["s3://bucket/b?versionId=v1"], ["s3://bucket/b"])
+        copies = [c.kwargs for c in fs._call.call_args_list if c.args[0] is fs._client.copy_object]
+        assert [(c["CopySource"].get("VersionId"), c["Key"]) for c in copies] == [("v1", "b")]
+        deletes = [
+            c.kwargs["Delete"]["Objects"]
+            for c in fs._call.call_args_list
+            if c.args[0] is fs._client.delete_objects
+        ]
+        assert deletes == [[{"Key": "b", "VersionId": "v1"}]]
 
     def test_mv_nothing_within_maxdepth(self):
         # Only directories within maxdepth: nothing is moved, as with copy().
@@ -3433,6 +3686,15 @@ class TestS3FileSystem:
         result = fs.find(dir_)
         assert len(result) == 4
 
+        # Each slash in the prefix counts as one level
+        assert fs.find(dir_, maxdepth=1, prefix="level1/") == []
+        assert fs.find(dir_, maxdepth=2, prefix="level1/") == [
+            fs._strip_protocol(f"{dir_}/level1/file1.txt")
+        ]
+
+        # An object path returns the object itself
+        assert fs.find(f"{dir_}/file0.txt", maxdepth=1) == [fs._strip_protocol(f"{dir_}/file0.txt")]
+
     def test_find_withdirs(self, fs):
         dir_ = f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/filesystem/test_find_withdirs"
         # Create directory structure with files
@@ -3450,6 +3712,8 @@ class TestS3FileSystem:
         # Test withdirs=True
         result = fs.find(dir_, withdirs=True)
         assert len(result) > 4  # Files and directories
+        assert fs._strip_protocol(dir_) in result
+        assert fs._strip_protocol(dir_) in fs.find(dir_, maxdepth=1, withdirs=True)
 
         # Verify directories are included
         dirs = [r for r in result if not r.endswith(".txt")]
@@ -3478,6 +3742,7 @@ class TestS3FileSystem:
         assert fs._strip_protocol(path) in fs.glob(f"{dir_}/nested/*")
         assert fs._strip_protocol(path) in fs.glob(f"{dir_}/nested/test_*")
         assert fs._strip_protocol(path) in fs.glob(f"{dir_}/*/*")
+        assert fs._strip_protocol(f"{dir_}/nested") in fs.glob(f"{dir_}/nested/**")
 
         with pytest.raises(ValueError):  # noqa: PT011
             fs.glob("*")
