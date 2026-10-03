@@ -316,8 +316,10 @@ class S3FileSystem(AbstractFileSystem):
                 )
             except FileNotFoundError:
                 self.dircache.pop(bucket, None)
-                # The cached bucket listing may still contain the bucket.
-                self.dircache.pop("", None)
+                # Evict the cached bucket listing only if it still lists the bucket.
+                buckets = self.dircache.get("")
+                if buckets and any(b.name == bucket for b in buckets):
+                    self.dircache.pop("", None)
                 return None
             file = S3Object(
                 init={
@@ -793,8 +795,8 @@ class S3FileSystem(AbstractFileSystem):
             detail: If True, return dict of {path: S3Object}; if False, return list of paths.
             **kwargs: Additional arguments including:
                 prefix: Key prefix, relative to the path, to filter the listed keys
-                    by. If nothing is listed and the path itself is an object, that
-                    object is returned regardless of the prefix.
+                    by. Without maxdepth, if nothing is listed and the path itself is
+                    an object, that object is returned regardless of the prefix.
                 refresh: If True, bypass the cache and list from S3.
 
         Returns:

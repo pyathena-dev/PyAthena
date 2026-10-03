@@ -322,6 +322,17 @@ class TestS3FileSystem:
         assert not fs.exists("s3://bucket/key", refresh=True)
         assert not fs.exists("s3://bucket", refresh=True)
 
+    def test_missing_bucket_keeps_bucket_listing_without_it(self):
+        fs = self._make_fs()
+        fs.dircache[""] = [fs._directory_object("bucket", None)]
+        fs._call.side_effect = FileNotFoundError
+
+        assert not fs.exists("s3://missing")
+        # Other buckets are still answered from the cached bucket listing.
+        fs._call.reset_mock()
+        assert fs.exists("s3://bucket")
+        fs._call.assert_not_called()
+
     def test_mkdir_creates_bucket(self):
         fs = self._make_fs()
         fs.allow_bucket_creation = True
