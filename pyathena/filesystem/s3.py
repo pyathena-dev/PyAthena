@@ -2111,8 +2111,9 @@ class S3File(AbstractBufferedFile):
         In read mode, the object is looked up with ``info()`` and the reads
         are made conditional on its ETag (``IfMatch``). In append mode, an
         existing object smaller than ``MULTIPART_UPLOAD_MIN_PART_SIZE`` is
-        read into the write buffer; a larger one is copied as the first parts
-        once a multipart upload starts.
+        read into the write buffer; a larger one is copied with
+        ``UploadPartCopy`` as the first parts of a multipart upload, whatever
+        the block size.
 
         Args:
             fs: The filesystem that the file belongs to.
@@ -2188,11 +2189,15 @@ class S3File(AbstractBufferedFile):
                 self.s3_additional_kwargs.update({"IfMatch": etag})
             self._details = info
         elif "a" in mode and self.fs.exists(path):
-            self.append_block = True
             info = self.fs.info(self.path, version_id=self.version_id)
             loc = info.get("size", 0)
             if loc < self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE:
+                # Too small to be a part of a multipart upload: rewrite it
+                # from the buffer.
                 self.write(self.fs.cat(self.path))
+            else:
+                # Copied with UploadPartCopy as the leading part(s).
+                self.append_block = True
             self.loc = loc
             self.s3_additional_kwargs.update(info.to_api_repr())
             self._details = info
@@ -2208,8 +2213,10 @@ class S3File(AbstractBufferedFile):
         self._executor.shutdown()
 
     def _initiate_upload(self) -> None:
-        if self.tell() < self.blocksize:
+        if not self.append_block and self.tell() < self.blocksize:
             # Files smaller than block size in size cannot be multipart uploaded.
+            # An append to an object copied with UploadPartCopy always uses
+            # a multipart upload, whatever the block size.
             return
 
         self.multipart_upload = self.fs._create_multipart_upload(
@@ -2259,7 +2266,7 @@ class S3File(AbstractBufferedFile):
         # can still read the bytes; resetting it there would upload an empty
         # object for small files. Mid-stream chunks (final=False) return True so
         # fsspec clears the already-uploaded buffer between parts.
-        if self.tell() < self.blocksize:
+        if not self.append_block and self.tell() < self.blocksize:
             # Files smaller than block size in size cannot be multipart uploaded.
             if self.autocommit and final:
                 self.commit()

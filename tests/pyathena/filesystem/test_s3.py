@@ -676,6 +676,31 @@ class TestS3FileSystem:
             assert len(actual) == len(data + extra)
             assert actual == data + extra
 
+    @pytest.mark.parametrize(
+        ("size", "extra_size", "block_size"),
+        [
+            # GH-921: an existing object of at least 5 MiB, appended within a
+            # larger block size, is copied with UploadPartCopy.
+            (6 * 2**20, 5, 16 * 2**20),
+            # An existing object smaller than 5 MiB is rewritten from the
+            # buffer, not copied as well, when the append crosses the block size.
+            (2**20, 5 * 2**20, None),
+        ],
+    )
+    def test_append_with_block_size(self, fs, size, extra_size, block_size):
+        data = b"a" * size
+        extra = b"b" * extra_size
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_append_with_block_size/{uuid.uuid4()}"
+        )
+        fs.pipe_file(path, data)
+        with fs.open(path, "ab", block_size=block_size) as f:
+            f.write(extra)
+        actual = fs.cat_file(path)
+        assert len(actual) == len(data + extra)
+        assert actual == data + extra
+
     def test_ls_buckets(self, fs):
         fs.invalidate_cache()
         actual = fs.ls("s3://")
@@ -1511,6 +1536,7 @@ class TestS3File:
         file.s3_additional_kwargs = {}
         file.autocommit = autocommit
         file.blocksize = S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE
+        file.append_block = False
         file.multipart_upload = None
         file.multipart_upload_parts = []
         file.buffer = io.BytesIO(data)
@@ -1533,6 +1559,73 @@ class TestS3File:
             etag=f'"e{kw["part_number"]}"', part_number=kw["part_number"]
         )
         return file
+
+    @staticmethod
+    def _make_append_fs(existing: bytes):
+        # A mocked filesystem holding an existing object, with a minimum part
+        # size of 4 bytes so that the append paths can be exercised with tiny
+        # data and no AWS access.
+        fs = mock.MagicMock(spec=S3FileSystem)
+        fs.MULTIPART_UPLOAD_MIN_PART_SIZE = 4
+        fs.MULTIPART_UPLOAD_MAX_PART_SIZE = 64
+        fs.exists.return_value = True
+        fs.info.return_value = S3Object(
+            init={"ContentLength": len(existing)},
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket="bucket",
+            key="key.txt",
+        )
+        fs.cat.return_value = existing
+        fs._create_multipart_upload.return_value = SimpleNamespace(upload_id="uploadid")
+
+        def part(**kw):
+            return SimpleNamespace(etag=f'"e{kw["part_number"]}"', part_number=kw["part_number"])
+
+        fs._upload_part.side_effect = part
+        fs._upload_part_copy.side_effect = part
+        return fs
+
+    @staticmethod
+    def _uploaded_object(fs, existing: bytes) -> bytes:
+        # Rebuild the object S3 would store from the mocked upload calls.
+        # A part copy without a range copies the whole existing object.
+        if fs._put_object.called:
+            fs._create_multipart_upload.assert_not_called()
+            return fs._put_object.call_args.kwargs["body"]
+        fs._finish_multipart_upload.assert_called_once()
+        parts = [(c.kwargs["part_number"], existing) for c in fs._upload_part_copy.call_args_list]
+        parts += [
+            (c.kwargs["part_number"], c.kwargs["body"]) for c in fs._upload_part.call_args_list
+        ]
+        part_numbers = sorted(n for n, _ in parts)
+        assert part_numbers == list(range(1, len(parts) + 1))
+        return b"".join(body for _, body in sorted(parts))
+
+    @pytest.mark.parametrize(
+        ("existing", "appended", "multipart", "part_copy"),
+        [
+            # Smaller than the minimum part size: read into the buffer.
+            (b"aa", b"bb", False, False),
+            # GH-921: an existing object of at least the minimum part size is
+            # copied with UploadPartCopy even when the block size is larger
+            # than the whole object.
+            (b"a" * 6, b"bb", True, True),
+            (b"a" * 6, b"", True, True),
+            # An existing object read into the buffer is not copied again
+            # when the append crosses the block size.
+            (b"aa", b"b" * 16, True, False),
+        ],
+    )
+    def test_append(self, existing, appended, multipart, part_copy):
+        fs = self._make_append_fs(existing)
+
+        with S3File(fs, "s3://bucket/key.txt", mode="ab", block_size=16) as f:
+            f.write(appended)
+
+        assert self._uploaded_object(fs, existing) == existing + appended
+        assert fs._create_multipart_upload.called is multipart
+        assert fs._upload_part_copy.called is part_copy
+        fs.touch.assert_not_called()
 
     @pytest.mark.parametrize(
         ("objects", "target"),
