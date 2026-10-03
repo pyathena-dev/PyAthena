@@ -46,9 +46,21 @@ from pyathena.filesystem.s3_object import (
     S3PutObject,
     S3StorageClass,
 )
-from pyathena.util import RetryConfig, retry_api_call
+from pyathena.util import RetryConfig, override, retry_api_call
 
 _logger = logging.getLogger(__name__)
+
+
+class _CompressedBuffer(BytesIO):
+    """A buffer that keeps its data when a codec closes it.
+
+    Some codecs, such as the ``zstandard`` stream writer, close the file
+    that they write to when they are closed.
+    """
+
+    @override
+    def close(self) -> None:
+        pass
 
 
 def _compress(
@@ -75,7 +87,7 @@ def _compress(
     if isinstance(value, memoryview) and not value.c_contiguous:
         # Codecs cannot compress a non-contiguous memoryview.
         value = value.tobytes()
-    buffer = BytesIO()
+    buffer = _CompressedBuffer()
     with compr[compression](buffer, mode="w") as f:
         f.write(value)
     return buffer.getvalue()

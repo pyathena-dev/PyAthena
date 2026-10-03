@@ -25,12 +25,13 @@ import botocore.exceptions
 import pytest
 from botocore.stub import Stubber
 from fsspec import Callback
+from fsspec.compression import compr
 from fsspec.dircache import DirCache
 from fsspec.implementations.dirfs import DirFileSystem
 
 import pyathena
 from pyathena.filesystem import register_s3_filesystem
-from pyathena.filesystem.s3 import S3File, S3FileSystem
+from pyathena.filesystem.s3 import S3File, S3FileSystem, _compress
 from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import S3Object, S3ObjectType, S3StorageClass
@@ -4609,3 +4610,16 @@ class TestS3File:
             file.commit()
         file.fs._finish_multipart_upload.assert_called_once()
         file.fs._put_object.assert_not_called()
+
+
+def test_compress_codec_closing_its_file():
+    # GH-1037: some codecs, such as the zstandard stream writer, close the
+    # file that they write to when they are closed.
+    def closing_gzip(f, mode):
+        g = gzip.GzipFile(fileobj=f, mode=mode)
+        close = g.close
+        g.close = lambda: (close(), f.close())
+        return g
+
+    with mock.patch.dict(compr, {"closing": closing_gzip}):
+        assert gzip.decompress(_compress("s3://bucket/key", b"a", "closing")) == b"a"
