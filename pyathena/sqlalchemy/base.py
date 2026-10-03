@@ -709,20 +709,19 @@ class AthenaDialect(DefaultDialect):
                 enclosing type is reported as unrecognized.
 
         Returns:
-            The SQLAlchemy type. A type name that is not recognized becomes
-            ``NullType`` with a warning, in place when it is an element, key,
-            value, or field type. An ARRAY, MAP, or STRUCT/ROW whose arguments
-            cannot be parsed becomes ``NullType`` as a whole, with a warning.
+            The SQLAlchemy type. A type name that is not recognized, such as
+            ``foo`` in ``struct<a:foo>``, becomes ``NullType`` in place with a
+            warning. A type that cannot be parsed, such as ``map<int>`` or
+            ``varchar(x)``, makes its innermost enclosing ARRAY ``NullType``
+            with a warning; without an enclosing ARRAY, a top-level MAP or
+            STRUCT/ROW becomes ``NullType`` instead.
 
         Raises:
-            ValueError: If the length, precision, or scale of a CHAR, VARCHAR,
-                or DECIMAL type is not an integer, or if the arguments of a
-                nested MAP or STRUCT/ROW cannot be parsed. Inside a top-level
-                ARRAY, MAP, or STRUCT/ROW, these errors make that type
-                ``NullType`` instead.
-            TypeError: If a DECIMAL type has more arguments than SQLAlchemy's
-                ``DECIMAL`` accepts, with the same exception for a top-level
-                ARRAY, MAP, or STRUCT/ROW.
+            ValueError: If a type cannot be parsed and neither an enclosing
+                ARRAY nor a top-level MAP or STRUCT/ROW handles it, for example
+                a top-level ``varchar(x)`` or a nested ``map<int>``.
+            TypeError: In the same case, for a DECIMAL type with more
+                arguments than SQLAlchemy's ``DECIMAL`` accepts.
         """
         type_ = type_.strip()
         match = self._pattern_column_type.match(type_)
