@@ -157,14 +157,14 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
             size: Number of rows to retrieve. If None, returns entire chunk.
 
         Returns:
-            DataFrame chunk.
+            DataFrame chunk, with date truncation applied as in iteration.
         """
         from pandas.io.parsers import TextFileReader
 
         try:
             if isinstance(self._reader, TextFileReader):
-                return self._reader.get_chunk(size)
-            return next(self._reader)
+                return self._trunc_date(self._reader.get_chunk(size))
+            return self._trunc_date(next(self._reader))
         except BaseException:
             self.close()
             raise
