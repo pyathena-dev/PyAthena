@@ -222,6 +222,49 @@ class TestS3FileSystem:
         assert list(fs.dircache) == kept
 
     @pytest.mark.parametrize(
+        ("path", "cache_key"),
+        [
+            ("s3://bucket/a/c.txt?versionId=v1", "bucket/a/c.txt?versionId=v1"),
+            (Path("bucket/a/c.txt?versionId=v1"), "bucket/a/c.txt?versionId=v1"),
+            # A directory marker object keeps the trailing slash before the query.
+            ("s3://bucket/a/c.txt/?versionId=v1", "bucket/a/c.txt/?versionId=v1"),
+            # parse_path accepts other spellings of the query.
+            ("s3://bucket/a/c.txt?version_id=v1", "bucket/a/c.txt?versionId=v1"),
+            ("s3://bucket/a/c.txt?versionId=v1", "bucket/a/c.txt?versionid=v1"),
+        ],
+    )
+    def test_invalidate_cache_version_drops_object_path(self, path, cache_key):
+        fs = self._make_fs()
+        invalidated = [
+            cache_key,
+            (cache_key, "/"),
+            "bucket/a/c.txt",
+            ("bucket/a", "/"),
+            ("bucket", "/"),
+        ]
+        # Other versions of the object do not change.
+        kept = ["bucket/a/c.txt?versionId=v2"]
+        for key in invalidated + kept:
+            fs.dircache[key] = []
+
+        fs.invalidate_cache(path)
+        assert list(fs.dircache) == kept
+
+    def test_rm_file_version_invalidates_object_path(self):
+        fs = self._make_fs()
+        fs.dircache["bucket/a/c.txt"] = self._file_object("a/c.txt")
+
+        fs.rm_file("s3://bucket/a/c.txt?versionId=v1")
+        fs._call.assert_called_once_with(
+            fs._client.delete_object, Bucket="bucket", Key="a/c.txt", VersionId="v1"
+        )
+
+        # The deleted version was the only one: HeadObject and the prefix
+        # listing find nothing, instead of the cached object answering.
+        fs._call.side_effect = [FileNotFoundError("bucket/a/c.txt"), {}]
+        assert not fs.exists("s3://bucket/a/c.txt")
+
+    @pytest.mark.parametrize(
         ("prefix", "next_token"),
         [
             ("test_", None),
