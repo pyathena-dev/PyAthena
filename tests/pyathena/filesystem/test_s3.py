@@ -285,6 +285,7 @@ class TestS3FileSystem:
         fs = self._make_fs()
         fs.dircache["bucket/key"] = self._file_object("key")
         fs.dircache["bucket"] = fs._directory_object("bucket", None)
+        fs.dircache[""] = [fs._directory_object("bucket", None)]
 
         def call(method, **kwargs):
             if method in (fs._client.head_object, fs._client.head_bucket):
