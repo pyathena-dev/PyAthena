@@ -16,6 +16,7 @@ from io import BytesIO
 from multiprocessing import cpu_count
 from re import Pattern
 from typing import Any, cast
+from urllib.parse import unquote_plus
 
 import botocore.exceptions
 from boto3 import Session
@@ -207,10 +208,11 @@ class S3FileSystem(AbstractFileSystem):
 
         Accepts the constructor arguments that s3fs users pass through fsspec
         storage options — ``key``/``username``, ``secret``/``password``,
-        ``token``, ``anon``, ``use_ssl``, ``endpoint_url``,
+        ``token``, ``profile``, ``anon``, ``use_ssl``, ``endpoint_url``,
         ``connect_timeout``/``read_timeout``, and the ``client_kwargs`` /
         ``config_kwargs`` dictionaries — in addition to boto3 session
-        arguments such as ``region_name`` and ``profile_name``.
+        arguments such as ``region_name`` and ``profile_name``. ``profile``
+        is used as ``profile_name`` when ``profile_name`` is not given.
 
         Args:
             **kwargs: The filesystem constructor arguments.
@@ -249,6 +251,8 @@ class S3FileSystem(AbstractFileSystem):
             }
             kwargs.update(creds)
             client_kwargs.update(creds)
+        if profile := kwargs.pop("profile", None):
+            kwargs.setdefault("profile_name", profile)
 
         session = Session(
             **{k: v for k, v in kwargs.items() if k in Connection._SESSION_PASSING_ARGS}
@@ -1568,7 +1572,8 @@ class S3FileSystem(AbstractFileSystem):
             path: S3 path (s3://bucket/key) to write to.
             value: The bytes to write.
             mode: "overwrite" (default) or "create". With "create", raise
-                FileExistsError when the object already exists.
+                FileExistsError when the object already exists, including
+                one created during the write, which is not replaced.
             **kwargs: Additional parameters passed to the PutObject API
                 (e.g., ContentType, StorageClass) on the single-request
                 path. The ``block_size``, ``max_workers``, and
@@ -1577,7 +1582,8 @@ class S3FileSystem(AbstractFileSystem):
 
         Raises:
             FileExistsError: If the mode is "create" and the path already
-                exists.
+                exists, or an object is created at it before the write is
+                committed.
             ValueError: If the path does not contain a key or specifies a
                 version, or if the data takes more than
                 ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
@@ -1589,15 +1595,20 @@ class S3FileSystem(AbstractFileSystem):
             # Defer to the buffered open() path, which keeps the
             # deferred-commit semantics of fsspec transactions and uploads
             # large data as a parallel multipart upload.
-            super().pipe_file(path, value, mode=mode, **kwargs)
+            with self.open(path, "xb" if mode == "create" else "wb", **kwargs) as f:
+                f.write(value)
             return
         bucket, key, version_id = self.parse_path(path)
         if version_id:
             raise ValueError("Cannot write to the file with the version specified.")
         if not key:
             raise ValueError("Cannot write to a bucket.")
-        if mode == "create" and self.exists(path):
-            raise FileExistsError(path)
+        if mode == "create":
+            # Checked up front, as open() does in "xb" mode, and with
+            # IfNoneMatch for an object created since.
+            if self.exists(path):
+                raise FileExistsError(path)
+            kwargs["IfNoneMatch"] = "*"
         if not isinstance(value, bytes):
             # Accept bytes-like values (bytearray, memoryview) as the
             # buffered path does.
@@ -1753,7 +1764,14 @@ class S3FileSystem(AbstractFileSystem):
                 return b""
             raise
 
-    def put_file(self, lpath: str, rpath: str, callback=_DEFAULT_CALLBACK, **kwargs):
+    def put_file(
+        self,
+        lpath: str,
+        rpath: str,
+        callback=_DEFAULT_CALLBACK,
+        mode: str = "overwrite",
+        **kwargs,
+    ):
         """Upload a local file to S3.
 
         Uploads a file from the local filesystem to an S3 location. Supports
@@ -1764,11 +1782,18 @@ class S3FileSystem(AbstractFileSystem):
             lpath: Local file path to upload.
             rpath: S3 destination path (s3://bucket/key).
             callback: Progress callback for tracking upload progress.
+            mode: "overwrite" (default) or "create". With "create", the file
+                is written as with ``open()`` in ``xb`` mode: raise
+                FileExistsError when the object already exists, including
+                one created during the upload, which is not replaced.
             **kwargs: Additional S3 parameters (e.g., ContentType, StorageClass).
                 The ``block_size``, ``max_workers``, and ``s3_additional_kwargs``
                 parameters of ``open()`` are also accepted.
 
         Raises:
+            FileExistsError: If the mode is "create" and the path already
+                exists, or an object is created at it before the upload is
+                committed.
             ValueError: If the file takes more than
                 ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
 
@@ -1801,7 +1826,7 @@ class S3FileSystem(AbstractFileSystem):
         with (
             self.open(
                 rpath,
-                "wb",
+                "xb" if mode == "create" else "wb",
                 block_size=block_size,
                 max_workers=max_workers,
                 s3_additional_kwargs=s3_additional_kwargs,
@@ -2148,15 +2173,20 @@ class S3FileSystem(AbstractFileSystem):
         to abort all of them.
 
         Args:
-            path: S3 bucket or prefix path (e.g., "bucket", "s3://bucket" or
-                "s3://bucket/prefix"). If the path contains a key prefix,
-                only the uploads under that prefix are listed.
+            path: S3 bucket or key path (e.g., "bucket", "s3://bucket" or
+                "s3://bucket/prefix"). If the path contains a key, only the
+                uploads to that key and to the keys under ``key/`` are
+                listed, not those to sibling keys that merely start with the
+                same characters (e.g., ``prefix2/a``).
 
         Returns:
             List of S3MultipartUpload instances describing the in-progress
             multipart uploads.
         """
         bucket, key, _ = self.parse_path(path)
+        # S3 matches Prefix as a plain string, so the uploads are filtered to
+        # the key itself and the keys under it.
+        prefix = f"{key.rstrip('/')}/" if key else ""
 
         _logger.debug(f"List multipart uploads: s3://{bucket}/{key}")
         uploads: list[S3MultipartUpload] = []
@@ -2175,7 +2205,9 @@ class S3FileSystem(AbstractFileSystem):
                 **request,
             )
             uploads.extend(
-                S3MultipartUpload({**u, "Bucket": bucket}) for u in response.get("Uploads", [])
+                S3MultipartUpload({**u, "Bucket": bucket})
+                for u in response.get("Uploads", [])
+                if u["Key"] == key or u["Key"].startswith(prefix)
             )
             if not response.get("IsTruncated"):
                 break
@@ -2188,7 +2220,15 @@ class S3FileSystem(AbstractFileSystem):
     def object_version_info(
         self, path: str, delete_markers: bool = False, **kwargs
     ) -> list[S3ObjectVersion]:
-        """List the versions of the objects under the path.
+        """List the versions of the object or of the objects under the path.
+
+        A key path without a trailing slash selects that key if it has any
+        versions or delete markers, and otherwise the keys under ``key/``.
+        The choice does not depend on ``delete_markers``, so a key that has
+        only delete markers yields no versions without them. A key path with
+        a trailing slash selects the keys under it, and a bucket path selects
+        all the keys in the bucket. Sibling keys that merely start with the
+        same characters (e.g., ``key.bak``) are never included.
 
         Args:
             path: S3 path (s3://bucket/key or a key prefix) to list the
@@ -2201,6 +2241,9 @@ class S3FileSystem(AbstractFileSystem):
             List of S3ObjectVersion instances describing the versions.
         """
         bucket, key, _ = self.parse_path(path)
+        # S3 matches Prefix as a plain string, so the versions are filtered to
+        # the key itself or the keys under it.
+        prefix = f"{key.rstrip('/')}/" if key else ""
 
         _logger.debug(f"List object versions: s3://{bucket}/{key}")
         versions: list[S3ObjectVersion] = []
@@ -2209,20 +2252,30 @@ class S3FileSystem(AbstractFileSystem):
                 S3ObjectVersion(bucket=bucket, is_delete_marker=False, response=v)
                 for v in response.get("Versions", [])
             )
-            if delete_markers:
-                versions.extend(
-                    S3ObjectVersion(bucket=bucket, is_delete_marker=True, response=m)
-                    for m in response.get("DeleteMarkers", [])
-                )
-        return versions
+            # Delete markers are kept until the key is chosen, so that the
+            # choice is the same with and without them.
+            versions.extend(
+                S3ObjectVersion(bucket=bucket, is_delete_marker=True, response=m)
+                for m in response.get("DeleteMarkers", [])
+            )
+        # botocore decodes the keys only when it sets EncodingType itself, so
+        # the keys of an explicit EncodingType="url" are decoded for matching.
+        url_encoded = kwargs.get("EncodingType") == "url"
+        keys = [unquote_plus(v.key) if url_encoded else v.key for v in versions]
+        if key and not key.endswith("/") and key in keys:
+            selected = [v for v, k in zip(versions, keys, strict=True) if k == key]
+        else:
+            selected = [v for v, k in zip(versions, keys, strict=True) if k.startswith(prefix)]
+        return [v for v in selected if delete_markers or not v.is_delete_marker]
 
     def clear_multipart_uploads(self, path: str) -> None:
         """Abort any incomplete multipart uploads in the bucket.
 
         Args:
-            path: S3 bucket or prefix path (e.g., "bucket", "s3://bucket" or
-                "s3://bucket/prefix"). If the path contains a key prefix,
-                only the uploads under that prefix are aborted.
+            path: S3 bucket or key path (e.g., "bucket", "s3://bucket" or
+                "s3://bucket/prefix"). If the path contains a key, only the
+                uploads to that key and to the keys under ``key/`` are
+                aborted, as listed by :meth:`list_multipart_uploads`.
         """
         uploads = self.list_multipart_uploads(path)
         if not uploads:
@@ -2607,12 +2660,15 @@ class S3File(AbstractBufferedFile):
         existing object smaller than ``MULTIPART_UPLOAD_MIN_PART_SIZE`` is
         read into the write buffer; a larger one is copied with
         ``UploadPartCopy`` as the first parts of a multipart upload, whatever
-        the block size.
+        the block size. In exclusive-create mode, the object must not exist
+        when the file is opened, and the upload is committed with
+        ``IfNoneMatch="*"`` so that it does not replace an object created in
+        the meantime.
 
         Args:
             fs: The filesystem that the file belongs to.
             path: S3 path (s3://bucket/key) of the file.
-            mode: The file mode, such as ``rb``, ``wb`` or ``ab``.
+            mode: The file mode: ``rb``, ``wb``, ``ab``, or ``xb``.
             version_id: The version ID to read. Must match the version ID in
                 the path if both are given. A version cannot be given, in
                 either form, for writing or appending.
@@ -2636,6 +2692,8 @@ class S3File(AbstractBufferedFile):
                 which take precedence over ``s3_additional_kwargs``.
 
         Raises:
+            FileExistsError: If an object exists at the path in
+                exclusive-create mode.
             FileNotFoundError: If no object exists at the path when reading,
                 including when the path is a prefix.
             ValueError: If the path has no key, the version IDs do not match,
@@ -2709,6 +2767,12 @@ class S3File(AbstractBufferedFile):
                 # Too small to be a part of a multipart upload: rewritten
                 # from the buffer.
                 append_data = fs.cat(path)
+        elif "x" in mode:
+            # Checked up front so that no data is uploaded for an existing
+            # object, and on commit with IfNoneMatch for one created since.
+            if fs.exists(path):
+                raise FileExistsError(path)
+            self.s3_additional_kwargs.update({"IfNoneMatch": "*"})
 
         self._executor: S3Executor = executor or S3ThreadPoolExecutor(max_workers=max_workers)
         super().__init__(
@@ -2898,6 +2962,8 @@ class S3File(AbstractBufferedFile):
         completion fails. Invalidates the cache of the path afterwards.
 
         Raises:
+            FileExistsError: If an object was created at the path after the
+                file was opened in exclusive-create mode.
             RuntimeError: If parts were submitted but no multipart upload is
                 initialized.
         """

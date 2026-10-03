@@ -54,6 +54,9 @@ fs = S3FileSystem(connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 # Or with direct credentials (s3fs-compatible arguments).
 fs = S3FileSystem(key="YOUR_ACCESS_KEY", secret="YOUR_SECRET_KEY")
 
+# Or with a named profile.
+fs = S3FileSystem(profile="YOUR_PROFILE")
+
 # Or anonymously for public buckets.
 fs = S3FileSystem(anon=True)
 ```
@@ -135,6 +138,7 @@ operations raise natural errors instead of botocore's `ClientError`:
 | `404` / `NoSuchKey` / `NoSuchBucket` | `FileNotFoundError` |
 | `403` / `AccessDenied` | `PermissionError` |
 | `BucketAlreadyExists` / `BucketAlreadyOwnedByYou` | `FileExistsError` |
+| `PreconditionFailed` of an `If-None-Match` condition | `FileExistsError` |
 | `RequestTimeout` | `TimeoutError` |
 | Others | `OSError` with the matching `errno` |
 
@@ -172,7 +176,7 @@ uploads = fs.list_multipart_uploads("s3://YOUR_S3_BUCKET")
 for upload in uploads:
     print(upload.key, upload.upload_id, upload.initiated)
 
-# Abort all incomplete uploads under a bucket or key prefix.
+# Abort all incomplete uploads to a key and the keys under it.
 fs.clear_multipart_uploads("s3://YOUR_S3_BUCKET/path/to/")
 ```
 

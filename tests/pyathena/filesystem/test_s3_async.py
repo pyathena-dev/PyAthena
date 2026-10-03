@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import boto3
 import fsspec
 import pytest
 from fsspec import Callback
@@ -232,12 +233,40 @@ class TestAioS3FileSystem:
                 write()
             put_object.assert_not_called()
 
-    def test_transaction_pipe_file_create_existing(self):
+    def test_transaction_pipe_put_file_create_existing(self, tmp_path):
+        # GH-972: in a transaction, put_file(mode="create") also raises, when
+        # the file is opened, for an existing object.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
         fs._sync_fs.exists = mock.MagicMock(return_value=True)
-        with fs.transaction, pytest.raises(FileExistsError):
-            fs.pipe_file("s3://bucket/key", b"data", mode="create")
-        fs._sync_fs.exists.assert_called_once_with("s3://bucket/key")
+        fs._sync_fs._call = mock.MagicMock()
+        local = tmp_path / "local"
+        local.write_bytes(b"a")
+        with fs.transaction:
+            with pytest.raises(FileExistsError):
+                fs.pipe_file("s3://bucket/k1", b"data", mode="create")
+            with pytest.raises(FileExistsError):
+                fs.put_file(str(local), "s3://bucket/k2", mode="create")
+        assert fs._sync_fs.exists.call_count == 2
+        fs._sync_fs._call.assert_not_called()
+
+    @pytest.mark.parametrize("mode", ["overwrite", "create"])
+    def test_put_file_mode(self, tmp_path, mode):
+        # GH-972: fsspec's mode argument used to be sent to PutObject.
+        # A real client selects the request parameters of each operation.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs._sync_fs._client = boto3.client(
+            "s3", region_name="us-east-1", aws_access_key_id="dummy", aws_secret_access_key="dummy"
+        )
+        fs._sync_fs.exists = mock.MagicMock(return_value=False)
+        fs._sync_fs._call = mock.MagicMock(return_value={"ETag": '"e"'})
+        local = tmp_path / "local"
+        local.write_bytes(b"a")
+
+        fs.put_file(str(local), "s3://bucket/key", mode=mode)
+
+        (call,) = fs._sync_fs._call.call_args_list
+        assert "mode" not in call.kwargs
+        assert call.kwargs.get("IfNoneMatch") == ("*" if mode == "create" else None)
 
     @pytest.mark.parametrize("kwargs", [{"block_size": 4}, {}])
     def test_transaction_pipe_put_file_exceeding_max_parts(self, tmp_path, kwargs):
@@ -407,9 +436,11 @@ class TestAioS3FileSystem:
         (call,) = sync_fs._call.call_args_list
         assert call.kwargs["Delete"]["Objects"] == [{"Key": "dir"}, {"Key": "dir/a"}]
 
-    def test_put_file_in_transaction_open_parameters(self, tmp_path):
+    @pytest.mark.parametrize(("mode", "open_mode"), [("overwrite", "wb"), ("create", "xb")])
+    def test_put_file_in_transaction_open_parameters(self, tmp_path, mode, open_mode):
         # GH-969: the open() parameters of put_file() go to open(), and the
         # other parameters, also in s3_additional_kwargs, to S3.
+        # GH-972: fsspec's mode argument selects the mode of the file.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
         fs.open = mock.MagicMock()
         fs.open.return_value.__enter__.return_value.blocksize = 4
@@ -420,6 +451,7 @@ class TestAioS3FileSystem:
             str(lpath),
             "s3://bucket/key",
             Callback(),
+            mode,
             block_size=S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE,
             max_workers=2,
             StorageClass="STANDARD_IA",
@@ -427,7 +459,7 @@ class TestAioS3FileSystem:
 
         fs.open.assert_called_once_with(
             "s3://bucket/key",
-            "wb",
+            open_mode,
             block_size=S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE,
             max_workers=2,
             s3_additional_kwargs={"StorageClass": "STANDARD_IA", "ContentType": "text/csv"},

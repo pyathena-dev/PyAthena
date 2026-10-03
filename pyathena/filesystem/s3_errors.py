@@ -33,7 +33,9 @@ class S3ClientError:
     as properties, along with :attr:`os_error`, the equivalent standard
     Python exception. The error is mapped by its S3 error code first, then
     by its HTTP status code; if neither is recognized, a generic ``OSError``
-    with the original error message is used.
+    with the original error message is used. A ``PreconditionFailed`` error
+    of an ``If-None-Match`` condition, from a write that must not replace an
+    existing object, is mapped to ``FileExistsError``.
 
     Example:
         >>> try:
@@ -105,11 +107,15 @@ class S3ClientError:
         error_info = error.response.get("Error", {})
         self._code: str = str(error_info.get("Code", ""))
         self._message: str = str(error_info.get("Message", error))
+        self._condition: str = str(error_info.get("Condition", ""))
         status_code = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
         self._http_status_code: int | None = int(status_code) if status_code is not None else None
         self._os_error: OSError = self._translate()
 
     def _translate(self) -> OSError:
+        if self._code == "PreconditionFailed" and self._condition == "If-None-Match":
+            # A conditional write (IfNoneMatch="*") found an existing object.
+            return FileExistsError(self._message)
         exception = self._ERROR_CODE_TO_EXCEPTION.get(self._code)
         if exception:
             return exception(self._message)

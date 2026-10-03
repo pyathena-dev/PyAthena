@@ -180,8 +180,10 @@ class AioS3FileSystem(AsyncFileSystem):
         Args:
             path: S3 path (s3://bucket/key) to write to.
             value: The bytes to write.
-            mode: "overwrite" or "create". With "create", raise
-                FileExistsError when the object already exists.
+            mode: "overwrite" or "create". With "create", the file is
+                opened in ``xb`` mode: raise FileExistsError when the object
+                already exists, including one created before the
+                transaction is committed, which is not replaced.
             **kwargs: Additional parameters passed to ``open()``.
 
         Raises:
@@ -193,19 +195,30 @@ class AioS3FileSystem(AsyncFileSystem):
         block_size = kwargs.get("block_size") or self._sync_fs.default_block_size
         # The size in bytes; the length of a memoryview counts its items.
         self._sync_fs._check_multipart_upload_size(path, memoryview(value).nbytes, block_size)
-        if mode == "create" and self._sync_fs.exists(path):
-            raise FileExistsError(path)
-        with self.open(path, "wb", **kwargs) as f:
+        with self.open(path, "xb" if mode == "create" else "wb", **kwargs) as f:
             f.write(value)
 
-    async def _put_file(self, lpath: str, rpath: str, callback=_DEFAULT_CALLBACK, **kwargs) -> None:
+    async def _put_file(
+        self,
+        lpath: str,
+        rpath: str,
+        callback=_DEFAULT_CALLBACK,
+        mode: str = "overwrite",
+        **kwargs,
+    ) -> None:
         if self._intrans:
             # See _pipe_file.
-            await asyncio.to_thread(self._put_file_in_transaction, lpath, rpath, callback, **kwargs)
+            await asyncio.to_thread(
+                self._put_file_in_transaction, lpath, rpath, callback, mode, **kwargs
+            )
             return
-        await asyncio.to_thread(self._sync_fs.put_file, lpath, rpath, callback=callback, **kwargs)
+        await asyncio.to_thread(
+            self._sync_fs.put_file, lpath, rpath, callback=callback, mode=mode, **kwargs
+        )
 
-    def _put_file_in_transaction(self, lpath: str, rpath: str, callback, **kwargs) -> None:
+    def _put_file_in_transaction(
+        self, lpath: str, rpath: str, callback, mode: str, **kwargs
+    ) -> None:
         """Upload a local file as a file of this filesystem's transaction.
 
         Mirrors :meth:`S3FileSystem.put_file`, but writes through ``open()``
@@ -215,11 +228,17 @@ class AioS3FileSystem(AsyncFileSystem):
             lpath: Local file path to upload.
             rpath: S3 destination path (s3://bucket/key).
             callback: Progress callback for tracking upload progress.
+            mode: "overwrite" or "create". With "create", the file is
+                opened in ``xb`` mode: raise FileExistsError when the object
+                already exists, including one created before the
+                transaction is committed, which is not replaced.
             **kwargs: Additional S3 parameters (e.g., ContentType, StorageClass).
                 The ``block_size``, ``max_workers``, and ``s3_additional_kwargs``
                 parameters of ``open()`` are also accepted.
 
         Raises:
+            FileExistsError: If the mode is "create" and the path already
+                exists.
             ValueError: If the file takes more than
                 ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
         """
@@ -244,7 +263,7 @@ class AioS3FileSystem(AsyncFileSystem):
         with (
             self.open(
                 rpath,
-                "wb",
+                "xb" if mode == "create" else "wb",
                 block_size=block_size,
                 max_workers=max_workers,
                 s3_additional_kwargs=s3_additional_kwargs,
@@ -597,7 +616,7 @@ class AioS3FileSystem(AsyncFileSystem):
     def object_version_info(
         self, path: str, delete_markers: bool = False, **kwargs
     ) -> list[S3ObjectVersion]:
-        """List the versions of the objects under the path.
+        """List the versions of the object or of the objects under the path.
 
         See :meth:`S3FileSystem.object_version_info`.
 
@@ -617,7 +636,7 @@ class AioS3FileSystem(AsyncFileSystem):
         See :meth:`S3FileSystem.list_multipart_uploads`.
 
         Args:
-            path: S3 bucket or prefix path (e.g., "s3://bucket" or "s3://bucket/prefix").
+            path: S3 bucket or key path (e.g., "s3://bucket" or "s3://bucket/prefix").
 
         Returns:
             List of S3MultipartUpload instances describing the uploads.
@@ -630,7 +649,7 @@ class AioS3FileSystem(AsyncFileSystem):
         See :meth:`S3FileSystem.clear_multipart_uploads`.
 
         Args:
-            path: S3 bucket or prefix path (e.g., "s3://bucket" or "s3://bucket/prefix").
+            path: S3 bucket or key path (e.g., "s3://bucket" or "s3://bucket/prefix").
         """
         self._sync_fs.clear_multipart_uploads(path)
 
