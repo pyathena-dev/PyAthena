@@ -230,9 +230,9 @@ df = cursor.as_pandas()  # In-memory conversion, no await needed
 
 The `as_pandas()`, `as_arrow()`, and `as_polars()` convenience methods are synchronous.
 When `execute()` has loaded the whole result, they return that data.
-When the result is read in chunks (`chunksize`, or `auto_optimize_chunksize` with pandas), they read
-S3 on the calling thread and block the event loop: `as_pandas()` returns or reads chunks as it is
-iterated, and `as_polars()` reads every remaining chunk.
+When the result is read in chunks, they read S3 on the calling thread and block the event loop.
+With `chunksize`, `as_pandas()` returns an iterator that reads each chunk as it is iterated, and
+`as_polars()` reads every remaining chunk.
 
 See each cursor's documentation page for detailed usage examples.
 
