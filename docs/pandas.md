@@ -481,7 +481,7 @@ for chunk in cursor.iter_chunks():
 
 Without an explicit `chunksize`, `as_pandas()` returns a single DataFrame even when a chunk size was chosen automatically.
 It reads every chunk and joins them, so the whole result is held in memory.
-Use `iter_chunks()` or the fetch methods to process a large result chunk by chunk.
+Use `iter_chunks()`, `fetchone()`, or `fetchmany()` to read a large result one chunk at a time.
 
 **Priority of chunksize settings:**
 
