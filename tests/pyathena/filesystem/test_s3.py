@@ -1822,6 +1822,38 @@ class TestS3FileSystem:
             fs.cp_file("s3://bucket/src", "s3://bucket/dst")
         assert "bucket/dst" not in fs.dircache
 
+    def test_copy_object_with_multipart_upload_head_object_size(self):
+        # GH-973: the ranges cover the size that HeadObject reports for the
+        # copied object, not a cached size, and the "null" version of a
+        # bucket with versioning suspended is not pinned.
+        fs = self._make_fs()
+        fs._call.return_value = {
+            "ContentLength": 3 * S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE,
+            "VersionId": "null",
+        }
+        fs._create_multipart_upload = mock.MagicMock(
+            return_value=SimpleNamespace(upload_id="uploadid")
+        )
+        fs._upload_part_copy = mock.MagicMock()
+        fs._finish_multipart_upload = mock.MagicMock()
+
+        self._multipart_copy(
+            fs,
+            MetadataDirective="REPLACE",
+            TaggingDirective="REPLACE",
+            AnnotationDirective="EXCLUDE",
+        )
+
+        size = S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE
+        # The parts are copied in parallel, in any order.
+        parts = sorted(
+            (c.kwargs["copy_source_ranges"], c.kwargs["copy_source"])
+            for c in fs._upload_part_copy.call_args_list
+        )
+        assert parts == [
+            ((i * size, (i + 1) * size), {"Bucket": "bucket", "Key": "src"}) for i in range(3)
+        ]
+
     def test_copy_object_with_multipart_upload_replace_directives(self):
         # GH-973: REPLACE uses the values of the copy without reading the
         # source, and EXCLUDE skips the annotations.
@@ -1867,7 +1899,7 @@ class TestS3FileSystem:
         fs = self._stubbed_fs()
         with Stubber(fs._client) as stubber:
             stubber.add_response("head_object", {}, None)
-            create_kwargs, version_id = fs._get_multipart_copy_kwargs(
+            create_kwargs, version_id, size = fs._get_multipart_copy_kwargs(
                 "bucket",
                 "src",
                 None,
@@ -1879,6 +1911,7 @@ class TestS3FileSystem:
             )
         assert create_kwargs == {"ContentTyp": "text/csv"}
         assert version_id is None
+        assert size is None
         with pytest.raises(botocore.exceptions.ParamValidationError, match="ContentTyp"):
             fs._client.create_multipart_upload(Bucket="bucket", Key="dst", **create_kwargs)
 

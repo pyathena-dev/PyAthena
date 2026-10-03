@@ -114,10 +114,11 @@ source are copied, and the values given for them are ignored, as CopyObject does
 `REPLACE` directive uses the given values instead, and `AnnotationDirective="EXCLUDE"`
 skips the annotations. Copying the tags needs `s3:GetObjectTagging` on the source, and
 copying the annotations needs `s3:ListObjectAnnotations` and `s3:GetObjectAnnotation` on
-the source and `s3:PutObjectAnnotation` on the destination. In a versioned bucket, a
-source without a `?versionId=` suffix is copied from the version that it has when the
-copy starts, which needs `s3:GetObjectVersion` and `s3:GetObjectVersionTagging` on the
-source. The annotations are listed before anything is written and copied after the
+the source and `s3:PutObjectAnnotation` on the destination. In a bucket with versioning
+enabled, a source without a `?versionId=` suffix is copied from the version that it has
+when the copy starts, which needs `s3:GetObjectVersion` and, to copy the tags,
+`s3:GetObjectVersionTagging` on the source. The `null` version of a bucket with
+versioning suspended is not pinned. The annotations are listed before anything is written and copied after the
 upload completes, so the destination exists without them until the last one is
 written. If an annotation fails to copy, the error is raised and the destination is
 kept. A failed part copy aborts the multipart upload.

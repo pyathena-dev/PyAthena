@@ -185,9 +185,9 @@ class TestAioS3FileSystem:
         ]
 
     @staticmethod
-    async def _multipart_copy(**kwargs):
+    async def _multipart_copy(fs=None, **kwargs):
         # max_workers=1 runs the stubbed requests in a deterministic order.
-        fs = AioS3FileSystem(
+        fs = fs or AioS3FileSystem(
             key="dummy",
             secret="dummy",
             region_name="us-east-1",
@@ -230,9 +230,24 @@ class TestAioS3FileSystem:
     @pytest.mark.asyncio
     async def test_copy_object_with_multipart_upload_failed_annotation(self):
         # GH-973: a failed annotation copy is raised; the completed
-        # destination is neither aborted nor deleted.
-        with pytest.raises(PermissionError):
-            await self._multipart_copy(fail_annotation=True)
+        # destination is neither aborted nor deleted, and no other
+        # annotation is copied.
+        fs = AioS3FileSystem(
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            max_workers=1,
+            skip_instance_cache=True,
+        )
+        sync_fs = fs._sync_fs
+        with (
+            mock.patch.object(
+                sync_fs, "_copy_object_annotation", wraps=sync_fs._copy_object_annotation
+            ) as copy_annotation,
+            pytest.raises(PermissionError),
+        ):
+            await self._multipart_copy(fs, fail_annotation=True)
+        assert [c.args[0] for c in copy_annotation.call_args_list] == ["a1"]
 
     @pytest.mark.asyncio
     async def test_cp_file_failed_multipart_copy_invalidates_cache(self):
@@ -278,6 +293,8 @@ class TestAioS3FileSystem:
 
         sync_fs._upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
         sync_fs._complete_multipart_upload = mock.MagicMock()
+        # The HeadObject of the source, for its version.
+        sync_fs._call = mock.MagicMock(return_value={})
         sync_fs._abort_multipart_upload = mock.MagicMock(
             side_effect=lambda *args: events.append("abort")
         )

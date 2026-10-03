@@ -1830,10 +1830,12 @@ class S3FileSystem(AbstractFileSystem):
                 f"5 GiB ({self.MULTIPART_UPLOAD_MAX_PART_SIZE} bytes), inclusive: {block_size}."
             )
 
-        ranges = self._get_copy_ranges(size1, block_size)
-        create_kwargs, version_id1 = self._get_multipart_copy_kwargs(
+        create_kwargs, version_id1, head_size = self._get_multipart_copy_kwargs(
             bucket1, key1, version_id1, kwargs
         )
+        # The size of the copied version, not the one that the caller found,
+        # which may come from a cached listing.
+        ranges = self._get_copy_ranges(size1 if head_size is None else head_size, block_size)
         copy_source = {
             "Bucket": bucket1,
             "Key": key1,
@@ -1915,13 +1917,15 @@ class S3FileSystem(AbstractFileSystem):
 
     def _get_multipart_copy_kwargs(
         self, bucket: str, key: str, version_id: str | None, kwargs: Mapping[str, Any]
-    ) -> tuple[dict[str, Any], str | None]:
+    ) -> tuple[dict[str, Any], str | None, int | None]:
         """Build the CreateMultipartUpload parameters of a multipart copy.
 
         The source is read with HeadObject. Without a given version, the
-        version that it reports, if the bucket is versioned, is the version
-        to copy, so that the parts, the tags and the annotations come from
-        the same object even if the source is replaced during the copy.
+        version that it reports in a bucket with versioning enabled is the
+        version to copy, so that the parts, the tags and the annotations come
+        from the same object even if the source is replaced during the copy.
+        The ``null`` version of a bucket without versioning or with
+        versioning suspended is not pinned, since it is replaced by a write.
 
         No multipart request accepts the directives of CopyObject, so they
         are implemented here as CopyObject applies them. With the COPY
@@ -1941,9 +1945,9 @@ class S3FileSystem(AbstractFileSystem):
             kwargs: The CopyObject parameters of the copy.
 
         Returns:
-            The parameters for CreateMultipartUpload, and the version of the
-            source to copy: the given one, or the one that HeadObject
-            reported, which is None for a bucket without versioning.
+            The parameters for CreateMultipartUpload, the version of the
+            source to copy (the given one, the one that HeadObject reported,
+            or None), and the size of that version from HeadObject.
 
         Raises:
             ValueError: If a directive has a value that CopyObject does not
@@ -1972,7 +1976,7 @@ class S3FileSystem(AbstractFileSystem):
                 **source,
             )
         )
-        if not version_id and head.version_id:
+        if not version_id and head.version_id and head.version_id != "null":
             version_id = head.version_id
             source.update({"VersionId": version_id})
         if metadata_directive == "COPY":
@@ -2005,12 +2009,16 @@ class S3FileSystem(AbstractFileSystem):
         copy_members = self._client.meta.service_model.operation_model(
             "CopyObject"
         ).input_shape.members
-        return {
-            **self._get_operation_kwargs("create_multipart_upload", request),
-            # A parameter that CopyObject does not accept either is sent as
-            # is, so that botocore rejects it as it does for CopyObject.
-            **{k: v for k, v in request.items() if k not in copy_members},
-        }, version_id
+        return (
+            {
+                **self._get_operation_kwargs("create_multipart_upload", request),
+                # A parameter that CopyObject does not accept either is sent as
+                # is, so that botocore rejects it as it does for CopyObject.
+                **{k: v for k, v in request.items() if k not in copy_members},
+            },
+            version_id,
+            head.content_length,
+        )
 
     def _copies_annotations(self, bucket: str, kwargs: Mapping[str, Any]) -> bool:
         """Return whether a multipart copy copies the annotations of its source.

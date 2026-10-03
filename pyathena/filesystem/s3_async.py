@@ -523,9 +523,12 @@ class AioS3FileSystem(AsyncFileSystem):
                 f"inclusive: {block_size}."
             )
 
-        ranges = self._sync_fs._get_copy_ranges(size1, block_size)
-        create_kwargs, version_id1 = await asyncio.to_thread(
+        create_kwargs, version_id1, head_size = await asyncio.to_thread(
             self._sync_fs._get_multipart_copy_kwargs, bucket1, key1, version_id1, kwargs
+        )
+        # The size of the copied version; see S3FileSystem.
+        ranges = self._sync_fs._get_copy_ranges(
+            size1 if head_size is None else head_size, block_size
         )
         copy_source: dict[str, Any] = {
             "Bucket": bucket1,
