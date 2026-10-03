@@ -1517,6 +1517,11 @@ class TestS3FileSystem:
             (["s3://bucket/a", "s3://bucket/b"], ["s3://bucket/c", "s3a://bucket/c"]),
             # A destination that is another source.
             (["s3://bucket/a", "s3://bucket/b"], ["s3://bucket/b", "s3://bucket/a"]),
+            # An object with keys below it is checked like a file.
+            (
+                ["s3://bucket/d", "s3://bucket/d/x", "s3://bucket/e"],
+                ["s3://bucket/e", "s3://bucket/o/x", "s3://bucket/o/e"],
+            ),
         ],
     )
     def test_mv_conflicting_destinations(self, path1, path2):

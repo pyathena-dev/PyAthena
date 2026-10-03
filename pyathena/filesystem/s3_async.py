@@ -355,8 +355,8 @@ class AioS3FileSystem(AsyncFileSystem):
         Raises:
             ValueError: If two sources have the same destination, or a
                 destination is another source, which is checked before
-                anything is copied. Directories with other sources below
-                them are not checked, since they are not copied.
+                anything is copied. A directory, which has other sources
+                below it and is not copied, may move onto another directory.
         """
         if path1 == path2:
             return
