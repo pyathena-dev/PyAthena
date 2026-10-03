@@ -514,6 +514,74 @@ class TestS3FileSystem:
         fs.pipe_file("s3://bucket/key", b"data", max_workers=2)
         fs._put_object.assert_called_once_with(bucket="bucket", key="key", body=b"data")
 
+    @pytest.mark.parametrize(
+        ("size", "block_size", "min_block_size"),
+        [
+            # The data fits in the maximum number of parts.
+            (12, 4, None),
+            # GH-953: more data is rejected with the minimum block size,
+            (13, 4, 5),
+            # which is at least the minimum part size.
+            (5, 1, 4),
+        ],
+    )
+    def test_check_multipart_upload_size(self, size, block_size, min_block_size):
+        fs = self._make_fs()
+        fs.MULTIPART_UPLOAD_MIN_PART_SIZE = 4
+        fs.MULTIPART_UPLOAD_MAX_PARTS = 3
+
+        if min_block_size is None:
+            fs._check_multipart_upload_size("s3://bucket/key", size, block_size)
+        else:
+            with pytest.raises(ValueError, match=f"at least {min_block_size} bytes"):
+                fs._check_multipart_upload_size("s3://bucket/key", size, block_size)
+
+    @pytest.mark.parametrize("kwargs", [{"block_size": 4}, {}])
+    def test_put_file_exceeding_max_parts(self, tmp_path, kwargs):
+        # GH-953: a file that does not fit in the maximum number of parts is
+        # rejected before anything is uploaded.
+        fs = self._make_fs()
+        fs.MULTIPART_UPLOAD_MAX_PARTS = 3
+        fs.default_block_size = 4
+        fs.open = mock.MagicMock()
+        lpath = tmp_path / "data"
+        lpath.write_bytes(b"a" * 13)
+
+        with pytest.raises(ValueError, match="block_size"):
+            fs.put_file(str(lpath), "s3://bucket/key", **kwargs)
+        fs.open.assert_not_called()
+        fs._call.assert_not_called()
+
+    def test_put_file_block_size(self, tmp_path):
+        # block_size is passed to open() instead of the S3 API.
+        fs = self._make_fs()
+        fs.open = mock.MagicMock()
+        fs.open.return_value.__enter__.return_value.blocksize = 8
+        lpath = tmp_path / "data"
+        lpath.write_bytes(b"a" * 13)
+
+        fs.put_file(str(lpath), "s3://bucket/key", block_size=8)
+
+        fs.open.assert_called_once_with(
+            "s3://bucket/key", "wb", block_size=8, s3_additional_kwargs={}
+        )
+
+    @pytest.mark.parametrize("kwargs", [{"block_size": 4}, {}])
+    def test_pipe_file_exceeding_max_parts(self, kwargs):
+        # GH-953: data that does not fit in the maximum number of parts is
+        # rejected before anything is uploaded.
+        fs = self._make_fs()
+        fs.MULTIPART_UPLOAD_MAX_PARTS = 3
+        fs.default_block_size = 4
+        fs.open = mock.MagicMock()
+        fs._put_object = mock.MagicMock()
+
+        with pytest.raises(ValueError, match="block_size"):
+            fs.pipe_file("s3://bucket/key", b"a" * 13, **kwargs)
+        fs.open.assert_not_called()
+        fs._put_object.assert_not_called()
+        fs._call.assert_not_called()
+
     def test_open_max_workers(self):
         fs = self._make_fs()
         fs.default_cache_type = "bytes"

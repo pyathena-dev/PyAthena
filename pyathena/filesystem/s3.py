@@ -1353,6 +1353,31 @@ class S3FileSystem(AbstractFileSystem):
                 starts.append(starts[-1] + (size - starts[-1]) // 2)
         return list(zip(starts, [*starts[1:], size], strict=True))
 
+    def _check_multipart_upload_size(self, path: str, size: int, block_size: int) -> None:
+        """Check that data fits in a multipart upload before uploading it.
+
+        Args:
+            path: The path that the data is written to.
+            size: The size of the data in bytes.
+            block_size: The block size of the write in bytes.
+
+        Raises:
+            ValueError: If the data takes more than
+                ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
+        """
+        if size > block_size * self.MULTIPART_UPLOAD_MAX_PARTS:
+            min_block_size = max(
+                math.ceil(size / self.MULTIPART_UPLOAD_MAX_PARTS),
+                self.MULTIPART_UPLOAD_MIN_PART_SIZE,
+            )
+            raise ValueError(
+                f"Cannot upload {size} bytes to {path} in "
+                f"{self.MULTIPART_UPLOAD_MAX_PARTS} parts with a block size of "
+                f"{block_size} bytes. Write the file with a block_size, or a "
+                "default_block_size of the filesystem, of at least "
+                f"{min_block_size} bytes."
+            )
+
     def pipe_file(
         self, path: str, value: bytes | bytearray | memoryview, mode: str = "overwrite", **kwargs
     ) -> None:
@@ -1379,9 +1404,11 @@ class S3FileSystem(AbstractFileSystem):
             FileExistsError: If the mode is "create" and the path already
                 exists.
             ValueError: If the path does not contain a key or specifies a
-                version.
+                version, or if the data takes more than
+                ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
         """
         block_size = kwargs.get("block_size") or self.default_block_size
+        self._check_multipart_upload_size(path, len(value), block_size)
         if self._intrans or len(value) > min(block_size, self.MULTIPART_UPLOAD_MAX_PART_SIZE):
             # Defer to the buffered open() path, which keeps the
             # deferred-commit semantics of fsspec transactions and uploads
@@ -1523,6 +1550,11 @@ class S3FileSystem(AbstractFileSystem):
             rpath: S3 destination path (s3://bucket/key).
             callback: Progress callback for tracking upload progress.
             **kwargs: Additional S3 parameters (e.g., ContentType, StorageClass).
+                The ``block_size`` parameter of ``open()`` is also accepted.
+
+        Raises:
+            ValueError: If the file takes more than
+                ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
 
         Note:
             Directories are not supported for upload. If lpath is a directory,
@@ -1539,6 +1571,8 @@ class S3FileSystem(AbstractFileSystem):
             return
 
         size = os.path.getsize(lpath)
+        block_size = kwargs.pop("block_size", None) or self.default_block_size
+        self._check_multipart_upload_size(rpath, size, block_size)
         callback.set_size(size)
         if "ContentType" not in kwargs:
             content_type, _ = mimetypes.guess_type(lpath)
@@ -1546,7 +1580,7 @@ class S3FileSystem(AbstractFileSystem):
                 kwargs["ContentType"] = content_type
 
         with (
-            self.open(rpath, "wb", s3_additional_kwargs=kwargs) as remote,
+            self.open(rpath, "wb", block_size=block_size, s3_additional_kwargs=kwargs) as remote,
             open(lpath, "rb") as local,
         ):
             while data := local.read(remote.blocksize):
