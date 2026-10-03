@@ -504,6 +504,25 @@ class TestS3FileSystem:
         fs._call.return_value = {"ContentLength": 4, "ETag": '"etag"', "VersionId": "v1"}
         assert fs._head_object("bucket/key").version_id == "v1"
 
+    @pytest.mark.parametrize("version_aware", [False, True])
+    def test_info_caches_each_version_separately(self, version_aware):
+        fs = self._make_fs()
+        fs.version_aware = version_aware
+        responses = {
+            None: {"ContentLength": 3, "ETag": '"e3"', "VersionId": "v3"},
+            "v1": {"ContentLength": 1, "ETag": '"e1"', "VersionId": "v1"},
+            "v2": {"ContentLength": 2, "ETag": '"e2"', "VersionId": "v2"},
+        }
+        fs._call.side_effect = lambda _, **kwargs: responses[kwargs.get("VersionId")]
+
+        for _ in range(2):
+            assert fs.info("s3://bucket/key", version_id="v1").size == 1
+            assert fs.info("s3://bucket/key", version_id="v2").size == 2
+            assert fs.info("s3://bucket/key?versionId=v1").size == 1
+            assert fs.info("s3://bucket/key").size == 3
+        # The second round is served from the cache.
+        assert fs._call.call_count == 3
+
     def test_object_version_info_paginates(self):
         fs = self._make_fs()
         fs._call.side_effect = [
