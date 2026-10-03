@@ -824,6 +824,20 @@ class TestS3FileSystem:
         assert sorted(v.key for v in actual if not v.is_delete_marker) == expected
         assert sorted(v.key for v in actual if v.is_delete_marker) == expected
 
+    def test_object_version_info_matches_url_encoded_keys(self):
+        fs = self._make_fs()
+        # With an explicit EncodingType="url", botocore leaves the keys encoded.
+        fs._call.return_value = {
+            "Versions": [
+                {"Key": "a+b", "VersionId": "v1", "IsLatest": True},
+                {"Key": "a+b.bak", "VersionId": "v2", "IsLatest": True},
+            ],
+            "IsTruncated": False,
+        }
+
+        actual = fs.object_version_info("s3://bucket/a b", EncodingType="url")
+        assert [(v.key, v.version_id) for v in actual] == [("a+b", "v1")]
+
     def test_ls_versions_requires_version_aware(self):
         fs = self._make_fs()
         with pytest.raises(ValueError, match="version aware"):

@@ -13,6 +13,7 @@ from datetime import datetime
 from multiprocessing import cpu_count
 from re import Pattern
 from typing import Any, cast
+from urllib.parse import unquote_plus
 
 import botocore.exceptions
 from boto3 import Session
@@ -1937,11 +1938,15 @@ class S3FileSystem(AbstractFileSystem):
                     S3ObjectVersion(bucket=bucket, is_delete_marker=True, response=m)
                     for m in response.get("DeleteMarkers", [])
                 )
+        # botocore decodes the keys only when it sets EncodingType itself, so
+        # the keys of an explicit EncodingType="url" are decoded for matching.
+        url_encoded = kwargs.get("EncodingType") == "url"
+        keys = [unquote_plus(v.key) if url_encoded else v.key for v in versions]
         if key and not key.endswith("/"):
-            object_versions = [v for v in versions if v.key == key]
+            object_versions = [v for v, k in zip(versions, keys, strict=True) if k == key]
             if object_versions:
                 return object_versions
-        return [v for v in versions if v.key.startswith(prefix)]
+        return [v for v, k in zip(versions, keys, strict=True) if k.startswith(prefix)]
 
     def clear_multipart_uploads(self, path: str) -> None:
         """Abort any incomplete multipart uploads in the bucket.
