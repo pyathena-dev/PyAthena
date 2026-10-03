@@ -1924,7 +1924,7 @@ class S3FileSystem(AbstractFileSystem):
         version ID other than ``null`` that it reports is the version to
         copy, so that the parts, the tags and the annotations come from the
         same object even if the source is replaced during the copy. A
-        ``null`` version is not pinned, since a write replaces it.
+        ``null`` version, which a write can replace, is not pinned.
 
         No multipart request accepts the directives of CopyObject, so they
         are implemented here as CopyObject applies them. With the COPY
