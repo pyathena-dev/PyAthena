@@ -231,6 +231,21 @@ class TestAthenaDialect:
         assert "\tm MAP<INT, STRING>,\n" in ddl
         assert "\ts STRUCT<a:INT, `b c`:ARRAY<STRUCT<x:INT>>>\n" in ddl
 
+    def test_unrecognized_field_type_reflects_null_type_and_blocks_ddl(self):
+        dialect = AthenaDialect()
+        with pytest.warns(sqlalchemy.exc.SAWarning, match="Did not recognize type"):
+            struct = dialect._get_column_type("struct<a:int,b:timestamp(3) with time zone>")
+        assert isinstance(struct.fields["a"], types.INTEGER)
+        assert isinstance(struct.fields["b"], types.NullType)
+        table = Table(
+            "t", MetaData(), Column("payload", struct), awsathena_location="s3://bucket/path/"
+        )
+        with pytest.raises(
+            sqlalchemy.exc.CompileError,
+            match=r"column 'payload'.*Can't generate DDL for NullType",
+        ):
+            CreateTable(table).compile(dialect=dialect)
+
     @pytest.mark.parametrize(
         "type_", ["map<int>", "struct<a>", "row(a)", "struct<a:map<int>>", "map<int,struct<a>>"]
     )
