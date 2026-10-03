@@ -600,7 +600,7 @@ class _ArrayUpdateCompiler:
         ):
             raise exc.CompileError("An ARRAY slice assignment requires a non-NULL array")
         rhs = compiler.process(value, **kw)
-        rhs_type = compiler._dml_type_compiler.process(
+        rhs_type = compiler._dml_type_compiler.process_element(
             expression.value_type, require_precision=True
         )
         rhs = f"CAST({rhs} AS {rhs_type})"
@@ -649,7 +649,7 @@ class _ArrayUpdateCompiler:
         array_type = self._type_inspector.array_type(array_type)
         if array_type is None:
             raise exc.CompileError("Partial ARRAY updates require an ARRAY column type")
-        array_sql_type = compiler._dml_type_compiler.process(array_type)
+        array_sql_type = compiler._dml_type_compiler.process_element(array_type)
         array = f"coalesce({array}, CAST(ARRAY[] AS {array_sql_type}))"
         bound = path[0]
         if isinstance(bound, Slice):
@@ -658,7 +658,7 @@ class _ArrayUpdateCompiler:
 
     def _prefix_and_padding(self, array, start, array_type):
         prefix = f"slice({array}, 1, least({start} - 1, cardinality({array})))"
-        element_type = self.compiler._dml_type_compiler.process(
+        element_type = self.compiler._dml_type_compiler.process_element(
             _ArrayTypeInspector.item_type(array_type)
         )
         padding = (

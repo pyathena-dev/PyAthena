@@ -32,6 +32,7 @@ from sqlalchemy import (
     union,
 )
 from sqlalchemy.engine.url import make_url
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.sql import literal, literal_column, operators
 from sqlalchemy.sql.compiler import FROM_LINTING
 from sqlalchemy.sql.ddl import CreateTable
@@ -695,12 +696,40 @@ class TestAthenaStatementCompiler:
             (types.DateTime, "TIMESTAMP(6)"),
         ],
     )
-    def test_cast_renders_subclass_with_own_visit_name_as_base(self, base, expected):
-        type_ = type("Custom", (base,), {"__visit_name__": "pyathena_custom"})()
+    @pytest.mark.parametrize("visit_name", ["pyathena_custom", "DATE", "INTEGER", "JSON"])
+    def test_cast_renders_subclass_by_base_class(self, base, expected, visit_name):
+        # oracle.DATE, for example, subclasses DateTime with the visit name DATE.
+        type_ = type("Custom", (base,), {"__visit_name__": visit_name})()
         assert self._compile_sql(cast(column("col"), type_)) == f"CAST(col AS {expected})"
         assert self._compile_sql(cast(column("col"), types.ARRAY(type_))) == (
             f"CAST(col AS ARRAY({expected}))"
         )
+
+    def test_cast_applies_compilation_rule_of_decorator(self):
+        class _Wide(types.TypeDecorator):
+            impl = types.Integer
+            cache_ok = True
+
+        @compiles(_Wide, "awsathena")
+        def _compile_wide(type_, compiler, **kw):
+            return "BIGINT"
+
+        assert self._compile_sql(cast(column("col"), _Wide())) == "CAST(col AS BIGINT)"
+        assert self._compile_sql(cast(column("col"), types.ARRAY(_Wide()))) == (
+            "CAST(col AS ARRAY(BIGINT))"
+        )
+
+    def test_array_assignment_rejects_unknown_value_type(self):
+        items = Table(
+            "items",
+            MetaData(),
+            Column(
+                "a",
+                AthenaArray(types.NullType()).with_variant(AthenaArray(Integer), "awsathena"),
+            ),
+        )
+        with pytest.raises(exc.CompileError, match="explicit element type"):
+            items.update().values({items.c.a[1]: 1}).compile(dialect=self.dialect)
 
     @pytest.mark.parametrize(
         "type_", [AthenaStruct(), types.ARRAY(AthenaStruct()), AthenaMap(String, AthenaStruct())]
@@ -1023,9 +1052,10 @@ class TestAthenaDDLCompiler:
             Column("subclassed", type("MyInteger", (Integer,), {})()),
             Column("text_value", types.CLOB),
         )
-        assert "decorated INT" in ddl
-        assert "subclassed INT" in ddl
-        assert "text_value STRING" in ddl
+        assert "decorated INT,\n" in ddl
+        assert "subclassed INT,\n" in ddl
+        assert "text_value STRING\n" in ddl
+        assert "INTEGER" not in ddl
 
     def test_unsupported_type_inside_struct_column_still_raises(self):
         with pytest.raises(exc.CompileError, match="not supported"):

@@ -364,13 +364,16 @@ class AthenaDMLTypeCompiler(GenericTypeCompiler):
 
     ``AthenaStatementCompiler`` renders the types of CAST expressions with
     this compiler, while ``AthenaTypeCompiler`` renders the Hive types of
-    DDL statements. Character types render as VARCHAR, FLOAT and REAL as
-    REAL, binary types as VARBINARY, and DateTime types as ``TIMESTAMP(6)``
-    or ``TIMESTAMP(precision)``. Complex types render as
-    ``ROW(name type)``, ``MAP(key, value)``, and ``ARRAY(item)``.
+    DDL statements.
 
     A type is resolved through its ``with_variant()`` type for this dialect
-    and the implementation of a TypeDecorator before it is rendered.
+    and the implementation of a TypeDecorator, and then matched by class:
+    ARRAY, ``AthenaMap``, and ``AthenaStruct`` render as ``ARRAY(item)``,
+    ``MAP(key, value)``, and ``ROW(name type)``; String types as VARCHAR;
+    binary types as VARBINARY; Double types as DOUBLE; other Float types as
+    REAL; and DateTime types as ``TIMESTAMP(6)`` or ``TIMESTAMP(precision)``.
+    Subclasses of these types render the same way whatever their visit name.
+    Other types render through their visit methods.
 
     Two keyword arguments of ``process()`` adjust the rendering:
 
@@ -392,62 +395,43 @@ class AthenaDMLTypeCompiler(GenericTypeCompiler):
 
     @override
     def process(self, type_: TypeEngine[Any], **kw: Any) -> str:
-        return self._type_inspector.dialect_type(type_)._compiler_dispatch(self, **kw)
+        resolved = self._type_inspector.dialect_type(type_)
+        if isinstance(resolved, types.ARRAY):
+            return self.visit_array(resolved, **kw)
+        if isinstance(resolved, AthenaMap):
+            return self.visit_map(resolved, **kw)
+        if isinstance(resolved, AthenaStruct):
+            return self.visit_struct(resolved, **kw)
+        if isinstance(resolved, types.String):
+            return "VARCHAR"
+        if isinstance(resolved, (types.LargeBinary, types.BINARY, types.VARBINARY)):
+            return "VARBINARY"
+        if isinstance(resolved, types.Double):
+            return "DOUBLE"
+        if isinstance(resolved, types.Float):
+            return "REAL"
+        if isinstance(resolved, (types.DateTime, AthenaTimestamp)):
+            return self.visit_TIMESTAMP(resolved, **kw)  # type: ignore[arg-type]
+        # Dispatch the declared type so a compilation rule registered for a
+        # TypeDecorator still applies.
+        return super().process(type_, **kw)
 
-    def _process_element(self, type_: TypeEngine[Any], **kw: Any) -> str:
-        """Render the element type of an ARRAY, MAP, or ROW.
+    def process_element(self, type_: TypeEngine[Any], **kw: Any) -> str:
+        """Render a type that must be known, such as an ARRAY, MAP, or ROW element.
 
         Args:
-            type_: The element type.
+            type_: The type to render.
             **kw: Type-compiler keyword arguments.
 
         Returns:
-            The element type clause.
+            The type clause.
 
         Raises:
-            CompileError: If the element type is unknown.
+            CompileError: If the type is unknown.
         """
         if isinstance(self._type_inspector.dialect_type(type_), types.NullType):
             raise exc.CompileError("Bound ARRAY values require an explicit element type")
         return self.process(type_, **kw)
-
-    @override
-    def visit_unsupported_compilation(  # type: ignore[override]  # base returns NoReturn
-        self, element: Any, err: Exception, **kw: Any
-    ) -> str:
-        """Render a type whose own visit name has no method as its nearest base type.
-
-        A subclass of ``String`` with its own ``__visit_name__``, for example,
-        renders as VARCHAR.
-
-        Args:
-            element: The type to render.
-            err: The error from the missing visit method.
-            **kw: Type-compiler keyword arguments.
-
-        Returns:
-            The type clause of the nearest base type that this compiler renders.
-
-        Raises:
-            UnsupportedCompilationError: If no base type has a visit method.
-        """
-        for base in type(element).__mro__[1:]:
-            visit_name = base.__dict__.get("__visit_name__")
-            if isinstance(visit_name, str) and hasattr(self, f"visit_{visit_name}"):
-                return cast("str", getattr(self, f"visit_{visit_name}")(element, **kw))
-        return super().visit_unsupported_compilation(element, err, **kw)
-
-    @override
-    def visit_FLOAT(self, type_: types.Float[Any], **kw: Any) -> str:
-        return "REAL"
-
-    @override
-    def visit_REAL(self, type_: types.REAL[Any], **kw: Any) -> str:
-        return "REAL"
-
-    @override
-    def visit_DOUBLE_PRECISION(self, type_, **kw) -> str:
-        return "DOUBLE"
 
     @override
     def visit_NUMERIC(self, type_: types.Numeric[Any], **kw: Any) -> str:
@@ -496,52 +480,8 @@ class AthenaDMLTypeCompiler(GenericTypeCompiler):
         return "TIMESTAMP(6)"
 
     @override
-    def visit_DATETIME(self, type_: types.DateTime, **kw: Any) -> str:
-        return self.visit_TIMESTAMP(type_, **kw)  # type: ignore[arg-type]
-
-    @override
     def visit_TIME(self, type_: types.Time, **kw: Any) -> str:
         raise exc.CompileError(f"Data type `{type_}` is not supported")
-
-    @override
-    def visit_CHAR(self, type_: types.CHAR, **kw: Any) -> str:
-        return "VARCHAR"
-
-    @override
-    def visit_NCHAR(self, type_: types.NCHAR, **kw: Any) -> str:
-        return "VARCHAR"
-
-    @override
-    def visit_VARCHAR(self, type_: types.String, **kw: Any) -> str:
-        return "VARCHAR"
-
-    @override
-    def visit_NVARCHAR(self, type_: types.NVARCHAR, **kw: Any) -> str:
-        return "VARCHAR"
-
-    @override
-    def visit_TEXT(self, type_: types.Text, **kw: Any) -> str:
-        return "VARCHAR"
-
-    @override
-    def visit_CLOB(self, type_: types.CLOB, **kw: Any) -> str:
-        return "VARCHAR"
-
-    @override
-    def visit_NCLOB(self, type_: types.Text, **kw: Any) -> str:
-        return "VARCHAR"
-
-    @override
-    def visit_BLOB(self, type_: types.LargeBinary, **kw: Any) -> str:
-        return "VARBINARY"
-
-    @override
-    def visit_BINARY(self, type_: types.BINARY, **kw: Any) -> str:
-        return "VARBINARY"
-
-    @override
-    def visit_VARBINARY(self, type_: types.VARBINARY, **kw: Any) -> str:
-        return "VARBINARY"
 
     def visit_JSON(self, type_: types.JSON, **kw: Any) -> str:
         """Render a JSON type.
@@ -559,7 +499,7 @@ class AthenaDMLTypeCompiler(GenericTypeCompiler):
     def visit_null(self, type_, **kw):
         return "NULL"
 
-    def visit_struct(self, type_, **kw):
+    def visit_struct(self, type_: Any, **kw: Any) -> str:
         """Render a STRUCT type as ``ROW(name type, ...)``.
 
         Args:
@@ -579,7 +519,7 @@ class AthenaDMLTypeCompiler(GenericTypeCompiler):
             raise exc.CompileError("ROW requires at least one field")
         preparer = self.dialect.identifier_preparer
         fields = ", ".join(
-            f"{preparer.quote(name)} {self._process_element(field_type, **kw)}"
+            f"{preparer.quote(name)} {self.process_element(field_type, **kw)}"
             for name, field_type in type_.fields.items()
         )
         return f"ROW({fields})"
@@ -596,7 +536,7 @@ class AthenaDMLTypeCompiler(GenericTypeCompiler):
         """
         return self.visit_struct(type_, **kw)
 
-    def visit_map(self, type_, **kw):
+    def visit_map(self, type_: Any, **kw: Any) -> str:
         """Render a MAP type as ``MAP(key, value)``.
 
         Args:
@@ -612,8 +552,8 @@ class AthenaDMLTypeCompiler(GenericTypeCompiler):
         """
         if not isinstance(type_, AthenaMap):
             raise exc.CompileError(f"Cannot render `{type_!r}` as MAP")
-        key_type_str = self._process_element(type_.key_type, **kw)
-        value_type_str = self._process_element(type_.value_type, **kw)
+        key_type_str = self.process_element(type_.key_type, **kw)
+        value_type_str = self.process_element(type_.value_type, **kw)
         return f"MAP({key_type_str}, {value_type_str})"
 
     def visit_MAP(self, type_, **kw):
@@ -628,7 +568,7 @@ class AthenaDMLTypeCompiler(GenericTypeCompiler):
         """
         return self.visit_map(type_, **kw)
 
-    def visit_array(self, type_, **kw):
+    def visit_array(self, type_: Any, **kw: Any) -> str:
         """Render an ARRAY type as ``ARRAY(item)``.
 
         Args:
@@ -643,7 +583,7 @@ class AthenaDMLTypeCompiler(GenericTypeCompiler):
         """
         if not isinstance(type_, types.ARRAY):
             raise exc.CompileError(f"Cannot render `{type_!r}` as ARRAY")
-        return f"ARRAY({self._process_element(_ArrayTypeInspector.item_type(type_), **kw)})"
+        return f"ARRAY({self.process_element(_ArrayTypeInspector.item_type(type_), **kw)})"
 
     def visit_ARRAY(self, type_, **kw):
         """Render an ARRAY type through ``visit_array``.
@@ -865,7 +805,9 @@ class AthenaStatementCompiler(SQLCompiler):
         if _ArrayTypeInspector.has_unknown_element(array_type):
             empty = f"slice({sql}, 1, 0)"
         else:
-            empty_type = self._dml_type_compiler.process(array_type, timestamp_precision=False)
+            empty_type = self._dml_type_compiler.process_element(
+                array_type, timestamp_precision=False
+            )
             empty = f"CAST(ARRAY[] AS {empty_type})"
         return f"IF({step_sql} = 1, {sql}, slice({empty}, {failure}, 0))"
 
