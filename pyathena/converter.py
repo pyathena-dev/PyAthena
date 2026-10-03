@@ -103,12 +103,13 @@ def _to_time(varchar_value: str | None) -> time | None:
     """Convert an Athena TIME value to a time.
 
     Args:
-        varchar_value: The value as text, or None.
+        varchar_value: The value as text, or None. An empty string, which the Arrow
+            CSV reader returns for NULL, is None.
 
     Returns:
         The time, or None.
     """
-    if varchar_value is None:
+    if not varchar_value:
         return None
     return _parse_time(varchar_value)
 
@@ -118,7 +119,8 @@ def _to_time_with_tz(varchar_value: str | None) -> time | None:
 
     Args:
         varchar_value: The value as text with a trailing ``+HH:MM`` or ``-HH:MM``
-            offset, or None. An empty string, which pandas passes for NULL, is None.
+            offset, or None. An empty string, which pandas and the Arrow CSV reader
+            return for NULL, is None.
 
     Returns:
         The time with a fixed-offset ``tzinfo``, or None.

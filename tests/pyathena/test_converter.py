@@ -598,6 +598,7 @@ class TestDefaultTypeConverter:
     ("input_value", "expected"),
     [
         (None, None),
+        ("", None),
         ("12:34:56", time(12, 34, 56)),
         ("12:34:56.1", time(12, 34, 56, 100000)),
         ("12:34:56.123", time(12, 34, 56, 123000)),

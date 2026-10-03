@@ -998,15 +998,25 @@ class TestArrowCursor:
               ,json_parse('{"a": 1}') AS col_json
               ,CAST('{"a": 1}' AS JSON) AS col_json_string
               ,CAST(NULL AS JSON) AS col_json_null
+              ,CAST(NULL AS TIME) AS col_time_null
             UNION ALL
             SELECT
-              2, CAST('12:34:56' AS TIME), X'0102', json_parse('[1, "x"]'), json_parse('"s"'), NULL
+              2, CAST('12:34:56' AS TIME), X'0102', json_parse('[1, "x"]'), json_parse('"s"'), NULL,
+              NULL
             ORDER BY col
             """
         )
         assert arrow_cursor.fetchall() == [
-            (1, datetime(2017, 1, 1, 12, 34, 56).time(), b"\x01\x02", {"a": 1}, '{"a": 1}', None),
-            (2, datetime(2017, 1, 1, 12, 34, 56).time(), b"\x01\x02", [1, "x"], "s", None),
+            (
+                1,
+                datetime(2017, 1, 1, 12, 34, 56).time(),
+                b"\x01\x02",
+                {"a": 1},
+                '{"a": 1}',
+                None,
+                None,
+            ),
+            (2, datetime(2017, 1, 1, 12, 34, 56).time(), b"\x01\x02", [1, "x"], "s", None, None),
         ]
         assert arrow_cursor.as_arrow().schema.field("col_json").type == pa.string()
 
