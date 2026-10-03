@@ -268,16 +268,61 @@ class TestS3FileSystem:
         assert fs.isfile("s3://bucket/d")
         fs._call.assert_called_once_with(fs._client.head_object, Bucket="bucket", Key="d")
 
-    def test_refresh_drops_cached_parent_listing(self):
-        # A refreshed lookup that finds a listed object deleted is not
-        # contradicted by the listing afterwards.
+    @pytest.mark.parametrize(
+        ("version_aware", "lookup"),
+        [
+            pytest.param(
+                False, lambda fs: fs.exists("s3://bucket/d/key", refresh=True), id="exists"
+            ),
+            pytest.param(False, lambda fs: fs.ls("s3://bucket/d/key", refresh=True), id="ls"),
+            # The listed entry has no version, so it is looked up again.
+            pytest.param(True, lambda fs: fs.isfile("s3://bucket/d/key"), id="version_aware"),
+        ],
+    )
+    def test_missing_object_drops_cached_parent_listing(self, version_aware, lookup):
+        # A lookup that finds a listed object deleted is not contradicted by
+        # the listing afterwards.
+        fs = self._make_fs()
+        fs.version_aware = version_aware
+        fs.dircache[("bucket/d", "/")] = [self._file_object("d/key")]
+
+        def call(method, **kwargs):
+            if method == fs._client.head_object:
+                raise FileNotFoundError
+            return {}
+
+        fs._call.side_effect = call
+
+        lookup(fs)
+        assert ("bucket/d", "/") not in fs.dircache
+        assert not fs.exists("s3://bucket/d/key")
+
+    def test_refreshed_prefix_drops_cached_parent_listing(self):
+        # A key prefix created after the parent was listed is not reported
+        # missing by the listing after a refreshed lookup finds it.
         fs = self._make_fs()
         fs.dircache[("bucket/d", "/")] = [self._file_object("d/key")]
-        fs._call.side_effect = [FileNotFoundError, {}] * 2
 
-        assert not fs.exists("s3://bucket/d/key", refresh=True)
-        assert not fs.exists("s3://bucket/d/key")
-        assert fs._call.call_count == 4
+        def call(method, **kwargs):
+            if method == fs._client.head_object:
+                raise FileNotFoundError
+            return {"KeyCount": 1}
+
+        fs._call.side_effect = call
+
+        assert fs.isdir("s3://bucket/d/new") is False
+        assert (
+            fs.info("s3://bucket/d/new", refresh=True).type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
+        )
+        assert fs.isdir("s3://bucket/d/new")
+
+    def test_missing_object_keeps_cached_parent_listing_without_it(self):
+        fs = self._make_fs()
+        fs.dircache[("bucket/d", "/")] = [self._file_object("d/key")]
+        fs._call.side_effect = FileNotFoundError
+
+        assert fs._head_object("bucket/d/other", refresh=True) is None
+        assert ("bucket/d", "/") in fs.dircache
 
     def test_info_version_aware_heads_listed_file(self):
         fs = self._make_fs()

@@ -359,7 +359,9 @@ class S3FileSystem(AbstractFileSystem):
 
         The result is cached under the path, or under the version-qualified
         path for an explicit version. An explicitly requested ``"null"``
-        version is not cached. A missing object evicts its entry.
+        version is not cached. A missing object evicts its entry and, unless
+        a version was requested, the cached listing of its parent that still
+        lists it.
 
         Args:
             path: The object path, optionally with a versionId query.
@@ -394,6 +396,13 @@ class S3FileSystem(AbstractFileSystem):
                 )
             except FileNotFoundError:
                 self._evict_cache(path)
+                if not version_id:
+                    # Evict the cached listing of the parent only if it still
+                    # lists the path.
+                    parent_key = (self._parent(path), "/")
+                    files = self.dircache.get(parent_key)
+                    if files and any(f.name == path for f in files):
+                        self._evict_cache(parent_key)
                 return None
             if self.version_aware and not version_id:
                 # Pin the version of the object so that subsequent reads see
@@ -637,7 +646,9 @@ class S3FileSystem(AbstractFileSystem):
         Otherwise, a key path is looked up with HeadObject and, if no object
         exists, with a ListObjectsV2 request (``Delimiter="/"``,
         ``MaxKeys=1``) that checks whether it is a key prefix; a bucket path
-        is looked up with HeadBucket. With ``version_aware``, a cached file
+        is looked up with HeadBucket. If these requests find a listed object
+        missing, or find a key prefix, the cached listing of the parent is
+        removed. With ``version_aware``, a cached file
         entry without a version ID is looked up again. With an explicit
         version, the cached entries of the path are skipped, and the
         HeadObject result is cached under the version-qualified path apart
@@ -647,9 +658,7 @@ class S3FileSystem(AbstractFileSystem):
         Args:
             path: S3 path (e.g., "s3://bucket" or "s3://bucket/key").
             **kwargs: Additional arguments including:
-                refresh: If True, bypass the cache and query S3. For a key
-                    path without a version, the cached listing of its parent
-                    is also removed.
+                refresh: If True, bypass the cache and query S3.
                 version_id: The version ID to look up when the path has none.
 
         Returns:
@@ -676,10 +685,6 @@ class S3FileSystem(AbstractFileSystem):
                 key=None,
                 version_id=None,
             )
-        if refresh and key and not version_id:
-            # The cached listing of the parent also describes the path, and
-            # the refreshed result may contradict it.
-            self._evict_cache((self._parent(path), "/"))
         # Cached entries describe the current version of a path, so an
         # explicit version uses only the HeadObject cache of that version.
         if not refresh and not version_id:
@@ -735,6 +740,9 @@ class S3FileSystem(AbstractFileSystem):
             or response.get("Contents", [])
             or response.get("CommonPrefixes", [])
         ):
+            # Nothing caches the key prefix, and the cached listing of the
+            # parent may predate it.
+            self._evict_cache((self._parent(path), "/"))
             return self._directory_object(bucket, key.rstrip("/") if key else None, version_id)
         raise FileNotFoundError(path)
 
