@@ -164,7 +164,11 @@ fs.chmod("s3://YOUR_S3_BUCKET/path/to/", "private", recursive=True)
 
 Note that `setxattr` rewrites the object by copying it onto itself (S3 does not allow
 updating the metadata of an existing object in place), which updates its last-modified
-time.
+time. The copy keeps the system-defined metadata (such as `ContentType` and
+`CacheControl`), the storage class, and the server-side encryption of the object;
+parameters given in `copy_kwargs` take precedence over them, and any encryption
+parameter replaces all of the kept encryption settings. A path with a `?versionId=`
+suffix raises `ValueError`, since the metadata of an existing version cannot be changed.
 
 ## Multipart upload management
 

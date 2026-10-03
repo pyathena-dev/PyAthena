@@ -129,6 +129,19 @@ class S3FileSystem(AbstractFileSystem):
     BUCKET_ACLS: frozenset[str] = frozenset(
         {"private", "public-read", "public-read-write", "authenticated-read"}
     )
+    # https://docs.aws.amazon.com/AmazonS3/latest/API/API_CopyObject.html
+    # The CopyObject parameters that set the encryption of the copy.
+    _SSE_COPY_PARAMS: frozenset[str] = frozenset(
+        {
+            "ServerSideEncryption",
+            "SSEKMSKeyId",
+            "SSEKMSEncryptionContext",
+            "BucketKeyEnabled",
+            "SSECustomerAlgorithm",
+            "SSECustomerKey",
+            "SSECustomerKeyMD5",
+        }
+    )
     PATTERN_PATH: Pattern[str] = re.compile(
         r"(^s3://|^s3a://|^)(?P<bucket>[a-zA-Z0-9.\-_]+)(/(?P<key>[^?]+)|/)?"
         r"($|\?version(Id|ID|id|_id)=(?P<version_id>.+)$)"
@@ -2028,12 +2041,18 @@ class S3FileSystem(AbstractFileSystem):
         S3 does not allow updating the metadata of an existing object in
         place, so the object is copied onto itself with the REPLACE metadata
         directive. Note that this rewrites the object and updates its
-        last-modified time.
+        last-modified time. The system-defined metadata (e.g.,
+        ``ContentType`` and ``CacheControl``), the storage class, and the
+        server-side encryption of the object are kept.
 
         Args:
-            path: S3 path (s3://bucket/key) to set metadata for.
+            path: S3 path (s3://bucket/key) to set metadata for. A path with
+                a version ID is rejected, since copying a version onto the
+                key would replace the current object with it.
             copy_kwargs: Additional parameters to use for the underlying
-                CopyObject API call.
+                CopyObject API call. They take precedence over the kept
+                system-defined metadata and storage class. Any encryption
+                parameter replaces all kept encryption settings.
             **kw_args: Key-value pairs to set, where the values must be
                 strings. The keys are used as-is; names that are not valid
                 Python identifiers (e.g., containing hyphens) can be passed
@@ -2045,30 +2064,58 @@ class S3FileSystem(AbstractFileSystem):
             >>> fs = S3FileSystem()
             >>> fs.setxattr("s3://bucket/key", attribute1="value1")
             >>> fs.setxattr("s3://bucket/key", **{"attribute-2": "value2"})
+
+        Raises:
+            ValueError: If the path is a bucket or has a version ID.
         """
         bucket, key, version_id = self.parse_path(path)
         if not key:
             raise ValueError("Cannot set metadata of a bucket.")
-        metadata = dict(self.metadata(path))
+        if version_id:
+            raise ValueError("Cannot set metadata of a version.")
+        head = self.metadata(path)
+        metadata = dict(head)
         for k, v in kw_args.items():
             if v is None:
                 metadata.pop(k, None)
             else:
                 metadata[k] = v
 
-        copy_source: dict[str, Any] = {"Bucket": bucket, "Key": key}
-        if version_id:
-            copy_source.update({"VersionId": version_id})
+        # With the REPLACE directive, S3 does not copy what the request
+        # omits: the system-defined metadata is dropped, and the copy is
+        # written as STANDARD with the default encryption of the bucket.
+        kept: dict[str, Any] = {
+            "CacheControl": head.cache_control,
+            "ContentDisposition": head.content_disposition,
+            "ContentEncoding": head.content_encoding,
+            "ContentLanguage": head.content_language,
+            "ContentType": head.content_type,
+            "Expires": head.expires,
+            "WebsiteRedirectLocation": head.website_redirect_location,
+            "StorageClass": head.storage_class,
+        }
+        copy_kwargs = copy_kwargs if copy_kwargs else {}
+        if not self._SSE_COPY_PARAMS.intersection(copy_kwargs):
+            kept.update(
+                {
+                    "ServerSideEncryption": head.server_side_encryption,
+                    "SSEKMSKeyId": head.sse_kms_key_id,
+                    "BucketKeyEnabled": head.bucket_key_enabled,
+                }
+            )
 
-        _logger.debug(f"Set object metadata: s3://{bucket}/{key}?versionId={version_id}")
+        _logger.debug(f"Set object metadata: s3://{bucket}/{key}")
         self._call(
             self._client.copy_object,
-            CopySource=copy_source,
+            CopySource={"Bucket": bucket, "Key": key},
             Bucket=bucket,
             Key=key,
             Metadata=metadata,
             MetadataDirective="REPLACE",
-            **(copy_kwargs if copy_kwargs else {}),
+            **{
+                **{k: v for k, v in kept.items() if v is not None},
+                **copy_kwargs,
+            },
         )
         self.invalidate_cache(path)
 

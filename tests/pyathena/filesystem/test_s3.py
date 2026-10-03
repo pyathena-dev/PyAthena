@@ -3369,13 +3369,16 @@ class TestS3FileSystem:
             f"filesystem/test_metadata/{uuid.uuid4()}"
         )
         data = b"0123456789"
-        fs.pipe(path, data)
+        fs.pipe(path, data, ContentType="text/csv", CacheControl="max-age=60")
         assert fs.metadata(path) == {}
 
         # The keys are stored as-is; hyphenated names can be passed by
         # unpacking a dictionary.
         fs.setxattr(path, attr1="value1", **{"attr-2": "value2"})
         assert fs.metadata(path) == {"attr1": "value1", "attr-2": "value2"}
+        # GH-975: the system-defined metadata is kept.
+        assert fs.metadata(path).content_type == "text/csv"
+        assert fs.metadata(path).cache_control == "max-age=60"
         assert fs.getxattr(path, "attr1") == "value1"
         assert fs.getxattr(path, "attr-2") == "value2"
         assert fs.getxattr(path, "missing") is None
@@ -3406,6 +3409,121 @@ class TestS3FileSystem:
             fs.metadata(f"s3://{ENV.s3_staging_bucket}")
         with pytest.raises(ValueError, match="Cannot set metadata"):
             fs.setxattr(f"s3://{ENV.s3_staging_bucket}", attr1="value1")
+
+    @staticmethod
+    def _stubbed_fs():
+        return S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+
+    def test_setxattr_keeps_system_metadata(self):
+        # GH-975: the REPLACE directive drops what the CopyObject request
+        # omits, so the system-defined metadata, the storage class and the
+        # encryption are sent from the HeadObject response.
+        fs = self._stubbed_fs()
+        expires = datetime(2030, 1, 1, tzinfo=UTC)
+        head_object = {
+            "ContentLength": 10,
+            "CacheControl": "max-age=60",
+            "ContentDisposition": "attachment",
+            "ContentEncoding": "gzip",
+            "ContentLanguage": "en",
+            "ContentType": "text/csv",
+            "Expires": expires,
+            "WebsiteRedirectLocation": "/other",
+            "StorageClass": "STANDARD_IA",
+            "ServerSideEncryption": "aws:kms",
+            "SSEKMSKeyId": "arn:aws:kms:us-east-1:111122223333:key/k",
+            "BucketKeyEnabled": True,
+            "Metadata": {"a": "1"},
+        }
+        kept = {
+            "CacheControl": "max-age=60",
+            "ContentDisposition": "attachment",
+            "ContentEncoding": "gzip",
+            "ContentLanguage": "en",
+            "ContentType": "text/csv",
+            "Expires": expires,
+            "WebsiteRedirectLocation": "/other",
+            "StorageClass": "STANDARD_IA",
+        }
+        request = {
+            "CopySource": {"Bucket": "bucket", "Key": "key.csv"},
+            "Bucket": "bucket",
+            "Key": "key.csv",
+            "Metadata": {"a": "1", "b": "2"},
+            "MetadataDirective": "REPLACE",
+        }
+        with Stubber(fs._client) as stubber:
+            stubber.add_response("head_object", head_object, {"Bucket": "bucket", "Key": "key.csv"})
+            stubber.add_response(
+                "copy_object",
+                {},
+                {
+                    **request,
+                    **kept,
+                    "ServerSideEncryption": "aws:kms",
+                    "SSEKMSKeyId": "arn:aws:kms:us-east-1:111122223333:key/k",
+                    "BucketKeyEnabled": True,
+                },
+            )
+            fs.setxattr("s3://bucket/key.csv", b="2")
+
+            # copy_kwargs take precedence, and an encryption parameter
+            # replaces all kept encryption settings.
+            stubber.add_response("head_object", head_object, {"Bucket": "bucket", "Key": "key.csv"})
+            stubber.add_response(
+                "copy_object",
+                {},
+                {
+                    **request,
+                    **kept,
+                    "ContentType": "text/plain",
+                    "ServerSideEncryption": "AES256",
+                },
+            )
+            fs.setxattr(
+                "s3://bucket/key.csv",
+                copy_kwargs={"ContentType": "text/plain", "ServerSideEncryption": "AES256"},
+                b="2",
+            )
+            stubber.assert_no_pending_responses()
+
+    def test_setxattr_omits_unset_system_metadata(self):
+        # S3 omits StorageClass for STANDARD objects; unset headers are not sent.
+        fs = self._stubbed_fs()
+        with Stubber(fs._client) as stubber:
+            stubber.add_response(
+                "head_object", {"ContentLength": 1}, {"Bucket": "bucket", "Key": "key"}
+            )
+            stubber.add_response(
+                "copy_object",
+                {},
+                {
+                    "CopySource": {"Bucket": "bucket", "Key": "key"},
+                    "Bucket": "bucket",
+                    "Key": "key",
+                    "Metadata": {"a": "1"},
+                    "MetadataDirective": "REPLACE",
+                    "StorageClass": "STANDARD",
+                },
+            )
+            fs.setxattr("s3://bucket/key", a="1")
+            stubber.assert_no_pending_responses()
+
+    @pytest.mark.parametrize(
+        "path",
+        ["s3://bucket/key?versionId=OLD", "s3://bucket/key?version_id=OLD"],
+    )
+    def test_setxattr_version_path(self, path):
+        # GH-975: copying a version onto the key would replace the current
+        # object with it, so a version path is rejected without requests.
+        fs = self._stubbed_fs()
+        with (
+            Stubber(fs._client),
+            pytest.raises(ValueError, match="Cannot set metadata of a version"),
+        ):
+            fs.setxattr(path, a="1")
 
     def test_get_and_put_tags(self, fs):
         path = (
