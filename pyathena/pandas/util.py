@@ -1,3 +1,5 @@
+"""Helpers that convert query results to pandas DataFrames and write DataFrames to Athena."""
+
 from __future__ import annotations
 
 import concurrent

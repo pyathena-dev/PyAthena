@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""Native asyncio cursors that return rows as tuples or dictionaries."""
+
 from __future__ import annotations
 
 import logging
@@ -50,6 +52,24 @@ class AioCursor(WithAsyncFetch):
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
         **kwargs,
     ) -> None:
+        """Initialize an AioCursor.
+
+        Args:
+            s3_staging_dir: S3 location for query results.
+            schema_name: Default schema name.
+            catalog_name: Default catalog name.
+            work_group: Athena workgroup name.
+            poll_interval: Query status polling interval in seconds.
+            encryption_option: S3 encryption option (SSE_S3, SSE_KMS, CSE_KMS).
+            kms_key: KMS key for encryption.
+            kill_on_interrupt: Cancel the query when the task is cancelled while
+                ``execute()`` starts or waits for the query.
+            result_reuse_enable: Enable Athena query result reuse.
+            result_reuse_minutes: Maximum age in minutes of a reused result.
+            **kwargs: Arguments forwarded to ``WithResultSet.__init__`` and
+                ``AioBaseCursor.__init__``, such as ``arraysize``, ``connection``,
+                ``converter``, ``formatter``, and ``retry_config``.
+        """
         super().__init__(
             s3_staging_dir=s3_staging_dir,
             schema_name=schema_name,
@@ -104,12 +124,14 @@ class AioCursor(WithAsyncFetch):
             parameters: Query parameters (optional).
             work_group: Athena workgroup to use (optional).
             s3_staging_dir: S3 location for query results (optional).
-            cache_size: Query result cache size (optional).
+            cache_size: Number of queries to check for result caching (optional).
             cache_expiration_time: Cache expiration time in seconds (optional).
             result_reuse_enable: Enable result reuse (optional).
             result_reuse_minutes: Result reuse duration in minutes (optional).
             paramstyle: Parameter style to use (optional).
-            on_start_query_execution: Callback called when query starts.
+            on_start_query_execution: Callback invoked with the query ID before ``execute()``
+                waits for the query: after the ``StartQueryExecution`` call, or after a
+                reusable query ID is found through ``cache_size``.
             result_set_type_hints: Optional dictionary mapping column names to
                 Athena DDL type signatures for precise type conversion within
                 complex types.
@@ -225,6 +247,13 @@ class AioDictCursor(AioCursor):
     """
 
     def __init__(self, **kwargs) -> None:
+        """Initialize an AioDictCursor.
+
+        Args:
+            **kwargs: Arguments forwarded to ``AioCursor.__init__``. If they include
+                ``dict_type``, it is also assigned to the class attribute
+                ``AthenaAioDictResultSet.dict_type``, the type used to build each row.
+        """
         super().__init__(**kwargs)
         self._result_set_class = AthenaAioDictResultSet
         if "dict_type" in kwargs:

@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""SQLAlchemy dialect for Athena that returns results through ``S3FSCursor``."""
+
 from typing import TYPE_CHECKING
 
 from pyathena.sqlalchemy.base import AthenaDialect

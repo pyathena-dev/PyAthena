@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""Options shared by the ``execute()`` methods of the SQL cursors."""
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -54,8 +56,9 @@ class ExecuteOptions:
             falls back to the connection-level setting.
         paramstyle: Parameter style for this query ('qmark' or 'pyformat').
             None (default) uses the module-level ``pyathena.paramstyle``.
-        on_start_query_execution: Callback invoked with the query ID
-            immediately after the StartQueryExecution API call. Invoked by
+        on_start_query_execution: Callback invoked with the query ID before
+            ``execute()`` waits for the query: after the StartQueryExecution API
+            call, or after a reusable query ID is found through ``cache_size``. Invoked by
             synchronous and aio cursors; ``AsyncCursor``-based cursors
             return the query ID directly through their execution model and
             do not invoke it.

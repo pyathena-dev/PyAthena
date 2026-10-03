@@ -1,3 +1,5 @@
+"""Parsing of Athena type signatures and conversion of values by parsed type."""
+
 from __future__ import annotations
 
 import json
@@ -231,6 +233,13 @@ class TypedValueConverter:
         default_converter: Callable[[str | None], Any | None],
         struct_parser: Callable[[str | None], dict[str, Any] | str | None],
     ) -> None:
+        """Initialize the converter.
+
+        Args:
+            converters: Mapping of type names to conversion functions.
+            default_converter: Fallback conversion function for unknown types.
+            struct_parser: Function to parse untyped struct values.
+        """
         self._converters = converters
         self._default_converter = default_converter
         self._struct_parser = struct_parser

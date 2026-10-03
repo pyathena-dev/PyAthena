@@ -1,3 +1,5 @@
+"""Model classes for S3 objects and S3 API responses used by the S3 filesystem."""
+
 from __future__ import annotations
 
 import copy
@@ -109,6 +111,22 @@ class S3Object(MutableMapping[str, Any]):
         init: dict[str, Any],
         **kwargs,
     ) -> None:
+        """Initialize the object from an S3 API response.
+
+        Only the fields of ``init`` that have a property mapping are kept,
+        under their property names (e.g., ``ContentType`` -> ``content_type``).
+        ``storage_class`` defaults to ``STANDARD`` when ``init`` has no
+        ``StorageClass``, and ``size`` is taken from ``Size`` or
+        ``ContentLength``. ``name`` is set to ``bucket/key``, or to the bucket
+        when there is no key.
+
+        Args:
+            init: An S3 API response or listing entry, such as a HeadObject
+                response or a ListObjectsV2 ``Contents`` entry.
+            **kwargs: Additional fields stored as-is, such as ``type``,
+                ``bucket``, ``key`` and ``version_id``. S3 API field names
+                are stored under their property names.
+        """
         if init:
             filtered = {}
             for k, v in init.items():
@@ -181,6 +199,13 @@ class S3Object(MutableMapping[str, Any]):
         return copy.deepcopy(self.__dict__)
 
     def to_api_repr(self) -> dict[str, Any]:
+        """Convert the object metadata to S3 API request parameters.
+
+        Returns:
+            Dictionary keyed by S3 API field names (e.g., ``ContentType``) of
+            the fields that are set, excluding ``ETag``, ``ContentLength`` and
+            ``LastModified``.
+        """
         fields = {}
         for k, v in _API_FIELD_TO_S3_OBJECT_PROPERTY.items():
             if k in ["ETag", "ContentLength", "LastModified"]:
@@ -213,6 +238,11 @@ class S3Metadata(Mapping[str, str]):
     """
 
     def __init__(self, response: dict[str, Any]) -> None:
+        """Initialize the metadata from a HeadObject response.
+
+        Args:
+            response: The HeadObject response.
+        """
         self._cache_control: str | None = response.get("CacheControl")
         self._content_disposition: str | None = response.get("ContentDisposition")
         self._content_encoding: str | None = response.get("ContentEncoding")
@@ -255,70 +285,87 @@ class S3Metadata(Mapping[str, str]):
 
     @property
     def cache_control(self) -> str | None:
+        """The ``CacheControl`` header of the object."""
         return self._cache_control
 
     @property
     def content_disposition(self) -> str | None:
+        """The ``ContentDisposition`` header of the object."""
         return self._content_disposition
 
     @property
     def content_encoding(self) -> str | None:
+        """The ``ContentEncoding`` header of the object."""
         return self._content_encoding
 
     @property
     def content_language(self) -> str | None:
+        """The ``ContentLanguage`` header of the object."""
         return self._content_language
 
     @property
     def content_length(self) -> int | None:
+        """The ``ContentLength`` of the object in bytes."""
         return self._content_length
 
     @property
     def content_type(self) -> str | None:
+        """The ``ContentType`` of the object."""
         return self._content_type
 
     @property
     def etag(self) -> str | None:
+        """The ``ETag`` (entity tag) of the object."""
         return self._etag
 
     @property
     def expiration(self) -> str | None:
+        """The ``Expiration`` header of the object."""
         return self._expiration
 
     @property
     def expires(self) -> datetime | None:
+        """The ``Expires`` date of the object."""
         return self._expires
 
     @property
     def last_modified(self) -> datetime | None:
+        """The ``LastModified`` time of the object."""
         return self._last_modified
 
     @property
     def storage_class(self) -> str:
+        """The ``StorageClass`` of the object; ``STANDARD`` when S3 omits it."""
         return self._storage_class
 
     @property
     def server_side_encryption(self) -> str | None:
+        """The ``ServerSideEncryption`` algorithm of the object."""
         return self._server_side_encryption
 
     @property
     def sse_customer_algorithm(self) -> str | None:
+        """The ``SSECustomerAlgorithm`` of the object."""
         return self._sse_customer_algorithm
 
     @property
     def sse_kms_key_id(self) -> str | None:
+        """The ``SSEKMSKeyId`` of the KMS key for the object."""
         return self._sse_kms_key_id
 
     @property
     def bucket_key_enabled(self) -> bool | None:
+        """Whether the object uses an S3 Bucket Key (``BucketKeyEnabled``)."""
         return self._bucket_key_enabled
 
     @property
     def website_redirect_location(self) -> str | None:
+        """The ``WebsiteRedirectLocation`` of the object."""
         return self._website_redirect_location
 
     @property
     def version_id(self) -> str | None:
+        """The ``VersionId`` of the object."""
         return self._version_id
 
     @property
@@ -349,6 +396,15 @@ class S3ObjectVersion:
     """
 
     def __init__(self, bucket: str, is_delete_marker: bool, response: dict[str, Any]) -> None:
+        """Initialize the version from a ListObjectVersions entry.
+
+        Args:
+            bucket: The name of the bucket that contains the version.
+            is_delete_marker: Whether the entry comes from ``DeleteMarkers``
+                rather than ``Versions``.
+            response: A ``Versions`` or ``DeleteMarkers`` entry of the
+                ListObjectVersions response.
+        """
         self._bucket = bucket
         self._is_delete_marker = is_delete_marker
         self._key: str = response["Key"]
@@ -363,46 +419,57 @@ class S3ObjectVersion:
 
     @property
     def bucket(self) -> str:
+        """The name of the bucket that contains the version."""
         return self._bucket
 
     @property
     def key(self) -> str:
+        """The ``Key`` of the object."""
         return self._key
 
     @property
     def name(self) -> str:
+        """The path of the version in ``bucket/key`` form."""
         return f"{self._bucket}/{self._key}"
 
     @property
     def version_id(self) -> str | None:
+        """The ``VersionId`` of the version."""
         return self._version_id
 
     @property
     def is_latest(self) -> bool:
+        """Whether the version is the latest version of the object (``IsLatest``)."""
         return self._is_latest
 
     @property
     def is_delete_marker(self) -> bool:
+        """Whether the version is a delete marker."""
         return self._is_delete_marker
 
     @property
     def last_modified(self) -> datetime | None:
+        """The ``LastModified`` time of the version."""
         return self._last_modified
 
     @property
     def etag(self) -> str | None:
+        """The ``ETag`` of the version; None for delete markers."""
         return self._etag
 
     @property
     def size(self) -> int | None:
+        """The ``Size`` of the version in bytes; None for delete markers."""
         return self._size
 
     @property
     def storage_class(self) -> str | None:
+        """The ``StorageClass`` of the version; None for delete markers."""
         return self._storage_class
 
     @property
     def owner(self) -> S3Owner | None:
+        """The ``Owner`` of the version, or None if the response has none."""
         return self._owner
 
 
@@ -426,6 +493,11 @@ class S3PutObject:
     """
 
     def __init__(self, response: dict[str, Any]) -> None:
+        """Initialize the result from a PutObject response.
+
+        Args:
+            response: The PutObject response.
+        """
         self._expiration: str | None = response.get("Expiration")
         self._version_id: str | None = response.get("VersionId")
         self._etag: str | None = response.get("ETag")
@@ -443,61 +515,81 @@ class S3PutObject:
 
     @property
     def expiration(self) -> str | None:
+        """The ``Expiration`` header of the uploaded object."""
         return self._expiration
 
     @property
     def version_id(self) -> str | None:
+        """The ``VersionId`` of the uploaded object."""
         return self._version_id
 
     @property
     def etag(self) -> str | None:
+        """The ``ETag`` of the uploaded object."""
         return self._etag
 
     @property
     def checksum_crc32(self) -> str | None:
+        """The ``ChecksumCRC32`` of the uploaded object."""
         return self._checksum_crc32
 
     @property
     def checksum_crc32c(self) -> str | None:
+        """The ``ChecksumCRC32C`` of the uploaded object."""
         return self._checksum_crc32c
 
     @property
     def checksum_sha1(self) -> str | None:
+        """The ``ChecksumSHA1`` of the uploaded object."""
         return self._checksum_sha1
 
     @property
     def checksum_sha256(self) -> str | None:
+        """The ``ChecksumSHA256`` of the uploaded object."""
         return self._checksum_sha256
 
     @property
     def server_side_encryption(self) -> str | None:
+        """The ``ServerSideEncryption`` algorithm of the uploaded object."""
         return self._server_side_encryption
 
     @property
     def sse_customer_algorithm(self) -> str | None:
+        """The ``SSECustomerAlgorithm`` of the uploaded object."""
         return self._sse_customer_algorithm
 
     @property
     def sse_customer_key_md5(self) -> str | None:
+        """The ``SSECustomerKeyMD5`` of the customer-provided key for the uploaded object."""
         return self._sse_customer_key_md5
 
     @property
     def sse_kms_key_id(self) -> str | None:
+        """The ``SSEKMSKeyId`` of the KMS key for the uploaded object."""
         return self._sse_kms_key_id
 
     @property
     def sse_kms_encryption_context(self) -> str | None:
+        """The ``SSEKMSEncryptionContext`` of the uploaded object."""
         return self._sse_kms_encryption_context
 
     @property
     def bucket_key_enabled(self) -> bool | None:
+        """Whether the uploaded object uses an S3 Bucket Key (``BucketKeyEnabled``)."""
         return self._bucket_key_enabled
 
     @property
     def request_charged(self) -> str | None:
+        """The ``RequestCharged`` field of the response."""
         return self._request_charged
 
     def to_dict(self) -> dict[str, Any]:
+        """Convert the response to a dictionary.
+
+        Returns:
+            Deep copy of the instance attributes, keyed by their attribute
+            names (e.g., ``_etag``).
+        """
         return copy.deepcopy(self.__dict__)
 
 
@@ -510,15 +602,22 @@ class S3Owner:
     """
 
     def __init__(self, response: dict[str, Any]) -> None:
+        """Initialize the owner from an ``Owner`` or ``Initiator`` response field.
+
+        Args:
+            response: The ``Owner`` or ``Initiator`` field of an S3 API response.
+        """
         self._display_name: str | None = response.get("DisplayName")
         self._id: str | None = response.get("ID")
 
     @property
     def display_name(self) -> str | None:
+        """The ``DisplayName`` of the owner."""
         return self._display_name
 
     @property
     def id(self) -> str | None:
+        """The canonical user ``ID`` of the owner."""
         return self._id
 
 
@@ -544,6 +643,12 @@ class S3MultipartUpload:
     """
 
     def __init__(self, response: dict[str, Any]) -> None:
+        """Initialize the upload from an S3 API response.
+
+        Args:
+            response: A CreateMultipartUpload response or an ``Uploads`` entry
+                of a ListMultipartUploads response.
+        """
         self._abort_date = response.get("AbortDate")
         self._abort_rule_id = response.get("AbortRuleId")
         self._bucket = response.get("Bucket")
@@ -567,70 +672,87 @@ class S3MultipartUpload:
 
     @property
     def abort_date(self) -> datetime | None:
+        """The ``AbortDate`` of the upload set by a lifecycle rule."""
         return self._abort_date
 
     @property
     def abort_rule_id(self) -> str | None:
+        """The ``AbortRuleId`` of the lifecycle rule that applies to the upload."""
         return self._abort_rule_id
 
     @property
     def bucket(self) -> str | None:
+        """The ``Bucket`` of the upload."""
         return self._bucket
 
     @property
     def key(self) -> str | None:
+        """The ``Key`` of the object being uploaded."""
         return self._key
 
     @property
     def upload_id(self) -> str | None:
+        """The ``UploadId`` of the multipart upload."""
         return self._upload_id
 
     @property
     def server_side_encryption(self) -> str | None:
+        """The ``ServerSideEncryption`` algorithm of the upload."""
         return self._server_side_encryption
 
     @property
     def sse_customer_algorithm(self) -> str | None:
+        """The ``SSECustomerAlgorithm`` of the upload."""
         return self._sse_customer_algorithm
 
     @property
     def sse_customer_key_md5(self) -> str | None:
+        """The ``SSECustomerKeyMD5`` of the customer-provided key for the upload."""
         return self._sse_customer_key_md5
 
     @property
     def sse_kms_key_id(self) -> str | None:
+        """The ``SSEKMSKeyId`` of the KMS key for the upload."""
         return self._sse_kms_key_id
 
     @property
     def sse_kms_encryption_context(self) -> str | None:
+        """The ``SSEKMSEncryptionContext`` of the upload."""
         return self._sse_kms_encryption_context
 
     @property
     def bucket_key_enabled(self) -> bool | None:
+        """Whether the upload uses an S3 Bucket Key (``BucketKeyEnabled``)."""
         return self._bucket_key_enabled
 
     @property
     def request_charged(self) -> str | None:
+        """The ``RequestCharged`` field of the response."""
         return self._request_charged
 
     @property
     def checksum_algorithm(self) -> str | None:
+        """The ``ChecksumAlgorithm`` of the upload."""
         return self._checksum_algorithm
 
     @property
     def initiated(self) -> datetime | None:
+        """The ``Initiated`` time of the upload, returned by ListMultipartUploads."""
         return self._initiated
 
     @property
     def storage_class(self) -> str | None:
+        """The ``StorageClass`` of the upload, returned by ListMultipartUploads."""
         return self._storage_class
 
     @property
     def owner(self) -> S3Owner | None:
+        """The ``Owner`` of the upload, returned by ListMultipartUploads."""
         return self._owner
 
     @property
     def initiator(self) -> S3Owner | None:
+        """The ``Initiator`` of the upload, returned by ListMultipartUploads."""
         return self._initiator
 
 
@@ -653,6 +775,15 @@ class S3MultipartUploadPart:
     """
 
     def __init__(self, part_number: int, response: dict[str, Any]) -> None:
+        """Initialize the part from an UploadPart or UploadPartCopy response.
+
+        For an UploadPartCopy response, the ``ETag``, ``LastModified`` and
+        checksums are read from its ``CopyPartResult``.
+
+        Args:
+            part_number: The part number of the part.
+            response: The UploadPart or UploadPartCopy response.
+        """
         self._part_number = part_number
         self._copy_source_version_id: str | None = response.get("CopySourceVersionId")
         copy_part_result = response.get("CopyPartResult")
@@ -679,61 +810,81 @@ class S3MultipartUploadPart:
 
     @property
     def part_number(self) -> int:
+        """The part number of the part."""
         return self._part_number
 
     @property
     def copy_source_version_id(self) -> str | None:
+        """The ``CopySourceVersionId`` of the source object of a copied part."""
         return self._copy_source_version_id
 
     @property
     def last_modified(self) -> datetime | None:
+        """The ``LastModified`` time from ``CopyPartResult``; None for uploaded parts."""
         return self._last_modified
 
     @property
     def etag(self) -> str | None:
+        """The ``ETag`` of the part."""
         return self._etag
 
     @property
     def checksum_crc32(self) -> str | None:
+        """The ``ChecksumCRC32`` of the part."""
         return self._checksum_crc32
 
     @property
     def checksum_crc32c(self) -> str | None:
+        """The ``ChecksumCRC32C`` of the part."""
         return self._checksum_crc32c
 
     @property
     def checksum_sha1(self) -> str | None:
+        """The ``ChecksumSHA1`` of the part."""
         return self._checksum_sha1
 
     @property
     def checksum_sha256(self) -> str | None:
+        """The ``ChecksumSHA256`` of the part."""
         return self._checksum_sha256
 
     @property
     def server_side_encryption(self) -> str | None:
+        """The ``ServerSideEncryption`` algorithm of the part."""
         return self._server_side_encryption
 
     @property
     def sse_customer_algorithm(self) -> str | None:
+        """The ``SSECustomerAlgorithm`` of the part."""
         return self._sse_customer_algorithm
 
     @property
     def sse_customer_key_md5(self) -> str | None:
+        """The ``SSECustomerKeyMD5`` of the customer-provided key for the part."""
         return self._sse_customer_key_md5
 
     @property
     def sse_kms_key_id(self) -> str | None:
+        """The ``SSEKMSKeyId`` of the KMS key for the part."""
         return self._sse_kms_key_id
 
     @property
     def bucket_key_enabled(self) -> bool | None:
+        """Whether the part uses an S3 Bucket Key (``BucketKeyEnabled``)."""
         return self._bucket_key_enabled
 
     @property
     def request_charged(self) -> str | None:
+        """The ``RequestCharged`` field of the response."""
         return self._request_charged
 
     def to_api_repr(self) -> dict[str, Any]:
+        """Convert the part to a part entry of a CompleteMultipartUpload request.
+
+        Returns:
+            Dictionary with the ``ETag``, checksum and ``PartNumber`` fields of
+            the part.
+        """
         return {
             "ETag": self.etag,
             "ChecksumCRC32": self.checksum_crc32,
@@ -765,6 +916,11 @@ class S3CompleteMultipartUpload:
     """
 
     def __init__(self, response: dict[str, Any]) -> None:
+        """Initialize the result from a CompleteMultipartUpload response.
+
+        Args:
+            response: The CompleteMultipartUpload response.
+        """
         self._location: str | None = response.get("Location")
         self._bucket: str | None = response.get("Bucket")
         self._key: str | None = response.get("Key")
@@ -782,59 +938,79 @@ class S3CompleteMultipartUpload:
 
     @property
     def location(self) -> str | None:
+        """The ``Location`` URI of the completed object."""
         return self._location
 
     @property
     def bucket(self) -> str | None:
+        """The ``Bucket`` of the completed object."""
         return self._bucket
 
     @property
     def key(self) -> str | None:
+        """The ``Key`` of the completed object."""
         return self._key
 
     @property
     def expiration(self) -> str | None:
+        """The ``Expiration`` header of the completed object."""
         return self._expiration
 
     @property
     def version_id(self) -> str | None:
+        """The ``VersionId`` of the completed object."""
         return self._version_id
 
     @property
     def etag(self) -> str | None:
+        """The ``ETag`` of the completed object."""
         return self._etag
 
     @property
     def checksum_crc32(self) -> str | None:
+        """The ``ChecksumCRC32`` of the completed object."""
         return self._checksum_crc32
 
     @property
     def checksum_crc32c(self) -> str | None:
+        """The ``ChecksumCRC32C`` of the completed object."""
         return self._checksum_crc32c
 
     @property
     def checksum_sha1(self) -> str | None:
+        """The ``ChecksumSHA1`` of the completed object."""
         return self._checksum_sha1
 
     @property
     def checksum_sha256(self) -> str | None:
+        """The ``ChecksumSHA256`` of the completed object."""
         return self._checksum_sha256
 
     @property
     def server_side_encryption(self) -> str | None:
+        """The ``ServerSideEncryption`` algorithm of the completed object."""
         return self._server_side_encryption
 
     @property
     def sse_kms_key_id(self) -> str | None:
+        """The ``SSEKMSKeyId`` of the KMS key for the completed object."""
         return self._sse_kms_key_id
 
     @property
     def bucket_key_enabled(self) -> bool | None:
+        """Whether the completed object uses an S3 Bucket Key (``BucketKeyEnabled``)."""
         return self._bucket_key_enabled
 
     @property
     def request_charged(self) -> str | None:
+        """The ``RequestCharged`` field of the response."""
         return self._request_charged
 
     def to_dict(self):
+        """Convert the response to a dictionary.
+
+        Returns:
+            Deep copy of the instance attributes, keyed by their attribute
+            names (e.g., ``_etag``).
+        """
         return copy.deepcopy(self.__dict__)

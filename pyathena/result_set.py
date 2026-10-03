@@ -1,3 +1,5 @@
+"""Result sets for ``GetQueryResults`` and the cursor mixins that expose them."""
+
 from __future__ import annotations
 
 import collections
@@ -67,6 +69,24 @@ class AthenaResultSet(CursorIterator):
         _pre_fetch: bool = True,
         result_set_type_hints: dict[str | int, str] | None = None,
     ) -> None:
+        """Initialize the result set and fetch the first page if the query succeeded.
+
+        Args:
+            connection: The connection that ran the query.
+            converter: The converter for result values.
+            query_execution: The query execution whose results to read.
+            arraysize: The number of rows per ``GetQueryResults`` page and the default
+                ``fetchmany()`` size.
+            retry_config: The retry configuration for API calls.
+            _pre_fetch: Whether to fetch the first page here when the query succeeded.
+                The async result set passes False and fetches it itself.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
+
+        Raises:
+            ProgrammingError: If ``query_execution`` is not given.
+            OperationalError: If fetching the first page fails.
+        """
         super().__init__(arraysize=arraysize)
         self._connection: Connection[Any] | None = connection
         self._converter = converter
@@ -105,150 +125,175 @@ class AthenaResultSet(CursorIterator):
 
     @property
     def database(self) -> str | None:
+        """The database in the ``QueryExecutionContext`` of the query."""
         if not self._query_execution:
             return None
         return self._query_execution.database
 
     @property
     def catalog(self) -> str | None:
+        """The data catalog in the ``QueryExecutionContext`` of the query."""
         if not self._query_execution:
             return None
         return self._query_execution.catalog
 
     @property
     def query_id(self) -> str | None:
+        """The ID of the query execution."""
         if not self._query_execution:
             return None
         return self._query_execution.query_id
 
     @property
     def query(self) -> str | None:
+        """The SQL statement that the query execution ran."""
         if not self._query_execution:
             return None
         return self._query_execution.query
 
     @property
     def statement_type(self) -> str | None:
+        """The ``StatementType`` of the query, such as ``DDL``, ``DML``, or ``UTILITY``."""
         if not self._query_execution:
             return None
         return self._query_execution.statement_type
 
     @property
     def substatement_type(self) -> str | None:
+        """The ``SubstatementType`` of the query, such as ``INSERT`` or ``MERGE``."""
         if not self._query_execution:
             return None
         return self._query_execution.substatement_type
 
     @property
     def work_group(self) -> str | None:
+        """The work group in which the query ran."""
         if not self._query_execution:
             return None
         return self._query_execution.work_group
 
     @property
     def execution_parameters(self) -> list[str]:
+        """The ``ExecutionParameters`` values of the query."""
         if not self._query_execution:
             return []
         return self._query_execution.execution_parameters
 
     @property
     def state(self) -> str | None:
+        """The state of the query execution, such as ``RUNNING`` or ``SUCCEEDED``."""
         if not self._query_execution:
             return None
         return self._query_execution.state
 
     @property
     def state_change_reason(self) -> str | None:
+        """The ``StateChangeReason`` that gives further detail about the state."""
         if not self._query_execution:
             return None
         return self._query_execution.state_change_reason
 
     @property
     def submission_date_time(self) -> datetime | None:
+        """The date and time when the query was submitted."""
         if not self._query_execution:
             return None
         return self._query_execution.submission_date_time
 
     @property
     def completion_date_time(self) -> datetime | None:
+        """The date and time when the query completed."""
         if not self._query_execution:
             return None
         return self._query_execution.completion_date_time
 
     @property
     def error_category(self) -> int | None:
+        """The ``ErrorCategory`` of the failure: 1 for system, 2 for user, 3 for other."""
         if not self._query_execution:
             return None
         return self._query_execution.error_category
 
     @property
     def error_type(self) -> int | None:
+        """The ``ErrorType`` code of the query failure."""
         if not self._query_execution:
             return None
         return self._query_execution.error_type
 
     @property
     def retryable(self) -> bool | None:
+        """Whether Athena reports the query failure as retryable."""
         if not self._query_execution:
             return None
         return self._query_execution.retryable
 
     @property
     def error_message(self) -> str | None:
+        """The ``ErrorMessage`` that describes the query failure."""
         if not self._query_execution:
             return None
         return self._query_execution.error_message
 
     @property
     def data_scanned_in_bytes(self) -> int | None:
+        """The number of bytes that the query scanned."""
         if not self._query_execution:
             return None
         return self._query_execution.data_scanned_in_bytes
 
     @property
     def engine_execution_time_in_millis(self) -> int | None:
+        """The time in milliseconds that the query engine took to run the query."""
         if not self._query_execution:
             return None
         return self._query_execution.engine_execution_time_in_millis
 
     @property
     def query_queue_time_in_millis(self) -> int | None:
+        """The time in milliseconds that the query waited in the queue."""
         if not self._query_execution:
             return None
         return self._query_execution.query_queue_time_in_millis
 
     @property
     def total_execution_time_in_millis(self) -> int | None:
+        """The total time in milliseconds that Athena took to run the query."""
         if not self._query_execution:
             return None
         return self._query_execution.total_execution_time_in_millis
 
     @property
     def query_planning_time_in_millis(self) -> int | None:
+        """The time in milliseconds that Athena took to plan the query."""
         if not self._query_execution:
             return None
         return self._query_execution.query_planning_time_in_millis
 
     @property
     def service_processing_time_in_millis(self) -> int | None:
+        """The time in milliseconds that Athena took to publish the query results."""
         if not self._query_execution:
             return None
         return self._query_execution.service_processing_time_in_millis
 
     @property
     def output_location(self) -> str | None:
+        """The S3 location of the query results."""
         if not self._query_execution:
             return None
         return self._query_execution.output_location
 
     @property
     def data_manifest_location(self) -> str | None:
+        """The S3 location of the data manifest that lists the files the query wrote."""
         if not self._query_execution:
             return None
         return self._query_execution.data_manifest_location
 
     @property
     def reused_previous_result(self) -> bool | None:
+        """Whether Athena reused a previous query result instead of running the query."""
         if not self._query_execution:
             return None
         return self._query_execution.reused_previous_result
@@ -268,48 +313,56 @@ class AthenaResultSet(CursorIterator):
 
     @property
     def encryption_option(self) -> str | None:
+        """The ``EncryptionOption`` of the query results, such as ``SSE_S3`` or ``SSE_KMS``."""
         if not self._query_execution:
             return None
         return self._query_execution.encryption_option
 
     @property
     def kms_key(self) -> str | None:
+        """The KMS key used to encrypt the query results."""
         if not self._query_execution:
             return None
         return self._query_execution.kms_key
 
     @property
     def expected_bucket_owner(self) -> str | None:
+        """The AWS account ID expected to own the S3 bucket of the query results."""
         if not self._query_execution:
             return None
         return self._query_execution.expected_bucket_owner
 
     @property
     def s3_acl_option(self) -> str | None:
+        """The ``S3AclOption`` of the query results, such as ``BUCKET_OWNER_FULL_CONTROL``."""
         if not self._query_execution:
             return None
         return self._query_execution.s3_acl_option
 
     @property
     def selected_engine_version(self) -> str | None:
+        """The Athena engine version selected to run the query."""
         if not self._query_execution:
             return None
         return self._query_execution.selected_engine_version
 
     @property
     def effective_engine_version(self) -> str | None:
+        """The Athena engine version that ran the query."""
         if not self._query_execution:
             return None
         return self._query_execution.effective_engine_version
 
     @property
     def result_reuse_enabled(self) -> bool | None:
+        """Whether reuse of previous query results by age is enabled for the query."""
         if not self._query_execution:
             return None
         return self._query_execution.result_reuse_enabled
 
     @property
     def result_reuse_minutes(self) -> int | None:
+        """The maximum age in minutes of a previous query result that Athena can reuse."""
         if not self._query_execution:
             return None
         return self._query_execution.result_reuse_minutes
@@ -318,6 +371,10 @@ class AthenaResultSet(CursorIterator):
     def description(
         self,
     ) -> list[tuple[str, str, None, None, int, int, str]] | None:
+        """The DB API 2.0 column descriptions.
+
+        None without result metadata, or for ``INSERT``, ``UPDATE``, ``DELETE``, and ``MERGE``.
+        """
         if self._metadata is None or (
             self.substatement_type
             and self.substatement_type.upper() in self._DML_SUBSTATEMENT_TYPES
@@ -338,6 +395,7 @@ class AthenaResultSet(CursorIterator):
 
     @property
     def connection(self) -> Connection[Any]:
+        """The connection of the result set; raises ``ProgrammingError`` if closed."""
         if self.is_closed:
             raise ProgrammingError("AthenaResultSet is closed.")
         return cast("Connection[Any]", self._connection)
@@ -732,9 +790,11 @@ class AthenaResultSet(CursorIterator):
 
     @property
     def is_closed(self) -> bool:
+        """Whether the result set is closed."""
         return self._connection is None
 
     def close(self) -> None:
+        """Close the result set and discard its query execution, metadata, and rows."""
         self._connection = None
         self._query_execution = None
         self._metadata = None
@@ -753,6 +813,8 @@ class AthenaResultSet(CursorIterator):
 
 
 class AthenaDictResultSet(AthenaResultSet):
+    """A result set that returns each row as a dictionary keyed by column name."""
+
     # You can override this to use OrderedDict or other dict-like types.
     dict_type: type[Any] = dict
 
@@ -862,24 +924,28 @@ class WithResultSet:
 
     @property
     def has_result_set(self) -> bool:
+        """Whether the cursor has a result set."""
         return self.result_set is not None
 
     @property
     def description(
         self,
     ) -> list[tuple[str, str, None, None, int, int, str]] | None:
+        """The DB API 2.0 column descriptions of the result set, or None without one."""
         if not self.result_set:
             return None
         return self.result_set.description
 
     @property
     def database(self) -> str | None:
+        """The database in the ``QueryExecutionContext`` of the query."""
         if not self.result_set:
             return None
         return self.result_set.database
 
     @property
     def catalog(self) -> str | None:
+        """The data catalog in the ``QueryExecutionContext`` of the query."""
         if not self.result_set:
             return None
         return self.result_set.catalog
@@ -911,180 +977,210 @@ class WithResultSet:
 
     @property
     def query(self) -> str | None:
+        """The SQL statement that the query execution ran."""
         if not self.result_set:
             return None
         return self.result_set.query
 
     @property
     def statement_type(self) -> str | None:
+        """The ``StatementType`` of the query, such as ``DDL``, ``DML``, or ``UTILITY``."""
         if not self.result_set:
             return None
         return self.result_set.statement_type
 
     @property
     def substatement_type(self) -> str | None:
+        """The ``SubstatementType`` of the query, such as ``INSERT`` or ``MERGE``."""
         if not self.result_set:
             return None
         return self.result_set.substatement_type
 
     @property
     def work_group(self) -> str | None:
+        """The work group in which the query ran."""
         if not self.result_set:
             return None
         return self.result_set.work_group
 
     @property
     def execution_parameters(self) -> list[str]:
+        """The ``ExecutionParameters`` values of the query."""
         if not self.result_set:
             return []
         return self.result_set.execution_parameters
 
     @property
     def state(self) -> str | None:
+        """The state of the query execution, such as ``RUNNING`` or ``SUCCEEDED``."""
         if not self.result_set:
             return None
         return self.result_set.state
 
     @property
     def state_change_reason(self) -> str | None:
+        """The ``StateChangeReason`` that gives further detail about the state."""
         if not self.result_set:
             return None
         return self.result_set.state_change_reason
 
     @property
     def submission_date_time(self) -> datetime | None:
+        """The date and time when the query was submitted."""
         if not self.result_set:
             return None
         return self.result_set.submission_date_time
 
     @property
     def completion_date_time(self) -> datetime | None:
+        """The date and time when the query completed."""
         if not self.result_set:
             return None
         return self.result_set.completion_date_time
 
     @property
     def error_category(self) -> int | None:
+        """The ``ErrorCategory`` of the failure: 1 for system, 2 for user, 3 for other."""
         if not self.result_set:
             return None
         return self.result_set.error_category
 
     @property
     def error_type(self) -> int | None:
+        """The ``ErrorType`` code of the query failure."""
         if not self.result_set:
             return None
         return self.result_set.error_type
 
     @property
     def retryable(self) -> bool | None:
+        """Whether Athena reports the query failure as retryable."""
         if not self.result_set:
             return None
         return self.result_set.retryable
 
     @property
     def error_message(self) -> str | None:
+        """The ``ErrorMessage`` that describes the query failure."""
         if not self.result_set:
             return None
         return self.result_set.error_message
 
     @property
     def data_scanned_in_bytes(self) -> int | None:
+        """The number of bytes that the query scanned."""
         if not self.result_set:
             return None
         return self.result_set.data_scanned_in_bytes
 
     @property
     def engine_execution_time_in_millis(self) -> int | None:
+        """The time in milliseconds that the query engine took to run the query."""
         if not self.result_set:
             return None
         return self.result_set.engine_execution_time_in_millis
 
     @property
     def query_queue_time_in_millis(self) -> int | None:
+        """The time in milliseconds that the query waited in the queue."""
         if not self.result_set:
             return None
         return self.result_set.query_queue_time_in_millis
 
     @property
     def total_execution_time_in_millis(self) -> int | None:
+        """The total time in milliseconds that Athena took to run the query."""
         if not self.result_set:
             return None
         return self.result_set.total_execution_time_in_millis
 
     @property
     def query_planning_time_in_millis(self) -> int | None:
+        """The time in milliseconds that Athena took to plan the query."""
         if not self.result_set:
             return None
         return self.result_set.query_planning_time_in_millis
 
     @property
     def service_processing_time_in_millis(self) -> int | None:
+        """The time in milliseconds that Athena took to publish the query results."""
         if not self.result_set:
             return None
         return self.result_set.service_processing_time_in_millis
 
     @property
     def output_location(self) -> str | None:
+        """The S3 location of the query results."""
         if not self.result_set:
             return None
         return self.result_set.output_location
 
     @property
     def data_manifest_location(self) -> str | None:
+        """The S3 location of the data manifest that lists the files the query wrote."""
         if not self.result_set:
             return None
         return self.result_set.data_manifest_location
 
     @property
     def reused_previous_result(self) -> bool | None:
+        """Whether Athena reused a previous query result instead of running the query."""
         if not self.result_set:
             return None
         return self.result_set.reused_previous_result
 
     @property
     def encryption_option(self) -> str | None:
+        """The ``EncryptionOption`` of the query results, such as ``SSE_S3`` or ``SSE_KMS``."""
         if not self.result_set:
             return None
         return self.result_set.encryption_option
 
     @property
     def kms_key(self) -> str | None:
+        """The KMS key used to encrypt the query results."""
         if not self.result_set:
             return None
         return self.result_set.kms_key
 
     @property
     def expected_bucket_owner(self) -> str | None:
+        """The AWS account ID expected to own the S3 bucket of the query results."""
         if not self.result_set:
             return None
         return self.result_set.expected_bucket_owner
 
     @property
     def s3_acl_option(self) -> str | None:
+        """The ``S3AclOption`` of the query results, such as ``BUCKET_OWNER_FULL_CONTROL``."""
         if not self.result_set:
             return None
         return self.result_set.s3_acl_option
 
     @property
     def selected_engine_version(self) -> str | None:
+        """The Athena engine version selected to run the query."""
         if not self.result_set:
             return None
         return self.result_set.selected_engine_version
 
     @property
     def effective_engine_version(self) -> str | None:
+        """The Athena engine version that ran the query."""
         if not self.result_set:
             return None
         return self.result_set.effective_engine_version
 
     @property
     def result_reuse_enabled(self) -> bool | None:
+        """Whether reuse of previous query results by age is enabled for the query."""
         if not self.result_set:
             return None
         return self.result_set.result_reuse_enabled
 
     @property
     def result_reuse_minutes(self) -> int | None:
+        """The maximum age in minutes of a previous query result that Athena can reuse."""
         if not self.result_set:
             return None
         return self.result_set.result_reuse_minutes

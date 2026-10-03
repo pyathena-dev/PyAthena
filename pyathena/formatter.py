@@ -1,3 +1,5 @@
+"""Formatting of query parameters as SQL literals, and wrapping of queries in UNLOAD."""
+
 from __future__ import annotations
 
 import logging
@@ -47,6 +49,12 @@ class Formatter(metaclass=ABCMeta):
         mappings: dict[type[Any], Callable[[Formatter, Callable[[str], str], Any], Any]],
         default: Callable[[Formatter, Callable[[str], str], Any], Any] | None = None,
     ) -> None:
+        """Initialize the formatter.
+
+        Args:
+            mappings: Formatting functions keyed by Python type.
+            default: Formatting function for types not in ``mappings``.
+        """
         self._mappings = mappings
         self._default = default
 
@@ -77,18 +85,43 @@ class Formatter(metaclass=ABCMeta):
         type_: type[Any],
         formatter: Callable[[Formatter, Callable[[str], str], Any], Any],
     ) -> None:
+        """Set the formatting function for a Python type.
+
+        Args:
+            type_: The Python type.
+            formatter: The formatting function to use for this type.
+        """
         self.mappings[type_] = formatter
 
     def remove(self, type_: type[Any]) -> None:
+        """Remove the formatting function for a Python type.
+
+        Args:
+            type_: The Python type to remove.
+        """
         self.mappings.pop(type_, None)
 
     def update(
         self, mappings: dict[type[Any], Callable[[Formatter, Callable[[str], str], Any], Any]]
     ) -> None:
+        """Update multiple formatting functions at once.
+
+        Args:
+            mappings: Dictionary of Python types to formatting functions.
+        """
         self.mappings.update(mappings)
 
     @abstractmethod
     def format(self, operation: str, parameters: dict[str, Any] | None = None) -> str:
+        """Format a query with its parameters.
+
+        Args:
+            operation: SQL query string.
+            parameters: Query parameters.
+
+        Returns:
+            The formatted query.
+        """
         raise NotImplementedError  # pragma: no cover
 
     @staticmethod
@@ -395,6 +428,7 @@ class DefaultParameterFormatter(Formatter):
     """
 
     def __init__(self) -> None:
+        """Initialize the formatter with the default formatting functions and no default."""
         super().__init__(mappings=deepcopy(_DEFAULT_FORMATTERS), default=None)
 
     @override

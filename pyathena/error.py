@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""DB API 2.0 exception hierarchy used by PyAthena."""
+
 __all__ = [
     "DataError",
     "DatabaseError",

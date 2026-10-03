@@ -1,3 +1,5 @@
+"""DB API 2.0 connection to Amazon Athena."""
+
 from __future__ import annotations
 
 import logging
@@ -231,7 +233,8 @@ class Connection(Generic[ConnectionCursor]):
             config: Boto3 Config object for client configuration.
             result_reuse_enable: Enable Athena query result reuse. Defaults to False.
             result_reuse_minutes: Minutes to reuse cached results.
-            on_start_query_execution: Callback function called when query starts.
+            on_start_query_execution: Callback invoked with each query ID before the cursor
+                waits for the query, as for the ``execute()`` argument of the same name.
             on_poll: Callback invoked once per poll iteration with the current
                 execution object (``AthenaQueryExecution``, or
                 ``AthenaCalculationExecutionStatus`` for Spark). Useful for

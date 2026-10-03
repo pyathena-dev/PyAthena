@@ -1,3 +1,5 @@
+"""Thread-pool cursors that run Athena queries concurrently and return futures."""
+
 from __future__ import annotations
 
 import logging
@@ -68,6 +70,31 @@ class AsyncCursor(BaseCursor):
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
         **kwargs,
     ) -> None:
+        """Initialize an AsyncCursor.
+
+        Args:
+            s3_staging_dir: S3 location for query results.
+            schema_name: Default schema name.
+            catalog_name: Default catalog name.
+            work_group: Athena workgroup name.
+            poll_interval: Query status polling interval in seconds.
+            encryption_option: S3 encryption option (SSE_S3, SSE_KMS, CSE_KMS).
+            kms_key: KMS key for encryption.
+            kill_on_interrupt: Cancel a query whose start in ``execute()`` is interrupted by
+                ``KeyboardInterrupt``. Waiting runs on worker threads, which do not
+                receive the interrupt.
+            max_workers: Maximum number of threads in the cursor's thread pool.
+            arraysize: Default number of rows per ``fetchmany()`` call of the result
+                sets the cursor creates.
+            result_reuse_enable: Enable Athena query result reuse.
+            result_reuse_minutes: Maximum age in minutes of a reused result.
+            **kwargs: Arguments forwarded to ``BaseCursor.__init__``, such as
+                ``connection``, ``converter``, ``formatter``, and ``retry_config``.
+
+        Raises:
+            ProgrammingError: If ``arraysize`` is not between 1 and
+                ``CursorIterator.DEFAULT_FETCH_SIZE``.
+        """
         super().__init__(
             s3_staging_dir=s3_staging_dir,
             schema_name=schema_name,
@@ -88,6 +115,7 @@ class AsyncCursor(BaseCursor):
 
     @property
     def arraysize(self) -> int:
+        """The default number of rows per ``fetchmany()`` call of the result sets."""
         return self._arraysize
 
     @arraysize.setter
@@ -112,6 +140,16 @@ class AsyncCursor(BaseCursor):
     def description(
         self, query_id: str
     ) -> Future[list[tuple[str, str, None, None, int, int, str]] | None]:
+        """Get the column descriptions of a query's result set asynchronously.
+
+        The future waits for the query to finish before it reads the result set.
+
+        Args:
+            query_id: The Athena query execution ID.
+
+        Returns:
+            Future object containing the DB API 2.0 column descriptions, or None.
+        """
         return self._executor.submit(self._description, query_id)
 
     def query_execution(self, query_id: str) -> Future[AthenaQueryExecution]:
@@ -190,7 +228,7 @@ class AsyncCursor(BaseCursor):
             parameters: Query parameters (optional).
             work_group: Athena workgroup to use (optional).
             s3_staging_dir: S3 location for query results (optional).
-            cache_size: Query result cache size in MB (optional).
+            cache_size: Number of queries to check for result caching (optional).
             cache_expiration_time: Cache expiration time in seconds (optional).
             result_reuse_enable: Enable result reuse for identical queries (optional).
             result_reuse_minutes: Result reuse duration in minutes (optional).
@@ -298,6 +336,13 @@ class AsyncDictCursor(AsyncCursor):
     """
 
     def __init__(self, **kwargs) -> None:
+        """Initialize an AsyncDictCursor.
+
+        Args:
+            **kwargs: Arguments forwarded to ``AsyncCursor.__init__``. If they include
+                ``dict_type``, it is also assigned to the class attribute
+                ``AthenaDictResultSet.dict_type``, the type used to build each row.
+        """
         super().__init__(**kwargs)
         self._result_set_class = AthenaDictResultSet
         if "dict_type" in kwargs:

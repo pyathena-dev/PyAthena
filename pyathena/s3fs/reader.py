@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""CSV readers that parse Athena query result files for the S3FS cursor."""
+
 from __future__ import annotations
 
 import csv

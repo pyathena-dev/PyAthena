@@ -1,3 +1,5 @@
+"""Base SQLAlchemy dialect for Amazon Athena."""
+
 from __future__ import annotations
 
 import contextlib
@@ -227,6 +229,17 @@ class AthenaDialect(DefaultDialect):
     _URL_ENGINE_OPTIONS: tuple[str, ...] = ("insertmanyvalues_page_size", "use_insertmanyvalues")
 
     def __init__(self, json_deserializer=None, json_serializer=None, **kwargs):
+        """Initialize the dialect.
+
+        Args:
+            json_deserializer: Callable used to deserialize JSON values, or
+                ``None`` for the default.
+            json_serializer: Callable used to serialize JSON values, or ``None``
+                for the default.
+            **kwargs: Keyword arguments forwarded to ``DefaultDialect.__init__``.
+                Those that are URL engine options take precedence over the same
+                options in the connection URL query.
+        """
         DefaultDialect.__init__(self, **kwargs)
         self._json_deserializer = json_deserializer
         self._json_serializer = json_serializer

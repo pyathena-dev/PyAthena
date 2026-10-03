@@ -320,6 +320,7 @@ Result columns from a passthrough query come back with the source system's types
 PyAthena provides a callback mechanism that allows you to get immediate access to the query ID
 as soon as the `start_query_execution` API call is made, before waiting for query completion.
 This is useful for monitoring, logging, or cancelling long-running queries from another thread.
+When `cache_size` finds a reusable query, no new query starts, and the callback receives the reused query's ID.
 
 The `on_start_query_execution` callback can be configured at both the connection level and
 the execute level. When both are set, both callbacks will be invoked.

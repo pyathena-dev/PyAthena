@@ -1,3 +1,5 @@
+"""Base classes and callback types shared by PyAthena cursors."""
+
 from __future__ import annotations
 
 import logging
@@ -81,6 +83,16 @@ class CursorIterator(metaclass=ABCMeta):
     DEFAULT_RESULT_REUSE_MINUTES = 60
 
     def __init__(self, **kwargs) -> None:
+        """Initialize the iterator with no current row and an unknown row count.
+
+        Args:
+            **kwargs: Keyword arguments, of which only ``arraysize`` is used. If it is
+                absent, ``DEFAULT_FETCH_SIZE`` is used.
+
+        Raises:
+            ProgrammingError: If ``arraysize`` is outside the range the
+                ``arraysize`` setter accepts.
+        """
         super().__init__()
         self.arraysize: int = kwargs.get("arraysize", self.DEFAULT_FETCH_SIZE)
         self._rownumber: int | None = None
@@ -88,6 +100,7 @@ class CursorIterator(metaclass=ABCMeta):
 
     @property
     def arraysize(self) -> int:
+        """The default number of rows per ``fetchmany()`` call."""
         return self._arraysize
 
     @arraysize.setter
@@ -100,22 +113,27 @@ class CursorIterator(metaclass=ABCMeta):
 
     @property
     def rownumber(self) -> int | None:
+        """The zero-based index of the next row, or None if it is unknown."""
         return self._rownumber
 
     @property
     def rowcount(self) -> int:
+        """The number of rows affected by the last operation, or -1 if it is unknown."""
         return self._rowcount
 
     @abstractmethod
     def fetchone(self):
+        """Fetch the next row of the result."""
         raise NotImplementedError  # pragma: no cover
 
     @abstractmethod
     def fetchmany(self):
+        """Fetch the next set of rows of the result."""
         raise NotImplementedError  # pragma: no cover
 
     @abstractmethod
     def fetchall(self):
+        """Fetch all remaining rows of the result."""
         raise NotImplementedError  # pragma: no cover
 
     def __next__(self):
@@ -195,6 +213,30 @@ class BaseCursor(metaclass=ABCMeta):
         on_poll: OnPollCallback | None = None,
         **kwargs,
     ) -> None:
+        """Initialize the cursor with the settings it uses to run queries.
+
+        Args:
+            connection: The connection that created the cursor.
+            converter: Converter for result values.
+            formatter: Formatter for query parameters.
+            retry_config: Retry configuration for API calls.
+            s3_staging_dir: S3 location for query results.
+            schema_name: Default schema name.
+            catalog_name: Default catalog name.
+            work_group: Athena workgroup name.
+            poll_interval: Query status polling interval in seconds.
+            encryption_option: S3 encryption option (SSE_S3, SSE_KMS, CSE_KMS).
+            kms_key: KMS key for encryption.
+            kill_on_interrupt: Cancel the execution when a ``KeyboardInterrupt`` interrupts
+                starting it or waiting for it.
+            result_reuse_enable: Enable Athena query result reuse.
+            result_reuse_minutes: Maximum age in minutes of a reused result.
+            on_start_query_execution: Callback invoked with each query ID before the cursor
+                waits for the query, by cursors whose ``execute()`` supports it.
+            on_poll: Callback invoked once per poll iteration with the current
+                execution object.
+            **kwargs: Ignored.
+        """
         super().__init__()
         self._connection = connection
         self._converter = converter
@@ -231,6 +273,7 @@ class BaseCursor(metaclass=ABCMeta):
 
     @property
     def connection(self) -> Connection[Any]:
+        """The connection that created this cursor."""
         return self._connection
 
     def _build_start_query_execution_request(
@@ -1183,7 +1226,8 @@ class BaseCursor(metaclass=ABCMeta):
 
         Both callbacks are invoked if set. Called by cursors whose execution
         model supports early access to the query ID (the synchronous and aio
-        cursors) immediately after the StartQueryExecution API call.
+        cursors) once ``_execute()`` returns it: after the StartQueryExecution
+        API call, or with a reusable query ID found through ``cache_size``.
         """
         if self._on_start_query_execution:
             self._on_start_query_execution(query_id)
@@ -1314,6 +1358,13 @@ class BaseCursor(metaclass=ABCMeta):
         parameters: dict[str, Any] | list[str] | None = None,
         **kwargs,
     ):
+        """Execute a SQL query.
+
+        Args:
+            operation: SQL query string.
+            parameters: Query parameters.
+            **kwargs: Execution options defined by the cursor implementation.
+        """
         raise NotImplementedError  # pragma: no cover
 
     @abstractmethod
@@ -1323,10 +1374,18 @@ class BaseCursor(metaclass=ABCMeta):
         seq_of_parameters: list[dict[str, Any] | list[str] | None],
         **kwargs,
     ) -> None:
+        """Execute a SQL query once for each set of parameters.
+
+        Args:
+            operation: SQL query string.
+            seq_of_parameters: Sequence of parameter sets.
+            **kwargs: Execution options defined by the cursor implementation.
+        """
         raise NotImplementedError  # pragma: no cover
 
     @abstractmethod
     def close(self) -> None:
+        """Close the cursor."""
         raise NotImplementedError  # pragma: no cover
 
     def _cancel(self, query_id: str) -> None:
@@ -1351,10 +1410,20 @@ class BaseCursor(metaclass=ABCMeta):
             raise OperationalError(*e.args) from e
 
     def setinputsizes(self, sizes):  # noqa: B027
-        """Does nothing by default"""
+        """Accept input sizes as DB API 2.0 requires, and ignore them.
+
+        Args:
+            sizes: Sequence of parameter types or sizes.
+        """
 
     def setoutputsize(self, size, column=None):  # noqa: B027
-        """Does nothing by default"""
+        """Accept a column buffer size as DB API 2.0 requires, and ignore it.
+
+        Args:
+            size: Buffer size for large columns.
+            column: Index of the column the size applies to, or None for all
+                large columns.
+        """
 
     def __enter__(self):
         return self

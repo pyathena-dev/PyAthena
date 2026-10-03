@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""Async SQLAlchemy dialect for Athena that uses ``AioS3FSCursor``."""
+
 from typing import TYPE_CHECKING
 
 from pyathena.aio.sqlalchemy.base import AthenaAioDialect

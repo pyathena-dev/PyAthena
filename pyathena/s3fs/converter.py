@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""Type converter for S3FS cursor results."""
+
 from __future__ import annotations
 
 import logging
@@ -50,6 +52,7 @@ class DefaultS3FSTypeConverter(Converter):
     """
 
     def __init__(self) -> None:
+        """Initialize the converter with the standard Athena conversion functions."""
         super().__init__(
             mappings=deepcopy(_DEFAULT_CONVERTERS),
             default=_to_default,

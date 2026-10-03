@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""Asynchronous fsspec filesystem for Amazon S3 built on ``S3FileSystem``."""
+
 from __future__ import annotations
 
 import asyncio
@@ -84,6 +86,23 @@ class AioS3FileSystem(AsyncFileSystem):
         batch_size: int | None = None,
         **kwargs,
     ) -> None:
+        """Initialize the filesystem and its internal ``S3FileSystem``.
+
+        Args:
+            connection: Passed to the internal ``S3FileSystem``.
+            default_block_size: Passed to the internal ``S3FileSystem``.
+            default_cache_type: Passed to the internal ``S3FileSystem``.
+            max_workers: Passed to the internal ``S3FileSystem``.
+            s3_additional_kwargs: Passed to the internal ``S3FileSystem``.
+            allow_bucket_creation: Passed to the internal ``S3FileSystem``.
+            allow_bucket_deletion: Passed to the internal ``S3FileSystem``.
+            version_aware: Passed to the internal ``S3FileSystem``.
+            asynchronous: Passed to ``fsspec.asyn.AsyncFileSystem``.
+            loop: Passed to ``fsspec.asyn.AsyncFileSystem``.
+            batch_size: Passed to ``fsspec.asyn.AsyncFileSystem``.
+            **kwargs: Passed to both ``fsspec.asyn.AsyncFileSystem`` and the
+                internal ``S3FileSystem``.
+        """
         super().__init__(
             asynchronous=asynchronous,
             loop=loop,
@@ -106,6 +125,19 @@ class AioS3FileSystem(AsyncFileSystem):
 
     @staticmethod
     def parse_path(path: str) -> tuple[str, str | None, str | None]:
+        """Parse an S3 path into its bucket, key and version ID.
+
+        See :meth:`S3FileSystem.parse_path`.
+
+        Args:
+            path: The S3 path.
+
+        Returns:
+            Tuple of the bucket, the key and the version ID.
+
+        Raises:
+            ValueError: If the path is not a valid S3 path.
+        """
         return S3FileSystem.parse_path(path)
 
     async def _info(self, path: str, **kwargs) -> S3Object:
@@ -348,50 +380,200 @@ class AioS3FileSystem(AsyncFileSystem):
         await asyncio.to_thread(self._sync_fs.rmdir, path)
 
     def rmdir(self, path: str) -> None:
+        """Remove an S3 bucket, which must be empty.
+
+        See :meth:`S3FileSystem.rmdir`.
+
+        Args:
+            path: S3 bucket path (e.g., "s3://bucket").
+        """
         self._sync_fs.rmdir(path)
 
     def sign(self, path: str, expiration: int = 3600, **kwargs) -> str:
+        """Generate a presigned URL for S3 object access.
+
+        See :meth:`S3FileSystem.sign`.
+
+        Args:
+            path: S3 path (s3://bucket/key) to generate the URL for.
+            expiration: URL expiration time in seconds.
+            **kwargs: Additional parameters passed to :meth:`S3FileSystem.sign`.
+
+        Returns:
+            The presigned URL.
+        """
         return cast(str, self._sync_fs.sign(path, expiration=expiration, **kwargs))
 
     def metadata(self, path: str, **kwargs) -> S3Metadata:
+        """Return the metadata of the path.
+
+        See :meth:`S3FileSystem.metadata`.
+
+        Args:
+            path: S3 path (s3://bucket/key) to get metadata for.
+            **kwargs: Additional parameters passed to the HeadObject API.
+
+        Returns:
+            S3Metadata of the object.
+        """
         return self._sync_fs.metadata(path, **kwargs)
 
     def getxattr(self, path: str, attr_name: str, **kwargs) -> str | None:
+        """Get an attribute from the user-defined metadata of the path.
+
+        See :meth:`S3FileSystem.getxattr`.
+
+        Args:
+            path: S3 path (s3://bucket/key) to get the attribute for.
+            attr_name: The name of the attribute.
+            **kwargs: Additional parameters passed to the HeadObject API.
+
+        Returns:
+            The value of the attribute, or None if the attribute is not set.
+        """
         return self._sync_fs.getxattr(path, attr_name, **kwargs)
 
     def setxattr(self, path: str, copy_kwargs: dict[str, Any] | None = None, **kwargs) -> None:
+        """Set the user-defined metadata of the path.
+
+        See :meth:`S3FileSystem.setxattr`.
+
+        Args:
+            path: S3 path (s3://bucket/key) to set metadata for.
+            copy_kwargs: Additional parameters to use for the underlying
+                CopyObject API call.
+            **kwargs: Key-value pairs of metadata to set; a None value deletes the
+                key.
+        """
         self._sync_fs.setxattr(path, copy_kwargs=copy_kwargs, **kwargs)
 
     def get_tags(self, path: str) -> dict[str, str]:
+        """Retrieve the tag key/values for the given path.
+
+        See :meth:`S3FileSystem.get_tags`.
+
+        Args:
+            path: S3 path (s3://bucket/key) to get tags for.
+
+        Returns:
+            Dictionary mapping tag keys to tag values.
+        """
         return self._sync_fs.get_tags(path)
 
     def put_tags(self, path: str, tags: dict[str, str], mode: str = "o") -> None:
+        """Set the tags for the given existing key.
+
+        See :meth:`S3FileSystem.put_tags`.
+
+        Args:
+            path: S3 path (s3://bucket/key) of the existing key.
+            tags: Tags to apply.
+            mode: ``o`` to overwrite the existing tags or ``m`` to merge with them.
+        """
         self._sync_fs.put_tags(path, tags, mode=mode)
 
     def chmod(self, path: str, acl: str, recursive: bool = False, **kwargs) -> None:
+        """Set the canned ACL of a bucket or key.
+
+        See :meth:`S3FileSystem.chmod`.
+
+        Args:
+            path: S3 path (s3://bucket or s3://bucket/key) to set the ACL on.
+            acl: The canned ACL to apply.
+            recursive: Whether to apply the ACL to all keys below the path too.
+            **kwargs: Additional parameters passed to the PutObjectAcl or
+                PutBucketAcl API.
+        """
         self._sync_fs.chmod(path, acl, recursive=recursive, **kwargs)
 
     def object_version_info(
         self, path: str, delete_markers: bool = False, **kwargs
     ) -> list[S3ObjectVersion]:
+        """List the versions of the objects under the path.
+
+        See :meth:`S3FileSystem.object_version_info`.
+
+        Args:
+            path: S3 path (s3://bucket/key or a key prefix) to list the versions for.
+            delete_markers: Whether to include delete markers in the result.
+            **kwargs: Additional parameters passed to the ListObjectVersions API.
+
+        Returns:
+            List of S3ObjectVersion instances describing the versions.
+        """
         return self._sync_fs.object_version_info(path, delete_markers=delete_markers, **kwargs)
 
     def list_multipart_uploads(self, path: str) -> list[S3MultipartUpload]:
+        """List in-progress (incomplete) multipart uploads in a bucket.
+
+        See :meth:`S3FileSystem.list_multipart_uploads`.
+
+        Args:
+            path: S3 bucket or prefix path (e.g., "s3://bucket" or "s3://bucket/prefix").
+
+        Returns:
+            List of S3MultipartUpload instances describing the uploads.
+        """
         return self._sync_fs.list_multipart_uploads(path)
 
     def clear_multipart_uploads(self, path: str) -> None:
+        """Abort any incomplete multipart uploads in the bucket.
+
+        See :meth:`S3FileSystem.clear_multipart_uploads`.
+
+        Args:
+            path: S3 bucket or prefix path (e.g., "s3://bucket" or "s3://bucket/prefix").
+        """
         self._sync_fs.clear_multipart_uploads(path)
 
     def checksum(self, path: str, **kwargs) -> int:
+        """Get the checksum of an S3 object or directory.
+
+        See :meth:`S3FileSystem.checksum`.
+
+        Args:
+            path: S3 path (s3://bucket/key) to get the checksum for.
+            **kwargs: Additional arguments passed to :meth:`S3FileSystem.checksum`.
+
+        Returns:
+            Integer checksum derived from the ETag or the directory token.
+        """
         return cast(int, self._sync_fs.checksum(path, **kwargs))
 
     def created(self, path: str) -> datetime:
+        """Return the creation time of the path.
+
+        See :meth:`S3FileSystem.created`.
+
+        Args:
+            path: S3 path (s3://bucket/key).
+
+        Returns:
+            The last-modified time of the object.
+        """
         return self._sync_fs.created(path)
 
     def modified(self, path: str) -> datetime:
+        """Return the last-modified time of the path.
+
+        See :meth:`S3FileSystem.modified`.
+
+        Args:
+            path: S3 path (s3://bucket/key).
+
+        Returns:
+            The last-modified time of the object.
+        """
         return self._sync_fs.modified(path)
 
     def invalidate_cache(self, path: str | None = None) -> None:
+        """Remove the cached entries of the path and its parent paths.
+
+        See :meth:`S3FileSystem.invalidate_cache`.
+
+        Args:
+            path: The path to invalidate. If None, clear the whole cache.
+        """
         self._sync_fs.invalidate_cache(path)
 
     async def _touch(self, path: str, truncate: bool = True, **kwargs) -> None:

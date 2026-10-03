@@ -1,3 +1,5 @@
+"""Asyncio base cursor and the fetch mixin shared by the asyncio SQL cursors."""
+
 from __future__ import annotations
 
 import asyncio

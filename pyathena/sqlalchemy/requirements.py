@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""SQLAlchemy test suite requirements for the Athena dialect."""
+
 from sqlalchemy.testing import exclusions
 from sqlalchemy.testing.requirements import SuiteRequirements
 
@@ -15,6 +17,8 @@ unsupported = exclusions.closed
 
 
 class Requirements(SuiteRequirements):
+    """Features of the Athena dialect for the SQLAlchemy test suite."""
+
     @property
     @override
     def comment_reflection(self):

@@ -1,3 +1,5 @@
+"""DB API 2.0 cursors that return rows as tuples or dictionaries."""
+
 from __future__ import annotations
 
 import logging
@@ -56,6 +58,24 @@ class Cursor(WithFetch):
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
         **kwargs,
     ) -> None:
+        """Initialize a Cursor.
+
+        Args:
+            s3_staging_dir: S3 location for query results.
+            schema_name: Default schema name.
+            catalog_name: Default catalog name.
+            work_group: Athena workgroup name.
+            poll_interval: Query status polling interval in seconds.
+            encryption_option: S3 encryption option (SSE_S3, SSE_KMS, CSE_KMS).
+            kms_key: KMS key for encryption.
+            kill_on_interrupt: Cancel the query when a ``KeyboardInterrupt`` interrupts
+                ``execute()`` while it starts or waits for the query.
+            result_reuse_enable: Enable Athena query result reuse.
+            result_reuse_minutes: Maximum age in minutes of a reused result.
+            **kwargs: Arguments forwarded to ``WithResultSet.__init__`` and
+                ``BaseCursor.__init__``, such as ``arraysize``, ``connection``,
+                ``converter``, ``formatter``, and ``retry_config``.
+        """
         super().__init__(
             s3_staging_dir=s3_staging_dir,
             schema_name=schema_name,
@@ -107,8 +127,16 @@ class Cursor(WithFetch):
         Args:
             operation: SQL query string to execute.
             parameters: Query parameters (optional).
-            on_start_query_execution: Callback function called immediately after
-                start_query_execution API is called.
+            work_group: Athena workgroup to use for this query.
+            s3_staging_dir: S3 location for query results.
+            cache_size: Number of queries to check for result caching.
+            cache_expiration_time: Cache expiration time in seconds.
+            result_reuse_enable: Enable Athena result reuse for this query.
+            result_reuse_minutes: Minutes to reuse cached results.
+            paramstyle: Parameter style ('qmark' or 'pyformat').
+            on_start_query_execution: Callback invoked with the query ID before ``execute()``
+                waits for the query: after the ``StartQueryExecution`` call, or after a
+                reusable query ID is found through ``cache_size``.
                 Function signature: (query_id: str) -> None
                 This allows early access to query_id for
                 monitoring/cancellation.
@@ -189,6 +217,13 @@ class DictCursor(Cursor):
     """
 
     def __init__(self, **kwargs) -> None:
+        """Initialize a DictCursor.
+
+        Args:
+            **kwargs: Arguments forwarded to ``Cursor.__init__``. If they include
+                ``dict_type``, it is also assigned to the class attribute
+                ``AthenaDictResultSet.dict_type``, the type used to build each row.
+        """
         super().__init__(**kwargs)
         self._result_set_class = AthenaDictResultSet
         if "dict_type" in kwargs:

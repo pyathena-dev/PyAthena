@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""Result set that reads Athena CSV query results through an fsspec filesystem."""
+
 from __future__ import annotations
 
 import logging
@@ -74,6 +76,29 @@ class AthenaS3FSResultSet(AthenaResultSet):
         result_set_type_hints: dict[str | int, str] | None = None,
         **kwargs,
     ) -> None:
+        """Initialize the result set and prepare to read the query results.
+
+        Args:
+            connection: The connection that ran the query.
+            converter: The converter for result values.
+            query_execution: The query execution whose results to read.
+            arraysize: The number of rows read from the CSV results per fetch and the
+                default ``fetchmany()`` size.
+            retry_config: The retry configuration for API calls.
+            block_size: The default block size in bytes for the filesystem. If not set,
+                ``DEFAULT_BLOCK_SIZE`` is used.
+            csv_reader: The CSV reader class for the results. If None,
+                ``AthenaCSVReader`` is used.
+            filesystem_class: The filesystem class for reading the results. If None,
+                PyAthena's ``S3FileSystem`` is used.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
+            **kwargs: Additional keyword arguments, which are ignored.
+
+        Raises:
+            ProgrammingError: If ``query_execution`` is not given.
+            OperationalError: If reading the query results fails.
+        """
         super().__init__(
             connection=connection,
             converter=converter,

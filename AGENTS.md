@@ -134,4 +134,5 @@ Versions are derived from git tags via `hatch-vcs` — never edit `pyathena/_ver
 
 ### Google-style Docstrings
 
-Use Google-style docstrings for public methods. See existing code for examples.
+Follow the [docstring rules](docs/contributing.md#write-docstrings), which `just lint` checks with ruff's pydocstyle rules for `pyathena/`.
+Mark overrides with `pyathena.util.override` instead of repeating the base method's docstring.

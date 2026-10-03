@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""Native asyncio cursor that reads Athena CSV query results through ``AioS3FileSystem``."""
+
 from __future__ import annotations
 
 import asyncio
@@ -55,6 +57,26 @@ class AioS3FSCursor(WithAsyncFetch):
         csv_reader: CSVReaderType | None = None,
         **kwargs,
     ) -> None:
+        """Initialize an AioS3FSCursor.
+
+        Args:
+            s3_staging_dir: S3 location for query results.
+            schema_name: Default schema name.
+            catalog_name: Default catalog name.
+            work_group: Athena workgroup name.
+            poll_interval: Query status polling interval in seconds.
+            encryption_option: S3 encryption option for query results.
+            kms_key: KMS key for encrypting query results.
+            kill_on_interrupt: Cancel the query when the task is cancelled while
+                ``execute()`` starts or waits for the query.
+            result_reuse_enable: Whether to enable Athena query result reuse.
+            result_reuse_minutes: Maximum age of a reused query result in minutes.
+            csv_reader: CSV reader class for parsing the result files. If None,
+                ``AthenaCSVReader`` is used, which distinguishes NULL from empty
+                strings. ``DefaultCSVReader`` reads both as empty strings.
+            **kwargs: Other cursor arguments, such as ``connection`` and ``arraysize``,
+                passed to the parent ``__init__``.
+        """
         super().__init__(
             s3_staging_dir=s3_staging_dir,
             schema_name=schema_name,
@@ -116,7 +138,9 @@ class AioS3FSCursor(WithAsyncFetch):
             result_reuse_enable: Enable Athena result reuse for this query.
             result_reuse_minutes: Minutes to reuse cached results.
             paramstyle: Parameter style ('qmark' or 'pyformat').
-            on_start_query_execution: Callback called when query starts.
+            on_start_query_execution: Callback invoked with the query ID before ``execute()``
+                waits for the query: after the ``StartQueryExecution`` call, or after a
+                reusable query ID is found through ``cache_size``.
             result_set_type_hints: Optional dictionary mapping column names to
                 Athena DDL type signatures for precise type conversion within
                 complex types.

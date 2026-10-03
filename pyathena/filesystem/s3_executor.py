@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""Executors that run S3 filesystem operations in parallel."""
+
 from __future__ import annotations
 
 import asyncio
@@ -53,6 +55,11 @@ class S3ThreadPoolExecutor(S3Executor):
     """
 
     def __init__(self, max_workers: int) -> None:
+        """Initialize the executor with a new ``ThreadPoolExecutor``.
+
+        Args:
+            max_workers: The maximum number of threads of the thread pool.
+        """
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
 
     @override
@@ -83,6 +90,12 @@ class S3AioExecutor(S3Executor):
     """
 
     def __init__(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
+        """Initialize the executor with the event loop to schedule work on.
+
+        Args:
+            loop: The asyncio event loop. ``submit`` raises ``RuntimeError``
+                if it is None or not running.
+        """
         self._loop = loop
 
     @override

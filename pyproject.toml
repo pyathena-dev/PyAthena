@@ -159,15 +159,25 @@ select = [
     "PGH",  # pygrep-hooks
     "G",  # flake8-logging-format
     "PT",  # flake8-pytest-style
+    "D",  # pydocstyle
 ]
 ignore = [
     "RUF059",  # unused-unpacked-variable (too noisy for interface-heavy code)
     "G004",  # logging-f-string (f-strings are preferred for log messages)
+    "D105",  # undocumented-magic-method (protocol methods need no docstring)
 ]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+# Overrides marked with @override inherit the base method's documentation.
+ignore-decorators = ["pyathena.util.override"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = [
     "RUF012",  # mutable-class-default (test classes often use mutable defaults)
+]
+"!pyathena/**" = [
+    "D",  # docstring rules apply to the package only
 ]
 "pyathena/sqlalchemy/compiler.py" = [
     "N802",  # SQLAlchemy TypeCompiler requires visit_UPPERCASE method names

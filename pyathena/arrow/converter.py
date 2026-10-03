@@ -1,3 +1,5 @@
+"""Type converters for Apache Arrow cursor results."""
+
 from __future__ import annotations
 
 import logging
@@ -56,6 +58,7 @@ class DefaultArrowTypeConverter(Converter):
     """
 
     def __init__(self) -> None:
+        """Initialize the converter with the default Arrow conversion functions and types."""
         super().__init__(
             mappings=deepcopy(_DEFAULT_ARROW_CONVERTERS),
             default=_to_default,
@@ -111,6 +114,7 @@ class DefaultArrowUnloadTypeConverter(Converter):
     """
 
     def __init__(self) -> None:
+        """Initialize the converter with no type mappings."""
         super().__init__(
             mappings={},
             default=_to_default,

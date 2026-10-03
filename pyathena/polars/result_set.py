@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""Result set that reads Athena query results into Polars DataFrames."""
+
 from __future__ import annotations
 
 import logging

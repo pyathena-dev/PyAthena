@@ -1,3 +1,5 @@
+"""Asyncio result sets that fetch Athena query results with ``GetQueryResults``."""
+
 from __future__ import annotations
 
 import logging
@@ -39,6 +41,21 @@ class AthenaAioResultSet(AthenaResultSet):
         retry_config: RetryConfig,
         result_set_type_hints: dict[str | int, str] | None = None,
     ) -> None:
+        """Initialize the result set without fetching rows; ``create()`` fetches the first page.
+
+        Args:
+            connection: The connection that ran the query.
+            converter: The converter for result values.
+            query_execution: The query execution whose results to read.
+            arraysize: The number of rows per ``GetQueryResults`` page and the default
+                ``fetchmany()`` size.
+            retry_config: The retry configuration for API calls.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
+
+        Raises:
+            ProgrammingError: If ``query_execution`` is not given.
+        """
         super().__init__(
             connection=connection,
             converter=converter,

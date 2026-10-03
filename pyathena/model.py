@@ -1,3 +1,5 @@
+"""Model classes that wrap Amazon Athena API responses and table format constants."""
+
 from __future__ import annotations
 
 import logging
@@ -66,6 +68,15 @@ class AthenaQueryExecution:
     S3_ACL_OPTION_BUCKET_OWNER_FULL_CONTROL = "BUCKET_OWNER_FULL_CONTROL"
 
     def __init__(self, response: dict[str, Any]) -> None:
+        """Initialize the query execution from a ``GetQueryExecution`` response.
+
+        Args:
+            response: The API response containing a ``QueryExecution`` object.
+
+        Raises:
+            DataError: If ``QueryExecution``, ``QueryExecutionId``, ``Query``,
+                or ``Status`` is missing from the response.
+        """
         query_execution = response.get("QueryExecution")
         if not query_execution:
             raise DataError("KeyError `QueryExecution`")
@@ -165,162 +176,202 @@ class AthenaQueryExecution:
 
     @property
     def database(self) -> str | None:
+        """The ``Database`` of the query execution context."""
         return self._database
 
     @property
     def catalog(self) -> str | None:
+        """The ``Catalog`` of the query execution context."""
         return self._catalog
 
     @property
     def query_id(self) -> str | None:
+        """The ``QueryExecutionId`` of the query."""
         return self._query_id
 
     @property
     def query(self) -> str | None:
+        """The ``Query`` string that was executed."""
         return self._query
 
     @property
     def statement_type(self) -> str | None:
+        """The ``StatementType`` of the query, such as ``DDL`` or ``DML``."""
         return self._statement_type
 
     @property
     def substatement_type(self) -> str | None:
+        """The ``SubstatementType`` of the query."""
         return self._substatement_type
 
     @property
     def work_group(self) -> str | None:
+        """The ``WorkGroup`` in which the query ran."""
         return self._work_group
 
     @property
     def execution_parameters(self) -> list[str]:
+        """The ``ExecutionParameters`` of the query, or an empty list."""
         return self._execution_parameters
 
     @property
     def state(self) -> str | None:
+        """The ``State`` of the query execution, such as ``RUNNING`` or ``SUCCEEDED``."""
         return self._state
 
     @property
     def state_change_reason(self) -> str | None:
+        """The ``StateChangeReason`` of the query execution status."""
         return self._state_change_reason
 
     @property
     def submission_date_time(self) -> datetime | None:
+        """The ``SubmissionDateTime`` of the query."""
         return self._submission_date_time
 
     @property
     def completion_date_time(self) -> datetime | None:
+        """The ``CompletionDateTime`` of the query."""
         return self._completion_date_time
 
     @property
     def error_category(self) -> int | None:
+        """The ``ErrorCategory`` of the ``AthenaError``."""
         return self._error_category
 
     @property
     def error_type(self) -> int | None:
+        """The ``ErrorType`` of the ``AthenaError``."""
         return self._error_type
 
     @property
     def retryable(self) -> bool | None:
+        """The ``Retryable`` flag of the ``AthenaError``."""
         return self._retryable
 
     @property
     def error_message(self) -> str | None:
+        """The ``ErrorMessage`` of the ``AthenaError``."""
         return self._error_message
 
     @property
     def data_scanned_in_bytes(self) -> int | None:
+        """The ``DataScannedInBytes`` statistic of the query."""
         return self._data_scanned_in_bytes
 
     @property
     def engine_execution_time_in_millis(self) -> int | None:
+        """The ``EngineExecutionTimeInMillis`` statistic of the query."""
         return self._engine_execution_time_in_millis
 
     @property
     def query_queue_time_in_millis(self) -> int | None:
+        """The ``QueryQueueTimeInMillis`` statistic of the query."""
         return self._query_queue_time_in_millis
 
     @property
     def total_execution_time_in_millis(self) -> int | None:
+        """The ``TotalExecutionTimeInMillis`` statistic of the query."""
         return self._total_execution_time_in_millis
 
     @property
     def query_planning_time_in_millis(self) -> int | None:
+        """The ``QueryPlanningTimeInMillis`` statistic of the query."""
         return self._query_planning_time_in_millis
 
     @property
     def service_pre_processing_time_in_millis(self) -> int | None:
+        """The ``ServicePreProcessingTimeInMillis`` statistic of the query."""
         return self._service_pre_processing_time_in_millis
 
     @property
     def service_processing_time_in_millis(self) -> int | None:
+        """The ``ServiceProcessingTimeInMillis`` statistic of the query."""
         return self._service_processing_time_in_millis
 
     @property
     def dpu_count(self) -> float | None:
+        """The ``DpuCount`` statistic of the query."""
         return self._dpu_count
 
     @property
     def output_location(self) -> str | None:
+        """The ``OutputLocation`` of the result configuration."""
         return self._output_location
 
     @property
     def data_manifest_location(self) -> str | None:
+        """The ``DataManifestLocation`` statistic of the query."""
         return self._data_manifest_location
 
     @property
     def reused_previous_result(self) -> bool | None:
+        """The ``ReusedPreviousResult`` flag of the result reuse information."""
         return self._reused_previous_result
 
     @property
     def encryption_option(self) -> str | None:
+        """The ``EncryptionOption`` of the result encryption configuration."""
         return self._encryption_option
 
     @property
     def kms_key(self) -> str | None:
+        """The ``KmsKey`` of the result encryption configuration."""
         return self._kms_key
 
     @property
     def expected_bucket_owner(self) -> str | None:
+        """The ``ExpectedBucketOwner`` of the result configuration."""
         return self._expected_bucket_owner
 
     @property
     def s3_acl_option(self) -> str | None:
+        """The ``S3AclOption`` of the result ACL configuration."""
         return self._s3_acl_option
 
     @property
     def selected_engine_version(self) -> str | None:
+        """The ``SelectedEngineVersion`` of the query."""
         return self._selected_engine_version
 
     @property
     def effective_engine_version(self) -> str | None:
+        """The ``EffectiveEngineVersion`` of the query."""
         return self._effective_engine_version
 
     @property
     def result_reuse_enabled(self) -> bool | None:
+        """The ``Enabled`` flag of the result reuse by age configuration."""
         return self._result_reuse_enabled
 
     @property
     def result_reuse_minutes(self) -> int | None:
+        """The ``MaxAgeInMinutes`` of the result reuse by age configuration."""
         return self._result_reuse_minutes
 
     @property
     def managed_query_results_enabled(self) -> bool | None:
+        """The ``Enabled`` flag of the managed query results configuration."""
         return self._managed_query_results_enabled
 
     @property
     def managed_query_results_kms_key(self) -> str | None:
+        """The ``KmsKey`` of the managed query results encryption configuration."""
         return self._managed_query_results_kms_key
 
     @property
     def enable_s3_access_grants(self) -> bool | None:
+        """The ``EnableS3AccessGrants`` flag of the S3 Access Grants configuration."""
         return self._enable_s3_access_grants
 
     @property
     def create_user_level_prefix(self) -> bool | None:
+        """The ``CreateUserLevelPrefix`` flag of the S3 Access Grants configuration."""
         return self._create_user_level_prefix
 
     @property
     def s3_access_grants_authentication_type(self) -> str | None:
+        """The ``AuthenticationType`` of the S3 Access Grants configuration."""
         return self._s3_access_grants_authentication_type
 
 
@@ -357,6 +408,14 @@ class AthenaCalculationExecutionStatus:
     TERMINAL_STATES: tuple[str, ...] = (STATE_COMPLETED, STATE_FAILED, STATE_CANCELED)
 
     def __init__(self, response: dict[str, Any]) -> None:
+        """Initialize the calculation status from an Athena API response.
+
+        Args:
+            response: The API response containing ``Status`` and ``Statistics`` objects.
+
+        Raises:
+            DataError: If ``Status`` or ``Statistics`` is missing from the response.
+        """
         status = response.get("Status")
         if not status:
             raise DataError("KeyError `Status`")
@@ -373,26 +432,32 @@ class AthenaCalculationExecutionStatus:
 
     @property
     def state(self) -> str | None:
+        """The ``State`` of the calculation, such as ``RUNNING`` or ``COMPLETED``."""
         return self._state
 
     @property
     def state_change_reason(self) -> str | None:
+        """The ``StateChangeReason`` of the calculation status."""
         return self._state_change_reason
 
     @property
     def submission_date_time(self) -> datetime | None:
+        """The ``SubmissionDateTime`` of the calculation."""
         return self._submission_date_time
 
     @property
     def completion_date_time(self) -> datetime | None:
+        """The ``CompletionDateTime`` of the calculation."""
         return self._completion_date_time
 
     @property
     def dpu_execution_in_millis(self) -> int | None:
+        """The ``DpuExecutionInMillis`` statistic of the calculation."""
         return self._dpu_execution_in_millis
 
     @property
     def progress(self) -> str | None:
+        """The ``Progress`` statistic of the calculation."""
         return self._progress
 
 
@@ -412,6 +477,16 @@ class AthenaCalculationExecution(AthenaCalculationExecutionStatus):
     """
 
     def __init__(self, response: dict[str, Any]) -> None:
+        """Initialize the calculation execution from a ``GetCalculationExecution`` response.
+
+        Args:
+            response: The API response containing the calculation fields, ``Status``,
+                ``Statistics``, and an optional ``Result`` object.
+
+        Raises:
+            DataError: If ``Status``, ``Statistics``, ``CalculationExecutionId``,
+                or ``SessionId`` is missing from the response.
+        """
         super().__init__(response)
 
         self._calculation_id: str | None = response.get("CalculationExecutionId")
@@ -432,34 +507,42 @@ class AthenaCalculationExecution(AthenaCalculationExecutionStatus):
 
     @property
     def calculation_id(self) -> str | None:
+        """The ``CalculationExecutionId`` of the calculation."""
         return self._calculation_id
 
     @property
     def session_id(self) -> str | None:
+        """The ``SessionId`` of the session that ran the calculation."""
         return self._session_id
 
     @property
     def description(self) -> str | None:
+        """The ``Description`` of the calculation."""
         return self._description
 
     @property
     def working_directory(self) -> str | None:
+        """The ``WorkingDirectory`` of the calculation."""
         return self._working_directory
 
     @property
     def std_out_s3_uri(self) -> str | None:
+        """The ``StdOutS3Uri`` of the calculation result."""
         return self._std_out_s3_uri
 
     @property
     def std_error_s3_uri(self) -> str | None:
+        """The ``StdErrorS3Uri`` of the calculation result."""
         return self._std_error_s3_uri
 
     @property
     def result_s3_uri(self) -> str | None:
+        """The ``ResultS3Uri`` of the calculation result."""
         return self._result_s3_uri
 
     @property
     def result_type(self) -> str | None:
+        """The ``ResultType`` of the calculation result."""
         return self._result_type
 
 
@@ -495,6 +578,14 @@ class AthenaSessionStatus:
     STATE_FAILED: str = "FAILED"
 
     def __init__(self, response: dict[str, Any]) -> None:
+        """Initialize the session status from an Athena API response.
+
+        Args:
+            response: The API response containing ``SessionId`` and a ``Status`` object.
+
+        Raises:
+            DataError: If ``Status`` is missing from the response.
+        """
         self._session_id: str | None = response.get("SessionId")
 
         status = response.get("Status")
@@ -509,30 +600,37 @@ class AthenaSessionStatus:
 
     @property
     def session_id(self) -> str | None:
+        """The ``SessionId`` of the session."""
         return self._session_id
 
     @property
     def state(self) -> str | None:
+        """The ``State`` of the session, such as ``IDLE`` or ``BUSY``."""
         return self._state
 
     @property
     def state_change_reason(self) -> str | None:
+        """The ``StateChangeReason`` of the session status."""
         return self._state_change_reason
 
     @property
     def start_date_time(self) -> datetime | None:
+        """The ``StartDateTime`` of the session."""
         return self._start_date_time
 
     @property
     def last_modified_date_time(self) -> datetime | None:
+        """The ``LastModifiedDateTime`` of the session."""
         return self._last_modified_date_time
 
     @property
     def end_date_time(self) -> datetime | None:
+        """The ``EndDateTime`` of the session."""
         return self._end_date_time
 
     @property
     def idle_since_date_time(self) -> datetime | None:
+        """The ``IdleSinceDateTime`` of the session."""
         return self._idle_since_date_time
 
 
@@ -549,6 +647,14 @@ class AthenaDatabase:
     """
 
     def __init__(self, response):
+        """Initialize the database from an Athena API response.
+
+        Args:
+            response: A dictionary containing a ``Database`` object.
+
+        Raises:
+            DataError: If ``Database`` is missing from the response.
+        """
         database = response.get("Database")
         if not database:
             raise DataError("KeyError `Database`")
@@ -559,14 +665,17 @@ class AthenaDatabase:
 
     @property
     def name(self) -> str | None:
+        """The ``Name`` of the database."""
         return self._name
 
     @property
     def description(self) -> str | None:
+        """The ``Description`` of the database."""
         return self._description
 
     @property
     def parameters(self) -> dict[str, str]:
+        """The ``Parameters`` of the database, or an empty dictionary."""
         return self._parameters
 
 
@@ -582,20 +691,28 @@ class AthenaTableMetadataColumn:
     """
 
     def __init__(self, response):
+        """Initialize the column from an Athena ``Column`` object.
+
+        Args:
+            response: The ``Column`` object with ``Name``, ``Type``, and ``Comment``.
+        """
         self._name: str | None = response.get("Name")
         self._type: str | None = response.get("Type")
         self._comment: str | None = response.get("Comment")
 
     @property
     def name(self) -> str | None:
+        """The ``Name`` of the column."""
         return self._name
 
     @property
     def type(self) -> str | None:
+        """The ``Type`` of the column."""
         return self._type
 
     @property
     def comment(self) -> str | None:
+        """The ``Comment`` of the column."""
         return self._comment
 
 
@@ -612,20 +729,28 @@ class AthenaTableMetadataPartitionKey:
     """
 
     def __init__(self, response):
+        """Initialize the partition key from an Athena ``Column`` object.
+
+        Args:
+            response: The ``Column`` object with ``Name``, ``Type``, and ``Comment``.
+        """
         self._name: str | None = response.get("Name")
         self._type: str | None = response.get("Type")
         self._comment: str | None = response.get("Comment")
 
     @property
     def name(self) -> str | None:
+        """The ``Name`` of the partition key."""
         return self._name
 
     @property
     def type(self) -> str | None:
+        """The ``Type`` of the partition key."""
         return self._type
 
     @property
     def comment(self) -> str | None:
+        """The ``Comment`` of the partition key."""
         return self._comment
 
 
@@ -645,6 +770,14 @@ class AthenaTableMetadata:
     """
 
     def __init__(self, response):
+        """Initialize the table metadata from an Athena API response.
+
+        Args:
+            response: A dictionary containing a ``TableMetadata`` object.
+
+        Raises:
+            DataError: If ``TableMetadata`` is missing from the response.
+        """
         table_metadata = response.get("TableMetadata")
         if not table_metadata:
             raise DataError("KeyError `TableMetadata`")
@@ -668,50 +801,62 @@ class AthenaTableMetadata:
 
     @property
     def name(self) -> str | None:
+        """The ``Name`` of the table."""
         return self._name
 
     @property
     def create_time(self) -> datetime | None:
+        """The ``CreateTime`` of the table."""
         return self._create_time
 
     @property
     def last_access_time(self) -> datetime | None:
+        """The ``LastAccessTime`` of the table."""
         return self._last_access_time
 
     @property
     def table_type(self) -> str | None:
+        """The ``TableType`` of the table."""
         return self._table_type
 
     @property
     def columns(self) -> list[AthenaTableMetadataColumn]:
+        """The ``Columns`` of the table."""
         return self._columns
 
     @property
     def partition_keys(self) -> list[AthenaTableMetadataPartitionKey]:
+        """The ``PartitionKeys`` of the table."""
         return self._partition_keys
 
     @property
     def parameters(self) -> dict[str, str]:
+        """The ``Parameters`` of the table, or an empty dictionary."""
         return self._parameters
 
     @property
     def comment(self) -> str | None:
+        """The ``comment`` table parameter."""
         return self._parameters.get("comment")
 
     @property
     def location(self) -> str | None:
+        """The ``location`` table parameter."""
         return self._parameters.get("location")
 
     @property
     def input_format(self) -> str | None:
+        """The ``inputformat`` table parameter."""
         return self._parameters.get("inputformat")
 
     @property
     def output_format(self) -> str | None:
+        """The ``outputformat`` table parameter."""
         return self._parameters.get("outputformat")
 
     @property
     def row_format(self) -> str | None:
+        """The ``SERDE '<lib>'`` clause built from ``serde_serialization_lib``, or ``None``."""
         serde = self.serde_serialization_lib
         if serde:
             return f"SERDE '{serde}'"
@@ -719,6 +864,7 @@ class AthenaTableMetadata:
 
     @property
     def file_format(self) -> str | None:
+        """The ``INPUTFORMAT '...' OUTPUTFORMAT '...'`` clause, or ``None`` unless both are set."""
         input = self.input_format
         output = self.output_format
         if input and output:
@@ -727,10 +873,16 @@ class AthenaTableMetadata:
 
     @property
     def serde_serialization_lib(self) -> str | None:
+        """The ``serde.serialization.lib`` table parameter."""
         return self._parameters.get("serde.serialization.lib")
 
     @property
     def compression(self) -> str | None:
+        """The compression codec from the table parameters, or ``None``.
+
+        The first parameter present is used, in the order ``write.compression``,
+        ``serde.param.write.compression``, ``parquet.compress``, and ``orc.compress``.
+        """
         if "write.compression" in self._parameters:  # text or json
             return self._parameters["write.compression"]
         if "serde.param.write.compression" in self._parameters:  # text or json
@@ -743,6 +895,7 @@ class AthenaTableMetadata:
 
     @property
     def serde_properties(self) -> dict[str, str]:
+        """The ``serde.param.``-prefixed table parameters with the prefix removed."""
         return {
             k.replace("serde.param.", ""): v
             for k, v in self._parameters.items()
@@ -751,6 +904,7 @@ class AthenaTableMetadata:
 
     @property
     def table_properties(self) -> dict[str, str]:
+        """The table parameters that do not start with ``serde.param.``."""
         return {k: v for k, v in self._parameters.items() if not k.startswith("serde.param.")}
 
 
@@ -797,10 +951,26 @@ class AthenaFileFormat:
 
     @staticmethod
     def is_parquet(value: str) -> bool:
+        """Check whether a file format name is ``PARQUET``, ignoring case.
+
+        Args:
+            value: The file format name.
+
+        Returns:
+            True if the value is ``PARQUET``, False otherwise.
+        """
         return value.upper() == AthenaFileFormat.FILE_FORMAT_PARQUET
 
     @staticmethod
     def is_orc(value: str) -> bool:
+        """Check whether a file format name is ``ORC``, ignoring case.
+
+        Args:
+            value: The file format name.
+
+        Returns:
+            True if the value is ``ORC``, False otherwise.
+        """
         return value.upper() == AthenaFileFormat.FILE_FORMAT_ORC
 
 
@@ -846,6 +1016,15 @@ class AthenaRowFormatSerde:
 
     @staticmethod
     def is_parquet(value: str) -> bool:
+        """Check whether a ``SERDE '<lib>'`` row format uses the Parquet SerDe.
+
+        Args:
+            value: The row format string, such as the value of
+                ``AthenaTableMetadata.row_format``.
+
+        Returns:
+            True if the SerDe is ``ROW_FORMAT_SERDE_PARQUET``, False otherwise.
+        """
         match = AthenaRowFormatSerde.PATTERN_ROW_FORMAT_SERDE.search(value)
         if match:
             serde = match.group("serde")
@@ -855,6 +1034,15 @@ class AthenaRowFormatSerde:
 
     @staticmethod
     def is_orc(value: str) -> bool:
+        """Check whether a ``SERDE '<lib>'`` row format uses the ORC SerDe.
+
+        Args:
+            value: The row format string, such as the value of
+                ``AthenaTableMetadata.row_format``.
+
+        Returns:
+            True if the SerDe is ``ROW_FORMAT_SERDE_ORC``, False otherwise.
+        """
         match = AthenaRowFormatSerde.PATTERN_ROW_FORMAT_SERDE.search(value)
         if match:
             serde = match.group("serde")
@@ -911,6 +1099,15 @@ class AthenaCompression:
 
     @staticmethod
     def is_valid(value: str) -> bool:
+        """Check whether a value is a supported compression format, ignoring case.
+
+        Args:
+            value: The compression format name.
+
+        Returns:
+            True if the value matches one of the ``COMPRESSION_*`` constants,
+            False otherwise.
+        """
         return value.upper() in [
             AthenaCompression.COMPRESSION_BZIP2,
             AthenaCompression.COMPRESSION_DEFLATE,
@@ -963,6 +1160,15 @@ class AthenaPartitionTransform:
 
     @staticmethod
     def is_valid(value: str) -> bool:
+        """Check whether a value is a supported partition transform, ignoring case.
+
+        Args:
+            value: The partition transform name.
+
+        Returns:
+            True if the value matches one of the ``PARTITION_TRANSFORM_*`` constants,
+            False otherwise.
+        """
         return value.lower() in [
             AthenaPartitionTransform.PARTITION_TRANSFORM_YEAR,
             AthenaPartitionTransform.PARTITION_TRANSFORM_MONTH,

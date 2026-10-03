@@ -71,6 +71,23 @@ External-fork pull requests must not be run in the project's AWS integration CI.
 Do not submit an untested change expecting a maintainer to approve an AWS CI run to validate it.
 Checks that need no AWS access may still run, but their success does not establish integration coverage.
 
+## Write docstrings
+
+Code under `pyathena/` uses [Google-style docstrings](https://google.github.io/styleguide/pyguide.html#38-comments-and-docstrings).
+`just lint` checks them with ruff's pydocstyle rules.
+
+- Modules, packages, public classes, and public functions and methods have a docstring.
+  Describe arguments, return values, and raised exceptions in `Args:`, `Returns:`, and `Raises:` sections.
+- `__init__` describes the constructor arguments in its `Args:` section.
+- A property getter has a one-line docstring; its setter needs none.
+- Magic methods such as `__enter__` and `__iter__` need no docstring.
+- A method that overrides a base class method is decorated with `override` from `pyathena.util`.
+  It needs a docstring only when its behavior differs from the base method; otherwise the API reference shows the base method's docstring.
+  mypy reports a missing decorator, except on an unannotated property.
+- Overrides of fsspec methods are not decorated, because fsspec has no type information, so they need a docstring.
+- New or changed private functions and methods use the same style.
+  ruff does not require them to have a docstring, but checks the docstrings they have.
+
 ## Open a pull request
 
 Open a draft pull request with the repository's template completed.

@@ -97,6 +97,11 @@ class S3ClientError:
     }
 
     def __init__(self, error: botocore.exceptions.ClientError) -> None:
+        """Initialize the error from a botocore ``ClientError``.
+
+        Args:
+            error: The ``ClientError`` raised by the S3 client.
+        """
         error_info = error.response.get("Error", {})
         self._code: str = str(error_info.get("Code", ""))
         self._message: str = str(error_info.get("Message", error))
