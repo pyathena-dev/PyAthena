@@ -1430,6 +1430,18 @@ class AthenaDDLCompiler(DDLCompiler):
     def _get_table_properties_specification(
         self, dialect_opts: _DialectArgDict, connect_opts: Mapping[str, Any]
     ) -> str:
+        """Build the TBLPROPERTIES clause, including the compression property.
+
+        The compression property name follows the file format, matched
+        case-insensitively, or the row format's SerDe when no file format is set.
+
+        Args:
+            dialect_opts: The table's ``awsathena_*`` dialect options.
+            connect_opts: The connection options, used for unset dialect options.
+
+        Returns:
+            The TBLPROPERTIES clause, or an empty string if there are no properties.
+        """
         properties = self._get_table_properties(dialect_opts, connect_opts)
         if properties:
             if isinstance(properties, dict):
@@ -1444,9 +1456,9 @@ class AthenaDDLCompiler(DDLCompiler):
             file_format = self._get_file_format(dialect_opts, connect_opts)
             row_format = self._get_row_format(dialect_opts, connect_opts)
             if file_format:
-                if file_format == AthenaFileFormat.FILE_FORMAT_PARQUET:
+                if AthenaFileFormat.is_parquet(file_format):
                     table_properties.append(f"\t'parquet.compress' = '{compression}'")
-                elif file_format == AthenaFileFormat.FILE_FORMAT_ORC:
+                elif AthenaFileFormat.is_orc(file_format):
                     table_properties.append(f"\t'orc.compress' = '{compression}'")
                 else:
                     table_properties.append(f"\t'write.compress' = '{compression}'")
