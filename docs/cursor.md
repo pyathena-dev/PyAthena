@@ -216,10 +216,10 @@ NOTE: The cancel method of the [future object](https://docs.python.org/3/library
 
 ## AsyncDictCursor
 
-AsyncDIctCursor is an AsyncCursor that can retrieve the query execution result
+AsyncDictCursor is an AsyncCursor that can retrieve the query execution result
 as a dictionary type with column names and values.
 
-You can use the DictCursor by specifying the `cursor_class`
+You can use the AsyncDictCursor by specifying the `cursor_class`
 with the connect method or connection object.
 
 ```python
@@ -262,7 +262,7 @@ The basic usage is the same as the AsyncCursor.
 
 ```python
 from pyathena.connection import Connection
-from pyathena.cursor import DictCursor
+from pyathena.async_cursor import AsyncDictCursor
 
 cursor = Connection(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                     region_name="us-west-2").cursor(AsyncDictCursor)

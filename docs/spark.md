@@ -305,7 +305,7 @@ Athena returns the earlier calculation for a reused token, even when the code di
 
 ## AsyncSparkCursor
 
-AsyncSparkCursor is an AsyncCursor that can handle Spark applications.
+AsyncSparkCursor is an asynchronous Spark cursor that, like AsyncCursor, returns [future objects](https://docs.python.org/3/library/concurrent.futures.html#future-objects).
 
 You can use the AsyncSparkCursor by specifying the `cursor_class`
 with the connect method or connection object.
@@ -401,6 +401,7 @@ with conn.cursor() as cursor:
 ```
 
 Standard output and standard error can be retrieved by passing this object to the cursor class.
+`get_std_out()` and `get_std_error()` return None instead of a future when the calculation has no standard output or standard error location.
 
 ```python
 from pyathena import connect
