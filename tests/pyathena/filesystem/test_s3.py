@@ -30,6 +30,7 @@ from fsspec.implementations.dirfs import DirFileSystem
 import pyathena
 from pyathena.filesystem import register_s3_filesystem
 from pyathena.filesystem.s3 import S3File, S3FileSystem
+from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import S3Object, S3ObjectType, S3StorageClass
 from pyathena.util import RetryConfig
@@ -886,6 +887,165 @@ class TestS3FileSystem:
             max_workers=2,
             s3_additional_kwargs={"StorageClass": "STANDARD_IA", "ContentType": "text/csv"},
         )
+
+    @staticmethod
+    def _record_requests(fs, precondition_failed=False):
+        # Record the S3 requests of the filesystem by operation name. With
+        # precondition_failed, the conditional writes fail as S3 fails them
+        # when an object exists.
+        requests = []
+
+        def call(method, **request):
+            name = method if isinstance(method, str) else method._extract_mock_name()
+            name = name.split(".")[-1]
+            requests.append((name, request))
+            if precondition_failed and name in {"put_object", "complete_multipart_upload"}:
+                error = botocore.exceptions.ClientError(
+                    {
+                        "Error": {
+                            "Code": "PreconditionFailed",
+                            "Message": "At least one of the pre-conditions you specified "
+                            "did not hold",
+                            "Condition": "If-None-Match",
+                        },
+                        "ResponseMetadata": {"HTTPStatusCode": 412},
+                    },
+                    name,
+                )
+                raise S3ClientError(error).os_error from error
+            return {"UploadId": "uploadid", "ETag": '"e"'}
+
+        fs._call.side_effect = call
+        return requests
+
+    @pytest.mark.parametrize(
+        ("size", "expected"),
+        [
+            # An empty file is created by touch().
+            (0, ["put_object"]),
+            (1, ["put_object"]),
+            (
+                S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE + 1,
+                ["create_multipart_upload", "upload_part", "complete_multipart_upload"],
+            ),
+        ],
+    )
+    def test_open_exclusive_create(self, size, expected):
+        # GH-972: "xb" used to replace an existing object. The upload is
+        # committed only if no object exists, with IfNoneMatch on the
+        # requests that accept it.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs.exists = mock.MagicMock(return_value=False)
+        requests = self._record_requests(fs)
+
+        with fs.open("s3://bucket/key", "xb", block_size=fs.MULTIPART_UPLOAD_MIN_PART_SIZE) as f:
+            f.write(b"a" * size)
+
+        fs.exists.assert_called_once()
+        assert [name for name, _ in requests] == expected
+        for name, request in requests:
+            conditional = name in {"put_object", "complete_multipart_upload"}
+            assert request.get("IfNoneMatch") == ("*" if conditional else None)
+
+    def test_open_exclusive_create_existing(self):
+        # GH-972: an existing object is found when the file is opened, before
+        # any data is uploaded.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs.exists = mock.MagicMock(return_value=True)
+
+        with pytest.raises(FileExistsError):
+            fs.open("s3://bucket/key", "xb")
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("size", "expected"),
+        [
+            (1, ["put_object"]),
+            (
+                S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE + 1,
+                [
+                    "create_multipart_upload",
+                    "upload_part",
+                    "complete_multipart_upload",
+                    "abort_multipart_upload",
+                ],
+            ),
+        ],
+    )
+    def test_open_exclusive_create_created_since(self, size, expected):
+        # GH-972: an object created after the file was opened is not
+        # replaced. S3 rejects the conditional write, which raises
+        # FileExistsError, and the multipart upload is aborted.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs.exists = mock.MagicMock(return_value=False)
+        requests = self._record_requests(fs, precondition_failed=True)
+
+        with (
+            pytest.raises(FileExistsError),
+            fs.open("s3://bucket/key", "xb", block_size=fs.MULTIPART_UPLOAD_MIN_PART_SIZE) as f,
+        ):
+            f.write(b"a" * size)
+
+        assert [name for name, _ in requests] == expected
+
+    @pytest.mark.parametrize(("mode", "open_mode"), [("overwrite", "wb"), ("create", "xb")])
+    def test_put_file_mode(self, tmp_path, mode, open_mode):
+        # GH-972: fsspec's mode argument used to be sent to PutObject. It
+        # selects the mode of the remote file instead.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs.exists = mock.MagicMock(return_value=False)
+        requests = self._record_requests(fs)
+        lpath = tmp_path / "data"
+        lpath.write_bytes(b"a")
+
+        with mock.patch.object(fs, "open", wraps=fs.open) as open_:
+            fs.put_file(str(lpath), "s3://bucket/key", mode=mode)
+
+        assert open_.call_args.args == ("s3://bucket/key", open_mode)
+        ((name, request),) = requests
+        assert name == "put_object"
+        assert "mode" not in request
+        assert request.get("IfNoneMatch") == ("*" if mode == "create" else None)
+
+    def test_put_file_create_existing(self, tmp_path):
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs.exists = mock.MagicMock(return_value=True)
+        lpath = tmp_path / "data"
+        lpath.write_bytes(b"a")
+
+        with pytest.raises(FileExistsError):
+            fs.put_file(str(lpath), "s3://bucket/key", mode="create")
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("size", "conditional"),
+        [
+            (1, "put_object"),
+            (S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE + 1, "complete_multipart_upload"),
+        ],
+    )
+    def test_pipe_file_create_created_since(self, size, conditional):
+        # GH-972: pipe_file(mode="create") also writes conditionally, on the
+        # single-request path as on the buffered one, so that an object
+        # created after the existence check is not replaced.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs.default_block_size = fs.MULTIPART_UPLOAD_MIN_PART_SIZE
+        fs.exists = mock.MagicMock(return_value=False)
+        requests = self._record_requests(fs, precondition_failed=True)
+
+        with pytest.raises(FileExistsError):
+            fs.pipe_file("s3://bucket/key", b"a" * size, mode="create")
+
+        fs.exists.assert_called_once()
+        assert [name for name, request in requests if request.get("IfNoneMatch") == "*"] == [
+            conditional
+        ]
 
     @pytest.mark.parametrize("fail", [False, True])
     def test_open_parameters_named_as_request_fields(self, fail):
@@ -2708,6 +2868,34 @@ class TestS3FileSystem:
         )
         fs.pipe(path, data)
         assert fs.cat(path) == data
+
+    def test_exclusive_create(self, fs, tmp_path):
+        # GH-972: "xb" and put_file(mode="create") used to replace an
+        # existing object.
+        prefix = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_exclusive_create/{uuid.uuid4()}"
+        )
+        path = f"{prefix}/existing"
+        with fs.open(path, "xb") as f:
+            f.write(b"old")
+        lpath = tmp_path / "data"
+        lpath.write_bytes(b"new")
+        with pytest.raises(FileExistsError):
+            fs.open(path, "xb")
+        with pytest.raises(FileExistsError):
+            fs.put_file(str(lpath), path, mode="create")
+        assert fs.cat(path) == b"old"
+
+        # S3 rejects the conditional write of an object created after the
+        # file was opened.
+        path = f"{prefix}/created_since"
+        f = fs.open(path, "xb")
+        f.write(b"new")
+        fs.pipe_file(path, b"old")
+        with pytest.raises(FileExistsError):
+            f.close()
+        assert fs.cat(path) == b"old"
 
     def test_pipe_file_create_mode_and_kwargs(self, fs):
         path = (

@@ -1569,7 +1569,8 @@ class S3FileSystem(AbstractFileSystem):
             path: S3 path (s3://bucket/key) to write to.
             value: The bytes to write.
             mode: "overwrite" (default) or "create". With "create", raise
-                FileExistsError when the object already exists.
+                FileExistsError when the object already exists, including
+                one created during the write, which is not replaced.
             **kwargs: Additional parameters passed to the PutObject API
                 (e.g., ContentType, StorageClass) on the single-request
                 path. The ``block_size``, ``max_workers``, and
@@ -1578,7 +1579,8 @@ class S3FileSystem(AbstractFileSystem):
 
         Raises:
             FileExistsError: If the mode is "create" and the path already
-                exists.
+                exists, or an object is created at it before the write is
+                committed.
             ValueError: If the path does not contain a key or specifies a
                 version, or if the data takes more than
                 ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
@@ -1590,15 +1592,20 @@ class S3FileSystem(AbstractFileSystem):
             # Defer to the buffered open() path, which keeps the
             # deferred-commit semantics of fsspec transactions and uploads
             # large data as a parallel multipart upload.
-            super().pipe_file(path, value, mode=mode, **kwargs)
+            with self.open(path, "xb" if mode == "create" else "wb", **kwargs) as f:
+                f.write(value)
             return
         bucket, key, version_id = self.parse_path(path)
         if version_id:
             raise ValueError("Cannot write to the file with the version specified.")
         if not key:
             raise ValueError("Cannot write to a bucket.")
-        if mode == "create" and self.exists(path):
-            raise FileExistsError(path)
+        if mode == "create":
+            # Checked up front, as open() does in "xb" mode, and with
+            # IfNoneMatch for an object created since.
+            if self.exists(path):
+                raise FileExistsError(path)
+            kwargs["IfNoneMatch"] = "*"
         if not isinstance(value, bytes):
             # Accept bytes-like values (bytearray, memoryview) as the
             # buffered path does.
@@ -1754,7 +1761,14 @@ class S3FileSystem(AbstractFileSystem):
                 return b""
             raise
 
-    def put_file(self, lpath: str, rpath: str, callback=_DEFAULT_CALLBACK, **kwargs):
+    def put_file(
+        self,
+        lpath: str,
+        rpath: str,
+        callback=_DEFAULT_CALLBACK,
+        mode: str = "overwrite",
+        **kwargs,
+    ):
         """Upload a local file to S3.
 
         Uploads a file from the local filesystem to an S3 location. Supports
@@ -1765,11 +1779,18 @@ class S3FileSystem(AbstractFileSystem):
             lpath: Local file path to upload.
             rpath: S3 destination path (s3://bucket/key).
             callback: Progress callback for tracking upload progress.
+            mode: "overwrite" (default) or "create". With "create", the file
+                is written as with ``open()`` in ``xb`` mode: raise
+                FileExistsError when the object already exists, including
+                one created during the upload, which is not replaced.
             **kwargs: Additional S3 parameters (e.g., ContentType, StorageClass).
                 The ``block_size``, ``max_workers``, and ``s3_additional_kwargs``
                 parameters of ``open()`` are also accepted.
 
         Raises:
+            FileExistsError: If the mode is "create" and the path already
+                exists, or an object is created at it before the upload is
+                committed.
             ValueError: If the file takes more than
                 ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
 
@@ -1802,7 +1823,7 @@ class S3FileSystem(AbstractFileSystem):
         with (
             self.open(
                 rpath,
-                "wb",
+                "xb" if mode == "create" else "wb",
                 block_size=block_size,
                 max_workers=max_workers,
                 s3_additional_kwargs=s3_additional_kwargs,
@@ -2618,12 +2639,15 @@ class S3File(AbstractBufferedFile):
         existing object smaller than ``MULTIPART_UPLOAD_MIN_PART_SIZE`` is
         read into the write buffer; a larger one is copied with
         ``UploadPartCopy`` as the first parts of a multipart upload, whatever
-        the block size.
+        the block size. In exclusive-create mode, the object must not exist
+        when the file is opened, and the upload is committed with
+        ``IfNoneMatch="*"`` so that it does not replace an object created in
+        the meantime.
 
         Args:
             fs: The filesystem that the file belongs to.
             path: S3 path (s3://bucket/key) of the file.
-            mode: The file mode, such as ``rb``, ``wb`` or ``ab``.
+            mode: The file mode: ``rb``, ``wb``, ``ab``, or ``xb``.
             version_id: The version ID to read. Must match the version ID in
                 the path if both are given. A version cannot be given, in
                 either form, for writing or appending.
@@ -2647,6 +2671,8 @@ class S3File(AbstractBufferedFile):
                 which take precedence over ``s3_additional_kwargs``.
 
         Raises:
+            FileExistsError: If an object exists at the path in
+                exclusive-create mode.
             FileNotFoundError: If no object exists at the path when reading,
                 including when the path is a prefix.
             ValueError: If the path has no key, the version IDs do not match,
@@ -2720,6 +2746,12 @@ class S3File(AbstractBufferedFile):
                 # Too small to be a part of a multipart upload: rewritten
                 # from the buffer.
                 append_data = fs.cat(path)
+        elif "x" in mode:
+            # Checked up front so that no data is uploaded for an existing
+            # object, and on commit with IfNoneMatch for one created since.
+            if fs.exists(path):
+                raise FileExistsError(path)
+            self.s3_additional_kwargs.update({"IfNoneMatch": "*"})
 
         self._executor: S3Executor = executor or S3ThreadPoolExecutor(max_workers=max_workers)
         super().__init__(
@@ -2909,6 +2941,8 @@ class S3File(AbstractBufferedFile):
         completion fails. Invalidates the cache of the path afterwards.
 
         Raises:
+            FileExistsError: If an object was created at the path after the
+                file was opened in exclusive-create mode.
             RuntimeError: If parts were submitted but no multipart upload is
                 initialized.
         """
