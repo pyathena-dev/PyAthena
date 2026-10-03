@@ -819,7 +819,8 @@ class S3FileSystem(AbstractFileSystem):
 
         Args:
             path: S3 path to check (e.g., "s3://bucket" or "s3://bucket/key").
-            **kwargs: Additional arguments (unused).
+            **kwargs: Additional arguments including:
+                refresh: If True, bypass the cache and query S3.
 
         Returns:
             True if the path exists, False otherwise.
@@ -829,6 +830,7 @@ class S3FileSystem(AbstractFileSystem):
             >>> fs.exists("s3://my-bucket/file.txt")
             >>> fs.exists("s3://my-bucket/")
         """
+        refresh = kwargs.pop("refresh", False)
         path = self._strip_protocol(path)
         if path in ["", "/"]:
             # The root always exists.
@@ -836,22 +838,22 @@ class S3FileSystem(AbstractFileSystem):
         bucket, key, _ = self.parse_path(path)
         if key:
             try:
-                if self._ls_from_cache(path):
+                if not refresh and self._ls_from_cache(path):
                     return True
-                info = self.info(path)
+                info = self.info(path, refresh=refresh)
                 return bool(info)
             except FileNotFoundError:
                 return False
-        elif self.dircache.get(bucket, False):
-            return True
-        else:
+        if not refresh:
+            if self.dircache.get(bucket, False):
+                return True
             try:
                 if self._ls_from_cache(bucket):
                     return True
             except FileNotFoundError:
                 pass
-            file = self._head_bucket(bucket)
-            return bool(file)
+        file = self._head_bucket(bucket, refresh=refresh)
+        return bool(file)
 
     def rm_file(self, path: str, **kwargs) -> None:
         """Delete an S3 object with DeleteObject.

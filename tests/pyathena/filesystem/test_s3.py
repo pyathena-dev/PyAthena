@@ -302,6 +302,26 @@ class TestS3FileSystem:
             fs.info("s3://bucket", refresh=True)
         assert not fs.exists("s3://bucket")
 
+    def test_exists_refresh_bypasses_cache(self):
+        fs = self._make_fs()
+        fs.dircache["bucket/key"] = self._file_object("key")
+        fs.dircache["bucket"] = fs._directory_object("bucket", None)
+        fs.dircache[""] = [fs._directory_object("bucket", None)]
+
+        def call(method, **kwargs):
+            if method in (fs._client.head_object, fs._client.head_bucket):
+                raise FileNotFoundError
+            return {}
+
+        fs._call.side_effect = call
+
+        assert fs.exists("s3://bucket/key")
+        assert fs.exists("s3://bucket")
+        fs._call.assert_not_called()
+
+        assert not fs.exists("s3://bucket/key", refresh=True)
+        assert not fs.exists("s3://bucket", refresh=True)
+
     def test_mkdir_creates_bucket(self):
         fs = self._make_fs()
         fs.allow_bucket_creation = True
