@@ -81,6 +81,10 @@ through the buffered file path. Inside an
 [fsspec transaction](https://filesystem-spec.readthedocs.io/en/latest/features.html#transactions),
 writes are deferred until the transaction commits and are discarded on rollback.
 
+The block size for writing, given by the `block_size` argument of `open` or by the
+filesystem's `default_block_size`, must be between 5 MiB and 5 GiB, inclusive, the part
+size limits of a multipart upload. Otherwise, `open` raises `ValueError`.
+
 ## Error translation
 
 S3 error responses are translated into standard Python exceptions, so filesystem
