@@ -306,33 +306,43 @@ class TestAioS3FileSystem:
         ]
 
     @pytest.mark.asyncio
-    async def test_rm_cancel_invalidates_cache_after_requests(self):
-        # The request threads keep running after _rm() is cancelled, so the
-        # cache is invalidated when they finish.
+    async def test_rm_cancel_invalidates_cache_after_each_request(self):
+        # The request threads keep running after _rm() is cancelled, so each
+        # request invalidates the cache of its objects when it finishes.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
-        started = threading.Event()
-        release = threading.Event()
+        started = {"b1": threading.Event(), "b2": threading.Event()}
+        release = {"b1": threading.Event(), "b2": threading.Event()}
 
         def call(method, **request):
-            started.set()
-            release.wait(10)
+            started[request["Bucket"]].set()
+            release[request["Bucket"]].wait(10)
             return {}
 
+        async def wait_invalidated(path):
+            for _ in range(100):
+                if path not in fs.dircache:
+                    return
+                await asyncio.sleep(0.01)
+
         fs._sync_fs._call = call
-        fs.dircache["bucket/a"] = []
-        task = asyncio.create_task(fs._rm("s3://bucket/a"))
-        await asyncio.to_thread(started.wait, 10)
+        task = asyncio.create_task(fs._rm(["s3://b1/a", "s3://b2/b"]))
+        for event in started.values():
+            await asyncio.to_thread(event.wait, 10)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        fs.dircache["bucket/a"] = []
+        # Cached while the requests still run, e.g. by a concurrent info().
+        fs.dircache["b1/a"] = []
+        fs.dircache["b2/b"] = []
 
-        release.set()
-        for _ in range(100):
-            if "bucket/a" not in fs.dircache:
-                break
-            await asyncio.sleep(0.01)
-        assert "bucket/a" not in fs.dircache
+        release["b1"].set()
+        await wait_invalidated("b1/a")
+        assert "b1/a" not in fs.dircache
+        assert "b2/b" in fs.dircache
+
+        release["b2"].set()
+        await wait_invalidated("b2/b")
+        assert "b2/b" not in fs.dircache
 
     @pytest.mark.asyncio
     async def test_rm_maxdepth(self):

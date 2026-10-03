@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import mimetypes
@@ -932,12 +933,7 @@ class S3FileSystem(AbstractFileSystem):
             OSError: If S3 could not delete some of the objects.
         """
         paths = self._expand_delete_paths(path, recursive=recursive, maxdepth=maxdepth)
-        try:
-            self._delete_objects(paths, **kwargs)
-        finally:
-            # A failed request may follow requests that deleted objects.
-            for p in paths:
-                self.invalidate_cache(p)
+        self._delete_objects(paths, **kwargs)
 
     def _expand_delete_paths(
         self, path: str | list[str], recursive: bool = False, maxdepth: int | None = None
@@ -1024,10 +1020,7 @@ class S3FileSystem(AbstractFileSystem):
 
         max_workers = max_workers if max_workers else self.max_workers
         with self._create_executor(max_workers=max_workers) as executor:
-            fs = [
-                executor.submit(self._call, self._client.delete_objects, **request)
-                for request in requests
-            ]
+            fs = [executor.submit(self._delete_objects_request, request) for request in requests]
         # The executor has waited for every request, also after a failure.
         self._raise_delete_objects_errors(requests, [f.exception() or f.result() for f in fs])
 
@@ -1070,6 +1063,40 @@ class S3FileSystem(AbstractFileSystem):
             for i in range(0, len(objects), self.DELETE_OBJECTS_MAX_KEYS)
         ]
 
+    def _delete_objects_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Send a DeleteObjects request and invalidate the cache of its objects.
+
+        The cache is invalidated when the request has finished, also when it
+        fails, because S3 may have deleted some of the objects.
+
+        Args:
+            request: The DeleteObjects request.
+
+        Returns:
+            The DeleteObjects response.
+        """
+        try:
+            return self._call(self._client.delete_objects, **request)
+        finally:
+            for object_ in request["Delete"]["Objects"]:
+                self.invalidate_cache(self._delete_objects_path(request["Bucket"], object_))
+
+    @staticmethod
+    def _delete_objects_path(bucket: str, object_: dict[str, Any]) -> str:
+        """Build the path of a DeleteObjects object or error entry.
+
+        Args:
+            bucket: The bucket of the request.
+            object_: An entry with ``Key`` and an optional ``VersionId``.
+
+        Returns:
+            The path, with a ``?versionId=`` query if the entry has a version.
+        """
+        path = f"{bucket}/{object_['Key']}"
+        if object_.get("VersionId"):
+            path += f"?versionId={object_['VersionId']}"
+        return path
+
     @staticmethod
     def _raise_delete_objects_errors(
         requests: list[dict[str, Any]], results: list[dict[str, Any] | BaseException]
@@ -1096,9 +1123,7 @@ class S3FileSystem(AbstractFileSystem):
                 exceptions.append(result)
                 continue
             for error in result.get("Errors", []):
-                path = f"{request['Bucket']}/{error.get('Key')}"
-                if error.get("VersionId"):
-                    path += f"?versionId={error['VersionId']}"
+                path = S3FileSystem._delete_objects_path(request["Bucket"], error)
                 errors.append(f"{path} ({error.get('Code')}: {error.get('Message')})")
         message = f"Failed to delete objects: {', '.join(sorted(errors))}" if errors else None
         if exceptions:
@@ -2177,10 +2202,13 @@ class S3FileSystem(AbstractFileSystem):
                         for name in ("versionId", "versionID", "versionid", "version_id")
                     )
                 for cache_path in cache_paths:
-                    self.dircache.pop(cache_path, None)
                     # _ls_dirs caches listings under (path, delimiter).
-                    for delimiter in ("/", ""):
-                        self.dircache.pop((cache_path, delimiter), None)
+                    for cache_key in (cache_path, (cache_path, "/"), (cache_path, "")):
+                        # DirCache.pop() reads and then deletes the entry, so
+                        # it raises KeyError when the request threads of rm()
+                        # invalidate a shared parent at once; del does not.
+                        with contextlib.suppress(KeyError):
+                            del self.dircache[cache_key]
                 # A version-qualified path continues with the path without
                 # the version.
                 path = self._strip_protocol(base) if query else self._parent(path)
