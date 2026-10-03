@@ -1557,6 +1557,27 @@ class S3FileSystem(AbstractFileSystem):
                 f"{min_block_size} bytes."
             )
 
+    @staticmethod
+    def _write_and_close(f: S3File, value: bytes | bytearray | memoryview) -> None:
+        """Write the whole value to a file opened for writing and close it.
+
+        Unlike a ``with`` block, a failed write closes the file without
+        committing it, so the existing object is left unchanged.
+
+        Args:
+            f: The file to write to.
+            value: The bytes to write.
+        """
+        try:
+            if isinstance(value, memoryview) and not value.c_contiguous:
+                # The buffer of the file cannot write a non-contiguous memoryview.
+                value = value.tobytes()
+            f.write(value)
+        except BaseException:
+            f._close_without_commit()
+            raise
+        f.close()
+
     def pipe_file(
         self, path: str, value: bytes | bytearray | memoryview, mode: str = "overwrite", **kwargs
     ) -> None:
@@ -1566,7 +1587,8 @@ class S3FileSystem(AbstractFileSystem):
         instead of the inherited ``open()`` + ``write()`` path. Larger data
         and writes inside an fsspec transaction go through the buffered
         path, which uploads the data as a parallel multipart upload and
-        keeps the deferred-commit semantics of transactions.
+        keeps the deferred-commit semantics of transactions. A write that
+        fails on that path leaves the existing object unchanged.
 
         Args:
             path: S3 path (s3://bucket/key) to write to.
@@ -1595,8 +1617,9 @@ class S3FileSystem(AbstractFileSystem):
             # Defer to the buffered open() path, which keeps the
             # deferred-commit semantics of fsspec transactions and uploads
             # large data as a parallel multipart upload.
-            with self.open(path, "xb" if mode == "create" else "wb", **kwargs) as f:
-                f.write(value)
+            self._write_and_close(
+                self.open(path, "xb" if mode == "create" else "wb", **kwargs), value
+            )
             return
         bucket, key, version_id = self.parse_path(path)
         if version_id:
@@ -2819,6 +2842,28 @@ class S3File(AbstractBufferedFile):
             # The executor is shut down even if the final flush fails.
             self._executor.shutdown()
 
+    def _close_without_commit(self) -> None:
+        """Close the file without uploading the written data.
+
+        Drops the buffered data, so that neither close() nor a deferred
+        commit() uploads it, and aborts the multipart upload, if any. An
+        abort failure is logged instead of raised, so it does not mask the
+        error that the caller is handling. Even if the abort fails or is
+        interrupted, commit() does not complete the upload afterwards. The
+        executor is shut down here, as fsspec does not close a closed file
+        again when it is garbage collected.
+        """
+        self.buffer = None
+        self.closed = True
+        try:
+            self.discard()
+        except Exception:
+            _logger.exception(f"Failed to abort multipart upload to s3://{self.bucket}/{self.key}.")
+        finally:
+            self.multipart_upload = None
+            self.multipart_upload_parts = []
+            self._executor.shutdown()
+
     def _initiate_upload(self) -> None:
         if not self.append_block and self.tell() < self.blocksize:
             # Files smaller than block size in size cannot be multipart uploaded.
@@ -2909,23 +2954,7 @@ class S3File(AbstractBufferedFile):
 
             for upload in uploads:
                 if part_number >= self.fs.MULTIPART_UPLOAD_MAX_PARTS:
-                    # Close the file without the buffered data, so that
-                    # neither close() nor commit() uploads it, and abort the
-                    # upload. An abort failure does not mask this error, and
-                    # commit() does not complete the upload afterwards. The
-                    # executor is shut down here, as fsspec does not close a
-                    # closed file again when it is garbage collected.
-                    self.buffer = None
-                    self.closed = True
-                    try:
-                        self.discard()
-                    except Exception:
-                        _logger.exception(
-                            f"Failed to abort multipart upload to s3://{self.bucket}/{self.key}."
-                        )
-                        self.multipart_upload = None
-                        self.multipart_upload_parts = []
-                    self._executor.shutdown()
+                    self._close_without_commit()
                     raise ValueError(
                         f"Cannot upload more than {self.fs.MULTIPART_UPLOAD_MAX_PARTS} "
                         f"parts to s3://{self.bucket}/{self.key} with a block size of "
