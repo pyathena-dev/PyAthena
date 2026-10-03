@@ -237,6 +237,41 @@ class TestS3FileSystem:
         assert fs._ls_dirs("bucket/dir", delimiter="") == [cached]
         fs._call.assert_not_called()
 
+    def test_ls_dirs_empty_refresh_evicts_cached_listing(self):
+        fs = self._make_fs()
+        fs.dircache[("bucket/dir", "/")] = [
+            S3Object(
+                init={"Key": "dir/deleted"},
+                type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+                bucket="bucket",
+                key="dir/deleted",
+            )
+        ]
+        fs._call.return_value = {}
+
+        assert fs._ls_dirs("bucket/dir", refresh=True) == []
+        # The next listing must not return the deleted object from the cache.
+        fs._call.reset_mock()
+        assert fs._ls_dirs("bucket/dir") == []
+        fs._call.assert_called_once()
+
+    def test_find_withdirs_does_not_modify_cached_listing(self):
+        fs = self._make_fs()
+        fs.dircache[("bucket/dir", "")] = [
+            S3Object(
+                init={"Key": "dir/sub/file"},
+                type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+                bucket="bucket",
+                key="dir/sub/file",
+            )
+        ]
+
+        expected = ["bucket/dir/sub", "bucket/dir/sub/file"]
+        assert sorted(fs.find("s3://bucket/dir", withdirs=True)) == expected
+        assert sorted(fs.find("s3://bucket/dir", withdirs=True)) == expected
+        assert fs.find("s3://bucket/dir") == ["bucket/dir/sub/file"]
+        fs._call.assert_not_called()
+
     def test_mkdir_creates_bucket(self):
         fs = self._make_fs()
         fs.allow_bucket_creation = True

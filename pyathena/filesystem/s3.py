@@ -406,7 +406,8 @@ class S3FileSystem(AbstractFileSystem):
     ) -> list[S3Object]:
         """List the objects and common prefixes under a path.
 
-        A complete listing of the path is cached under ``(path, delimiter)``.
+        A complete, non-empty listing of the path is cached under
+        ``(path, delimiter)``, and an empty one evicts it.
         ``invalidate_cache`` drops it when the path or a path under it is
         invalidated.
 
@@ -464,8 +465,11 @@ class S3FileSystem(AbstractFileSystem):
             next_token = response.get("NextContinuationToken")
             if not next_token:
                 break
-        if use_cache and files:
-            self.dircache[cache_key] = files
+        if use_cache:
+            if files:
+                self.dircache[cache_key] = files
+            else:
+                self.dircache.pop(cache_key, None)
         return files
 
     def ls(
@@ -753,7 +757,8 @@ class S3FileSystem(AbstractFileSystem):
 
         # If withdirs is True, we need to derive directories from file paths
         if withdirs:
-            files.extend(self._extract_parent_directories(files, bucket, key))
+            # Build a new list; files may be the cached listing.
+            files = files + self._extract_parent_directories(files, bucket, key)
 
         # Filter directories if withdirs is False (default)
         if withdirs is False or withdirs is None:
