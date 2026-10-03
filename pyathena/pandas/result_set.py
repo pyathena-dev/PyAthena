@@ -564,7 +564,11 @@ class AthenaPandasResultSet(AthenaResultSet):
                 source: str | IOBase = self.output_location
                 binary_columns = self._configure_binary_csv_read(read_csv_kwargs, pd.read_csv)
                 if binary_columns:
-                    storage_options = read_csv_kwargs.pop("storage_options", None)
+                    # Given storage_options, even None, open the file through fsspec
+                    # as pandas does.
+                    storage_options = None
+                    if "storage_options" in read_csv_kwargs:
+                        storage_options = read_csv_kwargs.pop("storage_options") or {}
                     source = self._csv_stream = stack.enter_context(
                         self._open_binary_csv_stream(binary_columns, storage_options)
                     )

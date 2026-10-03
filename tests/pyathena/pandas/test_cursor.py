@@ -256,23 +256,40 @@ class TestPandasCursor:
         if not pandas_cursor.result_set.is_unload:
             assert pandas_cursor.result_set._csv_stream.closed
 
-    def test_csv_storage_options(self, pandas_cursor):
-        # Given storage_options, pandas opens the CSV output through fsspec with them.
+    @pytest.mark.parametrize(
+        ("query", "expected", "binary"),
+        [
+            ("SELECT * FROM one_row", [(1,)], False),
+            ("SELECT X'01' AS value", [(b"\x01",)], True),
+        ],
+        ids=["plain", "binary"],
+    )
+    @pytest.mark.parametrize("with_options", [False, True], ids=["none", "options"])
+    def test_csv_storage_options(self, pandas_cursor, query, expected, binary, with_options):
+        # Given storage_options, even None, the CSV output is opened through fsspec
+        # with them, as pandas does, instead of the result set's filesystem.
+        storage_options = (
+            {
+                "connection": pandas_cursor.connection,
+                "default_cache_type": "none",
+                "skip_instance_cache": True,
+            }
+            if with_options
+            else None
+        )
         with patch.object(
-            S3FileSystem, "__init__", autospec=True, side_effect=S3FileSystem.__init__
-        ) as init:
-            pandas_cursor.execute(
-                "SELECT * FROM one_row",
-                storage_options={
-                    "connection": pandas_cursor.connection,
-                    "default_cache_type": "none",
-                    "skip_instance_cache": True,
-                },
-            )
-            assert pandas_cursor.fetchall() == [(1,)]
-        assert init.call_count == 2
-        assert init.call_args.kwargs["default_cache_type"] == "none"
-        assert pandas_cursor.result_set._csv_stream is None
+            S3FileSystem, "open", autospec=True, side_effect=S3FileSystem.open
+        ) as open_:
+            pandas_cursor.execute(query, storage_options=storage_options)
+            assert pandas_cursor.fetchall() == expected
+        file_systems = [c.args[0] for c in open_.call_args_list]
+        assert not [fs for fs in file_systems if fs is pandas_cursor.result_set._fs]
+        if with_options:
+            assert file_systems
+            assert all(fs.default_cache_type == "none" for fs in file_systems)
+        if not binary:
+            # pandas opens and closes the file itself.
+            assert pandas_cursor.result_set._csv_stream is None
 
     @pytest.mark.parametrize(
         ("pandas_cursor", "parquet_engine", "chunksize"),
