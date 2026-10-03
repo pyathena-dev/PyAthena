@@ -1920,12 +1920,11 @@ class S3FileSystem(AbstractFileSystem):
     ) -> tuple[dict[str, Any], str | None, int | None]:
         """Build the CreateMultipartUpload parameters of a multipart copy.
 
-        The source is read with HeadObject. Without a given version, the
-        version that it reports in a bucket with versioning enabled is the
-        version to copy, so that the parts, the tags and the annotations come
-        from the same object even if the source is replaced during the copy.
-        The ``null`` version of a bucket without versioning or with
-        versioning suspended is not pinned, since it is replaced by a write.
+        The source is read with HeadObject. Without a given version, a
+        version ID other than ``null`` that it reports is the version to
+        copy, so that the parts, the tags and the annotations come from the
+        same object even if the source is replaced during the copy. A
+        ``null`` version is not pinned, since a write replaces it.
 
         No multipart request accepts the directives of CopyObject, so they
         are implemented here as CopyObject applies them. With the COPY
