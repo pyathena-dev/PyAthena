@@ -77,10 +77,10 @@ class AsyncPandasCursor(AsyncCursor):
         unload: bool = False,
         engine: str = "auto",
         chunksize: int | None = None,
-        block_size: int | None = None,
-        cache_type: str | None = None,
         result_reuse_enable: bool = False,
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
+        block_size: int | None = None,
+        cache_type: str | None = None,
         auto_optimize_chunksize: bool = False,
         **kwargs,
     ) -> None:
@@ -103,10 +103,10 @@ class AsyncPandasCursor(AsyncCursor):
             engine: Parsing engine (``auto``, ``c``, ``python``, or ``pyarrow``).
             chunksize: Number of rows per DataFrame chunk when reading CSV results.
                 If set, it takes precedence over ``auto_optimize_chunksize``.
-            block_size: Default block size of the S3 filesystem that reads the results.
-            cache_type: Default cache type of the S3 filesystem that reads the results.
             result_reuse_enable: Whether to enable Athena query result reuse.
             result_reuse_minutes: Maximum age of a reused query result in minutes.
+            block_size: Default block size of the S3 filesystem that reads the results.
+            cache_type: Default cache type of the S3 filesystem that reads the results.
             auto_optimize_chunksize: Whether to choose a chunk size from the size of the
                 CSV result file when ``chunksize`` is None.
             **kwargs: Other cursor arguments, such as ``connection`` and ``converter``,
