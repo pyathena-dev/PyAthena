@@ -83,6 +83,9 @@ block size (5 MiB by default); larger data is uploaded as a parallel multipart u
 through the buffered file path. Inside an
 [fsspec transaction](https://filesystem-spec.readthedocs.io/en/latest/features.html#transactions),
 writes are deferred until the transaction commits and are discarded on rollback.
+With the `compression` argument (a codec of fsspec, or `"infer"` from the extension of
+the path), `pipe`/`pipe_file` compress the data before uploading it, and the sizes in
+this section apply to the compressed data.
 
 The block size for writing, given by the `block_size` argument of `open` or by the
 filesystem's `default_block_size`, must be between 5 MiB and 5 GiB, inclusive, the part
