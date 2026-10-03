@@ -1918,17 +1918,17 @@ class S3FileSystem(AbstractFileSystem):
         if path is None:
             self.dircache.clear()
         else:
-            # _head_object caches a version-qualified path under its own name.
-            self.dircache.pop(self._strip_protocol(path), None)
-            # parse_path does not accept "?" in keys, so it starts the
-            # versionId query.
-            path = self._strip_protocol(path.split("?", 1)[0])
+            path = self._strip_protocol(path)
             while path:
                 self.dircache.pop(path, None)
                 # _ls_dirs caches listings under (path, delimiter).
                 for delimiter in ("/", ""):
                     self.dircache.pop((path, delimiter), None)
-                path = self._parent(path)
+                # parse_path does not accept "?" in keys, so it starts the
+                # versionId query. A version-qualified path continues with
+                # the path without the version.
+                unversioned = self._strip_protocol(path.split("?", 1)[0])
+                path = unversioned if unversioned != path else self._parent(path)
 
     def _ls_from_cache(self, path: str) -> list[S3Object] | S3Object | None:
         """Check the dircache for a cached entry of the path.

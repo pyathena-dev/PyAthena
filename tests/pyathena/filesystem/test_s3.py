@@ -224,6 +224,7 @@ class TestS3FileSystem:
         ("path", "cache_key"),
         [
             ("s3://bucket/a/c.txt?versionId=v1", "bucket/a/c.txt?versionId=v1"),
+            (Path("bucket/a/c.txt?versionId=v1"), "bucket/a/c.txt?versionId=v1"),
             # A directory marker object keeps the trailing slash before the query.
             ("s3://bucket/a/c.txt/?versionId=v1", "bucket/a/c.txt/?versionId=v1"),
         ],
@@ -232,6 +233,7 @@ class TestS3FileSystem:
         fs = self._make_fs()
         invalidated = [
             cache_key,
+            (cache_key, "/"),
             "bucket/a/c.txt",
             ("bucket/a", "/"),
             ("bucket", "/"),
@@ -243,6 +245,20 @@ class TestS3FileSystem:
 
         fs.invalidate_cache(path)
         assert list(fs.dircache) == kept
+
+    def test_rm_file_version_invalidates_object_path(self):
+        fs = self._make_fs()
+        fs.dircache["bucket/a/c.txt"] = self._file_object("a/c.txt")
+
+        fs.rm_file("s3://bucket/a/c.txt?versionId=v1")
+        fs._call.assert_called_once_with(
+            fs._client.delete_object, Bucket="bucket", Key="a/c.txt", VersionId="v1"
+        )
+
+        # The deleted version was the only one: HeadObject and the prefix
+        # listing find nothing, instead of the cached object answering.
+        fs._call.side_effect = [FileNotFoundError("bucket/a/c.txt"), {}]
+        assert not fs.exists("s3://bucket/a/c.txt")
 
     @pytest.mark.parametrize(
         ("prefix", "next_token"),
@@ -1699,21 +1715,6 @@ class TestS3FileSystem:
         assert version.size == 4
         # An unversioned bucket reports the "null" version.
         assert version.version_id
-
-    def test_rm_file_version_invalidates_object_cache(self, fs):
-        path = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_rm_file_version/{uuid.uuid4()}"
-        )
-        fs.pipe(path, b"data")
-        # Cache the HeadObject result of the object path.
-        assert fs.info(path)["size"] == 4
-        # An unversioned bucket reports the "null" version, and deleting it
-        # deletes the object.
-        version_id = fs.object_version_info(path)[0].version_id
-
-        fs.rm_file(f"{path}?versionId={version_id}")
-        assert not fs.exists(path)
 
     @pytest.mark.parametrize("fs", [{"version_aware": True}], indirect=True)
     def test_version_aware_read(self, fs):
