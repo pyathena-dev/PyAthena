@@ -1004,6 +1004,17 @@ class TestAioS3FileSystem:
         result = await fs._find(dir_)
         assert len(result) == 4
 
+        # Each slash in the prefix counts as one level
+        assert await fs._find(dir_, maxdepth=1, prefix="level1/") == []
+        assert await fs._find(dir_, maxdepth=2, prefix="level1/") == [
+            fs._strip_protocol(f"{dir_}/level1/file1.txt")
+        ]
+
+        # An object path returns the object itself
+        assert await fs._find(f"{dir_}/file0.txt", maxdepth=1) == [
+            fs._strip_protocol(f"{dir_}/file0.txt")
+        ]
+
     @pytest.mark.asyncio
     async def test_find_withdirs(self, fs):
         dir_ = (
@@ -1025,6 +1036,8 @@ class TestAioS3FileSystem:
         # Test withdirs=True
         result = await fs._find(dir_, withdirs=True)
         assert len(result) > 4  # Files and directories
+        assert fs._strip_protocol(dir_) in result
+        assert fs._strip_protocol(dir_) in await fs._find(dir_, maxdepth=1, withdirs=True)
 
         # Verify directories are included
         dirs = [r for r in result if not r.endswith(".txt")]
@@ -1057,6 +1070,10 @@ class TestAioS3FileSystem:
         assert fs._strip_protocol(path) in fs.glob(f"{dir_}/nested/*")
         assert fs._strip_protocol(path) in fs.glob(f"{dir_}/nested/test_*")
         assert fs._strip_protocol(path) in fs.glob(f"{dir_}/*/*")
+        assert fs.glob(f"{dir_}/nested/**") == [
+            fs._strip_protocol(f"{dir_}/nested"),
+            fs._strip_protocol(path),
+        ]
 
         with pytest.raises(ValueError):  # noqa: PT011
             fs.glob("*")

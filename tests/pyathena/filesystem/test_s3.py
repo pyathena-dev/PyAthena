@@ -26,6 +26,7 @@ from botocore.stub import Stubber
 from fsspec import Callback
 from fsspec.dircache import DirCache
 from fsspec.implementations.dirfs import DirFileSystem
+from fsspec.implementations.memory import MemoryFileSystem
 
 import pyathena
 from pyathena.filesystem import register_s3_filesystem
@@ -735,7 +736,7 @@ class TestS3FileSystem:
         fs = self._make_fs()
         fs.dircache[("bucket/dir", "")] = [self._file_object("dir/sub/file")]
 
-        expected = ["bucket/dir/sub", "bucket/dir/sub/file"]
+        expected = ["bucket/dir", "bucket/dir/sub", "bucket/dir/sub/file"]
         assert sorted(fs.find("s3://bucket/dir", withdirs=True)) == expected
         assert sorted(fs.find("s3://bucket/dir", withdirs=True)) == expected
         assert fs.find("s3://bucket/dir") == ["bucket/dir/sub/file"]
@@ -780,6 +781,7 @@ class TestS3FileSystem:
 
         assert fs.find("s3://bucket/dir", maxdepth=1) == ["bucket/dir/direct"]
         assert sorted(fs.find("s3://bucket/dir", maxdepth=1, withdirs=True)) == [
+            "bucket/dir",
             "bucket/dir/direct",
             "bucket/dir/sub",
         ]
@@ -791,6 +793,124 @@ class TestS3FileSystem:
             "bucket/dir/direct",
             "bucket/dir/sub/deep/file",
             "bucket/dir/sub/nested",
+        ]
+
+    FIND_KEYS = ("dir/direct", "dir/sub/nested", "dir/sub/deep/file")
+
+    @staticmethod
+    def _serve_keys(fs, keys):
+        # Answer the ListObjectsV2 and HeadObject requests of "bucket" from
+        # the given keys.
+        def call(method, **kwargs):
+            if method is fs._client.head_object:
+                if kwargs["Key"] not in keys:
+                    raise FileNotFoundError(kwargs["Key"])
+                return {"ContentLength": 0}
+            prefix, delimiter = kwargs["Prefix"], kwargs["Delimiter"]
+            contents, prefixes = [], set()
+            for key in sorted(keys):
+                if not key.startswith(prefix):
+                    continue
+                rest = key[len(prefix) :]
+                if delimiter and delimiter in rest:
+                    prefixes.add(prefix + rest.split(delimiter)[0] + delimiter)
+                else:
+                    contents.append({"Key": key})
+            return {
+                "Contents": contents,
+                "CommonPrefixes": [{"Prefix": p} for p in sorted(prefixes)],
+                "KeyCount": len(contents) + len(prefixes),
+            }
+
+        fs._call.side_effect = call
+
+    @staticmethod
+    def _memory_fs(keys):
+        # Build an fsspec MemoryFileSystem with the keys under "/bucket".
+        memory = MemoryFileSystem(skip_instance_cache=True)
+        memory.store = {}
+        memory.pseudo_dirs = [""]
+        for key in keys:
+            memory.pipe(f"/bucket/{key}", b"")
+        return memory
+
+    @pytest.mark.parametrize(
+        ("path", "maxdepth", "withdirs"),
+        [
+            ("dir", None, True),
+            ("dir", None, False),
+            ("dir", 1, True),
+            ("dir", 2, True),
+            ("dir", 1, False),
+            ("dir/sub", 1, True),
+            ("dir/direct", None, True),
+            ("dir/direct", 1, True),
+            ("dir/direct", 1, False),
+            ("missing", None, True),
+            ("missing", 1, True),
+        ],
+    )
+    def test_find_matches_fsspec(self, path, maxdepth, withdirs):
+        fs = self._make_fs()
+        self._serve_keys(fs, self.FIND_KEYS)
+        memory = self._memory_fs(self.FIND_KEYS)
+
+        expected = [p.lstrip("/") for p in memory.find(f"/bucket/{path}", maxdepth, withdirs)]
+        assert sorted(fs.find(f"s3://bucket/{path}", maxdepth, withdirs)) == expected
+
+    @pytest.mark.parametrize("pattern", ["dir/**", "dir/*", "dir/*/*", "dir/s*", "dir/**/file"])
+    def test_glob_matches_fsspec(self, pattern):
+        fs = self._make_fs()
+        self._serve_keys(fs, self.FIND_KEYS)
+        memory = self._memory_fs(self.FIND_KEYS)
+
+        expected = [p.lstrip("/") for p in memory.glob(f"/bucket/{pattern}")]
+        assert sorted(fs.glob(f"s3://bucket/{pattern}")) == expected
+
+    def test_find_withdirs_lists_root_without_extra_requests(self):
+        fs = self._make_fs()
+        self._serve_keys(fs, self.FIND_KEYS)
+
+        assert "bucket/dir" in fs.find("s3://bucket/dir", withdirs=True)
+        assert fs._call.call_count == 1
+        fs._call.reset_mock()
+        assert "bucket/dir" in fs.find("s3://bucket/dir", maxdepth=1, withdirs=True)
+        assert fs._call.call_count == 1
+
+    def test_find_prefix_counts_levels_from_path(self):
+        fs = self._make_fs()
+        self._serve_keys(fs, self.FIND_KEYS)
+
+        # Nothing directly under dir/ starts with "sub/deep/".
+        assert fs.find("s3://bucket/dir", maxdepth=1, prefix="sub/deep/") == []
+        assert fs.find("s3://bucket/dir", maxdepth=2, prefix="sub/deep/") == []
+        assert fs.find("s3://bucket/dir", maxdepth=3, prefix="sub/deep/") == [
+            "bucket/dir/sub/deep/file"
+        ]
+        assert sorted(fs.find("s3://bucket/dir", maxdepth=2, prefix="sub/")) == [
+            "bucket/dir/sub/nested"
+        ]
+        # The directories above the prefix do not start with it, with or
+        # without maxdepth.
+        expected = [
+            "bucket/dir",
+            "bucket/dir/sub/deep",
+            "bucket/dir/sub/deep/file",
+            "bucket/dir/sub/nested",
+        ]
+        assert sorted(fs.find("s3://bucket/dir", maxdepth=3, prefix="sub/", withdirs=True)) == (
+            expected
+        )
+        assert sorted(fs.find("s3://bucket/dir", prefix="sub/", withdirs=True)) == expected
+
+    @pytest.mark.parametrize("maxdepth", [None, 1])
+    def test_find_object_path_ignores_prefix(self, maxdepth):
+        fs = self._make_fs()
+        self._serve_keys(fs, self.FIND_KEYS)
+
+        # As in fsspec, the object itself is returned when nothing is listed.
+        assert fs.find("s3://bucket/dir/direct", maxdepth=maxdepth, prefix="x") == [
+            "bucket/dir/direct"
         ]
 
     def test_refresh_evicts_cached_object_and_bucket_not_found(self):
@@ -3433,6 +3553,15 @@ class TestS3FileSystem:
         result = fs.find(dir_)
         assert len(result) == 4
 
+        # Each slash in the prefix counts as one level
+        assert fs.find(dir_, maxdepth=1, prefix="level1/") == []
+        assert fs.find(dir_, maxdepth=2, prefix="level1/") == [
+            fs._strip_protocol(f"{dir_}/level1/file1.txt")
+        ]
+
+        # An object path returns the object itself
+        assert fs.find(f"{dir_}/file0.txt", maxdepth=1) == [fs._strip_protocol(f"{dir_}/file0.txt")]
+
     def test_find_withdirs(self, fs):
         dir_ = f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/filesystem/test_find_withdirs"
         # Create directory structure with files
@@ -3450,6 +3579,8 @@ class TestS3FileSystem:
         # Test withdirs=True
         result = fs.find(dir_, withdirs=True)
         assert len(result) > 4  # Files and directories
+        assert fs._strip_protocol(dir_) in result
+        assert fs._strip_protocol(dir_) in fs.find(dir_, maxdepth=1, withdirs=True)
 
         # Verify directories are included
         dirs = [r for r in result if not r.endswith(".txt")]
@@ -3478,6 +3609,10 @@ class TestS3FileSystem:
         assert fs._strip_protocol(path) in fs.glob(f"{dir_}/nested/*")
         assert fs._strip_protocol(path) in fs.glob(f"{dir_}/nested/test_*")
         assert fs._strip_protocol(path) in fs.glob(f"{dir_}/*/*")
+        assert fs.glob(f"{dir_}/nested/**") == [
+            fs._strip_protocol(f"{dir_}/nested"),
+            fs._strip_protocol(path),
+        ]
 
         with pytest.raises(ValueError):  # noqa: PT011
             fs.glob("*")

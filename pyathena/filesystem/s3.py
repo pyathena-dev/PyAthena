@@ -829,7 +829,7 @@ class S3FileSystem(AbstractFileSystem):
         raise FileNotFoundError(path)
 
     def _extract_parent_directories(
-        self, files: list[S3Object], bucket: str, base_key: str | None
+        self, files: list[S3Object], bucket: str, base_key: str | None, prefix: str = ""
     ) -> list[S3Object]:
         """Extract parent directory objects from file paths.
 
@@ -840,6 +840,8 @@ class S3FileSystem(AbstractFileSystem):
             files: List of S3Object instances representing files.
             bucket: S3 bucket name.
             base_key: Base key path to calculate relative paths from.
+            prefix: Key prefix, relative to the base key, that the paths of the
+                directories relative to the base key must start with.
 
         Returns:
             List of S3Object instances representing directories.
@@ -861,11 +863,9 @@ class S3FileSystem(AbstractFileSystem):
                 # Get all parent directories
                 parts = relative_path.split("/")
                 for i in range(1, len(parts)):
-                    if base_key:
-                        dir_path = base_key + "/" + "/".join(parts[:i])
-                    else:
-                        dir_path = "/".join(parts[:i])
-                    dirs.add(dir_path)
+                    relative_dir = "/".join(parts[:i])
+                    if relative_dir.startswith(prefix):
+                        dirs.add(f"{base_key}/{relative_dir}" if base_key else relative_dir)
 
         return [self._directory_object(bucket, dir_path) for dir_path in dirs]
 
@@ -899,53 +899,80 @@ class S3FileSystem(AbstractFileSystem):
             raise ValueError("Cannot traverse all files in S3.")
         bucket, key, _ = self.parse_path(path)
         prefix = kwargs.pop("prefix", "")
-        # Keep refresh in kwargs so that the recursive calls also refresh.
-        refresh = kwargs.get("refresh", False)
+        refresh = kwargs.pop("refresh", False)
 
-        # When maxdepth is specified, use a recursive approach with delimiter
         if maxdepth is not None:
-            result: list[S3Object] = []
+            # The entries listed with the prefix lie as many levels further
+            # below the path as the prefix has slashes.
+            levels = maxdepth - prefix.count("/")
+            files = (
+                self._find_levels(path, levels, withdirs, prefix=prefix, refresh=refresh)
+                if levels >= 1
+                else []
+            )
+        else:
+            files = self._ls_dirs(path, prefix=prefix, delimiter="", refresh=refresh)
+            # S3 doesn't return directory entries without a delimiter, so the
+            # directories are derived from the listed keys.
+            if withdirs:
+                # Build a new list; files may be the cached listing.
+                files = files + self._extract_parent_directories(files, bucket, key, prefix)
 
-            # List files and directories at current level
-            current_items = self._ls_dirs(path, prefix=prefix, delimiter="/", refresh=refresh)
-
-            for item in current_items:
-                if item.type == S3ObjectType.S3_OBJECT_TYPE_FILE:
-                    # Add files
-                    result.append(item)
-                elif item.type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
-                    # Add directory if withdirs is True
-                    if withdirs:
-                        result.append(item)
-
-                    # Recursively explore subdirectory if depth allows
-                    if maxdepth > 1:
-                        sub_path = f"s3://{bucket}/{item.key}"
-                        sub_results = self._find(
-                            sub_path, maxdepth=maxdepth - 1, withdirs=withdirs, **kwargs
-                        )
-                        result.extend(sub_results)
-
-            return result
-
-        # For unlimited depth, use the original approach (get all files at once)
-        files = self._ls_dirs(path, prefix=prefix, delimiter="", refresh=refresh)
-        if not files and key:
+        if files:
+            # Something is listed below the path, so the path is a directory,
+            # which fsspec includes with the directories.
+            if withdirs:
+                files = [self._directory_object(bucket, key), *files]
+        elif key:
+            # As in fsspec, the path itself is returned if it is an object.
             try:
                 files = [self.info(path, refresh=refresh)]
             except FileNotFoundError:
                 files = []
 
-        # If withdirs is True, we need to derive directories from file paths
-        if withdirs:
-            # Build a new list; files may be the cached listing.
-            files = files + self._extract_parent_directories(files, bucket, key)
-
-        # Filter directories if withdirs is False (default)
-        if withdirs is False or withdirs is None:
+        if not withdirs:
             files = [f for f in files if f.type != S3ObjectType.S3_OBJECT_TYPE_DIRECTORY]
-
         return files
+
+    def _find_levels(
+        self,
+        path: str,
+        maxdepth: int,
+        withdirs: bool | None,
+        prefix: str = "",
+        refresh: bool = False,
+    ) -> list[S3Object]:
+        """List the objects below a path level by level with ``Delimiter="/"``.
+
+        Args:
+            path: S3 path to search under.
+            maxdepth: Number of levels to list, at least 1.
+            withdirs: Whether to include directories in the result.
+            prefix: Key prefix, relative to the path, to filter the first
+                level by.
+            refresh: If True, bypass the cache and list from S3.
+
+        Returns:
+            The objects found, and the directories if ``withdirs`` is True.
+        """
+        bucket, _, _ = self.parse_path(path)
+        result: list[S3Object] = []
+        for item in self._ls_dirs(path, prefix=prefix, delimiter="/", refresh=refresh):
+            if item.type == S3ObjectType.S3_OBJECT_TYPE_FILE:
+                result.append(item)
+            elif item.type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
+                if withdirs:
+                    result.append(item)
+                if maxdepth > 1:
+                    result.extend(
+                        self._find_levels(
+                            f"s3://{bucket}/{item.key}",
+                            maxdepth - 1,
+                            withdirs,
+                            refresh=refresh,
+                        )
+                    )
+        return result
 
     def find(
         self,
@@ -959,7 +986,9 @@ class S3FileSystem(AbstractFileSystem):
 
         Recursively searches for files under the specified path, with optional
         depth limiting and directory inclusion. Uses efficient S3 list operations
-        with delimiter handling for performance.
+        with delimiter handling for performance. As in fsspec, the result
+        includes the path itself if it is a directory and withdirs is True, or
+        if it is an object and nothing is listed below it.
 
         Args:
             path: S3 path to search under (e.g., "s3://bucket/prefix").
@@ -970,8 +999,9 @@ class S3FileSystem(AbstractFileSystem):
             detail: If True, return dict of {path: S3Object}; if False, return list of paths.
             **kwargs: Additional arguments including:
                 prefix: Key prefix, relative to the path, to filter the listed keys
-                    by. Without maxdepth, if nothing is listed and the path itself is
-                    an object, that object is returned regardless of the prefix.
+                    by. Each slash in the prefix counts as one level of maxdepth.
+                    With withdirs, only the directories whose paths relative to the
+                    path start with the prefix are included.
                 refresh: If True, bypass the cache and list from S3.
 
         Returns:
