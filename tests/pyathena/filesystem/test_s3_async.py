@@ -7,6 +7,7 @@ import uuid
 from datetime import UTC, datetime
 from itertools import chain
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import fsspec
@@ -129,6 +130,41 @@ class TestAioS3FileSystem:
 
         with pytest.raises(ValueError, match="Invalid S3 path format"):
             AioS3FileSystem.parse_path("s3a://bucket/path/to/obj?foo=bar")
+
+    @pytest.mark.parametrize("max_workers", [1, 4])
+    @pytest.mark.asyncio
+    async def test_copy_object_with_multipart_upload_part_sizes(self, max_workers):
+        # GH-951: the parts are within the S3 part size limits whatever the
+        # number of workers; a single worker used to copy the whole object
+        # as one part larger than 5 GiB.
+        fs = AioS3FileSystem(
+            connection=mock.MagicMock(), max_workers=max_workers, skip_instance_cache=True
+        )
+        sync_fs = fs._sync_fs
+        sync_fs._create_multipart_upload = mock.MagicMock(
+            return_value=SimpleNamespace(upload_id="uploadid")
+        )
+        sync_fs._upload_part_copy = mock.MagicMock(
+            side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
+        )
+        sync_fs._complete_multipart_upload = mock.MagicMock()
+
+        await fs._copy_object_with_multipart_upload(
+            bucket1="bucket",
+            key1="src",
+            size1=5 * 2**30 + 2**20,
+            bucket2="bucket",
+            key2="dst",
+        )
+
+        parts = sorted(
+            (c.kwargs["part_number"], c.kwargs["copy_source_ranges"])
+            for c in sync_fs._upload_part_copy.call_args_list
+        )
+        assert parts == [
+            (1, (0, 5 * 2**29 + 2**19)),
+            (2, (5 * 2**29 + 2**19, 5 * 2**30 + 2**20)),
+        ]
 
     @pytest.fixture(scope="class")
     def fs(self, request):
