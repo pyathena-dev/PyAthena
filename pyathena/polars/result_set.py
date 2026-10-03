@@ -537,15 +537,15 @@ class AthenaPolarsResultSet(AthenaResultSet):
         method for accessing results with PolarsCursor.
 
         Note:
-            When chunksize is set, calling this method will collect the chunks that
-            the fetch methods and iter_chunks() have not yet read into a single
-            DataFrame, loading them all into memory, and a later call returns an
-            empty DataFrame. Use iter_chunks() for memory-efficient processing of
-            large datasets.
+            When chunksize is set and the result file is read in chunks, calling this
+            method will collect the chunks that the fetch methods and iter_chunks()
+            have not yet read into a single DataFrame, loading them all into memory,
+            and a later call returns an empty DataFrame. Use iter_chunks() for
+            memory-efficient processing of large datasets.
 
         Returns:
-            Polars DataFrame containing all query results. Without chunksize, it is
-            the same DataFrame on every call.
+            Polars DataFrame containing all query results. When the result is not
+            read in chunks, it is the same DataFrame on every call.
 
         Example:
             >>> cursor = connection.cursor(PolarsCursor)
@@ -565,8 +565,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
         interoperability with other Arrow-compatible tools and libraries.
 
         Returns:
-            Apache Arrow Table containing all query results. When chunksize is set,
-            it contains the chunks that have not yet been read, as with as_polars().
+            Apache Arrow Table containing all query results. When the result file is
+            read in chunks, it contains the chunks that have not yet been read, as
+            with as_polars().
 
         Raises:
             ImportError: If pyarrow is not installed.
@@ -674,9 +675,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
         When chunksize is specified, it yields DataFrames in chunks using lazy
         evaluation for memory-efficient processing. These chunks come from the same
         iterator as the fetch methods, so a chunk that one of them reads is not
-        available to the other. When chunksize is not specified, each call returns
-        a new iterator that yields the entire result as a single DataFrame, and the
-        fetch methods keep their position.
+        available to the other. When chunksize is not specified, or the result has
+        no result file to read in chunks, each call returns a new iterator that
+        yields the entire result as a single DataFrame, and the fetch methods keep
+        their position.
 
         Returns:
             PolarsDataFrameIterator that yields Polars DataFrames for each chunk

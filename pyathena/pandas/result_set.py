@@ -868,12 +868,12 @@ class AthenaPandasResultSet(AthenaResultSet):
         """Iterate over result chunks as pandas DataFrames.
 
         This method provides an iterator interface for processing large result sets.
-        When chunksize is specified, or ``auto_optimize_chunksize`` chose a chunk size
-        for a large CSV result, it yields DataFrames in chunks for memory-efficient
-        processing. These chunks come from the same iterator as the fetch methods,
-        so a chunk that one of them reads is not available to the other. Otherwise,
-        each call returns a new iterator that yields the entire result as a single
-        DataFrame, and the fetch methods keep their position.
+        When a CSV result is read in chunks, because chunksize is specified or
+        ``auto_optimize_chunksize`` chose a chunk size, it yields DataFrames in chunks
+        for memory-efficient processing. These chunks come from the same iterator as
+        the fetch methods, so a chunk that one of them reads is not available to the
+        other. Otherwise, each call returns a new iterator that yields the entire
+        result as a single DataFrame, and the fetch methods keep their position.
 
         Returns:
             PandasDataFrameIterator that yields pandas DataFrames for each chunk
