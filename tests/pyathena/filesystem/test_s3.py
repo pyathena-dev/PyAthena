@@ -423,6 +423,21 @@ class TestS3FileSystem:
         with pytest.raises(ValueError, match="version"):
             fs.pipe_file("s3://bucket/key?versionId=12345abcde", b"data")
 
+    def test_pipe_file_small_drops_max_workers(self):
+        fs = self._make_fs()
+        fs._put_object = mock.MagicMock()
+
+        # max_workers is an open() parameter and is not sent to PutObject.
+        fs.pipe_file("s3://bucket/key", b"data", max_workers=2)
+        fs._put_object.assert_called_once_with(bucket="bucket", key="key", body=b"data")
+
+    def test_open_max_workers(self):
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+
+        with fs.open("s3://bucket/key", "wb", max_workers=2) as f:
+            assert f.max_workers == 2
+
     def test_finish_multipart_upload(self):
         fs = self._make_fs()
         fs._complete_multipart_upload = mock.MagicMock()
