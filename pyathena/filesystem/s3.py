@@ -2298,14 +2298,15 @@ class S3FileSystem(AbstractFileSystem):
         upload_id: str,
         futures: list[Future[S3MultipartUploadPart]],
         request_kwargs: Mapping[str, Any] | None = None,
+        abort: bool = True,
     ) -> S3CompleteMultipartUpload:
         """Collect the uploaded parts and complete the multipart upload.
 
         When any part or the completion fails, or the wait for them is
         interrupted, the parts that have not started are cancelled, the
         running ones are waited for, and the multipart upload is aborted so
-        that no incomplete upload or part is left behind. The original error
-        is then re-raised.
+        that no incomplete upload or part is left behind, unless ``abort`` is
+        false. The original error is then re-raised.
 
         Args:
             bucket: S3 bucket name.
@@ -2315,6 +2316,8 @@ class S3FileSystem(AbstractFileSystem):
             request_kwargs: Parameters of the upload, such as
                 ``RequestPayer`` or the SSE-C parameters; the completion and
                 the abort receive those that they accept.
+            abort: Whether to abort the multipart upload on failure. A caller
+                that keeps the upload to abort it itself passes false.
 
         Returns:
             S3CompleteMultipartUpload of the completed upload.
@@ -2332,6 +2335,8 @@ class S3FileSystem(AbstractFileSystem):
                 **self._get_operation_kwargs("complete_multipart_upload", request_kwargs),
             )
         except BaseException:
+            if not abort:
+                raise
             # A part that is still uploading when the upload is aborted may
             # be stored after the abort, so wait for the parts that could not
             # be cancelled first.
@@ -3869,8 +3874,9 @@ class S3File(AbstractBufferedFile):
         Creates an empty object if nothing was written, uploads the buffered
         data with PutObject if no multipart upload part was submitted, and
         otherwise completes the multipart upload, which is aborted if the
-        completion fails or is interrupted. Invalidates the cache of the path
-        afterwards.
+        completion fails or is interrupted. If the abort also fails, the
+        upload is kept so that :meth:`discard` can abort it. Invalidates the
+        cache of the path afterwards.
 
         Raises:
             FileExistsError: If an object was created at the path after the
@@ -3904,14 +3910,20 @@ class S3File(AbstractBufferedFile):
                     upload_id=cast(str, self.multipart_upload.upload_id),
                     futures=self.multipart_upload_parts,
                     request_kwargs=self.s3_additional_kwargs,
+                    abort=False,
                 )
-            except Exception:
-                # The multipart upload has been aborted by the helper;
-                # prevent discard() from aborting it again. An interrupt may
-                # have stopped the helper before the abort, so the upload is
-                # kept for discard() then.
-                self.multipart_upload = None
-                self.multipart_upload_parts = []
+            except BaseException:
+                # discard() keeps the upload if the abort fails or is
+                # interrupted, so that a later discard(), as a transaction
+                # calls after a failed commit(), retries the abort. An abort
+                # failure is logged so that it does not mask the original
+                # error.
+                try:
+                    self.discard()
+                except Exception:
+                    _logger.exception(
+                        f"Failed to abort multipart upload to s3://{self.bucket}/{self.key}."
+                    )
                 raise
 
         self.fs.invalidate_cache(self.path)

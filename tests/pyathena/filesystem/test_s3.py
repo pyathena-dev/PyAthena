@@ -3106,6 +3106,26 @@ class TestS3FileSystem:
             UploadId="uploadid",
         )
 
+    def test_finish_multipart_upload_without_abort(self):
+        # A caller that aborts the upload itself, as S3File.commit() does,
+        # gets the original error with the parts and the upload left alone.
+        fs = self._make_fs()
+        fs._complete_multipart_upload = mock.MagicMock()
+        failed: Future[SimpleNamespace] = Future()
+        failed.set_exception(RuntimeError("upload failed"))
+        pending: Future[SimpleNamespace] = Future()
+
+        with pytest.raises(RuntimeError, match="upload failed"):
+            fs._finish_multipart_upload(
+                bucket="bucket",
+                key="key",
+                upload_id="uploadid",
+                futures=[failed, pending],
+                abort=False,
+            )
+        assert not pending.cancelled()
+        fs._call.assert_not_called()
+
     def test_finish_multipart_upload_abort_failure_does_not_mask_the_original_error(self):
         fs = self._make_fs()
         fs._complete_multipart_upload = mock.MagicMock()
@@ -5526,21 +5546,33 @@ class TestS3File:
         waited.assert_called_once_with([running])
         assert pending.cancelled()
 
-    @pytest.mark.parametrize(("error", "aborts"), [(RuntimeError, 0), (KeyboardInterrupt, 1)])
-    def test_commit_failure_and_discard(self, error, aborts):
-        # GH-1014: an error from _finish_multipart_upload() follows its
-        # abort, so a later discard(), as a transaction calls after a failed
-        # commit(), does not abort the upload again. An interrupt may have
-        # stopped it before the abort, so the upload is kept for discard().
+    @pytest.mark.parametrize("abort_fails", [False, True])
+    @pytest.mark.parametrize("error", [RuntimeError, KeyboardInterrupt])
+    def test_commit_failure_and_discard(self, error, abort_fails):
+        # GH-1014: a failed or interrupted completion is aborted by commit(),
+        # so a later discard(), as a transaction calls after a failed
+        # commit(), does not abort the upload again. GH-945: if the abort
+        # also fails, the upload is kept so that discard() aborts it.
         file = self._make_multipart_write_file(b"x" * 16, autocommit=False)
         file._upload_chunk(final=True)
-        file.fs._finish_multipart_upload.side_effect = error("failed")
+        file.fs._finish_multipart_upload.side_effect = functools.partial(
+            S3FileSystem._finish_multipart_upload, file.fs
+        )
+        file.fs._complete_multipart_upload.side_effect = error("complete failed")
+        if abort_fails:
+            file.fs._call.side_effect = [PermissionError("abort failed"), None]
 
-        with pytest.raises(error):
+        # The abort failure is logged, and the original error propagates.
+        with pytest.raises(error, match="complete failed"):
             file.commit()
+        assert (file.multipart_upload is not None) is abort_fails
         file.discard()
 
-        assert file.fs._call.call_count == aborts
+        assert file.fs._call.call_args_list == [
+            mock.call("abort_multipart_upload", Bucket="bucket", Key="key.txt", UploadId="uploadid")
+        ] * (2 if abort_fails else 1)
+        assert file.multipart_upload is None
+        assert file.multipart_upload_parts == []
 
     def test_discard_on_event_loop_thread(self):
         # GH-976: the parts that have not started are cancelled and not
