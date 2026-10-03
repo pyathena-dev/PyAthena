@@ -73,8 +73,10 @@ class TestS3AioExecutor:
         # A function that has not started when the event loop shuts down is
         # never run, and its future is cancelled instead of left pending.
         events = []
+        started = threading.Event()
 
         def work():
+            started.set()
             time.sleep(0.1)
             events.append("finished")
 
@@ -84,7 +86,8 @@ class TestS3AioExecutor:
             executor = S3AioExecutor(loop=loop)
             running = executor.submit(work)
             pending = executor.submit(events.append, "pending finished")
-            await asyncio.sleep(0)
+            while not started.is_set():
+                await asyncio.sleep(0.01)
             return running, pending
 
         running, pending = asyncio.run(main())
