@@ -89,7 +89,7 @@ CREATE EXTERNAL TABLE pyathena_benchmark.pypi_file_downloads (
 PARTITIONED BY (`download_date` string)
 STORED AS PARQUET
 LOCATION 's3://pyathena-benchmark/pypi_file_downloads/'
-TBLPROPERTIES ('parquet.compress'='SNAPPY');
+TBLPROPERTIES ('parquet.compression'='SNAPPY');
 
 ALTER TABLE pyathena_benchmark.pypi_file_downloads
 ADD PARTITION (download_date='2026-09-17')
