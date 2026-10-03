@@ -398,7 +398,8 @@ class S3FileSystem(AbstractFileSystem):
         """Get the object with HeadObject.
 
         The result is cached under the path, or under the version-qualified
-        path for an explicit version, apart for each set of lookup parameters
+        path (spelled ``?versionId=``) for an explicit version, apart for each
+        set of lookup parameters
         (see ``_get_cached_lookup``). An explicitly requested ``"null"``
         version is not cached. A missing object evicts its entries and,
         unless a version was requested, the cached listing of its parent that
@@ -416,10 +417,12 @@ class S3FileSystem(AbstractFileSystem):
         """
         bucket, key, path_version_id = self.parse_path(path)
         version_id = path_version_id if path_version_id else version_id
-        if version_id and not path_version_id:
+        if version_id:
             # Cache an explicit version under its version-qualified path so
-            # that it neither reuses nor replaces the entry of another version.
-            path = f"{path}?versionId={version_id}"
+            # that it neither reuses nor replaces the entry of another version,
+            # with a single spelling of the query so that a missing version
+            # evicts the entry whatever spelling looked it up.
+            path = f"{path.partition('?')[0]}?versionId={version_id}"
         # Writes invalidate only the path without the version, and an
         # overwrite replaces the "null" version of a bucket without
         # versioning, so that version is looked up every time.

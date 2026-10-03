@@ -2535,6 +2535,30 @@ class TestS3FileSystem:
         # The second round is served from the cache.
         assert fs._call.call_count == 3
 
+    @pytest.mark.parametrize("lookup", [False, True])
+    def test_info_version_spellings_share_cache(self, lookup):
+        # A version looked up with any spelling of the query is cached once,
+        # so a missing version evicts it for every spelling.
+        fs = self._make_fs()
+        kwargs = self.LOOKUP_KWARGS if lookup else {}
+        fs._call.side_effect = [
+            {"ContentLength": 4, "ETag": '"etag"', "VersionId": "v1"},
+            FileNotFoundError("key"),
+            {"KeyCount": 0},
+            FileNotFoundError("key"),
+            {"KeyCount": 0},
+        ]
+
+        assert fs.info("s3://bucket/key?versionId=v1", **kwargs).size == 4
+        assert fs.info("s3://bucket/key?version_id=v1", **kwargs).size == 4
+        assert fs.info("s3://bucket/key", version_id="v1", **kwargs).size == 4
+        assert fs._call.call_count == 1
+        with pytest.raises(FileNotFoundError):
+            fs.info("s3://bucket/key?version_id=v1", refresh=True, **kwargs)
+        with pytest.raises(FileNotFoundError):
+            fs.info("s3://bucket/key?versionId=v1", **kwargs)
+        assert fs._call.call_count == 5
+
     def test_info_does_not_cache_null_version(self):
         fs = self._make_fs()
         fs._call.return_value = {"ContentLength": 4, "ETag": '"etag"', "VersionId": "null"}
