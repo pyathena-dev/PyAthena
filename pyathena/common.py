@@ -1280,7 +1280,8 @@ class BaseCursor(metaclass=ABCMeta):
         """Start a query execution, or find a previous one to reuse.
 
         The individual keyword arguments override the ``options`` field of the
-        same name unless None.
+        same name unless None. A query with execution parameters (``qmark``)
+        always starts a new execution.
 
         Args:
             operation: SQL query string.
@@ -1317,12 +1318,16 @@ class BaseCursor(metaclass=ABCMeta):
             paramstyle=paramstyle,
         )
         query, request = self._build_execute_request(operation, parameters, options)
-        query_id = self._find_previous_query_id(
-            query,
-            options.work_group,
-            cache_size=options.cache_size,
-            cache_expiration_time=options.cache_expiration_time,
-        )
+        query_id = None
+        # Athena does not return the ExecutionParameters of earlier executions,
+        # so the cache cannot tell which parameters an execution ran with (#941).
+        if not request.get("ExecutionParameters"):
+            query_id = self._find_previous_query_id(
+                query,
+                options.work_group,
+                cache_size=options.cache_size,
+                cache_expiration_time=options.cache_expiration_time,
+            )
         if query_id is None:
             query_id = self._start_execution(lambda: self._start_query_execution(request))
         return query_id

@@ -199,6 +199,24 @@ class TestCursor:
         assert first_query_id != second_query_id
         assert third_query_id in [first_query_id, second_query_id]
 
+    @pytest.mark.parametrize("cursor", [{"work_group": ENV.work_group}], indirect=["cursor"])
+    def test_cache_size_with_qmark_parameters(self, cursor):
+        query = f"SELECT ? AS v -- {datetime.now(UTC)!s}"
+
+        cursor.execute(query, ["'1'"], paramstyle="qmark")
+        first_query_id = cursor.query_id
+
+        # Different parameters must not reuse the earlier execution (#941).
+        cursor.execute(query, ["'2'"], paramstyle="qmark", cache_size=100)
+        assert cursor.query_id != first_query_id
+        assert cursor.fetchall() == [("2",)]
+
+        # Athena does not return the parameters of earlier executions,
+        # so even the same parameters run again.
+        cursor.execute(query, ["'1'"], paramstyle="qmark", cache_size=100)
+        assert cursor.query_id != first_query_id
+        assert cursor.fetchall() == [("1",)]
+
     def test_cache_expiration_time(self, cursor):
         query = f"SELECT * FROM one_row -- {datetime.now(UTC)!s}"
 
@@ -1302,6 +1320,32 @@ class TestCursor:
             cache_size=10,
             cache_expiration_time=100,
         )
+
+    def test_execute_qmark_parameters_skip_cache(self):
+        """A qmark query with parameters never searches the cache (no AWS, #941)."""
+        cursor = Cursor.__new__(Cursor)  # bypass __init__ to avoid AWS calls
+        cursor._connection = MagicMock()
+        cursor._connection.client.start_query_execution.return_value = {
+            "QueryExecutionId": "test_query_id"
+        }
+        cursor._retry_config = RetryConfig()
+        cursor._kill_on_interrupt = True
+
+        with (
+            patch.object(
+                Cursor,
+                "_build_start_query_execution_request",
+                return_value={"ExecutionParameters": ["'1'"]},
+            ) as request_mock,
+            patch.object(Cursor, "_find_previous_query_id", return_value="cached") as cache_mock,
+        ):
+            query_id = cursor._execute(
+                "SELECT ?", ["'1'"], paramstyle="qmark", cache_size=10, cache_expiration_time=100
+            )
+
+        assert query_id == "test_query_id"
+        assert request_mock.call_args.kwargs["execution_parameters"] == ["'1'"]
+        cache_mock.assert_not_called()
 
     def test_connection_level_callback(self):
         """Test connection-level default callback."""
