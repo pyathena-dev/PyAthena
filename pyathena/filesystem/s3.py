@@ -1796,8 +1796,9 @@ class S3FileSystem(AbstractFileSystem):
 
         The parts are copied in parallel with UploadPartCopy. The upload
         gets the metadata and tags that CopyObject would copy (see
-        :meth:`_get_multipart_copy_kwargs`), and the annotations of the
-        source are copied onto the destination after the upload completes.
+        :meth:`_get_multipart_copy_kwargs`). The annotations of the source
+        are listed before the upload is created and copied onto the
+        destination after it completes.
         A failed part or completion aborts the upload; a failed annotation
         copy is raised and leaves the destination in place.
 
@@ -1829,18 +1830,27 @@ class S3FileSystem(AbstractFileSystem):
                 f"5 GiB ({self.MULTIPART_UPLOAD_MAX_PART_SIZE} bytes), inclusive: {block_size}."
             )
 
+        ranges = self._get_copy_ranges(size1, block_size)
+        create_kwargs, version_id1 = self._get_multipart_copy_kwargs(
+            bucket1, key1, version_id1, kwargs
+        )
         copy_source = {
             "Bucket": bucket1,
             "Key": key1,
         }
         if version_id1:
             copy_source.update({"VersionId": version_id1})
-
-        ranges = self._get_copy_ranges(size1, block_size)
+        # The annotations are listed before anything is written, so that a
+        # missing permission fails first.
+        annotations = (
+            self._list_object_annotations(bucket1, key1, version_id1, kwargs)
+            if self._copies_annotations(bucket1, kwargs)
+            else []
+        )
         multipart_upload = self._create_multipart_upload(
             bucket=bucket2,
             key=key2,
-            **self._get_multipart_copy_kwargs(bucket1, key1, version_id1, kwargs),
+            **create_kwargs,
         )
         with self._create_executor(max_workers=max_workers) as executor:
             futures = [
@@ -1863,11 +1873,10 @@ class S3FileSystem(AbstractFileSystem):
                 futures=futures,
                 request_kwargs=kwargs,
             )
-        if self._copies_annotations(bucket1, kwargs):
-            for name in self._list_object_annotations(bucket1, key1, version_id1, kwargs):
-                self._copy_object_annotation(
-                    name, bucket1, key1, version_id1, bucket2, key2, completed, kwargs
-                )
+        for name in annotations:
+            self._copy_object_annotation(
+                name, bucket1, key1, version_id1, bucket2, key2, completed, kwargs
+            )
 
     @staticmethod
     def _is_directory_bucket(bucket: str) -> bool:
@@ -1906,14 +1915,19 @@ class S3FileSystem(AbstractFileSystem):
 
     def _get_multipart_copy_kwargs(
         self, bucket: str, key: str, version_id: str | None, kwargs: Mapping[str, Any]
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], str | None]:
         """Build the CreateMultipartUpload parameters of a multipart copy.
+
+        The source is read with HeadObject. Without a given version, the
+        version that it reports, if the bucket is versioned, is the version
+        to copy, so that the parts, the tags and the annotations come from
+        the same object even if the source is replaced during the copy.
 
         No multipart request accepts the directives of CopyObject, so they
         are implemented here as CopyObject applies them. With the COPY
         metadata directive (the default), the content headers and the
-        user-defined metadata are read from the source with HeadObject, and
-        the values of the copy are ignored. With the COPY tagging directive
+        user-defined metadata of the source are used, and the values of the
+        copy are ignored. With the COPY tagging directive
         (the default), the tags are read with GetObjectTagging, and the
         ``Tagging`` of the copy is ignored. REPLACE uses the values of the
         copy instead. CopyObject parameters that CreateMultipartUpload does
@@ -1927,7 +1941,9 @@ class S3FileSystem(AbstractFileSystem):
             kwargs: The CopyObject parameters of the copy.
 
         Returns:
-            The parameters for CreateMultipartUpload.
+            The parameters for CreateMultipartUpload, and the version of the
+            source to copy: the given one, or the one that HeadObject
+            reported, which is None for a bucket without versioning.
 
         Raises:
             ValueError: If a directive has a value that CopyObject does not
@@ -1948,15 +1964,18 @@ class S3FileSystem(AbstractFileSystem):
         source = {"Bucket": bucket, "Key": key}
         if version_id:
             source.update({"VersionId": version_id})
-        if metadata_directive == "COPY":
-            _logger.debug(f"Head object to copy: s3://{bucket}/{key}?versionId={version_id}")
-            head = S3Metadata(
-                self._call(
-                    self._client.head_object,
-                    **self._get_operation_kwargs("head_object", source_kwargs),
-                    **source,
-                )
+        _logger.debug(f"Head object to copy: s3://{bucket}/{key}?versionId={version_id}")
+        head = S3Metadata(
+            self._call(
+                self._client.head_object,
+                **self._get_operation_kwargs("head_object", source_kwargs),
+                **source,
             )
+        )
+        if not version_id and head.version_id:
+            version_id = head.version_id
+            source.update({"VersionId": version_id})
+        if metadata_directive == "COPY":
             for name in self._COPY_METADATA_PARAMS:
                 request.pop(name, None)
             copied = {
@@ -1991,7 +2010,7 @@ class S3FileSystem(AbstractFileSystem):
             # A parameter that CopyObject does not accept either is sent as
             # is, so that botocore rejects it as it does for CopyObject.
             **{k: v for k, v in request.items() if k not in copy_members},
-        }
+        }, version_id
 
     def _copies_annotations(self, bucket: str, kwargs: Mapping[str, Any]) -> bool:
         """Return whether a multipart copy copies the annotations of its source.

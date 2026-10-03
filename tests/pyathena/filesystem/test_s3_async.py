@@ -160,6 +160,7 @@ class TestAioS3FileSystem:
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
         )
         sync_fs._complete_multipart_upload = mock.MagicMock()
+        sync_fs._call = mock.MagicMock(return_value={})
 
         await fs._copy_object_with_multipart_upload(
             bucket1="bucket",
@@ -184,7 +185,7 @@ class TestAioS3FileSystem:
         ]
 
     @staticmethod
-    async def _multipart_copy(fail_part=False, fail_annotation=False):
+    async def _multipart_copy(**kwargs):
         # max_workers=1 runs the stubbed requests in a deterministic order.
         fs = AioS3FileSystem(
             key="dummy",
@@ -194,7 +195,7 @@ class TestAioS3FileSystem:
             skip_instance_cache=True,
         )
         with Stubber(fs._sync_fs._client) as stubber:
-            stub_multipart_copy(stubber, fail_part=fail_part, fail_annotation=fail_annotation)
+            stub_multipart_copy(stubber, **kwargs)
             try:
                 await fs._copy_object_with_multipart_upload(
                     bucket1="bucket",
@@ -213,6 +214,12 @@ class TestAioS3FileSystem:
         # GH-973: the same requests as S3FileSystem; see
         # TestS3FileSystem.test_copy_object_with_multipart_upload_copies_source.
         await self._multipart_copy()
+
+    @pytest.mark.asyncio
+    async def test_copy_object_with_multipart_upload_failed_listing(self):
+        # GH-973: nothing is written when the annotations cannot be listed.
+        with pytest.raises(PermissionError):
+            await self._multipart_copy(fail_list=True)
 
     @pytest.mark.asyncio
     async def test_copy_object_with_multipart_upload_failed_part(self):
@@ -758,6 +765,8 @@ class TestAioS3FileSystem:
 
         sync_fs._upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
         sync_fs._complete_multipart_upload = mock.MagicMock()
+        # The HeadObject of the source, for its version.
+        sync_fs._call = mock.MagicMock(return_value={})
         directives = {
             "MetadataDirective": "REPLACE",
             "TaggingDirective": "REPLACE",

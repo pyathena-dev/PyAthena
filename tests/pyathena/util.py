@@ -266,14 +266,17 @@ def _annotation(name):
     return {"AnnotationName": name, "LastModified": MULTIPART_COPY_EXPIRES, "Size": 1}
 
 
-def stub_multipart_copy(stubber, fail_part=False, fail_annotation=False):
+def stub_multipart_copy(stubber, fail_list=False, fail_part=False, fail_annotation=False):
     """Queue the requests of a multipart copy with MULTIPART_COPY_KWARGS.
 
-    The source has user-defined metadata, a tag and two annotations listed
-    on two pages, which are copied with the default COPY directives.
+    The source, in a versioned bucket, has user-defined metadata, a tag and
+    two annotations listed on two pages, which are copied with the default
+    COPY directives from the version that HeadObject reports.
 
     Args:
         stubber: The Stubber of the S3 client.
+        fail_list: Deny the listing of the annotations; nothing is written
+            then.
         fail_part: Fail the second part copy; the upload is then aborted.
         fail_annotation: Fail the write of the first annotation; no
             other annotation is copied then.
@@ -299,10 +302,29 @@ def stub_multipart_copy(stubber, fail_part=False, fail_annotation=False):
             "Expires": MULTIPART_COPY_EXPIRES,
             "StorageClass": "GLACIER_IR",
             "Metadata": {"owner": "etl"},
+            "VersionId": "v-src",
         },
         source,
     )
+    # The version that HeadObject reports is read from then on.
+    source = {**source, "VersionId": "v-src"}
     stubber.add_response("get_object_tagging", {"TagSet": [{"Key": "t 1", "Value": "v1"}]}, source)
+    # The annotations are listed before anything is written.
+    if fail_list:
+        stubber.add_client_error(
+            "list_object_annotations", "AccessDenied", 403, expected_params=source
+        )
+        return
+    stubber.add_response(
+        "list_object_annotations",
+        {"Annotations": [_annotation("a1")], "NextContinuationToken": "next"},
+        source,
+    )
+    stubber.add_response(
+        "list_object_annotations",
+        {"Annotations": [_annotation("a2")]},
+        {**source, "ContinuationToken": "next"},
+    )
     stubber.add_response(
         "create_multipart_upload",
         {"Bucket": "bucket", "Key": "dst", "UploadId": "u"},
@@ -320,7 +342,7 @@ def stub_multipart_copy(stubber, fail_part=False, fail_annotation=False):
     for part_number in (1, 2):
         part = {
             **destination,
-            "CopySource": {"Bucket": "bucket", "Key": "src"},
+            "CopySource": {"Bucket": "bucket", "Key": "src", "VersionId": "v-src"},
             "UploadId": "u",
             "PartNumber": part_number,
             "CopySourceRange": f"bytes={(part_number - 1) * size}-{part_number * size - 1}",
@@ -346,16 +368,6 @@ def stub_multipart_copy(stubber, fail_part=False, fail_annotation=False):
                 "Parts": [{"ETag": '"p1"', "PartNumber": 1}, {"ETag": '"p2"', "PartNumber": 2}]
             },
         },
-    )
-    stubber.add_response(
-        "list_object_annotations",
-        {"Annotations": [_annotation("a1")], "NextContinuationToken": "next"},
-        source,
-    )
-    stubber.add_response(
-        "list_object_annotations",
-        {"Annotations": [_annotation("a2")]},
-        {**source, "ContinuationToken": "next"},
     )
     for name in ("a1", "a2"):
         payload = f"payload of {name}".encode()

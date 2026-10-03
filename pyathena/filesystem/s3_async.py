@@ -523,16 +523,23 @@ class AioS3FileSystem(AsyncFileSystem):
                 f"inclusive: {block_size}."
             )
 
+        ranges = self._sync_fs._get_copy_ranges(size1, block_size)
+        create_kwargs, version_id1 = await asyncio.to_thread(
+            self._sync_fs._get_multipart_copy_kwargs, bucket1, key1, version_id1, kwargs
+        )
         copy_source: dict[str, Any] = {
             "Bucket": bucket1,
             "Key": key1,
         }
         if version_id1:
             copy_source["VersionId"] = version_id1
-
-        ranges = self._sync_fs._get_copy_ranges(size1, block_size)
-        create_kwargs = await asyncio.to_thread(
-            self._sync_fs._get_multipart_copy_kwargs, bucket1, key1, version_id1, kwargs
+        # Listed before anything is written; see S3FileSystem.
+        annotations = (
+            await asyncio.to_thread(
+                self._sync_fs._list_object_annotations, bucket1, key1, version_id1, kwargs
+            )
+            if self._sync_fs._copies_annotations(bucket1, kwargs)
+            else []
         )
         multipart_upload = await asyncio.to_thread(
             self._sync_fs._create_multipart_upload,
@@ -594,12 +601,6 @@ class AioS3FileSystem(AsyncFileSystem):
             )
             raise
 
-        if not self._sync_fs._copies_annotations(bucket1, kwargs):
-            return
-        names = await asyncio.to_thread(
-            self._sync_fs._list_object_annotations, bucket1, key1, version_id1, kwargs
-        )
-
         failed = False
 
         async def _copy_annotation(name: str) -> None:
@@ -626,7 +627,7 @@ class AioS3FileSystem(AsyncFileSystem):
                     raise
 
         results = await asyncio.gather(
-            *[_copy_annotation(name) for name in names], return_exceptions=True
+            *[_copy_annotation(name) for name in annotations], return_exceptions=True
         )
         for result in results:
             if isinstance(result, BaseException):
