@@ -662,16 +662,16 @@ class S3FileSystem(AbstractFileSystem):
                 version_id: The version ID to look up when the path has none.
 
         Returns:
-            S3Object describing the bucket, directory, or file.
+            S3Object describing the bucket, directory, or file. The root path
+            (``""``, ``"/"`` or ``"s3://"``) is a directory.
 
         Raises:
             FileNotFoundError: If the path does not exist.
         """
         refresh = kwargs.pop("refresh", False)
         path = self._strip_protocol(path)
-        bucket, key, path_version_id = self.parse_path(path)
-        version_id = path_version_id if path_version_id else kwargs.pop("version_id", None)
         if path in ["/", ""]:
+            # parse_path rejects the root path.
             return S3Object(
                 init={
                     "ContentLength": 0,
@@ -681,10 +681,12 @@ class S3FileSystem(AbstractFileSystem):
                     "LastModified": None,
                 },
                 type=S3ObjectType.S3_OBJECT_TYPE_DIRECTORY,
-                bucket=bucket,
+                bucket="",
                 key=None,
                 version_id=None,
             )
+        bucket, key, path_version_id = self.parse_path(path)
+        version_id = path_version_id if path_version_id else kwargs.pop("version_id", None)
         # Cached entries describe the current version of a path, so an
         # explicit version uses only the HeadObject cache of that version.
         if not refresh and not version_id:

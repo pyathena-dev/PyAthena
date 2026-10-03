@@ -361,6 +361,17 @@ class TestS3FileSystem:
         fs._call.assert_not_called()
 
     @pytest.mark.parametrize("path", ["", "/", "s3://"])
+    def test_info_root(self, path):
+        fs = self._make_fs()
+
+        info = fs.info(path)
+        assert (info.name, info.type, info.size) == ("", S3ObjectType.S3_OBJECT_TYPE_DIRECTORY, 0)
+        assert fs.isdir(path)
+        assert not fs.isfile(path)
+        assert fs.size(path) == 0
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize("path", ["", "/", "s3://"])
     def test_invalidate_cache_root_drops_bucket_listing(self, path):
         fs = self._make_fs()
         fs.dircache[""] = [fs._directory_object("bucket", None)]
