@@ -561,17 +561,19 @@ class AthenaPandasResultSet(AthenaResultSet):
 
         try:
             with ExitStack() as stack:
+                source: str | IOBase = self.output_location
                 binary_columns = self._configure_binary_csv_read(read_csv_kwargs, pd.read_csv)
-                storage_options = read_csv_kwargs.pop("storage_options", None)
                 if binary_columns:
-                    self._csv_stream = stack.enter_context(
+                    storage_options = read_csv_kwargs.pop("storage_options", None)
+                    source = self._csv_stream = stack.enter_context(
                         self._open_binary_csv_stream(binary_columns, storage_options)
                     )
-                else:
-                    self._csv_stream = stack.enter_context(
-                        self._open_output_location(storage_options, mode="rb")
+                elif "storage_options" not in read_csv_kwargs:
+                    # With storage_options, pandas opens the file through fsspec.
+                    source = self._csv_stream = stack.enter_context(
+                        self._fs.open(self.output_location, mode="rb")
                     )
-                result = pd.read_csv(self._csv_stream, **read_csv_kwargs)
+                result = pd.read_csv(source, **read_csv_kwargs)
                 if not isinstance(result, pd.DataFrame):
                     # The chunk iterator takes ownership of the stream.
                     stack.pop_all()
@@ -734,30 +736,18 @@ class AthenaPandasResultSet(AthenaResultSet):
             read_csv_kwargs["converters"] = converters
         return binary_columns
 
-    def _open_output_location(self, storage_options: dict[str, Any] | None, **kwargs: Any) -> Any:
-        """Open the CSV output location for reading.
-
-        Args:
-            storage_options: The ``storage_options`` given in the read options. Without
-                them, the file is opened through the filesystem of this result set;
-                with them, through fsspec with these options.
-            **kwargs: The mode and text options to open the file with.
-
-        Returns:
-            A context manager that returns the open file.
-        """
-        if storage_options is None:
-            return self._fs.open(self.output_location, **kwargs)
-        return filesystem_open(self.output_location, **kwargs, **storage_options)
-
     def _open_binary_csv_stream(
         self, binary_columns: set[int], storage_options: dict[str, Any] | None
     ) -> TextIOWrapper:
         """Open a stream that preserves binary NULL fields and original CSV newlines."""
+        text_options: dict[str, Any] = {"mode": "rt", "encoding": "utf-8", "newline": ""}
         with ExitStack() as stack:
-            source = stack.enter_context(
-                self._open_output_location(storage_options, mode="rt", encoding="utf-8", newline="")
-            )
+            if storage_options is None:
+                source = stack.enter_context(self._fs.open(self.output_location, **text_options))
+            else:
+                source = stack.enter_context(
+                    filesystem_open(self.output_location, **text_options, **storage_options)
+                )
             reader = stack.enter_context(BinaryCSVReader(source, binary_columns))
             buffer = stack.enter_context(BufferedReader(reader))
             stream = TextIOWrapper(buffer, encoding="utf-8", newline="")

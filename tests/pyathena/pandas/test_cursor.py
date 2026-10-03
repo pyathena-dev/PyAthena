@@ -256,6 +256,24 @@ class TestPandasCursor:
         if not pandas_cursor.result_set.is_unload:
             assert pandas_cursor.result_set._csv_stream.closed
 
+    def test_csv_storage_options(self, pandas_cursor):
+        # Given storage_options, pandas opens the CSV output through fsspec with them.
+        with patch.object(
+            S3FileSystem, "__init__", autospec=True, side_effect=S3FileSystem.__init__
+        ) as init:
+            pandas_cursor.execute(
+                "SELECT * FROM one_row",
+                storage_options={
+                    "connection": pandas_cursor.connection,
+                    "default_cache_type": "none",
+                    "skip_instance_cache": True,
+                },
+            )
+            assert pandas_cursor.fetchall() == [(1,)]
+        assert init.call_count == 2
+        assert init.call_args.kwargs["default_cache_type"] == "none"
+        assert pandas_cursor.result_set._csv_stream is None
+
     @pytest.mark.parametrize(
         ("pandas_cursor", "parquet_engine", "chunksize"),
         [
