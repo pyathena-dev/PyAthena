@@ -1703,6 +1703,14 @@ class TestS3FileSystem:
         with fs.open(path, "rb") as f:
             assert f.read() == b"0123456789"
 
+    def test_read_version_twice(self, fs):
+        # An unversioned bucket stores each object as the "null" version.
+        path = f"s3://{ENV.s3_staging_bucket}/{ENV.s3_filesystem_test_file_key}?versionId=null"
+        # The second open reads the metadata cached by the first one.
+        for _ in range(2):
+            with fs.open(path, "rb") as f:
+                assert f.read() == b"0123456789"
+
     def test_file_url_metadata_getxattr_setxattr(self, fs):
         path = (
             f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
