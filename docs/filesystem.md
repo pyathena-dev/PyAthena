@@ -15,7 +15,7 @@ PyAthena ships its own [fsspec](https://filesystem-spec.readthedocs.io/en/latest
 filesystem implementation for Amazon S3 (`S3FileSystem`), built on boto3, with an API
 surface compatible with [s3fs](https://github.com/fsspec/s3fs) for users migrating from it.
 
-The filesystem is used internally by the pandas/polars result sets to read query results
+The filesystem is used internally by the pandas, Polars, and S3FS result sets to read query results
 from S3, and can also be used independently for S3 file operations.
 
 ## fsspec registration
@@ -48,7 +48,8 @@ s3fs-compatible credential arguments:
 from pyathena import connect
 from pyathena.filesystem.s3 import S3FileSystem
 
-fs = S3FileSystem(connect(region_name="us-west-2"))
+fs = S3FileSystem(connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                           region_name="us-west-2"))
 
 # Or with direct credentials (s3fs-compatible arguments).
 fs = S3FileSystem(key="YOUR_ACCESS_KEY", secret="YOUR_SECRET_KEY")
@@ -139,7 +140,10 @@ reading. Explicit versions can always be read with the `?versionId=` suffix or t
 `version_id` argument.
 
 ```python
-fs = S3FileSystem(connect(region_name="us-west-2"), version_aware=True)
+fs = S3FileSystem(
+    connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/", region_name="us-west-2"),
+    version_aware=True,
+)
 
 with fs.open("s3://YOUR_S3_BUCKET/path/to/object", "rb") as f:
     data = f.read()  # Pinned to the version observed at open time.
@@ -164,7 +168,7 @@ create or delete a bucket. Pass the opt-in flags to enable them:
 
 ```python
 fs = S3FileSystem(
-    connect(region_name="us-west-2"),
+    connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/", region_name="us-west-2"),
     allow_bucket_creation=True,
     allow_bucket_deletion=True,
 )

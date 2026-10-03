@@ -160,15 +160,15 @@ class CustomArrowTypeConverter(Converter):
             },
         )
 
-def convert(self, type_, value):
-    converter = self.get(type_)
-    return converter(value)
+    def convert(self, type_, value, type_hint=None):
+        converter = self.get(type_)
+        return converter(value)
 ```
 
 `types` is used to explicitly specify the Arrow type when reading CSV files.
 `mappings` is used as a conversion method when fetching data from a cursor object.
 
-Then you simply specify an instance of this class in the convertes argument when creating a connection or cursor.
+Then you simply specify an instance of this class in the `converter` argument when creating a connection or cursor.
 
 ```python
 from pyathena import connect
@@ -189,14 +189,16 @@ cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 
 If the unload option is enabled, the Parquet file itself has a schema, so the conversion is done to the Arrow type according to that schema,
 and the `types` setting of the Converter class is not used.
+The `mappings` are still applied to rows returned by the fetch methods.
 
 (arrow-unload-options)=
 
 ### Unload options
 
 ArrowCursor supports the unload option. When this option is enabled,
-queries with SELECT statements are automatically converted to unload statements and executed to Athena,
-and the results are output in Parquet format (Snappy compressed) to `s3_staging_dir`.
+queries that start with SELECT or WITH are automatically converted to unload statements and executed to Athena,
+and the results are output in Parquet format (Snappy compressed) under `{s3_staging_dir}unload/<date>/<uuid>/`.
+This option requires `s3_staging_dir`; without it, `execute()` raises `ProgrammingError`.
 The cursor reads the output Parquet file directly.
 
 The output of query results with the unload statement is faster than normal query execution.
@@ -290,8 +292,9 @@ cursor = connect(
 ).cursor(ArrowCursor, connect_timeout=10.0, request_timeout=30.0)
 ```
 
-The timeout parameters accept float values in seconds and apply to all S3 operations performed by the cursor,
-including HeadObject and GetObject operations when retrieving query results.
+The timeout parameters accept float values in seconds and apply to the pyarrow S3 filesystem that reads the result CSV and Parquet files.
+The other S3 requests, the HeadObject request for the result file size and the GetObject request for the UNLOAD data manifest,
+use the connection's boto3 client and its botocore configuration.
 
 (async-arrow-cursor)=
 
@@ -365,7 +368,7 @@ query_id, future = cursor.execute("SELECT * FROM many_rows")
 ```
 
 The return value of the [future object](https://docs.python.org/3/library/concurrent.futures.html#future-objects) is an `AthenaArrowResultSet` object.
-This object has an interface similar to `AthenaResultSetObject`.
+This object has an interface similar to `AthenaResultSet`.
 
 ```python
 from pyathena import connect
@@ -429,7 +432,7 @@ print(table.schema)
 print(table.shape)
 ```
 
-As with AsyncArrowCursor, you need a query ID to cancel a query.
+As with AsyncCursor, you need a query ID to cancel a query.
 
 ```python
 from pyathena import connect
@@ -443,7 +446,7 @@ query_id, future = cursor.execute("SELECT * FROM many_rows")
 cursor.cancel(query_id)
 ```
 
-As with AsyncArrowCursor, the UNLOAD option is also available.
+As with ArrowCursor, the UNLOAD option is also available.
 
 ```python
 from pyathena import connect
@@ -459,7 +462,7 @@ cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 
 ```python
 from pyathena import connect
-from pyathena.arrow.cursor import AsyncArrowCursor
+from pyathena.arrow.async_cursor import AsyncArrowCursor
 
 cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                  region_name="us-west-2",

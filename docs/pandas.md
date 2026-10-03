@@ -109,6 +109,7 @@ cursor.execute("SHOW PARTITIONS YOUR_TABLE")
 print(cursor.fetchall())
 ```
 
+`to_sql` writes the data as Parquet with pyarrow, so it requires `pip install PyAthena[Pandas,Arrow]`.
 Conversion to Parquet and upload to S3 use [ThreadPoolExecutor](https://docs.python.org/3/library/concurrent.futures.html#threadpoolexecutor) by default.
 It is also possible to use [ProcessPoolExecutor](https://docs.python.org/3/library/concurrent.futures.html#processpoolexecutor).
 
@@ -292,7 +293,7 @@ class CustomPandasTypeConverter(Converter):
 
 Specify the combination of converter functions in the mappings argument and the dtypes combination in the types argument.
 
-Then you simply specify an instance of this class in the convertes argument when creating a connection or cursor.
+Then you simply specify an instance of this class in the `converter` argument when creating a connection or cursor.
 
 ```python
 from pyathena import connect
@@ -379,7 +380,8 @@ awsathena+pandas://:@athena.{region_name}.amazonaws.com:443/{schema_name}?s3_sta
 ```
 
 When this option is used, the object returned by the as_pandas method is a `PandasDataFrameIterator` object.
-This object has exactly the same interface as the `TextFileReader` object and can be handled in the same way.
+This object is an iterator of DataFrames, like the pandas `TextFileReader` object.
+It also provides `get_chunk()`, `as_pandas()`, `iterrows()`, and `close()`, and can be used as a context manager.
 
 ```python
 from pyathena import connect
@@ -557,6 +559,7 @@ For example, `dtype` replaces the whole column type mapping, and `parse_dates` r
 ### Unload options
 
 PandasCursor also supports the unload option, as does {ref}`arrow-cursor`.
+Reading the unloaded Parquet files requires pyarrow (`pip install PyAthena[Pandas,Arrow]`), and `engine` must be `auto` or `pyarrow`.
 
 See {ref}`arrow-unload-options` for more information.
 
@@ -662,7 +665,7 @@ query_id, future = cursor.execute("SELECT * FROM many_rows")
 ```
 
 The return value of the [future object](https://docs.python.org/3/library/concurrent.futures.html#future-objects) is an `AthenaPandasResultSet` object.
-This object has an interface similar to `AthenaResultSetObject`.
+This object has an interface similar to `AthenaResultSet`.
 
 ```python
 from pyathena import connect
@@ -735,7 +738,7 @@ result_set = future.result()
 print(type(result_set.fetchone()[0]))  # <class 'pandas._libs.tslibs.timestamps.Timestamp'>
 ```
 
-As with AsyncPandasCursor, you need a query ID to cancel a query.
+As with AsyncCursor, you need a query ID to cancel a query.
 
 ```python
 from pyathena import connect
@@ -749,7 +752,7 @@ query_id, future = cursor.execute("SELECT * FROM many_rows")
 cursor.cancel(query_id)
 ```
 
-As with AsyncPandasCursor, the unload option is also available.
+As with PandasCursor, the unload option is also available.
 
 ```python
 from pyathena import connect
@@ -765,7 +768,7 @@ cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 
 ```python
 from pyathena import connect
-from pyathena.pandas.cursor import AsyncPandasCursor
+from pyathena.pandas.async_cursor import AsyncPandasCursor
 
 cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                  region_name="us-west-2",

@@ -110,6 +110,7 @@ SELECT CAST(%(param)s AS TIMESTAMP(3)) AS col_timestamp
 If you want to use Athena's parameterized queries, you can do so by changing the `paramstyle` to `qmark` as follows.
 
 ```python
+import pyathena
 from pyathena import connect
 
 pyathena.paramstyle = "qmark"
@@ -146,7 +147,10 @@ You can find more information about the [considerations and limitations of param
 The `execute()` method of every SQL cursor (`Cursor`, `AsyncCursor`, the aio cursors, and their
 pandas/arrow/polars/s3fs variants) accepts the same set of shared keyword arguments, such as
 `work_group`, `s3_staging_dir`, `cache_size`, `cache_expiration_time`, `result_reuse_enable`,
-`result_reuse_minutes`, `paramstyle`, `on_start_query_execution`, and `result_set_type_hints`.
+`result_reuse_minutes`, `paramstyle`, and `result_set_type_hints`.
+The synchronous and aio cursors also accept `on_start_query_execution`.
+`AsyncCursor` and its variants return the query ID from `execute()` instead; they do not take
+`on_start_query_execution` as a keyword argument and ignore it in `options`.
 The Spark cursors execute calculations instead of SQL queries and do not accept these arguments.
 
 These arguments can also be passed together as an `ExecuteOptions` instance using the `options`
@@ -259,7 +263,7 @@ cursor.execute("SELECT * FROM one_row", cache_size=10)  # re-use earlier results
 print(cursor.query_id)  # You should expect to see the same Query ID
 ```
 
-The unit of `expiration_time` is seconds. To use the results of queries executed up to one hour ago, specify like the following.
+The unit of `cache_expiration_time` is seconds. To use the results of queries executed up to one hour ago, specify like the following.
 
 ```python
 from pyathena import connect
@@ -280,8 +284,9 @@ cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 cursor.execute("SELECT * FROM one_row", cache_size=100, cache_expiration_time=3600)  # Use the last 100 queries within 1 hour as cache.
 ```
 
-Results will only be re-used if the query strings match *exactly*,
-and the query was a DML statement (the assumption being that you always want to re-run queries like `CREATE TABLE` and `DROP TABLE`).
+Results will only be re-used from a succeeded DML query (the assumption being that you always want to re-run queries like `CREATE TABLE` and `DROP TABLE`)
+whose query string (with `pyformat` parameters substituted) matches *exactly*, and that ran with the same schema and catalog as the cursor.
+With `unload=True` on the pandas, Arrow, and Polars cursors, a query that is wrapped in `UNLOAD` is written to a new location each time, so the cache never matches it.
 
 The S3 staging directory is not checked, so it's possible that the location of the results is not in your provided `s3_staging_dir`.
 
@@ -371,20 +376,18 @@ cursor.execute(
 A common use case is to cancel long-running analytical queries after a timeout:
 
 ```python
-import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
+import threading
 from pyathena import connect
 
 def cancel_long_running_query():
     """Example: Cancel a complex analytical query after 10 minutes."""
+    timeout_minutes = 10
 
     def track_query_start(query_id):
         print(f"Long-running analysis started: {query_id}")
-        return query_id
 
-    def monitor_and_cancel(cursor, timeout_minutes):
-        """Monitor query and cancel if it exceeds timeout."""
-        time.sleep(timeout_minutes * 60)  # Convert to seconds
+    def cancel_on_timeout(cursor):
+        """Cancel the query that is still running when the timer fires."""
         try:
             cursor.cancel()
             print(f"Query cancelled after {timeout_minutes} minutes timeout")
@@ -422,7 +425,7 @@ def cancel_long_running_query():
     )
     SELECT
         segment,
-        COUNT(DISTINCT user_id) as users,
+        COUNT(DISTINCT dm.user_id) as users,
         AVG(events) as avg_daily_events
     FROM daily_metrics dm
     JOIN user_segments us ON dm.user_id = us.user_id
@@ -430,29 +433,24 @@ def cancel_long_running_query():
     ORDER BY avg_daily_events DESC
     """
 
-    # Use ThreadPoolExecutor for timeout management
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        # Start timeout monitor (cancel after 10 minutes)
-        timeout_future = executor.submit(monitor_and_cancel, cursor, 10)
+    # Cancel the query if it is still running after the timeout
+    timer = threading.Timer(timeout_minutes * 60, cancel_on_timeout, args=(cursor,))
+    timer.start()
+    try:
+        print("Starting complex analytical query (10-minute timeout)...")
+        cursor.execute(long_query)
 
-        try:
-            print("Starting complex analytical query (10-minute timeout)...")
-            cursor.execute(long_query)
+        # Process results
+        results = cursor.fetchall()
+        print(f"Analysis completed successfully: {len(results)} segments found")
+        for row in results:
+            print(f"  {row[0]}: {row[1]} users, {row[2]:.1f} avg events")
 
-            # Process results
-            results = cursor.fetchall()
-            print(f"Analysis completed successfully: {len(results)} segments found")
-            for row in results:
-                print(f"  {row[0]}: {row[1]} users, {row[2]:.1f} avg events")
-
-        except Exception as e:
-            print(f"Query failed or was cancelled: {e}")
-        finally:
-            # Clean up timeout monitor
-            try:
-                timeout_future.result(timeout=1)
-            except TimeoutError:
-                pass  # Monitor is still running, which is fine
+    except Exception as e:
+        print(f"Query failed or was cancelled: {e}")
+    finally:
+        # Stop the timer once the query has finished
+        timer.cancel()
 
 # Run the example
 cancel_long_running_query()
@@ -615,6 +613,8 @@ result = future.result()
 the synchronous cursors, the `Async*` cursors, the native-async `Aio*` cursors, and the Spark
 cursors. For Spark cursors the callback receives the per-poll
 `AthenaCalculationExecutionStatus` rather than an `AthenaQueryExecution`.
+
+(usage-type-hints)=
 
 ## Type hints for complex types
 

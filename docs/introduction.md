@@ -60,7 +60,7 @@ PyAthena provides comprehensive support for Amazon Athena's data types and featu
 
 **Additional Features:**
 
-- **Connection Management**: Efficient connection pooling and configuration
+- **Connection Management**: Flexible connection configuration (credentials, role assumption, workgroups)
 - **Result Caching**: Athena query result reuse capabilities
 - **Error Handling**: Comprehensive exception handling and recovery
 - **S3 Integration**: Direct S3 data access and staging support

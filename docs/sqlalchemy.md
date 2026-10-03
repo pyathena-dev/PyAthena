@@ -328,7 +328,7 @@ bucket_count
 
   Description: The number of buckets for bucketing your data.
 
-  Value: Integer value greater than or equal to 0
+  Value: Positive integer
 
   Example:
 
@@ -339,7 +339,7 @@ bucket_count
 All table options can also be configured with the connection string as follows:
 
 ```text
-awsathena+rest://:@athena.us-west-2.amazonaws.com:443/default?s3_staging_dir=s3%3A%2F%2Fbucket%2Fpath%2Fto%2F&location=s3%3A%2F%2Fbucket%2Fpath%2Fto%2F&file_format=parquet&compression=snappy&...
+awsathena+rest://:@athena.us-west-2.amazonaws.com:443/default?s3_staging_dir=s3%3A%2F%2Fbucket%2Fpath%2Fto%2F&location=s3%3A%2F%2Fbucket%2Fpath%2Fto%2F&file_format=PARQUET&compression=SNAPPY&...
 ```
 
 `serdeproperties` and `tblproperties` must be converted to strings in the `'key'='value','key'='value'` format and url encoded.
@@ -394,7 +394,7 @@ partition_transform_bucket_count
   Only has an effect for ICEBERG tables and when partition is set to true and
   when the partition transform is set to 'bucket' for the column.
 
-  Value: Integer value greater than or equal to 0
+  Value: Positive integer
 
   Example:
 
@@ -409,7 +409,7 @@ partition_transform_truncate_length
   Only has an effect for ICEBERG tables and when partition is set to true and
   when the partition transform is set to 'truncate' for the column.
 
-  Value: Integer value greater than or equal to 0
+  Value: Positive integer
 
   Example:
 
@@ -556,7 +556,7 @@ engine = create_engine(
 
 with engine.connect() as connection:
     result = connection.execute(text("SELECT * FROM many_rows"))
-    # query_callback will be invoked before query execution
+    # query_callback was invoked when the query started, before execute() waited for it
 ```
 
 ### Execution options callback
@@ -585,26 +585,25 @@ with engine.connect() as connection:
 A practical example for managing long-running analytical queries with timeout:
 
 ```python
-import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
+import threading
 from sqlalchemy import create_engine, text
 
 def run_analytics_with_timeout():
     """Run analytics query with automatic timeout and cancellation."""
-
-    query_info = {'query_id': None, 'connection': None}
+    timeout_minutes = 15
+    query_info = {'query_id': None}
 
     def track_query_start(query_id):
         query_info['query_id'] = query_id
         print(f"Analytics query started: {query_id}")
 
-    def timeout_monitor(timeout_minutes):
-        """Cancel query after timeout period."""
-        time.sleep(timeout_minutes * 60)
-        if query_info['query_id'] and query_info['connection']:
+    def cancel_on_timeout(connection):
+        """Cancel the query that is still running when the timer fires."""
+        if query_info['query_id']:
             try:
-                # Cancel via raw connection's cursor
-                cursor = query_info['connection'].connection.cursor()
+                # Cancel through a new cursor on the same DB-API connection
+                cursor = connection.connection.cursor()
+                cursor.query_id = query_info['query_id']
                 cursor.cancel()
                 print(f"Query {query_info['query_id']} cancelled after {timeout_minutes}min timeout")
             except Exception as e:
@@ -650,38 +649,31 @@ def run_analytics_with_timeout():
     ORDER BY cohort_month, month_number
     """)
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        with engine.connect() as connection:
-            query_info['connection'] = connection
+    with engine.connect() as connection:
+        # Cancel the query if it is still running after the timeout
+        timer = threading.Timer(timeout_minutes * 60, cancel_on_timeout, args=(connection,))
+        timer.start()
+        try:
+            print("Starting cohort analysis (15-minute timeout)...")
+            result = connection.execute(analytics_query)
 
-            # Start timeout monitor (15 minutes for complex analytics)
-            timeout_future = executor.submit(timeout_monitor, 15)
+            # Process results
+            rows = result.fetchall()
+            print(f"Cohort analysis completed: {len(rows)} data points")
 
-            try:
-                print("Starting cohort analysis (15-minute timeout)...")
-                result = connection.execute(analytics_query)
+            # Show sample results
+            for i, row in enumerate(rows[:5]):  # First 5 rows
+                print(f"  Cohort {row.cohort_month}: Month {row.month_number}, "
+                      f"{row.users} users, {row.retention_rate}% retention")
 
-                # Process results
-                rows = result.fetchall()
-                print(f"Cohort analysis completed: {len(rows)} data points")
+            if len(rows) > 5:
+                print(f"  ... and {len(rows) - 5} more rows")
 
-                # Show sample results
-                for i, row in enumerate(rows[:5]):  # First 5 rows
-                    print(f"  Cohort {row.cohort_month}: Month {row.month_number}, "
-                          f"{row.users} users, {row.retention_rate}% retention")
-
-                if len(rows) > 5:
-                    print(f"  ... and {len(rows) - 5} more rows")
-
-            except Exception as e:
-                print(f"Analytics query failed or was cancelled: {e}")
-            finally:
-                # Clean up
-                query_info['connection'] = None
-                try:
-                    timeout_future.result(timeout=1)
-                except TimeoutError:
-                    pass  # Timeout monitor still running
+        except Exception as e:
+            print(f"Analytics query failed or was cancelled: {e}")
+        finally:
+            # Stop the timer once the query has finished
+            timer.cancel()
 
 # Run the analytics example
 run_analytics_with_timeout()
@@ -727,6 +719,7 @@ The `on_start_query_execution` callback is supported by all PyAthena SQLAlchemy 
 - `awsathena+arrow` (arrow cursor)
 - `awsathena+polars` (polars cursor)
 - `awsathena+s3fs` (S3FS cursor)
+- `awsathena+aiorest`, `awsathena+aiopandas`, `awsathena+aioarrow`, `awsathena+aiopolars`, and `awsathena+aios3fs` (aio cursors)
 
 Usage with different dialects:
 
@@ -841,34 +834,32 @@ Integer fields, and integer MAP keys and values, use `INT` in that DDL.
 PyAthena automatically converts STRUCT data between different formats:
 
 ```python
-from sqlalchemy import create_engine, select
+from sqlalchemy import text
 
 # Query STRUCT data using ROW constructor
 result = connection.execute(
-    select().from_statement(
-        text("SELECT ROW('John Doe', 30, 'john@example.com') as profile")
-    )
+    text("SELECT ROW('John Doe', 30, 'john@example.com') as profile")
 ).fetchone()
 
-# Access STRUCT fields as dictionary
-profile = result.profile  # {"0": "John Doe", "1": 30, "2": "john@example.com"}
+# Access STRUCT fields as dictionary; scalar values stay strings
+profile = result.profile  # {"0": "John Doe", "1": "30", "2": "john@example.com"}
 ```
 
 #### Named STRUCT fields
 
-For better readability, use JSON casting to get named fields:
+For better readability, cast the ROW to a named ROW type, and cast that to JSON to also get typed values:
 
 ```python
 # Using CAST AS JSON for named field access
 result = connection.execute(
-    select().from_statement(
-        text("SELECT CAST(ROW('John', 30) AS JSON) as user_data")
+    text(
+        "SELECT CAST(CAST(ROW('John', 30) AS ROW(name VARCHAR, age INTEGER)) AS JSON)"
+        " as user_data"
     )
 ).fetchone()
 
-# Parse JSON result
-import json
-user_data = json.loads(result.user_data)  # ["John", 30]
+# The JSON result is already decoded
+user_data = result.user_data  # {"name": "John", "age": 30}
 ```
 
 #### Data format support
@@ -879,7 +870,7 @@ PyAthena supports multiple STRUCT data formats:
 
 ```python
 # Input: "{name=John, age=30}"
-# Output: {"name": "John", "age": 30}
+# Output: {"name": "John", "age": "30"}
 ```
 
 **JSON Format (Recommended):**
@@ -893,7 +884,7 @@ PyAthena supports multiple STRUCT data formats:
 
 ```python
 # Input: "{Alice, 25}"
-# Output: {"0": "Alice", "1": 25}
+# Output: {"0": "Alice", "1": "25"}
 ```
 
 #### Performance considerations
@@ -939,16 +930,14 @@ PyAthena supports multiple STRUCT data formats:
 
 ```python
 result = cursor.execute("SELECT struct_column FROM table").fetchone()
-raw_data = result[0]  # "{\"name\": \"John\", \"age\": 30}"
-import json
-parsed_data = json.loads(raw_data)
+raw_data = result[0]  # "{name=John, age=30}" - Athena's native ROW text
 ```
 
 **After (automatic conversion):**
 
 ```python
 result = cursor.execute("SELECT struct_column FROM table").fetchone()
-struct_data = result[0]  # {"name": "John", "age": 30} - automatically converted
+struct_data = result[0]  # {"name": "John", "age": "30"} - automatically converted
 name = struct_data['name']  # Direct access
 ```
 
@@ -990,13 +979,11 @@ CREATE TABLE products (
 PyAthena automatically converts MAP data between different formats:
 
 ```python
-from sqlalchemy import create_engine, select
+from sqlalchemy import text
 
 # Query MAP data using MAP constructor
 result = connection.execute(
-    select().from_statement(
-        text("SELECT MAP(ARRAY['name', 'category'], ARRAY['Laptop', 'Electronics']) as product_info")
-    )
+    text("SELECT MAP(ARRAY['name', 'category'], ARRAY['Laptop', 'Electronics']) as product_info")
 ).fetchone()
 
 # Access MAP data as dictionary
@@ -1010,14 +997,11 @@ For complex MAP operations, use JSON casting:
 ```python
 # Using CAST AS JSON for complex MAP operations
 result = connection.execute(
-    select().from_statement(
-        text("SELECT CAST(MAP(ARRAY['price', 'rating'], ARRAY['999', '4.5']) AS JSON) as data")
-    )
+    text("SELECT CAST(MAP(ARRAY['price', 'rating'], ARRAY['999', '4.5']) AS JSON) as data")
 ).fetchone()
 
-# Parse JSON result
-import json
-data = json.loads(result.data)  # {"price": "999", "rating": "4.5"}
+# The JSON result is already decoded
+data = result.data  # {"price": "999", "rating": "4.5"}
 ```
 
 #### Data format support
@@ -1073,9 +1057,7 @@ PyAthena supports multiple MAP data formats:
 
 ```python
 result = cursor.execute("SELECT map_column FROM table").fetchone()
-raw_data = result[0]  # "{\"key1\": \"value1\", \"key2\": \"value2\"}"
-import json
-parsed_data = json.loads(raw_data)
+raw_data = result[0]  # "{key1=value1, key2=value2}" - Athena's native MAP text
 ```
 
 **After (automatic conversion):**
@@ -1162,7 +1144,7 @@ This creates a table definition equivalent to:
 
 ```sql
 CREATE TABLE orders (
-    id INTEGER,
+    id INT,
     item_ids ARRAY<INT>,
     tags ARRAY<STRING>,
     categories ARRAY<STRING>
@@ -1383,8 +1365,7 @@ print(type(result.json_col))  # <class 'dict'>
 
 Athena's JSON type support has specific limitations:
 
-- **JSON objects are fully supported** - Objects with key-value pairs work correctly
-- **Top-level JSON arrays are not supported** - Direct CAST of arrays like `[1, 2, 3]` will fail
+- **JSON objects and arrays are supported** - `CAST('...' AS JSON)` accepts an object or a top-level array such as `[1, 2, 3]`
 - **Arrays within objects are supported** - JSON objects can contain arrays as property values
 - **DML only** - JSON type is supported for SELECT queries but not in CREATE TABLE statements
 
@@ -1400,9 +1381,16 @@ result = connection.execute(
 ).fetchone()
 print(result.json_col)  # {"items": [1, 2, 3]}
 
-# Not supported: Top-level array
-# This will raise InvalidRequestException
-# CAST('[1, 2, 3]' AS JSON)
+# Supported: Top-level array
+result = connection.execute(
+    select(
+        type_coerce(
+            literal_column("CAST('[1, 2, 3]' AS JSON)"),
+            JSON
+        ).label("json_col")
+    )
+).fetchone()
+print(result.json_col)  # [1, 2, 3]
 ```
 
 #### Best practices
@@ -1410,4 +1398,3 @@ print(result.json_col)  # {"items": [1, 2, 3]}
 1. **Use with SELECT queries** - JSON type works best for querying existing data
 2. **Handle nested structures** - Objects with nested arrays and objects are fully supported
 3. **Explicit type coercion** - Use `type_coerce()` when working with literal JSON values
-4. **Error handling** - Be prepared to handle `InvalidRequestException` for unsupported operations

@@ -123,14 +123,17 @@ The following type mappings are used:
 | char, varchar, string | str |
 | date | datetime.date |
 | timestamp | datetime.datetime |
+| timestamp with time zone | datetime.datetime (timezone-aware) |
 | time | datetime.time |
-| binary, varbinary | bytes |
-| array, map, row (struct) | Parsed as Python list/dict using JSON-like parsing |
-| json | Parsed JSON (dict or list) |
+| varbinary | bytes |
+| array, map, row (struct) | Parsed into Python list/dict (see {ref}`usage-type-hints` for the types of nested values); values too complex to parse are returned as the original string |
+| json | Parsed JSON value (dict, list, or scalar) |
 
 If you want to customize type conversion, create a converter class like this:
 
 ```python
+from typing import Any
+
 from pyathena.s3fs.converter import DefaultS3FSTypeConverter
 
 class CustomS3FSTypeConverter(DefaultS3FSTypeConverter):
@@ -312,7 +315,7 @@ query_id, future = cursor.execute("SELECT * FROM many_rows")
 ```
 
 The return value of the [future object](https://docs.python.org/3/library/concurrent.futures.html#future-objects) is an `AthenaS3FSResultSet` object.
-This object has an interface similar to `AthenaResultSetObject`.
+This object has an interface similar to `AthenaResultSet`.
 
 ```python
 from pyathena import connect

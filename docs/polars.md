@@ -299,6 +299,7 @@ for row in cursor:
 in chunks, which is more efficient for batch processing:
 
 ```python
+import polars as pl
 from pyathena import connect
 from pyathena.polars.cursor import PolarsCursor
 
@@ -335,8 +336,8 @@ for chunk in cursor.iter_chunks():
     process_chunk(chunk)
 ```
 
-When the chunksize option is used, the object returned by the `as_polars` method is a `PolarsDataFrameIterator` object.
-This object provides the same chunked iteration interface and can be used in the same way:
+With the chunksize option, the `as_polars` method still returns a single `polars.DataFrame`.
+It reads every chunk and concatenates them, so the whole result is loaded into memory:
 
 ```python
 from pyathena import connect
@@ -345,26 +346,11 @@ from pyathena.polars.cursor import PolarsCursor
 cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                  region_name="us-west-2",
                  cursor_class=PolarsCursor).cursor(chunksize=50_000)
-df_iter = cursor.execute("SELECT * FROM many_rows").as_polars()
-for df in df_iter:
-    print(df.describe())
-    print(df.head())
+df = cursor.execute("SELECT * FROM many_rows").as_polars()  # All chunks in a single DataFrame
 ```
 
-The `PolarsDataFrameIterator` also has an `as_polars()` method that collects all chunks into a single DataFrame:
-
-```python
-from pyathena import connect
-from pyathena.polars.cursor import PolarsCursor
-
-cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
-                 region_name="us-west-2",
-                 cursor_class=PolarsCursor).cursor(chunksize=50_000)
-df_iter = cursor.execute("SELECT * FROM many_rows").as_polars()
-df = df_iter.as_polars()  # Collect all chunks into a single DataFrame
-```
-
-This is equivalent to using [polars.concat](https://docs.pola.rs/api/python/stable/reference/api/polars.concat.html):
+Apart from returning an empty DataFrame when there are no chunks, this is equivalent to using
+[polars.concat](https://docs.pola.rs/api/python/stable/reference/api/polars.concat.html) on the chunks from `iter_chunks()`:
 
 ```python
 import polars as pl
@@ -374,8 +360,8 @@ from pyathena.polars.cursor import PolarsCursor
 cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                  region_name="us-west-2",
                  cursor_class=PolarsCursor).cursor(chunksize=50_000)
-df_iter = cursor.execute("SELECT * FROM many_rows").as_polars()
-df = pl.concat(list(df_iter))
+cursor.execute("SELECT * FROM many_rows")
+df = pl.concat(list(cursor.iter_chunks()))
 ```
 
 (async-polars-cursor)=
@@ -450,7 +436,7 @@ query_id, future = cursor.execute("SELECT * FROM many_rows")
 ```
 
 The return value of the [future object](https://docs.python.org/3/library/concurrent.futures.html#future-objects) is an `AthenaPolarsResultSet` object.
-This object has an interface similar to `AthenaResultSetObject`.
+This object has an interface similar to `AthenaResultSet`.
 
 ```python
 from pyathena import connect
@@ -508,7 +494,7 @@ print(df.describe())
 print(df.head())
 ```
 
-As with AsyncPolarsCursor, you need a query ID to cancel a query.
+As with AsyncCursor, you need a query ID to cancel a query.
 
 ```python
 from pyathena import connect
@@ -522,7 +508,7 @@ query_id, future = cursor.execute("SELECT * FROM many_rows")
 cursor.cancel(query_id)
 ```
 
-As with AsyncPolarsCursor, the unload option is also available.
+As with PolarsCursor, the unload option is also available.
 
 ```python
 from pyathena import connect
