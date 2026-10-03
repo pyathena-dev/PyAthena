@@ -710,9 +710,8 @@ class DefaultTypeConverter(Converter):
         """Initialize the converter with the default conversion functions."""
         super().__init__(mappings=deepcopy(_DEFAULT_CONVERTERS), default=_to_default)
         self._parser = TypeSignatureParser()
-        # Nested values use the same mappings, so set() and remove() apply to them too.
         self._typed_converter = TypedValueConverter(
-            converters=self.mappings,
+            converters=_DEFAULT_CONVERTERS,
             default_converter=_to_default,
             struct_parser=_to_struct,
         )
@@ -796,10 +795,19 @@ _TEXT_VALUE_TYPES: tuple[str, ...] = ("json", "time with time zone")
 def _text_value_converter() -> DefaultTypeConverter:
     """Return a ``DefaultTypeConverter`` that keeps ``_TEXT_VALUE_TYPES`` values as text.
 
+    Values nested in typed complex values keep only TIME WITH TIME ZONE values as text,
+    because Arrow and Polars time types would drop the offset; nested JSON values are
+    decoded as before.
+
     Returns:
         The converter.
     """
     converter = DefaultTypeConverter()
     for type_ in _TEXT_VALUE_TYPES:
         converter.set(type_, _to_default)
+    converter._typed_converter = TypedValueConverter(
+        converters={**_DEFAULT_CONVERTERS, "time with time zone": _to_default},
+        default_converter=_to_default,
+        struct_parser=_to_struct,
+    )
     return converter

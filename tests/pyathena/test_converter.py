@@ -5,10 +5,10 @@ from dateutil.tz import gettz
 
 from pyathena.converter import (
     DefaultTypeConverter,
+    _text_value_converter,
     _to_array,
     _to_datetime,
     _to_datetime_with_tz,
-    _to_default,
     _to_json,
     _to_map,
     _to_struct,
@@ -675,13 +675,15 @@ def test_typed_time_with_tz_elements():
     ) == {"a": time(12, 34, 56, tzinfo=jst)}
 
 
-def test_set_applies_to_nested_values():
-    """A conversion function set on a converter also converts nested values."""
-    converter = DefaultTypeConverter()
-    converter.set("time with time zone", _to_default)
+def test_text_value_converter():
+    """The fallback converter keeps text values and nested time zones as text."""
+    converter = _text_value_converter()
+    assert converter.convert("json", '{"a": 1}') == '{"a": 1}'
+    assert converter.convert("time with time zone", "12:34:56+09:00") == "12:34:56+09:00"
     assert converter.convert(
         "array", "[12:34:56.789+09:00]", type_hint="array(time with time zone)"
     ) == ["12:34:56.789+09:00"]
+    assert converter.convert("array", '[{"a": 1}]', type_hint="array(json)") == [{"a": 1}]
     # Other converters keep the default mappings.
     assert DefaultTypeConverter().convert(
         "array", "[12:34:56.789+09:00]", type_hint="array(time with time zone)"
