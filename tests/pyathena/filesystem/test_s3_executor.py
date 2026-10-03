@@ -79,7 +79,14 @@ class TestS3AioExecutor:
         assert not running.cancelled()
         assert pending.cancelled()
 
-    def test_loop_shutdown(self):
+    @pytest.mark.parametrize(
+        ("threads", "max_workers"),
+        [
+            (1, 5),  # The pending function waits for a thread.
+            (2, 1),  # The pending function waits for a permit.
+        ],
+    )
+    def test_loop_shutdown(self, threads, max_workers):
         # A function that has not started when the event loop shuts down is
         # never run, and its future is cancelled and settled, so that wait()
         # returns, instead of left pending.
@@ -96,8 +103,8 @@ class TestS3AioExecutor:
 
         async def main():
             loop = asyncio.get_running_loop()
-            loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
-            executor = S3AioExecutor(loop=loop)
+            loop.set_default_executor(ThreadPoolExecutor(max_workers=threads))
+            executor = S3AioExecutor(loop=loop, max_workers=max_workers)
             running = executor.submit(work)
             pending = executor.submit(events.append, "pending finished")
             pending.add_done_callback(lambda _: settled.set())
