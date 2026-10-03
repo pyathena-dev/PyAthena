@@ -256,8 +256,10 @@ The `cancel()` method sends a [StopCalculationExecution](https://docs.aws.amazon
 request for the calculation. It does not terminate the session.
 Athena cancels the calculation on a best-effort basis:
 
-- A running Spark job, such as a DataFrame action, stops within seconds.
-  The calculation ends in the `CANCELED` state, and the session remains usable for later calculations.
+- A running Spark job, such as a DataFrame action, usually stops within seconds.
+  The calculation then ends in the `CANCELED` state, and the session remains usable for later calculations.
+- A request sent right after the calculation starts can occasionally have no effect.
+  The calculation then runs as if it had not been canceled.
 - Python code that runs on the driver without a Spark job, such as `time.sleep()`, runs to completion.
   The calculation ends in the `COMPLETED` state, and the session rejects new calculations until then.
 - Canceling a calculation that has already finished does not raise an error or change its state.
