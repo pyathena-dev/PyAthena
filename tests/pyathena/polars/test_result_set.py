@@ -11,7 +11,7 @@ import polars as pl
 import pytest
 
 from pyathena.error import OperationalError
-from pyathena.polars.result_set import AthenaPolarsResultSet
+from pyathena.polars.result_set import AthenaPolarsResultSet, PolarsDataFrameIterator
 
 _ROWS_BEFORE_FAILURE = 300_000
 
@@ -80,3 +80,16 @@ class TestAthenaPolarsResultSet:
             pytest.raises(OperationalError),
         ):
             list(result_set._iter_parquet_chunks())
+
+
+class TestPolarsDataFrameIterator:
+    @pytest.mark.parametrize(
+        "reader",
+        [pl.DataFrame({"a": [1, 2]}), (df for df in [pl.DataFrame({"a": [1]})] * 2)],
+        ids=["dataframe", "generator"],
+    )
+    def test_close_stops_iteration(self, reader):
+        """A closed iterator yields nothing for either reader kind."""
+        df_iter = PolarsDataFrameIterator(reader, {}, ["a"])
+        df_iter.close()
+        assert list(df_iter) == []

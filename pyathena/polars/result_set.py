@@ -121,8 +121,10 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         """Close the iterator and release resources."""
         from types import GeneratorType
 
-        if isinstance(self._reader, GeneratorType):
-            self._reader.close()
+        reader = self._reader
+        self._reader = iter(())
+        if isinstance(reader, GeneratorType):
+            reader.close()
 
     def iterrows(self) -> Iterator[tuple[int, dict[str, Any]]]:
         """Iterate over rows as (index, row_dict) tuples.
