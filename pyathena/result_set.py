@@ -1265,7 +1265,8 @@ class WithFetch(WithResultSet, BaseCursor, CursorIterator):
         """Fetch the next row of the result set.
 
         Returns:
-            A tuple representing the next row, or None if no more rows.
+            The next row (a tuple, or a dict for dict cursors), or None if no
+            more rows.
 
         Raises:
             ProgrammingError: If no result set is available.
@@ -1282,10 +1283,11 @@ class WithFetch(WithResultSet, BaseCursor, CursorIterator):
         """Fetch multiple rows from the result set.
 
         Args:
-            size: Maximum number of rows to fetch. Defaults to arraysize.
+            size: Maximum number of rows to fetch. If None or not positive,
+                ``arraysize`` is used.
 
         Returns:
-            List of tuples representing the fetched rows.
+            The fetched rows.
 
         Raises:
             ProgrammingError: If no result set is available.
@@ -1302,7 +1304,7 @@ class WithFetch(WithResultSet, BaseCursor, CursorIterator):
         """Fetch all remaining rows from the result set.
 
         Returns:
-            List of tuples representing all remaining rows.
+            The remaining rows.
 
         Raises:
             ProgrammingError: If no result set is available.

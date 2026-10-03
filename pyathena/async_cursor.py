@@ -29,18 +29,16 @@ class AsyncCursor(BaseCursor):
     provides methods to check query status and retrieve results when ready.
 
     Attributes:
-        description: Sequence of column descriptions for the last query.
-        rowcount: Number of rows affected by the last query (-1 for SELECT queries).
-        arraysize: Default number of rows to fetch with fetchmany().
-        max_workers: Maximum number of worker threads for concurrent execution.
+        arraysize: Default number of rows that fetchmany() returns on the result
+            sets this cursor creates.
 
     Example:
         >>> cursor = connection.cursor(AsyncCursor)
         >>>
         >>> # Execute multiple queries concurrently
-        >>> future1 = cursor.execute("SELECT COUNT(*) FROM table1")
-        >>> future2 = cursor.execute("SELECT COUNT(*) FROM table2")
-        >>> future3 = cursor.execute("SELECT COUNT(*) FROM table3")
+        >>> query_id1, future1 = cursor.execute("SELECT COUNT(*) FROM table1")
+        >>> query_id2, future2 = cursor.execute("SELECT COUNT(*) FROM table2")
+        >>> query_id3, future3 = cursor.execute("SELECT COUNT(*) FROM table3")
         >>>
         >>> # Check if queries are done and get results
         >>> if future1.done():
@@ -50,8 +48,10 @@ class AsyncCursor(BaseCursor):
         >>> results = [f.result().fetchall() for f in [future1, future2, future3]]
 
     Note:
-        Each execute() call returns a Future object that can be used to
-        check completion status and retrieve results.
+        Each execute() call returns a ``(query_id, future)`` tuple. The future
+        resolves to the result set, which provides the column descriptions and
+        the fetch methods. ``description(query_id)`` also returns the column
+        descriptions as a Future.
     """
 
     def __init__(
@@ -235,9 +235,8 @@ class AsyncCursor(BaseCursor):
             result_reuse_enable: Enable result reuse for identical queries (optional).
             result_reuse_minutes: Result reuse duration in minutes (optional).
             paramstyle: Parameter style to use (optional).
-            result_set_type_hints: Optional dictionary mapping column names to
-                Athena DDL type signatures for precise type conversion within
-                complex types.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
             options: Shared execution options as an
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.
@@ -331,9 +330,9 @@ class AsyncDictCursor(AsyncCursor):
 
     Example:
         >>> cursor = connection.cursor(AsyncDictCursor)
-        >>> future = cursor.execute("SELECT id, name, email FROM users")
-        >>> result_cursor = future.result()
-        >>> row = result_cursor.fetchone()
+        >>> query_id, future = cursor.execute("SELECT id, name, email FROM users")
+        >>> result_set = future.result()
+        >>> row = result_set.fetchone()
         >>> print(f"User: {row['name']} ({row['email']})")
     """
 

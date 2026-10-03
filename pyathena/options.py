@@ -35,8 +35,9 @@ class ExecuteOptions:
         >>> cursor.execute("SELECT ...", options=options, work_group="adhoc")
 
     Passing None for an individual keyword argument is treated as "not
-    provided" and leaves the corresponding ``options`` field unchanged; to
-    reset a field, use :meth:`merge` or construct a new instance.
+    provided" and leaves the corresponding ``options`` field unchanged. :meth:`merge`
+    also ignores None, so to clear a field, use :func:`dataclasses.replace` or
+    construct a new instance.
 
     Attributes:
         work_group: Athena workgroup to use for this query. Overrides the
@@ -62,9 +63,9 @@ class ExecuteOptions:
             synchronous and aio cursors; ``AsyncCursor``-based cursors
             return the query ID directly through their execution model and
             do not invoke it.
-        result_set_type_hints: Mapping of column names (or indices) to Athena
-            DDL type signatures for precise type conversion within complex
-            types. For example:
+        result_set_type_hints: Athena type signatures for complex-type columns,
+            keyed by column name (case-insensitive) or zero-based column index.
+            For example:
             ``{"tags": "array(varchar)", "metadata": "map(varchar, integer)"}``
     """
 

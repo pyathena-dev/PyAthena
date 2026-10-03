@@ -63,6 +63,8 @@ class S3StorageClass:
         - DEEP_ARCHIVE: Lowest cost archive storage
         - GLACIER_IR: Archive with faster retrieval than standard Glacier
         - OUTPOSTS: Storage on AWS Outposts
+        - BUCKET: Pseudo storage class PyAthena assigns to bucket entries
+        - DIRECTORY: Pseudo storage class PyAthena assigns to directory entries
 
     See Also:
         AWS S3 storage classes documentation:

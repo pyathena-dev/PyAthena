@@ -66,10 +66,6 @@ class S3FileSystem(AbstractFileSystem):
       (e.g., ``404`` -> ``FileNotFoundError``, ``403`` -> ``PermissionError``)
 
     Attributes:
-        session: The boto3 session used for S3 operations.
-        client: The S3 client for direct API calls.
-        config: Boto3 configuration for the client.
-        retry_config: Configuration for retry behavior on failed operations.
         allow_bucket_creation: Whether mkdir/makedirs may create buckets.
             Defaults to False.
         allow_bucket_deletion: Whether rmdir may delete buckets.

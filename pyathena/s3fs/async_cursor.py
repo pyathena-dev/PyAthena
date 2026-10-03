@@ -156,9 +156,8 @@ class AsyncS3FSCursor(AsyncCursor):
 
         Args:
             query_id: The Athena query execution ID.
-            result_set_type_hints: Optional dictionary mapping column names to
-                Athena DDL type signatures for precise type conversion within
-                complex types.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
             kwargs: Additional keyword arguments for result set.
 
         Returns:
@@ -210,9 +209,8 @@ class AsyncS3FSCursor(AsyncCursor):
             result_reuse_enable: Enable Athena result reuse for this query.
             result_reuse_minutes: Minutes to reuse cached results.
             paramstyle: Parameter style ('qmark' or 'pyformat').
-            result_set_type_hints: Optional dictionary mapping column names to
-                Athena DDL type signatures for precise type conversion within
-                complex types.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
             options: Shared execution options as an
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.

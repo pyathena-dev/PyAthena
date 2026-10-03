@@ -33,7 +33,7 @@ class Cursor(WithFetch):
 
     Example:
         >>> cursor = connection.cursor()
-        >>> cursor.execute("SELECT name, age FROM users WHERE age > %s", (18,))
+        >>> cursor.execute("SELECT name, age FROM users WHERE age > %(age)s", {"age": 18})
         >>> while True:
         ...     row = cursor.fetchone()
         ...     if not row:
@@ -141,9 +141,9 @@ class Cursor(WithFetch):
                 Function signature: (query_id: str) -> None
                 This allows early access to query_id for
                 monitoring/cancellation.
-            result_set_type_hints: Optional dictionary mapping column names to
-                Athena DDL type signatures for precise type conversion within
-                complex types. For example:
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
+                For example:
                 ``{"tags": "array(varchar)", "metadata": "map(varchar, integer)"}``
             options: Shared execution options as an
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual

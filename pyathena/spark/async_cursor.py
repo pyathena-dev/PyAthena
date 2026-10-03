@@ -39,9 +39,7 @@ class AsyncSparkCursor(SparkBaseCursor):
         - Thread pool executor for concurrent operations
 
     Attributes:
-        max_workers: Maximum number of worker threads for async operations.
         session_id: The Athena Spark session ID.
-        engine_configuration: Spark engine configuration settings.
 
     Example:
         >>> from pyathena.spark.async_cursor import AsyncSparkCursor

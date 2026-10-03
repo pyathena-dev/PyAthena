@@ -190,11 +190,11 @@ class AthenaPandasResultSet(AthenaResultSet):
 
     This result set handles CSV and Parquet result files from S3, converting them to
     pandas DataFrames with configurable chunking for memory-efficient processing.
-    It automatically optimizes chunk sizes based on file size and provides iterative
-    processing capabilities for large datasets.
+    With ``auto_optimize_chunksize=True``, it chooses a chunk size based on file
+    size, and it provides iterative processing capabilities for large datasets.
 
     Features:
-        - Automatic chunk size optimization based on file size
+        - Optional chunk size optimization based on file size
         - Support for both CSV and Parquet result formats
         - Memory-efficient iterative processing
         - Automatic date/time parsing for pandas compatibility
@@ -211,10 +211,10 @@ class AthenaPandasResultSet(AthenaResultSet):
         >>> cursor.execute("SELECT * FROM large_table")
         >>>
         >>> # Get full DataFrame
-        >>> df = cursor.fetchall()
+        >>> df = cursor.as_pandas()
         >>>
         >>> # Or iterate through chunks for memory efficiency
-        >>> for chunk_df in cursor:
+        >>> for chunk_df in cursor.iter_chunks():
         ...     process_chunk(chunk_df)
 
     Note:
@@ -266,8 +266,11 @@ class AthenaPandasResultSet(AthenaResultSet):
             connection: Database connection instance.
             converter: Data type converter for Athena types to pandas types.
             query_execution: Query execution metadata from Athena.
-            arraysize: Number of rows to fetch in each batch (not used for pandas processing).
-            retry_config: Retry configuration for S3 operations.
+            arraysize: Default number of rows that ``fetchmany()`` returns.
+            retry_config: Retry configuration for the ``GetQueryResults`` calls and
+                for the HeadObject and GetObject calls this result set makes. Result
+                files are read through the connection's S3 filesystem, which uses the
+                connection's retry configuration.
             keep_default_na: pandas option for handling NA values.
             na_values: Additional values to recognize as NA.
             quoting: CSV quoting behavior.
@@ -281,8 +284,8 @@ class AthenaPandasResultSet(AthenaResultSet):
             max_workers: Maximum worker threads for parallel operations.
             auto_optimize_chunksize: Enable automatic chunksize determination
                                    for large files when chunksize is None.
-            result_set_type_hints: Optional dictionary mapping column names to
-                Athena DDL type signatures for precise type conversion.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
             **kwargs: Additional arguments passed to pandas.read_csv/read_parquet.
         """
         super().__init__(

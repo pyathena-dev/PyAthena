@@ -33,8 +33,9 @@ class PandasCursor(WithFetch):
     """Cursor for handling pandas DataFrame results from Athena queries.
 
     This cursor returns query results as pandas DataFrames with memory-efficient
-    processing through chunking support and automatic chunksize optimization
-    for large result sets. It's ideal for data analysis and data science workflows.
+    processing through chunking support and optional automatic chunksize
+    optimization for large result sets. It's ideal for data analysis and data
+    science workflows.
 
     The cursor supports both regular CSV-based results and high-performance
     UNLOAD operations that return results in Parquet format, which is significantly
@@ -44,24 +45,24 @@ class PandasCursor(WithFetch):
         description: Sequence of column descriptions for the last query.
         rowcount: Number of rows affected by the last query (-1 for SELECT queries).
         arraysize: Default number of rows to fetch with fetchmany().
-        chunksize: Number of rows per chunk when iterating through results.
 
     Example:
         >>> from pyathena.pandas.cursor import PandasCursor
         >>> cursor = connection.cursor(PandasCursor)
         >>> cursor.execute("SELECT * FROM sales_data WHERE year = 2023")
-        >>> df = cursor.fetchall()  # Returns pandas DataFrame
+        >>> df = cursor.as_pandas()  # Returns pandas DataFrame
         >>> print(df.describe())
 
         # Memory-efficient iteration for large datasets
+        >>> cursor = connection.cursor(PandasCursor, chunksize=50_000)
         >>> cursor.execute("SELECT * FROM huge_table")
-        >>> for chunk_df in cursor:
+        >>> for chunk_df in cursor.iter_chunks():
         ...     process_chunk(chunk_df)  # Process data in chunks
 
         # High-performance UNLOAD for large datasets
         >>> cursor = connection.cursor(PandasCursor, unload=True)
         >>> cursor.execute("SELECT * FROM big_table")
-        >>> df = cursor.fetchall()  # Faster Parquet-based result
+        >>> df = cursor.as_pandas()  # Faster Parquet-based result
     """
 
     def __init__(
@@ -108,7 +109,10 @@ class PandasCursor(WithFetch):
             auto_optimize_chunksize: Enable automatic chunksize determination for
                                    large files. Only effective when chunksize is None.
                                    Default: False (no automatic chunking).
-            **kwargs: Additional arguments passed to pandas.read_csv.
+            **kwargs: Arguments forwarded to ``WithResultSet.__init__`` and
+                ``BaseCursor.__init__``, such as ``arraysize``, ``connection``,
+                ``converter``, ``formatter``, and ``retry_config``. Pass pandas
+                ``read_csv``/``read_parquet`` options to ``execute()`` instead.
         """
         super().__init__(
             s3_staging_dir=s3_staging_dir,
@@ -183,9 +187,8 @@ class PandasCursor(WithFetch):
             on_start_query_execution: Callback invoked with the query ID before ``execute()``
                 waits for the query: after the ``StartQueryExecution`` call, or after a
                 reusable query ID is found through ``cache_size``.
-            result_set_type_hints: Optional dictionary mapping column names to
-                Athena DDL type signatures for precise type conversion within
-                complex types.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
             options: Shared execution options as an
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.
@@ -197,7 +200,7 @@ class PandasCursor(WithFetch):
         Example:
             >>> cursor.execute("SELECT * FROM sales WHERE year = %(year)s",
             ...                {"year": 2023})
-            >>> df = cursor.fetchall()  # Returns pandas DataFrame
+            >>> df = cursor.as_pandas()  # Returns pandas DataFrame
         """
         self._reset_state()
         options = ExecuteOptions.resolve(
@@ -253,6 +256,9 @@ class PandasCursor(WithFetch):
 
         Returns:
             DataFrame when chunksize is None, PandasDataFrameIterator when chunksize is set.
+
+        Raises:
+            ProgrammingError: If no result set is available.
         """
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
