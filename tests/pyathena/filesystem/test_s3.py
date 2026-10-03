@@ -1746,7 +1746,9 @@ class TestS3FileSystem:
         assert fs._finish_multipart_upload.call_args.kwargs["request_kwargs"] == kwargs
 
     @staticmethod
-    def _stubbed_fs(**kwargs):
+    def _stubbed_copy_fs(**kwargs):
+        # max_workers=1 copies the parts in the order of the stubbed
+        # responses.
         return S3FileSystem(
             key="dummy",
             secret="dummy",
@@ -1774,7 +1776,7 @@ class TestS3FileSystem:
         # annotations of the source, ignoring the values of the copy; the
         # source condition goes to the part copies, and the source's lookups
         # get the source's expected bucket owner.
-        fs = self._stubbed_fs()
+        fs = self._stubbed_copy_fs()
         with Stubber(fs._client) as stubber:
             stub_multipart_copy(stubber)
             self._multipart_copy(fs, **MULTIPART_COPY_KWARGS)
@@ -1784,7 +1786,7 @@ class TestS3FileSystem:
         # GH-973: the annotations are listed before the upload is created, so
         # a caller without s3:ListObjectAnnotations fails before anything is
         # written.
-        fs = self._stubbed_fs()
+        fs = self._stubbed_copy_fs()
         with Stubber(fs._client) as stubber:
             stub_multipart_copy(stubber, fail_list=True)
             with pytest.raises(PermissionError):
@@ -1792,7 +1794,7 @@ class TestS3FileSystem:
             stubber.assert_no_pending_responses()
 
     def test_copy_object_with_multipart_upload_failed_part(self):
-        fs = self._stubbed_fs()
+        fs = self._stubbed_copy_fs()
         with Stubber(fs._client) as stubber:
             stub_multipart_copy(stubber, fail_part=True)
             with pytest.raises(OSError, match="part failed"):
@@ -1802,7 +1804,7 @@ class TestS3FileSystem:
     def test_copy_object_with_multipart_upload_failed_annotation(self):
         # GH-973: a failed annotation copy is raised; the completed
         # destination is neither aborted nor deleted.
-        fs = self._stubbed_fs()
+        fs = self._stubbed_copy_fs()
         with Stubber(fs._client) as stubber:
             stub_multipart_copy(stubber, fail_annotation=True)
             with pytest.raises(PermissionError):
@@ -1857,7 +1859,7 @@ class TestS3FileSystem:
     def test_copy_object_with_multipart_upload_replace_directives(self):
         # GH-973: REPLACE uses the values of the copy without reading the
         # source, and EXCLUDE skips the annotations.
-        fs = self._stubbed_fs()
+        fs = self._stubbed_copy_fs()
         with Stubber(fs._client) as stubber:
             # Read only for the version, which a bucket without versioning
             # does not report.
@@ -1889,14 +1891,14 @@ class TestS3FileSystem:
         ],
     )
     def test_copy_object_with_multipart_upload_invalid_directive(self, directive):
-        fs = self._stubbed_fs()
+        fs = self._stubbed_copy_fs()
         with Stubber(fs._client), pytest.raises(ValueError, match="Invalid"):
             self._multipart_copy(fs, **directive)
 
     def test_copy_object_with_multipart_upload_unknown_parameter(self):
         # A parameter that CopyObject does not accept is passed on to
         # CreateMultipartUpload, so that botocore still rejects it.
-        fs = self._stubbed_fs()
+        fs = self._stubbed_copy_fs()
         with Stubber(fs._client) as stubber:
             stubber.add_response("head_object", {}, None)
             create_kwargs, version_id, size = fs._get_multipart_copy_kwargs(
@@ -1918,7 +1920,7 @@ class TestS3FileSystem:
     def test_copy_object_with_multipart_upload_sse_c_source(self):
         # GH-973: the source's SSE-C key reaches its HeadObject, and an SSE-C
         # object, which cannot have annotations, is not listed for them.
-        fs = self._stubbed_fs()
+        fs = self._stubbed_copy_fs()
         sse_c = {"CopySourceSSECustomerAlgorithm": "AES256", "CopySourceSSECustomerKey": "k" * 32}
         with Stubber(fs._client) as stubber:
             stubber.add_response(
@@ -1946,7 +1948,7 @@ class TestS3FileSystem:
         # GH-973: objects in a directory bucket have neither tags nor
         # annotations, and the bucket supports neither GetObjectTagging nor
         # ListObjectAnnotations.
-        fs = self._stubbed_fs()
+        fs = self._stubbed_copy_fs()
         bucket = "bucket--usw2-az1--x-s3"
         with Stubber(fs._client) as stubber:
             stubber.add_response(
