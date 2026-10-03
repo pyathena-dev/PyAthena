@@ -969,5 +969,16 @@ class TestArrowCursor:
         indirect=["arrow_cursor"],
     )
     def test_fetch_all_rows(self, arrow_cursor):
-        arrow_cursor.execute("SELECT 1 AS col")
-        assert arrow_cursor.fetchall() == [(1,)]
+        arrow_cursor.execute(
+            """
+            SELECT
+              1 AS col
+              ,CAST('12:34:56' AS TIME) AS col_time
+              ,X'0102' AS col_varbinary
+              ,json_parse('{"a": 1}') AS col_json
+              ,CAST('{"a": 1}' AS JSON) AS col_json_string
+            """
+        )
+        assert arrow_cursor.fetchall() == [
+            (1, datetime(2017, 1, 1, 12, 34, 56).time(), b"\x01\x02", {"a": 1}, '{"a": 1}')
+        ]

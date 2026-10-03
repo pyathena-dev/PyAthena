@@ -146,6 +146,9 @@ class AthenaArrowResultSet(AthenaResultSet):
             import pyarrow as pa
 
             self._table = pa.Table.from_pydict({})
+        # The fetch methods convert only the values read from a result file.
+        # GetQueryResults values are already converted.
+        self._convert_rows = bool(self.output_location)
         self._batches = iter(self._table.to_batches(arraysize))
 
     def _create_s3_file_system(self):
@@ -251,11 +254,15 @@ class AthenaArrowResultSet(AthenaResultSet):
             return
         else:
             dict_rows = rows.to_pydict()
-            column_names = dict_rows.keys()
-            processed_rows = [
-                tuple(self.converters[k](v) for k, v in zip(column_names, row, strict=False))
-                for row in zip(*dict_rows.values(), strict=False)
-            ]
+            if self._convert_rows:
+                converters = self.converters
+                column_names = dict_rows.keys()
+                processed_rows = [
+                    tuple(converters[k](v) for k, v in zip(column_names, row, strict=False))
+                    for row in zip(*dict_rows.values(), strict=False)
+                ]
+            else:
+                processed_rows = list(zip(*dict_rows.values(), strict=False))
             self._rows.extend(processed_rows)
 
     @override
