@@ -495,6 +495,42 @@ class TestAioS3FileSystem:
         await fs._cp_file("s3://bucket/src", "s3://bucket/dst")
         fs._sync_fs._call.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_mv(self):
+        # GH-1008: the files are copied in parallel, the directories are
+        # skipped, and only the copied sources are deleted.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        started = asyncio.Event()
+        copies = []
+
+        async def copy_file(path1, path2, **kwargs):
+            if path1 == "s3://bucket/d":
+                return False
+            copies.append((path1, path2, kwargs))
+            if len(copies) == 2:
+                started.set()
+            # Both copies start before either finishes.
+            await asyncio.wait_for(started.wait(), 1)
+            return True
+
+        fs._copy_file = copy_file
+        fs._sync_fs._call = mock.MagicMock(return_value={})
+
+        await fs._mv(
+            ["s3://bucket/a", "s3://bucket/d", "s3://bucket/c"],
+            ["s3://bucket/x/a", "s3://bucket/x/d", "s3://bucket/x/c"],
+            RequestPayer="requester",
+        )
+        assert sorted(copies) == [
+            ("s3://bucket/a", "s3://bucket/x/a", {"RequestPayer": "requester"}),
+            ("s3://bucket/c", "s3://bucket/x/c", {"RequestPayer": "requester"}),
+        ]
+        fs._sync_fs._call.assert_called_once_with(
+            fs._sync_fs._client.delete_objects,
+            Bucket="bucket",
+            Delete={"Objects": [{"Key": "a"}, {"Key": "c"}], "Quiet": True},
+        )
+
     @pytest.mark.parametrize("size", [10, 5 * 2**30 + 1])
     @pytest.mark.asyncio
     async def test_cp_file_multipart_parameters(self, size):
