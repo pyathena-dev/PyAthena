@@ -649,6 +649,8 @@ class TestPolarsCursor:
             rows.append(row)
 
         assert len(rows) == 15
+        assert [d[0] for d in polars_cursor.description] == ["a"]
+        assert all(isinstance(row[0], int) for row in rows)
 
     @pytest.mark.parametrize(
         "polars_cursor",
@@ -664,6 +666,29 @@ class TestPolarsCursor:
         polars_cursor.execute("SELECT * FROM many_rows LIMIT 15")
         rows = list(polars_cursor)
         assert len(rows) == 15
+
+    @pytest.mark.parametrize(
+        ("polars_cursor", "query", "expected"),
+        [
+            (
+                {"cursor_kwargs": {"unload": True, "chunksize": 5}},
+                "SELECT 1 AS a, 'x' AS b",
+                [(1, "x")],
+            ),
+            (
+                {"cursor_kwargs": {"unload": True, "chunksize": 5}},
+                "SELECT 1 AS a, 'x' AS b WHERE 1 = 0",
+                [],
+            ),
+        ],
+        indirect=["polars_cursor"],
+    )
+    def test_description_with_chunksize_unload(self, polars_cursor, query, expected):
+        """Test that chunked UNLOAD results describe the Parquet columns."""
+        polars_cursor.execute(query)
+        description = [d[:2] for d in polars_cursor.description]
+        assert description == ([("a", "integer"), ("b", "varchar")] if expected else [])
+        assert polars_cursor.fetchall() == expected
 
     @pytest.mark.parametrize(
         "polars_cursor",
