@@ -7,7 +7,7 @@ import mimetypes
 import os.path
 import re
 from collections.abc import Callable, Iterator
-from concurrent.futures import Future, as_completed
+from concurrent.futures import Future, as_completed, wait
 from copy import deepcopy
 from datetime import datetime
 from multiprocessing import cpu_count
@@ -1275,7 +1275,11 @@ class S3FileSystem(AbstractFileSystem):
             block_size < self.MULTIPART_UPLOAD_MIN_PART_SIZE
             or block_size > self.MULTIPART_UPLOAD_MAX_PART_SIZE
         ):
-            raise ValueError("Block size must be greater than 5MiB and less than 5GiB.")
+            raise ValueError(
+                "Block size must be between "
+                f"5 MiB ({self.MULTIPART_UPLOAD_MIN_PART_SIZE} bytes) and "
+                f"5 GiB ({self.MULTIPART_UPLOAD_MAX_PART_SIZE} bytes), inclusive: {block_size}."
+            )
 
         copy_source = {
             "Bucket": bucket1,
@@ -1407,9 +1411,10 @@ class S3FileSystem(AbstractFileSystem):
     ) -> S3CompleteMultipartUpload:
         """Collect the uploaded parts and complete the multipart upload.
 
-        When any part fails, the remaining parts are cancelled and the
-        multipart upload is aborted so that no incomplete upload is left
-        behind, then the original error is re-raised.
+        When any part or the completion fails, the parts that have not
+        started are cancelled, the running ones are waited for, and the
+        multipart upload is aborted so that no incomplete upload or part is
+        left behind. The original error is then re-raised.
 
         Args:
             bucket: S3 bucket name.
@@ -1433,6 +1438,9 @@ class S3FileSystem(AbstractFileSystem):
         except Exception:
             for future in futures:
                 future.cancel()
+            # A part that is still uploading when the upload is aborted may
+            # be stored after the abort, so wait for the running parts first.
+            wait(futures)
             try:
                 self._call(
                     self._client.abort_multipart_upload,
@@ -2249,8 +2257,9 @@ class S3File(AbstractBufferedFile):
                 part copies.
             executor: The executor for parallel operations. If None, a new
                 ``S3ThreadPoolExecutor`` is created.
-            block_size: The block size for reads and writes. Must be at least
-                ``MULTIPART_UPLOAD_MIN_PART_SIZE`` unless reading.
+            block_size: The block size for reads and writes. Must be between
+                ``MULTIPART_UPLOAD_MIN_PART_SIZE`` and
+                ``MULTIPART_UPLOAD_MAX_PART_SIZE``, inclusive, unless reading.
             cache_type: The fsspec cache type for reads.
             autocommit: Whether to commit the written data when the file is
                 closed. If False, :meth:`commit` must be called.
@@ -2263,13 +2272,16 @@ class S3File(AbstractBufferedFile):
 
         Raises:
             ValueError: If the path has no key, the version IDs do not match,
-                a version is given for writing, or the block size is too small
-                for writing.
+                a version is given for writing, or the block size is not
+                between ``MULTIPART_UPLOAD_MIN_PART_SIZE`` and
+                ``MULTIPART_UPLOAD_MAX_PART_SIZE`` for writing.
         """
         self.max_workers = max_workers
-        self._executor: S3Executor = executor or S3ThreadPoolExecutor(max_workers=max_workers)
         self.s3_additional_kwargs = s3_additional_kwargs if s3_additional_kwargs else {}
 
+        # The arguments are validated, and the objects looked up, before the
+        # base class initializer: a file that fails here is never opened, so
+        # its garbage collection does not close (flush and commit) it.
         bucket, key, path_version_id = S3FileSystem.parse_path(path)
         self.bucket = bucket
         if not key:
@@ -2292,8 +2304,20 @@ class S3File(AbstractBufferedFile):
             # Carry the version in the path, as with the ?versionId= suffix,
             # so that a reopened (e.g., unpickled) file reads the same version.
             path = f"{path}?versionId={self.version_id}"
+        if "r" not in mode and not (
+            fs.MULTIPART_UPLOAD_MIN_PART_SIZE <= block_size <= fs.MULTIPART_UPLOAD_MAX_PART_SIZE
+        ):
+            # When writing, every full block is uploaded as a part of a
+            # multipart upload.
+            raise ValueError(
+                "Block size for writing must be between "
+                f"5 MiB ({fs.MULTIPART_UPLOAD_MIN_PART_SIZE} bytes) and "
+                f"5 GiB ({fs.MULTIPART_UPLOAD_MAX_PART_SIZE} bytes), inclusive: {block_size}."
+            )
 
         self._details: S3Object | dict[str, Any] = {}
+        append_info: S3Object | None = None
+        append_data: bytes | None = None
         if "r" in mode:
             # Looked up before the base class initializer, which would
             # otherwise take the size from the latest version of the object.
@@ -2308,7 +2332,14 @@ class S3File(AbstractBufferedFile):
             self._details = info
             if size is None:
                 size = info.get("size")
+        elif "a" in mode and fs.exists(path):
+            append_info = fs.info(path)
+            if append_info.get("size", 0) < fs.MULTIPART_UPLOAD_MIN_PART_SIZE:
+                # Too small to be a part of a multipart upload: rewritten
+                # from the buffer.
+                append_data = fs.cat(path)
 
+        self._executor: S3Executor = executor or S3ThreadPoolExecutor(max_workers=max_workers)
         super().__init__(
             fs=fs,
             path=path,
@@ -2319,28 +2350,19 @@ class S3File(AbstractBufferedFile):
             cache_options=cache_options,
             size=size,
         )
-        if "r" not in mode and block_size < self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE:
-            # When writing occurs, the block size should not be smaller
-            # than the minimum size of a part in a multipart upload.
-            raise ValueError(f"Block size must be >= {self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE}MB.")
 
         self.append_block = False
-        if "a" in mode and self.fs.exists(path):
-            info = self.fs.info(self.path, version_id=self.version_id)
-            loc = info.get("size", 0)
-            if loc < self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE:
-                # Too small to be a part of a multipart upload: rewrite it
-                # from the buffer.
-                self.write(self.fs.cat(self.path))
+        self.multipart_upload: S3MultipartUpload | None = None
+        self.multipart_upload_parts: list[Future[S3MultipartUploadPart]] = []
+        if append_info is not None:
+            if append_data is not None:
+                self.write(append_data)
             else:
                 # Copied with UploadPartCopy as the leading part(s).
                 self.append_block = True
-            self.loc = loc
-            self.s3_additional_kwargs.update(info.to_api_repr())
-            self._details = info
-
-        self.multipart_upload: S3MultipartUpload | None = None
-        self.multipart_upload_parts: list[Future[S3MultipartUploadPart]] = []
+            self.loc = append_info.get("size", 0)
+            self.s3_additional_kwargs.update(append_info.to_api_repr())
+            self._details = append_info
 
     def close(self) -> None:
         """Close the file, flushing any written data, and shut down its executor."""
@@ -2497,10 +2519,17 @@ class S3File(AbstractBufferedFile):
         self.fs.invalidate_cache(self.path)
 
     def discard(self) -> None:
-        """Cancel pending part uploads and abort the multipart upload, if any."""
+        """Abort the multipart upload, if any.
+
+        The part uploads that have not started are cancelled, and the
+        running ones are waited for before the abort.
+        """
         if self.multipart_upload:
             for f in self.multipart_upload_parts:
                 f.cancel()
+            # A part that is still uploading when the upload is aborted may
+            # be stored after the abort, so wait for the running parts first.
+            wait(self.multipart_upload_parts)
             # s3_additional_kwargs also holds object parameters (e.g., the
             # existing object's metadata in append mode) that
             # AbortMultipartUpload rejects.

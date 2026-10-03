@@ -166,6 +166,33 @@ class TestAioS3FileSystem:
             (2, (5 * 2**29 + 2**19, 5 * 2**30 + 2**20)),
         ]
 
+    @pytest.mark.parametrize(
+        "block_size",
+        [
+            S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE - 1,
+            S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE + 1,
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_copy_object_with_multipart_upload_invalid_block_size(self, block_size):
+        # GH-926: the message states the accepted range.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs._sync_fs._call = mock.MagicMock()
+
+        with pytest.raises(
+            ValueError,
+            match=r"between 5 MiB \(5242880 bytes\) and 5 GiB \(5368709120 bytes\), inclusive",
+        ):
+            await fs._copy_object_with_multipart_upload(
+                bucket1="bucket",
+                key1="src",
+                size1=5 * 2**30 + 2**20,
+                bucket2="bucket",
+                key2="dst",
+                block_size=block_size,
+            )
+        fs._sync_fs._call.assert_not_called()
+
     @pytest.fixture(scope="class")
     def fs(self, request):
         if not hasattr(request, "param"):

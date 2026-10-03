@@ -1,7 +1,10 @@
 import functools
+import gc
 import io
 import os
+import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -551,6 +554,69 @@ class TestS3FileSystem:
         with pytest.raises(ValueError, match="version specified"):
             fs.open(path, mode, **kwargs)
 
+    @pytest.mark.parametrize("mode", ["wb", "ab", "xb"])
+    @pytest.mark.parametrize(
+        ("path", "block_size", "match"),
+        [
+            # GH-926: the message states the accepted range.
+            (
+                "s3://bucket/key",
+                S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE - 1,
+                r"between 5 MiB \(5242880 bytes\) and 5 GiB \(5368709120 bytes\), inclusive",
+            ),
+            # GH-952: a part cannot be larger than the maximum part size.
+            ("s3://bucket/key", S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE + 1, "between"),
+            ("s3://bucket", S3FileSystem.DEFAULT_BLOCK_SIZE, "does not contain a key"),
+        ],
+    )
+    def test_open_invalid_for_writing(self, monkeypatch, mode, path, block_size, match):
+        # GH-976: an open() that fails validation sends no request and leaves
+        # no half-initialized file, whose garbage collection would close it.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs._call.side_effect = AssertionError("No request is expected.")
+        unraisable = []
+        monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+
+        with pytest.raises(ValueError, match=match):
+            fs.open(path, mode, block_size=block_size)
+        gc.collect()
+
+        assert unraisable == []
+
+    def test_open_append_lookup_failure(self, monkeypatch):
+        # GH-976: an append whose lookup of the existing object fails leaves
+        # no half-initialized file, whose garbage collection would close it.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+
+        def exists(path):
+            # A new exception each time: one kept by a mock would keep its
+            # traceback, and the file, alive.
+            raise PermissionError("denied")
+
+        fs.exists = exists
+        unraisable = []
+        monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+
+        with pytest.raises(PermissionError, match="denied"):
+            fs.open("s3://bucket/key", "ab")
+        gc.collect()
+
+        assert unraisable == []
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "block_size",
+        [S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE, S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE],
+    )
+    def test_open_block_size_limits_for_writing(self, block_size):
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+
+        with fs.open("s3://bucket/key", "wb", block_size=block_size) as f:
+            assert f.blocksize == block_size
+
     @pytest.mark.parametrize(
         ("path", "expected"),
         [
@@ -637,6 +703,38 @@ class TestS3FileSystem:
                 bucket="bucket", key="key", upload_id="uploadid", futures=[future]
             )
 
+    def test_finish_multipart_upload_waits_for_running_parts(self):
+        # GH-976: a part that is still uploading when the upload is aborted
+        # may be stored after the abort, so the abort waits for it. The
+        # parts that have not started are cancelled.
+        fs = self._make_fs()
+        fs._complete_multipart_upload = mock.MagicMock()
+        events = []
+        fs._call.side_effect = lambda *args, **kwargs: events.append("abort")
+        failed: Future[SimpleNamespace] = Future()
+        failed.set_exception(RuntimeError("upload failed"))
+        started = threading.Event()
+
+        def upload_part():
+            started.set()
+            time.sleep(0.1)
+            events.append("part 2 stored")
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            running = executor.submit(upload_part)
+            pending = executor.submit(events.append, "part 3 stored")
+            started.wait()
+            with pytest.raises(RuntimeError, match="upload failed"):
+                fs._finish_multipart_upload(
+                    bucket="bucket",
+                    key="key",
+                    upload_id="uploadid",
+                    futures=[failed, running, pending],
+                )
+
+        assert events == ["part 2 stored", "abort"]
+        assert pending.cancelled()
+
     @pytest.mark.parametrize(
         ("size", "block_size", "ranges"),
         [
@@ -693,6 +791,31 @@ class TestS3FileSystem:
             (1, (0, 5 * 2**29 + 2**19)),
             (2, (5 * 2**29 + 2**19, 5 * 2**30 + 2**20)),
         ]
+
+    @pytest.mark.parametrize(
+        "block_size",
+        [
+            S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE - 1,
+            S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE + 1,
+        ],
+    )
+    def test_copy_object_with_multipart_upload_invalid_block_size(self, block_size):
+        # GH-926: the message states the accepted range.
+        fs = self._make_fs()
+
+        with pytest.raises(
+            ValueError,
+            match=r"between 5 MiB \(5242880 bytes\) and 5 GiB \(5368709120 bytes\), inclusive",
+        ):
+            fs._copy_object_with_multipart_upload(
+                bucket1="bucket",
+                key1="src",
+                size1=5 * 2**30 + 2**20,
+                bucket2="bucket",
+                key2="dst",
+                block_size=block_size,
+            )
+        fs._call.assert_not_called()
 
     def test_head_object_version_aware(self):
         fs = self._make_fs()
@@ -2304,6 +2427,31 @@ class TestS3File:
         file.fs._put_object.assert_not_called()
         assert file.multipart_upload is None
         assert file.multipart_upload_parts == []
+
+    def test_discard_waits_for_running_parts(self):
+        # GH-976: a part that is still uploading when the upload is aborted
+        # may be stored after the abort, so the abort waits for it. The
+        # parts that have not started are cancelled.
+        file = self._make_write_file(b"", autocommit=False)
+        file.multipart_upload = SimpleNamespace(upload_id="uploadid")
+        events = []
+        file.fs._call.side_effect = lambda *args, **kwargs: events.append("abort")
+        started = threading.Event()
+
+        def upload_part():
+            started.set()
+            time.sleep(0.1)
+            events.append("part 1 stored")
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            running = executor.submit(upload_part)
+            pending = executor.submit(events.append, "part 2 stored")
+            file.multipart_upload_parts = [running, pending]
+            started.wait()
+            file.discard()
+
+        assert events == ["part 1 stored", "abort"]
+        assert pending.cancelled()
 
     @pytest.mark.parametrize("autocommit", [True, False])
     def test_upload_chunk_multipart(self, autocommit):
