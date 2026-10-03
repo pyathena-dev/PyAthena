@@ -12,7 +12,7 @@ from typing import (
 )
 
 from pyathena.common import BaseCursor, CursorIterator
-from pyathena.converter import Converter, DefaultTypeConverter
+from pyathena.converter import _TEXT_VALUE_TYPES, Converter, DefaultTypeConverter
 from pyathena.error import DataError, OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig, override, parse_output_location, retry_api_call
@@ -681,19 +681,19 @@ class AthenaResultSet(CursorIterator):
                 return False
         return True
 
-    def _json_converters(
+    def _text_value_converters(
         self, converters: dict[str, Callable[[str | None], Any | None]]
     ) -> dict[str, Callable[[str | None], Any | None]]:
-        """Select the converters of the json columns.
+        """Select the converters of the columns that the fallbacks keep as text.
 
         Args:
             converters: The converters keyed by column name.
 
         Returns:
-            The converters of the columns whose Athena type is json.
+            The converters of the columns whose Athena type is in ``_TEXT_VALUE_TYPES``.
         """
         description = self.description if self.description else []
-        return {d[0]: converters[d[0]] for d in description if d[1] == "json"}
+        return {d[0]: converters[d[0]] for d in description if d[1] in _TEXT_VALUE_TYPES}
 
     def _fetch_all_rows(
         self,

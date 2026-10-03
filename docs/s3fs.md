@@ -125,6 +125,7 @@ The following type mappings are used:
 | timestamp | datetime.datetime |
 | timestamp with time zone | datetime.datetime (timezone-aware) |
 | time | datetime.time |
+| time with time zone | datetime.time (timezone-aware) |
 | varbinary | bytes |
 | array, map, row (struct) | Parsed into Python list/dict (see {ref}`usage-type-hints` for the types of nested values); values too complex to parse are returned as the original string |
 | json | Parsed JSON value (dict, list, or scalar) |

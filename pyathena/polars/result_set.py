@@ -20,7 +20,7 @@ from typing import (
 )
 
 from pyathena import OperationalError
-from pyathena.converter import Converter, _json_text_converter
+from pyathena.converter import Converter, _text_value_converter
 from pyathena.error import ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.polars.util import to_column_info
@@ -277,8 +277,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 self._df_iter = self._create_dataframe_iterator()
         elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
             self._df = self._as_polars_from_api()
-            # GetQueryResults values are already converted, except json values kept as text.
-            self._df_converters = self._json_converters(self.converters)
+            # GetQueryResults values are already converted, except json and time with
+            # time zone values kept as text.
+            self._df_converters = self._text_value_converters(self.converters)
         else:
             self._df = pl.DataFrame()
         if self._df is not None:
@@ -582,12 +583,12 @@ class AthenaPolarsResultSet(AthenaResultSet):
 
         Args:
             converter: Type converter for result values. Defaults to
-                ``DefaultTypeConverter`` with json values kept as text, as in
-                the CSV result file.
+                ``DefaultTypeConverter`` with json and time with time zone values kept as
+                text, as in the CSV result file. A Polars ``Time`` has no time zone.
         """
         import polars as pl
 
-        rows = self._fetch_all_rows(converter or _json_text_converter())
+        rows = self._fetch_all_rows(converter or _text_value_converter())
         if not rows:
             return pl.DataFrame()
         description = self.description if self.description else []

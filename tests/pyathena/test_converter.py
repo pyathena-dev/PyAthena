@@ -1,16 +1,19 @@
-from datetime import datetime
+from datetime import datetime, time, timedelta, timezone
 
 import pytest
 from dateutil.tz import gettz
 
 from pyathena.converter import (
     DefaultTypeConverter,
-    _csv_to_json,
+    _text_value_converter,
     _to_array,
     _to_datetime,
     _to_datetime_with_tz,
+    _to_json,
     _to_map,
     _to_struct,
+    _to_time,
+    _to_time_with_tz,
 )
 
 
@@ -327,22 +330,6 @@ def test_to_array_invalid_formats(input_value):
 
 
 @pytest.mark.parametrize(
-    ("input_value", "expected"),
-    [
-        (None, None),
-        ("", None),
-        ('{"a":1}', {"a": 1}),
-        ("[1,2]", [1, 2]),
-        ('""', ""),
-        ('"[1, 2]"', "[1, 2]"),
-        ("null", None),
-    ],
-)
-def test_csv_to_json(input_value, expected):
-    assert _csv_to_json(input_value) == expected
-
-
-@pytest.mark.parametrize(
     ("value", "type_hint", "expected"),
     [
         ('[""]', "array(json)", [""]),
@@ -590,3 +577,152 @@ class TestDefaultTypeConverter:
             type_hint="array<row(a int, b varchar)>",
         )
         assert result == [{"a": 1, "b": "hello"}]
+
+
+@pytest.mark.parametrize(
+    ("input_value", "expected"),
+    [
+        (None, None),
+        ("", None),
+        ("12:34:56", time(12, 34, 56)),
+        ("12:34:56.1", time(12, 34, 56, 100000)),
+        ("12:34:56.123", time(12, 34, 56, 123000)),
+        ("12:34:56.123456", time(12, 34, 56, 123456)),
+        ("12:34:56.123456789012", time(12, 34, 56, 123456)),
+    ],
+)
+def test_to_time_any_precision(input_value, expected):
+    assert _to_time(input_value) == expected
+
+
+@pytest.mark.parametrize(
+    ("input_value", "expected"),
+    [
+        (None, None),
+        ("", None),
+        ("12:34:56+09:00", time(12, 34, 56, tzinfo=timezone(timedelta(hours=9)))),
+        (
+            "12:34:56.789-05:30",
+            time(12, 34, 56, 789000, tzinfo=timezone(-timedelta(hours=5, minutes=30))),
+        ),
+        ("00:00:00.123456789012+00:00", time(0, 0, 0, 123456, tzinfo=timezone(timedelta(0)))),
+        ("23:59:59.9-14:00", time(23, 59, 59, 900000, tzinfo=timezone(-timedelta(hours=14)))),
+    ],
+)
+def test_to_time_with_tz(input_value, expected):
+    result = _to_time_with_tz(input_value)
+    assert result == expected
+    if expected is not None:
+        assert result.utcoffset() == expected.utcoffset()
+
+
+@pytest.mark.parametrize(
+    ("input_value", "expected"),
+    [
+        (None, None),
+        ("", None),
+        ('""', ""),
+        ('"[1, 2]"', "[1, 2]"),
+        ('{"a": 1}', {"a": 1}),
+        ("[1, 2]", [1, 2]),
+        ("null", None),
+    ],
+)
+def test_to_json(input_value, expected):
+    assert _to_json(input_value) == expected
+
+
+@pytest.mark.parametrize(
+    ("type_hint", "value", "expected"),
+    [
+        ("array(json)", '[""]', [""]),
+        (
+            "array(json)",
+            '[{"a":1}, "x", 1, true, null, ""]',
+            [{"a": 1}, "x", 1, True, None, ""],
+        ),
+        # JSON string scalars whose text looks like JSON stay strings.
+        (
+            "array(json)",
+            '["{\\"a\\": 1}", "123", "true", "null"]',
+            ['{"a": 1}', "123", "true", "null"],
+        ),
+        (
+            "map(varchar,json)",
+            '{"k": "", "n": 1, "b": true, "z": null}',
+            {"k": "", "n": 1, "b": True, "z": None},
+        ),
+        ("row(a json, b json)", '{"a": "x", "b": {"c": 1}}', {"a": "x", "b": {"c": 1}}),
+        ("row(a json, b json)", '{"a": "", "b": true}', {"a": "", "b": True}),
+        ("array(varchar)", '["a", "123"]', ["a", "123"]),
+    ],
+)
+def test_typed_json_elements(type_hint, value, expected):
+    """JSON elements of typed complex values decode their original JSON text."""
+    type_ = type_hint.split("(", 1)[0]
+    assert DefaultTypeConverter().convert(type_, value, type_hint=type_hint) == expected
+
+
+def test_typed_time_with_tz_elements():
+    """Parameterized time zone types in type hints keep their time zone."""
+    converter = DefaultTypeConverter()
+    jst = timezone(timedelta(hours=9))
+    assert converter.convert(
+        "array", "[12:34:56.789+09:00, null]", type_hint="array(time(3) with time zone)"
+    ) == [time(12, 34, 56, 789000, tzinfo=jst), None]
+    assert converter.convert(
+        "map", "{a=12:34:56+09:00}", type_hint="map(varchar, time(0) with time zone)"
+    ) == {"a": time(12, 34, 56, tzinfo=jst)}
+
+
+def test_text_value_converter():
+    """The fallback converter keeps text values and nested time zones as text."""
+    converter = _text_value_converter()
+    assert converter.convert("json", '{"a": 1}') == '{"a": 1}'
+    assert converter.convert("time with time zone", "12:34:56+09:00") == "12:34:56+09:00"
+    assert converter.convert(
+        "array", "[12:34:56.789+09:00]", type_hint="array(time with time zone)"
+    ) == ["12:34:56.789+09:00"]
+    assert converter.convert("array", '[{"a": 1}]', type_hint="array(json)") == [{"a": 1}]
+    # Other converters keep the default mappings.
+    assert DefaultTypeConverter().convert(
+        "array", "[12:34:56.789+09:00]", type_hint="array(time with time zone)"
+    ) == [time(12, 34, 56, 789000, tzinfo=timezone(timedelta(hours=9)))]
+
+
+@pytest.mark.parametrize(
+    ("input_value", "expected"),
+    [
+        (None, None),
+        ("", None),
+        (
+            "2024-02-29 23:59:58.123 +05:30",
+            datetime(
+                2024, 2, 29, 23, 59, 58, 123000, tzinfo=timezone(timedelta(hours=5, minutes=30))
+            ),
+        ),
+        (
+            "2024-02-29 23:59:58.123456 -08:00",
+            datetime(2024, 2, 29, 23, 59, 58, 123456, tzinfo=timezone(-timedelta(hours=8))),
+        ),
+        (
+            "2024-02-29 23:59:58 +00:00",
+            datetime(2024, 2, 29, 23, 59, 58, tzinfo=timezone(timedelta(0))),
+        ),
+        (
+            "2024-02-29 23:59:58.123 UTC",
+            datetime(2024, 2, 29, 23, 59, 58, 123000, tzinfo=gettz("UTC")),
+        ),
+        (
+            "2024-02-29 23:59:58.123 America/New_York",
+            datetime(2024, 2, 29, 23, 59, 58, 123000, tzinfo=gettz("America/New_York")),
+        ),
+    ],
+)
+def test_to_datetime_with_tz_offsets_and_zone_names(input_value, expected):
+    """Numeric UTC offsets give fixed-offset time zones; zone names keep their zone."""
+    result = _to_datetime_with_tz(input_value)
+    assert result == expected
+    if expected is not None:
+        assert result.utcoffset() == expected.utcoffset()
+        assert result.tzinfo is not None

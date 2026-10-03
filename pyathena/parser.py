@@ -141,7 +141,11 @@ class TypeSignatureParser:
                 return TypeNode(type_name=type_name, children=[key_type, value_type])
             return TypeNode(type_name=type_name)
 
-        # Types with parameters like decimal(10, 2), varchar(255)
+        # Types with parameters like decimal(10, 2), varchar(255), or
+        # time(3) with time zone, whose suffix is part of the type name.
+        # Other trailing text is ignored.
+        if " ".join(type_str[close_idx + 1 :].lower().split()) == "with time zone":
+            type_name = f"{type_name} with time zone"
         return TypeNode(type_name=type_name)
 
     def _split_type_args(self, s: str) -> list[str]:
@@ -268,19 +272,21 @@ class TypedValueConverter:
         return converter_fn(value)
 
     @staticmethod
-    def _to_json_str(value: Any) -> str:
+    def _to_json_str(value: Any, type_node: TypeNode) -> str:
         """Convert a JSON-parsed value back to a string for further conversion.
 
-        Uses json.dumps for dict/list to produce valid JSON, and str() for
-        scalar types to produce converter-compatible strings.
+        Uses json.dumps for dict/list values and for every value of a JSON type,
+        so that the JSON converter decodes the original JSON text, and str() for
+        the other scalar types to produce converter-compatible strings.
 
         Args:
             value: A value from json.loads output.
+            type_node: The type of the value.
 
         Returns:
             String representation suitable for type conversion.
         """
-        if isinstance(value, (dict, list)):
+        if isinstance(value, (dict, list)) or type_node.type_name == "json":
             return json.dumps(value)
         return str(value)
 
@@ -324,7 +330,7 @@ class TypedValueConverter:
                     return [
                         None
                         if elem is None
-                        else self.convert(self._to_json_str(elem), element_type)
+                        else self.convert(self._to_json_str(elem, element_type), element_type)
                         for elem in parsed
                     ]
             except json.JSONDecodeError:
@@ -379,8 +385,12 @@ class TypedValueConverter:
                 parsed = json.loads(value)
                 if isinstance(parsed, dict):
                     return {
-                        str(self.convert(self._to_json_str(k), key_type) if k is not None else k): (
-                            self.convert(self._to_json_str(v), value_type)
+                        str(
+                            self.convert(self._to_json_str(k, key_type), key_type)
+                            if k is not None
+                            else k
+                        ): (
+                            self.convert(self._to_json_str(v, value_type), value_type)
                             if v is not None
                             else None
                         )
@@ -447,7 +457,7 @@ class TypedValueConverter:
                     for i, (k, v) in enumerate(parsed.items()):
                         ft = self._get_field_type(k, type_node, i)
                         result[k] = (
-                            self.convert(self._to_json_str(v), ft) if v is not None else None
+                            self.convert(self._to_json_str(v, ft), ft) if v is not None else None
                         )
                     return result
             except json.JSONDecodeError:
