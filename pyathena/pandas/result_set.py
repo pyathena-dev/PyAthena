@@ -343,17 +343,27 @@ class AthenaPandasResultSet(AthenaResultSet):
             d[0] for d in description if d[1] in ("time", "time with time zone")
         ]
 
-        if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
-            df = self._as_pandas()
-            trunc_date = _no_trunc_date if self.is_unload else self._trunc_date
-            self._df_iter = PandasDataFrameIterator(df, trunc_date, self._csv_stream)
-        elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
-            df = self._as_pandas_from_api()
-            self._df_iter = PandasDataFrameIterator(df, self._trunc_date)
-        else:
-            import pandas as pd
+        import pandas as pd
 
-            self._df_iter = PandasDataFrameIterator(pd.DataFrame(), _no_trunc_date)
+        # The whole result when it was not read in chunks.
+        self._df: DataFrame | None = None
+        if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
+            result = self._as_pandas()
+            trunc_date = _no_trunc_date if self.is_unload else self._trunc_date
+            if isinstance(result, pd.DataFrame):
+                self._df = trunc_date(result)
+            else:
+                self._df_iter = PandasDataFrameIterator(result, trunc_date, self._csv_stream)
+        elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
+            # GetQueryResults values are already converted and need no time truncation.
+            self._df = self._as_pandas_from_api()
+        else:
+            self._df = pd.DataFrame()
+        if self._df is not None:
+            # A shallow copy keeps assignments to the DataFrame from as_pandas()
+            # out of the rows that the fetch methods return. Mutable values in its
+            # cells, such as lists from JSON columns, are still shared.
+            self._df_iter = PandasDataFrameIterator(self._df.copy(deep=False), _no_trunc_date)
         self._iterrows = self._df_iter.iterrows()
 
     def _get_parquet_engine(self) -> str:
@@ -842,22 +852,30 @@ class AthenaPandasResultSet(AthenaResultSet):
         """Return the query results as a DataFrame or an iterator of DataFrame chunks.
 
         Returns:
-            If ``chunksize`` is None, one DataFrame that joins the chunks the result
-            iterator has not yet yielded (read in chunks when ``auto_optimize_chunksize``
-            chose a chunk size), which is the whole result unless rows were already
-            fetched; otherwise the ``PandasDataFrameIterator`` that yields DataFrame chunks.
+            If ``chunksize`` is None, the DataFrame of the whole result, the same one
+            on every call. When ``auto_optimize_chunksize`` chose a chunk size, one
+            DataFrame that joins the chunks the result iterator has not yet yielded,
+            which is the whole result only if neither the fetch methods nor
+            ``iter_chunks()`` read from it before, and a later call returns an empty
+            DataFrame. If ``chunksize`` is set, the iterator that ``iter_chunks()``
+            returns.
         """
         if self._chunksize is None:
+            if self._df is not None:
+                return self._df
             return self._df_iter.as_pandas()
-        return self._df_iter
+        return self.iter_chunks()
 
     def iter_chunks(self) -> PandasDataFrameIterator:
         """Iterate over result chunks as pandas DataFrames.
 
         This method provides an iterator interface for processing large result sets.
-        When chunksize is specified, or ``auto_optimize_chunksize`` chose a chunk size
-        for a large CSV result, it yields DataFrames in chunks for memory-efficient
-        processing. Otherwise, it yields the entire result as a single DataFrame.
+        When a CSV result is read in chunks, because chunksize is specified or
+        ``auto_optimize_chunksize`` chose a chunk size, it yields DataFrames in chunks
+        for memory-efficient processing. These chunks come from the same iterator as
+        the fetch methods, so a chunk that one of them reads is not available to the
+        other. Otherwise, each call returns a new iterator that yields the entire
+        result as a single DataFrame, and the fetch methods keep their position.
 
         Returns:
             PandasDataFrameIterator that yields pandas DataFrames for each chunk
@@ -876,6 +894,8 @@ class AthenaPandasResultSet(AthenaResultSet):
             >>> for df in cursor.iter_chunks():
             ...     process(df)  # Single DataFrame with all data
         """
+        if self._df is not None:
+            return PandasDataFrameIterator(self._df, _no_trunc_date)
         return self._df_iter
 
     @override
@@ -884,6 +904,7 @@ class AthenaPandasResultSet(AthenaResultSet):
 
         super().close()
         self._df_iter.close()
-        self._df_iter = PandasDataFrameIterator(pd.DataFrame(), _no_trunc_date)
+        self._df = pd.DataFrame()
+        self._df_iter = PandasDataFrameIterator(self._df, _no_trunc_date)
         self._iterrows = enumerate([])
         self._data_manifest = []

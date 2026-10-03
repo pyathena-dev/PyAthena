@@ -482,6 +482,33 @@ class TestPolarsCursor:
         assert isinstance(chunks[0], pl.DataFrame)
         assert chunks[0].height == 1
 
+    def test_whole_result_reused(self, polars_cursor):
+        """Test that as_polars(), as_arrow(), and iter_chunks() do not consume the rows."""
+        polars_cursor.execute("SELECT number FROM (VALUES (1), (2), (3)) AS t(number)")
+        df = polars_cursor.as_polars()
+        assert df["number"].to_list() == [1, 2, 3]
+        assert polars_cursor.as_polars() is df
+        assert polars_cursor.as_arrow().column("number").to_pylist() == [1, 2, 3]
+        df[0, "number"] = 0
+
+        assert polars_cursor.fetchone() == (1,)
+        assert [chunk.height for chunk in polars_cursor.iter_chunks()] == [3]
+        assert [chunk.height for chunk in polars_cursor.iter_chunks()] == [3]
+        assert polars_cursor.as_polars() is df
+        assert polars_cursor.fetchall() == [(2,), (3,)]
+
+    @pytest.mark.parametrize(
+        "polars_cursor", [{"cursor_kwargs": {"chunksize": 5}}], indirect=["polars_cursor"]
+    )
+    def test_close_stops_chunks(self, polars_cursor):
+        """Test that closing the result set closes the chunk iterator it returned."""
+        polars_cursor.execute("SELECT * FROM many_rows LIMIT 15")
+        result_set = polars_cursor.result_set
+        chunks = result_set.iter_chunks()
+        assert next(chunks).height == 5
+        result_set.close()
+        assert list(chunks) == []
+
     def test_iter_chunks_many_rows(self):
         """Test chunked iteration with many rows."""
         with contextlib.closing(connect(schema_name=ENV.schema)) as conn:
@@ -699,5 +726,5 @@ class TestPolarsCursor:
         indirect=["polars_cursor"],
     )
     def test_fetch_all_rows(self, polars_cursor):
-        polars_cursor.execute("SELECT 1 AS col")
-        assert polars_cursor.fetchall() == [(1,)]
+        polars_cursor.execute("SELECT 1 AS col, CAST('12:34:56' AS TIME) AS col_time")
+        assert polars_cursor.fetchall() == [(1, datetime(2017, 1, 1, 12, 34, 56).time())]
