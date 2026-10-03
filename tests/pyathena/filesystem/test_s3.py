@@ -1477,6 +1477,7 @@ class TestS3FileSystem:
         # GH-974: recursive get() passes directories, including the bucket,
         # which become local directories as with fsspec's get_file().
         fs = self._make_fs()
+        fs.default_cache_type = "bytes"
         fs.info = mock.MagicMock(return_value=S3FileSystem._directory_object("bucket", key))
         rpath = f"s3://bucket/{key}" if key else "s3://bucket"
         lpath = tmp_path / "out" / "dir"
@@ -1488,6 +1489,16 @@ class TestS3FileSystem:
         assert lpath.is_dir()
         fs._call.assert_not_called()
 
+    def test_get_file_missing(self, tmp_path):
+        # A missing object leaves no local file or parent directory.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs.info = mock.MagicMock(side_effect=FileNotFoundError("bucket/key"))
+
+        with pytest.raises(FileNotFoundError):
+            fs.get_file("s3://bucket/key", str(tmp_path / "new" / "key"))
+        assert list(tmp_path.iterdir()) == []
+
     def test_get_file_creates_parent_directories(self, tmp_path):
         # GH-974: the parent directories used to raise FileNotFoundError.
         fs, _ = self._make_object_fs(b"data")
@@ -1497,6 +1508,18 @@ class TestS3FileSystem:
         fs.get_file("s3://bucket/key", str(lpath), callback=callback)
         assert lpath.read_bytes() == b"data"
         assert callback.size == callback.value == 4
+
+    def test_get_file_parent_through_symlink(self, tmp_path):
+        # The parent is created as open() resolves it: "link/.." is the
+        # parent of the symlink's target, not tmp_path / "a".
+        fs, _ = self._make_object_fs(b"data")
+        (tmp_path / "b" / "sub").mkdir(parents=True)
+        (tmp_path / "a").mkdir()
+        (tmp_path / "a" / "link").symlink_to(tmp_path / "b" / "sub")
+        (tmp_path / "a" / "out").touch()
+
+        fs.get_file("s3://bucket/key", str(tmp_path / "a" / "link" / ".." / "out" / "key"))
+        assert (tmp_path / "b" / "out" / "key").read_bytes() == b"data"
 
     @pytest.mark.parametrize(
         ("rpath", "kwargs"),
@@ -1530,6 +1553,11 @@ class TestS3FileSystem:
         assert outfile.getvalue() == b"data"
         assert not outfile.closed
         assert not (tmp_path / "key").exists()
+
+        # As with fsspec, lpath may be omitted when outfile is given.
+        outfile = io.BytesIO()
+        fs.get_file("s3://bucket/key", outfile=outfile)
+        assert outfile.getvalue() == b"data"
 
     def test_cat_ranges_range(self):
         fs, ranges = self._make_object_fs(b"0123456789")

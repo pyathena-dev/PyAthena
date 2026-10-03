@@ -1814,7 +1814,7 @@ class S3FileSystem(AbstractFileSystem):
 
         self.invalidate_cache(rpath)
 
-    def get_file(self, rpath: str, lpath, callback=_DEFAULT_CALLBACK, outfile=None, **kwargs):
+    def get_file(self, rpath: str, lpath=None, callback=_DEFAULT_CALLBACK, outfile=None, **kwargs):
         """Download an S3 file to local filesystem.
 
         Downloads a file from S3 to the local filesystem with progress tracking.
@@ -1827,6 +1827,7 @@ class S3FileSystem(AbstractFileSystem):
         Args:
             rpath: S3 source path (s3://bucket/key).
             lpath: Local destination path, or a file-like object to write to.
+                Not needed when ``outfile`` is given.
             callback: Progress callback for tracking download progress.
             outfile: A file-like object to write to instead of ``lpath``.
             **kwargs: Additional S3 parameters passed to open().
@@ -1850,7 +1851,9 @@ class S3FileSystem(AbstractFileSystem):
         with contextlib.ExitStack() as stack:
             remote = stack.enter_context(self.open(rpath, "rb", **kwargs))
             if outfile is None:
-                os.makedirs(os.path.dirname(os.path.abspath(lpath)), exist_ok=True)
+                # Not abspath(), which would resolve ".." before symlinks.
+                if parent := os.path.dirname(lpath):
+                    os.makedirs(parent, exist_ok=True)
                 outfile = stack.enter_context(open(lpath, "wb"))
             callback.set_size(remote.size)
             while data := remote.read(remote.blocksize):
