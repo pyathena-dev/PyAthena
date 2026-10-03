@@ -138,7 +138,7 @@ With `kill_on_interrupt` enabled, which is the default, cancelling the task whil
 requests cancellation of the query, waits until it reaches a terminal state, and then raises `asyncio.CancelledError`.
 Cancellation is a best-effort request, so the query can still end as `SUCCEEDED` or `FAILED`.
 The `query_id` property keeps the ID of the cancelled query.
-If the cancellation request fails, `asyncio.CancelledError` is raised with the error as its cause.
+If the cancellation request or that wait fails, `asyncio.CancelledError` is raised with the error as its cause.
 Cancelling the task while `execute()` is still starting the query first waits for the start request to finish,
 and then cancels the query it started in the same way.
 If the task is cancelled before `execute()` begins the request, the request is never sent.

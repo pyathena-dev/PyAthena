@@ -285,7 +285,8 @@ with conn.cursor() as cursor:
 With `kill_on_interrupt` enabled, which is the default, a `KeyboardInterrupt` while `execute()` waits for the calculation
 requests cancellation, waits until the calculation reaches a terminal state, and then propagates.
 The `state` property returns that terminal state.
-If the cancellation request fails, the `KeyboardInterrupt` propagates with the error as its cause.
+If the cancellation request or that wait fails, the `KeyboardInterrupt` propagates with the error as its cause,
+and the `state` property returns `None`.
 
 A `KeyboardInterrupt` while `execute()` is still starting the calculation first waits for the
 [StartCalculationExecution](https://docs.aws.amazon.com/athena/latest/APIReference/API_StartCalculationExecution.html)
