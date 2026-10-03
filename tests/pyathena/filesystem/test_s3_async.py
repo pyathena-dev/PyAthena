@@ -484,6 +484,17 @@ class TestAioS3FileSystem:
             s3_additional_kwargs={"StorageClass": "STANDARD_IA", "ContentType": "text/csv"},
         )
 
+    @pytest.mark.asyncio
+    async def test_cp_file_directory(self):
+        # GH-1008: recursive copy() passes the directories, which used to be
+        # sent to CopyObject and fail with NoSuchKey.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs._info = mock.AsyncMock(return_value=S3FileSystem._directory_object("bucket", "src"))
+        fs._sync_fs._call = mock.MagicMock()
+
+        await fs._cp_file("s3://bucket/src", "s3://bucket/dst")
+        fs._sync_fs._call.assert_not_called()
+
     @pytest.mark.parametrize("size", [10, 5 * 2**30 + 1])
     @pytest.mark.asyncio
     async def test_cp_file_multipart_parameters(self, size):
@@ -1182,6 +1193,22 @@ class TestAioS3FileSystem:
         fs.mv(path1, path2)
         assert await fs._cat_file(path2) == data
         assert not await fs._exists(path1)
+
+    @pytest.mark.asyncio
+    async def test_move_recursive(self, fs):
+        # GH-974: the directory entries used to make mv() fail, after copying
+        # the files.
+        base = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_async_move_recursive/{uuid.uuid4()}"
+        )
+        await fs._pipe_file(f"{base}/src/a", b"a")
+        await fs._pipe_file(f"{base}/src/sub/b", b"b")
+        fs.mv(f"{base}/src", f"{base}/dst", recursive=True)
+        assert await fs._cat_file(f"{base}/dst/a") == b"a"
+        assert await fs._cat_file(f"{base}/dst/sub/b") == b"b"
+        assert not await fs._exists(f"{base}/src/a")
+        assert not await fs._exists(f"{base}/src/sub/b")
 
     @pytest.mark.asyncio
     async def test_get_file(self, fs):

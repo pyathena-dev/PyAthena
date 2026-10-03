@@ -25,6 +25,7 @@ from pyathena.filesystem.s3_object import (
     S3Metadata,
     S3MultipartUpload,
     S3Object,
+    S3ObjectType,
     S3ObjectVersion,
 )
 
@@ -325,8 +326,36 @@ class AioS3FileSystem(AsyncFileSystem):
         )
         self._sync_fs._raise_delete_objects_errors(requests, results)
 
+    def mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs) -> None:
+        """Move files from one S3 location to another.
+
+        Delegates to :meth:`S3FileSystem.mv`, which deletes only the source
+        objects that it has copied.
+
+        Args:
+            path1: Source S3 path, glob pattern, or list of paths.
+            path2: Destination S3 path, or list of paths when ``path1`` is a
+                list.
+            recursive: Whether to move the directories with their contents.
+            maxdepth: Maximum depth of a recursive move.
+            **kwargs: Additional S3 copy parameters.
+        """
+        self._sync_fs.mv(path1, path2, recursive=recursive, maxdepth=maxdepth, **kwargs)
+
     async def _cp_file(self, path1: str, path2: str, **kwargs) -> None:
-        """Copy an S3 object, using async parallel multipart upload for large files."""
+        """Copy an S3 object, using async parallel multipart upload for large files.
+
+        A directory ``path1``, which recursive ``copy()`` passes along with
+        the files under it, is skipped.
+
+        Args:
+            path1: Source S3 path (s3://bucket/key).
+            path2: Destination S3 path (s3://bucket/key).
+            **kwargs: Additional S3 copy parameters.
+
+        Raises:
+            ValueError: If trying to copy to a versioned file or copy buckets.
+        """
         # fsspec < 2026.6.0 leaks the typo'd "onerror" keyword from mv();
         # see S3FileSystem.cp_file.
         kwargs.pop("onerror", None)
@@ -341,6 +370,10 @@ class AioS3FileSystem(AsyncFileSystem):
             raise ValueError("Cannot copy buckets.")
 
         info1 = await self._info(path1)
+        if info1.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
+            # Recursive copy() passes the directories too; see
+            # S3FileSystem.cp_file.
+            return
         size1 = info1.get("size", 0)
         if size1 <= S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE:
             await asyncio.to_thread(
