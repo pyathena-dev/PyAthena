@@ -1472,14 +1472,64 @@ class TestS3FileSystem:
             fs.cat_file("s3://bucket/dir/", start=start, end=end)
         assert ranges == []
 
-    def test_get_file_directory(self, tmp_path):
+    @pytest.mark.parametrize("key", ["dir", None])
+    def test_get_file_directory(self, tmp_path, key):
+        # GH-974: recursive get() passes directories, including the bucket,
+        # which become local directories as with fsspec's get_file().
         fs = self._make_fs()
-        fs.default_cache_type = "bytes"
-        fs.info = mock.MagicMock(return_value=S3FileSystem._directory_object("bucket", "dir"))
+        fs.info = mock.MagicMock(return_value=S3FileSystem._directory_object("bucket", key))
+        rpath = f"s3://bucket/{key}" if key else "s3://bucket"
+        lpath = tmp_path / "out" / "dir"
 
-        with pytest.raises(FileNotFoundError):
-            fs.get_file("s3://bucket/dir", str(tmp_path / "dir"))
-        assert list(tmp_path.iterdir()) == []
+        fs.get_file(rpath, str(lpath))
+        assert lpath.is_dir()
+        # Existing directories are kept.
+        fs.get_file(rpath, str(lpath))
+        assert lpath.is_dir()
+        fs._call.assert_not_called()
+
+    def test_get_file_creates_parent_directories(self, tmp_path):
+        # GH-974: the parent directories used to raise FileNotFoundError.
+        fs, _ = self._make_object_fs(b"data")
+        lpath = tmp_path / "new" / "dir" / "key"
+        callback = Callback()
+
+        fs.get_file("s3://bucket/key", str(lpath), callback=callback)
+        assert lpath.read_bytes() == b"data"
+        assert callback.size == callback.value == 4
+
+    @pytest.mark.parametrize(
+        ("rpath", "kwargs"),
+        [
+            ("s3://bucket/key", {"version_id": "v1"}),
+            ("s3://bucket/key?versionId=v1", {}),
+        ],
+    )
+    def test_get_file_version_id(self, tmp_path, rpath, kwargs):
+        # A requested version is looked up only by open(), not as a possible
+        # directory: isdir() would look up the latest version, or the prefix
+        # of the same name when the version does not exist.
+        fs, _ = self._make_object_fs(b"data")
+        lpath = tmp_path / "key"
+
+        fs.get_file(rpath, str(lpath), **kwargs)
+        assert lpath.read_bytes() == b"data"
+        assert fs.info.call_count == 1
+
+    def test_get_file_file_like(self, tmp_path):
+        # GH-974: a file-like lpath used to raise TypeError, and outfile was
+        # ignored in favor of the local file lpath.
+        fs, _ = self._make_object_fs(b"data")
+        lpath = io.BytesIO()
+        fs.get_file("s3://bucket/key", lpath)
+        assert lpath.getvalue() == b"data"
+        assert not lpath.closed
+
+        outfile = io.BytesIO()
+        fs.get_file("s3://bucket/key", str(tmp_path / "key"), outfile=outfile)
+        assert outfile.getvalue() == b"data"
+        assert not outfile.closed
+        assert not (tmp_path / "key").exists()
 
     def test_cat_ranges_range(self):
         fs, ranges = self._make_object_fs(b"0123456789")
@@ -2798,6 +2848,18 @@ class TestS3FileSystem:
     #     for i in range(10):
     #         assert fs.cat(f"{dir2}test_{i}") == bytes(i)
     #         assert not fs.exists(f"{dir1}test_{i}")
+
+    def test_get_recursive(self, fs, tmp_path):
+        # GH-974: the directory entries used to be written as empty files.
+        base = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_get_recursive/{uuid.uuid4()}"
+        )
+        fs.pipe(f"{base}/a", b"a")
+        fs.pipe(f"{base}/sub/b", b"b")
+        fs.get(base, str(tmp_path / "out"), recursive=True)
+        assert (tmp_path / "out" / "a").read_bytes() == b"a"
+        assert (tmp_path / "out" / "sub" / "b").read_bytes() == b"b"
 
     def test_get_file(self, fs):
         with tempfile.TemporaryDirectory() as tmp:
