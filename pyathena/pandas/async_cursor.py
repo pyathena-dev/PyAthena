@@ -40,9 +40,8 @@ class AsyncPandasCursor(AsyncCursor):
         - Memory optimization through configurable chunking
 
     Attributes:
-        arraysize: Number of rows to fetch per batch.
-        engine: Parsing engine ('auto', 'c', 'python', 'pyarrow').
-        chunksize: Number of rows per chunk for large datasets.
+        arraysize: Default number of rows that fetchmany() returns on the result
+            sets this cursor creates.
 
     Example:
         >>> from pyathena.pandas.async_cursor import AsyncPandasCursor
@@ -55,7 +54,7 @@ class AsyncPandasCursor(AsyncCursor):
         >>> df = result_set.as_pandas()
         >>>
         >>> # Or iterate through chunks for large datasets
-        >>> for chunk_df in result_set:
+        >>> for chunk_df in result_set.iter_chunks():
         ...     process_chunk(chunk_df)
 
     Note:
@@ -207,9 +206,8 @@ class AsyncPandasCursor(AsyncCursor):
             result_reuse_enable: Enable Athena result reuse for this query.
             result_reuse_minutes: Minutes to reuse cached results.
             paramstyle: Parameter style ('qmark' or 'pyformat').
-            result_set_type_hints: Optional dictionary mapping column names to
-                Athena DDL type signatures for precise type conversion within
-                complex types.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
             keep_default_na: Whether to keep default pandas NA values.
             na_values: Additional values to treat as NA.
             quoting: CSV quoting behavior (pandas csv.QUOTE_* constants).

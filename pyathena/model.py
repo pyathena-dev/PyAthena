@@ -34,9 +34,9 @@ class AthenaQueryExecution:
         - UTILITY: Utility statements (SHOW, DESCRIBE, EXPLAIN)
 
     Example:
-        >>> # Typically accessed through cursor execution
-        >>> cursor.execute("SELECT COUNT(*) FROM my_table")
-        >>> query_execution = cursor._last_query_execution  # Internal access
+        >>> # AsyncCursor returns the query execution through a Future
+        >>> query_id, future = cursor.execute("SELECT COUNT(*) FROM my_table")
+        >>> query_execution = cursor.query_execution(query_id).result()
         >>> print(f"Query ID: {query_execution.query_id}")
         >>> print(f"State: {query_execution.state}")
         >>> print(f"Data scanned: {query_execution.data_scanned_in_bytes} bytes")
@@ -472,8 +472,8 @@ class AthenaCalculationExecution(AthenaCalculationExecutionStatus):
     and timing information.
 
     See Also:
-        AWS Athena CalculationExecution API reference:
-        https://docs.aws.amazon.com/athena/latest/APIReference/API_CalculationSummary.html
+        AWS Athena GetCalculationExecution API reference:
+        https://docs.aws.amazon.com/athena/latest/APIReference/API_GetCalculationExecution.html
     """
 
     def __init__(self, response: dict[str, Any]) -> None:

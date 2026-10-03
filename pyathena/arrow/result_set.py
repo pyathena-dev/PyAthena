@@ -50,7 +50,7 @@ class AthenaArrowResultSet(AthenaResultSet):
         >>> cursor.execute("SELECT * FROM large_table")
         >>>
         >>> # Get Arrow Table
-        >>> table = cursor.fetchall()
+        >>> table = cursor.as_arrow()
         >>>
         >>> # Convert to pandas if needed
         >>> df = table.to_pandas()

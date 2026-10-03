@@ -501,7 +501,6 @@ class Converter(metaclass=ABCMeta):
 
     Attributes:
         mappings: Dictionary mapping Athena type names to conversion functions.
-        default: Default conversion function for unmapped types.
         types: Optional dictionary mapping type names to Python type objects.
     """
 

@@ -32,7 +32,7 @@ class AioCursor(WithAsyncFetch):
     calls, keeping the event loop free.
 
     Example:
-        >>> async with AioConnection.create(...) as conn:
+        >>> async with await AioConnection.create(...) as conn:
         ...     async with conn.cursor() as cursor:
         ...         await cursor.execute("SELECT * FROM my_table")
         ...         rows = await cursor.fetchall()
@@ -133,9 +133,8 @@ class AioCursor(WithAsyncFetch):
             on_start_query_execution: Callback invoked with the query ID before ``execute()``
                 waits for the query: after the ``StartQueryExecution`` call, or after a
                 reusable query ID is found through ``cache_size``.
-            result_set_type_hints: Optional dictionary mapping column names to
-                Athena DDL type signatures for precise type conversion within
-                complex types.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
             options: Shared execution options as an
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.
@@ -188,7 +187,8 @@ class AioCursor(WithAsyncFetch):
         """Fetch the next row of a query result set.
 
         Returns:
-            A tuple representing the next row, or None if no more rows.
+            The next row (a tuple, or a dict for ``AioDictCursor``), or None if
+            no more rows.
 
         Raises:
             ProgrammingError: If called before executing a query that
@@ -204,10 +204,11 @@ class AioCursor(WithAsyncFetch):
         """Fetch multiple rows from a query result set.
 
         Args:
-            size: Maximum number of rows to fetch. If None, uses arraysize.
+            size: Maximum number of rows to fetch. If None or not positive,
+                ``arraysize`` is used.
 
         Returns:
-            List of tuples representing the fetched rows.
+            The fetched rows.
 
         Raises:
             ProgrammingError: If called before executing a query that
@@ -225,7 +226,7 @@ class AioCursor(WithAsyncFetch):
         """Fetch all remaining rows from a query result set.
 
         Returns:
-            List of tuples representing all remaining rows in the result set.
+            The remaining rows.
 
         Raises:
             ProgrammingError: If called before executing a query that
@@ -241,7 +242,7 @@ class AioDictCursor(AioCursor):
     """Native asyncio cursor that returns rows as dictionaries.
 
     Example:
-        >>> async with AioConnection.create(...) as conn:
+        >>> async with await AioConnection.create(...) as conn:
         ...     cursor = conn.cursor(AioDictCursor)
         ...     await cursor.execute("SELECT id, name FROM users")
         ...     row = await cursor.fetchone()

@@ -51,7 +51,6 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
     Attributes:
         session_id: The Athena Spark session identifier.
         calculation_id: ID of the current calculation being executed.
-        engine_configuration: DPU and resource configuration for Spark.
 
     Note:
         This is an abstract base class used by concrete Spark cursor implementations
