@@ -13,8 +13,10 @@ import pytest
 from pyathena.filesystem.s3_errors import S3ClientError
 
 
-def _client_error(code, message="error message", status_code=None):
+def _client_error(code, message="error message", status_code=None, condition=None):
     error_response = {"Error": {"Code": code, "Message": message}}
+    if condition is not None:
+        error_response["Error"]["Condition"] = condition
     if status_code is not None:
         error_response["ResponseMetadata"] = {"HTTPStatusCode": status_code}
     return botocore.exceptions.ClientError(error_response, "TestOperation")
@@ -93,4 +95,24 @@ class TestS3ClientError:
         actual = S3ClientError(_client_error("UnknownCode")).os_error
         assert type(actual) is OSError
         assert actual.errno == errno.EIO
+        assert "error message" in str(actual)
+
+    @pytest.mark.parametrize(
+        ("condition", "expected"),
+        [
+            # GH-972: a conditional write (IfNoneMatch="*") found an existing
+            # object.
+            ("If-None-Match", FileExistsError),
+            # A read conditional on the ETag (IfMatch) found another object.
+            ("If-Match", OSError),
+            (None, OSError),
+        ],
+    )
+    def test_os_error_precondition_failed(self, condition, expected):
+        actual = S3ClientError(
+            _client_error("PreconditionFailed", status_code=412, condition=condition)
+        ).os_error
+        assert type(actual) is expected
+        if expected is OSError:
+            assert actual.errno == errno.EINVAL
         assert "error message" in str(actual)
