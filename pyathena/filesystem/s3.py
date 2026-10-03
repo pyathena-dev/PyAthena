@@ -1904,12 +1904,13 @@ class S3FileSystem(AbstractFileSystem):
     ) -> list[S3ObjectVersion]:
         """List the versions of the object or of the objects under the path.
 
-        A key path without a trailing slash returns the versions of that key
-        if it has any, and otherwise the versions of the keys under ``key/``.
-        A key path with a trailing slash returns the versions of the keys
-        under it, and a bucket path returns the versions of all the keys in
-        the bucket. Sibling keys that merely start with the same characters
-        (e.g., ``key.bak``) are never included.
+        A key path without a trailing slash selects that key if it has any
+        versions or delete markers, and otherwise the keys under ``key/``.
+        The choice does not depend on ``delete_markers``, so a key that has
+        only delete markers yields no versions without them. A key path with
+        a trailing slash selects the keys under it, and a bucket path selects
+        all the keys in the bucket. Sibling keys that merely start with the
+        same characters (e.g., ``key.bak``) are never included.
 
         Args:
             path: S3 path (s3://bucket/key or a key prefix) to list the
@@ -1933,20 +1934,21 @@ class S3FileSystem(AbstractFileSystem):
                 S3ObjectVersion(bucket=bucket, is_delete_marker=False, response=v)
                 for v in response.get("Versions", [])
             )
-            if delete_markers:
-                versions.extend(
-                    S3ObjectVersion(bucket=bucket, is_delete_marker=True, response=m)
-                    for m in response.get("DeleteMarkers", [])
-                )
+            # Delete markers are kept until the key is chosen, so that the
+            # choice is the same with and without them.
+            versions.extend(
+                S3ObjectVersion(bucket=bucket, is_delete_marker=True, response=m)
+                for m in response.get("DeleteMarkers", [])
+            )
         # botocore decodes the keys only when it sets EncodingType itself, so
         # the keys of an explicit EncodingType="url" are decoded for matching.
         url_encoded = kwargs.get("EncodingType") == "url"
         keys = [unquote_plus(v.key) if url_encoded else v.key for v in versions]
-        if key and not key.endswith("/"):
-            object_versions = [v for v, k in zip(versions, keys, strict=True) if k == key]
-            if object_versions:
-                return object_versions
-        return [v for v, k in zip(versions, keys, strict=True) if k.startswith(prefix)]
+        if key and not key.endswith("/") and key in keys:
+            selected = [v for v, k in zip(versions, keys, strict=True) if k == key]
+        else:
+            selected = [v for v, k in zip(versions, keys, strict=True) if k.startswith(prefix)]
+        return [v for v in selected if delete_markers or not v.is_delete_marker]
 
     def clear_multipart_uploads(self, path: str) -> None:
         """Abort any incomplete multipart uploads in the bucket.

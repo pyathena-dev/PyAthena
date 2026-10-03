@@ -824,6 +824,28 @@ class TestS3FileSystem:
         assert sorted(v.key for v in actual if not v.is_delete_marker) == expected
         assert sorted(v.key for v in actual if v.is_delete_marker) == expected
 
+    @pytest.mark.parametrize(
+        ("delete_markers", "expected"),
+        [
+            (False, []),
+            (True, [("dir", "m1", True)]),
+        ],
+    )
+    def test_object_version_info_chooses_key_with_only_delete_markers(
+        self, delete_markers, expected
+    ):
+        fs = self._make_fs()
+        # "dir" is both a deleted object, with only a delete marker left, and
+        # a folder.
+        fs._call.return_value = {
+            "Versions": [{"Key": "dir/x", "VersionId": "v1", "IsLatest": True}],
+            "DeleteMarkers": [{"Key": "dir", "VersionId": "m1", "IsLatest": True}],
+            "IsTruncated": False,
+        }
+
+        actual = fs.object_version_info("s3://bucket/dir", delete_markers=delete_markers)
+        assert [(v.key, v.version_id, v.is_delete_marker) for v in actual] == expected
+
     def test_object_version_info_matches_url_encoded_keys(self):
         fs = self._make_fs()
         # With an explicit EncodingType="url", botocore leaves the keys encoded.
