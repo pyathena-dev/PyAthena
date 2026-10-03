@@ -945,7 +945,8 @@ class AthenaPandasResultSet(AthenaResultSet):
         dtypes: dict[str, Any] = {}
         for d in description:
             if d[1] in self._INTEGER_TYPES:
-                dtypes[d[0]] = self._converter.get_dtype(d[1], d[4], d[5])
+                if (dtype := self._converter.get_dtype(d[1], d[4], d[5])) is not None:
+                    dtypes[d[0]] = dtype
             elif d[1] == "json":
                 dtypes[d[0]] = object
         return pd.DataFrame(

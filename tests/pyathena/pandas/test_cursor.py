@@ -26,6 +26,12 @@ from tests.pyathena.conftest import connect
 from tests.pyathena.util import CONVERTED_VALUES_QUERY, CONVERTED_VALUES_ROW, cached_file_systems
 
 
+def _pandas_converter_without_bigint_dtype():
+    converter = DefaultPandasTypeConverter()
+    del converter.types["bigint"]
+    return converter
+
+
 class TestPandasCursor:
     @pytest.mark.parametrize(
         ("engine", "chunksize"), [("auto", None), ("c", 2), ("python", 2), ("pyarrow", None)]
@@ -1671,6 +1677,34 @@ class TestPandasCursor:
         kwargs = result_set_class.call_args.kwargs
         expected = {**cursor_kwargs, **execute_kwargs}
         assert {key: kwargs[key] for key in expected} == expected
+
+    @pytest.mark.parametrize(
+        "pandas_cursor",
+        [
+            pytest.param({"converter": _pandas_converter_without_bigint_dtype()}, id="default"),
+            pytest.param(
+                {
+                    "work_group": ENV.managed_work_group,
+                    "s3_staging_dir": "",
+                    "converter": _pandas_converter_without_bigint_dtype(),
+                },
+                id="managed",
+                marks=pytest.mark.skipif(
+                    not ENV.managed_work_group,
+                    reason="AWS_ATHENA_MANAGED_WORKGROUP not set",
+                ),
+            ),
+        ],
+        indirect=["pandas_cursor"],
+    )
+    def test_integer_without_dtype(self, pandas_cursor):
+        pandas_cursor.execute(
+            "SELECT * FROM (VALUES BIGINT '1', NULL) AS t(col_bigint) ORDER BY col_bigint"
+        )
+        df = pandas_cursor.as_pandas()
+        assert df["col_bigint"].dtype == np.float64
+        assert df["col_bigint"].iloc[0] == 1.0
+        assert math.isnan(df["col_bigint"].iloc[1])
 
     @pytest.mark.parametrize(
         ("pandas_cursor", "kwargs"),
