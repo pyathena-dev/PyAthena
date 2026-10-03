@@ -13,7 +13,7 @@ import urllib.request
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
-from itertools import chain
+from itertools import chain, pairwise
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -25,7 +25,7 @@ from fsspec import Callback
 import pyathena
 from pyathena.filesystem import register_s3_filesystem
 from pyathena.filesystem.s3 import S3File, S3FileSystem
-from pyathena.filesystem.s3_executor import S3AioExecutor
+from pyathena.filesystem.s3_executor import S3AioExecutor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import S3Object, S3ObjectType, S3StorageClass
 from pyathena.util import RetryConfig
 from tests import ENV
@@ -508,6 +508,18 @@ class TestS3FileSystem:
         with pytest.raises(ValueError, match="version"):
             fs.pipe_file("s3://bucket/key?versionId=12345abcde", b"data")
 
+    def test_pipe_file_non_contiguous_memoryview(self):
+        # A non-contiguous memoryview within the block size in items, 4 items
+        # of 8 bytes here, is uploaded with PutObject, as the buffered path
+        # cannot write it.
+        fs = self._make_fs()
+        fs._put_object = mock.MagicMock()
+        value = memoryview(b"ab" * 8).cast("H")[::2]
+
+        fs.pipe_file("s3://bucket/key", value, block_size=6)
+
+        fs._put_object.assert_called_once_with(bucket="bucket", key="key", body=b"ab" * 4)
+
     def test_pipe_file_small_drops_max_workers(self):
         fs = self._make_fs()
         fs._put_object = mock.MagicMock()
@@ -515,6 +527,82 @@ class TestS3FileSystem:
         # max_workers is an open() parameter and is not sent to PutObject.
         fs.pipe_file("s3://bucket/key", b"data", max_workers=2)
         fs._put_object.assert_called_once_with(bucket="bucket", key="key", body=b"data")
+
+    @pytest.mark.parametrize(
+        ("size", "block_size", "min_block_size"),
+        [
+            # The data fits in the maximum number of parts.
+            (12, 4, None),
+            # GH-953: more data is rejected with the minimum block size,
+            (13, 4, 5),
+            # which is at least the minimum part size.
+            (5, 1, 4),
+        ],
+    )
+    def test_check_multipart_upload_size(self, size, block_size, min_block_size):
+        fs = self._make_fs()
+        fs.MULTIPART_UPLOAD_MIN_PART_SIZE = 4
+        fs.MULTIPART_UPLOAD_MAX_PARTS = 3
+
+        if min_block_size is None:
+            fs._check_multipart_upload_size("s3://bucket/key", size, block_size)
+        else:
+            with pytest.raises(ValueError, match=f"at least {min_block_size} bytes"):
+                fs._check_multipart_upload_size("s3://bucket/key", size, block_size)
+
+    @pytest.mark.parametrize("kwargs", [{"block_size": 4}, {}])
+    def test_put_file_exceeding_max_parts(self, tmp_path, kwargs):
+        # GH-953: a file that does not fit in the maximum number of parts is
+        # rejected before anything is uploaded.
+        fs = self._make_fs()
+        fs.MULTIPART_UPLOAD_MAX_PARTS = 3
+        fs.default_block_size = 4
+        fs.open = mock.MagicMock()
+        lpath = tmp_path / "data"
+        lpath.write_bytes(b"a" * 13)
+
+        with pytest.raises(ValueError, match="block_size"):
+            fs.put_file(str(lpath), "s3://bucket/key", **kwargs)
+        fs.open.assert_not_called()
+        fs._call.assert_not_called()
+
+    def test_put_file_block_size(self, tmp_path):
+        # block_size is passed to open() instead of the S3 API.
+        fs = self._make_fs()
+        fs.open = mock.MagicMock()
+        fs.open.return_value.__enter__.return_value.blocksize = 8
+        lpath = tmp_path / "data"
+        lpath.write_bytes(b"a" * 13)
+
+        fs.put_file(str(lpath), "s3://bucket/key", block_size=8)
+
+        fs.open.assert_called_once_with(
+            "s3://bucket/key", "wb", block_size=8, s3_additional_kwargs={}
+        )
+
+    @pytest.mark.parametrize(
+        ("value", "kwargs"),
+        [
+            (b"a" * 13, {"block_size": 4}),
+            (b"a" * 13, {}),
+            # The size of a memoryview is counted in bytes, not items.
+            (memoryview(b"a" * 16).cast("I"), {}),
+        ],
+    )
+    def test_pipe_file_exceeding_max_parts(self, value, kwargs):
+        # GH-953: data that does not fit in the maximum number of parts is
+        # rejected before anything is uploaded.
+        fs = self._make_fs()
+        fs.MULTIPART_UPLOAD_MAX_PARTS = 3
+        fs.default_block_size = 4
+        fs.open = mock.MagicMock()
+        fs._put_object = mock.MagicMock()
+
+        with pytest.raises(ValueError, match="block_size"):
+            fs.pipe_file("s3://bucket/key", value, **kwargs)
+        fs.open.assert_not_called()
+        fs._put_object.assert_not_called()
+        fs._call.assert_not_called()
 
     def test_open_max_workers(self):
         fs = self._make_fs()
@@ -984,6 +1072,32 @@ class TestS3FileSystem:
     )
     def test_get_copy_ranges(self, size, block_size, ranges):
         assert self._make_fs()._get_copy_ranges(size, block_size) == ranges
+
+    @pytest.mark.parametrize(
+        ("size", "num_ranges"),
+        [
+            # The block size splits the object into the maximum number of parts.
+            (10_000 * 5 * 2**20, 10_000),
+            # GH-953: a larger object is split by a larger size instead of
+            # into more parts than the maximum,
+            (10_000 * 5 * 2**20 + 1, 9_999),
+            (50 * 2**30, 10_000),
+            # including the maximum object size.
+            (5 * 2**40, 10_000),
+        ],
+    )
+    def test_get_copy_ranges_max_parts(self, size, num_ranges):
+        fs = self._make_fs()
+        ranges = fs._get_copy_ranges(size, 5 * 2**20)
+
+        assert len(ranges) == num_ranges
+        assert ranges[0][0] == 0
+        assert ranges[-1][1] == size
+        assert all(end == start for (_, end), (start, _) in pairwise(ranges))
+        assert all(
+            fs.MULTIPART_UPLOAD_MIN_PART_SIZE <= end - start <= fs.MULTIPART_UPLOAD_MAX_PART_SIZE
+            for start, end in ranges
+        )
 
     @pytest.mark.parametrize("max_workers", [1, 4])
     def test_copy_object_with_multipart_upload_part_sizes(self, max_workers):
@@ -2376,6 +2490,7 @@ class TestS3File:
         file.s3_additional_kwargs = {}
         file.autocommit = autocommit
         file.blocksize = S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE
+        file.fs.MULTIPART_UPLOAD_MAX_PARTS = S3FileSystem.MULTIPART_UPLOAD_MAX_PARTS
         file.append_block = False
         file.multipart_upload = None
         file.multipart_upload_parts = []
@@ -2408,6 +2523,7 @@ class TestS3File:
         fs = mock.MagicMock(spec=S3FileSystem)
         fs.MULTIPART_UPLOAD_MIN_PART_SIZE = 4
         fs.MULTIPART_UPLOAD_MAX_PART_SIZE = 64
+        fs.MULTIPART_UPLOAD_MAX_PARTS = S3FileSystem.MULTIPART_UPLOAD_MAX_PARTS
         fs.exists.return_value = True
         fs.info.return_value = S3Object(
             init={"ContentLength": len(existing)},
@@ -2520,6 +2636,125 @@ class TestS3File:
         sizes = [size for _, size in parts]
         assert all(size >= fs.MULTIPART_UPLOAD_MIN_PART_SIZE for size in sizes[:-1])
         assert all(size <= fs.MULTIPART_UPLOAD_MAX_PART_SIZE for size in sizes)
+
+    @staticmethod
+    def _write_and_close(f, writes: list[bytes]) -> None:
+        with f:
+            for data in writes:
+                f.write(data)
+
+    @pytest.mark.parametrize(
+        ("existing", "mode", "writes"),
+        [
+            # The data fills the maximum number of parts.
+            (b"", "wb", [b"a" * 4] * 3),
+            (b"", "wb", [b"a" * 14]),
+            # The parts copied from the existing object in an append count
+            # toward the maximum.
+            (b"a" * 6, "ab", [b"b" * 4] * 2),
+        ],
+    )
+    @pytest.mark.parametrize("autocommit", [True, False])
+    def test_write_max_parts(self, existing, mode, writes, autocommit):
+        fs = self._make_append_fs(existing)
+        fs.MULTIPART_UPLOAD_MAX_PARTS = 3
+
+        f = S3File(fs, "s3://bucket/key.txt", mode=mode, block_size=4, autocommit=autocommit)
+        self._write_and_close(f, writes)
+        if not autocommit:
+            f.commit()
+
+        assert self._uploaded_object(fs, existing) == existing + b"".join(writes)
+        assert fs._upload_part_copy.call_count + fs._upload_part.call_count == 3
+
+    @pytest.mark.parametrize(
+        ("existing", "mode", "writes"),
+        [
+            # GH-953: the part after the maximum is not uploaded, whether it is
+            # flushed by a write()
+            (b"", "wb", [b"a" * 4] * 4),
+            # or by close(),
+            (b"", "wb", [b"a" * 12, b"b" * 3]),
+            # including after the parts copied in an append.
+            (b"a" * 6, "ab", [b"b" * 4] * 3),
+        ],
+    )
+    @pytest.mark.parametrize("autocommit", [True, False])
+    def test_write_exceeding_max_parts(self, existing, mode, writes, autocommit):
+        fs = self._make_append_fs(existing)
+        fs.MULTIPART_UPLOAD_MAX_PARTS = 3
+
+        executor = mock.MagicMock(wraps=S3ThreadPoolExecutor(max_workers=1))
+        f = S3File(
+            fs,
+            "s3://bucket/key.txt",
+            mode=mode,
+            block_size=4,
+            autocommit=autocommit,
+            executor=executor,
+        )
+        with pytest.raises(ValueError, match="block_size"):
+            self._write_and_close(f, writes)
+        # The upload is aborted, and committing a deferred write afterwards
+        # uploads nothing.
+        if not autocommit:
+            f.commit()
+
+        assert f.closed
+        # The submitted parts, some of which the abort may have cancelled.
+        assert [c.kwargs["part_number"] for c in executor.submit.call_args_list] == [1, 2, 3]
+        executor.shutdown.assert_called()
+        fs._call.assert_called_once_with(
+            "abort_multipart_upload", Bucket="bucket", Key="key.txt", UploadId="uploadid"
+        )
+        fs._finish_multipart_upload.assert_not_called()
+        fs._put_object.assert_not_called()
+
+    @pytest.mark.parametrize("autocommit", [True, False])
+    def test_write_exceeding_max_parts_abort_failure(self, autocommit):
+        # An abort failure is logged; the part limit error propagates, and
+        # neither closing the file nor committing a deferred write retries
+        # the upload or completes it.
+        fs = self._make_append_fs(b"")
+        fs.MULTIPART_UPLOAD_MAX_PARTS = 3
+        fs._call.side_effect = PermissionError("abort failed")
+
+        executor = mock.MagicMock(wraps=S3ThreadPoolExecutor(max_workers=1))
+        f = S3File(
+            fs,
+            "s3://bucket/key.txt",
+            mode="wb",
+            block_size=4,
+            autocommit=autocommit,
+            executor=executor,
+        )
+        with pytest.raises(ValueError, match="block_size"):
+            self._write_and_close(f, [b"a" * 4] * 4)
+        if not autocommit:
+            f.commit()
+
+        assert f.closed
+        assert [c.kwargs["part_number"] for c in executor.submit.call_args_list] == [1, 2, 3]
+        executor.shutdown.assert_called()
+        fs._call.assert_called_once()
+        fs._finish_multipart_upload.assert_not_called()
+        fs._put_object.assert_not_called()
+
+    def test_write_exceeding_max_parts_without_close(self):
+        # The executor of the closed file is shut down, as fsspec does not
+        # close it again when it is garbage collected.
+        fs = self._make_append_fs(b"")
+        fs.MULTIPART_UPLOAD_MAX_PARTS = 3
+        executor = mock.MagicMock(wraps=S3ThreadPoolExecutor(max_workers=1))
+        f = S3File(fs, "s3://bucket/key.txt", mode="wb", block_size=4, executor=executor)
+
+        for _ in range(3):
+            f.write(b"a" * 4)
+        with pytest.raises(ValueError, match="block_size"):
+            f.write(b"a" * 4)
+
+        assert f.closed
+        executor.shutdown.assert_called_once()
 
     def test_append_discard(self):
         # Rolling back an append aborts its multipart upload without the
