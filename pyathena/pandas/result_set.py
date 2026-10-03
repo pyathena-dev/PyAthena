@@ -170,7 +170,10 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
             raise
 
     def as_pandas(self) -> DataFrame:
-        """Collect all chunks into a single DataFrame.
+        """Collect all remaining chunks into a single DataFrame.
+
+        The chunks keep their index, so the result has the row numbers or the
+        ``index_col`` values of the CSV file. Categorical columns stay categorical.
 
         Returns:
             Single pandas DataFrame containing all data.
@@ -182,7 +185,15 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
             return pd.DataFrame()
         if len(dfs) == 1:
             return dfs[0]
-        return pd.concat(dfs, ignore_index=True)
+        df = pd.concat(dfs)
+        # Each chunk infers its own categories, and concat turns categorical columns
+        # whose categories differ into object columns.
+        for column, dtype in dfs[0].dtypes.items():
+            if isinstance(dtype, pd.CategoricalDtype) and not isinstance(
+                df[column].dtype, pd.CategoricalDtype
+            ):
+                df[column] = df[column].astype(pd.CategoricalDtype(ordered=dtype.ordered))
+        return df
 
 
 class AthenaPandasResultSet(AthenaResultSet):
@@ -834,13 +845,13 @@ class AthenaPandasResultSet(AthenaResultSet):
         """Iterate over result chunks as pandas DataFrames.
 
         This method provides an iterator interface for processing large result sets.
-        When chunksize is specified, it yields DataFrames in chunks for memory-efficient
-        processing. When chunksize is not specified, it yields the entire result as a
-        single DataFrame.
+        When chunksize is specified, or ``auto_optimize_chunksize`` chose a chunk size
+        for a large CSV result, it yields DataFrames in chunks for memory-efficient
+        processing. Otherwise, it yields the entire result as a single DataFrame.
 
         Returns:
             PandasDataFrameIterator that yields pandas DataFrames for each chunk
-            of rows, or the entire DataFrame if chunksize was not specified.
+            of rows, or the entire DataFrame if the result was not read in chunks.
 
         Example:
             >>> # With chunking for large datasets
