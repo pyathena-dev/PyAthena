@@ -976,8 +976,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "boto3", specifier = ">=1.41.2" },
-    { name = "botocore", specifier = ">=1.41.2" },
+    { name = "boto3", specifier = ">=1.43.31" },
+    { name = "botocore", specifier = ">=1.43.31" },
     { name = "fsspec" },
     { name = "pandas", marker = "extra == 'pandas'", specifier = ">=3.0.0" },
     { name = "polars", marker = "extra == 'polars'", specifier = ">=1.39.0" },
