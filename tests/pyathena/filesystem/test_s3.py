@@ -1517,6 +1517,13 @@ class TestS3FileSystem:
             (["s3://bucket/a", "s3://bucket/b"], ["s3://bucket/c", "s3a://bucket/c"]),
             # A destination that is another source.
             (["s3://bucket/a", "s3://bucket/b"], ["s3://bucket/b", "s3://bucket/a"]),
+            # A destination that is a source left in place.
+            (["s3://bucket/a", "s3://bucket/b"], ["s3://bucket/b", "s3://bucket/b"]),
+            # A destination whose "null" version is another source.
+            (
+                ["s3://bucket/a", "s3://bucket/b?versionId=null"],
+                ["s3://bucket/b", "s3://bucket/out"],
+            ),
         ],
     )
     def test_mv_conflicting_destinations(self, path1, path2):
@@ -1602,6 +1609,25 @@ class TestS3FileSystem:
         methods = {c.args[0] for c in fs._call.call_args_list}
         assert fs._client.copy_object not in methods
         assert fs._client.delete_objects not in methods
+
+    def test_mv_versions_onto_their_key(self):
+        fs = self._make_fs()
+        self._serve_keys(fs, {"b"})
+
+        # The "null" version is the object at the key, so it stays in place.
+        fs.mv(["s3://bucket/b?versionId=null"], ["s3://bucket/b"])
+        fs._call.assert_not_called()
+
+        # Another version is copied onto the key, and then deleted.
+        fs.mv(["s3://bucket/b?versionId=v1"], ["s3://bucket/b"])
+        copies = [c.kwargs for c in fs._call.call_args_list if c.args[0] is fs._client.copy_object]
+        assert [(c["CopySource"].get("VersionId"), c["Key"]) for c in copies] == [("v1", "b")]
+        deletes = [
+            c.kwargs["Delete"]["Objects"]
+            for c in fs._call.call_args_list
+            if c.args[0] is fs._client.delete_objects
+        ]
+        assert deletes == [[{"Key": "b", "VersionId": "v1"}]]
 
     def test_mv_nothing_within_maxdepth(self):
         # Only directories within maxdepth: nothing is moved, as with copy().

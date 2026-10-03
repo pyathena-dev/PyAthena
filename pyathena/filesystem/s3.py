@@ -1475,8 +1475,9 @@ class S3FileSystem(AbstractFileSystem):
         ``AbstractFileSystem.mv()`` instead removes ``path1`` by expanding it
         again, which also deletes copies placed where ``path1`` matches them
         and files that ``maxdepth`` kept from being copied. A file whose
-        destination is the file itself is left in place, and directories,
-        which S3 does not store as objects, are not copied.
+        destination is the file itself, or the ``null`` version of a file
+        moved to the file, is left in place, and directories, which S3 does
+        not store as objects, are not copied.
 
         Args:
             path1: Source S3 path, glob pattern, or list of paths.
@@ -1488,9 +1489,9 @@ class S3FileSystem(AbstractFileSystem):
 
         Raises:
             ValueError: If two sources have the same destination, or a
-                destination is another source, which is checked before
-                anything is copied. A directory with no object at its key,
-                which is not copied, does not conflict.
+                destination is another source, including one left in place,
+                which is checked before anything is copied. A directory with
+                no object at its key, which is not copied, does not conflict.
         """
         if path1 == path2:
             return
@@ -1515,12 +1516,14 @@ class S3FileSystem(AbstractFileSystem):
 
         Returns:
             The source and destination paths, except the sources whose
-            destination is the source itself.
+            destination is the source itself or, for a ``null`` version, the
+            key of the source.
 
         Raises:
             ValueError: If two sources have the same destination, or a
-                destination is another source, except for a directory with
-                no object at its key, which is not copied.
+                destination is another source, including one left in place,
+                except for a directory with no object at its key, which is not
+                copied.
         """
         if isinstance(path1, list) and isinstance(path2, list):
             paths1, paths2 = path1, path2
@@ -1543,18 +1546,19 @@ class S3FileSystem(AbstractFileSystem):
                 )
             )
             paths2 = other_paths(paths1, path2, exists=exists, flatten=not source_is_str)
-        # The paths are copied as given, and compared without the protocol.
-        pairs = [
-            (p1, p2)
+        # The paths are copied as given, and compared by what they name.
+        named = [
+            (p1, p2, self._move_target(p1), self._move_target(p2))
             for p1, p2 in zip(paths1, paths2, strict=False)
-            if self._strip_protocol(p1) != self._strip_protocol(p2)
         ]
-        stripped = [(self._strip_protocol(p1), self._strip_protocol(p2)) for p1, p2 in pairs]
-        sources = {source for source, _ in stripped}
+        pairs = [(p1, p2) for p1, p2, source, dest in named if source != dest]
+        stripped = [(source, dest) for _, _, source, dest in named if source != dest]
+        # The sources left in place count too; a copy onto one overwrites it.
+        sources = {source for _, _, source, _ in named}
         counts = Counter(dest for _, dest in stripped)
         # A source with another source below it may be a directory.
         directories: set[str] = set()
-        for source, _ in stripped:
+        for source in sources:
             parent = source.rpartition("/")[0]
             while parent and parent not in directories:
                 directories.add(parent)
@@ -1577,6 +1581,25 @@ class S3FileSystem(AbstractFileSystem):
             if dest in sources:
                 raise ValueError("Cannot move a path onto another path that is moved.")
         return pairs
+
+    def _move_target(self, path: str) -> str:
+        """Return what a path of a move names, for comparing the paths.
+
+        A write to a key replaces its ``null`` version, which the objects of a
+        bucket without versioning have, so that version names the key itself.
+
+        Args:
+            path: S3 path, possibly with a version ID.
+
+        Returns:
+            The path in ``bucket/key`` form, with the version ID unless it is
+            ``null``.
+        """
+        bucket, key, version_id = self.parse_path(path)
+        target = f"{bucket}/{key}" if key else bucket
+        if version_id and version_id != "null":
+            return f"{target}?versionId={version_id}"
+        return target
 
     def cp_file(
         self, path1: str, path2: str, recursive=False, maxdepth=None, on_error=None, **kwargs
