@@ -101,9 +101,9 @@ use parts large enough to stay within the limit.
 Paths follow fsspec, which drops a trailing slash: `s3://YOUR_S3_BUCKET/dir/` and
 `s3://YOUR_S3_BUCKET/dir` are the same path. An object whose key ends in a slash, such
 as a folder marker, is therefore a directory for `info`, `isfile`, and `open`, and
-`open` raises `FileNotFoundError` for it. `ls` and `find` list it as a file entry.
-`cat_file` reads it without a range, with a non-empty range of non-negative offsets,
-or with a negative `start` and no `end`.
+`open` raises `FileNotFoundError` for it. `find`, and `ls` of that directory, list the
+object as a file entry. `cat_file` reads it without a range, with a non-empty range of
+non-negative offsets, or with a negative `start` and no `end`.
 
 ## Error translation
 
