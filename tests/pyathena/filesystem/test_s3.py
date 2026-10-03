@@ -1490,6 +1490,30 @@ class TestS3FileSystem:
 
         fs._put_object.assert_called_once_with(bucket="bucket", key="key", body=b"ab" * 4)
 
+    @pytest.mark.parametrize("intrans", [False, True])
+    @pytest.mark.parametrize("size", [1, S3FileSystem.DEFAULT_BLOCK_SIZE + 1])
+    def test_pipe_file_trailing_slash(self, intrans, size):
+        # GH-1037: a path with a trailing slash is written without it, as
+        # open() writes it, whatever the size of the value. The single
+        # request used to write the key with the trailing slash.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs._transaction = None
+        fs._put_object = mock.MagicMock()
+        fs._create_multipart_upload = mock.MagicMock(
+            return_value=SimpleNamespace(upload_id="uploadid")
+        )
+        fs._upload_part = mock.MagicMock(
+            side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
+        )
+        fs._finish_multipart_upload = mock.MagicMock()
+
+        with fs.transaction if intrans else contextlib.nullcontext():
+            fs.pipe_file("s3://bucket/dir/key/", b"a" * size)
+
+        calls = fs._put_object.call_args_list + fs._create_multipart_upload.call_args_list
+        assert [c.kwargs["key"] for c in calls] == ["dir/key"]
+
     def test_pipe_file_memoryview_routed_by_bytes(self):
         # A memoryview larger than the block size in bytes, but not in items,
         # is uploaded as a multipart upload. Its item count used to route it
@@ -1563,18 +1587,18 @@ class TestS3FileSystem:
         fs._call.assert_not_called()
 
     @pytest.mark.parametrize(
-        ("path", "compression"),
+        ("path", "compression", "key"),
         [
-            ("s3://bucket/key", "gzip"),
-            ("s3://bucket/key.gz", "infer"),
-            # Inferred from the path without the trailing slash, as open()
-            # does.
-            ("s3://bucket/key.gz/", "infer"),
+            ("s3://bucket/key", "gzip", "key"),
+            ("s3://bucket/key.gz", "infer", "key.gz"),
+            # Inferred from, and written to, the path without the trailing
+            # slash, as open() does.
+            ("s3://bucket/key.gz/", "infer", "key.gz"),
         ],
     )
     @pytest.mark.parametrize("intrans", [False, True])
     @pytest.mark.parametrize("size", [1, S3FileSystem.DEFAULT_BLOCK_SIZE + 1])
-    def test_pipe_file_compression(self, path, compression, intrans, size):
+    def test_pipe_file_compression(self, path, compression, key, intrans, size):
         # GH-1037: the value is compressed before it is uploaded, on every
         # path. The single-request path used to send compression to
         # PutObject, which botocore rejects.
@@ -1589,6 +1613,7 @@ class TestS3FileSystem:
 
         # The compressed value fits in one block.
         ((_, kwargs),) = fs._put_object.call_args_list
+        assert kwargs["key"] == key
         assert "compression" not in kwargs
         assert gzip.decompress(kwargs["body"]) == value
 

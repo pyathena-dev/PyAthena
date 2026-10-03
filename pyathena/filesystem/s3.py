@@ -1786,7 +1786,8 @@ class S3FileSystem(AbstractFileSystem):
         and writes inside an fsspec transaction go through the buffered
         path, which uploads the data as a parallel multipart upload and
         keeps the deferred-commit semantics of transactions. A write that
-        fails on that path leaves the existing object unchanged.
+        fails on that path leaves the existing object unchanged. Both paths
+        write to the path without a trailing slash, as ``open()`` does.
 
         Args:
             path: S3 path (s3://bucket/key) to write to.
@@ -1811,9 +1812,11 @@ class S3FileSystem(AbstractFileSystem):
                 version, if the compression is not supported, or if the data
                 takes more than ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
         """
-        # The codec is taken as open() takes it, also from the extension of
-        # the path without the protocol for "infer".
-        compression = get_compression(self._strip_protocol(path), kwargs.pop("compression", None))
+        # Normalized as open() normalizes it, so that the key written, and
+        # the codec that "infer" takes from its extension, do not depend on
+        # the path that the size of the value selects.
+        path = self._strip_protocol(path)
+        compression = get_compression(path, kwargs.pop("compression", None))
         if compression is not None:
             # Compressed up front, so that every path uploads the compressed
             # bytes, and open() returns the file instead of a wrapper.
