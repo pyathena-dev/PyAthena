@@ -60,7 +60,7 @@ class CompressedBuffer(BytesIO):
 
     @override
     def close(self) -> None:
-        pass
+        """Do nothing, so that the data can still be read after a codec closes the buffer."""
 
     @classmethod
     def compress(cls, value: bytes | bytearray | memoryview, compression: str) -> bytes:
