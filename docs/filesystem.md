@@ -109,9 +109,8 @@ and `open` treat `s3://YOUR_S3_BUCKET/dir/` as `s3://YOUR_S3_BUCKET/dir`: the ob
 `dir` if it exists, and otherwise the directory `dir`. An object whose key ends in a
 slash, such as a folder marker, is therefore not a file for these methods. Opening
 `dir/` for reading reads the object `dir` or raises `FileNotFoundError`. Opening it for
-writing, `pipe`, `pipe_file`, and `put_file` write the object `dir`, and `put` writes
-the file into the directory `dir`. A path with a `?versionId=` suffix keeps the slash
-and refers to the object. `find`, and `ls` of the directory, list the object as a file
+writing, `pipe`, `pipe_file`, and `put_file` write the object `dir`. A path with a
+`?versionId=` suffix keeps the slash and refers to the object. `find`, and `ls` of the directory, list the object as a file
 entry. `cat_file` uses the key as written. Without a `?versionId=` suffix, it reads
 such an object without a range, with a non-empty range of non-negative offsets, or with
 a negative `start` and no `end`, and raises `FileNotFoundError` for other ranges.
