@@ -9,6 +9,7 @@ import math
 import mimetypes
 import os.path
 import re
+import time
 from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import Future, as_completed, wait
 from copy import deepcopy
@@ -2516,7 +2517,9 @@ class S3FileSystem(AbstractFileSystem):
         A lookup without lookup parameters uses the entry under the path. A
         lookup with them uses only the result of a lookup with the same
         values, cached under ``(path, _LOOKUPS_CACHE_KEY)``, because the
-        authorization of the request depends on them.
+        authorization of the request depends on them. Each of these results
+        expires on its own after the ``listings_expiry_time`` of the
+        dircache.
 
         Args:
             path: The path of the object, optionally version-qualified, or
@@ -2529,7 +2532,16 @@ class S3FileSystem(AbstractFileSystem):
         if not lookup_kwargs:
             return cast("S3Object | None", self.dircache.get(path))
         lookups = self.dircache.get((path, _LOOKUPS_CACHE_KEY))
-        return lookups.get(self._get_lookup_cache_id(lookup_kwargs)) if lookups else None
+        cached = lookups.get(self._get_lookup_cache_id(lookup_kwargs)) if lookups else None
+        if cached is None:
+            return None
+        cached_at, file = cached
+        expiry_time = self.dircache.listings_expiry_time
+        if expiry_time and time.time() - cached_at > expiry_time:
+            # Caching the result of any parameters renews the dircache entry
+            # of the path, so each result expires on its own.
+            return None
+        return cast(S3Object, file)
 
     def _cache_lookup(self, path: str, lookup_kwargs: Mapping[str, Any], file: S3Object) -> None:
         """Cache the HeadObject or HeadBucket result of a lookup.
@@ -2550,7 +2562,7 @@ class S3FileSystem(AbstractFileSystem):
             lookups = {}
         # Updated in place: a copy written back could replace a result that
         # another thread has cached since for other parameters.
-        lookups[self._get_lookup_cache_id(lookup_kwargs)] = file
+        lookups[self._get_lookup_cache_id(lookup_kwargs)] = (time.time(), file)
         # Set again so that the expiry time of the entry is renewed.
         self.dircache[key] = lookups
 

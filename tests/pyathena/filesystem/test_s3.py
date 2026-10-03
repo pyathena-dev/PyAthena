@@ -154,7 +154,7 @@ class TestS3FileSystem:
         # Build a minimal S3FileSystem without touching AWS, bypassing
         # __init__ which would require a boto3 client.
         fs = S3FileSystem.__new__(S3FileSystem)
-        fs.dircache = {}
+        fs.dircache = DirCache()
         fs._client = mock.MagicMock()
         fs._client.meta.method_to_api_mapping = S3_CLIENT.meta.method_to_api_mapping
         fs._client.meta.service_model = S3_CLIENT.meta.service_model
@@ -1789,7 +1789,7 @@ class TestS3FileSystem:
         stale, fresh, other = (fs._directory_object("bucket", "key") for _ in range(3))
         fs._cache_lookup(path, lookup_kwargs, stale)
 
-        class InterleavedDict(dict):
+        class InterleavedDirCache(DirCache):
             interleaved = False
 
             def get(self, key, default=None):
@@ -1800,15 +1800,17 @@ class TestS3FileSystem:
                     fs._cache_lookup(path, lookup_kwargs, fresh)
                 return value
 
-        fs.dircache = InterleavedDict(fs.dircache)
+        cache = InterleavedDirCache()
+        cache.update(fs.dircache)
+        fs.dircache = cache
         fs._cache_lookup(path, other_key, other)
 
         assert fs._get_cached_lookup(path, lookup_kwargs) is fresh
         assert fs._get_cached_lookup(path, other_key) is other
 
-    def test_cache_lookup_renews_expiry(self, monkeypatch):
-        # GH-1004: caching a lookup renews the expiry time of the cached
-        # lookups of the path, as caching other entries does.
+    def test_cache_lookup_expiry(self, monkeypatch):
+        # GH-1004: the cached lookups with parameters expire after the
+        # listings_expiry_time of the dircache, each on its own.
         fs = self._make_fs()
         fs.dircache = DirCache(listings_expiry_time=60)
         now = [0.0]
@@ -1816,12 +1818,20 @@ class TestS3FileSystem:
         path = "bucket/key"
         stale, fresh = (fs._directory_object("bucket", "key") for _ in range(2))
 
+        other_key = {**self.LOOKUP_KWARGS, "SSECustomerKey": "j" * 32}
+
         fs._cache_lookup(path, self.LOOKUP_KWARGS, stale)
         now[0] = 59.0
         fs._cache_lookup(path, self.LOOKUP_KWARGS, fresh)
         now[0] = 61.0
-
         assert fs._get_cached_lookup(path, self.LOOKUP_KWARGS) is fresh
+
+        # Each result expires on its own, also while the results of other
+        # parameters keep renewing the entry of the path.
+        fs._cache_lookup(path, other_key, stale)
+        now[0] = 120.0
+        assert fs._get_cached_lookup(path, other_key) is stale
+        assert fs._get_cached_lookup(path, self.LOOKUP_KWARGS) is None
 
     def test_info_lookup_parameters_cache(self):
         # GH-1004: a cached result serves only lookups with the same lookup
