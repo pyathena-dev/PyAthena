@@ -718,7 +718,7 @@ class TestS3FileSystem:
         assert fs.cat_file("s3://bucket/key", start=start, end=end) == data[start:end]
         # Only a negative offset needs the size of the object.
         assert fs.info.called == ((start or 0) < 0 or (end or 0) < 0)
-        if start is not None and end is not None and 0 <= start >= end >= 0:
+        if start is not None and end is not None and 0 <= end <= start:
             assert ranges == []
 
     def test_cat_file_range_stale_size(self):
