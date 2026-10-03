@@ -1,4 +1,3 @@
-import json
 from datetime import datetime, time, timedelta, timezone
 
 import pytest
@@ -6,7 +5,6 @@ from dateutil.tz import gettz
 
 from pyathena.converter import (
     DefaultTypeConverter,
-    _csv_to_json,
     _to_array,
     _to_datetime,
     _to_datetime_with_tz,
@@ -331,22 +329,6 @@ def test_to_array_invalid_formats(input_value):
 
 
 @pytest.mark.parametrize(
-    ("input_value", "expected"),
-    [
-        (None, None),
-        ("", None),
-        ('{"a":1}', {"a": 1}),
-        ("[1,2]", [1, 2]),
-        ('""', ""),
-        ('"[1, 2]"', "[1, 2]"),
-        ("null", None),
-    ],
-)
-def test_csv_to_json(input_value, expected):
-    assert _csv_to_json(input_value) == expected
-
-
-@pytest.mark.parametrize(
     ("value", "type_hint", "expected"),
     [
         ('[""]', "array(json)", [""]),
@@ -637,7 +619,9 @@ def test_to_time_with_tz(input_value, expected):
     ("input_value", "expected"),
     [
         (None, None),
+        ("", None),
         ('""', ""),
+        ('"[1, 2]"', "[1, 2]"),
         ('{"a": 1}', {"a": 1}),
         ("[1, 2]", [1, 2]),
         ("null", None),
@@ -645,24 +629,34 @@ def test_to_time_with_tz(input_value, expected):
 )
 def test_to_json(input_value, expected):
     assert _to_json(input_value) == expected
-    assert _csv_to_json(input_value) == expected
-
-
-def test_to_json_empty_string():
-    """Only the result-file converter treats an empty string as NULL."""
-    assert _csv_to_json("") is None
-    with pytest.raises(json.JSONDecodeError):
-        _to_json("")
 
 
 @pytest.mark.parametrize(
     ("type_hint", "value", "expected"),
     [
         ("array(json)", '[""]', [""]),
-        ("map(varchar,json)", '{"k": ""}', {"k": ""}),
+        (
+            "array(json)",
+            '[{"a":1}, "x", 1, true, null, ""]',
+            [{"a": 1}, "x", 1, True, None, ""],
+        ),
+        # JSON string scalars whose text looks like JSON stay strings.
+        (
+            "array(json)",
+            '["{\\"a\\": 1}", "123", "true", "null"]',
+            ['{"a": 1}', "123", "true", "null"],
+        ),
+        (
+            "map(varchar,json)",
+            '{"k": "", "n": 1, "b": true, "z": null}',
+            {"k": "", "n": 1, "b": True, "z": None},
+        ),
+        ("row(a json, b json)", '{"a": "x", "b": {"c": 1}}', {"a": "x", "b": {"c": 1}}),
+        ("row(a json, b json)", '{"a": "", "b": true}', {"a": "", "b": True}),
+        ("array(varchar)", '["a", "123"]', ["a", "123"]),
     ],
 )
-def test_typed_json_empty_string_element(type_hint, value, expected):
-    """An empty JSON string inside a typed complex value stays an empty string."""
+def test_typed_json_elements(type_hint, value, expected):
+    """JSON elements of typed complex values decode their original JSON text."""
     type_ = type_hint.split("(", 1)[0]
     assert DefaultTypeConverter().convert(type_, value, type_hint=type_hint) == expected

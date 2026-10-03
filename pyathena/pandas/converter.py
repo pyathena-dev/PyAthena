@@ -9,11 +9,11 @@ from typing import Any
 
 from pyathena.converter import (
     Converter,
-    _csv_to_json,
     _to_binary,
     _to_boolean,
     _to_decimal,
     _to_default,
+    _to_json,
     _to_time_with_tz,
 )
 from pyathena.util import override
@@ -25,7 +25,7 @@ _DEFAULT_PANDAS_CONVERTERS: dict[str, Callable[[str | None], Any | None]] = {
     "boolean": _to_boolean,
     "decimal": _to_decimal,
     "varbinary": _to_binary,
-    "json": _csv_to_json,
+    "json": _to_json,
     "time with time zone": _to_time_with_tz,
 }
 
