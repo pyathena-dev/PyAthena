@@ -1409,9 +1409,8 @@ class S3FileSystem(AbstractFileSystem):
         """
         block_size = kwargs.get("block_size") or self.default_block_size
         # The size in bytes; the length of a memoryview counts its items.
-        size = memoryview(value).nbytes
-        self._check_multipart_upload_size(path, size, block_size)
-        if self._intrans or size > min(block_size, self.MULTIPART_UPLOAD_MAX_PART_SIZE):
+        self._check_multipart_upload_size(path, memoryview(value).nbytes, block_size)
+        if self._intrans or len(value) > min(block_size, self.MULTIPART_UPLOAD_MAX_PART_SIZE):
             # Defer to the buffered open() path, which keeps the
             # deferred-commit semantics of fsspec transactions and uploads
             # large data as a parallel multipart upload.

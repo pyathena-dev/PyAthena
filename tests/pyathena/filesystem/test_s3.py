@@ -506,6 +506,18 @@ class TestS3FileSystem:
         with pytest.raises(ValueError, match="version"):
             fs.pipe_file("s3://bucket/key?versionId=12345abcde", b"data")
 
+    def test_pipe_file_non_contiguous_memoryview(self):
+        # A non-contiguous memoryview within the block size in items, 4 items
+        # of 8 bytes here, is uploaded with PutObject, as the buffered path
+        # cannot write it.
+        fs = self._make_fs()
+        fs._put_object = mock.MagicMock()
+        value = memoryview(b"ab" * 8).cast("H")[::2]
+
+        fs.pipe_file("s3://bucket/key", value, block_size=6)
+
+        fs._put_object.assert_called_once_with(bucket="bucket", key="key", body=b"ab" * 4)
+
     def test_pipe_file_small_drops_max_workers(self):
         fs = self._make_fs()
         fs._put_object = mock.MagicMock()
