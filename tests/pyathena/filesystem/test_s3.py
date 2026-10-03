@@ -3,6 +3,7 @@ import functools
 import gc
 import io
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -650,6 +651,100 @@ class TestS3FileSystem:
             Range="bytes=2-3",
             VersionId=expected,
         )
+
+    def _make_object_fs(self, data):
+        # A filesystem holding one object at s3://bucket/key that answers
+        # GetObject like S3, failing on a range that S3 would not answer with
+        # exactly the requested bytes: S3 returns the whole object when the
+        # last byte precedes the first one, and InvalidRange when the first
+        # byte is past the end. The requested ranges are recorded.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs.info = mock.MagicMock(return_value=self._file_object("key"))
+        fs.info.return_value.size = len(data)
+        ranges = []
+
+        def call(method, **request):
+            assert method is fs._client.get_object
+            range_ = request.get("Range")
+            ranges.append(range_)
+            if range_ is None:
+                return {"Body": io.BytesIO(data)}
+            match = re.fullmatch(r"bytes=(\d+)-(\d+)", range_)
+            assert match, range_
+            first, last = int(match[1]), int(match[2])
+            assert first <= last, range_
+            assert first < len(data), range_
+            return {"Body": io.BytesIO(data[first : last + 1])}
+
+        fs._call.side_effect = call
+        return fs, ranges
+
+    @pytest.mark.parametrize(
+        ("start", "end"),
+        [
+            (None, None),
+            (None, 5),
+            (5, None),
+            (1, -1),
+            (-5, None),
+            (5, 100),
+            (-100, 5),
+            # Empty ranges.
+            (0, 0),
+            (5, 5),
+            (7, 3),
+            (10, None),
+            (12, None),
+            (12, 20),
+            (None, -20),
+        ],
+    )
+    def test_cat_file_range(self, start, end):
+        data = b"0123456789"
+        fs, ranges = self._make_object_fs(data)
+
+        # The range selects bytes like a slice.
+        assert fs.cat_file("s3://bucket/key", start=start, end=end) == data[start:end]
+        if not data[start:end]:
+            assert ranges == []
+
+    def test_cat_ranges_range(self):
+        fs, ranges = self._make_object_fs(b"0123456789")
+
+        assert fs.cat_ranges(["s3://bucket/key"] * 3, [5, 0, -100], [5, 3, 5]) == [
+            b"",
+            b"012",
+            b"01234",
+        ]
+        assert sorted(ranges) == ["bytes=0-2", "bytes=0-4"]
+
+    def test_get_object_empty_range(self):
+        fs = self._make_fs()
+
+        with pytest.raises(ValueError, match="empty range"):
+            fs._get_object("bucket", "key", ranges=(5, 5))
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("size", "offset", "open_kwargs"),
+        [
+            # FirstChunkCache fetches an empty range at the end of the object.
+            (10, 10, {"cache_type": "first"}),
+            # MMapCache fetches an empty last block.
+            (32, 16, {"cache_type": "mmap", "block_size": 16}),
+            # A read past the end is split into ranges for parallel requests.
+            (40, 20, {"cache_type": "none", "block_size": 16, "max_workers": 4}),
+        ],
+    )
+    def test_read_to_end(self, size, offset, open_kwargs):
+        data = bytes(range(size))
+        fs, _ = self._make_object_fs(data)
+
+        with fs.open("s3://bucket/key", "rb", **open_kwargs) as f:
+            assert f.read(offset) == data[:offset]
+            assert f.read(size) == data[offset:]
+            assert f.read(size) == b""
 
     def test_finish_multipart_upload(self):
         fs = self._make_fs()

@@ -1458,6 +1458,10 @@ class S3FileSystem(AbstractFileSystem):
     ) -> bytes:
         """Read the contents of an S3 object with GetObject.
 
+        ``start`` and ``end`` select bytes like a slice: they are clamped to
+        the object, and an empty range returns ``b""`` without a GetObject
+        request.
+
         Args:
             path: S3 path (s3://bucket/key) of the object.
             start: Byte offset to start reading at. A negative value counts
@@ -1477,20 +1481,10 @@ class S3FileSystem(AbstractFileSystem):
             version_id = path_version_id
         if start is not None or end is not None:
             size = self.info(path, version_id=version_id).get("size", 0)
-            if start is None:
-                range_start = 0
-            elif start < 0:
-                range_start = size + start
-            else:
-                range_start = start
-
-            if end is None:
-                range_end = size
-            elif end < 0:
-                range_end = size + end
-            else:
-                range_end = end
-
+            # S3 would return the whole object for an empty range.
+            range_start, range_end, _ = slice(start, end).indices(size)
+            if range_start >= range_end:
+                return b""
             ranges = (range_start, range_end)
         else:
             ranges = None
@@ -2083,8 +2077,28 @@ class S3FileSystem(AbstractFileSystem):
         version_id: str | None = None,
         **kwargs,
     ) -> tuple[int, bytes]:
+        """Read an object or a byte range of it with GetObject.
+
+        Args:
+            bucket: The bucket name.
+            key: The object key.
+            ranges: The ``(start, end)`` byte range to read, with an exclusive
+                end, or ``None`` to read the whole object.
+            version_id: The version ID to read, or ``None`` for the latest.
+            **kwargs: Additional parameters passed to the GetObject API.
+
+        Returns:
+            Tuple of the start of the range (0 for the whole object) and the
+            bytes read.
+
+        Raises:
+            ValueError: If the range is empty. S3 ignores a range whose last
+                byte precedes its first byte and returns the whole object.
+        """
         request = {"Bucket": bucket, "Key": key}
         if ranges:
+            if ranges[0] >= ranges[1]:
+                raise ValueError(f"Invalid empty range: {ranges}.")
             range_ = S3File._format_ranges(ranges)
             request.update({"Range": range_})
         else:
@@ -2602,6 +2616,23 @@ class S3File(AbstractBufferedFile):
         self.fs.setxattr(self.path, copy_kwargs=copy_kwargs, **kwargs)
 
     def _fetch_range(self, start: int, end: int) -> bytes:
+        """Read a byte range of the object for the fsspec cache.
+
+        The range is clamped to the size of the object, since fsspec caches
+        may request a range that is empty or reaches past the end of the
+        object. S3 would answer the former with the whole object and a range
+        starting past the end with an ``InvalidRange`` error.
+
+        Args:
+            start: The offset of the first byte to read.
+            end: The offset to stop reading at (exclusive).
+
+        Returns:
+            The bytes read, empty if the clamped range is empty.
+        """
+        end = min(end, self.size)
+        if start >= end:
+            return b""
         ranges = self._get_ranges(
             start, end, max_workers=self.max_workers, worker_block_size=self.blocksize
         )
