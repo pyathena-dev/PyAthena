@@ -1433,10 +1433,12 @@ class S3FileSystem(AbstractFileSystem):
             copy_source.update({"VersionId": version_id1})
 
         ranges = self._get_copy_ranges(size1, block_size)
+        # The parameters of the copy (CopyObject's) go to each request that
+        # accepts them, e.g., CopySourceIfMatch to the part copies.
         multipart_upload = self._create_multipart_upload(
             bucket=bucket2,
             key=key2,
-            **kwargs,
+            **self._get_operation_kwargs("create_multipart_upload", kwargs),
         )
         with self._create_executor(max_workers=max_workers) as executor:
             futures = [

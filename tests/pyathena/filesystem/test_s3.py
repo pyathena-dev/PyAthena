@@ -951,8 +951,9 @@ class TestS3FileSystem:
             )
 
     def test_copy_object_with_multipart_upload_request_parameters(self):
-        # GH-946: the part copies receive the parameters of the copy that
-        # they accept, and the completion and the abort get them all.
+        # GH-946, GH-969: each request of the copy receives the parameters
+        # of the copy that it accepts, e.g., CopySourceIfMatch only the part
+        # copies; the completion and the abort select theirs.
         fs = self._make_fs()
         fs._create_multipart_upload = mock.MagicMock(
             return_value=SimpleNamespace(upload_id="uploadid")
@@ -961,7 +962,11 @@ class TestS3FileSystem:
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
         )
         fs._finish_multipart_upload = mock.MagicMock()
-        kwargs = {"ContentType": "text/csv", "RequestPayer": "requester"}
+        kwargs = {
+            "ContentType": "text/csv",
+            "RequestPayer": "requester",
+            "CopySourceIfMatch": '"e"',
+        }
 
         fs._copy_object_with_multipart_upload(
             bucket1="bucket",
@@ -972,9 +977,13 @@ class TestS3FileSystem:
             **kwargs,
         )
 
-        fs._create_multipart_upload.assert_called_once_with(bucket="bucket", key="dst", **kwargs)
+        fs._create_multipart_upload.assert_called_once_with(
+            bucket="bucket", key="dst", ContentType="text/csv", RequestPayer="requester"
+        )
         assert all(
-            c.kwargs["RequestPayer"] == "requester" and "ContentType" not in c.kwargs
+            c.kwargs["RequestPayer"] == "requester"
+            and c.kwargs["CopySourceIfMatch"] == '"e"'
+            and "ContentType" not in c.kwargs
             for c in fs._upload_part_copy.call_args_list
         )
         assert fs._finish_multipart_upload.call_args.kwargs["request_kwargs"] == kwargs
