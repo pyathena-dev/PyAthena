@@ -85,9 +85,10 @@ class AthenaTypeCompiler(GenericTypeCompiler):
     and ``TypeEngine.compile()``. ``AthenaStatementCompiler`` renders the
     types of CAST expressions with ``AthenaDMLTypeCompiler``.
 
-    Integers render as INT, FLOAT and REAL as FLOAT, and binary types as
-    BINARY. TEXT, CLOB, and character types without a length render as
-    STRING; with a length, they render as CHAR(n) or VARCHAR(n). Complex
+    INTEGER renders as INT, FLOAT and REAL as FLOAT, and binary types as
+    BINARY. String, TEXT, CLOB, and CHAR, NCHAR, VARCHAR, or NVARCHAR
+    without a length render as STRING; with a length, CHAR, NCHAR, VARCHAR,
+    and NVARCHAR render as CHAR(n) or VARCHAR(n). Complex
     types render as ``STRUCT<name:type>``, ``MAP<key, value>``, and
     ``ARRAY<item>``. TIME, JSON, and a STRUCT without fields have no Athena
     DDL type and raise ``CompileError``.
@@ -409,6 +410,32 @@ class AthenaDMLTypeCompiler(GenericTypeCompiler):
         if isinstance(self._type_inspector.dialect_type(type_), types.NullType):
             raise exc.CompileError("Bound ARRAY values require an explicit element type")
         return self.process(type_, **kw)
+
+    @override
+    def visit_unsupported_compilation(  # type: ignore[override]  # base returns NoReturn
+        self, element: Any, err: Exception, **kw: Any
+    ) -> str:
+        """Render a type whose own visit name has no method as its nearest base type.
+
+        A subclass of ``String`` with its own ``__visit_name__``, for example,
+        renders as VARCHAR.
+
+        Args:
+            element: The type to render.
+            err: The error from the missing visit method.
+            **kw: Type-compiler keyword arguments.
+
+        Returns:
+            The type clause of the nearest base type that this compiler renders.
+
+        Raises:
+            UnsupportedCompilationError: If no base type has a visit method.
+        """
+        for base in type(element).__mro__[1:]:
+            visit_name = base.__dict__.get("__visit_name__")
+            if isinstance(visit_name, str) and hasattr(self, f"visit_{visit_name}"):
+                return cast("str", getattr(self, f"visit_{visit_name}")(element, **kw))
+        return super().visit_unsupported_compilation(element, err, **kw)
 
     @override
     def visit_FLOAT(self, type_: types.Float[Any], **kw: Any) -> str:

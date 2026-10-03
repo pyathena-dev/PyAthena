@@ -686,6 +686,23 @@ class TestAthenaStatementCompiler:
         assert self._compile_sql(cast(column("col"), type_)) == f"CAST(col AS {expected})"
 
     @pytest.mark.parametrize(
+        ("base", "expected"),
+        [
+            (types.String, "VARCHAR"),
+            (types.LargeBinary, "VARBINARY"),
+            (types.Float, "REAL"),
+            (types.Double, "DOUBLE"),
+            (types.DateTime, "TIMESTAMP(6)"),
+        ],
+    )
+    def test_cast_renders_subclass_with_own_visit_name_as_base(self, base, expected):
+        type_ = type("Custom", (base,), {"__visit_name__": "pyathena_custom"})()
+        assert self._compile_sql(cast(column("col"), type_)) == f"CAST(col AS {expected})"
+        assert self._compile_sql(cast(column("col"), types.ARRAY(type_))) == (
+            f"CAST(col AS ARRAY({expected}))"
+        )
+
+    @pytest.mark.parametrize(
         "type_", [AthenaStruct(), types.ARRAY(AthenaStruct()), AthenaMap(String, AthenaStruct())]
     )
     def test_cast_to_empty_struct_raises(self, type_):
