@@ -1920,7 +1920,8 @@ class S3FileSystem(AbstractFileSystem):
         else:
             # _head_object caches a version-qualified path under its own name.
             self.dircache.pop(self._strip_protocol(path), None)
-            # Keys cannot contain "?", so it starts the versionId query.
+            # parse_path does not accept "?" in keys, so it starts the
+            # versionId query.
             path = self._strip_protocol(path.split("?", 1)[0])
             while path:
                 self.dircache.pop(path, None)
