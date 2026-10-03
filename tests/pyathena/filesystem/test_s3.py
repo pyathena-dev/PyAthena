@@ -1743,7 +1743,13 @@ class TestS3FileSystem:
         fs.default_cache_type = "bytes"
         requests = self._record_requests(fs, exists=mode != "xb")
 
-        with fs.open("s3://bucket/key", mode, ContentType="text/plain", **self.LOOKUP_KWARGS) as f:
+        with fs.open(
+            "s3://bucket/key",
+            mode,
+            ContentType="text/plain",
+            Range="bytes=0-0",
+            **self.LOOKUP_KWARGS,
+        ) as f:
             if mode == "rb":
                 assert f.read() == b"aa"
             else:
@@ -1766,8 +1772,39 @@ class TestS3FileSystem:
                 "RequestPayer": "requester",
             }
         else:
-            assert self.LOOKUP_KWARGS.items() <= lookups.pop("get_object").items()
+            get_object = lookups.pop("get_object")
+            assert self.LOOKUP_KWARGS.items() <= get_object.items()
+            if mode == "ab":
+                # The whole existing object is read.
+                assert "Range" not in get_object
         assert lookups == {}
+
+    def test_cache_lookup_concurrent_parameters(self):
+        # GH-1004: caching a lookup with some parameters does not replace a
+        # result cached in the meantime for other parameters.
+        fs = self._make_fs()
+        path = "bucket/key"
+        lookup_kwargs = self.LOOKUP_KWARGS
+        other_key = {**lookup_kwargs, "SSECustomerKey": "j" * 32}
+        stale, fresh, other = (fs._directory_object("bucket", "key") for _ in range(3))
+        fs._cache_lookup(path, lookup_kwargs, stale)
+
+        class InterleavedDict(dict):
+            interleaved = False
+
+            def get(self, key, default=None):
+                value = super().get(key, default)
+                if not self.interleaved:
+                    # Another thread refreshes the lookup in between.
+                    self.interleaved = True
+                    fs._cache_lookup(path, lookup_kwargs, fresh)
+                return value
+
+        fs.dircache = InterleavedDict(fs.dircache)
+        fs._cache_lookup(path, other_key, other)
+
+        assert fs._get_cached_lookup(path, lookup_kwargs) is fresh
+        assert fs._get_cached_lookup(path, other_key) is other
 
     def test_info_lookup_parameters_cache(self):
         # GH-1004: a cached result serves only lookups with the same lookup

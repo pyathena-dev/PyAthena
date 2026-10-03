@@ -2545,12 +2545,13 @@ class S3FileSystem(AbstractFileSystem):
             self.dircache[path] = file
             return
         key = (path, _LOOKUPS_CACHE_KEY)
-        # A new dictionary, so that a concurrent reader does not see it
-        # change.
-        self.dircache[key] = {
-            **(self.dircache.get(key) or {}),
-            self._get_lookup_cache_id(lookup_kwargs): file,
-        }
+        lookups = self.dircache.get(key)
+        if lookups is None:
+            lookups = {}
+            self.dircache[key] = lookups
+        # Updated in place: a copy written back could replace a result that
+        # another thread has cached since for other parameters.
+        lookups[self._get_lookup_cache_id(lookup_kwargs)] = file
 
     @staticmethod
     def _get_lookup_cache_id(lookup_kwargs: Mapping[str, Any]) -> tuple[tuple[str, Any], ...]:
@@ -3003,10 +3004,9 @@ class S3File(AbstractBufferedFile):
                 and append_info.get("size", 0) < fs.MULTIPART_UPLOAD_MIN_PART_SIZE
             ):
                 # Too small to be a part of a multipart upload: rewritten
-                # from the buffer.
-                append_data = fs.cat_file(
-                    path, **fs._get_operation_kwargs("get_object", self.s3_additional_kwargs)
-                )
+                # from the buffer. Only the lookup parameters are sent, so
+                # that the whole object is read.
+                append_data = fs.cat_file(path, **lookup_kwargs)
         elif "x" in mode:
             # Checked up front so that no data is uploaded for an existing
             # object, and on commit with IfNoneMatch for one created since.
