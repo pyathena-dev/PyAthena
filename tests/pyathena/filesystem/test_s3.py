@@ -1561,6 +1561,13 @@ class TestS3FileSystem:
                 "s3://bucket/src/archive/",
                 {"src/archive/a", "src/archive/archive/x"},
             ),
+            # A directory shares its destination with an object.
+            (
+                {"d/x", "e/y"},
+                ["s3://bucket/d", "s3://bucket/d/x", "s3://bucket/e/y"],
+                ["s3://bucket/e", "s3://bucket/e", "s3://bucket/out"],
+                {"e", "out"},
+            ),
         ],
     )
     def test_mv_glob_with_directories(self, keys, path1, path2, expected):
@@ -1592,6 +1599,9 @@ class TestS3FileSystem:
                 recursive=True,
             )
         assert store == keys
+        methods = {c.args[0] for c in fs._call.call_args_list}
+        assert fs._client.copy_object not in methods
+        assert fs._client.delete_objects not in methods
 
     def test_mv_nothing_within_maxdepth(self):
         # Only directories within maxdepth: nothing is moved, as with copy().

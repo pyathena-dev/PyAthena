@@ -1559,16 +1559,23 @@ class S3FileSystem(AbstractFileSystem):
             while parent and parent not in directories:
                 directories.add(parent)
                 parent = parent.rpartition("/")[0]
-        for source, dest in stripped:
-            if counts[dest] == 1 and dest not in sources:
-                continue
-            # A directory without an object at its key is not copied, so it
-            # writes no destination.
-            if source in directories and self._head_object(source) is None:
-                continue
+        # A directory without an object at its key is not copied, so it
+        # writes no destination and is left out of the checks.
+        writers = [
+            (source, dest)
+            for source, dest in stripped
+            if not (
+                (counts[dest] > 1 or dest in sources)
+                and source in directories
+                and self._head_object(source) is None
+            )
+        ]
+        counts = Counter(dest for _, dest in writers)
+        for _, dest in writers:
             if counts[dest] > 1:
                 raise ValueError("Cannot move several paths to the same destination.")
-            raise ValueError("Cannot move a path onto another path that is moved.")
+            if dest in sources:
+                raise ValueError("Cannot move a path onto another path that is moved.")
         return pairs
 
     def cp_file(
