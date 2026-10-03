@@ -268,6 +268,17 @@ class TestS3FileSystem:
         assert fs.isfile("s3://bucket/d")
         fs._call.assert_called_once_with(fs._client.head_object, Bucket="bucket", Key="d")
 
+    def test_refresh_drops_cached_parent_listing(self):
+        # A refreshed lookup that finds a listed object deleted is not
+        # contradicted by the listing afterwards.
+        fs = self._make_fs()
+        fs.dircache[("bucket/d", "/")] = [self._file_object("d/key")]
+        fs._call.side_effect = [FileNotFoundError, {}] * 2
+
+        assert not fs.exists("s3://bucket/d/key", refresh=True)
+        assert not fs.exists("s3://bucket/d/key")
+        assert fs._call.call_count == 4
+
     def test_info_version_aware_heads_listed_file(self):
         fs = self._make_fs()
         fs.version_aware = True
@@ -991,18 +1002,42 @@ class TestS3FileSystem:
 
         assert unraisable == []
 
+    def test_open_append_keeps_metadata_of_listed_object(self):
+        # A cached listing entry lacks the metadata that the rewritten object
+        # keeps, so the append looks up the object.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs.dircache[("bucket", "/")] = [self._file_object("key")]
+        fs._call.return_value = {
+            "ContentLength": 2,
+            "ContentType": "text/plain",
+            "Metadata": {"k": "v"},
+        }
+        fs.cat = mock.MagicMock(return_value=b"aa")
+        fs._put_object = mock.MagicMock()
+
+        with fs.open("s3://bucket/key", "ab") as f:
+            f.write(b"bb")
+        fs._call.assert_called_once_with(fs._client.head_object, Bucket="bucket", Key="key")
+        request = fs._put_object.call_args.kwargs
+        assert (request["body"], request["ContentType"], request["Metadata"]) == (
+            b"aabb",
+            "text/plain",
+            {"k": "v"},
+        )
+
     def test_open_append_lookup_failure(self, monkeypatch):
         # GH-976: an append whose lookup of the existing object fails leaves
         # no half-initialized file, whose garbage collection would close it.
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
 
-        def exists(path):
+        def info(path, **kwargs):
             # A new exception each time: one kept by a mock would keep its
             # traceback, and the file, alive.
             raise PermissionError("denied")
 
-        fs.exists = exists
+        fs.info = info
         unraisable = []
         monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
 
@@ -2902,7 +2937,6 @@ class TestS3File:
         fs.MULTIPART_UPLOAD_MIN_PART_SIZE = 4
         fs.MULTIPART_UPLOAD_MAX_PART_SIZE = 64
         fs.MULTIPART_UPLOAD_MAX_PARTS = S3FileSystem.MULTIPART_UPLOAD_MAX_PARTS
-        fs.exists.return_value = True
         fs.info.return_value = S3Object(
             init={"ContentLength": len(existing)},
             type=S3ObjectType.S3_OBJECT_TYPE_FILE,

@@ -647,7 +647,9 @@ class S3FileSystem(AbstractFileSystem):
         Args:
             path: S3 path (e.g., "s3://bucket" or "s3://bucket/key").
             **kwargs: Additional arguments including:
-                refresh: If True, bypass the cache and query S3.
+                refresh: If True, bypass the cache and query S3. For a key
+                    path without a version, the cached listing of its parent
+                    is also removed.
                 version_id: The version ID to look up when the path has none.
 
         Returns:
@@ -674,6 +676,10 @@ class S3FileSystem(AbstractFileSystem):
                 key=None,
                 version_id=None,
             )
+        if refresh and key and not version_id:
+            # The cached listing of the parent also describes the path, and
+            # the refreshed result may contradict it.
+            self._evict_cache((self._parent(path), "/"))
         # Cached entries describe the current version of a path, so an
         # explicit version uses only the HeadObject cache of that version.
         if not refresh and not version_id:
@@ -2650,9 +2656,15 @@ class S3File(AbstractBufferedFile):
             self._details = info
             if size is None:
                 size = info.get("size")
-        elif "a" in mode and fs.exists(path):
-            append_info = fs.info(path)
-            if append_info.get("size", 0) < fs.MULTIPART_UPLOAD_MIN_PART_SIZE:
+        elif "a" in mode:
+            # The rewritten object keeps the metadata of the existing one,
+            # which a cached listing entry lacks, so look up the object.
+            with contextlib.suppress(FileNotFoundError):
+                append_info = fs.info(path, refresh=True)
+            if (
+                append_info is not None
+                and append_info.get("size", 0) < fs.MULTIPART_UPLOAD_MIN_PART_SIZE
+            ):
                 # Too small to be a part of a multipart upload: rewritten
                 # from the buffer.
                 append_data = fs.cat(path)
