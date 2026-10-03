@@ -228,6 +228,25 @@ class TestAioS3FileSystem:
             await self._multipart_copy(fail_annotation=True)
 
     @pytest.mark.asyncio
+    async def test_cp_file_failed_multipart_copy_invalidates_cache(self):
+        # GH-973: see TestS3FileSystem.test_cp_file_failed_multipart_copy_invalidates_cache.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs._info = mock.AsyncMock(
+            return_value=S3Object(
+                init={"ContentLength": S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE + 1},
+                type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+                bucket="bucket",
+                key="src",
+            )
+        )
+        fs._copy_object_with_multipart_upload = mock.AsyncMock(side_effect=PermissionError)
+        fs._sync_fs.dircache["bucket/dst"] = []
+
+        with pytest.raises(PermissionError):
+            await fs._cp_file("s3://bucket/src", "s3://bucket/dst")
+        assert "bucket/dst" not in fs._sync_fs.dircache
+
+    @pytest.mark.asyncio
     async def test_copy_object_with_multipart_upload_waits_for_running_parts(self):
         # GH-973: the abort waits for the part copies that are running when
         # one fails, and no part starts after the failure.

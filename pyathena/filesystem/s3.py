@@ -1725,28 +1725,32 @@ class S3FileSystem(AbstractFileSystem):
             # to copy for them.
             return False
         size1 = info1.get("size", 0)
-        if size1 <= self.MULTIPART_UPLOAD_MAX_PART_SIZE:
-            self._copy_object(
-                bucket1=bucket1,
-                key1=key1,
-                version_id1=version_id1,
-                bucket2=bucket2,
-                key2=key2,
-                **kwargs,
-            )
-        else:
-            self._copy_object_with_multipart_upload(
-                bucket1=bucket1,
-                key1=key1,
-                version_id1=version_id1,
-                size1=size1,
-                bucket2=bucket2,
-                key2=key2,
-                max_workers=max_workers,
-                block_size=block_size,
-                **kwargs,
-            )
-        self.invalidate_cache(path2)
+        try:
+            if size1 <= self.MULTIPART_UPLOAD_MAX_PART_SIZE:
+                self._copy_object(
+                    bucket1=bucket1,
+                    key1=key1,
+                    version_id1=version_id1,
+                    bucket2=bucket2,
+                    key2=key2,
+                    **kwargs,
+                )
+            else:
+                self._copy_object_with_multipart_upload(
+                    bucket1=bucket1,
+                    key1=key1,
+                    version_id1=version_id1,
+                    size1=size1,
+                    bucket2=bucket2,
+                    key2=key2,
+                    max_workers=max_workers,
+                    block_size=block_size,
+                    **kwargs,
+                )
+        finally:
+            # A multipart copy that fails to copy an annotation has already
+            # written the destination.
+            self.invalidate_cache(path2)
         return True
 
     def _copy_object(
@@ -1862,7 +1866,7 @@ class S3FileSystem(AbstractFileSystem):
         if self._copies_annotations(bucket1, kwargs):
             for name in self._list_object_annotations(bucket1, key1, version_id1, kwargs):
                 self._copy_object_annotation(
-                    name, bucket1, key1, version_id1, bucket2, key2, completed.etag, kwargs
+                    name, bucket1, key1, version_id1, bucket2, key2, completed, kwargs
                 )
 
     @staticmethod
@@ -2048,14 +2052,15 @@ class S3FileSystem(AbstractFileSystem):
         version_id1: str | None,
         bucket2: str,
         key2: str,
-        etag2: str | None,
+        completed: S3CompleteMultipartUpload,
         kwargs: Mapping[str, Any],
     ) -> None:
         """Copy an annotation of the source of a copy onto its destination.
 
-        The annotation is written only if the destination still has the
-        ETag of the object that the copy created, so that it is not attached
-        to an object written over the copy.
+        The annotation is written to the version that the copy created, if
+        the bucket is versioned, and only if the destination still has the
+        ETag of the copy, so that it is not attached to an object written
+        over the copy.
 
         Args:
             name: The annotation name.
@@ -2064,7 +2069,7 @@ class S3FileSystem(AbstractFileSystem):
             version_id1: Source version ID, if any.
             bucket2: Destination S3 bucket name.
             key2: Destination object key.
-            etag2: ETag of the destination that the copy created.
+            completed: The completion of the multipart upload of the copy.
             kwargs: The CopyObject parameters of the copy.
         """
         source: dict[str, Any] = {"Bucket": bucket1, "Key": key1, "AnnotationName": name}
@@ -2087,8 +2092,10 @@ class S3FileSystem(AbstractFileSystem):
             "AnnotationName": name,
             "AnnotationPayload": response["AnnotationPayload"].read(),
         }
-        if etag2:
-            destination.update({"ObjectIfMatch": etag2})
+        if completed.version_id:
+            destination.update({"VersionId": completed.version_id})
+        if completed.etag:
+            destination.update({"ObjectIfMatch": completed.etag})
         self._call(
             self._client.put_object_annotation,
             # The fields of the request take precedence over inherited

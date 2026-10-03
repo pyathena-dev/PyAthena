@@ -1796,6 +1796,19 @@ class TestS3FileSystem:
                 self._multipart_copy(fs, **MULTIPART_COPY_KWARGS)
             stubber.assert_no_pending_responses()
 
+    def test_cp_file_failed_multipart_copy_invalidates_cache(self):
+        # GH-973: a multipart copy that fails to copy an annotation has
+        # written the destination, so its cached entries are removed.
+        fs = self._make_fs()
+        fs.info = mock.MagicMock(return_value=self._file_object("src"))
+        fs.info.return_value.size = S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE + 1
+        fs._copy_object_with_multipart_upload = mock.MagicMock(side_effect=PermissionError)
+        fs.dircache["bucket/dst"] = [self._file_object("dst")]
+
+        with pytest.raises(PermissionError):
+            fs.cp_file("s3://bucket/src", "s3://bucket/dst")
+        assert "bucket/dst" not in fs.dircache
+
     def test_copy_object_with_multipart_upload_replace_directives(self):
         # GH-973: REPLACE uses the values of the copy without reading the
         # source, and EXCLUDE skips the annotations.

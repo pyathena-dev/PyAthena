@@ -448,29 +448,32 @@ class AioS3FileSystem(AsyncFileSystem):
             # S3FileSystem.cp_file.
             return False
         size1 = info1.get("size", 0)
-        if size1 <= S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE:
-            await asyncio.to_thread(
-                self._sync_fs._copy_object,
-                bucket1=bucket1,
-                key1=key1,
-                version_id1=version_id1,
-                bucket2=bucket2,
-                key2=key2,
-                **kwargs,
-            )
-        else:
-            await self._copy_object_with_multipart_upload(
-                bucket1=bucket1,
-                key1=key1,
-                version_id1=version_id1,
-                size1=size1,
-                bucket2=bucket2,
-                key2=key2,
-                max_workers=max_workers,
-                block_size=block_size,
-                **kwargs,
-            )
-        self._sync_fs.invalidate_cache(path2)
+        try:
+            if size1 <= S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE:
+                await asyncio.to_thread(
+                    self._sync_fs._copy_object,
+                    bucket1=bucket1,
+                    key1=key1,
+                    version_id1=version_id1,
+                    bucket2=bucket2,
+                    key2=key2,
+                    **kwargs,
+                )
+            else:
+                await self._copy_object_with_multipart_upload(
+                    bucket1=bucket1,
+                    key1=key1,
+                    version_id1=version_id1,
+                    size1=size1,
+                    bucket2=bucket2,
+                    key2=key2,
+                    max_workers=max_workers,
+                    block_size=block_size,
+                    **kwargs,
+                )
+        finally:
+            # See S3FileSystem._copy_file.
+            self._sync_fs.invalidate_cache(path2)
         return True
 
     async def _copy_object_with_multipart_upload(
@@ -597,19 +600,30 @@ class AioS3FileSystem(AsyncFileSystem):
             self._sync_fs._list_object_annotations, bucket1, key1, version_id1, kwargs
         )
 
+        failed = False
+
         async def _copy_annotation(name: str) -> None:
+            nonlocal failed
             async with semaphore:
-                await asyncio.to_thread(
-                    self._sync_fs._copy_object_annotation,
-                    name,
-                    bucket1,
-                    key1,
-                    version_id1,
-                    bucket2,
-                    key2,
-                    completed.etag,
-                    kwargs,
-                )
+                if failed:
+                    # Do not start more copies after one failed, as
+                    # S3FileSystem does.
+                    return
+                try:
+                    await asyncio.to_thread(
+                        self._sync_fs._copy_object_annotation,
+                        name,
+                        bucket1,
+                        key1,
+                        version_id1,
+                        bucket2,
+                        key2,
+                        completed,
+                        kwargs,
+                    )
+                except Exception:
+                    failed = True
+                    raise
 
         results = await asyncio.gather(
             *[_copy_annotation(name) for name in names], return_exceptions=True

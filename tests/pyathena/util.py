@@ -275,7 +275,8 @@ def stub_multipart_copy(stubber, fail_part=False, fail_annotation=False):
     Args:
         stubber: The Stubber of the S3 client.
         fail_part: Fail the second part copy; the upload is then aborted.
-        fail_annotation: Fail the write of the first annotation.
+        fail_annotation: Fail the write of the first annotation; no
+            other annotation is copied then.
     """
     source = {
         "Bucket": "bucket",
@@ -337,7 +338,7 @@ def stub_multipart_copy(stubber, fail_part=False, fail_annotation=False):
         )
     stubber.add_response(
         "complete_multipart_upload",
-        {"ETag": '"dst"'},
+        {"ETag": '"dst"', "VersionId": "v-dst"},
         {
             **destination,
             "UploadId": "u",
@@ -367,6 +368,7 @@ def stub_multipart_copy(stubber, fail_part=False, fail_annotation=False):
             **destination,
             "AnnotationName": name,
             "AnnotationPayload": payload,
+            "VersionId": "v-dst",
             "ObjectIfMatch": '"dst"',
         }
         if fail_annotation:
