@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, time, timedelta, timezone
 
 import pytest
@@ -636,7 +637,6 @@ def test_to_time_with_tz(input_value, expected):
     ("input_value", "expected"),
     [
         (None, None),
-        ("", None),
         ('""', ""),
         ('{"a": 1}', {"a": 1}),
         ("[1, 2]", [1, 2]),
@@ -645,3 +645,24 @@ def test_to_time_with_tz(input_value, expected):
 )
 def test_to_json(input_value, expected):
     assert _to_json(input_value) == expected
+    assert _csv_to_json(input_value) == expected
+
+
+def test_to_json_empty_string():
+    """Only the result-file converter treats an empty string as NULL."""
+    assert _csv_to_json("") is None
+    with pytest.raises(json.JSONDecodeError):
+        _to_json("")
+
+
+@pytest.mark.parametrize(
+    ("type_hint", "value", "expected"),
+    [
+        ("array(json)", '[""]', [""]),
+        ("map(varchar,json)", '{"k": ""}', {"k": ""}),
+    ],
+)
+def test_typed_json_empty_string_element(type_hint, value, expected):
+    """An empty JSON string inside a typed complex value stays an empty string."""
+    type_ = type_hint.split("(", 1)[0]
+    assert DefaultTypeConverter().convert(type_, value, type_hint=type_hint) == expected
