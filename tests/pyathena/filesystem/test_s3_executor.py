@@ -128,4 +128,3 @@ class TestS3AioExecutor:
         future = asyncio.run(main())
 
         assert not future.cancelled()
-
