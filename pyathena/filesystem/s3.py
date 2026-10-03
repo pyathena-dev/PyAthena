@@ -1474,15 +1474,22 @@ class S3FileSystem(AbstractFileSystem):
 
         Returns:
             The bytes read from the object.
+
+        Raises:
+            FileNotFoundError: If the path is not an object.
         """
         bucket, key, path_version_id = self.parse_path(path)
         version_id = kwargs.pop("version_id", None)
         if path_version_id:
             version_id = path_version_id
         if start is not None or end is not None:
-            size = self.info(path, version_id=version_id).get("size", 0)
+            info = self.info(path, version_id=version_id)
+            if info.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
+                # There is no object to read, as GetObject reports without
+                # a range.
+                raise FileNotFoundError(path)
             # S3 would return the whole object for an empty range.
-            range_start, range_end, _ = slice(start, end).indices(size)
+            range_start, range_end, _ = slice(start, end).indices(info.get("size", 0))
             if range_start >= range_end:
                 return b""
             ranges = (range_start, range_end)

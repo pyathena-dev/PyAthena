@@ -709,6 +709,16 @@ class TestS3FileSystem:
         if not data[start:end]:
             assert ranges == []
 
+    @pytest.mark.parametrize(("start", "end"), [(0, 5), (5, None)])
+    def test_cat_file_range_directory(self, start, end):
+        fs = self._make_fs()
+        fs.info = mock.MagicMock(return_value=S3FileSystem._directory_object("bucket", "dir"))
+
+        # A prefix is not read as an empty object.
+        with pytest.raises(FileNotFoundError):
+            fs.cat_file("s3://bucket/dir", start=start, end=end)
+        fs._call.assert_not_called()
+
     def test_cat_ranges_range(self):
         fs, ranges = self._make_object_fs(b"0123456789")
 
