@@ -789,7 +789,9 @@ class S3FileSystem(AbstractFileSystem):
             maxdepth: Maximum depth to recurse (None for unlimited).
             withdirs: Whether to include directories in results (None = default behavior).
             detail: If True, return dict of {path: S3Object}; if False, return list of paths.
-            **kwargs: Additional arguments.
+            **kwargs: Additional arguments including:
+                prefix: Key prefix, relative to the path, to filter the results by.
+                refresh: If True, bypass the cache and list from S3.
 
         Returns:
             Dictionary mapping paths to S3Objects (if detail=True) or
