@@ -818,6 +818,19 @@ class AthenaDictResultSet(AthenaResultSet):
     # You can override this to use OrderedDict or other dict-like types.
     dict_type: type[Any] = dict
 
+    def __init__(self, *args: Any, dict_type: type[Any] | None = None, **kwargs: Any) -> None:
+        """Initialize the result set with an optional row type for this instance.
+
+        Args:
+            *args: Positional arguments passed to the next ``__init__`` in the MRO.
+            dict_type: The type used to build each row of this result set. If
+                None, the class attribute ``dict_type`` is used.
+            **kwargs: Keyword arguments passed to the next ``__init__`` in the MRO.
+        """
+        if dict_type is not None:
+            self.dict_type = dict_type
+        super().__init__(*args, **kwargs)
+
     @override
     def _get_rows(
         self,

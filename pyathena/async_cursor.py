@@ -112,6 +112,7 @@ class AsyncCursor(BaseCursor):
         self._max_workers = max_workers
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
         self._result_set_class = AthenaResultSet
+        self._result_set_kwargs: dict[str, Any] = {}
 
     @property
     def arraysize(self) -> int:
@@ -198,6 +199,7 @@ class AsyncCursor(BaseCursor):
             arraysize=self._arraysize,
             retry_config=self._retry_config,
             result_set_type_hints=result_set_type_hints,
+            **self._result_set_kwargs,
         )
 
     @override
@@ -335,15 +337,15 @@ class AsyncDictCursor(AsyncCursor):
         >>> print(f"User: {row['name']} ({row['email']})")
     """
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, dict_type: type[Any] | None = None, **kwargs) -> None:
         """Initialize an AsyncDictCursor.
 
         Args:
-            **kwargs: Arguments forwarded to ``AsyncCursor.__init__``. If they include
-                ``dict_type``, it is also assigned to the class attribute
-                ``AthenaDictResultSet.dict_type``, the type used to build each row.
+            dict_type: The type used to build each row of this cursor's result
+                sets. If None, the result set class's ``dict_type`` is used.
+            **kwargs: Arguments forwarded to ``AsyncCursor.__init__``.
         """
         super().__init__(**kwargs)
         self._result_set_class = AthenaDictResultSet
-        if "dict_type" in kwargs:
-            AthenaDictResultSet.dict_type = kwargs["dict_type"]
+        if dict_type is not None:
+            self._result_set_kwargs = {"dict_type": dict_type}
