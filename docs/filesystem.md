@@ -85,6 +85,14 @@ The block size for writing, given by the `block_size` argument of `open` or by t
 filesystem's `default_block_size`, must be between 5 MiB and 5 GiB, inclusive, the part
 size limits of a multipart upload. Otherwise, `open` raises `ValueError`.
 
+A multipart upload consists of at most 10,000 parts, one per block, so a write with
+the default block size can upload up to about 48.8 GiB (10,000 × 5 MiB). To write a
+larger object, use a block size of at least its size divided by 10,000, either with
+the `block_size` argument of `open` and `pipe` or with the `default_block_size`
+argument of `S3FileSystem`. A write that would need more parts raises `ValueError`
+and aborts its multipart upload. Multipart copies with `cp` use parts large enough
+to stay within the limit.
+
 ## Error translation
 
 S3 error responses are translated into standard Python exceptions, so filesystem

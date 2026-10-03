@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import mimetypes
 import os.path
 import re
@@ -10,6 +11,7 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import Future, as_completed, wait
 from copy import deepcopy
 from datetime import datetime
+from io import BytesIO
 from multiprocessing import cpu_count
 from re import Pattern
 from typing import Any, cast
@@ -104,6 +106,9 @@ class S3FileSystem(AbstractFileSystem):
     # https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
     # The maximum size of a part in a multipart upload is 5GiB.
     MULTIPART_UPLOAD_MAX_PART_SIZE: int = 5 * 2**30  # 5GiB
+    # https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
+    # The maximum number of parts per multipart upload is 10,000.
+    MULTIPART_UPLOAD_MAX_PARTS: int = 10_000
     # https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjects.html
     DELETE_OBJECTS_MAX_KEYS: int = 1000
     DEFAULT_BLOCK_SIZE: int = 5 * 2**20  # 5MiB
@@ -1318,7 +1323,8 @@ class S3FileSystem(AbstractFileSystem):
         """Split an object into the source ranges of a multipart copy.
 
         The object is split into ranges of ``block_size`` bytes, whatever the
-        number of workers. A last range shorter than
+        number of workers, or of a larger size that splits it into at most
+        ``MULTIPART_UPLOAD_MAX_PARTS`` ranges. A last range shorter than
         ``MULTIPART_UPLOAD_MIN_PART_SIZE`` is merged into the previous one,
         which is split in half if the result exceeds
         ``MULTIPART_UPLOAD_MAX_PART_SIZE``. Every range is then within the
@@ -1330,14 +1336,16 @@ class S3FileSystem(AbstractFileSystem):
             size: The size of the source object in bytes.
             block_size: The size in bytes to split the object by, between
                 ``MULTIPART_UPLOAD_MIN_PART_SIZE`` and
-                ``MULTIPART_UPLOAD_MAX_PART_SIZE``. The range that a short
-                last range is merged into can be longer, up to
-                ``MULTIPART_UPLOAD_MAX_PART_SIZE``.
+                ``MULTIPART_UPLOAD_MAX_PART_SIZE``. It is raised to
+                ``size`` divided by ``MULTIPART_UPLOAD_MAX_PARTS``, rounded
+                up, if smaller. The range that a short last range is merged
+                into can be longer, up to ``MULTIPART_UPLOAD_MAX_PART_SIZE``.
 
         Returns:
             The ``(start, end)`` byte ranges, with an exclusive end, that
             cover the whole object in order.
         """
+        block_size = max(block_size, math.ceil(size / self.MULTIPART_UPLOAD_MAX_PARTS))
         starts = list(range(0, size, block_size))
         if len(starts) > 1 and size - starts[-1] < self.MULTIPART_UPLOAD_MIN_PART_SIZE:
             starts.pop()
@@ -2219,6 +2227,7 @@ class S3File(AbstractBufferedFile):
     """
 
     fs: S3FileSystem
+    buffer: BytesIO | None
 
     def __init__(
         self,
@@ -2429,15 +2438,18 @@ class S3File(AbstractBufferedFile):
         if not self.multipart_upload:
             raise RuntimeError("Multipart upload is not initialized.")
 
+        # fsspec's flush() never calls this on a closed file, whose buffer
+        # may have been dropped.
+        buffer = cast(BytesIO, self.buffer)
         part_number = len(self.multipart_upload_parts)
-        self.buffer.seek(0)
-        data = self.buffer.read(self.blocksize)
+        buffer.seek(0)
+        data = buffer.read(self.blocksize)
         while data:
             # Only the last part of a multipart upload may be smaller than the
             # minimum part size, and more data may follow a mid-stream chunk.
             # A single write() can leave several blocks in the buffer, so look
             # ahead one block and merge a short last block into this one.
-            next_data = self.buffer.read(self.blocksize)
+            next_data = buffer.read(self.blocksize)
             next_data_size = len(next_data)
             if 0 < next_data_size < self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE:
                 upload_data = data + next_data
@@ -2452,6 +2464,20 @@ class S3File(AbstractBufferedFile):
                 uploads = [data]
 
             for upload in uploads:
+                if part_number >= self.fs.MULTIPART_UPLOAD_MAX_PARTS:
+                    # Abort the upload and close the file without the
+                    # buffered data, so that neither close() nor commit()
+                    # uploads it.
+                    self.discard()
+                    self.buffer = None
+                    self.closed = True
+                    raise ValueError(
+                        f"Cannot upload more than {self.fs.MULTIPART_UPLOAD_MAX_PARTS} "
+                        f"parts to s3://{self.bucket}/{self.key} with a block size of "
+                        f"{self.blocksize} bytes. Write the file with a block_size, or "
+                        "a default_block_size of the filesystem, of at least its total "
+                        f"size divided by {self.fs.MULTIPART_UPLOAD_MAX_PARTS}."
+                    )
                 part_number += 1
                 self.multipart_upload_parts.append(
                     self._executor.submit(
