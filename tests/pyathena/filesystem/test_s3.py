@@ -5566,6 +5566,7 @@ class TestS3File:
         with pytest.raises(error, match="complete failed"):
             file.commit()
         assert (file.multipart_upload is not None) is abort_fails
+        assert bool(file.multipart_upload_parts) is abort_fails
         assert (
             "Failed to abort multipart upload uploadid to s3://bucket/key.txt." in caplog.text
         ) is abort_fails
@@ -5574,6 +5575,28 @@ class TestS3File:
         assert file.fs._call.call_args_list == [
             mock.call("abort_multipart_upload", Bucket="bucket", Key="key.txt", UploadId="uploadid")
         ] * (2 if abort_fails else 1)
+        assert file.multipart_upload is None
+        assert file.multipart_upload_parts == []
+
+    def test_commit_failure_and_interrupted_abort(self):
+        # GH-945: if the abort after a failed completion is interrupted, the
+        # interrupt propagates and the upload is kept so that discard()
+        # retries the abort.
+        file = self._make_multipart_write_file(b"x" * 16, autocommit=False)
+        file._upload_chunk(final=True)
+        file.fs._finish_multipart_upload.side_effect = functools.partial(
+            S3FileSystem._finish_multipart_upload, file.fs
+        )
+        file.fs._complete_multipart_upload.side_effect = RuntimeError("complete failed")
+        file.fs._call.side_effect = [KeyboardInterrupt, None]
+
+        with pytest.raises(KeyboardInterrupt):
+            file.commit()
+        assert file.multipart_upload is not None
+        assert file.multipart_upload_parts
+        file.discard()
+
+        assert file.fs._call.call_count == 2
         assert file.multipart_upload is None
         assert file.multipart_upload_parts == []
 
