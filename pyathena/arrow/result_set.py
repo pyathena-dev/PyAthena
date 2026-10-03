@@ -324,6 +324,9 @@ class AthenaArrowResultSet(AthenaResultSet):
                 ignore_empty_lines=False,
                 double_quote=True,
                 escape_char=False,
+                # A quoted value can contain a newline, so the reader must not split
+                # blocks inside quotes.
+                newlines_in_values=True,
             )
         else:
             return pa.Table.from_pydict({})
