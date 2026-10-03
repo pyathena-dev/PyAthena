@@ -174,10 +174,11 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
 
         The chunks keep their index, so the result has the row numbers or the
         ``index_col`` values of the CSV file. Categorical columns and a categorical
-        index stay categorical, with the categories inferred from all chunks in
-        sorted order. A whole-file read of a large file can order inferred
-        categories differently, because pandas joins its internal parser blocks
-        in the order they were read.
+        index stay categorical. Categories given in the dtype keep their order;
+        when the chunks inferred different categories, they are inferred again from
+        all chunks in sorted order. A whole-file read of a large file can order
+        inferred categories differently, because pandas joins its internal parser
+        blocks in the order they were read.
 
         Returns:
             Single pandas DataFrame containing all data.
