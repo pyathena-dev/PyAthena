@@ -291,6 +291,7 @@ A `KeyboardInterrupt` while `execute()` is still starting the calculation first 
 [StartCalculationExecution](https://docs.aws.amazon.com/athena/latest/APIReference/API_StartCalculationExecution.html)
 request to finish, and then cancels the calculation it started in the same way.
 The `calculation_id` property returns that calculation's ID.
+If `execute()` has not begun the request when the interrupt is handled, the request is never sent and `calculation_id` is `None`.
 A second `KeyboardInterrupt` during this wait propagates at once without cancelling the calculation.
 A cancellation request sent right after a calculation starts can occasionally have no effect, so the calculation can still end in the `COMPLETED` state.
 
