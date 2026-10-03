@@ -75,6 +75,7 @@ class AthenaAioResultSet(AthenaResultSet):
         arraysize: int,
         retry_config: RetryConfig,
         result_set_type_hints: dict[str | int, str] | None = None,
+        **kwargs: Any,
     ) -> AthenaAioResultSet:
         """Async factory method.
 
@@ -88,6 +89,8 @@ class AthenaAioResultSet(AthenaResultSet):
             retry_config: Retry configuration for API calls.
             result_set_type_hints: Optional dictionary mapping column names to
                 Athena DDL type signatures for precise type conversion.
+            **kwargs: Additional arguments passed to the constructor of ``cls``,
+                such as ``dict_type`` for ``AthenaAioDictResultSet``.
 
         Returns:
             A fully initialized ``AthenaAioResultSet``.
@@ -99,6 +102,7 @@ class AthenaAioResultSet(AthenaResultSet):
             arraysize,
             retry_config,
             result_set_type_hints=result_set_type_hints,
+            **kwargs,
         )
         if result_set.state == AthenaQueryExecution.STATE_SUCCEEDED:
             await result_set._async_pre_fetch()
