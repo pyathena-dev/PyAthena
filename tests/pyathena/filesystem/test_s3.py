@@ -1091,8 +1091,9 @@ class TestS3FileSystem:
         )
 
     @staticmethod
-    def _record_requests(fs, precondition_failed=False):
-        # Record the S3 requests of the filesystem by operation name. With
+    def _record_requests(fs, precondition_failed=False, exists=True):
+        # Record the S3 requests of the filesystem by operation name, with an
+        # object of 2 bytes at every key if it exists. With
         # precondition_failed, the conditional writes fail as S3 fails them
         # when an object exists.
         requests = []
@@ -1101,6 +1102,12 @@ class TestS3FileSystem:
             name = method if isinstance(method, str) else method._extract_mock_name()
             name = name.split(".")[-1]
             requests.append((name, request))
+            if name == "head_object":
+                if not exists:
+                    raise FileNotFoundError(request["Key"])
+                return {"ContentLength": 2, "ETag": '"e"'}
+            if name == "get_object":
+                return {"Body": io.BytesIO(b"aa")}
             if precondition_failed and name in {"put_object", "complete_multipart_upload"}:
                 error = botocore.exceptions.ClientError(
                     {
@@ -1727,26 +1734,6 @@ class TestS3FileSystem:
         "SSECustomerKey": "k" * 32,
     }
 
-    @staticmethod
-    def _record_lookups(fs, exists=True):
-        # Record the S3 requests of the filesystem by operation name, with
-        # an object of 2 bytes at every key if it exists.
-        requests = []
-
-        def call(method, **request):
-            name = method._extract_mock_name().split(".")[-1]
-            requests.append((name, request))
-            if name == "head_object":
-                if not exists:
-                    raise FileNotFoundError(request["Key"])
-                return {"ContentLength": 2, "ETag": '"e"'}
-            if name == "get_object":
-                return {"Body": io.BytesIO(b"aa")}
-            return {"UploadId": "uploadid", "ETag": '"e"'}
-
-        fs._call.side_effect = call
-        return requests
-
     @pytest.mark.parametrize("mode", ["rb", "ab", "xb"])
     def test_open_lookup_parameters(self, mode):
         # GH-1004: the lookups made while opening a file did not send its
@@ -1754,7 +1741,7 @@ class TestS3FileSystem:
         # in a requester-pays bucket, could not be opened.
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
-        requests = self._record_lookups(fs, exists=mode != "xb")
+        requests = self._record_requests(fs, exists=mode != "xb")
 
         with fs.open("s3://bucket/key", mode, ContentType="text/plain", **self.LOOKUP_KWARGS) as f:
             if mode == "rb":
@@ -1857,7 +1844,7 @@ class TestS3FileSystem:
         # GH-1004: the existence check of pipe_file(mode="create") sends the
         # lookup parameters of the write, as open() does in "xb" mode.
         fs = self._make_fs()
-        requests = self._record_lookups(fs, exists=False)
+        requests = self._record_requests(fs, exists=False)
 
         fs.pipe_file("s3://bucket/key", b"a", mode="create", **self.LOOKUP_KWARGS)
 
@@ -1872,7 +1859,7 @@ class TestS3FileSystem:
         # GH-1004: the lookup that resolves negative offsets sends the lookup
         # parameters of the read.
         fs = self._make_fs()
-        requests = self._record_lookups(fs)
+        requests = self._record_requests(fs)
 
         assert fs.cat_file("s3://bucket/key", start=-2, end=-1, **self.LOOKUP_KWARGS) == b"aa"
 
