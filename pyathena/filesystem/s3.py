@@ -404,13 +404,32 @@ class S3FileSystem(AbstractFileSystem):
         max_keys: int | None = None,
         refresh: bool = False,
     ) -> list[S3Object]:
+        """List the objects and common prefixes under a path.
+
+        A complete listing of the path is cached under ``(path, delimiter)``,
+        which ``invalidate_cache`` drops for the path and its parents.
+
+        Args:
+            path: The bucket or directory path to list.
+            prefix: Key prefix to filter by, relative to the path. A prefixed
+                listing is neither read from nor written to the cache.
+            delimiter: Delimiter to group keys by; ``""`` lists recursively.
+            next_token: Continuation token to start listing from. A listing
+                that starts from a token is neither read from nor written to
+                the cache.
+            max_keys: Maximum number of keys per ListObjectsV2 request.
+            refresh: If True, bypass the cache and list from S3.
+
+        Returns:
+            The listed directories and files.
+        """
         bucket, key, version_id = self.parse_path(path)
+        use_cache = not prefix and not next_token
         if key:
             prefix = f"{key}/{prefix if prefix else ''}"
 
-        # Create a cache key that includes the delimiter
         cache_key = (path, delimiter)
-        if cache_key in self.dircache and not refresh:
+        if use_cache and cache_key in self.dircache and not refresh:
             return cast(list[S3Object], self.dircache[cache_key])
 
         files: list[S3Object] = []
@@ -444,7 +463,7 @@ class S3FileSystem(AbstractFileSystem):
             next_token = response.get("NextContinuationToken")
             if not next_token:
                 break
-        if files:
+        if use_cache and files:
             self.dircache[cache_key] = files
         return files
 
@@ -1882,6 +1901,9 @@ class S3FileSystem(AbstractFileSystem):
             path = self._strip_protocol(path)
             while path:
                 self.dircache.pop(path, None)
+                # _ls_dirs caches listings under (path, delimiter).
+                for delimiter in ("/", ""):
+                    self.dircache.pop((path, delimiter), None)
                 path = self._parent(path)
 
     def _ls_from_cache(self, path: str) -> list[S3Object] | S3Object | None:

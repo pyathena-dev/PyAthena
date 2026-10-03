@@ -192,6 +192,51 @@ class TestS3FileSystem:
         # every cache value is a listing and raises TypeError here).
         assert fs._ls_from_cache("bucket/key/child") is None
 
+    def test_invalidate_cache_drops_listings_of_path_and_parents(self):
+        fs = self._make_fs()
+        invalidated = [
+            "bucket/a/b/c.txt",
+            ("bucket/a/b", "/"),
+            ("bucket/a/b", ""),
+            ("bucket/a", "/"),
+            ("bucket/a", ""),
+            ("bucket", "/"),
+            ("bucket", ""),
+        ]
+        kept = ["", ("bucket/a/x", "/"), ("bucket/a/b/c.txt/d", "")]
+        for cache_key in invalidated + kept:
+            fs.dircache[cache_key] = []
+
+        fs.invalidate_cache("s3://bucket/a/b/c.txt")
+        assert list(fs.dircache) == kept
+
+    @pytest.mark.parametrize(
+        ("prefix", "next_token"),
+        [
+            ("test_", None),
+            ("", "token"),
+        ],
+    )
+    def test_ls_dirs_partial_listing_bypasses_cache(self, prefix, next_token):
+        fs = self._make_fs()
+        cached = S3Object(
+            init={"Key": "dir/cached"},
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket="bucket",
+            key="dir/cached",
+        )
+        fs.dircache[("bucket/dir", "")] = [cached]
+        fs._call.return_value = {"Contents": [{"Key": "dir/test_1"}]}
+
+        files = fs._ls_dirs("bucket/dir", prefix=prefix, delimiter="", next_token=next_token)
+        assert [f.name for f in files] == ["bucket/dir/test_1"]
+        assert fs.dircache[("bucket/dir", "")] == [cached]
+
+        # A complete listing of the path is still served from the cache.
+        fs._call.reset_mock()
+        assert fs._ls_dirs("bucket/dir", delimiter="") == [cached]
+        fs._call.assert_not_called()
+
     def test_mkdir_creates_bucket(self):
         fs = self._make_fs()
         fs.allow_bucket_creation = True
@@ -718,6 +763,29 @@ class TestS3FileSystem:
         assert len(test_1_detail) == 1
         assert test_1_detail[0].name == fs._strip_protocol(f"{dir_}/prefix/test_1")
         assert test_1_detail[0].size == 1
+
+    def test_ls_and_find_reflect_changes_through_the_filesystem(self, fs):
+        dir_ = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_ls_and_find_reflect_changes/{uuid.uuid4()}"
+        )
+        path = fs._strip_protocol(dir_)
+        fs.touch(f"{dir_}/a.txt")
+        fs.touch(f"{dir_}/b.txt")
+        assert sorted(fs.ls(dir_)) == [f"{path}/a.txt", f"{path}/b.txt"]
+        assert sorted(fs.find(dir_)) == [f"{path}/a.txt", f"{path}/b.txt"]
+
+        fs.rm(f"{dir_}/a.txt")
+        assert fs.ls(dir_) == [f"{path}/b.txt"]
+        assert fs.find(dir_) == [f"{path}/b.txt"]
+
+        fs.touch(f"{dir_}/c.txt")
+        assert sorted(fs.ls(dir_)) == [f"{path}/b.txt", f"{path}/c.txt"]
+        assert sorted(fs.find(dir_)) == [f"{path}/b.txt", f"{path}/c.txt"]
+        # A prefixed find must not be served from the unprefixed listing.
+        assert fs.find(dir_, prefix="c") == [f"{path}/c.txt"]
+
+        fs.rm(dir_, recursive=True)
 
     def test_info_bucket(self, fs):
         dir_ = f"s3://{ENV.s3_staging_bucket}"
