@@ -764,13 +764,23 @@ class TestS3FileSystem:
 
     @staticmethod
     def _serve_keys(fs, keys):
-        # Answer the ListObjectsV2 and HeadObject requests of "bucket" from
-        # the given keys.
+        # Answer the ListObjectsV2, HeadObject, CopyObject, and DeleteObjects
+        # requests of "bucket" from a set of the given keys, which is returned.
+        keys = set(keys)
+
         def call(method, **kwargs):
             if method is fs._client.head_object:
                 if kwargs["Key"] not in keys:
                     raise FileNotFoundError(kwargs["Key"])
                 return {"ContentLength": 0}
+            if method is fs._client.copy_object:
+                if kwargs["CopySource"]["Key"] not in keys:
+                    raise FileNotFoundError(kwargs["CopySource"]["Key"])
+                keys.add(kwargs["Key"])
+                return {}
+            if method is fs._client.delete_objects:
+                keys.difference_update(o["Key"] for o in kwargs["Delete"]["Objects"])
+                return {}
             prefix, delimiter = kwargs["Prefix"], kwargs["Delimiter"]
             contents, prefixes = [], set()
             for key in sorted(keys):
@@ -788,6 +798,7 @@ class TestS3FileSystem:
             }
 
         fs._call.side_effect = call
+        return keys
 
     @staticmethod
     def _memory_fs(keys):
@@ -1537,6 +1548,27 @@ class TestS3FileSystem:
         fs.mv(["s3://bucket/src"], ["s3://bucket/dst/"])
         fs._copy_file.assert_called_once_with("s3://bucket/src", "s3://bucket/dst/")
         fs._delete_objects.assert_called_once_with(["s3://bucket/src"])
+
+    @pytest.mark.parametrize(
+        ("keys", "path1", "path2", "expected"),
+        [
+            # The directory itself, which find() includes, is not copied.
+            ({"d/a", "d/b"}, "s3://bucket/d/**", "s3://bucket/out/", {"out/a", "out/b"}),
+            # The directory moved onto an existing subdirectory is no conflict.
+            (
+                {"src/a", "src/archive/x"},
+                "s3://bucket/src/**",
+                "s3://bucket/src/archive/",
+                {"src/archive/a", "src/archive/archive/x"},
+            ),
+        ],
+    )
+    def test_mv_glob_with_directories(self, keys, path1, path2, expected):
+        fs = self._make_fs()
+        store = self._serve_keys(fs, keys)
+
+        fs.mv(path1, path2, recursive=True)
+        assert store == expected
 
     def test_mv_nothing_within_maxdepth(self):
         # Only directories within maxdepth: nothing is moved, as with copy().

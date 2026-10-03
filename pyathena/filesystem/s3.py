@@ -1488,7 +1488,8 @@ class S3FileSystem(AbstractFileSystem):
         Raises:
             ValueError: If two sources have the same destination, or a
                 destination is another source, which is checked before
-                anything is copied.
+                anything is copied. Directories with other sources below
+                them are not checked, since they are not copied.
         """
         if path1 == path2:
             return
@@ -1517,7 +1518,8 @@ class S3FileSystem(AbstractFileSystem):
 
         Raises:
             ValueError: If two sources have the same destination, or a
-                destination is another source.
+                destination is another source, not counting the directories
+                with other sources below them.
         """
         if isinstance(path1, list) and isinstance(path2, list):
             paths1, paths2 = path1, path2
@@ -1546,10 +1548,20 @@ class S3FileSystem(AbstractFileSystem):
             for p1, p2 in zip(paths1, paths2, strict=False)
             if self._strip_protocol(p1) != self._strip_protocol(p2)
         ]
-        destinations = [self._strip_protocol(p2) for _, p2 in pairs]
+        stripped = [(self._strip_protocol(p1), self._strip_protocol(p2)) for p1, p2 in pairs]
+        # A source with another source below it is a directory, which is
+        # not copied, so only the other sources can conflict.
+        directories: set[str] = set()
+        for source, _ in stripped:
+            parent = source.rpartition("/")[0]
+            while parent and parent not in directories:
+                directories.add(parent)
+                parent = parent.rpartition("/")[0]
+        files = [(source, dest) for source, dest in stripped if source not in directories]
+        destinations = [dest for _, dest in files]
         if len(set(destinations)) != len(destinations):
             raise ValueError("Cannot move several paths to the same destination.")
-        if {self._strip_protocol(p1) for p1, _ in pairs}.intersection(destinations):
+        if {source for source, _ in files}.intersection(destinations):
             raise ValueError("Cannot move a path onto another path that is moved.")
         return pairs
 
