@@ -1497,9 +1497,11 @@ class S3FileSystem(AbstractFileSystem):
         ``start`` and ``end`` select bytes like a slice of the object: an
         empty range, or one that starts at or past the end of the object,
         returns ``b""``, and an end past the object reads up to its end.
-        Non-negative offsets are sent to S3 as they are; a negative offset is
-        resolved against the size from :meth:`info`, which also checks that
-        the object exists for an empty range.
+        Non-negative offsets are sent to S3 as they are, and so is a negative
+        ``start`` without an ``end``, as a suffix range of the last bytes.
+        Other negative offsets are resolved against the size from
+        :meth:`info`, which also checks that the object exists for an empty
+        range.
 
         Args:
             path: S3 path (s3://bucket/key) of the object.
@@ -1521,26 +1523,30 @@ class S3FileSystem(AbstractFileSystem):
         version_id = kwargs.pop("version_id", None)
         if path_version_id:
             version_id = path_version_id
-        if (start is not None and start < 0) or (
-            end is not None and (end < 0 or (start or 0) >= end)
-        ):
-            # A negative offset needs the size of the object, and an empty
-            # range sends no GetObject request that would report a missing
-            # object.
-            info = self.info(path, version_id=version_id)
-            if info.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
-                # There is no object to read, as GetObject reports for the
-                # other ranges.
-                raise FileNotFoundError(path)
-            start, end, _ = slice(start, end).indices(info.get("size", 0))
-
         ranges: tuple[int, int | None] | None = None
-        if start is not None or end is not None:
-            start = start or 0
-            if end is not None and start >= end:
-                # S3 would return the whole object for an empty range.
-                return b""
-            ranges = (start, end)
+        if start is not None and start < 0 and end is None:
+            # S3 returns the last bytes, or the whole object when it is
+            # shorter, without the size of the object.
+            ranges = (start, None)
+        else:
+            if (start is not None and start < 0) or (
+                end is not None and (end < 0 or (start or 0) >= end)
+            ):
+                # A negative offset needs the size of the object, and an
+                # empty range sends no GetObject request that would report a
+                # missing object.
+                info = self.info(path, version_id=version_id)
+                if info.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
+                    # There is no object to read, as GetObject reports for
+                    # the other ranges.
+                    raise FileNotFoundError(path)
+                start, end, _ = slice(start, end).indices(info.get("size", 0))
+            if start is not None or end is not None:
+                start = start or 0
+                if end is not None and start >= end:
+                    # S3 would return the whole object for an empty range.
+                    return b""
+                ranges = (start, end)
         try:
             return self._get_object(
                 bucket=bucket,
@@ -2154,14 +2160,15 @@ class S3FileSystem(AbstractFileSystem):
             bucket: The bucket name.
             key: The object key.
             ranges: The ``(start, end)`` byte range to read, with an exclusive
-                end or ``None`` to read to the end of the object, or ``None``
-                to read the whole object.
+                end or ``None`` to read to the end of the object (the last
+                ``-start`` bytes for a negative start), or ``None`` to read
+                the whole object.
             version_id: The version ID to read, or ``None`` for the latest.
             **kwargs: Additional parameters passed to the GetObject API.
 
         Returns:
-            Tuple of the start of the range (0 for the whole object) and the
-            bytes read.
+            Tuple of the start of the range as given (0 for the whole
+            object) and the bytes read.
 
         Raises:
             ValueError: If the range is empty. S3 ignores a range whose last
@@ -2775,13 +2782,16 @@ class S3File(AbstractBufferedFile):
 
         Args:
             ranges: The ``(start, end)`` byte range, with an exclusive end or
-                ``None`` for the end of the object.
+                ``None`` for the end of the object. A negative start with no
+                end selects the last ``-start`` bytes.
 
         Returns:
-            The range, such as ``bytes=0-99`` or ``bytes=100-``.
+            The range, such as ``bytes=0-99``, ``bytes=100-`` or ``bytes=-8``.
         """
         start, end = ranges
-        return f"bytes={start}-" if end is None else f"bytes={start}-{end - 1}"
+        if end is None:
+            return f"bytes={start}" if start < 0 else f"bytes={start}-"
+        return f"bytes={start}-{end - 1}"
 
     @staticmethod
     def _get_ranges(
