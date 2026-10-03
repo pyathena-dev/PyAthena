@@ -110,8 +110,8 @@ def unreachable_glue(connection):
 
 
 # TIME values of several precisions, with and without a time zone, TIMESTAMP WITH TIME
-# ZONE values with UTC offsets and a zone name, a NULL JSON value, and the row that
-# every cursor should fetch for them.
+# ZONE values with UTC offsets and a zone name, NULL JSON and TIME values, and the row
+# that every cursor should fetch for them.
 CONVERTED_VALUES_QUERY = """
 SELECT
   1 AS col
@@ -125,6 +125,7 @@ SELECT
   ,TIMESTAMP '2024-02-29 23:59:58.123 -08:00' AS col_timestamp_tz_negative
   ,TIMESTAMP '2024-02-29 23:59:58.123 America/New_York' AS col_timestamp_tz_name
   ,CAST(NULL AS TIMESTAMP WITH TIME ZONE) AS col_timestamp_tz_null
+  ,CAST(NULL AS TIME) AS col_time_null
 """
 CONVERTED_VALUES_ROW = (
     1,
@@ -137,6 +138,7 @@ CONVERTED_VALUES_ROW = (
     datetime(2024, 2, 29, 23, 59, 58, 123000, tzinfo=timezone(timedelta(hours=5, minutes=30))),
     datetime(2024, 2, 29, 23, 59, 58, 123000, tzinfo=timezone(-timedelta(hours=8))),
     datetime(2024, 2, 29, 23, 59, 58, 123000, tzinfo=gettz("America/New_York")),
+    None,
     None,
 )
 

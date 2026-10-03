@@ -518,7 +518,10 @@ class AthenaPandasResultSet(AthenaResultSet):
 
     def _trunc_date(self, df: DataFrame) -> DataFrame:
         if self._time_columns:
-            truncated = df.loc[:, self._time_columns].apply(lambda r: r.dt.time)
+            # A NULL is None, as with the GetQueryResults fallback and the other types.
+            truncated = df.loc[:, self._time_columns].apply(
+                lambda r: r.dt.time.astype(object).where(r.notna(), None)
+            )
             for time_col in self._time_columns:
                 df.isetitem(df.columns.get_loc(time_col), truncated[time_col])
         return df

@@ -726,3 +726,33 @@ def test_to_datetime_with_tz_offsets_and_zone_names(input_value, expected):
     if expected is not None:
         assert result.utcoffset() == expected.utcoffset()
         assert result.tzinfo is not None
+
+
+@pytest.mark.parametrize(
+    ("input_value", "expected"),
+    [
+        ("[x, , y]", ["x", "", "y"]),
+        ("[x, ]", ["x", ""]),
+        ("[x,  , y]", ["x", " ", "y"]),
+        ("[ , x]", [" ", "x"]),
+        ("[a,b, c]", ["a,b", "c"]),
+        ("[x, null]", ["x", None]),
+        ("[{a=1, b=}, {a=, b=2}]", [{"a": "1", "b": ""}, {"a": "", "b": "2"}]),
+    ],
+)
+def test_native_array_items(input_value, expected):
+    """Native arrays are split as Athena joins them, keeping empty items."""
+    assert _to_array(input_value) == expected
+    assert (
+        DefaultTypeConverter().convert("array", input_value, type_hint="array(varchar)") == expected
+    )
+
+
+def test_typed_json_array_starting_with_non_string():
+    """A typed array(json) value is parsed as JSON whatever its first element is."""
+    converter = DefaultTypeConverter()
+    assert converter.convert("array", '[1234567890, "a,b"]', type_hint="array(json)") == [
+        1234567890,
+        "a,b",
+    ]
+    assert converter.convert("array", "[1, 2.5, true]", type_hint="array(json)") == [1, 2.5, True]
