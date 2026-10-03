@@ -21,6 +21,7 @@ from unittest import mock
 import botocore.exceptions
 import pytest
 from fsspec import Callback
+from fsspec.dircache import DirCache
 
 import pyathena
 from pyathena.filesystem import register_s3_filesystem
@@ -381,6 +382,30 @@ class TestS3FileSystem:
         assert exc_info.value.__notes__ == [
             "Failed to delete objects: b2/b (AccessDenied: Access Denied)"
         ]
+
+    def test_rm_requests_invalidate_shared_parent(self):
+        # The request threads invalidate the shared parent "bucket/dir" at
+        # once. DirCache.pop() reads before it deletes, so the second delete
+        # raised KeyError when both threads had read the entry.
+        class BarrierDirCache(DirCache):
+            barrier = threading.Barrier(2, timeout=5)
+
+            def __getitem__(self, item):
+                value = super().__getitem__(item)
+                if item == "bucket/dir":
+                    # Both threads have read the entry before either deletes.
+                    self.barrier.wait()
+                return value
+
+        fs = self._make_fs()
+        fs._call.return_value = {}
+        fs.DELETE_OBJECTS_MAX_KEYS = 1
+        fs.dircache = BarrierDirCache()
+        fs.dircache["bucket/dir"] = []
+
+        fs.rm(["s3://bucket/dir/a", "s3://bucket/dir/b"])
+        assert fs._call.call_count == 2
+        assert "bucket/dir" not in fs.dircache._cache
 
     def test_rm_request_error_invalidates_cache(self):
         fs = self._make_fs()

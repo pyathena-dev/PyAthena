@@ -328,7 +328,11 @@ class TestAioS3FileSystem:
         task = asyncio.create_task(fs._rm(["s3://b1/a", "s3://b2/b"]))
         for event in started.values():
             await asyncio.to_thread(event.wait, 10)
-        task.cancel()
+        # Cancel every other task, as asyncio.run() does at shutdown, so the
+        # request tasks are cancelled directly, not only through _rm().
+        for other in asyncio.all_tasks():
+            if other is not asyncio.current_task():
+                other.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
         # Cached while the requests still run, e.g. by a concurrent info().
