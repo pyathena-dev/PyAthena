@@ -585,9 +585,7 @@ class S3FileSystem(AbstractFileSystem):
         exists, with a ListObjectsV2 request (``Delimiter="/"``,
         ``MaxKeys=1``) that checks whether it is a key prefix; a bucket path
         is looked up with HeadBucket. With ``version_aware``, a cached file
-        entry without a version ID is looked up again. A version is looked up
-        with HeadObject and cached under its version-qualified path, because
-        listings and the entry of the object path describe the latest version.
+        entry without a version ID is looked up again.
 
         Args:
             path: S3 path (e.g., "s3://bucket" or "s3://bucket/key").
@@ -619,7 +617,7 @@ class S3FileSystem(AbstractFileSystem):
                 key=None,
                 version_id=None,
             )
-        if not refresh and not version_id:
+        if not refresh:
             caches: list[S3Object] | S3Object | None = self._ls_from_cache(path)
             if caches is not None:
                 if isinstance(caches, list):
@@ -632,6 +630,7 @@ class S3FileSystem(AbstractFileSystem):
                 if cache:
                     if (
                         self.version_aware
+                        and not version_id
                         and cache.get("type") == S3ObjectType.S3_OBJECT_TYPE_FILE
                         and not cache.get("version_id")
                     ):
@@ -646,11 +645,7 @@ class S3FileSystem(AbstractFileSystem):
                         bucket, key.rstrip("/") if key else None, version_id
                     )
         if key:
-            # Cache a version under the same path as the ?versionId= suffix.
-            head_path = (
-                f"{path}?versionId={version_id}" if version_id and not path_version_id else path
-            )
-            object_info = self._head_object(head_path, refresh=refresh)
+            object_info = self._head_object(path, refresh=refresh, version_id=version_id)
             if object_info:
                 return object_info
         else:

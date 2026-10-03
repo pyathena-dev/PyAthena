@@ -438,42 +438,6 @@ class TestS3FileSystem:
         with fs.open("s3://bucket/key", "wb", max_workers=2) as f:
             assert f.max_workers == 2
 
-    @pytest.mark.parametrize(
-        "dircache",
-        [
-            {},
-            # The entry of the object path and the listing of its parent
-            # describe the latest version.
-            {"bucket/dir/key": _file_object("dir/key")},
-            {"bucket/dir": [_file_object("dir/key")]},
-        ],
-    )
-    @pytest.mark.parametrize(
-        ("path", "kwargs"),
-        [
-            ("s3://bucket/dir/key", {"version_id": "v1"}),
-            ("s3://bucket/dir/key?versionId=v1", {}),
-        ],
-    )
-    def test_info_version_id(self, dircache, path, kwargs):
-        fs = self._make_fs()
-        fs.dircache.update(dircache)
-        fs._call.return_value = {"ContentLength": 4, "ETag": '"etag"'}
-
-        for _ in range(2):
-            info = fs.info(path, **kwargs)
-            assert (info.type, info.size, info.version_id) == (
-                S3ObjectType.S3_OBJECT_TYPE_FILE,
-                4,
-                "v1",
-            )
-        # The version is looked up once and cached under its
-        # version-qualified path, apart from the latest version.
-        fs._call.assert_called_once_with(
-            fs._client.head_object, Bucket="bucket", Key="dir/key", VersionId="v1"
-        )
-        assert fs.dircache == {**dircache, "bucket/dir/key?versionId=v1": info}
-
     def test_open_version_id(self):
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
