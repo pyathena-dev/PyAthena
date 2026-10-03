@@ -731,6 +731,24 @@ class S3FileSystem(AbstractFileSystem):
         withdirs: bool | None = None,
         **kwargs,
     ) -> list[S3Object]:
+        """List the objects below a path, as described in ``find``.
+
+        Args:
+            path: S3 path to search under.
+            maxdepth: Maximum number of levels to descend, at least 1
+                (None for unlimited).
+            withdirs: Whether to include directories in the result.
+            **kwargs: Additional arguments including ``prefix`` and
+                ``refresh``, as described in ``find``.
+
+        Returns:
+            The objects found, and the directories if ``withdirs`` is True.
+
+        Raises:
+            ValueError: If ``maxdepth`` is less than 1 or the path is the root.
+        """
+        if maxdepth is not None and maxdepth < 1:
+            raise ValueError("maxdepth must be at least 1")
         path = self._strip_protocol(path)
         if path in ["", "/"]:
             raise ValueError("Cannot traverse all files in S3.")
@@ -756,7 +774,7 @@ class S3FileSystem(AbstractFileSystem):
                         result.append(item)
 
                     # Recursively explore subdirectory if depth allows
-                    if maxdepth > 0:
+                    if maxdepth > 1:
                         sub_path = f"s3://{bucket}/{item.key}"
                         sub_results = self._find(
                             sub_path, maxdepth=maxdepth - 1, withdirs=withdirs, **kwargs
@@ -800,7 +818,9 @@ class S3FileSystem(AbstractFileSystem):
 
         Args:
             path: S3 path to search under (e.g., "s3://bucket/prefix").
-            maxdepth: Maximum depth to recurse (None for unlimited).
+            maxdepth: Maximum number of levels to descend, at least 1
+                (None for unlimited). With 1, only the entries directly under
+                the path are listed.
             withdirs: Whether to include directories in results (None = default behavior).
             detail: If True, return dict of {path: S3Object}; if False, return list of paths.
             **kwargs: Additional arguments including:
@@ -812,6 +832,9 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             Dictionary mapping paths to S3Objects (if detail=True) or
             list of paths (if detail=False).
+
+        Raises:
+            ValueError: If ``maxdepth`` is less than 1 or the path is the root.
 
         Example:
             >>> fs = S3FileSystem()

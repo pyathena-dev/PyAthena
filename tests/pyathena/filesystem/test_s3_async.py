@@ -478,19 +478,23 @@ class TestAioS3FileSystem:
         await fs._touch(f"{dir_}/level1/level2/file2.txt")
         await fs._touch(f"{dir_}/level1/level2/level3/file3.txt")
 
-        # Test maxdepth=0 (only files in the root)
-        result = await fs._find(dir_, maxdepth=0)
+        # maxdepth must be at least 1, as in fsspec
+        with pytest.raises(ValueError, match="maxdepth must be at least 1"):
+            await fs._find(dir_, maxdepth=0)
+
+        # Test maxdepth=1 (only files in the root)
+        result = await fs._find(dir_, maxdepth=1)
         assert len(result) == 1
         assert fs._strip_protocol(f"{dir_}/file0.txt") in result
 
-        # Test maxdepth=1 (files in root and level1)
-        result = await fs._find(dir_, maxdepth=1)
+        # Test maxdepth=2 (files in root and level1)
+        result = await fs._find(dir_, maxdepth=2)
         assert len(result) == 2
         assert fs._strip_protocol(f"{dir_}/file0.txt") in result
         assert fs._strip_protocol(f"{dir_}/level1/file1.txt") in result
 
-        # Test maxdepth=2 (files in root, level1, and level2)
-        result = await fs._find(dir_, maxdepth=2)
+        # Test maxdepth=3 (files in root, level1, and level2)
+        result = await fs._find(dir_, maxdepth=3)
         assert len(result) == 3
         assert fs._strip_protocol(f"{dir_}/level1/level2/file2.txt") in result
 

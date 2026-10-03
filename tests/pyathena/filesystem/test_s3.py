@@ -323,7 +323,41 @@ class TestS3FileSystem:
 
         assert fs.find("s3://bucket/dir", refresh=True) == ["bucket/dir/sub/new"]
         # The subdirectory listings of maxdepth are refreshed as well.
-        assert fs.find("s3://bucket/dir", maxdepth=1, refresh=True) == ["bucket/dir/sub/new"]
+        assert fs.find("s3://bucket/dir", maxdepth=2, refresh=True) == ["bucket/dir/sub/new"]
+
+    def test_find_maxdepth_counts_levels_like_fsspec(self):
+        fs = self._make_fs()
+        responses = {
+            "dir/": {
+                "Contents": [{"Key": "dir/direct"}],
+                "CommonPrefixes": [{"Prefix": "dir/sub/"}],
+            },
+            "dir/sub/": {
+                "Contents": [{"Key": "dir/sub/nested"}],
+                "CommonPrefixes": [{"Prefix": "dir/sub/deep/"}],
+            },
+            "dir/sub/deep/": {"Contents": [{"Key": "dir/sub/deep/file"}]},
+        }
+        fs._call.side_effect = lambda method, **kwargs: responses[kwargs["Prefix"]]
+
+        with pytest.raises(ValueError, match="maxdepth must be at least 1"):
+            fs.find("s3://bucket/dir", maxdepth=0)
+        fs._call.assert_not_called()
+
+        assert fs.find("s3://bucket/dir", maxdepth=1) == ["bucket/dir/direct"]
+        assert sorted(fs.find("s3://bucket/dir", maxdepth=1, withdirs=True)) == [
+            "bucket/dir/direct",
+            "bucket/dir/sub",
+        ]
+        assert sorted(fs.find("s3://bucket/dir", maxdepth=2)) == [
+            "bucket/dir/direct",
+            "bucket/dir/sub/nested",
+        ]
+        assert sorted(fs.find("s3://bucket/dir", maxdepth=3)) == [
+            "bucket/dir/direct",
+            "bucket/dir/sub/deep/file",
+            "bucket/dir/sub/nested",
+        ]
 
     def test_refresh_evicts_cached_object_and_bucket_not_found(self):
         fs = self._make_fs()
@@ -1286,19 +1320,23 @@ class TestS3FileSystem:
         fs.touch(f"{dir_}/level1/level2/file2.txt")
         fs.touch(f"{dir_}/level1/level2/level3/file3.txt")
 
-        # Test maxdepth=0 (only files in the root)
-        result = fs.find(dir_, maxdepth=0)
+        # maxdepth must be at least 1, as in fsspec
+        with pytest.raises(ValueError, match="maxdepth must be at least 1"):
+            fs.find(dir_, maxdepth=0)
+
+        # Test maxdepth=1 (only files in the root)
+        result = fs.find(dir_, maxdepth=1)
         assert len(result) == 1
         assert fs._strip_protocol(f"{dir_}/file0.txt") in result
 
-        # Test maxdepth=1 (files in root and level1)
-        result = fs.find(dir_, maxdepth=1)
+        # Test maxdepth=2 (files in root and level1)
+        result = fs.find(dir_, maxdepth=2)
         assert len(result) == 2
         assert fs._strip_protocol(f"{dir_}/file0.txt") in result
         assert fs._strip_protocol(f"{dir_}/level1/file1.txt") in result
 
-        # Test maxdepth=2 (files in root, level1, and level2)
-        result = fs.find(dir_, maxdepth=2)
+        # Test maxdepth=3 (files in root, level1, and level2)
+        result = fs.find(dir_, maxdepth=3)
         assert len(result) == 3
         assert fs._strip_protocol(f"{dir_}/level1/level2/file2.txt") in result
 
