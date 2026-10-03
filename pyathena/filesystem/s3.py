@@ -2053,9 +2053,9 @@ class S3FileSystem(AbstractFileSystem):
     ) -> None:
         """Copy an annotation of the source of a copy onto its destination.
 
-        The annotation is written only if the destination is still the
-        object that the copy created, so that it is not attached to an
-        object written over the copy.
+        The annotation is written only if the destination still has the
+        ETag of the object that the copy created, so that it is not attached
+        to an object written over the copy.
 
         Args:
             name: The annotation name.
