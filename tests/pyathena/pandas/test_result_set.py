@@ -25,8 +25,19 @@ class TestPandasDataFrameIterator:
                 "id,kind\n10,c\n11,c\n12,a\n13,a\n14,b\n",
                 {"dtype": {"kind": pd.CategoricalDtype(ordered=True)}},
             ),
+            (
+                "id,kind\n10,c\n11,c\n12,a\n13,a\n14,b\n",
+                {"index_col": "kind", "dtype": {"kind": "category"}},
+            ),
         ],
-        ids=["default_index", "index_col", "category", "category_null_chunk", "ordered_category"],
+        ids=[
+            "default_index",
+            "index_col",
+            "category",
+            "category_null_chunk",
+            "ordered_category",
+            "category_index",
+        ],
     )
     def test_as_pandas_matches_whole_read(self, csv, read_csv_kwargs):
         """Joining the chunks gives the DataFrame that reading the whole file gives."""
