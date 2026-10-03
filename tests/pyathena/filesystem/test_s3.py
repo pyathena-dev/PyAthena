@@ -760,41 +760,6 @@ class TestS3FileSystem:
         # The subdirectory listings of maxdepth are refreshed as well.
         assert fs.find("s3://bucket/dir", maxdepth=2, refresh=True) == ["bucket/dir/sub/new"]
 
-    def test_find_maxdepth_counts_levels_like_fsspec(self):
-        fs = self._make_fs()
-        responses = {
-            "dir/": {
-                "Contents": [{"Key": "dir/direct"}],
-                "CommonPrefixes": [{"Prefix": "dir/sub/"}],
-            },
-            "dir/sub/": {
-                "Contents": [{"Key": "dir/sub/nested"}],
-                "CommonPrefixes": [{"Prefix": "dir/sub/deep/"}],
-            },
-            "dir/sub/deep/": {"Contents": [{"Key": "dir/sub/deep/file"}]},
-        }
-        fs._call.side_effect = lambda method, **kwargs: responses[kwargs["Prefix"]]
-
-        with pytest.raises(ValueError, match="maxdepth must be at least 1"):
-            fs.find("s3://bucket/dir", maxdepth=0)
-        fs._call.assert_not_called()
-
-        assert fs.find("s3://bucket/dir", maxdepth=1) == ["bucket/dir/direct"]
-        assert sorted(fs.find("s3://bucket/dir", maxdepth=1, withdirs=True)) == [
-            "bucket/dir",
-            "bucket/dir/direct",
-            "bucket/dir/sub",
-        ]
-        assert sorted(fs.find("s3://bucket/dir", maxdepth=2)) == [
-            "bucket/dir/direct",
-            "bucket/dir/sub/nested",
-        ]
-        assert sorted(fs.find("s3://bucket/dir", maxdepth=3)) == [
-            "bucket/dir/direct",
-            "bucket/dir/sub/deep/file",
-            "bucket/dir/sub/nested",
-        ]
-
     FIND_KEYS = ("dir/direct", "dir/sub/nested", "dir/sub/deep/file")
 
     @staticmethod
@@ -833,6 +798,25 @@ class TestS3FileSystem:
         for key in keys:
             memory.pipe(f"/bucket/{key}", b"")
         return memory
+
+    def test_find_maxdepth_counts_levels_like_fsspec(self):
+        fs = self._make_fs()
+        self._serve_keys(fs, self.FIND_KEYS)
+
+        with pytest.raises(ValueError, match="maxdepth must be at least 1"):
+            fs.find("s3://bucket/dir", maxdepth=0)
+        fs._call.assert_not_called()
+
+        assert fs.find("s3://bucket/dir", maxdepth=1) == ["bucket/dir/direct"]
+        assert sorted(fs.find("s3://bucket/dir", maxdepth=2)) == [
+            "bucket/dir/direct",
+            "bucket/dir/sub/nested",
+        ]
+        assert sorted(fs.find("s3://bucket/dir", maxdepth=3)) == [
+            "bucket/dir/direct",
+            "bucket/dir/sub/deep/file",
+            "bucket/dir/sub/nested",
+        ]
 
     @pytest.mark.parametrize(
         ("path", "maxdepth", "withdirs"),
@@ -893,6 +877,23 @@ class TestS3FileSystem:
         fs._call.reset_mock()
         assert fs.find("s3://bucket/dir", maxdepth=1, prefix="s") == []
         assert fs._call.call_count == 1
+
+    def test_find_maxdepth_listings_follow_invalidation(self):
+        fs = self._make_fs()
+        self._serve_keys(fs, ("dir/direct", "dir/sub/nested"))
+        assert sorted(fs.find("s3://bucket/dir", maxdepth=2)) == [
+            "bucket/dir/direct",
+            "bucket/dir/sub/nested",
+        ]
+
+        # A write below the subdirectory invalidates its cached listing.
+        self._serve_keys(fs, ("dir/direct", "dir/sub/nested", "dir/sub/new"))
+        fs.invalidate_cache("s3://bucket/dir/sub/new")
+        assert sorted(fs.find("s3://bucket/dir", maxdepth=2)) == [
+            "bucket/dir/direct",
+            "bucket/dir/sub/nested",
+            "bucket/dir/sub/new",
+        ]
 
     def test_find_prefix_counts_levels_from_path(self):
         fs = self._make_fs()

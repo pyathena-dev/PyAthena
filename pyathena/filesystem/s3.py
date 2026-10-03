@@ -829,7 +829,7 @@ class S3FileSystem(AbstractFileSystem):
         raise FileNotFoundError(path)
 
     def _extract_parent_directories(
-        self, files: list[S3Object], bucket: str, base_key: str | None, prefix: str = ""
+        self, files: list[S3Object], bucket: str, base_key: str | None
     ) -> list[S3Object]:
         """Extract parent directory objects from file paths.
 
@@ -840,8 +840,6 @@ class S3FileSystem(AbstractFileSystem):
             files: List of S3Object instances representing files.
             bucket: S3 bucket name.
             base_key: Base key path to calculate relative paths from.
-            prefix: Key prefix, relative to the base key, that the paths of the
-                directories relative to the base key must start with.
 
         Returns:
             List of S3Object instances representing directories.
@@ -863,9 +861,11 @@ class S3FileSystem(AbstractFileSystem):
                 # Get all parent directories
                 parts = relative_path.split("/")
                 for i in range(1, len(parts)):
-                    relative_dir = "/".join(parts[:i])
-                    if relative_dir.startswith(prefix):
-                        dirs.add(f"{base_key}/{relative_dir}" if base_key else relative_dir)
+                    if base_key:
+                        dir_path = base_key + "/" + "/".join(parts[:i])
+                    else:
+                        dir_path = "/".join(parts[:i])
+                    dirs.add(dir_path)
 
         return [self._directory_object(bucket, dir_path) for dir_path in dirs]
 
@@ -904,19 +904,18 @@ class S3FileSystem(AbstractFileSystem):
         if maxdepth is not None:
             # The entries listed with the prefix lie as many levels further
             # below the path as the prefix has slashes.
-            levels = maxdepth - prefix.count("/")
-            files = (
-                self._find_levels(path, levels, prefix=prefix, refresh=refresh)
-                if levels >= 1
-                else []
+            files = self._find_levels(
+                path, maxdepth - prefix.count("/"), prefix=prefix, refresh=refresh
             )
         else:
             files = self._ls_dirs(path, prefix=prefix, delimiter="", refresh=refresh)
             # S3 doesn't return directory entries without a delimiter, so the
-            # directories are derived from the listed keys.
+            # directories are derived from the listed keys, below the last
+            # slash of the prefix, as with maxdepth.
             if withdirs:
+                base_key = "/".join(k for k in (key, prefix.rpartition("/")[0]) if k)
                 # Build a new list; files may be the cached listing.
-                files = files + self._extract_parent_directories(files, bucket, key, prefix)
+                files = files + self._extract_parent_directories(files, bucket, base_key)
 
         if files:
             # Something is listed below the path, so the path is a directory,
@@ -941,7 +940,7 @@ class S3FileSystem(AbstractFileSystem):
 
         Args:
             path: S3 path to search under.
-            maxdepth: Number of levels to list, at least 1.
+            maxdepth: Number of levels to list.
             prefix: Key prefix, relative to the path, to filter the first
                 level by.
             refresh: If True, bypass the cache and list from S3.
@@ -949,14 +948,13 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             The objects and directories found.
         """
-        bucket, _, _ = self.parse_path(path)
+        if maxdepth < 1:
+            return []
         result: list[S3Object] = []
         for item in self._ls_dirs(path, prefix=prefix, delimiter="/", refresh=refresh):
             result.append(item)
-            if item.type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY and maxdepth > 1:
-                result.extend(
-                    self._find_levels(f"s3://{bucket}/{item.key}", maxdepth - 1, refresh=refresh)
-                )
+            if item.type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
+                result.extend(self._find_levels(item.name, maxdepth - 1, refresh=refresh))
         return result
 
     def find(
