@@ -1462,7 +1462,8 @@ class S3FileSystem(AbstractFileSystem):
         empty range, or one that starts at or past the end of the object,
         returns ``b""``, and an end past the object reads up to its end.
         Non-negative offsets are sent to S3 as they are; a negative offset is
-        resolved against the size from :meth:`info`.
+        resolved against the size from :meth:`info`, which also checks that
+        the object exists for an empty range.
 
         Args:
             path: S3 path (s3://bucket/key) of the object.
@@ -1484,7 +1485,12 @@ class S3FileSystem(AbstractFileSystem):
         version_id = kwargs.pop("version_id", None)
         if path_version_id:
             version_id = path_version_id
-        if (start is not None and start < 0) or (end is not None and end < 0):
+        if (start is not None and start < 0) or (
+            end is not None and (end < 0 or (start or 0) >= end)
+        ):
+            # A negative offset needs the size of the object, and an empty
+            # range sends no GetObject request that would report a missing
+            # object.
             info = self.info(path, version_id=version_id)
             if info.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
                 # There is no object to read, as GetObject reports for the
@@ -1581,8 +1587,8 @@ class S3FileSystem(AbstractFileSystem):
         if os.path.isdir(lpath):
             return
 
-        # The remote file is opened first so that no local file is left
-        # behind when it does not exist.
+        # The remote file is opened first so that no local file is created
+        # when open() finds no object at the path.
         with self.open(rpath, "rb", **kwargs) as remote, open(lpath, "wb") as local:
             callback.set_size(remote.size)
             while data := remote.read(remote.blocksize):

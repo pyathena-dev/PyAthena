@@ -716,9 +716,11 @@ class TestS3FileSystem:
 
         # The range selects bytes like a slice.
         assert fs.cat_file("s3://bucket/key", start=start, end=end) == data[start:end]
-        # Only a negative offset needs the size of the object.
-        assert fs.info.called == ((start or 0) < 0 or (end or 0) < 0)
-        if start is not None and end is not None and 0 <= end <= start:
+        negative = (start or 0) < 0 or (end or 0) < 0
+        empty = end is not None and 0 <= end <= (start or 0)
+        # Only a negative offset or an empty range looks up the object.
+        assert fs.info.called == (negative or empty)
+        if empty:
             assert ranges == []
 
     def test_cat_file_range_stale_size(self):
@@ -751,7 +753,17 @@ class TestS3FileSystem:
         with pytest.raises(OSError, match="Not satisfiable"):
             fs.cat_file("s3://bucket/key")
 
-    @pytest.mark.parametrize(("start", "end"), [(-5, None), (0, -1)])
+    @pytest.mark.parametrize(("start", "end"), [(0, 0), (5, 3), (None, 0)])
+    def test_cat_file_empty_range_missing(self, start, end):
+        fs = self._make_fs()
+        fs.info = mock.MagicMock(side_effect=FileNotFoundError("bucket/missing"))
+
+        # An empty range of a missing object is not read as empty.
+        with pytest.raises(FileNotFoundError):
+            fs.cat_file("s3://bucket/missing", start=start, end=end)
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize(("start", "end"), [(-5, None), (0, -1), (5, 5)])
     def test_cat_file_range_directory(self, start, end):
         fs = self._make_fs()
         fs.info = mock.MagicMock(return_value=S3FileSystem._directory_object("bucket", "dir"))
