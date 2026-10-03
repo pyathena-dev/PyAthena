@@ -270,16 +270,7 @@ class AthenaArrowResultSet(AthenaResultSet):
                     for row in zip(*dict_rows.values(), strict=False)
                 ]
             else:
-                converters = {
-                    d[0]: self._converter.get(d[1])
-                    for d in self.description or []
-                    if d[1] == "time with time zone"
-                }
-            column_converters = [converters.get(k) for k in dict_rows]
-            processed_rows = [
-                tuple(c(v) if c else v for c, v in zip(column_converters, row, strict=False))
-                for row in zip(*dict_rows.values(), strict=False)
-            ]
+                processed_rows = list(zip(*dict_rows.values(), strict=False))
             self._rows.extend(processed_rows)
 
     @override

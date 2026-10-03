@@ -19,6 +19,7 @@ import polars as pl
 import pyarrow as pa
 import pytest
 
+from pyathena.arrow.converter import DefaultArrowTypeConverter
 from pyathena.arrow.cursor import ArrowCursor
 from pyathena.arrow.result_set import AthenaArrowResultSet
 from pyathena.error import DatabaseError, ProgrammingError
@@ -972,6 +973,19 @@ class TestArrowCursor:
         assert values[2] == "hello"
         assert values[3] == "N/A"
         assert values[4] == "NULL"
+
+    def test_fetch_converts_each_value_once(self):
+        """The fetch methods call the converter once per value, after a set() too."""
+        calls = []
+        converter = DefaultArrowTypeConverter()
+        with (
+            contextlib.closing(connect()) as conn,
+            conn.cursor(ArrowCursor, converter=converter) as cursor,
+        ):
+            cursor.execute("SELECT * FROM (VALUES 'a', 'b') AS t(v) ORDER BY v")
+            converter.set("varchar", lambda value: calls.append(value) or value)
+            assert cursor.fetchall() == [("a",), ("b",)]
+        assert calls == ["a", "b"]
 
     @pytest.mark.parametrize(
         "arrow_cursor",
