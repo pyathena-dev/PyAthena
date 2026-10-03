@@ -917,7 +917,7 @@ class TestAioS3File:
             assert isinstance(f, AioS3File)
             assert f.version_id == "v1"
             assert f.size == 4
-        fs._sync_fs.info.assert_called_once_with("bucket/key", version_id="v1")
+        fs._sync_fs.info.assert_called_once_with("bucket/key?versionId=v1", version_id="v1")
 
     @pytest.mark.parametrize(
         ("objects", "target"),

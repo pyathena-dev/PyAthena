@@ -448,10 +448,30 @@ class TestS3FileSystem:
             assert f.version_id == "v1"
             # The size is that of the requested version, not the latest one.
             assert f.size == 4
-        fs.info.assert_called_once_with("bucket/key", version_id="v1")
+        fs.info.assert_called_once_with("bucket/key?versionId=v1", version_id="v1")
+        # The version is carried in the path, which fsspec reopens an
+        # unpickled file with.
+        assert f.path == "bucket/key?versionId=v1"
+        assert f.__reduce__()[1][1] == "bucket/key?versionId=v1"
         # The argument must match the version in the path.
         with pytest.raises(ValueError, match="do not match"):
             fs.open("s3://bucket/key?versionId=v2", "rb", version_id="v1")
+
+    @pytest.mark.parametrize("mode", ["wb", "ab", "xb"])
+    @pytest.mark.parametrize(
+        ("path", "kwargs"),
+        [
+            ("s3://bucket/key", {"version_id": "v1"}),
+            ("s3://bucket/key?versionId=v1", {}),
+        ],
+    )
+    def test_open_version_id_for_writing(self, mode, path, kwargs):
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs._call.side_effect = AssertionError("No request is expected.")
+
+        with pytest.raises(ValueError, match="version specified"):
+            fs.open(path, mode, **kwargs)
 
     @pytest.mark.parametrize(
         ("path", "expected"),

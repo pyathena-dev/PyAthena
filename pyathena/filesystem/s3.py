@@ -2162,7 +2162,8 @@ class S3File(AbstractBufferedFile):
             path: S3 path (s3://bucket/key) of the file.
             mode: The file mode, such as ``rb``, ``wb`` or ``ab``.
             version_id: The version ID to read. Must match the version ID in
-                the path if both are given.
+                the path if both are given. A version cannot be given, in
+                either form, for writing or appending.
             max_workers: The number of parallel workers for range reads and
                 part copies.
             executor: The executor for parallel operations. If None, a new
@@ -2181,7 +2182,8 @@ class S3File(AbstractBufferedFile):
 
         Raises:
             ValueError: If the path has no key, the version IDs do not match,
-                or the block size is too small for writing.
+                a version is given for writing, or the block size is too small
+                for writing.
         """
         self.max_workers = max_workers
         self._executor: S3Executor = executor or S3ThreadPoolExecutor(max_workers=max_workers)
@@ -2203,6 +2205,12 @@ class S3File(AbstractBufferedFile):
             self.version_id = path_version_id
         else:
             self.version_id = version_id
+        if self.version_id and "r" not in mode:
+            raise ValueError("Cannot write to the file with the version specified.")
+        if self.version_id and not path_version_id:
+            # Carry the version in the path, as with the ?versionId= suffix,
+            # so that a reopened (e.g., unpickled) file reads the same version.
+            path = f"{path}?versionId={self.version_id}"
 
         self._details: S3Object | dict[str, Any] = {}
         if "r" in mode:
