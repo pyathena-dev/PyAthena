@@ -1040,16 +1040,20 @@ class TestAioS3File:
         )
         block_size = S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE
         size = block_size * 4
-        lock = threading.Lock()
+        condition = threading.Condition()
         state = {"active": 0, "peak": 0}
 
         def track(result):
             def call(**kwargs):
-                with lock:
+                with condition:
                     state["active"] += 1
                     state["peak"] = max(state["peak"], state["active"])
-                time.sleep(0.1)
-                with lock:
+                    condition.notify_all()
+                    # Wait for a second call so that the calls overlap
+                    # whatever the scheduling, then leave time for more.
+                    condition.wait_for(lambda: state["active"] >= 2, timeout=5)
+                time.sleep(0.05)
+                with condition:
                     state["active"] -= 1
                 return result(**kwargs)
 

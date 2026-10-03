@@ -15,6 +15,7 @@ from abc import ABCMeta, abstractmethod
 from collections.abc import Callable
 from concurrent.futures import Future
 from concurrent.futures.thread import ThreadPoolExecutor
+from multiprocessing import cpu_count
 from typing import Any, TypeVar
 
 from pyathena.util import override
@@ -93,7 +94,11 @@ class S3AioExecutor(S3Executor):
         RuntimeError: If the event loop is not running when ``submit`` is called.
     """
 
-    def __init__(self, loop: asyncio.AbstractEventLoop | None = None, *, max_workers: int) -> None:
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop | None = None,
+        max_workers: int = (cpu_count() or 1) * 5,
+    ) -> None:
         """Initialize the executor with the event loop to schedule work on.
 
         Args:
@@ -122,8 +127,24 @@ class S3AioExecutor(S3Executor):
         Returns:
             The return value of the function.
         """
-        async with self._semaphore:
-            return await asyncio.to_thread(fn, *args, **kwargs)
+        await self._semaphore.acquire()
+        task = asyncio.ensure_future(asyncio.to_thread(fn, *args, **kwargs))
+        # Cancelling cannot stop the thread, so keep the permit until the
+        # function returns instead of until this coroutine is cancelled.
+        task.add_done_callback(self._release)
+        return await asyncio.shield(task)
+
+    def _release(self, task: asyncio.Future[Any]) -> None:
+        """Release the permit of a finished function.
+
+        Args:
+            task: The finished task that ran the function.
+        """
+        self._semaphore.release()
+        if not task.cancelled():
+            # Mark the exception as retrieved; the caller may have stopped
+            # waiting for it after a cancellation.
+            task.exception()
 
     @override
     def submit(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> Future[T]:

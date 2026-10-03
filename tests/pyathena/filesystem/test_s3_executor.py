@@ -16,6 +16,12 @@ from pyathena.filesystem.s3_executor import S3AioExecutor
 
 
 class TestS3AioExecutor:
+    def test_init(self):
+        # max_workers is optional, as before it was added.
+        S3AioExecutor(loop=None)
+        with pytest.raises(ValueError, match="max_workers must be greater than 0"):
+            S3AioExecutor(loop=None, max_workers=0)
+
     def test_submit(self):
         async def main():
             executor = S3AioExecutor(loop=asyncio.get_running_loop())
@@ -122,3 +128,26 @@ class TestS3AioExecutor:
         future = asyncio.run(main())
 
         assert not future.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_cancel_keeps_permit_until_function_returns(self):
+        # Cancelling a running function cannot stop its thread, so the next
+        # function must not start until it returns.
+        executor = S3AioExecutor(loop=asyncio.get_running_loop(), max_workers=1)
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocking():
+            started.set()
+            release.wait(5)
+            return "first"
+
+        first = executor.submit(blocking)
+        assert await asyncio.to_thread(started.wait, 5)
+        second = executor.submit(lambda: "second")
+        assert first.cancel()
+        await asyncio.sleep(0.1)
+        assert not second.done()
+
+        release.set()
+        assert await asyncio.wrap_future(second) == "second"
