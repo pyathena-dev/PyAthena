@@ -12,6 +12,7 @@ from unittest.mock import PropertyMock, patch
 import numpy as np
 import pandas as pd
 import pytest
+from pandas.io.parsers import TextFileReader
 
 from pyathena.error import DatabaseError, ProgrammingError
 from pyathena.pandas.converter import DefaultPandasTypeConverter
@@ -1351,17 +1352,32 @@ class TestPandasCursor:
 
         assert chunk_count >= 1
 
-    def test_pandas_cursor_auto_optimize_chunksize_enabled(self, pandas_cursor):
-        """Test PandasCursor with auto_optimize_chunksize enabled."""
-        cursor = pandas_cursor
-        cursor._chunksize = None  # No explicit chunksize
-        cursor._auto_optimize_chunksize = True
-        cursor.execute("SELECT number FROM (VALUES (1), (2), (3), (4), (5)) as t(number)")
+    @pytest.mark.parametrize(
+        ("pandas_cursor", "chunked"),
+        [
+            ({"cursor_kwargs": {"auto_optimize_chunksize": True}}, False),
+            ({"cursor_kwargs": {"auto_optimize_chunksize": True}}, True),
+        ],
+        indirect=["pandas_cursor"],
+    )
+    def test_pandas_cursor_auto_optimize_chunksize_enabled(
+        self, pandas_cursor, chunked, monkeypatch
+    ):
+        """Test that as_pandas() returns the whole result with auto_optimize_chunksize."""
+        if chunked:
+            # Make the five-row result exceed the threshold and read it two rows at a time.
+            monkeypatch.setattr(AthenaPandasResultSet, "LARGE_FILE_THRESHOLD_BYTES", 0)
+            monkeypatch.setattr(AthenaPandasResultSet, "ESTIMATED_BYTES_PER_ROW", 1)
+            monkeypatch.setattr(AthenaPandasResultSet, "AUTO_CHUNK_THRESHOLD_MEDIUM", 0)
+            monkeypatch.setattr(AthenaPandasResultSet, "AUTO_CHUNK_SIZE_MEDIUM", 2)
+        pandas_cursor.execute("SELECT number FROM (VALUES (1), (2), (3), (4), (5)) AS t(number)")
+        reader = pandas_cursor.result_set._df_iter._reader
+        assert isinstance(reader, TextFileReader) is chunked
 
-        # Should work without error (auto-optimization for small files may not trigger chunking)
-        result = cursor.as_pandas()
-        # Small test data likely won't trigger chunking, so expect DataFrame
-        assert isinstance(result, (pd.DataFrame, PandasDataFrameIterator))
+        df = pandas_cursor.as_pandas()
+        assert isinstance(df, pd.DataFrame)
+        assert df["number"].tolist() == [1, 2, 3, 4, 5]
+        assert df.index.tolist() == [0, 1, 2, 3, 4]
 
     def test_pandas_cursor_auto_optimize_chunksize_disabled(self, pandas_cursor):
         """Test PandasCursor with auto_optimize_chunksize disabled (default)."""

@@ -821,12 +821,13 @@ class AthenaPandasResultSet(AthenaResultSet):
         """Return the query results as a DataFrame or an iterator of DataFrame chunks.
 
         Returns:
-            If ``chunksize`` is None, the next DataFrame from the result iterator, which
-            holds the whole result unless ``auto_optimize_chunksize`` chose a chunk size;
-            otherwise the ``PandasDataFrameIterator`` that yields DataFrame chunks.
+            If ``chunksize`` is None, one DataFrame that joins the chunks the result
+            iterator has not yet yielded (read in chunks when ``auto_optimize_chunksize``
+            chose a chunk size), which is the whole result unless rows were already
+            fetched; otherwise the ``PandasDataFrameIterator`` that yields DataFrame chunks.
         """
         if self._chunksize is None:
-            return next(self._df_iter)
+            return self._df_iter.as_pandas()
         return self._df_iter
 
     def iter_chunks(self) -> PandasDataFrameIterator:
