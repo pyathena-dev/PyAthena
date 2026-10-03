@@ -257,8 +257,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
         import polars as pl
 
         # The whole result when it was not read in chunks.
-        # Note: _as_polars() may update _metadata for unload queries, so the converters
-        # and column names must be read AFTER it.
+        # Note: _as_polars() and _create_dataframe_iterator() update _metadata for unload
+        # queries, so the converters and column names must be read AFTER them.
         self._df: pl.DataFrame | None = None
         # Converters for the rows of self._df. GetQueryResults values are already converted.
         self._df_converters: dict[str, Callable[[str | None], Any | None]] = {}
@@ -280,7 +280,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
             )
 
         # Cache column names for efficient access in fetchone()
-        # Must be after _as_polars() which updates _metadata for unload
+        # Must be after _as_polars() and _create_dataframe_iterator(), which update
+        # _metadata for unload
         self._column_names_cache: list[str] = self._get_column_names()
         self._iterrows = self._df_iter.iterrows()
 
@@ -358,10 +359,21 @@ class AthenaPolarsResultSet(AthenaResultSet):
     def _create_dataframe_iterator(self) -> PolarsDataFrameIterator:
         """Create a DataFrame iterator that reads the result file in chunks.
 
+        For unload queries, it replaces the metadata with the schema of the Parquet
+        files, as ``_as_polars()`` does, before the chunks are read.
+
         Returns:
             PolarsDataFrameIterator that reads each chunk lazily.
         """
-        reader = self._iter_parquet_chunks() if self.is_unload else self._iter_csv_chunks()
+        reader: Iterator[pl.DataFrame]
+        if not self.is_unload:
+            reader = self._iter_csv_chunks()
+        elif self._prepare_parquet_location():
+            self._metadata = self._read_parquet_schema()
+            reader = self._iter_parquet_chunks()
+        else:
+            self._metadata = ()
+            reader = iter(())
         return PolarsDataFrameIterator(reader, self.converters, self._get_column_names())
 
     @override
@@ -649,16 +661,16 @@ class AthenaPolarsResultSet(AthenaResultSet):
     def _iter_parquet_chunks(self) -> Iterator[pl.DataFrame]:
         """Iterate over Parquet data in chunks using lazy evaluation.
 
+        ``_prepare_parquet_location()`` must have found the unload location first.
+
         Yields:
             Polars DataFrame for each chunk.
 
         Raises:
+            ProgrammingError: If the unload location is not set.
             OperationalError: If reading the Parquet files fails.
         """
         import polars as pl
-
-        if not self._prepare_parquet_location():
-            return
 
         if self._unload_location is None:
             raise ProgrammingError("unload_location is not available.")

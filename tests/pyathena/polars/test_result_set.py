@@ -77,7 +77,6 @@ class TestAthenaPolarsResultSet:
                 new_callable=PropertyMock,
                 return_value={},
             ),
-            patch.object(AthenaPolarsResultSet, "_prepare_parquet_location", return_value=True),
             pytest.raises(OperationalError),
         ):
             list(result_set._iter_parquet_chunks())
