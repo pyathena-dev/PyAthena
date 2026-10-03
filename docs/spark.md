@@ -256,8 +256,10 @@ The `cancel()` method sends a [StopCalculationExecution](https://docs.aws.amazon
 request for the calculation. It does not terminate the session.
 Athena cancels the calculation on a best-effort basis:
 
-- A running Spark job, such as a DataFrame action, stops within seconds.
-  The calculation ends in the `CANCELED` state, and the session remains usable for later calculations.
+- A running Spark job, such as a DataFrame action, usually stops within seconds.
+  The calculation then ends in the `CANCELED` state, and the session remains usable for later calculations.
+- A request sent right after the calculation starts can occasionally have no effect.
+  The calculation then runs as if it had not been canceled.
 - Python code that runs on the driver without a Spark job, such as `time.sleep()`, runs to completion.
   The calculation ends in the `COMPLETED` state, and the session rejects new calculations until then.
 - Canceling a calculation that has already finished does not raise an error or change its state.
@@ -283,12 +285,14 @@ with conn.cursor() as cursor:
 With `kill_on_interrupt` enabled, which is the default, a `KeyboardInterrupt` while `execute()` waits for the calculation
 requests cancellation, waits until the calculation reaches a terminal state, and then propagates.
 The `state` property returns that terminal state.
-If the cancellation request fails, the `KeyboardInterrupt` propagates with the error as its cause.
+If the cancellation request or that wait fails, the `KeyboardInterrupt` propagates with the error as its cause,
+and the `state` property returns `None`.
 
 A `KeyboardInterrupt` while `execute()` is still starting the calculation first waits for the
 [StartCalculationExecution](https://docs.aws.amazon.com/athena/latest/APIReference/API_StartCalculationExecution.html)
 request to finish, and then cancels the calculation it started in the same way.
 The `calculation_id` property returns that calculation's ID.
+If `execute()` has not begun the request when the interrupt is handled, the request is never sent and `calculation_id` is `None`.
 A second `KeyboardInterrupt` during this wait propagates at once without cancelling the calculation.
 A cancellation request sent right after a calculation starts can occasionally have no effect, so the calculation can still end in the `COMPLETED` state.
 

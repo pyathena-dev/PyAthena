@@ -507,7 +507,7 @@ With `kill_on_interrupt` enabled, which is the default, a `KeyboardInterrupt` wh
 requests cancellation, waits until the query reaches a terminal state, and then propagates.
 Cancellation is a best-effort request, so the query can still end as `SUCCEEDED` or `FAILED`.
 The `query_id` property keeps the ID of the interrupted query.
-If the cancellation request fails, the `KeyboardInterrupt` propagates with the error as its cause.
+If the cancellation request or that wait fails, the `KeyboardInterrupt` propagates with the error as its cause.
 
 A `KeyboardInterrupt` while `execute()` is still starting the query first waits for the
 [StartQueryExecution](https://docs.aws.amazon.com/athena/latest/APIReference/API_StartQueryExecution.html)
