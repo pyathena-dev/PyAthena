@@ -233,6 +233,9 @@ class AsyncPandasCursor(AsyncCursor):
             **kwargs: Additional pandas read_csv/read_parquet parameters.
                 ``engine``, ``chunksize``, ``block_size``, ``cache_type``, and
                 ``auto_optimize_chunksize`` override the cursor's values for this query.
+                ``storage_options`` and, for UNLOAD results, ``filesystem`` replace
+                PyAthena's S3 filesystem (see
+                :class:`~pyathena.pandas.result_set.AthenaPandasResultSet`).
                 ``max_workers`` sets the number of S3 read workers for this query.
 
         Returns:

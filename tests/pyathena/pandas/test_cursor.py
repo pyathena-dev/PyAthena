@@ -1401,6 +1401,19 @@ class TestPandasCursor:
         assert callback_results[0] == pandas_cursor.query_id
         assert pandas_cursor.query_id is not None
 
+    @pytest.mark.parametrize("pandas_cursor", [{"cursor_kwargs": {"unload": True}}], indirect=True)
+    @pytest.mark.parametrize("option", ["filesystem", "storage_options"])
+    def test_unload_with_filesystem_options(self, pandas_cursor, option):
+        """filesystem or storage_options given to execute() read the UNLOAD result."""
+        fs_kwargs = {"connection": pandas_cursor.connection, "skip_instance_cache": True}
+        kwargs = (
+            {"filesystem": S3FileSystem(**fs_kwargs)}
+            if option == "filesystem"
+            else {"storage_options": fs_kwargs}
+        )
+        df = pandas_cursor.execute("SELECT * FROM one_row", **kwargs).as_pandas()
+        assert df.to_dict("records") == [{"number_of_rows": 1}]
+
     def test_pandas_cursor_iter_chunks_with_chunksize(self, pandas_cursor):
         """Test PandasCursor iter_chunks method with chunksize set."""
         cursor = pandas_cursor

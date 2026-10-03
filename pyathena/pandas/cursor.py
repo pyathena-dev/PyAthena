@@ -195,6 +195,9 @@ class PandasCursor(WithFetch):
             **kwargs: Additional pandas read_csv/read_parquet parameters.
                 ``engine``, ``chunksize``, ``block_size``, ``cache_type``, ``max_workers``,
                 and ``auto_optimize_chunksize`` override the cursor's values for this query.
+                ``storage_options`` and, for UNLOAD results, ``filesystem`` replace
+                PyAthena's S3 filesystem (see
+                :class:`~pyathena.pandas.result_set.AthenaPandasResultSet`).
 
         Returns:
             Self reference for method chaining.
