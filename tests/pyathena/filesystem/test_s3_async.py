@@ -15,7 +15,7 @@ from fsspec import Callback
 
 from pyathena.filesystem.s3 import S3File, S3FileSystem
 from pyathena.filesystem.s3_async import AioS3File, AioS3FileSystem
-from pyathena.filesystem.s3_object import S3ObjectType, S3StorageClass
+from pyathena.filesystem.s3_object import S3Object, S3ObjectType, S3StorageClass
 from tests import ENV
 from tests.pyathena.conftest import connect
 
@@ -900,6 +900,24 @@ class TestAioS3File:
         with fs.open("s3://bucket/key", "wb", max_workers=2) as f:
             assert isinstance(f, AioS3File)
             assert f.max_workers == 2
+
+    def test_open_version_id(self):
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs._sync_fs.info = mock.MagicMock(
+            return_value=S3Object(
+                init={"Key": "key"},
+                type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+                bucket="bucket",
+                key="key",
+            )
+        )
+        fs._sync_fs.info.return_value.size = 4
+
+        with fs.open("s3://bucket/key", "rb", version_id="v1") as f:
+            assert isinstance(f, AioS3File)
+            assert f.version_id == "v1"
+            assert f.size == 4
+        fs._sync_fs.info.assert_called_once_with("bucket/key", version_id="v1")
 
     @pytest.mark.parametrize(
         ("objects", "target"),

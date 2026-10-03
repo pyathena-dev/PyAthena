@@ -438,6 +438,53 @@ class TestS3FileSystem:
         with fs.open("s3://bucket/key", "wb", max_workers=2) as f:
             assert f.max_workers == 2
 
+    def test_open_version_id(self):
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs.info = mock.MagicMock(return_value=self._file_object("key"))
+        fs.info.return_value.size = 4
+
+        with fs.open("s3://bucket/key", "rb", version_id="v1") as f:
+            assert f.version_id == "v1"
+            # The size is that of the requested version, not the latest one.
+            assert f.size == 4
+        fs.info.assert_called_once_with("bucket/key", version_id="v1")
+        # The argument must match the version in the path.
+        with pytest.raises(ValueError, match="do not match"):
+            fs.open("s3://bucket/key?versionId=v2", "rb", version_id="v1")
+
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            ("s3://bucket/key", "v1"),
+            # The version in the path takes precedence, as in info().
+            ("s3://bucket/key?versionId=v2", "v2"),
+        ],
+    )
+    def test_cat_file_version_id(self, path, expected):
+        fs = self._make_fs()
+        fs.info = mock.MagicMock(return_value=self._file_object("key"))
+        fs.info.return_value.size = 10
+
+        fs._call.return_value = {"Body": io.BytesIO(b"data")}
+        assert fs.cat_file(path, version_id="v1") == b"data"
+        fs._call.assert_called_once_with(
+            fs._client.get_object, Bucket="bucket", Key="key", VersionId=expected
+        )
+
+        # A range is resolved against the size of the same version.
+        fs._call.reset_mock()
+        fs._call.return_value = {"Body": io.BytesIO(b"ta")}
+        assert fs.cat_file(path, start=2, end=4, version_id="v1") == b"ta"
+        fs.info.assert_called_once_with(path, version_id=expected)
+        fs._call.assert_called_once_with(
+            fs._client.get_object,
+            Bucket="bucket",
+            Key="key",
+            Range="bytes=2-3",
+            VersionId=expected,
+        )
+
     def test_finish_multipart_upload(self):
         fs = self._make_fs()
         fs._complete_multipart_upload = mock.MagicMock()
@@ -1675,6 +1722,25 @@ class TestS3FileSystem:
         assert version.size == 4
         # An unversioned bucket reports the "null" version.
         assert version.version_id
+
+    def test_read_version_id(self, fs):
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_read_version_id/{uuid.uuid4()}"
+        )
+        data = b"0123456789"
+        fs.pipe(path, data)
+        # An unversioned bucket reports the "null" version, which can be
+        # read explicitly.
+        version_id = fs.object_version_info(path)[0].version_id
+
+        assert fs.cat_file(path, version_id=version_id) == data
+        assert fs.cat_file(path, start=2, end=5, version_id=version_id) == data[2:5]
+        with fs.open(path, "rb", version_id=version_id) as f:
+            assert f.read() == data
+        # The version reaches S3, which rejects an unknown one.
+        with pytest.raises(OSError, match="Invalid version id"):
+            fs.cat_file(path, version_id="invalid")
 
     @pytest.mark.parametrize("fs", [{"version_aware": True}], indirect=True)
     def test_version_aware_read(self, fs):
