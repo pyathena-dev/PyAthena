@@ -19,6 +19,7 @@ from pyathena.common import CursorIterator
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.options import ExecuteOptions
+from pyathena.result_set import AthenaDictResultSet
 from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
@@ -254,17 +255,39 @@ class AioDictCursor(AioCursor):
                 ``dict_type``, it is the type used to build each row of this
                 cursor's result sets; other cursors are not affected.
         """
+        self._dict_type: type[Any] | None = kwargs.get("dict_type")
         super().__init__(**kwargs)
         self._result_set_class = AthenaAioDictResultSet
-        if "dict_type" in kwargs:
-            self._result_set_class = cast(
-                type[AthenaAioDictResultSet],
+
+    @property  # type: ignore[explicit-override]  # python/mypy#15900
+    @override
+    def _result_set_class(self) -> type[AthenaAioResultSet]:
+        """The result set class this cursor instantiates for each query.
+
+        Returns:
+            The class last assigned to this property, or a subclass of it
+            that carries this cursor's ``dict_type``.
+        """
+        return self._dict_result_set_class
+
+    @_result_set_class.setter
+    def _result_set_class(self, value: type[AthenaAioResultSet]) -> None:
+        """Set the result set class this cursor instantiates for each query.
+
+        If this cursor was given ``dict_type`` and ``value`` is a subclass of
+        ``AthenaDictResultSet``, a subclass of ``value`` whose ``dict_type`` is
+        that type is stored instead, so that ``value`` itself is not modified.
+
+        Args:
+            value: The result set class to instantiate.
+        """
+        if self._dict_type is not None and issubclass(value, AthenaDictResultSet):
+            value = cast(
+                type[AthenaAioResultSet],
                 type(
-                    AthenaAioDictResultSet.__name__,
-                    (AthenaAioDictResultSet,),
-                    {
-                        "__module__": AthenaAioDictResultSet.__module__,
-                        "dict_type": kwargs["dict_type"],
-                    },
+                    value.__name__,
+                    (value,),
+                    {"__module__": value.__module__, "dict_type": self._dict_type},
                 ),
             )
+        self._dict_result_set_class = value

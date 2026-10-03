@@ -32,9 +32,10 @@ from pyathena import (
 )
 from pyathena.async_cursor import AsyncCursor
 from pyathena.converter import _to_array, _to_map, _to_struct
-from pyathena.cursor import Cursor
+from pyathena.cursor import Cursor, DictCursor
 from pyathena.error import DatabaseError, NotSupportedError, OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
+from pyathena.result_set import AthenaDictResultSet
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
@@ -1884,6 +1885,20 @@ class TestDictCursor:
         # dict_type of another cursor does not change the row type of this one.
         dict_cursor.execute("SELECT * FROM one_row")
         assert type(dict_cursor.fetchone()) is dict
+
+    def test_dict_type_custom_result_set(self, dict_cursor):
+        class CustomResultSet(AthenaDictResultSet):
+            pass
+
+        class CustomDictCursor(DictCursor):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self._result_set_class = CustomResultSet
+
+        with dict_cursor.connection.cursor(CustomDictCursor, dict_type=OrderedDict) as cursor:
+            cursor.execute("SELECT * FROM one_row")
+            assert isinstance(cursor.result_set, CustomResultSet)
+            assert type(cursor.fetchone()) is OrderedDict
 
     def test_null_vs_empty_string(self, dict_cursor):
         """
