@@ -227,6 +227,9 @@ class TestS3FileSystem:
             (Path("bucket/a/c.txt?versionId=v1"), "bucket/a/c.txt?versionId=v1"),
             # A directory marker object keeps the trailing slash before the query.
             ("s3://bucket/a/c.txt/?versionId=v1", "bucket/a/c.txt/?versionId=v1"),
+            # parse_path accepts other spellings of the query.
+            ("s3://bucket/a/c.txt?version_id=v1", "bucket/a/c.txt?versionId=v1"),
+            ("s3://bucket/a/c.txt?versionId=v1", "bucket/a/c.txt?versionid=v1"),
         ],
     )
     def test_invalidate_cache_version_drops_object_path(self, path, cache_key):

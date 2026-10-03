@@ -1908,9 +1908,10 @@ class S3FileSystem(AbstractFileSystem):
     def invalidate_cache(self, path: str | None = None) -> None:
         """Remove the cached entries of the path and its parent paths.
 
-        A version-qualified path also invalidates the object path without the
-        version, because deleting or copying a version can change the current
-        version of the object.
+        A version-qualified path invalidates the version under every query
+        spelling that ``parse_path`` accepts, and also the object path without
+        the version, because deleting or copying a version can change the
+        current version of the object.
 
         Args:
             path: The path to invalidate. If None, clear the whole cache.
@@ -1920,15 +1921,24 @@ class S3FileSystem(AbstractFileSystem):
         else:
             path = self._strip_protocol(path)
             while path:
-                self.dircache.pop(path, None)
-                # _ls_dirs caches listings under (path, delimiter).
-                for delimiter in ("/", ""):
-                    self.dircache.pop((path, delimiter), None)
                 # parse_path does not accept "?" in keys, so it starts the
-                # versionId query. A version-qualified path continues with
-                # the path without the version.
-                unversioned = self._strip_protocol(path.split("?", 1)[0])
-                path = unversioned if unversioned != path else self._parent(path)
+                # versionId query.
+                base, _, query = path.partition("?")
+                cache_paths = [path]
+                if query:
+                    version_id = query.partition("=")[2]
+                    cache_paths.extend(
+                        f"{base}?{name}={version_id}"
+                        for name in ("versionId", "versionID", "versionid", "version_id")
+                    )
+                for cache_path in cache_paths:
+                    self.dircache.pop(cache_path, None)
+                    # _ls_dirs caches listings under (path, delimiter).
+                    for delimiter in ("/", ""):
+                        self.dircache.pop((cache_path, delimiter), None)
+                # A version-qualified path continues with the path without
+                # the version.
+                path = self._strip_protocol(base) if query else self._parent(path)
 
     def _ls_from_cache(self, path: str) -> list[S3Object] | S3Object | None:
         """Check the dircache for a cached entry of the path.
