@@ -355,7 +355,7 @@ class AthenaPandasResultSet(AthenaResultSet):
             else:
                 self._df_iter = PandasDataFrameIterator(result, trunc_date, self._csv_stream)
         elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
-            # GetQueryResults values are already converted, so time columns hold times.
+            # GetQueryResults values are already converted and need no time truncation.
             self._df = self._as_pandas_from_api()
         else:
             self._df = pd.DataFrame()
