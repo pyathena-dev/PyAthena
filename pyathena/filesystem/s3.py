@@ -358,8 +358,8 @@ class S3FileSystem(AbstractFileSystem):
         """Get the object with HeadObject.
 
         The result is cached under the path, or under the version-qualified
-        path for an explicit version. The ``"null"`` version is not cached.
-        A missing object evicts its entry.
+        path for an explicit version. An explicitly requested ``"null"``
+        version is not cached. A missing object evicts its entry.
 
         Args:
             path: The object path, optionally with a versionId query.
@@ -2249,7 +2249,8 @@ class S3FileSystem(AbstractFileSystem):
         ``DirCache.pop()`` reads and then deletes the entry, so it raises
         KeyError when another thread removes the same entry in between,
         such as the request threads of ``rm()`` invalidating a shared parent
-        at once. A single ``del`` does not.
+        at once. A single ``del`` raises KeyError only when the entry is
+        already gone, which this ignores.
 
         Args:
             key: The dircache key, a path or a ``(path, delimiter)`` listing
