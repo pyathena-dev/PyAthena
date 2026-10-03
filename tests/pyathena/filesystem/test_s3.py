@@ -1517,11 +1517,6 @@ class TestS3FileSystem:
             (["s3://bucket/a", "s3://bucket/b"], ["s3://bucket/c", "s3a://bucket/c"]),
             # A destination that is another source.
             (["s3://bucket/a", "s3://bucket/b"], ["s3://bucket/b", "s3://bucket/a"]),
-            # An object with keys below it is checked like a file.
-            (
-                ["s3://bucket/d", "s3://bucket/d/x", "s3://bucket/e"],
-                ["s3://bucket/e", "s3://bucket/o/x", "s3://bucket/o/e"],
-            ),
         ],
     )
     def test_mv_conflicting_destinations(self, path1, path2):
@@ -1574,6 +1569,29 @@ class TestS3FileSystem:
 
         fs.mv(path1, path2, recursive=True)
         assert store == expected
+
+    @pytest.mark.parametrize(
+        ("keys", "path2"),
+        [
+            # Onto another source that is only an object.
+            ({"d", "d/x", "e"}, ["e", "o/x", "o/e"]),
+            # Onto another source that also has keys below it.
+            ({"d", "d/x", "d/x/y"}, ["d/x", "o", "o/y"]),
+        ],
+    )
+    def test_mv_objects_with_keys_below_conflict(self, keys, path2):
+        # An object that also has keys below it is copied, so moving it onto
+        # another source raises before anything is copied.
+        fs = self._make_fs()
+        store = self._serve_keys(fs, keys)
+
+        with pytest.raises(ValueError, match="another path that is moved"):
+            fs.mv(
+                [f"s3://bucket/{k}" for k in sorted(keys)],
+                [f"s3://bucket/{k}" for k in path2],
+                recursive=True,
+            )
+        assert store == keys
 
     def test_mv_nothing_within_maxdepth(self):
         # Only directories within maxdepth: nothing is moved, as with copy().

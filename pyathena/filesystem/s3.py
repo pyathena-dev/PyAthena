@@ -10,6 +10,7 @@ import mimetypes
 import os.path
 import re
 import time
+from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import Future, as_completed, wait
 from copy import deepcopy
@@ -1488,8 +1489,8 @@ class S3FileSystem(AbstractFileSystem):
         Raises:
             ValueError: If two sources have the same destination, or a
                 destination is another source, which is checked before
-                anything is copied. A directory, which has other sources
-                below it and is not copied, may move onto another directory.
+                anything is copied. A directory with no object at its key,
+                which is not copied, does not conflict.
         """
         if path1 == path2:
             return
@@ -1518,8 +1519,8 @@ class S3FileSystem(AbstractFileSystem):
 
         Raises:
             ValueError: If two sources have the same destination, or a
-                destination is another source, except a directory, which has
-                other sources below it, moved onto another directory.
+                destination is another source, except for a directory with
+                no object at its key, which is not copied.
         """
         if isinstance(path1, list) and isinstance(path2, list):
             paths1, paths2 = path1, path2
@@ -1549,20 +1550,24 @@ class S3FileSystem(AbstractFileSystem):
             if self._strip_protocol(p1) != self._strip_protocol(p2)
         ]
         stripped = [(self._strip_protocol(p1), self._strip_protocol(p2)) for p1, p2 in pairs]
-        # A source with another source below it is a directory, which is
-        # not copied, so a directory moved onto another one is no conflict.
+        sources = {source for source, _ in stripped}
+        counts = Counter(dest for _, dest in stripped)
+        # A source with another source below it may be a directory.
         directories: set[str] = set()
         for source, _ in stripped:
             parent = source.rpartition("/")[0]
             while parent and parent not in directories:
                 directories.add(parent)
                 parent = parent.rpartition("/")[0]
-        destinations = [
-            dest for source, dest in stripped if not (source in directories and dest in directories)
-        ]
-        if len(set(destinations)) != len(destinations):
-            raise ValueError("Cannot move several paths to the same destination.")
-        if {source for source, _ in stripped}.intersection(destinations):
+        for source, dest in stripped:
+            if counts[dest] == 1 and dest not in sources:
+                continue
+            # A directory without an object at its key is not copied, so it
+            # writes no destination.
+            if source in directories and self._head_object(source) is None:
+                continue
+            if counts[dest] > 1:
+                raise ValueError("Cannot move several paths to the same destination.")
             raise ValueError("Cannot move a path onto another path that is moved.")
         return pairs
 
