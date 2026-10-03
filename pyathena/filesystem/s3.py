@@ -2374,8 +2374,11 @@ class S3File(AbstractBufferedFile):
 
     def close(self) -> None:
         """Close the file, flushing any written data, and shut down its executor."""
-        super().close()
-        self._executor.shutdown()
+        try:
+            super().close()
+        finally:
+            # The executor is shut down even if the final flush fails.
+            self._executor.shutdown()
 
     def _initiate_upload(self) -> None:
         if not self.append_block and self.tell() < self.blocksize:

@@ -23,7 +23,7 @@ from fsspec import Callback
 import pyathena
 from pyathena.filesystem import register_s3_filesystem
 from pyathena.filesystem.s3 import S3File, S3FileSystem
-from pyathena.filesystem.s3_executor import S3AioExecutor
+from pyathena.filesystem.s3_executor import S3AioExecutor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import S3Object, S3ObjectType, S3StorageClass
 from pyathena.util import RetryConfig
 from tests import ENV
@@ -2417,7 +2417,15 @@ class TestS3File:
         fs = self._make_append_fs(existing)
         fs.MULTIPART_UPLOAD_MAX_PARTS = 3
 
-        f = S3File(fs, "s3://bucket/key.txt", mode=mode, block_size=4, autocommit=autocommit)
+        executor = mock.MagicMock(wraps=S3ThreadPoolExecutor(max_workers=1))
+        f = S3File(
+            fs,
+            "s3://bucket/key.txt",
+            mode=mode,
+            block_size=4,
+            autocommit=autocommit,
+            executor=executor,
+        )
         with pytest.raises(ValueError, match="block_size"):
             self._write_and_close(f, writes)
         # The upload is aborted, and committing a deferred write afterwards
@@ -2426,7 +2434,9 @@ class TestS3File:
             f.commit()
 
         assert f.closed
-        assert fs._upload_part_copy.call_count + fs._upload_part.call_count == 3
+        # The submitted parts, some of which the abort may have cancelled.
+        assert [c.kwargs["part_number"] for c in executor.submit.call_args_list] == [1, 2, 3]
+        executor.shutdown.assert_called_once()
         fs._call.assert_called_once_with(
             "abort_multipart_upload", Bucket="bucket", Key="key.txt", UploadId="uploadid"
         )
@@ -2442,14 +2452,23 @@ class TestS3File:
         fs.MULTIPART_UPLOAD_MAX_PARTS = 3
         fs._call.side_effect = PermissionError("abort failed")
 
-        f = S3File(fs, "s3://bucket/key.txt", mode="wb", block_size=4, autocommit=autocommit)
+        executor = mock.MagicMock(wraps=S3ThreadPoolExecutor(max_workers=1))
+        f = S3File(
+            fs,
+            "s3://bucket/key.txt",
+            mode="wb",
+            block_size=4,
+            autocommit=autocommit,
+            executor=executor,
+        )
         with pytest.raises(ValueError, match="block_size"):
             self._write_and_close(f, [b"a" * 4] * 4)
         if not autocommit:
             f.commit()
 
         assert f.closed
-        assert fs._upload_part.call_count == 3
+        assert [c.kwargs["part_number"] for c in executor.submit.call_args_list] == [1, 2, 3]
+        executor.shutdown.assert_called_once()
         fs._call.assert_called_once()
         fs._finish_multipart_upload.assert_not_called()
         fs._put_object.assert_not_called()
