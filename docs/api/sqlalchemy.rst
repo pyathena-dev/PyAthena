@@ -55,6 +55,9 @@ Compilers
 .. autoclass:: pyathena.sqlalchemy.compiler.AthenaTypeCompiler
    :members:
 
+.. autoclass:: pyathena.sqlalchemy.compiler.AthenaDMLTypeCompiler
+   :members:
+
 .. autoclass:: pyathena.sqlalchemy.compiler.AthenaStatementCompiler
    :members:
 

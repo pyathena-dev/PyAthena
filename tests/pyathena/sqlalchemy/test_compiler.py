@@ -88,68 +88,51 @@ class TestAthenaTypeCompiler:
         dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
         struct_type = AthenaStruct()
-        result = compiler.visit_struct(struct_type)
-        assert result == "ROW()"
+        with pytest.raises(exc.CompileError, match="STRUCT requires at least one field"):
+            compiler.visit_struct(struct_type)
 
     def test_visit_struct_with_fields(self):
         dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
         struct_type = AthenaStruct(("name", String), ("age", Integer))
         result = compiler.visit_struct(struct_type)
-        # The exact order might vary, so we check that both fields are present
-        assert "ROW(" in result
-        assert "name STRING" in result or "name VARCHAR" in result
-        assert "age INTEGER" in result
-        assert result.endswith(")")
+        assert result == "STRUCT<name:STRING, age:INT>"
 
     def test_visit_struct_uppercase(self):
         dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
         struct_type = STRUCT(("id", Integer), ("title", String))
         result = compiler.visit_STRUCT(struct_type)
-        assert "ROW(" in result
-        assert "id INTEGER" in result
-        assert "title STRING" in result or "title VARCHAR" in result
-        assert result.endswith(")")
+        assert result == "STRUCT<id:INT, title:STRING>"
 
     def test_visit_struct_no_fields_attribute(self):
         # Test struct type without fields attribute
         dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
         struct_type = type("MockStruct", (), {})()
-        result = compiler.visit_struct(struct_type)
-        assert result == "ROW()"
+        with pytest.raises(exc.CompileError, match="as STRUCT"):
+            compiler.visit_struct(struct_type)
 
     def test_visit_struct_single_field(self):
         dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
         struct_type = AthenaStruct(("name", String))
         result = compiler.visit_struct(struct_type)
-        assert result == "ROW(name STRING)" or result == "ROW(name VARCHAR)"
+        assert result == "STRUCT<name:STRING>"
 
-    def test_visit_struct_and_map_without_column_context_stay_row(self):
-        dialect = AthenaDialect()
-        compiler = AthenaTypeCompiler(dialect)
+    def test_complex_types_render_hive_syntax_without_column(self):
+        compiler = AthenaDialect().type_compiler_instance
         struct_type = AthenaStruct(
             ("profile", AthenaStruct(("name", String), ("age", Integer))),
             ("metrics", AthenaMap(String, Integer)),
         )
         map_type = AthenaMap(Integer, AthenaStruct(("n", Integer)))
-        assert compiler.process(struct_type) == (
-            "ROW(profile ROW(name STRING, age INTEGER), metrics MAP<STRING, INTEGER>)"
-        )
-        assert compiler.process(map_type) == "MAP<INTEGER, ROW(n INTEGER)>"
-        assert compiler.process(AthenaStruct()) == "ROW()"
-
-    def test_type_expression_column_selects_hive_syntax(self):
-        compiler = AthenaDialect().type_compiler_instance
-        struct_type = AthenaStruct(("name", String), ("age", Integer))
-        map_type = AthenaMap(Integer, AthenaStruct(("n", Integer)))
-        assert compiler.process(struct_type, type_expression=Column("profile", struct_type)) == (
-            "STRUCT<name:STRING, age:INT>"
-        )
-        assert compiler.process(map_type, type_expression=Column("labels", map_type)) == (
-            "MAP<INT, STRUCT<n:INT>>"
+        expected_struct = "STRUCT<profile:STRUCT<name:STRING, age:INT>, metrics:MAP<STRING, INT>>"
+        assert compiler.process(struct_type) == expected_struct
+        assert struct_type.compile(dialect=AthenaDialect()) == expected_struct
+        assert compiler.process(map_type) == "MAP<INT, STRUCT<n:INT>>"
+        assert compiler.process(struct_type, type_expression=Column("c", struct_type)) == (
+            expected_struct
         )
 
     def test_visit_map_default(self):
@@ -164,22 +147,22 @@ class TestAthenaTypeCompiler:
         compiler = AthenaTypeCompiler(dialect)
         map_type = AthenaMap(String, Integer)
         result = compiler.visit_map(map_type)
-        assert result == "MAP<STRING, INTEGER>" or result == "MAP<VARCHAR, INTEGER>"
+        assert result == "MAP<STRING, INT>"
 
     def test_visit_map_uppercase(self):
         dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
         map_type = MAP(Integer, String)
         result = compiler.visit_MAP(map_type)
-        assert result == "MAP<INTEGER, STRING>" or result == "MAP<INTEGER, VARCHAR>"
+        assert result == "MAP<INT, STRING>"
 
     def test_visit_map_no_attributes(self):
         # Test map type without key_type/value_type attributes
         dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
         map_type = type("MockMap", (), {})()
-        result = compiler.visit_map(map_type)
-        assert result == "MAP<STRING, STRING>"
+        with pytest.raises(exc.CompileError, match="as MAP"):
+            compiler.visit_map(map_type)
 
     def test_visit_array_default(self):
         dialect = AthenaDialect()
@@ -207,18 +190,40 @@ class TestAthenaTypeCompiler:
         dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
         array_type = type("MockArray", (), {})()
-        result = compiler.visit_array(array_type)
-        assert result == "ARRAY<STRING>"
+        with pytest.raises(exc.CompileError, match="as ARRAY"):
+            compiler.visit_array(array_type)
 
     def test_visit_json(self):
-        """Test JSON type compilation."""
-        from sqlalchemy import types
-
         dialect = AthenaDialect()
         compiler = AthenaTypeCompiler(dialect)
         json_type = types.JSON()
-        result = compiler.visit_JSON(json_type)
-        assert result == "JSON"
+        with pytest.raises(exc.CompileError, match="not supported in Athena DDL"):
+            compiler.visit_JSON(json_type)
+
+    @pytest.mark.parametrize(
+        ("type_", "ddl", "cast_type"),
+        [
+            (Integer(), "INT", "INTEGER"),
+            (types.INTEGER(), "INT", "INTEGER"),
+            (types.CLOB(), "STRING", "VARCHAR"),
+            (types.Text(), "STRING", "VARCHAR"),
+            (types.VARCHAR(10), "VARCHAR(10)", "VARCHAR"),
+            (types.BINARY(), "BINARY", "VARBINARY"),
+        ],
+    )
+    def test_ddl_and_cast_types(self, type_, ddl, cast_type):
+        dialect = AthenaDialect()
+        assert dialect.type_compiler_instance.process(type_) == ddl
+        assert str(cast(column("x"), type_).compile(dialect=dialect)) == f"CAST(x AS {cast_type})"
+
+    @pytest.mark.parametrize(
+        "type_", [types.JSON(), AthenaArray(types.JSON), AthenaMap(String, types.JSON)]
+    )
+    def test_json_is_rejected_in_ddl_and_kept_in_cast(self, type_):
+        dialect = AthenaDialect()
+        with pytest.raises(exc.CompileError, match="not supported in Athena DDL"):
+            dialect.type_compiler_instance.process(type_)
+        assert "JSON" in str(cast(column("x"), type_).compile(dialect=dialect))
 
     @pytest.mark.parametrize(
         ("type_", "ddl", "cast_type"),
@@ -668,6 +673,25 @@ class TestAthenaStatementCompiler:
     def test_complex_cast_keeps_dml_syntax(self, type_, expected):
         assert self._compile_sql(cast(column("col"), type_)) == f"CAST(col AS {expected})"
 
+    @pytest.mark.parametrize(
+        ("type_", "expected"),
+        [
+            (types.JSON(), "JSON"),
+            (types.ARRAY(types.JSON), "ARRAY(JSON)"),
+            (AthenaMap(String, types.JSON), "MAP(VARCHAR, JSON)"),
+            (types.CLOB(), "VARCHAR"),
+        ],
+    )
+    def test_cast_renders_types_rejected_or_respelled_in_ddl(self, type_, expected):
+        assert self._compile_sql(cast(column("col"), type_)) == f"CAST(col AS {expected})"
+
+    @pytest.mark.parametrize(
+        "type_", [AthenaStruct(), types.ARRAY(AthenaStruct()), AthenaMap(String, AthenaStruct())]
+    )
+    def test_cast_to_empty_struct_raises(self, type_):
+        with pytest.raises(exc.CompileError, match="ROW requires at least one field"):
+            self._compile_sql(cast(column("col"), type_))
+
     def test_timestamp_precision_applies_to_compared_values(self):
         col = column("col", AthenaTimestamp(precision=3))
         value = datetime(2012, 10, 15, 12, 57, 18, 789999)
@@ -960,14 +984,31 @@ class TestAthenaDDLCompiler:
             '"a`b" VARCHAR, "first name" VARCHAR, _hidden INTEGER))'
         )
 
-    def test_empty_struct_column_stays_row(self):
+    @pytest.mark.parametrize(
+        "type_", [AthenaStruct(), AthenaArray(AthenaStruct()), AthenaMap(String, AthenaStruct())]
+    )
+    def test_empty_struct_column_raises(self, type_):
+        with pytest.raises(
+            exc.CompileError,
+            match=r"column 'empty'.*STRUCT requires at least one field",
+        ):
+            self._ddl(Column("empty", type_))
+
+    def test_json_column_raises(self):
+        with pytest.raises(
+            exc.CompileError, match=r"column 'payload'.*not supported in Athena DDL"
+        ):
+            self._ddl(Column("payload", types.JSON))
+
+    def test_integer_subclass_and_decorator_columns_use_int(self):
         ddl = self._ddl(
-            Column("empty", AthenaStruct()),
-            Column("filled", AthenaStruct(("n", Integer))),
+            Column("decorated", decorated(Integer())),
+            Column("subclassed", type("MyInteger", (Integer,), {})()),
+            Column("text_value", types.CLOB),
         )
-        assert "empty ROW()" in ddl
-        assert "filled STRUCT<n:INT>" in ddl
-        assert "STRUCT<>" not in ddl
+        assert "decorated INT" in ddl
+        assert "subclassed INT" in ddl
+        assert "text_value STRING" in ddl
 
     def test_unsupported_type_inside_struct_column_still_raises(self):
         with pytest.raises(exc.CompileError, match="not supported"):

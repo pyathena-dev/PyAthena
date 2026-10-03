@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from functools import partial
 from itertools import product
 from typing import TYPE_CHECKING, Any, cast
 
@@ -78,25 +77,20 @@ S3_TABLES_CATALOG_PREFIX = "s3tablescatalog/"
 
 
 class AthenaTypeCompiler(GenericTypeCompiler):
-    """Type compiler for Amazon Athena SQL types.
+    """Type compiler for Amazon Athena DDL types.
 
-    This compiler translates SQLAlchemy type objects into Athena-compatible
-    SQL type strings for use in DDL statements. It handles the mapping between
-    SQLAlchemy's portable types and Athena's specific type syntax.
+    Athena parses DDL statements such as CREATE TABLE with Hive type syntax,
+    and queries with Trino type syntax. This compiler renders the Hive types.
+    It is the dialect's type compiler, so it renders CREATE TABLE column types
+    and ``TypeEngine.compile()``. ``AthenaStatementCompiler`` renders the
+    types of CAST expressions with ``AthenaDMLTypeCompiler``.
 
-    Athena has specific requirements for type names that differ from standard
-    SQL. For example, FLOAT and REAL render as FLOAT here, while the statement
-    compiler renders them as REAL in CAST expressions. TEXT, and CHAR, NCHAR,
-    VARCHAR, or NVARCHAR without a length, render as STRING; with a length,
-    they render as CHAR(n) or VARCHAR(n).
-
-    The compiler also supports Athena-specific complex types:
-    - STRUCT/ROW: Nested record types with named fields
-    - MAP: Key-value pair collections
-    - ARRAY: Ordered collections of elements
-
-    CREATE TABLE columns render STRUCT fields as Hive ``STRUCT<name:type>``.
-    Compiling a type on its own renders ``ROW(...)``.
+    Integers render as INT, FLOAT and REAL as FLOAT, and binary types as
+    BINARY. TEXT, CLOB, and character types without a length render as
+    STRING; with a length, they render as CHAR(n) or VARCHAR(n). Complex
+    types render as ``STRUCT<name:type>``, ``MAP<key, value>``, and
+    ``ARRAY<item>``. TIME, JSON, and a STRUCT without fields have no Athena
+    DDL type and raise ``CompileError``.
 
     See Also:
         AWS Athena Data Types:
@@ -145,7 +139,7 @@ class AthenaTypeCompiler(GenericTypeCompiler):
 
     @override
     def visit_INTEGER(self, type_: types.Integer, **kw: Any) -> str:
-        return "INT" if kw.get("_athena_hive_ddl") else "INTEGER"
+        return "INT"
 
     @override
     def visit_SMALLINT(self, type_: types.SmallInteger, **kw: Any) -> str:
@@ -173,11 +167,11 @@ class AthenaTypeCompiler(GenericTypeCompiler):
 
     @override
     def visit_CLOB(self, type_: types.CLOB, **kw: Any) -> str:
-        return self.visit_BINARY(type_, **kw)  # type: ignore[arg-type]
+        return self.visit_TEXT(type_, **kw)
 
     @override
     def visit_NCLOB(self, type_: types.Text, **kw: Any) -> str:
-        return self.visit_BINARY(type_, **kw)  # type: ignore[arg-type]
+        return self.visit_TEXT(type_, **kw)
 
     @override
     def visit_CHAR(self, type_: types.CHAR, **kw: Any) -> str:
@@ -220,16 +214,16 @@ class AthenaTypeCompiler(GenericTypeCompiler):
         return "BOOLEAN"
 
     def visit_JSON(self, type_: types.JSON, **kw: Any) -> str:
-        """Render a JSON type.
+        """Reject a JSON type, which Athena DDL does not accept.
 
         Args:
             type_: The type to render.
             **kw: Type-compiler keyword arguments.
 
-        Returns:
-            ``JSON``.
+        Raises:
+            CompileError: Always.
         """
-        return "JSON"
+        raise exc.CompileError(f"Data type `{type_}` is not supported in Athena DDL")
 
     @override
     def visit_string(self, type_, **kw):
@@ -263,58 +257,33 @@ class AthenaTypeCompiler(GenericTypeCompiler):
     def visit_enum(self, type_, **kw):
         return self.visit_string(type_, **kw)
 
-    def _enable_hive_column_ddl(self, kw: dict[str, Any]) -> bool:
-        """Enable Hive spelling for a CREATE TABLE column type.
-
-        ``get_column_specification`` passes the column as ``type_expression``.
-        ARRAY compilation sets ``_athena_hive_ddl`` so nested fields use
-        ``STRUCT<name:type>`` and ``INT``. STRUCT and MAP reuse that flag in
-        column DDL. Direct compilation and CAST leave it unset.
-
-        Args:
-            kw: Type-compiler keyword arguments. When Hive spelling applies,
-                ``_athena_hive_ddl`` is set so nested types keep it.
-
-        Returns:
-            True when the type should use Hive DDL syntax.
-        """
-        if kw.get("_athena_hive_ddl") or isinstance(kw.get("type_expression"), Column):
-            kw["_athena_hive_ddl"] = True
-            return True
-        return False
+    @util.memoized_property
+    def _preparer(self) -> AthenaDDLIdentifierPreparer:
+        """The DDL identifier preparer that quotes STRUCT field names."""
+        return AthenaDDLIdentifierPreparer(self.dialect)
 
     def visit_struct(self, type_, **kw):
-        """Render a STRUCT type.
-
-        CREATE TABLE column types and types nested in an ARRAY render Hive
-        ``STRUCT<name:type, ...>``; other contexts render ``ROW(name type, ...)``.
-        A type that is not an ``AthenaStruct``, or one without fields, renders
-        ``ROW()``.
+        """Render a STRUCT type as ``STRUCT<name:type, ...>``.
 
         Args:
             type_: The type to render.
             **kw: Type-compiler keyword arguments.
 
         Returns:
-            The STRUCT or ROW type clause.
+            The STRUCT type clause.
+
+        Raises:
+            CompileError: If the type is not an ``AthenaStruct`` or has no fields.
         """
-        # Empty structs keep the existing ROW() rendering in every context.
-        if not isinstance(type_, AthenaStruct) or not type_.fields:
-            return "ROW()"
-        hive_ddl = self._enable_hive_column_ddl(kw)
-        preparer = (
-            AthenaDDLIdentifierPreparer(self.dialect)
-            if hive_ddl
-            else self.dialect.identifier_preparer
+        if not isinstance(type_, AthenaStruct):
+            raise exc.CompileError(f"Cannot render `{type_!r}` as STRUCT")
+        if not type_.fields:
+            raise exc.CompileError("STRUCT requires at least one field")
+        fields = ", ".join(
+            f"{self._preparer.quote(name)}:{self.process(field_type, **kw)}"
+            for name, field_type in type_.fields.items()
         )
-        separator = ":" if hive_ddl else " "
-        field_specs = []
-        for field_name, field_type in type_.fields.items():
-            field_type_str = self.process(field_type, **kw)
-            field_specs.append(f"{preparer.quote(field_name)}{separator}{field_type_str}")
-        if hive_ddl:
-            return f"STRUCT<{', '.join(field_specs)}>"
-        return f"ROW({', '.join(field_specs)})"
+        return f"STRUCT<{fields}>"
 
     def visit_STRUCT(self, type_, **kw):
         """Render a STRUCT type through ``visit_struct``.
@@ -324,14 +293,12 @@ class AthenaTypeCompiler(GenericTypeCompiler):
             **kw: Type-compiler keyword arguments.
 
         Returns:
-            The STRUCT or ROW type clause.
+            The STRUCT type clause.
         """
         return self.visit_struct(type_, **kw)
 
     def visit_map(self, type_, **kw):
         """Render a MAP type as ``MAP<key, value>``.
-
-        A type that is not an ``AthenaMap`` renders ``MAP<STRING, STRING>``.
 
         Args:
             type_: The type to render.
@@ -339,13 +306,15 @@ class AthenaTypeCompiler(GenericTypeCompiler):
 
         Returns:
             The MAP type clause.
+
+        Raises:
+            CompileError: If the type is not an ``AthenaMap``.
         """
-        if isinstance(type_, AthenaMap):
-            self._enable_hive_column_ddl(kw)
-            key_type_str = self.process(type_.key_type, **kw)
-            value_type_str = self.process(type_.value_type, **kw)
-            return f"MAP<{key_type_str}, {value_type_str}>"
-        return "MAP<STRING, STRING>"
+        if not isinstance(type_, AthenaMap):
+            raise exc.CompileError(f"Cannot render `{type_!r}` as MAP")
+        key_type_str = self.process(type_.key_type, **kw)
+        value_type_str = self.process(type_.value_type, **kw)
+        return f"MAP<{key_type_str}, {value_type_str}>"
 
     def visit_MAP(self, type_, **kw):
         """Render a MAP type through ``visit_map``.
@@ -362,8 +331,22 @@ class AthenaTypeCompiler(GenericTypeCompiler):
     def visit_array(self, type_, **kw):
         """Render an ARRAY type as ``ARRAY<item>``.
 
-        Nested types of an ARRAY use Hive DDL syntax. A type that is not an
-        ARRAY renders ``ARRAY<STRING>``.
+        Args:
+            type_: The type to render.
+            **kw: Type-compiler keyword arguments.
+
+        Returns:
+            The ARRAY type clause.
+
+        Raises:
+            CompileError: If the type is not an ARRAY.
+        """
+        if not isinstance(type_, types.ARRAY):
+            raise exc.CompileError(f"Cannot render `{type_!r}` as ARRAY")
+        return f"ARRAY<{self.process(_ArrayTypeInspector.item_type(type_), **kw)}>"
+
+    def visit_ARRAY(self, type_, **kw):
+        """Render an ARRAY type through ``visit_array``.
 
         Args:
             type_: The type to render.
@@ -372,11 +355,268 @@ class AthenaTypeCompiler(GenericTypeCompiler):
         Returns:
             The ARRAY type clause.
         """
-        if isinstance(type_, types.ARRAY):
-            kw["_athena_hive_ddl"] = True
-            item_type_str = self.process(_ArrayTypeInspector.item_type(type_), **kw)
-            return f"ARRAY<{item_type_str}>"
-        return "ARRAY<STRING>"
+        return self.visit_array(type_, **kw)
+
+
+class AthenaDMLTypeCompiler(GenericTypeCompiler):
+    """Type compiler for the Trino types of Amazon Athena queries.
+
+    ``AthenaStatementCompiler`` renders the types of CAST expressions with
+    this compiler, while ``AthenaTypeCompiler`` renders the Hive types of
+    DDL statements. Character types render as VARCHAR, FLOAT and REAL as
+    REAL, binary types as VARBINARY, and DateTime types as ``TIMESTAMP(6)``
+    or ``TIMESTAMP(precision)``. Complex types render as
+    ``ROW(name type)``, ``MAP(key, value)``, and ``ARRAY(item)``.
+
+    A type is resolved through its ``with_variant()`` type for this dialect
+    and the implementation of a TypeDecorator before it is rendered.
+
+    Two keyword arguments of ``process()`` adjust the rendering:
+
+    - ``require_precision``: Reject a Numeric type without a precision.
+    - ``timestamp_precision``: When False, render DateTime types as a bare
+      ``TIMESTAMP``. A cast that only types an empty value uses it, because
+      Athena widens a bare ``TIMESTAMP`` to the other operand's precision
+      instead of widening that operand.
+
+    See Also:
+        AWS Athena Data Types:
+        https://docs.aws.amazon.com/athena/latest/ug/data-types.html
+    """
+
+    @util.memoized_property
+    def _type_inspector(self) -> _ArrayTypeInspector:
+        """The inspector that resolves variants and TypeDecorators for this dialect."""
+        return _ArrayTypeInspector(self.dialect)
+
+    @override
+    def process(self, type_: TypeEngine[Any], **kw: Any) -> str:
+        return self._type_inspector.dialect_type(type_)._compiler_dispatch(self, **kw)
+
+    def _process_element(self, type_: TypeEngine[Any], **kw: Any) -> str:
+        """Render the element type of an ARRAY, MAP, or ROW.
+
+        Args:
+            type_: The element type.
+            **kw: Type-compiler keyword arguments.
+
+        Returns:
+            The element type clause.
+
+        Raises:
+            CompileError: If the element type is unknown.
+        """
+        if isinstance(self._type_inspector.dialect_type(type_), types.NullType):
+            raise exc.CompileError("Bound ARRAY values require an explicit element type")
+        return self.process(type_, **kw)
+
+    @override
+    def visit_FLOAT(self, type_: types.Float[Any], **kw: Any) -> str:
+        return "REAL"
+
+    @override
+    def visit_REAL(self, type_: types.REAL[Any], **kw: Any) -> str:
+        return "REAL"
+
+    @override
+    def visit_DOUBLE_PRECISION(self, type_, **kw) -> str:
+        return "DOUBLE"
+
+    @override
+    def visit_NUMERIC(self, type_: types.Numeric[Any], **kw: Any) -> str:
+        return self.visit_DECIMAL(type_, **kw)  # type: ignore[arg-type]
+
+    @override
+    def visit_DECIMAL(self, type_: types.DECIMAL[Any], **kw: Any) -> str:
+        if kw.get("require_precision") and type_.precision is None:
+            raise exc.CompileError(
+                "ARRAY decimal values require explicit Numeric precision; "
+                "specify precision and scale to avoid implicit rounding"
+            )
+        return super().visit_DECIMAL(type_, **kw)
+
+    def visit_tinyint(self, type_, **kw):
+        """Render a tinyint type.
+
+        Args:
+            type_: The type to render.
+            **kw: Type-compiler keyword arguments.
+
+        Returns:
+            ``TINYINT``.
+        """
+        return "TINYINT"
+
+    def visit_TINYINT(self, type_, **kw):
+        """Render a TINYINT type.
+
+        Args:
+            type_: The type to render.
+            **kw: Type-compiler keyword arguments.
+
+        Returns:
+            ``TINYINT``.
+        """
+        return "TINYINT"
+
+    @override
+    def visit_TIMESTAMP(self, type_: types.TIMESTAMP, **kw: Any) -> str:
+        # A bare TIMESTAMP is timestamp(3) in Athena and truncates microseconds.
+        if not kw.get("timestamp_precision", True):
+            return "TIMESTAMP"
+        if isinstance(type_, AthenaTimestamp) and type_.precision is not None:
+            return f"TIMESTAMP({type_.precision})"
+        return "TIMESTAMP(6)"
+
+    @override
+    def visit_DATETIME(self, type_: types.DateTime, **kw: Any) -> str:
+        return self.visit_TIMESTAMP(type_, **kw)  # type: ignore[arg-type]
+
+    @override
+    def visit_TIME(self, type_: types.Time, **kw: Any) -> str:
+        raise exc.CompileError(f"Data type `{type_}` is not supported")
+
+    @override
+    def visit_CHAR(self, type_: types.CHAR, **kw: Any) -> str:
+        return "VARCHAR"
+
+    @override
+    def visit_NCHAR(self, type_: types.NCHAR, **kw: Any) -> str:
+        return "VARCHAR"
+
+    @override
+    def visit_VARCHAR(self, type_: types.String, **kw: Any) -> str:
+        return "VARCHAR"
+
+    @override
+    def visit_NVARCHAR(self, type_: types.NVARCHAR, **kw: Any) -> str:
+        return "VARCHAR"
+
+    @override
+    def visit_TEXT(self, type_: types.Text, **kw: Any) -> str:
+        return "VARCHAR"
+
+    @override
+    def visit_CLOB(self, type_: types.CLOB, **kw: Any) -> str:
+        return "VARCHAR"
+
+    @override
+    def visit_NCLOB(self, type_: types.Text, **kw: Any) -> str:
+        return "VARCHAR"
+
+    @override
+    def visit_BLOB(self, type_: types.LargeBinary, **kw: Any) -> str:
+        return "VARBINARY"
+
+    @override
+    def visit_BINARY(self, type_: types.BINARY, **kw: Any) -> str:
+        return "VARBINARY"
+
+    @override
+    def visit_VARBINARY(self, type_: types.VARBINARY, **kw: Any) -> str:
+        return "VARBINARY"
+
+    def visit_JSON(self, type_: types.JSON, **kw: Any) -> str:
+        """Render a JSON type.
+
+        Args:
+            type_: The type to render.
+            **kw: Type-compiler keyword arguments.
+
+        Returns:
+            ``JSON``.
+        """
+        return "JSON"
+
+    @override
+    def visit_null(self, type_, **kw):
+        return "NULL"
+
+    def visit_struct(self, type_, **kw):
+        """Render a STRUCT type as ``ROW(name type, ...)``.
+
+        Args:
+            type_: The type to render.
+            **kw: Type-compiler keyword arguments.
+
+        Returns:
+            The ROW type clause.
+
+        Raises:
+            CompileError: If the type is not an ``AthenaStruct``, has no fields,
+                or has a field of unknown type.
+        """
+        if not isinstance(type_, AthenaStruct):
+            raise exc.CompileError(f"Cannot render `{type_!r}` as ROW")
+        if not type_.fields:
+            raise exc.CompileError("ROW requires at least one field")
+        preparer = self.dialect.identifier_preparer
+        fields = ", ".join(
+            f"{preparer.quote(name)} {self._process_element(field_type, **kw)}"
+            for name, field_type in type_.fields.items()
+        )
+        return f"ROW({fields})"
+
+    def visit_STRUCT(self, type_, **kw):
+        """Render a STRUCT type through ``visit_struct``.
+
+        Args:
+            type_: The type to render.
+            **kw: Type-compiler keyword arguments.
+
+        Returns:
+            The ROW type clause.
+        """
+        return self.visit_struct(type_, **kw)
+
+    def visit_map(self, type_, **kw):
+        """Render a MAP type as ``MAP(key, value)``.
+
+        Args:
+            type_: The type to render.
+            **kw: Type-compiler keyword arguments.
+
+        Returns:
+            The MAP type clause.
+
+        Raises:
+            CompileError: If the type is not an ``AthenaMap`` or has a key or
+                value of unknown type.
+        """
+        if not isinstance(type_, AthenaMap):
+            raise exc.CompileError(f"Cannot render `{type_!r}` as MAP")
+        key_type_str = self._process_element(type_.key_type, **kw)
+        value_type_str = self._process_element(type_.value_type, **kw)
+        return f"MAP({key_type_str}, {value_type_str})"
+
+    def visit_MAP(self, type_, **kw):
+        """Render a MAP type through ``visit_map``.
+
+        Args:
+            type_: The type to render.
+            **kw: Type-compiler keyword arguments.
+
+        Returns:
+            The MAP type clause.
+        """
+        return self.visit_map(type_, **kw)
+
+    def visit_array(self, type_, **kw):
+        """Render an ARRAY type as ``ARRAY(item)``.
+
+        Args:
+            type_: The type to render.
+            **kw: Type-compiler keyword arguments.
+
+        Returns:
+            The ARRAY type clause.
+
+        Raises:
+            CompileError: If the type is not an ARRAY or its item type is unknown.
+        """
+        if not isinstance(type_, types.ARRAY):
+            raise exc.CompileError(f"Cannot render `{type_!r}` as ARRAY")
+        return f"ARRAY({self._process_element(_ArrayTypeInspector.item_type(type_), **kw)})"
 
     def visit_ARRAY(self, type_, **kw):
         """Render an ARRAY type through ``visit_array``.
@@ -414,6 +654,11 @@ class AthenaStatementCompiler(SQLCompiler):
     @util.memoized_property
     def _array_type_inspector(self):
         return _ArrayTypeInspector(self.dialect)
+
+    @util.memoized_property
+    def _dml_type_compiler(self) -> AthenaDMLTypeCompiler:
+        """The type compiler for the Trino types of CAST expressions."""
+        return AthenaDMLTypeCompiler(self.dialect)
 
     def visit_char_length_func(self, fn: Function[Any], **kw: Any) -> str:
         """Render ``char_length()`` as Athena ``length()``.
@@ -590,11 +835,11 @@ class AthenaStatementCompiler(SQLCompiler):
             "CAST(concat('Unsupported ARRAY slice step: ', "
             f"coalesce(CAST({step_sql} AS VARCHAR), 'NULL')) AS BIGINT)"
         )
-        empty = (
-            f"slice({sql}, 1, 0)"
-            if _ArrayTypeInspector.has_unknown_element(array_type)
-            else f"CAST(ARRAY[] AS {self._complex_dml_type(array_type, timestamp_precision=False)})"
-        )
+        if _ArrayTypeInspector.has_unknown_element(array_type):
+            empty = f"slice({sql}, 1, 0)"
+        else:
+            empty_type = self._dml_type_compiler.process(array_type, timestamp_precision=False)
+            empty = f"CAST(ARRAY[] AS {empty_type})"
         return f"IF({step_sql} = 1, {sql}, slice({empty}, {failure}, 0))"
 
     @override
@@ -833,129 +1078,12 @@ class AthenaStatementCompiler(SQLCompiler):
             The CAST SQL.
 
         Raises:
-            CompileError: For an ARRAY, MAP, or ROW type that cannot be cast.
+            CompileError: For a type that cannot be cast.
         """
-        type_ = self._dialect_type(cast.type)
-        if isinstance(type_, (types.ARRAY, AthenaMap, AthenaStruct)):
-            type_clause = self._complex_dml_type(
-                type_, require_precision=cast._annotations.get("_pyathena_array_bind", False)
-            )
-            return f"CAST({self.process(cast.clause, **kwargs)} AS {type_clause})"
-        if (isinstance(type_, types.VARCHAR) and type_.length is None) or isinstance(
-            type_, types.String
-        ):
-            type_clause = "VARCHAR"
-        elif isinstance(type_, types.CHAR) and type_.length is None:
-            type_clause = "CHAR"
-        elif isinstance(type_, (types.LargeBinary, types.BINARY, types.VARBINARY)):
-            type_clause = "VARBINARY"
-        elif isinstance(type_, types.Double):
-            type_clause = "DOUBLE"
-        elif isinstance(type_, (types.FLOAT, types.Float, types.REAL)):
-            # https://docs.aws.amazon.com/athena/latest/ug/data-types.html
-            # In Athena, use float in DDL statements like CREATE TABLE
-            # and real in SQL functions like SELECT CAST.
-            type_clause = "REAL"
-        elif (timestamp_type := self._timestamp_dml_type(type_)) is not None:
-            type_clause = timestamp_type
-        else:
-            type_clause = cast.typeclause._compiler_dispatch(self, **kwargs)
-        return f"CAST({cast.clause._compiler_dispatch(self, **kwargs)} AS {type_clause})"
-
-    def _dialect_type(self, type_: TypeEngine[Any]) -> TypeEngine[Any]:
-        """Resolve the type this dialect uses for a SQLAlchemy type.
-
-        Takes the Athena variant from ``with_variant()`` and the implementation
-        of a TypeDecorator until neither applies.
-
-        Args:
-            type_: The declared type.
-
-        Returns:
-            The resolved type.
-        """
-        while True:
-            variant = self._array_type_inspector.variant(type_)
-            if variant is not None:
-                type_ = variant
-            elif isinstance(type_, types.TypeDecorator):
-                type_ = self._array_type_inspector.decorator_impl(type_)
-            else:
-                return type_
-
-    def _timestamp_dml_type(self, type_: TypeEngine[Any]) -> str | None:
-        """Return the DML type clause for a DateTime type.
-
-        A bare ``TIMESTAMP`` is ``timestamp(3)`` in Athena and truncates
-        microseconds, so DML casts use ``TIMESTAMP(6)``.
-
-        Args:
-            type_: The type to cast to, possibly a TypeDecorator or a type
-                with an Athena variant.
-
-        Returns:
-            ``TIMESTAMP(precision)`` for an AthenaTimestamp with a precision,
-            ``TIMESTAMP(6)`` for any other DateTime type, otherwise None.
-        """
-        type_ = self._dialect_type(type_)
-        if isinstance(type_, AthenaTimestamp) and type_.precision is not None:
-            return f"TIMESTAMP({type_.precision})"
-        if isinstance(type_, (types.DateTime, AthenaTimestamp)):
-            return "TIMESTAMP(6)"
-        return None
-
-    def _complex_dml_type(self, type_, *, require_precision=False, timestamp_precision=True):
-        """Render a type for a DML cast.
-
-        Args:
-            type_: The type to render.
-            require_precision: Reject a Numeric without an explicit precision.
-            timestamp_precision: Render DateTime types with their precision.
-                A cast that only types an empty value passes False to keep a
-                bare ``TIMESTAMP``, which Athena widens to the other operand's
-                precision instead of widening that operand.
-
-        Returns:
-            The type clause.
-
-        Raises:
-            CompileError: For an element type that cannot be cast.
-        """
-        recurse = partial(
-            self._complex_dml_type,
-            require_precision=require_precision,
-            timestamp_precision=timestamp_precision,
+        type_clause = self._dml_type_compiler.process(
+            cast.type, require_precision=cast._annotations.get("_pyathena_array_bind", False)
         )
-        type_ = self._dialect_type(type_)
-        if isinstance(type_, types.NullType):
-            raise exc.CompileError("Bound ARRAY values require an explicit element type")
-        if isinstance(type_, types.ARRAY):
-            return f"ARRAY({recurse(_ArrayTypeInspector.item_type(type_))})"
-        if isinstance(type_, AthenaMap):
-            return f"MAP({recurse(type_.key_type)}, {recurse(type_.value_type)})"
-        if isinstance(type_, AthenaStruct):
-            fields = ", ".join(
-                f"{self.preparer.quote(name)} {recurse(field_type)}"
-                for name, field_type in type_.fields.items()
-            )
-            return f"ROW({fields})"
-        if isinstance(type_, types.String):
-            return "VARCHAR"
-        if isinstance(type_, (types.LargeBinary, types.BINARY, types.VARBINARY)):
-            return "VARBINARY"
-        if isinstance(type_, types.Double):
-            return "DOUBLE"
-        if isinstance(type_, types.Float):
-            return "REAL"
-        timestamp_type = self._timestamp_dml_type(type_) if timestamp_precision else None
-        if timestamp_type is not None:
-            return timestamp_type
-        if require_precision and isinstance(type_, types.Numeric) and type_.precision is None:
-            raise exc.CompileError(
-                "ARRAY decimal values require explicit Numeric precision; "
-                "specify precision and scale to avoid implicit rounding"
-            )
-        return self.dialect.type_compiler_instance.process(type_)
+        return f"CAST({self.process(cast.clause, **kwargs)} AS {type_clause})"
 
     def visit_athena_array_json_projection(self, expression, **kw):
         """Render an ARRAY result column as a JSON envelope string.
@@ -973,7 +1101,7 @@ class AthenaStatementCompiler(SQLCompiler):
         return f"json_format(CAST(MAP(ARRAY['_pyathena_array'], ARRAY[{encoded}]) AS JSON))"
 
     def _array_json(self, value, type_, depth=0):
-        type_ = self._dialect_type(type_)
+        type_ = self._array_type_inspector.dialect_type(type_)
         # Each recursive value becomes JSON, including map keys and typed scalar leaves.
         variable = f"_pyathena_array_{depth}"
         if isinstance(type_, types.ARRAY):
@@ -1367,14 +1495,7 @@ class AthenaDDLCompiler(DDLCompiler):
 
     @override
     def get_column_specification(self, column: Column[Any], **kwargs) -> str:
-        if type(column.type) in [types.Integer, types.INTEGER, types.INT]:
-            # https://docs.aws.amazon.com/athena/latest/ug/create-table.html
-            # In Data Definition Language (DDL) queries like CREATE TABLE,
-            # use the int keyword to represent an integer
-            type_ = "INT"
-        else:
-            # type_expression marks column DDL so STRUCT and MAP use Hive syntax.
-            type_ = self.dialect.type_compiler_instance.process(column.type, type_expression=column)
+        type_ = self.dialect.type_compiler_instance.process(column.type, type_expression=column)
         text = [f"{self.preparer.format_column(column)} {type_}"]
         if column.comment:
             text.append(f"{self._get_comment_specification(column.comment)}")
