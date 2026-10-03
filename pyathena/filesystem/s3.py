@@ -1457,7 +1457,7 @@ class S3FileSystem(AbstractFileSystem):
                 key=key2,
                 upload_id=cast(str, multipart_upload.upload_id),
                 futures=futures,
-                **kwargs,
+                request_kwargs=kwargs,
             )
 
     def _get_copy_ranges(self, size: int, block_size: int) -> list[tuple[int, int]]:
@@ -1585,7 +1585,7 @@ class S3FileSystem(AbstractFileSystem):
         key: str,
         upload_id: str,
         futures: list[Future[S3MultipartUploadPart]],
-        **kwargs,
+        request_kwargs: Mapping[str, Any] | None = None,
     ) -> S3CompleteMultipartUpload:
         """Collect the uploaded parts and complete the multipart upload.
 
@@ -1599,13 +1599,14 @@ class S3FileSystem(AbstractFileSystem):
             key: Object key being uploaded.
             upload_id: Unique identifier for the multipart upload.
             futures: Futures of the part uploads, in part-number order.
-            **kwargs: Parameters of the upload, such as ``RequestPayer`` or
-                the SSE-C parameters; the completion and the abort receive
-                those that they accept.
+            request_kwargs: Parameters of the upload, such as
+                ``RequestPayer`` or the SSE-C parameters; the completion and
+                the abort receive those that they accept.
 
         Returns:
             S3CompleteMultipartUpload of the completed upload.
         """
+        request_kwargs = request_kwargs or {}
         try:
             # The futures are in part-number order.
             results = [future.result() for future in futures]
@@ -1615,7 +1616,7 @@ class S3FileSystem(AbstractFileSystem):
                 key=key,
                 upload_id=upload_id,
                 parts=parts,
-                **self._get_operation_kwargs("complete_multipart_upload", kwargs),
+                **self._get_operation_kwargs("complete_multipart_upload", request_kwargs),
             )
         except Exception:
             # A part that is still uploading when the upload is aborted may
@@ -1628,7 +1629,7 @@ class S3FileSystem(AbstractFileSystem):
                     Bucket=bucket,
                     Key=key,
                     UploadId=upload_id,
-                    **self._get_operation_kwargs("abort_multipart_upload", kwargs),
+                    **self._get_operation_kwargs("abort_multipart_upload", request_kwargs),
                 )
             except Exception:
                 _logger.exception(
@@ -1756,7 +1757,7 @@ class S3FileSystem(AbstractFileSystem):
         s3_additional_kwargs = {**kwargs.pop("s3_additional_kwargs", {}), **kwargs}
         self._check_multipart_upload_size(rpath, size, block_size)
         callback.set_size(size)
-        if "ContentType" not in s3_additional_kwargs:
+        if "ContentType" not in {**self.s3_additional_kwargs, **s3_additional_kwargs}:
             content_type, _ = mimetypes.guess_type(lpath)
             if content_type is not None:
                 s3_additional_kwargs["ContentType"] = content_type
@@ -2853,7 +2854,7 @@ class S3File(AbstractBufferedFile):
                     key=self.key,
                     upload_id=cast(str, self.multipart_upload.upload_id),
                     futures=self.multipart_upload_parts,
-                    **self.s3_additional_kwargs,
+                    request_kwargs=self.s3_additional_kwargs,
                 )
             except Exception:
                 # The multipart upload has been aborted by the helper;

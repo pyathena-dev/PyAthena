@@ -832,13 +832,17 @@ class TestS3FileSystem:
         part.set_result(SimpleNamespace(etag='"e1"', part_number=1))
 
         fs._finish_multipart_upload(
-            bucket="bucket", key="key", upload_id="uploadid", futures=[part], **kwargs
+            bucket="bucket", key="key", upload_id="uploadid", futures=[part], request_kwargs=kwargs
         )
         failed: Future[SimpleNamespace] = Future()
         failed.set_exception(RuntimeError("upload failed"))
         with pytest.raises(RuntimeError, match="upload failed"):
             fs._finish_multipart_upload(
-                bucket="bucket", key="key", upload_id="uploadid", futures=[failed], **kwargs
+                bucket="bucket",
+                key="key",
+                upload_id="uploadid",
+                futures=[failed],
+                request_kwargs=kwargs,
             )
 
         fs._complete_multipart_upload.assert_called_once_with(
@@ -930,8 +934,7 @@ class TestS3FileSystem:
             c.kwargs["RequestPayer"] == "requester" and "ContentType" not in c.kwargs
             for c in fs._upload_part_copy.call_args_list
         )
-        assert fs._finish_multipart_upload.call_args.kwargs["ContentType"] == "text/csv"
-        assert fs._finish_multipart_upload.call_args.kwargs["RequestPayer"] == "requester"
+        assert fs._finish_multipart_upload.call_args.kwargs["request_kwargs"] == kwargs
 
     def test_pipe_file_invalid_path_raises(self):
         fs = self._make_fs()
@@ -1016,6 +1019,28 @@ class TestS3FileSystem:
             max_workers=fs.max_workers,
             s3_additional_kwargs={},
         )
+
+    @pytest.mark.parametrize(
+        ("filesystem_kwargs", "kwargs", "expected"),
+        [
+            ({}, {}, {"ContentType": "text/csv"}),
+            ({}, {"ContentType": "text/plain"}, {"ContentType": "text/plain"}),
+            # An explicit ContentType of the filesystem takes precedence over
+            # the one guessed from the file extension.
+            ({"ContentType": "application/octet-stream"}, {}, {}),
+        ],
+    )
+    def test_put_file_content_type(self, tmp_path, filesystem_kwargs, kwargs, expected):
+        fs = self._make_fs()
+        fs.s3_additional_kwargs = filesystem_kwargs
+        fs.open = mock.MagicMock()
+        fs.open.return_value.__enter__.return_value.blocksize = 8
+        lpath = tmp_path / "data.csv"
+        lpath.write_bytes(b"a")
+
+        fs.put_file(str(lpath), "s3://bucket/key", **kwargs)
+
+        assert fs.open.call_args.kwargs["s3_additional_kwargs"] == expected
 
     @pytest.mark.parametrize(
         ("value", "kwargs"),
@@ -3269,7 +3294,18 @@ class TestS3File:
                 "SSECustomerAlgorithm": "AES256",
                 "SSECustomerKey": "key",
             }
-        assert fs._finish_multipart_upload.call_args.kwargs["ContentType"] == "text/csv"
+        assert fs._finish_multipart_upload.call_args.kwargs["request_kwargs"] == kwargs
+
+    def test_multipart_write_keyword_named_as_argument(self):
+        # A keyword parameter of the file named like a helper argument does
+        # not break the completion, which takes the parameters as a mapping.
+        fs = self._make_append_fs(b"")
+
+        with S3File(fs, "s3://bucket/key.txt", mode="wb", block_size=4, key="other") as f:
+            f.write(b"x" * 8)
+
+        assert fs._finish_multipart_upload.call_args.kwargs["key"] == "key.txt"
+        assert fs._finish_multipart_upload.call_args.kwargs["request_kwargs"] == {"key": "other"}
 
     def test_append_discard(self):
         # Rolling back an append aborts its multipart upload without the

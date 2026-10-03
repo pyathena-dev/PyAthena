@@ -236,7 +236,7 @@ class AioS3FileSystem(AsyncFileSystem):
         s3_additional_kwargs = {**kwargs.pop("s3_additional_kwargs", {}), **kwargs}
         self._sync_fs._check_multipart_upload_size(rpath, size, block_size)
         callback.set_size(size)
-        if "ContentType" not in s3_additional_kwargs:
+        if "ContentType" not in {**self._sync_fs.s3_additional_kwargs, **s3_additional_kwargs}:
             content_type, _ = mimetypes.guess_type(lpath)
             if content_type is not None:
                 s3_additional_kwargs["ContentType"] = content_type

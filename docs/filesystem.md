@@ -113,9 +113,11 @@ S3 request parameters, such as `ContentType`, `ServerSideEncryption`, or `Reques
 can be given to `open`, `pipe`, and `put` as keyword arguments or in
 `s3_additional_kwargs`, and to all of them through the `s3_additional_kwargs` argument
 of `S3FileSystem`. The parameters of a call take precedence over those of the
-filesystem.
-Each request receives only the parameters that its S3 operation accepts, so, for
-example, `ServerSideEncryption` for writes is not sent with reads.
+filesystem. A file sends each of its requests only the parameters that the S3 operation
+accepts, so, for example, `ServerSideEncryption` for writes is not sent with reads. A
+`pipe` of data up to the block size sends its parameters with a single PutObject
+request as given. `put` sets `ContentType` from the file extension unless the call or
+the filesystem gives one.
 
 ```python
 fs = S3FileSystem(s3_additional_kwargs={"ServerSideEncryption": "AES256"})
