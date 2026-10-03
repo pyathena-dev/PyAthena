@@ -268,6 +268,25 @@ class TestAioS3FileSystem:
         assert "mode" not in call.kwargs
         assert call.kwargs.get("IfNoneMatch") == ("*" if mode == "create" else None)
 
+    def test_transaction_pipe_file_write(self):
+        # GH-997: in a transaction, a non-contiguous memoryview is written,
+        # and a failed write does not replace the object with an empty one
+        # when the transaction commits.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        put_object = fs._sync_fs._put_object = mock.MagicMock()
+
+        with fs.transaction:
+            with (
+                mock.patch.object(AioS3File, "write", side_effect=RuntimeError("write failed")),
+                pytest.raises(RuntimeError, match="write failed"),
+            ):
+                fs.pipe_file("s3://bucket/k1", b"data")
+            fs.pipe_file("s3://bucket/k2", memoryview(b"ab" * 4)[::2])
+
+        assert [(c.kwargs["key"], c.kwargs["body"]) for c in put_object.call_args_list] == [
+            ("k2", b"aaaa")
+        ]
+
     @pytest.mark.parametrize("kwargs", [{"block_size": 4}, {}])
     def test_transaction_pipe_put_file_exceeding_max_parts(self, tmp_path, kwargs):
         # GH-953: in a transaction, as outside one, pipe_file() and put_file()

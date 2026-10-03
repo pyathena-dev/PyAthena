@@ -195,8 +195,9 @@ class AioS3FileSystem(AsyncFileSystem):
         block_size = kwargs.get("block_size") or self._sync_fs.default_block_size
         # The size in bytes; the length of a memoryview counts its items.
         self._sync_fs._check_multipart_upload_size(path, memoryview(value).nbytes, block_size)
-        with self.open(path, "xb" if mode == "create" else "wb", **kwargs) as f:
-            f.write(value)
+        self._sync_fs._write_and_close(
+            self.open(path, "xb" if mode == "create" else "wb", **kwargs), value
+        )
 
     async def _put_file(
         self,

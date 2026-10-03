@@ -1249,8 +1249,7 @@ class TestS3FileSystem:
 
     def test_pipe_file_non_contiguous_memoryview(self):
         # A non-contiguous memoryview within the block size in items, 4 items
-        # of 8 bytes here, is uploaded with PutObject, as the buffered path
-        # cannot write it.
+        # of 8 bytes here, is uploaded with PutObject.
         fs = self._make_fs()
         fs._put_object = mock.MagicMock()
         value = memoryview(b"ab" * 8).cast("H")[::2]
@@ -1266,6 +1265,70 @@ class TestS3FileSystem:
         # max_workers is an open() parameter and is not sent to PutObject.
         fs.pipe_file("s3://bucket/key", b"data", max_workers=2)
         fs._put_object.assert_called_once_with(bucket="bucket", key="key", body=b"data")
+
+    def test_pipe_file_buffered_non_contiguous_memoryview(self):
+        # GH-997: a non-contiguous memoryview larger than the block size is
+        # uploaded as a multipart upload; the buffer of the file used to
+        # raise BufferError for it.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs._create_multipart_upload = mock.MagicMock(
+            return_value=SimpleNamespace(upload_id="uploadid")
+        )
+        fs._upload_part = mock.MagicMock(
+            side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
+        )
+        fs._finish_multipart_upload = mock.MagicMock()
+        size = S3FileSystem.DEFAULT_BLOCK_SIZE + 1
+
+        fs.pipe_file("s3://bucket/key", memoryview(b"ab" * size)[::2])
+
+        assert b"".join(c.kwargs["body"] for c in fs._upload_part.call_args_list) == b"a" * size
+        fs._finish_multipart_upload.assert_called_once()
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize("intrans", [False, True])
+    def test_pipe_file_failed_write(self, intrans):
+        # GH-997: a write that fails on the buffered path leaves the existing
+        # object unchanged. The file used to be committed when the failure
+        # left the with block of fsspec's pipe_file(), which replaced the
+        # object with an empty one, also later in a transaction.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs._transaction = None
+        fs._put_object = mock.MagicMock()
+
+        with (
+            mock.patch.object(S3File, "write", side_effect=RuntimeError("write failed")),
+            fs.transaction if intrans else contextlib.nullcontext(),
+            pytest.raises(RuntimeError, match="write failed"),
+        ):
+            fs.pipe_file("s3://bucket/key", b"a" * (S3FileSystem.DEFAULT_BLOCK_SIZE + 1))
+
+        fs._put_object.assert_not_called()
+        fs._call.assert_not_called()
+
+    def test_pipe_file_failed_write_aborts_multipart_upload(self):
+        # GH-997: a write that fails after its multipart upload has started
+        # aborts the upload instead of completing it.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs._create_multipart_upload = mock.MagicMock(
+            return_value=SimpleNamespace(upload_id="uploadid")
+        )
+        fs._finish_multipart_upload = mock.MagicMock()
+        executor = mock.MagicMock()
+        executor.submit.side_effect = [Future(), RuntimeError("submit failed")]
+        fs._create_executor = mock.MagicMock(return_value=executor)
+
+        with pytest.raises(RuntimeError, match="submit failed"):
+            fs.pipe_file("s3://bucket/key", b"a" * (3 * S3FileSystem.DEFAULT_BLOCK_SIZE))
+
+        fs._finish_multipart_upload.assert_not_called()
+        fs._call.assert_called_once_with(
+            "abort_multipart_upload", Bucket="bucket", Key="key", UploadId="uploadid"
+        )
+        executor.shutdown.assert_called_once()
 
     @pytest.mark.parametrize(
         ("size", "block_size", "min_block_size"),
