@@ -28,6 +28,8 @@ from botocore import UNSIGNED
 from botocore.client import BaseClient, Config
 from fsspec import AbstractFileSystem
 from fsspec.callbacks import _DEFAULT_CALLBACK, Callback
+from fsspec.compression import compr
+from fsspec.core import get_compression
 from fsspec.implementations.local import trailing_sep
 from fsspec.spec import AbstractBufferedFile
 from fsspec.utils import isfilelike, other_paths, tokenize
@@ -47,7 +49,7 @@ from pyathena.filesystem.s3_object import (
     S3PutObject,
     S3StorageClass,
 )
-from pyathena.util import RetryConfig, retry_api_call
+from pyathena.util import RetryConfig, override, retry_api_call
 
 _logger = logging.getLogger(__name__)
 
@@ -65,6 +67,42 @@ _LOOKUP_REQUEST_PARAMETERS = frozenset(
 # The second element of the dircache key, ``(path, _LOOKUPS_CACHE_KEY)``, of
 # the lookup results of a path made with lookup request parameters.
 _LOOKUPS_CACHE_KEY = "lookups"
+
+
+class CompressedBuffer(BytesIO):
+    """An in-memory buffer of data compressed with a codec of fsspec.
+
+    The buffer keeps its data when it is closed, as some codecs, such as
+    the ``zstandard`` stream writer, close the file that they write to.
+    """
+
+    @override
+    def close(self) -> None:
+        """Do nothing, so that the data can still be read after a codec closes the buffer."""
+
+    @classmethod
+    def compress(cls, value: bytes | bytearray | memoryview, compression: str) -> bytes:
+        """Compress a value with a codec of fsspec.
+
+        Args:
+            value: The bytes to compress.
+            compression: Name of a codec in ``fsspec.compression.compr``.
+
+        Returns:
+            The compressed bytes.
+
+        Raises:
+            ValueError: If the codec is not supported.
+        """
+        if compression not in compr:
+            raise ValueError(f"Compression type {compression} not supported")
+        if isinstance(value, memoryview) and not value.c_contiguous:
+            # Codecs cannot compress a non-contiguous memoryview.
+            value = value.tobytes()
+        buffer = cls()
+        with compr[compression](buffer, mode="w") as f:
+            f.write(value)
+        return buffer.getvalue()
 
 
 class S3FileSystem(AbstractFileSystem):
@@ -1894,7 +1932,8 @@ class S3FileSystem(AbstractFileSystem):
         and writes inside an fsspec transaction go through the buffered
         path, which uploads the data as a parallel multipart upload and
         keeps the deferred-commit semantics of transactions. A write that
-        fails on that path leaves the existing object unchanged.
+        fails on that path leaves the existing object unchanged. Both paths
+        write to the path without a trailing slash, as ``open()`` does.
 
         Args:
             path: S3 path (s3://bucket/key) to write to.
@@ -1906,20 +1945,33 @@ class S3FileSystem(AbstractFileSystem):
                 (e.g., ContentType, StorageClass) on the single-request
                 path. The ``block_size``, ``max_workers``, and
                 ``s3_additional_kwargs`` parameters of the ``open()`` path
-                are also accepted.
+                are also accepted, and so is ``compression``: the codec of
+                ``open()`` to compress the value with before it is
+                uploaded, or ``"infer"`` to take it from the extension of
+                the path.
 
         Raises:
             FileExistsError: If the mode is "create" and the path already
                 exists, or an object is created at it before the write is
                 committed.
             ValueError: If the path does not contain a key or specifies a
-                version, or if the data takes more than
-                ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
+                version, if the compression is not supported, or if the data
+                takes more than ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
         """
+        # Normalized as open() normalizes it, so that the key written, and
+        # the codec that "infer" takes from its extension, do not depend on
+        # the path that the size of the value selects.
+        path = self._strip_protocol(path)
+        compression = get_compression(path, kwargs.pop("compression", None))
+        if compression is not None:
+            # Compressed up front, so that every path uploads the compressed
+            # bytes, and open() returns the file instead of a wrapper.
+            value = CompressedBuffer.compress(value, compression)
         block_size = kwargs.get("block_size") or self.default_block_size
         # The size in bytes; the length of a memoryview counts its items.
-        self._check_multipart_upload_size(path, memoryview(value).nbytes, block_size)
-        if self._intrans or len(value) > min(block_size, self.MULTIPART_UPLOAD_MAX_PART_SIZE):
+        size = memoryview(value).nbytes
+        self._check_multipart_upload_size(path, size, block_size)
+        if self._intrans or size > min(block_size, self.MULTIPART_UPLOAD_MAX_PART_SIZE):
             # Defer to the buffered open() path, which keeps the
             # deferred-commit semantics of fsspec transactions and uploads
             # large data as a parallel multipart upload.

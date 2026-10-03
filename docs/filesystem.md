@@ -83,6 +83,9 @@ block size (5 MiB by default); larger data is uploaded as a parallel multipart u
 through the buffered file path. Inside an
 [fsspec transaction](https://filesystem-spec.readthedocs.io/en/latest/features.html#transactions),
 writes are deferred until the transaction commits and are discarded on rollback.
+With the `compression` argument (a codec of fsspec, or `"infer"` from the extension of
+the path), `pipe`/`pipe_file` compress the data before uploading it, and the sizes in
+this section apply to the compressed data.
 
 The block size for writing, given by the `block_size` argument of `open` or by the
 filesystem's `default_block_size`, must be between 5 MiB and 5 GiB, inclusive, the part
@@ -105,9 +108,9 @@ Paths are normalized as in fsspec, which drops a trailing slash, so `info`, `isf
 and `open` treat `s3://YOUR_S3_BUCKET/dir/` as `s3://YOUR_S3_BUCKET/dir`: the object
 `dir` if it exists, and otherwise the directory `dir`. An object whose key ends in a
 slash, such as a folder marker, is therefore not a file for these methods. Opening
-`dir/` for reading reads the object `dir` or raises `FileNotFoundError`, and opening it
-for writing writes the object `dir`. A path with a `?versionId=` suffix keeps the slash
-and refers to the object. `find`, and `ls` of the directory, list the object as a file
+`dir/` for reading reads the object `dir` or raises `FileNotFoundError`. Opening it for
+writing, `pipe`, `pipe_file`, and `put_file` write the object `dir`. A path with a
+`?versionId=` suffix keeps the slash and refers to the object. `find`, and `ls` of the directory, list the object as a file
 entry. `cat_file` uses the key as written. Without a `?versionId=` suffix, it reads
 such an object without a range, with a non-empty range of non-negative offsets, or with
 a negative `start` and no `end`, and raises `FileNotFoundError` for other ranges.
