@@ -1478,15 +1478,37 @@ class TestS3FileSystem:
             fs.pipe_file("s3://bucket/key?versionId=12345abcde", b"data")
 
     def test_pipe_file_non_contiguous_memoryview(self):
-        # A non-contiguous memoryview within the block size in items, 4 items
-        # of 8 bytes here, is uploaded with PutObject.
+        # A non-contiguous memoryview within the block size, 4 items of 2
+        # bytes here, is uploaded with PutObject.
         fs = self._make_fs()
         fs._put_object = mock.MagicMock()
         value = memoryview(b"ab" * 8).cast("H")[::2]
 
-        fs.pipe_file("s3://bucket/key", value, block_size=6)
+        fs.pipe_file("s3://bucket/key", value, block_size=8)
 
         fs._put_object.assert_called_once_with(bucket="bucket", key="key", body=b"ab" * 4)
+
+    def test_pipe_file_memoryview_routed_by_bytes(self):
+        # A memoryview larger than the block size in bytes, but not in items,
+        # is uploaded as a multipart upload. Its item count used to route it
+        # to PutObject, which accepts at most 5 GiB.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs._put_object = mock.MagicMock()
+        fs._create_multipart_upload = mock.MagicMock(
+            return_value=SimpleNamespace(upload_id="uploadid")
+        )
+        fs._upload_part = mock.MagicMock(
+            side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
+        )
+        fs._finish_multipart_upload = mock.MagicMock()
+        data = b"a" * (S3FileSystem.DEFAULT_BLOCK_SIZE + 4)
+
+        fs.pipe_file("s3://bucket/key", memoryview(data).cast("I"))
+
+        fs._put_object.assert_not_called()
+        assert b"".join(c.kwargs["body"] for c in fs._upload_part.call_args_list) == data
+        fs._finish_multipart_upload.assert_called_once()
 
     def test_pipe_file_small_drops_max_workers(self):
         fs = self._make_fs()
