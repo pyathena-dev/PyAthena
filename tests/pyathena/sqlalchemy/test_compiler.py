@@ -1002,6 +1002,54 @@ class TestAthenaDDLCompiler:
         ddl = str(CreateTable(table).compile(dialect=dialect))
         assert "LOCATION" not in ddl
 
+    @pytest.mark.parametrize(
+        ("file_format", "expected"),
+        [
+            ("PARQUET", "'parquet.compress' = 'SNAPPY'"),
+            ("parquet", "'parquet.compress' = 'SNAPPY'"),
+            ("ORC", "'orc.compress' = 'SNAPPY'"),
+            ("orc", "'orc.compress' = 'SNAPPY'"),
+            ("TEXTFILE", "'write.compress' = 'SNAPPY'"),
+        ],
+    )
+    def test_create_table_compression_follows_file_format_case_insensitively(
+        self, file_format, expected
+    ):
+        table = Table(
+            "tbl",
+            MetaData(schema="pyathena"),
+            Column("id", Integer),
+            awsathena_location="s3://bucket/path/to/",
+            awsathena_file_format=file_format,
+            awsathena_compression="SNAPPY",
+        )
+        ddl = str(CreateTable(table).compile(dialect=AthenaDialect()))
+        assert f"STORED AS {file_format}" in ddl
+        assert expected in ddl
+        assert ddl.count(".compress'") == 1
+
+    @pytest.mark.parametrize(
+        ("file_format", "expected"),
+        [
+            ("parquet", "'parquet.compress' = 'snappy'"),
+            ("orc", "'orc.compress' = 'snappy'"),
+        ],
+    )
+    def test_create_table_compression_from_connection_options(self, file_format, expected):
+        # Connection strings such as ``?file_format=parquet&compression=snappy``
+        # pass the options through unchanged.
+        dialect = AthenaDialect()
+        dialect._connect_options = {"file_format": file_format, "compression": "snappy"}
+        table = Table(
+            "tbl",
+            MetaData(schema="pyathena"),
+            Column("id", Integer),
+            awsathena_location="s3://bucket/path/to/",
+        )
+        ddl = str(CreateTable(table).compile(dialect=dialect))
+        assert expected in ddl
+        assert ddl.count(".compress'") == 1
+
     def test_create_table_renders_hive_struct_syntax(self):
         ddl = self._ddl(
             Column("id", Integer),
