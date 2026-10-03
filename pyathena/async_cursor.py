@@ -80,8 +80,9 @@ class AsyncCursor(BaseCursor):
             poll_interval: Query status polling interval in seconds.
             encryption_option: S3 encryption option (SSE_S3, SSE_KMS, CSE_KMS).
             kms_key: KMS key for encryption.
-            kill_on_interrupt: Stop the running query on ``KeyboardInterrupt``
-                while polling.
+            kill_on_interrupt: Cancel a query whose start in ``execute()`` is interrupted by
+                ``KeyboardInterrupt``. Waiting runs on worker threads, which do not
+                receive the interrupt.
             max_workers: Maximum number of threads in the cursor's thread pool.
             arraysize: Default number of rows per ``fetchmany()`` call of the result
                 sets the cursor creates.

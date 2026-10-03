@@ -227,11 +227,12 @@ class BaseCursor(metaclass=ABCMeta):
             poll_interval: Query status polling interval in seconds.
             encryption_option: S3 encryption option (SSE_S3, SSE_KMS, CSE_KMS).
             kms_key: KMS key for encryption.
-            kill_on_interrupt: Stop the running query when polling is interrupted.
+            kill_on_interrupt: Cancel the execution when a ``KeyboardInterrupt`` interrupts
+                starting it or waiting for it.
             result_reuse_enable: Enable Athena query result reuse.
             result_reuse_minutes: Maximum age in minutes of a reused result.
-            on_start_query_execution: Callback invoked with the query ID, by cursors
-                whose ``execute()`` supports it.
+            on_start_query_execution: Callback invoked with each query ID before the cursor
+                waits for the query, by cursors whose ``execute()`` supports it.
             on_poll: Callback invoked once per poll iteration with the current
                 execution object.
             **kwargs: Ignored.
@@ -1225,7 +1226,8 @@ class BaseCursor(metaclass=ABCMeta):
 
         Both callbacks are invoked if set. Called by cursors whose execution
         model supports early access to the query ID (the synchronous and aio
-        cursors) immediately after the StartQueryExecution API call.
+        cursors) once ``_execute()`` returns it: after the StartQueryExecution
+        API call, or with a reusable query ID found through ``cache_size``.
         """
         if self._on_start_query_execution:
             self._on_start_query_execution(query_id)

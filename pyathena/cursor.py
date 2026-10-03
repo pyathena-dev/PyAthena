@@ -134,8 +134,9 @@ class Cursor(WithFetch):
             result_reuse_enable: Enable Athena result reuse for this query.
             result_reuse_minutes: Minutes to reuse cached results.
             paramstyle: Parameter style ('qmark' or 'pyformat').
-            on_start_query_execution: Callback function called immediately after
-                start_query_execution API is called.
+            on_start_query_execution: Callback invoked with the query ID before ``execute()``
+                waits for the query: after the ``StartQueryExecution`` call, or after a
+                reusable query ID is found through ``cache_size``.
                 Function signature: (query_id: str) -> None
                 This allows early access to query_id for
                 monitoring/cancellation.
