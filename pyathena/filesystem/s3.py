@@ -1436,11 +1436,10 @@ class S3FileSystem(AbstractFileSystem):
                 parts=parts,
             )
         except Exception:
-            for future in futures:
-                future.cancel()
             # A part that is still uploading when the upload is aborted may
-            # be stored after the abort, so wait for the running parts first.
-            wait(futures)
+            # be stored after the abort, so wait for the parts that could not
+            # be cancelled first.
+            wait([future for future in futures if not future.cancel()])
             try:
                 self._call(
                     self._client.abort_multipart_upload,
@@ -2525,11 +2524,10 @@ class S3File(AbstractBufferedFile):
         running ones are waited for before the abort.
         """
         if self.multipart_upload:
-            for f in self.multipart_upload_parts:
-                f.cancel()
             # A part that is still uploading when the upload is aborted may
-            # be stored after the abort, so wait for the running parts first.
-            wait(self.multipart_upload_parts)
+            # be stored after the abort, so wait for the parts that could not
+            # be cancelled first.
+            wait([f for f in self.multipart_upload_parts if not f.cancel()])
             # s3_additional_kwargs also holds object parameters (e.g., the
             # existing object's metadata in append mode) that
             # AbortMultipartUpload rejects.

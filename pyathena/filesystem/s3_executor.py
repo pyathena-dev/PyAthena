@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from abc import ABCMeta, abstractmethod
 from collections.abc import Callable
 from concurrent.futures import Future
@@ -107,10 +108,13 @@ class S3AioExecutor(S3Executor):
             # the function keeps running in its thread, so the returned future
             # is started and resolved by the function's thread instead.
             future: Future[T] = Future()
+            # Acquired once, by run() or by settle(), whichever comes first,
+            # so that the future is started or settled exactly once.
+            claim = threading.Lock()
 
             def run() -> None:
                 """Run the function and resolve the future unless it was cancelled."""
-                if not future.set_running_or_notify_cancel():
+                if not claim.acquire(blocking=False) or not future.set_running_or_notify_cancel():
                     return
                 try:
                     result = fn(*args, **kwargs)
@@ -127,10 +131,16 @@ class S3AioExecutor(S3Executor):
                 Args:
                     task: The finished future of the task that runs the function.
                 """
+                if not claim.acquire(blocking=False):
+                    # run() has claimed the future and resolves it.
+                    return
                 if task.cancelled():
                     future.cancel()
-                elif (e := task.exception()) is not None and future.set_running_or_notify_cancel():
-                    future.set_exception(e)
+                    # Notify the waiters of the cancellation, as an executor
+                    # does when it drops a cancelled function.
+                    future.set_running_or_notify_cancel()
+                elif future.set_running_or_notify_cancel():
+                    future.set_exception(task.exception())
 
             task = asyncio.run_coroutine_threadsafe(asyncio.to_thread(run), self._loop)
             task.add_done_callback(settle)

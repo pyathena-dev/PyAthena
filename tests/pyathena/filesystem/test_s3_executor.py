@@ -39,19 +39,23 @@ class TestS3AioExecutor:
         # before its function starts, so that wait() waits for a running one.
         events = []
         started = threading.Event()
+        cancelled = threading.Event()
 
         def work():
             started.set()
-            time.sleep(0.1)
+            cancelled.wait(5)
+            time.sleep(0.05)
             events.append("finished")
 
         def cancel(executor: S3AioExecutor) -> tuple[Future[None], Future[None]]:
             running = executor.submit(work)
             pending = executor.submit(events.append, "pending finished")
-            started.wait()
+            started.wait(5)
             assert not running.cancel()
             assert pending.cancel()
-            wait([running, pending])
+            cancelled.set()
+            _, not_done = wait([running, pending], timeout=5)
+            assert not not_done
             events.append("waited")
             return running, pending
 
@@ -71,13 +75,17 @@ class TestS3AioExecutor:
 
     def test_loop_shutdown(self):
         # A function that has not started when the event loop shuts down is
-        # never run, and its future is cancelled instead of left pending.
+        # never run, and its future is cancelled and settled, so that wait()
+        # returns, instead of left pending.
         events = []
         started = threading.Event()
+        settled = threading.Event()
 
         def work():
             started.set()
-            time.sleep(0.1)
+            # Running until the pending future is settled, so that the
+            # pending function cannot start before the shutdown.
+            settled.wait(5)
             events.append("finished")
 
         async def main():
@@ -86,15 +94,16 @@ class TestS3AioExecutor:
             executor = S3AioExecutor(loop=loop)
             running = executor.submit(work)
             pending = executor.submit(events.append, "pending finished")
+            pending.add_done_callback(lambda _: settled.set())
             while not started.is_set():
                 await asyncio.sleep(0.01)
             return running, pending
 
         running, pending = asyncio.run(main())
 
-        wait([running, pending], timeout=5)
+        _, not_done = wait([running, pending], timeout=5)
+        assert not not_done
         assert events == ["finished"]
-        assert running.done()
         assert not running.cancelled()
         assert pending.cancelled()
 

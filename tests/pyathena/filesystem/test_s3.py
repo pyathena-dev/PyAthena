@@ -1,3 +1,4 @@
+import asyncio
 import functools
 import gc
 import io
@@ -22,6 +23,7 @@ from fsspec import Callback
 import pyathena
 from pyathena.filesystem import register_s3_filesystem
 from pyathena.filesystem.s3 import S3File, S3FileSystem
+from pyathena.filesystem.s3_executor import S3AioExecutor
 from pyathena.filesystem.s3_object import S3Object, S3ObjectType, S3StorageClass
 from pyathena.util import RetryConfig
 from tests import ENV
@@ -714,16 +716,21 @@ class TestS3FileSystem:
         failed: Future[SimpleNamespace] = Future()
         failed.set_exception(RuntimeError("upload failed"))
         started = threading.Event()
+        cancelled = threading.Event()
 
         def upload_part():
             started.set()
-            time.sleep(0.1)
+            # Uploading until the pending part is cancelled, and a little
+            # longer, so that an abort that does not wait comes first.
+            cancelled.wait(5)
+            time.sleep(0.05)
             events.append("part 2 stored")
 
         with ThreadPoolExecutor(max_workers=1) as executor:
             running = executor.submit(upload_part)
             pending = executor.submit(events.append, "part 3 stored")
-            started.wait()
+            pending.add_done_callback(lambda _: cancelled.set())
+            started.wait(5)
             with pytest.raises(RuntimeError, match="upload failed"):
                 fs._finish_multipart_upload(
                     bucket="bucket",
@@ -734,6 +741,37 @@ class TestS3FileSystem:
 
         assert events == ["part 2 stored", "abort"]
         assert pending.cancelled()
+
+    def test_finish_multipart_upload_does_not_wait_for_cancelled_parts(self):
+        # GH-976: a cancelled part is not waited for, as nothing may
+        # acknowledge its cancellation, e.g., an event loop blocked by the
+        # caller.
+        fs = self._make_fs()
+        fs._complete_multipart_upload = mock.MagicMock()
+        failed: Future[SimpleNamespace] = Future()
+        failed.set_exception(RuntimeError("upload failed"))
+        never_started: Future[SimpleNamespace] = Future()
+        errors = []
+
+        def finish():
+            try:
+                fs._finish_multipart_upload(
+                    bucket="bucket",
+                    key="key",
+                    upload_id="uploadid",
+                    futures=[failed, never_started],
+                )
+            except RuntimeError as e:
+                errors.append(e)
+
+        thread = threading.Thread(target=finish, daemon=True)
+        thread.start()
+        thread.join(5)
+
+        assert not thread.is_alive()
+        assert [str(e) for e in errors] == ["upload failed"]
+        assert never_started.cancelled()
+        fs._call.assert_called_once()
 
     @pytest.mark.parametrize(
         ("size", "block_size", "ranges"),
@@ -2437,21 +2475,50 @@ class TestS3File:
         events = []
         file.fs._call.side_effect = lambda *args, **kwargs: events.append("abort")
         started = threading.Event()
+        cancelled = threading.Event()
 
         def upload_part():
             started.set()
-            time.sleep(0.1)
+            # Uploading until the pending part is cancelled, and a little
+            # longer, so that an abort that does not wait comes first.
+            cancelled.wait(5)
+            time.sleep(0.05)
             events.append("part 1 stored")
 
         with ThreadPoolExecutor(max_workers=1) as executor:
             running = executor.submit(upload_part)
             pending = executor.submit(events.append, "part 2 stored")
+            pending.add_done_callback(lambda _: cancelled.set())
             file.multipart_upload_parts = [running, pending]
-            started.wait()
+            started.wait(5)
             file.discard()
 
         assert events == ["part 1 stored", "abort"]
         assert pending.cancelled()
+
+    def test_discard_on_event_loop_thread(self):
+        # GH-976: the parts that have not started are cancelled and not
+        # waited for, so a rollback on the thread of the event loop that
+        # would run them does not block.
+        file = self._make_write_file(b"", autocommit=False)
+        file.multipart_upload = SimpleNamespace(upload_id="uploadid")
+        parts = []
+
+        async def rollback():
+            executor = S3AioExecutor(loop=asyncio.get_running_loop())
+            parts.extend(executor.submit(file.fs._upload_part) for _ in range(2))
+            file.multipart_upload_parts = list(parts)
+            file.discard()
+
+        thread = threading.Thread(target=asyncio.run, args=(rollback(),), daemon=True)
+        thread.start()
+        thread.join(5)
+
+        assert not thread.is_alive()
+        assert all(part.cancelled() for part in parts)
+        file.fs._upload_part.assert_not_called()
+        file.fs._call.assert_called_once()
+        assert file.fs._call.call_args.args[0] == "abort_multipart_upload"
 
     @pytest.mark.parametrize("autocommit", [True, False])
     def test_upload_chunk_multipart(self, autocommit):
