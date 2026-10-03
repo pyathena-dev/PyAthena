@@ -881,14 +881,16 @@ class AthenaTableMetadata:
         """The compression codec from the table parameters, or ``None``.
 
         The first parameter present is used, in the order ``write.compression``,
-        ``serde.param.write.compression``, ``parquet.compress``, and ``orc.compress``.
+        ``serde.param.write.compression``, ``parquet.compression``, and ``orc.compress``.
+        Athena does not apply ``parquet.compress`` or ``write.compress`` when writing,
+        so they are not read.
         """
         if "write.compression" in self._parameters:  # text or json
             return self._parameters["write.compression"]
         if "serde.param.write.compression" in self._parameters:  # text or json
             return self._parameters["serde.param.write.compression"]
-        if "parquet.compress" in self._parameters:  # parquet
-            return self._parameters["parquet.compress"]
+        if "parquet.compression" in self._parameters:  # parquet
+            return self._parameters["parquet.compression"]
         if "orc.compress" in self._parameters:  # orc
             return self._parameters["orc.compress"]
         return None

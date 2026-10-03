@@ -234,7 +234,7 @@ def test_generate_ddl():
         )
         STORED AS PARQUET
         LOCATION 's3://bucket/path/to/'
-        TBLPROPERTIES ('parquet.compress'='SNAPPY')
+        TBLPROPERTIES ('parquet.compression'='SNAPPY')
         """
         ).strip()
     )

@@ -1938,7 +1938,7 @@ class TestSQLAlchemyAthena:
             STORED AS PARQUET
             LOCATION 's3://path/to/{ENV.schema}/{table_name}/'
             TBLPROPERTIES (
-            \t'parquet.compress' = 'SNAPPY'
+            \t'parquet.compression' = 'SNAPPY'
             )
             """
         )
@@ -2029,7 +2029,7 @@ class TestSQLAlchemyAthena:
             STORED AS PARQUET
             LOCATION '{ENV.s3_staging_dir}{ENV.schema}/{table_name}/'
             TBLPROPERTIES (
-            \t'parquet.compress' = 'SNAPPY'
+            \t'parquet.compression' = 'SNAPPY'
             )
             """
         )
@@ -2210,7 +2210,7 @@ OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat'
             STORED AS PARQUET
             LOCATION '{ENV.s3_staging_dir}{ENV.schema}/{table_name}/'
             TBLPROPERTIES (
-            \t'parquet.compress' = 'ZSTD'
+            \t'parquet.compression' = 'ZSTD'
             )
             """
         )
@@ -2474,7 +2474,7 @@ OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat'
             STORED AS PARQUET
             LOCATION '{ENV.s3_staging_dir}{ENV.schema}/{table_name}/'
             TBLPROPERTIES (
-            \t'parquet.compress' = 'SNAPPY'
+            \t'parquet.compression' = 'SNAPPY'
             )
             """
         )
@@ -2655,7 +2655,7 @@ OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat'
             STORED AS PARQUET
             LOCATION '{ENV.s3_staging_dir}{ENV.schema}/{table_name}/'
             TBLPROPERTIES (
-            \t'parquet.compress' = 'SNAPPY'
+            \t'parquet.compression' = 'SNAPPY'
             )
             """
         )
@@ -2748,7 +2748,7 @@ OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat'
             \t'projection.dt.type' = 'date',
             \t'projection.dt.range' = 'NOW-1YEARS,NOW',
             \t'projection.dt.format' = 'yyyy-MM-dd',
-            \t'parquet.compress' = 'SNAPPY'
+            \t'parquet.compression' = 'SNAPPY'
             )
             """
         )

@@ -408,7 +408,8 @@ def generate_ddl(
         location: S3 location for the table data.
         schema: Database schema name. Defaults to "default".
         partitions: List of column names to use as partition keys.
-        compression: Parquet compression codec for TBLPROPERTIES.
+        compression: Parquet compression codec, set as the ``parquet.compression``
+            table property.
         type_mappings: Function to map pandas types to SQL types.
 
     Returns:
@@ -433,5 +434,5 @@ def generate_ddl(
     ddl += "STORED AS PARQUET\n"
     ddl += f"LOCATION '{location}'\n"
     if compression:
-        ddl += f"TBLPROPERTIES ('parquet.compress'='{compression.upper()}')\n"
+        ddl += f"TBLPROPERTIES ('parquet.compression'='{compression.upper()}')\n"
     return ddl
