@@ -236,6 +236,43 @@ class TestAioS3FileSystem:
             fs.pipe_file("s3://bucket/key", b"data", mode="create")
         fs._sync_fs.exists.assert_called_once_with("s3://bucket/key")
 
+    @pytest.mark.parametrize("kwargs", [{"block_size": 4}, {}])
+    def test_transaction_pipe_put_file_exceeding_max_parts(self, tmp_path, kwargs):
+        # GH-953: in a transaction, as outside one, pipe_file() and put_file()
+        # reject data that does not fit in the maximum number of parts before
+        # opening the file.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs._sync_fs.MULTIPART_UPLOAD_MAX_PARTS = 3
+        fs._sync_fs.default_block_size = 4
+        fs._sync_fs._call = mock.MagicMock()
+        fs.open = mock.MagicMock()
+        local = tmp_path / "local"
+        local.write_bytes(b"a" * 13)
+
+        with fs.transaction:
+            with pytest.raises(ValueError, match="block_size"):
+                fs.pipe_file("s3://bucket/k1", b"a" * 13, **kwargs)
+            with pytest.raises(ValueError, match="block_size"):
+                fs.put_file(str(local), "s3://bucket/k2", **kwargs)
+        fs.open.assert_not_called()
+        fs._sync_fs._call.assert_not_called()
+
+    def test_transaction_put_file_block_size(self, tmp_path):
+        # In a transaction, put_file() passes block_size to open() instead of
+        # the S3 API, as outside one.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs.open = mock.MagicMock()
+        fs.open.return_value.__enter__.return_value.blocksize = 8
+        local = tmp_path / "local"
+        local.write_bytes(b"a" * 13)
+
+        with fs.transaction:
+            fs.put_file(str(local), "s3://bucket/key", block_size=8)
+
+        fs.open.assert_called_once_with(
+            "s3://bucket/key", "wb", block_size=8, s3_additional_kwargs={}
+        )
+
     def test_touch_sync_wrapper(self):
         # GH-977: touch() used to be fsspec's open()-based default, which
         # dropped the PutObject parameters and returned None.

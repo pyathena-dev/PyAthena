@@ -187,7 +187,12 @@ class AioS3FileSystem(AsyncFileSystem):
         Raises:
             FileExistsError: If the mode is "create" and the path already
                 exists.
+            ValueError: If the data takes more than
+                ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
         """
+        block_size = kwargs.get("block_size") or self._sync_fs.default_block_size
+        # The size in bytes; the length of a memoryview counts its items.
+        self._sync_fs._check_multipart_upload_size(path, memoryview(value).nbytes, block_size)
         if mode == "create" and self._sync_fs.exists(path):
             raise FileExistsError(path)
         with self.open(path, "wb", **kwargs) as f:
@@ -211,6 +216,11 @@ class AioS3FileSystem(AsyncFileSystem):
             rpath: S3 destination path (s3://bucket/key).
             callback: Progress callback for tracking upload progress.
             **kwargs: Additional S3 parameters (e.g., ContentType, StorageClass).
+                The ``block_size`` parameter of ``open()`` is also accepted.
+
+        Raises:
+            ValueError: If the file takes more than
+                ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
         """
         if os.path.isdir(lpath):
             return
@@ -218,14 +228,17 @@ class AioS3FileSystem(AsyncFileSystem):
         if not key:
             return
 
-        callback.set_size(os.path.getsize(lpath))
+        size = os.path.getsize(lpath)
+        block_size = kwargs.pop("block_size", None) or self._sync_fs.default_block_size
+        self._sync_fs._check_multipart_upload_size(rpath, size, block_size)
+        callback.set_size(size)
         if "ContentType" not in kwargs:
             content_type, _ = mimetypes.guess_type(lpath)
             if content_type is not None:
                 kwargs["ContentType"] = content_type
 
         with (
-            self.open(rpath, "wb", s3_additional_kwargs=kwargs) as remote,
+            self.open(rpath, "wb", block_size=block_size, s3_additional_kwargs=kwargs) as remote,
             open(lpath, "rb") as local,
         ):
             while data := local.read(remote.blocksize):
