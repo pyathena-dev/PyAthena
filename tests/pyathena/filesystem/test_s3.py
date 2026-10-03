@@ -1610,6 +1610,21 @@ class TestS3FileSystem:
         assert fs._client.copy_object not in methods
         assert fs._client.delete_objects not in methods
 
+    def test_mv_version_with_keys_below_conflicts(self):
+        # A version names an object even with keys below its key, so it is
+        # not taken for a directory when no current object exists at the key.
+        fs = self._make_fs()
+        self._serve_keys(fs, {"d/x", "a"})
+
+        with pytest.raises(ValueError, match="same destination"):
+            fs.mv(
+                ["s3://bucket/d?versionId=null", "s3://bucket/d/x", "s3://bucket/a"],
+                ["s3://bucket/out", "s3://bucket/x", "s3://bucket/out"],
+            )
+        methods = {c.args[0] for c in fs._call.call_args_list}
+        assert fs._client.copy_object not in methods
+        assert fs._client.delete_objects not in methods
+
     def test_mv_versions_onto_their_key(self):
         fs = self._make_fs()
         self._serve_keys(fs, {"b"})

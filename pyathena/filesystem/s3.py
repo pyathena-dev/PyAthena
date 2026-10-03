@@ -1552,10 +1552,10 @@ class S3FileSystem(AbstractFileSystem):
             for p1, p2 in zip(paths1, paths2, strict=False)
         ]
         pairs = [(p1, p2) for p1, p2, source, dest in named if source != dest]
-        stripped = [(source, dest) for _, _, source, dest in named if source != dest]
+        moved = [(p1, source, dest) for p1, _, source, dest in named if source != dest]
         # The sources left in place count too; a copy onto one overwrites it.
         sources = {source for _, _, source, _ in named}
-        counts = Counter(dest for _, dest in stripped)
+        counts = Counter(dest for _, _, dest in moved)
         # A source with another source below it may be a directory.
         directories: set[str] = set()
         for source in sources:
@@ -1564,13 +1564,15 @@ class S3FileSystem(AbstractFileSystem):
                 directories.add(parent)
                 parent = parent.rpartition("/")[0]
         # A directory without an object at its key is not copied, so it
-        # writes no destination and is left out of the checks.
+        # writes no destination and is left out of the checks. A path with a
+        # version always names an object.
         writers = [
             (source, dest)
-            for source, dest in stripped
+            for p1, source, dest in moved
             if not (
                 (counts[dest] > 1 or dest in sources)
                 and source in directories
+                and not self.parse_path(p1)[2]
                 and self._head_object(source) is None
             )
         ]
