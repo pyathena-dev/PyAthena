@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, time, timedelta, timezone
 
 import pytest
 from dateutil.tz import gettz
@@ -11,6 +11,8 @@ from pyathena.converter import (
     _to_datetime_with_tz,
     _to_map,
     _to_struct,
+    _to_time,
+    _to_time_with_tz,
 )
 
 
@@ -590,3 +592,39 @@ class TestDefaultTypeConverter:
             type_hint="array<row(a int, b varchar)>",
         )
         assert result == [{"a": 1, "b": "hello"}]
+
+
+@pytest.mark.parametrize(
+    ("input_value", "expected"),
+    [
+        (None, None),
+        ("12:34:56", time(12, 34, 56)),
+        ("12:34:56.1", time(12, 34, 56, 100000)),
+        ("12:34:56.123", time(12, 34, 56, 123000)),
+        ("12:34:56.123456", time(12, 34, 56, 123456)),
+        ("12:34:56.123456789012", time(12, 34, 56, 123456)),
+    ],
+)
+def test_to_time_any_precision(input_value, expected):
+    assert _to_time(input_value) == expected
+
+
+@pytest.mark.parametrize(
+    ("input_value", "expected"),
+    [
+        (None, None),
+        ("", None),
+        ("12:34:56+09:00", time(12, 34, 56, tzinfo=timezone(timedelta(hours=9)))),
+        (
+            "12:34:56.789-05:30",
+            time(12, 34, 56, 789000, tzinfo=timezone(-timedelta(hours=5, minutes=30))),
+        ),
+        ("00:00:00.123456789012+00:00", time(0, 0, 0, 123456, tzinfo=timezone(timedelta(0)))),
+        ("23:59:59.9-14:00", time(23, 59, 59, 900000, tzinfo=timezone(-timedelta(hours=14)))),
+    ],
+)
+def test_to_time_with_tz(input_value, expected):
+    result = _to_time_with_tz(input_value)
+    assert result == expected
+    if expected is not None:
+        assert result.utcoffset() == expected.utcoffset()

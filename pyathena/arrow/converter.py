@@ -15,6 +15,7 @@ from pyathena.converter import (
     _to_decimal,
     _to_default,
     _to_time,
+    _to_time_with_tz,
 )
 from pyathena.util import override
 
@@ -24,6 +25,7 @@ _logger = logging.getLogger(__name__)
 _DEFAULT_ARROW_CONVERTERS: dict[str, Callable[[str | None], Any | None]] = {
     "date": _to_date,
     "time": _to_time,
+    "time with time zone": _to_time_with_tz,
     "decimal": _to_decimal,
     "varbinary": _to_binary,
     "json": _csv_to_json,
@@ -85,6 +87,7 @@ class DefaultArrowTypeConverter(Converter):
                 "timestamp": pa.timestamp("ms"),
                 "date": pa.timestamp("ms"),
                 "time": pa.string(),
+                "time with time zone": pa.string(),
                 "varbinary": pa.string(),
                 "array": pa.string(),
                 "map": pa.string(),

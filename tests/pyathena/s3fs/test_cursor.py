@@ -19,7 +19,7 @@ from pyathena.s3fs.result_set import AthenaS3FSResultSet
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
-from tests.pyathena.util import cached_file_systems
+from tests.pyathena.util import TIME_VALUES_QUERY, TIME_VALUES_ROW, cached_file_systems
 
 
 def _s3fs_converter_with_json_text():
@@ -537,8 +537,8 @@ class TestS3FSCursor:
         indirect=["s3fs_cursor"],
     )
     def test_fetch_all_rows(self, s3fs_cursor):
-        s3fs_cursor.execute("SELECT 1 AS col")
-        assert s3fs_cursor.fetchall() == [(1,)]
+        s3fs_cursor.execute(TIME_VALUES_QUERY)
+        assert s3fs_cursor.fetchall() == [TIME_VALUES_ROW]
 
     @pytest.mark.parametrize(
         "s3fs_cursor",

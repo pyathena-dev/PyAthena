@@ -14,6 +14,7 @@ from pyathena.converter import (
     _to_boolean,
     _to_decimal,
     _to_default,
+    _to_time_with_tz,
 )
 from pyathena.util import override
 
@@ -25,6 +26,7 @@ _DEFAULT_PANDAS_CONVERTERS: dict[str, Callable[[str | None], Any | None]] = {
     "decimal": _to_decimal,
     "varbinary": _to_binary,
     "json": _csv_to_json,
+    "time with time zone": _to_time_with_tz,
 }
 
 

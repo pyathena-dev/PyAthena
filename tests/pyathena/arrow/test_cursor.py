@@ -26,6 +26,7 @@ from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
+from tests.pyathena.util import TIME_VALUES_QUERY, TIME_VALUES_ROW
 
 
 class TestArrowCursor:
@@ -1008,6 +1009,11 @@ class TestArrowCursor:
             (2, datetime(2017, 1, 1, 12, 34, 56).time(), b"\x01\x02", [1, "x"], "s", None),
         ]
         assert arrow_cursor.as_arrow().schema.field("col_json").type == pa.string()
+
+        arrow_cursor.execute(TIME_VALUES_QUERY)
+        assert arrow_cursor.fetchall() == [TIME_VALUES_ROW]
+        # An Arrow time type has no time zone, so the table keeps the text.
+        assert arrow_cursor.as_arrow().column("col_time_tz").to_pylist() == ["12:34:56.789+09:00"]
 
     @pytest.mark.parametrize(
         "execute_kwargs", [{}, {"connect_timeout": 3.0, "request_timeout": 4.0}]

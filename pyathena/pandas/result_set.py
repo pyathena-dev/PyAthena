@@ -257,7 +257,6 @@ class AthenaPandasResultSet(AthenaResultSet):
     _PARSE_DATES: ClassVar[list[str]] = [
         "date",
         "time",
-        "time with time zone",
         "timestamp",
         "timestamp with time zone",
     ]
@@ -343,9 +342,7 @@ class AthenaPandasResultSet(AthenaResultSet):
 
         # Cache time column names for efficient _trunc_date processing
         description = self.description if self.description else []
-        self._time_columns: list[str] = [
-            d[0] for d in description if d[1] in ("time", "time with time zone")
-        ]
+        self._time_columns: list[str] = [d[0] for d in description if d[1] == "time"]
 
         import pandas as pd
 

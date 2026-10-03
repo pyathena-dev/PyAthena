@@ -24,7 +24,7 @@ from pyathena.polars.result_set import AthenaPolarsResultSet
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
-from tests.pyathena.util import cached_file_systems
+from tests.pyathena.util import TIME_VALUES_QUERY, TIME_VALUES_ROW, cached_file_systems
 
 
 class TestPolarsCursor:
@@ -778,6 +778,11 @@ class TestPolarsCursor:
             (2, datetime(2017, 1, 1, 12, 34, 56).time(), b"\x00\x01", [1, "x"], "s", None),
         ]
         assert polars_cursor.as_polars()["col_json"].dtype == pl.String
+
+        polars_cursor.execute(TIME_VALUES_QUERY)
+        assert polars_cursor.fetchall() == [TIME_VALUES_ROW]
+        # A Polars Time has no time zone, so the DataFrame keeps the text.
+        assert polars_cursor.as_polars()["col_time_tz"].to_list() == ["12:34:56.789+09:00"]
 
     @pytest.mark.parametrize(
         "execute_kwargs",

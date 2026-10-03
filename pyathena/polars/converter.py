@@ -21,6 +21,7 @@ from pyathena.converter import (
     _to_default,
     _to_json,
     _to_time,
+    _to_time_with_tz,
 )
 from pyathena.util import override
 
@@ -30,6 +31,7 @@ _logger = logging.getLogger(__name__)
 _DEFAULT_POLARS_CONVERTERS: dict[str, Callable[[str | None], Any | None]] = {
     "date": _to_date,
     "time": _to_time,
+    "time with time zone": _to_time_with_tz,
     "varbinary": _to_binary,
     "json": _to_json,
 }
@@ -89,6 +91,7 @@ class DefaultPolarsTypeConverter(Converter):
                 "timestamp": pl.Datetime,
                 "date": pl.Date,
                 "time": pl.String,
+                "time with time zone": pl.String,
                 "varbinary": pl.String,
                 "array": pl.String,
                 "map": pl.String,
