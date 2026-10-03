@@ -67,19 +67,41 @@ def _to_datetime(varchar_value: str | None) -> datetime | None:
     return _parse_datetime(varchar_value)
 
 
+_UTC_OFFSET_PATTERN: re.Pattern[str] = re.compile(r"([+-])(\d{2}):(\d{2})")
+
+
+def _parse_utc_offset(value: str) -> timezone | None:
+    """Parse a ``+HH:MM`` or ``-HH:MM`` UTC offset.
+
+    Args:
+        value: The text to parse.
+
+    Returns:
+        The fixed-offset time zone, or None if the text is not an offset.
+    """
+    match = _UTC_OFFSET_PATTERN.fullmatch(value)
+    if not match:
+        return None
+    sign, hours, minutes = match.groups()
+    offset = timedelta(hours=int(hours), minutes=int(minutes))
+    return timezone(-offset if sign == "-" else offset)
+
+
 def _to_datetime_with_tz(varchar_value: str | None) -> datetime | None:
     """Convert an Athena TIMESTAMP WITH TIME ZONE value to an aware datetime.
 
     Args:
-        varchar_value: The value as text with a trailing zone name, or None.
+        varchar_value: The value as text with a trailing zone name or ``+HH:MM`` /
+            ``-HH:MM`` UTC offset, or None. An empty string, which pandas and the
+            Arrow CSV reader return for NULL, is None.
 
     Returns:
         The aware datetime, or None.
     """
-    if varchar_value is None:
+    if not varchar_value:
         return None
     datetime_, _, tz = varchar_value.rpartition(" ")
-    return _parse_datetime(datetime_).replace(tzinfo=gettz(tz))
+    return _parse_datetime(datetime_).replace(tzinfo=_parse_utc_offset(tz) or gettz(tz))
 
 
 def _parse_time(value: str) -> time:
@@ -128,11 +150,9 @@ def _to_time_with_tz(varchar_value: str | None) -> time | None:
     if not varchar_value:
         return None
     index = max(varchar_value.rfind("+"), varchar_value.rfind("-"))
-    hours, _, minutes = varchar_value[index + 1 :].partition(":")
-    offset = timedelta(hours=int(hours), minutes=int(minutes))
-    if varchar_value[index] == "-":
-        offset = -offset
-    return _parse_time(varchar_value[:index]).replace(tzinfo=timezone(offset))
+    return _parse_time(varchar_value[:index]).replace(
+        tzinfo=_parse_utc_offset(varchar_value[index:])
+    )
 
 
 def _to_float(varchar_value: str | None) -> float | None:
@@ -789,15 +809,15 @@ class DefaultTypeConverter(Converter):
 
 # The types whose values the Arrow and Polars GetQueryResults fallbacks keep as text,
 # as in a CSV result file, and convert when the rows are fetched.
-_TEXT_VALUE_TYPES: tuple[str, ...] = ("json", "time with time zone")
+_TEXT_VALUE_TYPES: tuple[str, ...] = ("json", "time with time zone", "timestamp with time zone")
 
 
 def _text_value_converter() -> DefaultTypeConverter:
     """Return a ``DefaultTypeConverter`` that keeps ``_TEXT_VALUE_TYPES`` values as text.
 
-    Values nested in typed complex values keep only TIME WITH TIME ZONE values as text,
-    because Arrow and Polars time types would drop the offset; nested JSON values are
-    decoded as before.
+    Values nested in typed complex values keep only the time zone types as text,
+    because Arrow and Polars time and timestamp types hold one time zone per column;
+    nested JSON values are decoded as before.
 
     Returns:
         The converter.
@@ -806,7 +826,11 @@ def _text_value_converter() -> DefaultTypeConverter:
     for type_ in _TEXT_VALUE_TYPES:
         converter.set(type_, _to_default)
     converter._typed_converter = TypedValueConverter(
-        converters={**_DEFAULT_CONVERTERS, "time with time zone": _to_default},
+        converters={
+            **_DEFAULT_CONVERTERS,
+            "time with time zone": _to_default,
+            "timestamp with time zone": _to_default,
+        },
         default_converter=_to_default,
         struct_parser=_to_struct,
     )

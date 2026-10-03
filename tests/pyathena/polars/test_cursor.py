@@ -783,6 +783,9 @@ class TestPolarsCursor:
         assert polars_cursor.fetchall() == [CONVERTED_VALUES_ROW]
         # A Polars Time has no time zone, so the DataFrame keeps the text.
         assert polars_cursor.as_polars()["col_time_tz"].to_list() == ["12:34:56.789+09:00"]
+        assert polars_cursor.as_polars()["col_timestamp_tz"].to_list() == [
+            "2024-02-29 23:59:58.123 +05:30"
+        ]
 
     @pytest.mark.parametrize(
         "execute_kwargs",

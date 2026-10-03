@@ -18,6 +18,7 @@ from pyathena.converter import (
     Converter,
     _to_binary,
     _to_date,
+    _to_datetime_with_tz,
     _to_default,
     _to_json,
     _to_time,
@@ -32,6 +33,7 @@ _DEFAULT_POLARS_CONVERTERS: dict[str, Callable[[str | None], Any | None]] = {
     "date": _to_date,
     "time": _to_time,
     "time with time zone": _to_time_with_tz,
+    "timestamp with time zone": _to_datetime_with_tz,
     "varbinary": _to_binary,
     "json": _to_json,
 }
@@ -92,6 +94,7 @@ class DefaultPolarsTypeConverter(Converter):
                 "date": pl.Date,
                 "time": pl.String,
                 "time with time zone": pl.String,
+                "timestamp with time zone": pl.String,
                 "varbinary": pl.String,
                 "array": pl.String,
                 "map": pl.String,

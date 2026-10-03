@@ -258,7 +258,6 @@ class AthenaPandasResultSet(AthenaResultSet):
         "date",
         "time",
         "timestamp",
-        "timestamp with time zone",
     ]
 
     def __init__(

@@ -1038,6 +1038,9 @@ class TestArrowCursor:
         assert arrow_cursor.fetchall() == [CONVERTED_VALUES_ROW]
         # An Arrow time type has no time zone, so the table keeps the text.
         assert arrow_cursor.as_arrow().column("col_time_tz").to_pylist() == ["12:34:56.789+09:00"]
+        assert arrow_cursor.as_arrow().column("col_timestamp_tz").to_pylist() == [
+            "2024-02-29 23:59:58.123 +05:30"
+        ]
 
     @pytest.mark.parametrize(
         "execute_kwargs", [{}, {"connect_timeout": 3.0, "request_timeout": 4.0}]
