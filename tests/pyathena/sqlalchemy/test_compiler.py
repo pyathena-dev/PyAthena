@@ -975,8 +975,12 @@ class TestAthenaDDLCompiler:
             ({"note": "table_type iceberg"}, False),
             ("'table_type'='ICEBERG'", True),
             ("\t'format' = 'parquet',\n\t'table_type' = 'iceberg'", True),
+            ("'table_type'=\"ICEBERG\"", True),
+            ('"table_type"="ICEBERG"', True),
             ("'table_type'='HIVE','note'='iceberg migration'", False),
             ("'note'='\\'table_type\\'=\\'iceberg\\''", False),
+            ("'table_type'='HIVE','note'=\"'table_type'='ICEBERG'\"", False),
+            ("'note'=\"it's\",'table_type'='ICEBERG'", True),
         ],
     )
     def test_create_table_iceberg_requires_table_type_iceberg(self, tblproperties, is_iceberg):
@@ -994,6 +998,7 @@ class TestAthenaDDLCompiler:
         ("tblproperties", "is_iceberg"),
         [
             ("'table_type'='ICEBERG'", True),
+            ("'table_type'=\"ICEBERG\"", True),
             ("'table_type'='HIVE','note'='iceberg migration'", False),
         ],
     )

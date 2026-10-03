@@ -75,10 +75,12 @@ if TYPE_CHECKING:
 # https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-integrations-query-athena.html
 S3_TABLES_CATALOG_PREFIX = "s3tablescatalog/"
 
-# A ``'key' = 'value'`` pair in TBLPROPERTIES given as a string. A backslash
-# escapes the next character in a literal.
+# A string literal in TBLPROPERTIES, quoted with ``'`` or ``"``, in which a
+# backslash escapes the next character.
+_TABLE_PROPERTY_LITERAL = r"""'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*\""""
+# A ``'key' = 'value'`` pair in TBLPROPERTIES given as a string.
 _TABLE_PROPERTY_PATTERN = re.compile(
-    r"'(?P<key>(?:[^'\\]|\\.)*)'\s*=\s*'(?P<value>(?:[^'\\]|\\.)*)'", re.DOTALL
+    rf"({_TABLE_PROPERTY_LITERAL})\s*=\s*({_TABLE_PROPERTY_LITERAL})", re.DOTALL
 )
 
 
@@ -1349,7 +1351,10 @@ class AthenaDDLCompiler(DDLCompiler):
         if isinstance(properties, dict):
             pairs = [(str(key), str(value)) for key, value in properties.items()]
         else:
-            pairs = _TABLE_PROPERTY_PATTERN.findall(properties)
+            pairs = [
+                (key[1:-1], value[1:-1])
+                for key, value in _TABLE_PROPERTY_PATTERN.findall(properties)
+            ]
         return any(
             key.lower() == "table_type" and value.lower() == "iceberg" for key, value in pairs
         )
