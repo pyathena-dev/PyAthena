@@ -16,7 +16,7 @@ from glob import has_magic
 from io import BytesIO
 from multiprocessing import cpu_count
 from re import Pattern
-from typing import Any, cast
+from typing import Any, BinaryIO, cast
 from urllib.parse import unquote_plus
 
 import botocore.exceptions
@@ -24,7 +24,7 @@ from boto3 import Session
 from botocore import UNSIGNED
 from botocore.client import BaseClient, Config
 from fsspec import AbstractFileSystem
-from fsspec.callbacks import _DEFAULT_CALLBACK
+from fsspec.callbacks import _DEFAULT_CALLBACK, Callback
 from fsspec.implementations.local import trailing_sep
 from fsspec.spec import AbstractBufferedFile
 from fsspec.utils import isfilelike, other_paths, tokenize
@@ -1716,6 +1716,28 @@ class S3FileSystem(AbstractFileSystem):
             raise
         f.close()
 
+    @staticmethod
+    def _write_file_and_close(f: S3File, local: BinaryIO, callback: Callback) -> None:
+        """Write the rest of a local file to a file opened for writing and close it.
+
+        Unlike a ``with`` block, a failed read, write, or progress update
+        closes the file without committing it, so the existing object is
+        left unchanged.
+
+        Args:
+            f: The file to write to.
+            local: The local file to read from.
+            callback: Progress callback, updated with the size of each block.
+        """
+        try:
+            while data := local.read(f.blocksize):
+                f.write(data)
+                callback.relative_update(len(data))
+        except BaseException:
+            f._close_without_commit()
+            raise
+        f.close()
+
     def pipe_file(
         self, path: str, value: bytes | bytearray | memoryview, mode: str = "overwrite", **kwargs
     ) -> None:
@@ -1795,10 +1817,11 @@ class S3FileSystem(AbstractFileSystem):
     ) -> S3CompleteMultipartUpload:
         """Collect the uploaded parts and complete the multipart upload.
 
-        When any part or the completion fails, the parts that have not
-        started are cancelled, the running ones are waited for, and the
-        multipart upload is aborted so that no incomplete upload or part is
-        left behind. The original error is then re-raised.
+        When any part or the completion fails, or the wait for them is
+        interrupted, the parts that have not started are cancelled, the
+        running ones are waited for, and the multipart upload is aborted so
+        that no incomplete upload or part is left behind. The original error
+        is then re-raised.
 
         Args:
             bucket: S3 bucket name.
@@ -1824,7 +1847,7 @@ class S3FileSystem(AbstractFileSystem):
                 parts=parts,
                 **self._get_operation_kwargs("complete_multipart_upload", request_kwargs),
             )
-        except Exception:
+        except BaseException:
             # A part that is still uploading when the upload is aborted may
             # be stored after the abort, so wait for the parts that could not
             # be cancelled first.
@@ -1937,7 +1960,9 @@ class S3FileSystem(AbstractFileSystem):
 
         Uploads a file from the local filesystem to an S3 location. Supports
         automatic content type detection based on file extension and provides
-        progress callback functionality.
+        progress callback functionality. An upload that fails before it is
+        completed, including one of a local file that cannot be read, leaves
+        the existing object unchanged.
 
         Args:
             lpath: Local file path to upload.
@@ -1984,19 +2009,20 @@ class S3FileSystem(AbstractFileSystem):
             if content_type is not None:
                 s3_additional_kwargs["ContentType"] = content_type
 
-        with (
-            self.open(
-                rpath,
-                "xb" if mode == "create" else "wb",
-                block_size=block_size,
-                max_workers=max_workers,
-                s3_additional_kwargs=s3_additional_kwargs,
-            ) as remote,
-            open(lpath, "rb") as local,
-        ):
-            while data := local.read(remote.blocksize):
-                remote.write(data)
-                callback.relative_update(len(data))
+        # The local file is opened first, so that an unreadable one fails
+        # before the remote file is opened.
+        with open(lpath, "rb") as local:
+            self._write_file_and_close(
+                self.open(
+                    rpath,
+                    "xb" if mode == "create" else "wb",
+                    block_size=block_size,
+                    max_workers=max_workers,
+                    s3_additional_kwargs=s3_additional_kwargs,
+                ),
+                local,
+                callback,
+            )
 
         self.invalidate_cache(rpath)
 
@@ -3160,7 +3186,8 @@ class S3File(AbstractBufferedFile):
         Creates an empty object if nothing was written, uploads the buffered
         data with PutObject if no multipart upload part was submitted, and
         otherwise completes the multipart upload, which is aborted if the
-        completion fails. Invalidates the cache of the path afterwards.
+        completion fails or is interrupted. Invalidates the cache of the path
+        afterwards.
 
         Raises:
             FileExistsError: If an object was created at the path after the
@@ -3195,7 +3222,7 @@ class S3File(AbstractBufferedFile):
                     futures=self.multipart_upload_parts,
                     request_kwargs=self.s3_additional_kwargs,
                 )
-            except Exception:
+            except BaseException:
                 # The multipart upload has been aborted by the helper;
                 # prevent discard() from aborting it again.
                 self.multipart_upload = None

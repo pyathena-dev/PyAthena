@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import os
 import tempfile
 import threading
@@ -287,6 +288,36 @@ class TestAioS3FileSystem:
             ("k2", b"aaaa")
         ]
 
+    @pytest.mark.parametrize("error", [RuntimeError, PermissionError])
+    def test_transaction_put_file_failed_write(self, tmp_path, error):
+        # GH-1014: in a transaction, a failed write or a local file that
+        # cannot be read does not replace the object with the data written
+        # so far, or with an empty one, when the transaction commits.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        put_object = fs._sync_fs._put_object = mock.MagicMock()
+        local = tmp_path / "local"
+        local.write_bytes(b"a")
+        failing = tmp_path / "failing"
+        failing.write_bytes(b"b")
+        if error is PermissionError:
+            if os.geteuid() == 0:
+                pytest.skip("root can read a file without read permission.")
+            failing.chmod(0)
+
+        with fs.transaction:
+            with (
+                mock.patch.object(AioS3File, "write", side_effect=RuntimeError("write failed"))
+                if error is RuntimeError
+                else contextlib.nullcontext(),
+                pytest.raises(error),
+            ):
+                fs.put_file(str(failing), "s3://bucket/k1")
+            fs.put_file(str(local), "s3://bucket/k2")
+
+        assert [(c.kwargs["key"], c.kwargs["body"]) for c in put_object.call_args_list] == [
+            ("k2", b"a")
+        ]
+
     @pytest.mark.parametrize("kwargs", [{"block_size": 4}, {}])
     def test_transaction_pipe_put_file_exceeding_max_parts(self, tmp_path, kwargs):
         # GH-953: in a transaction, as outside one, pipe_file() and put_file()
@@ -313,7 +344,7 @@ class TestAioS3FileSystem:
         # open() instead of the S3 API, as outside one.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
         fs.open = mock.MagicMock()
-        fs.open.return_value.__enter__.return_value.blocksize = 8
+        fs.open.return_value.blocksize = 8
         local = tmp_path / "local"
         local.write_bytes(b"a" * 13)
 
@@ -462,7 +493,7 @@ class TestAioS3FileSystem:
         # GH-972: fsspec's mode argument selects the mode of the file.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
         fs.open = mock.MagicMock()
-        fs.open.return_value.__enter__.return_value.blocksize = 4
+        fs.open.return_value.blocksize = 4
         lpath = tmp_path / "data.csv"
         lpath.write_bytes(b"a")
 

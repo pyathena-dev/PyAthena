@@ -1558,6 +1558,68 @@ class TestS3FileSystem:
         )
         executor.shutdown.assert_called_once()
 
+    @pytest.mark.parametrize("intrans", [False, True])
+    @pytest.mark.parametrize("error", [RuntimeError, KeyboardInterrupt, PermissionError])
+    def test_put_file_failed_write(self, tmp_path, intrans, error):
+        # GH-1014: a failure inside the write loop, or a local file that
+        # cannot be read, leaves the existing object unchanged. The remote
+        # file used to be committed when the failure left the with block,
+        # which replaced the object with the data written so far or with an
+        # empty one, also later in a transaction.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs._transaction = None
+        fs._put_object = mock.MagicMock()
+        lpath = tmp_path / "data"
+        lpath.write_bytes(b"a")
+        callback = Callback()
+        if error is PermissionError:
+            if os.geteuid() == 0:
+                pytest.skip("root can read a file without read permission.")
+            lpath.chmod(0)
+        else:
+            callback.relative_update = mock.MagicMock(side_effect=error("callback failed"))
+
+        with (
+            fs.transaction if intrans else contextlib.nullcontext(),
+            pytest.raises(error),
+        ):
+            fs.put_file(str(lpath), "s3://bucket/key", callback=callback)
+
+        fs._put_object.assert_not_called()
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize("intrans", [False, True])
+    def test_put_file_failed_write_aborts_multipart_upload(self, tmp_path, intrans):
+        # GH-1014: a failure after the first block was uploaded aborts the
+        # multipart upload instead of completing it with that block only.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs._transaction = None
+        fs._create_multipart_upload = mock.MagicMock(
+            return_value=SimpleNamespace(upload_id="uploadid")
+        )
+        fs._upload_part = mock.MagicMock(
+            side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
+        )
+        fs._finish_multipart_upload = mock.MagicMock()
+        callback = Callback()
+        callback.relative_update = mock.MagicMock(side_effect=RuntimeError("callback failed"))
+        lpath = tmp_path / "data"
+        lpath.write_bytes(b"a" * (2 * S3FileSystem.DEFAULT_BLOCK_SIZE + 1))
+
+        with (
+            fs.transaction if intrans else contextlib.nullcontext(),
+            pytest.raises(RuntimeError, match="callback failed"),
+        ):
+            fs.put_file(str(lpath), "s3://bucket/key", callback=callback)
+
+        fs._upload_part.assert_called_once()
+        fs._finish_multipart_upload.assert_not_called()
+        fs._call.assert_called_once_with(
+            "abort_multipart_upload", Bucket="bucket", Key="key", UploadId="uploadid"
+        )
+
     @pytest.mark.parametrize(
         ("size", "block_size", "min_block_size"),
         [
@@ -1601,7 +1663,7 @@ class TestS3FileSystem:
         # API.
         fs = self._make_fs()
         fs.open = mock.MagicMock()
-        fs.open.return_value.__enter__.return_value.blocksize = 8
+        fs.open.return_value.blocksize = 8
         lpath = tmp_path / "data"
         lpath.write_bytes(b"a" * 13)
 
@@ -1629,7 +1691,7 @@ class TestS3FileSystem:
         fs = self._make_fs()
         fs.s3_additional_kwargs = filesystem_kwargs
         fs.open = mock.MagicMock()
-        fs.open.return_value.__enter__.return_value.blocksize = 8
+        fs.open.return_value.blocksize = 8
         lpath = tmp_path / "data.csv"
         lpath.write_bytes(b"a")
 
@@ -2138,13 +2200,16 @@ class TestS3FileSystem:
         )
         fs._call.assert_not_called()
 
-    def test_finish_multipart_upload_aborts_on_failure(self):
+    # GH-1014: an interrupt while waiting for the parts used to leave the
+    # multipart upload behind.
+    @pytest.mark.parametrize("error", [RuntimeError, KeyboardInterrupt])
+    def test_finish_multipart_upload_aborts_on_failure(self, error):
         fs = self._make_fs()
         fs._complete_multipart_upload = mock.MagicMock()
         future: Future[SimpleNamespace] = Future()
-        future.set_exception(RuntimeError("upload failed"))
+        future.set_exception(error("upload failed"))
 
-        with pytest.raises(RuntimeError, match="upload failed"):
+        with pytest.raises(error, match="upload failed"):
             fs._finish_multipart_upload(
                 bucket="bucket", key="key", upload_id="uploadid", futures=[future]
             )
