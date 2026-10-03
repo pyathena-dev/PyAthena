@@ -1590,5 +1590,11 @@ class TestPandasCursor:
         indirect=["pandas_cursor"],
     )
     def test_fetch_all_rows(self, pandas_cursor):
-        pandas_cursor.execute("SELECT 1 AS col, CAST('12:34:56' AS TIME) AS col_time")
-        assert pandas_cursor.fetchall() == [(1, datetime(2017, 1, 1, 12, 34, 56).time())]
+        pandas_cursor.execute(
+            "SELECT 1 AS col, CAST('12:34:56' AS TIME) AS col_time, X'0001' AS col_binary, "
+            "json_parse('{\"a\": 1}') AS col_json, CAST('[1, 2]' AS JSON) AS col_json_string, "
+            "CAST(NULL AS JSON) AS col_json_null"
+        )
+        assert pandas_cursor.fetchall() == [
+            (1, datetime(2017, 1, 1, 12, 34, 56).time(), b"\x00\x01", {"a": 1}, "[1, 2]", None)
+        ]

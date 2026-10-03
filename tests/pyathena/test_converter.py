@@ -8,6 +8,7 @@ from pyathena.converter import (
     _to_array,
     _to_datetime,
     _to_datetime_with_tz,
+    _to_json,
     _to_map,
     _to_struct,
 )
@@ -323,6 +324,22 @@ def test_to_array_non_array_json(input_value):
 )
 def test_to_array_invalid_formats(input_value):
     assert _to_array(input_value) is None
+
+
+@pytest.mark.parametrize(
+    ("input_value", "expected"),
+    [
+        (None, None),
+        ("", None),
+        ('{"a":1}', {"a": 1}),
+        ("[1,2]", [1, 2]),
+        ('""', ""),
+        ('"[1, 2]"', "[1, 2]"),
+        ("null", None),
+    ],
+)
+def test_to_json(input_value, expected):
+    assert _to_json(input_value) == expected
 
 
 class TestDefaultTypeConverter:
