@@ -135,6 +135,7 @@ operations raise natural errors instead of botocore's `ClientError`:
 | `404` / `NoSuchKey` / `NoSuchBucket` | `FileNotFoundError` |
 | `403` / `AccessDenied` | `PermissionError` |
 | `BucketAlreadyExists` / `BucketAlreadyOwnedByYou` | `FileExistsError` |
+| `PreconditionFailed` of an `If-None-Match` condition | `FileExistsError` |
 | `RequestTimeout` | `TimeoutError` |
 | Others | `OSError` with the matching `errno` |
 
