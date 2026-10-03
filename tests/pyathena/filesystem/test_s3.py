@@ -5548,7 +5548,7 @@ class TestS3File:
 
     @pytest.mark.parametrize("abort_fails", [False, True])
     @pytest.mark.parametrize("error", [RuntimeError, KeyboardInterrupt])
-    def test_commit_failure_and_discard(self, error, abort_fails):
+    def test_commit_failure_and_discard(self, caplog, error, abort_fails):
         # GH-1014: a failed or interrupted completion is aborted by commit(),
         # so a later discard(), such as a transaction rollback, does not
         # abort the upload again. GH-945: if the abort also fails, the upload
@@ -5566,6 +5566,9 @@ class TestS3File:
         with pytest.raises(error, match="complete failed"):
             file.commit()
         assert (file.multipart_upload is not None) is abort_fails
+        assert (
+            "Failed to abort multipart upload uploadid to s3://bucket/key.txt." in caplog.text
+        ) is abort_fails
         file.discard()
 
         assert file.fs._call.call_args_list == [

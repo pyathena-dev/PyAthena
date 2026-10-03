@@ -3903,11 +3903,12 @@ class S3File(AbstractBufferedFile):
             if not self.multipart_upload:
                 raise RuntimeError("Multipart upload is not initialized.")
 
+            upload_id = cast(str, self.multipart_upload.upload_id)
             try:
                 self.fs._finish_multipart_upload(
                     bucket=self.bucket,
                     key=self.key,
-                    upload_id=cast(str, self.multipart_upload.upload_id),
+                    upload_id=upload_id,
                     futures=self.multipart_upload_parts,
                     request_kwargs=self.s3_additional_kwargs,
                     abort=False,
@@ -3921,7 +3922,8 @@ class S3File(AbstractBufferedFile):
                     self.discard()
                 except Exception:
                     _logger.exception(
-                        f"Failed to abort multipart upload to s3://{self.bucket}/{self.key}."
+                        f"Failed to abort multipart upload {upload_id} "
+                        f"to s3://{self.bucket}/{self.key}."
                     )
                 raise
 
