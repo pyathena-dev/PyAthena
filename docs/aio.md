@@ -213,9 +213,9 @@ All aio cursors use `await` for fetch operations, so fetching does not block the
 
 - `AioCursor` and `AioDictCursor` page through `GetQueryResults` as rows are fetched.
 - `AioPandasCursor`, `AioArrowCursor`, and `AioPolarsCursor` download the result file (CSV or
-  Parquet) inside `execute()`, wrapped in `asyncio.to_thread()`. Their fetch methods are also
-  wrapped in `asyncio.to_thread()`, which matters when `chunksize` is set, as fetch calls then
-  read S3 lazily.
+  Parquet) inside `execute()`, wrapped in `asyncio.to_thread()`. With `chunksize` (pandas and
+  Polars), fetch calls read S3 lazily instead. The fetch methods are also wrapped in
+  `asyncio.to_thread()`.
 - `AioS3FSCursor` streams rows from S3 as they are fetched.
 
 ```python
