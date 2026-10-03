@@ -38,6 +38,7 @@ from pyathena.sqlalchemy.types import (
     AthenaArray,
     AthenaBinary,
     AthenaDate,
+    AthenaJSON,
     AthenaMap,
     AthenaStruct,
     AthenaTimestamp,
@@ -212,6 +213,7 @@ class AthenaDialect(DefaultDialect):
         types.ARRAY: AthenaArray,
         types.Date: AthenaDate,
         types.DateTime: AthenaTimestamp,
+        types.JSON: AthenaJSON,
     }
 
     ischema_names: dict[str, type[Any]] = ischema_names

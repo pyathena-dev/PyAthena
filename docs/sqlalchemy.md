@@ -1365,59 +1365,55 @@ events = Table('events', metadata,
 
 #### Querying JSON data
 
-When querying JSON data, PyAthena automatically parses JSON strings into Python dictionaries:
+PyAthena's default converters decode results of Athena's `json` type, and the `JSON` type returns those values unchanged.
+A JSON object becomes a `dict`, an array a `list`, and a string scalar a `str`.
+If the cursor returns the text of a `json` result instead, for example through a custom converter that does not decode it, the `JSON` type returns that text unchanged.
 
 ```python
 from sqlalchemy import select, literal_column
 from sqlalchemy.sql import type_coerce
 from sqlalchemy.types import JSON
 
-# Query with explicit type coercion
 result = connection.execute(
     select(
         type_coerce(
-            literal_column('CAST(\'{"name": "test", "value": 123}\' AS JSON)'),
+            literal_column('json_parse(\'{"name": "test", "items": [1, 2, 3]}\')'),
             JSON
         ).label("json_col")
     )
 ).fetchone()
 
-# Result is automatically parsed as a dictionary
-print(result.json_col)  # {"name": "test", "value": 123}
+print(result.json_col)  # {'items': [1, 2, 3], 'name': 'test'}
 print(type(result.json_col))  # <class 'dict'>
+```
+
+`json_parse()` parses text into a JSON value, while `CAST('...' AS JSON)` returns the text as a JSON string scalar:
+
+```python
+result = connection.execute(
+    select(
+        type_coerce(literal_column("json_parse('[1, 2, 3]')"), JSON).label("parsed"),
+        type_coerce(literal_column("CAST('[1, 2, 3]' AS JSON)"), JSON).label("cast"),
+    )
+).fetchone()
+
+print(result.parsed)  # [1, 2, 3]
+print(result.cast)  # '[1, 2, 3]'
+```
+
+The `JSON` type decodes JSON text in columns of other types, such as a `varchar` column, with `json.loads()` or the dialect's `json_deserializer`:
+
+```python
+result = connection.execute(
+    select(type_coerce(literal_column("'{\"a\": 1}'"), JSON).label("json_col"))
+).fetchone()
+
+print(result.json_col)  # {'a': 1}
 ```
 
 #### Important limitations
 
-Athena's JSON type support has specific limitations:
-
-- **JSON objects and arrays are supported** - `CAST('...' AS JSON)` accepts an object or a top-level array such as `[1, 2, 3]`
-- **Arrays within objects are supported** - JSON objects can contain arrays as property values
 - **DML only** - JSON type is supported for SELECT queries but not in CREATE TABLE statements; compiling `CREATE TABLE` with a `JSON` column raises `CompileError`
-
-```python
-# Supported: JSON object with nested array
-result = connection.execute(
-    select(
-        type_coerce(
-            literal_column('CAST(\'{"items": [1, 2, 3]}\' AS JSON)'),
-            JSON
-        ).label("json_col")
-    )
-).fetchone()
-print(result.json_col)  # {"items": [1, 2, 3]}
-
-# Supported: Top-level array
-result = connection.execute(
-    select(
-        type_coerce(
-            literal_column("CAST('[1, 2, 3]' AS JSON)"),
-            JSON
-        ).label("json_col")
-    )
-).fetchone()
-print(result.json_col)  # [1, 2, 3]
-```
 
 #### Best practices
 

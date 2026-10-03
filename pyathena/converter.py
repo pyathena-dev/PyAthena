@@ -124,6 +124,21 @@ def _to_json(varchar_value: str | None) -> Any | None:
     return json.loads(varchar_value)
 
 
+def _csv_to_json(varchar_value: str | None) -> Any | None:
+    """Convert an Athena JSON value read from a CSV result file.
+
+    Args:
+        varchar_value: The value as JSON text, or None. An empty string, which
+            CSV results use for SQL NULL, is also treated as NULL.
+
+    Returns:
+        The decoded value, or None for SQL NULL.
+    """
+    if not varchar_value:
+        return None
+    return json.loads(varchar_value)
+
+
 def _to_array(varchar_value: str | None) -> list[Any] | str | None:
     """Convert array data to Python list.
 
@@ -727,3 +742,14 @@ class DefaultTypeConverter(Converter):
         if normalized not in self._parsed_hints:
             self._parsed_hints[normalized] = self._parser.parse(normalized)
         return self._parsed_hints[normalized]
+
+
+def _json_text_converter() -> DefaultTypeConverter:
+    """Return a ``DefaultTypeConverter`` that keeps json values as text.
+
+    Returns:
+        The converter.
+    """
+    converter = DefaultTypeConverter()
+    converter.set("json", _to_default)
+    return converter

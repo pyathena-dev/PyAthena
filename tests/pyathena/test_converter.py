@@ -5,6 +5,7 @@ from dateutil.tz import gettz
 
 from pyathena.converter import (
     DefaultTypeConverter,
+    _csv_to_json,
     _to_array,
     _to_datetime,
     _to_datetime_with_tz,
@@ -323,6 +324,33 @@ def test_to_array_non_array_json(input_value):
 )
 def test_to_array_invalid_formats(input_value):
     assert _to_array(input_value) is None
+
+
+@pytest.mark.parametrize(
+    ("input_value", "expected"),
+    [
+        (None, None),
+        ("", None),
+        ('{"a":1}', {"a": 1}),
+        ("[1,2]", [1, 2]),
+        ('""', ""),
+        ('"[1, 2]"', "[1, 2]"),
+        ("null", None),
+    ],
+)
+def test_csv_to_json(input_value, expected):
+    assert _csv_to_json(input_value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "type_hint", "expected"),
+    [
+        ('[""]', "array(json)", [""]),
+        ('{"k": ""}', "map(varchar,json)", {"k": ""}),
+    ],
+)
+def test_nested_json_empty_string(value, type_hint, expected):
+    assert DefaultTypeConverter().convert(type_hint.split("(")[0], value, type_hint) == expected
 
 
 class TestDefaultTypeConverter:

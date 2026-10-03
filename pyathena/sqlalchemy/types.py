@@ -6,7 +6,7 @@ so existing ``pyathena.sqlalchemy.types`` imports remain supported.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import types
 from sqlalchemy.sql import sqltypes
@@ -19,7 +19,7 @@ from pyathena.util import override
 
 if TYPE_CHECKING:
     from sqlalchemy import Dialect
-    from sqlalchemy.sql.type_api import _LiteralProcessorType
+    from sqlalchemy.sql.type_api import _LiteralProcessorType, _ResultProcessorType
 
 __all__ = [
     "ARRAY",
@@ -29,6 +29,7 @@ __all__ = [
     "AthenaArray",
     "AthenaBinary",
     "AthenaDate",
+    "AthenaJSON",
     "AthenaMap",
     "AthenaStruct",
     "AthenaTimestamp",
@@ -45,6 +46,37 @@ class AthenaBinary(types.LargeBinary):
             return f"X'{value.hex()}'"
 
         return process
+
+
+class AthenaJSON(types.JSON):
+    """SQLAlchemy JSON type that keeps the values PyAthena has decoded.
+
+    PyAthena's default converters decode results of the Athena ``json`` type,
+    so this type returns them unchanged, and a JSON string scalar stays a
+    ``str``. If the cursor returns the text of a ``json`` result instead, for
+    example through a custom converter that does not decode it, this type
+    returns that text unchanged. Results of other Athena types, such as JSON
+    text in a ``varchar`` column, are decoded with the dialect's JSON
+    deserializer.
+    """
+
+    @override
+    def result_processor(
+        self, dialect: Dialect, coltype: object
+    ) -> _ResultProcessorType[Any] | None:
+        """Return a processor decoding JSON text of Athena types other than ``json``.
+
+        Args:
+            dialect: The dialect fetching the value.
+            coltype: The Athena type name from the cursor description.
+
+        Returns:
+            The processor, or None for the Athena ``json`` type.
+        """
+        if coltype == "json":
+            return None
+        processor: _ResultProcessorType[Any] | None = super().result_processor(dialect, coltype)
+        return processor
 
 
 class Tinyint(sqltypes.Integer):

@@ -8,13 +8,21 @@ from decimal import Decimal
 
 import pytest
 
+from pyathena.converter import _to_default
 from pyathena.error import DatabaseError, ProgrammingError
+from pyathena.s3fs.converter import DefaultS3FSTypeConverter
 from pyathena.s3fs.cursor import S3FSCursor
 from pyathena.s3fs.reader import AthenaCSVReader, DefaultCSVReader
 from pyathena.s3fs.result_set import AthenaS3FSResultSet
 from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import cached_file_systems
+
+
+def _s3fs_converter_with_json_text():
+    converter = DefaultS3FSTypeConverter()
+    converter.set("json", _to_default)
+    return converter
 
 
 class TestS3FSCursor:
@@ -528,3 +536,26 @@ class TestS3FSCursor:
     def test_fetch_all_rows(self, s3fs_cursor):
         s3fs_cursor.execute("SELECT 1 AS col")
         assert s3fs_cursor.fetchall() == [(1,)]
+
+    @pytest.mark.parametrize(
+        "s3fs_cursor",
+        [
+            pytest.param({"converter": _s3fs_converter_with_json_text()}, id="default"),
+            pytest.param(
+                {
+                    "work_group": ENV.managed_work_group,
+                    "s3_staging_dir": "",
+                    "converter": _s3fs_converter_with_json_text(),
+                },
+                id="managed",
+                marks=pytest.mark.skipif(
+                    not ENV.managed_work_group,
+                    reason="AWS_ATHENA_MANAGED_WORKGROUP not set",
+                ),
+            ),
+        ],
+        indirect=["s3fs_cursor"],
+    )
+    def test_fetch_all_rows_custom_converter(self, s3fs_cursor):
+        s3fs_cursor.execute("SELECT 1 AS col, json_parse('{\"a\": 1}') AS col_json")
+        assert s3fs_cursor.fetchall() == [(1, '{"a":1}')]

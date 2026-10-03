@@ -18,6 +18,8 @@ from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig, override, parse_output_location, retry_api_call
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from pyathena.connection import Connection
 
 _logger = logging.getLogger(__name__)
@@ -678,6 +680,20 @@ class AthenaResultSet(CursorIterator):
             if meta.get("Name") != data.get("VarCharValue"):
                 return False
         return True
+
+    def _json_converters(
+        self, converters: dict[str, Callable[[str | None], Any | None]]
+    ) -> dict[str, Callable[[str | None], Any | None]]:
+        """Select the converters of the json columns.
+
+        Args:
+            converters: The converters keyed by column name.
+
+        Returns:
+            The converters of the columns whose Athena type is json.
+        """
+        description = self.description if self.description else []
+        return {d[0]: converters[d[0]] for d in description if d[1] == "json"}
 
     def _fetch_all_rows(
         self,
