@@ -1458,9 +1458,11 @@ class S3FileSystem(AbstractFileSystem):
     ) -> bytes:
         """Read the contents of an S3 object with GetObject.
 
-        ``start`` and ``end`` select bytes like a slice: they are clamped to
-        the object, and an empty range returns ``b""`` without a GetObject
-        request.
+        ``start`` and ``end`` select bytes like a slice of the object: an
+        empty range, or one that starts at or past the end of the object,
+        returns ``b""``, and an end past the object reads up to its end.
+        Non-negative offsets are sent to S3 as they are; a negative offset is
+        resolved against the size from :meth:`info`.
 
         Args:
             path: S3 path (s3://bucket/key) of the object.
@@ -1476,33 +1478,44 @@ class S3FileSystem(AbstractFileSystem):
             The bytes read from the object.
 
         Raises:
-            FileNotFoundError: If the path is not an object.
+            FileNotFoundError: If the key does not exist.
         """
         bucket, key, path_version_id = self.parse_path(path)
         version_id = kwargs.pop("version_id", None)
         if path_version_id:
             version_id = path_version_id
-        if start is not None or end is not None:
+        if (start is not None and start < 0) or (end is not None and end < 0):
             info = self.info(path, version_id=version_id)
             if info.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
-                # There is no object to read, as GetObject reports without
-                # a range.
+                # There is no object to read, as GetObject reports for the
+                # other ranges.
                 raise FileNotFoundError(path)
-            # S3 would return the whole object for an empty range.
-            range_start, range_end, _ = slice(start, end).indices(info.get("size", 0))
-            if range_start >= range_end:
-                return b""
-            ranges = (range_start, range_end)
-        else:
-            ranges = None
+            start, end, _ = slice(start, end).indices(info.get("size", 0))
 
-        return self._get_object(
-            bucket=bucket,
-            key=cast(str, key),
-            ranges=ranges,
-            version_id=version_id,
-            **kwargs,
-        )[1]
+        ranges: tuple[int, int | None] | None = None
+        if start is not None or end is not None:
+            start = start or 0
+            if end is not None and start >= end:
+                # S3 would return the whole object for an empty range.
+                return b""
+            ranges = (start, end)
+        try:
+            return self._get_object(
+                bucket=bucket,
+                key=cast(str, key),
+                ranges=ranges,
+                version_id=version_id,
+                **kwargs,
+            )[1]
+        except OSError as e:
+            if (
+                ranges
+                and isinstance(e.__cause__, botocore.exceptions.ClientError)
+                and S3ClientError(e.__cause__).code == "InvalidRange"
+            ):
+                # The range starts at or past the end of the object.
+                return b""
+            raise
 
     def put_file(self, lpath: str, rpath: str, callback=_DEFAULT_CALLBACK, **kwargs):
         """Upload a local file to S3.
@@ -1568,7 +1581,9 @@ class S3FileSystem(AbstractFileSystem):
         if os.path.isdir(lpath):
             return
 
-        with open(lpath, "wb") as local, self.open(rpath, "rb", **kwargs) as remote:
+        # The remote file is opened first so that no local file is left
+        # behind when it does not exist.
+        with self.open(rpath, "rb", **kwargs) as remote, open(lpath, "wb") as local:
             callback.set_size(remote.size)
             while data := remote.read(remote.blocksize):
                 local.write(data)
@@ -2080,7 +2095,7 @@ class S3FileSystem(AbstractFileSystem):
         self,
         bucket: str,
         key: str,
-        ranges: tuple[int, int] | None = None,
+        ranges: tuple[int, int | None] | None = None,
         version_id: str | None = None,
         **kwargs,
     ) -> tuple[int, bytes]:
@@ -2090,7 +2105,8 @@ class S3FileSystem(AbstractFileSystem):
             bucket: The bucket name.
             key: The object key.
             ranges: The ``(start, end)`` byte range to read, with an exclusive
-                end, or ``None`` to read the whole object.
+                end or ``None`` to read to the end of the object, or ``None``
+                to read the whole object.
             version_id: The version ID to read, or ``None`` for the latest.
             **kwargs: Additional parameters passed to the GetObject API.
 
@@ -2104,7 +2120,7 @@ class S3FileSystem(AbstractFileSystem):
         """
         request = {"Bucket": bucket, "Key": key}
         if ranges:
-            if ranges[0] >= ranges[1]:
+            if ranges[1] is not None and ranges[0] >= ranges[1]:
                 raise ValueError(f"Invalid empty range: {ranges}.")
             range_ = S3File._format_ranges(ranges)
             request.update({"Range": range_})
@@ -2291,6 +2307,8 @@ class S3File(AbstractBufferedFile):
             **kwargs: Accepted for compatibility; not used.
 
         Raises:
+            FileNotFoundError: If no object exists at the path when reading,
+                including when the path is a prefix.
             ValueError: If the path has no key, the version IDs do not match,
                 a version is given for writing, or the block size is not
                 between ``MULTIPART_UPLOAD_MIN_PART_SIZE`` and
@@ -2342,6 +2360,9 @@ class S3File(AbstractBufferedFile):
             # Looked up before the base class initializer, which would
             # otherwise take the size from the latest version of the object.
             info = fs.info(path, version_id=self.version_id)
+            if info.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
+                # A prefix has no object to read.
+                raise FileNotFoundError(path)
             if fs.version_aware and not self.version_id:
                 # Pin the version observed at open time so that reads are
                 # consistent even if the object is overwritten. info() heads
@@ -2667,8 +2688,18 @@ class S3File(AbstractBufferedFile):
         return object_
 
     @staticmethod
-    def _format_ranges(ranges: tuple[int, int]):
-        return f"bytes={ranges[0]}-{ranges[1] - 1}"
+    def _format_ranges(ranges: tuple[int, int | None]) -> str:
+        """Format a byte range as the value of an HTTP ``Range`` header.
+
+        Args:
+            ranges: The ``(start, end)`` byte range, with an exclusive end or
+                ``None`` for the end of the object.
+
+        Returns:
+            The range, such as ``bytes=0-99`` or ``bytes=100-``.
+        """
+        start, end = ranges
+        return f"bytes={start}-" if end is None else f"bytes={start}-{end - 1}"
 
     @staticmethod
     def _get_ranges(

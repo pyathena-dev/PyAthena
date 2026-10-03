@@ -18,6 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import botocore.exceptions
 import pytest
 from fsspec import Callback
 
@@ -639,10 +640,10 @@ class TestS3FileSystem:
             fs._client.get_object, Bucket="bucket", Key="key", VersionId=expected
         )
 
-        # A range is resolved against the size of the same version.
+        # A negative offset is resolved against the size of the same version.
         fs._call.reset_mock()
         fs._call.return_value = {"Body": io.BytesIO(b"ta")}
-        assert fs.cat_file(path, start=2, end=4, version_id="v1") == b"ta"
+        assert fs.cat_file(path, start=-8, end=-6, version_id="v1") == b"ta"
         fs.info.assert_called_once_with(path, version_id=expected)
         fs._call.assert_called_once_with(
             fs._client.get_object,
@@ -653,37 +654,45 @@ class TestS3FileSystem:
         )
 
     def _make_object_fs(self, data):
-        # A filesystem holding one object at s3://bucket/key that answers
-        # GetObject like S3, failing on a range that S3 would not answer with
-        # exactly the requested bytes: S3 returns the whole object when the
-        # last byte precedes the first one, and InvalidRange when the first
-        # byte is past the end. The requested ranges are recorded.
+        # A filesystem holding one object at s3://bucket/key whose client
+        # answers GetObject like S3: InvalidRange when the range starts at
+        # or past the end of the object, and a failure on a range that S3
+        # would answer with the whole object (last byte before the first).
+        # info() reports the given size, and the requested ranges are
+        # recorded.
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
+        fs._call = functools.partial(S3FileSystem._call, fs)
         fs.info = mock.MagicMock(return_value=self._file_object("key"))
         fs.info.return_value.size = len(data)
         ranges = []
 
-        def call(method, **request):
-            assert method is fs._client.get_object
+        def get_object(**request):
             range_ = request.get("Range")
             ranges.append(range_)
             if range_ is None:
                 return {"Body": io.BytesIO(data)}
-            match = re.fullmatch(r"bytes=(\d+)-(\d+)", range_)
+            match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_)
             assert match, range_
-            first, last = int(match[1]), int(match[2])
-            assert first <= last, range_
-            assert first < len(data), range_
+            first = int(match[1])
+            last = int(match[2]) if match[2] else len(data) - 1
+            assert not match[2] or first <= last, range_
+            if first >= len(data):
+                raise botocore.exceptions.ClientError(
+                    {
+                        "Error": {"Code": "InvalidRange", "Message": "Not satisfiable"},
+                        "ResponseMetadata": {"HTTPStatusCode": 416},
+                    },
+                    "GetObject",
+                )
             return {"Body": io.BytesIO(data[first : last + 1])}
 
-        fs._call.side_effect = call
+        fs._client.get_object.side_effect = get_object
         return fs, ranges
 
     @pytest.mark.parametrize(
         ("start", "end"),
         [
-            (None, None),
             (None, 5),
             (5, None),
             (1, -1),
@@ -698,6 +707,7 @@ class TestS3FileSystem:
             (12, None),
             (12, 20),
             (None, -20),
+            (-3, -5),
         ],
     )
     def test_cat_file_range(self, start, end):
@@ -706,10 +716,42 @@ class TestS3FileSystem:
 
         # The range selects bytes like a slice.
         assert fs.cat_file("s3://bucket/key", start=start, end=end) == data[start:end]
-        if not data[start:end]:
+        # Only a negative offset needs the size of the object.
+        assert fs.info.called == ((start or 0) < 0 or (end or 0) < 0)
+        if start is not None and end is not None and 0 <= start >= end >= 0:
             assert ranges == []
 
-    @pytest.mark.parametrize(("start", "end"), [(0, 5), (5, None)])
+    def test_cat_file_range_stale_size(self):
+        fs, ranges = self._make_object_fs(b"0123456789abcdefghij")
+        # A cached entry from before the object grew.
+        fs.info.return_value.size = 10
+
+        assert fs.cat_file("s3://bucket/key", start=10, end=20) == b"abcdefghij"
+        assert fs.cat_file("s3://bucket/key", start=15) == b"fghij"
+        assert ranges == ["bytes=10-19", "bytes=15-"]
+
+    def test_cat_file_range_errors(self):
+        fs = self._make_fs()
+        fs._call = functools.partial(S3FileSystem._call, fs)
+        fs._client.get_object.side_effect = botocore.exceptions.ClientError(
+            {"Error": {"Code": "NoSuchKey", "Message": "No such key"}}, "GetObject"
+        )
+
+        # Errors other than InvalidRange are raised.
+        with pytest.raises(FileNotFoundError):
+            fs.cat_file("s3://bucket/dir", start=0, end=5)
+        fs._client.get_object.side_effect = botocore.exceptions.ClientError(
+            {
+                "Error": {"Code": "InvalidRange", "Message": "Not satisfiable"},
+                "ResponseMetadata": {"HTTPStatusCode": 416},
+            },
+            "GetObject",
+        )
+        # InvalidRange without a range is not taken as an empty read.
+        with pytest.raises(OSError, match="Not satisfiable"):
+            fs.cat_file("s3://bucket/key")
+
+    @pytest.mark.parametrize(("start", "end"), [(-5, None), (0, -1)])
     def test_cat_file_range_directory(self, start, end):
         fs = self._make_fs()
         fs.info = mock.MagicMock(return_value=S3FileSystem._directory_object("bucket", "dir"))
@@ -719,15 +761,25 @@ class TestS3FileSystem:
             fs.cat_file("s3://bucket/dir", start=start, end=end)
         fs._call.assert_not_called()
 
+    def test_get_file_directory(self, tmp_path):
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs.info = mock.MagicMock(return_value=S3FileSystem._directory_object("bucket", "dir"))
+
+        with pytest.raises(FileNotFoundError):
+            fs.get_file("s3://bucket/dir", str(tmp_path / "dir"))
+        assert list(tmp_path.iterdir()) == []
+
     def test_cat_ranges_range(self):
         fs, ranges = self._make_object_fs(b"0123456789")
 
-        assert fs.cat_ranges(["s3://bucket/key"] * 3, [5, 0, -100], [5, 3, 5]) == [
+        assert fs.cat_ranges(["s3://bucket/key"] * 4, [5, 0, -100, 12], [5, 3, 5, 20]) == [
             b"",
             b"012",
             b"01234",
+            b"",
         ]
-        assert sorted(ranges) == ["bytes=0-2", "bytes=0-4"]
+        assert sorted(ranges) == ["bytes=0-2", "bytes=0-4", "bytes=12-19"]
 
     def test_get_object_empty_range(self):
         fs = self._make_fs()
@@ -755,6 +807,16 @@ class TestS3FileSystem:
             assert f.read(offset) == data[:offset]
             assert f.read(size) == data[offset:]
             assert f.read(size) == b""
+
+    @pytest.mark.parametrize("cache_type", ["bytes", "all", "first"])
+    def test_open_directory(self, cache_type):
+        fs = self._make_fs()
+        fs.info = mock.MagicMock(return_value=S3FileSystem._directory_object("bucket", "dir"))
+
+        # A prefix is not read as an empty object.
+        with pytest.raises(FileNotFoundError):
+            fs.open("s3://bucket/dir", "rb", cache_type=cache_type)
+        fs._call.assert_not_called()
 
     def test_finish_multipart_upload(self):
         fs = self._make_fs()
@@ -2527,6 +2589,7 @@ class TestS3File:
 
     def test_format_ranges(self):
         assert S3File._format_ranges((0, 100)) == "bytes=0-99"
+        assert S3File._format_ranges((100, None)) == "bytes=100-"
 
     @pytest.mark.parametrize("autocommit", [True, False])
     def test_upload_chunk_small_file(self, autocommit):
