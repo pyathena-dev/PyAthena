@@ -260,9 +260,12 @@ class AthenaPolarsResultSet(AthenaResultSet):
         # Note: _as_polars() may update _metadata for unload queries, so the converters
         # and column names must be read AFTER it.
         self._df: pl.DataFrame | None = None
+        # Converters for the rows of self._df. GetQueryResults values are already converted.
+        self._df_converters: dict[str, Callable[[str | None], Any | None]] = {}
         if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
             if self._chunksize is None:
                 self._df = self._as_polars()
+                self._df_converters = self.converters
             else:
                 self._df_iter = self._create_dataframe_iterator()
         elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
@@ -270,10 +273,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
         else:
             self._df = pl.DataFrame()
         if self._df is not None:
-            # A clone keeps changes to the DataFrame from as_polars()
+            # A clone keeps assignments to the DataFrame from as_polars()
             # out of the rows that the fetch methods return.
             self._df_iter = PolarsDataFrameIterator(
-                self._df.clone(), self.converters, self._get_column_names()
+                self._df.clone(), self._df_converters, self._get_column_names()
             )
 
         # Cache column names for efficient access in fetchone()
@@ -698,7 +701,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             ...     process(df)  # Single DataFrame with all data
         """
         if self._df is not None:
-            return PolarsDataFrameIterator(self._df, self.converters, self._get_column_names())
+            return PolarsDataFrameIterator(self._df, self._df_converters, self._get_column_names())
         return self._df_iter
 
     @override
@@ -707,6 +710,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         import polars as pl
 
         super().close()
+        self._df_iter.close()
         self._df = pl.DataFrame()
         self._df_iter = PolarsDataFrameIterator(self._df, {}, [])
         self._iterrows = iter([])

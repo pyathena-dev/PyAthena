@@ -355,12 +355,14 @@ class AthenaPandasResultSet(AthenaResultSet):
             else:
                 self._df_iter = PandasDataFrameIterator(result, trunc_date, self._csv_stream)
         elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
-            self._df = self._trunc_date(self._as_pandas_from_api())
+            # GetQueryResults values are already converted, so time columns hold times.
+            self._df = self._as_pandas_from_api()
         else:
             self._df = pd.DataFrame()
         if self._df is not None:
-            # A shallow copy keeps changes to the DataFrame from as_pandas()
-            # out of the rows that the fetch methods return.
+            # A shallow copy keeps assignments to the DataFrame from as_pandas()
+            # out of the rows that the fetch methods return. Mutable values in its
+            # cells, such as lists from JSON columns, are still shared.
             self._df_iter = PandasDataFrameIterator(self._df.copy(deep=False), _no_trunc_date)
         self._iterrows = self._df_iter.iterrows()
 

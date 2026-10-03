@@ -489,6 +489,18 @@ class TestPolarsCursor:
         assert polars_cursor.as_polars() is df
         assert polars_cursor.fetchall() == [(2,), (3,)]
 
+    @pytest.mark.parametrize(
+        "polars_cursor", [{"cursor_kwargs": {"chunksize": 5}}], indirect=["polars_cursor"]
+    )
+    def test_close_stops_chunks(self, polars_cursor):
+        """Test that closing the result set closes the chunk iterator it returned."""
+        polars_cursor.execute("SELECT * FROM many_rows LIMIT 15")
+        result_set = polars_cursor.result_set
+        chunks = result_set.iter_chunks()
+        assert next(chunks).height == 5
+        result_set.close()
+        assert list(chunks) == []
+
     def test_iter_chunks_many_rows(self):
         """Test chunked iteration with many rows."""
         with contextlib.closing(connect(schema_name=ENV.schema)) as conn:
@@ -706,5 +718,5 @@ class TestPolarsCursor:
         indirect=["polars_cursor"],
     )
     def test_fetch_all_rows(self, polars_cursor):
-        polars_cursor.execute("SELECT 1 AS col")
-        assert polars_cursor.fetchall() == [(1,)]
+        polars_cursor.execute("SELECT 1 AS col, CAST('12:34:56' AS TIME) AS col_time")
+        assert polars_cursor.fetchall() == [(1, datetime(2017, 1, 1, 12, 34, 56).time())]
