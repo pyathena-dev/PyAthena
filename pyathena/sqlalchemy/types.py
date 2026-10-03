@@ -51,10 +51,12 @@ class AthenaBinary(types.LargeBinary):
 class AthenaJSON(types.JSON):
     """SQLAlchemy JSON type that keeps the values PyAthena has decoded.
 
-    PyAthena's converters decode results of the Athena ``json`` type, so this
-    type returns them unchanged, and a JSON string scalar stays a ``str``.
-    Results of other Athena types, such as JSON text in a ``varchar`` column,
-    are decoded with the dialect's JSON deserializer.
+    PyAthena's default converters decode results of the Athena ``json`` type,
+    so this type returns them unchanged, and a JSON string scalar stays a
+    ``str``. With a custom converter that does not decode ``json`` results,
+    this type returns their text. Results of other Athena types, such as JSON
+    text in a ``varchar`` column, are decoded with the dialect's JSON
+    deserializer.
     """
 
     @override

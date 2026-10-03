@@ -1365,8 +1365,9 @@ events = Table('events', metadata,
 
 #### Querying JSON data
 
-PyAthena's converters decode results of Athena's `json` type, and the `JSON` type returns those values unchanged.
-A JSON object becomes a `dict`, an array a `list`, and a string scalar a `str`:
+PyAthena's default converters decode results of Athena's `json` type, and the `JSON` type returns those values unchanged.
+A JSON object becomes a `dict`, an array a `list`, and a string scalar a `str`.
+With a custom converter that does not decode `json` results, the `JSON` type returns their text.
 
 ```python
 from sqlalchemy import select, literal_column
