@@ -123,7 +123,7 @@ class AioS3FileSystem(AsyncFileSystem):
             allow_bucket_creation=allow_bucket_creation,
             allow_bucket_deletion=allow_bucket_deletion,
             version_aware=version_aware,
-            # fsspec caches this instance itself when caching is wanted.
+            # fsspec caches the AioS3FileSystem itself when caching is wanted.
             skip_instance_cache=True,
             **kwargs,
         )
