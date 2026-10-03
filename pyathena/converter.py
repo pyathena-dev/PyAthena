@@ -119,7 +119,13 @@ def _to_binary(varchar_value: str | None) -> bytes | None:
 
 
 def _to_json(varchar_value: str | None) -> Any | None:
-    """Convert an Athena JSON value to the decoded Python value.
+    if varchar_value is None:
+        return None
+    return json.loads(varchar_value)
+
+
+def _csv_to_json(varchar_value: str | None) -> Any | None:
+    """Convert an Athena JSON value read from a CSV result file.
 
     Args:
         varchar_value: The value as JSON text, or None. An empty string, which
