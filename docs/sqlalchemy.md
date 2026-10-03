@@ -1367,7 +1367,7 @@ events = Table('events', metadata,
 
 PyAthena's default converters decode results of Athena's `json` type, and the `JSON` type returns those values unchanged.
 A JSON object becomes a `dict`, an array a `list`, and a string scalar a `str`.
-With a custom converter that does not decode `json` results, the `JSON` type returns their text.
+If the cursor returns the text of a `json` result instead, for example through a custom converter that does not decode it, the `JSON` type returns that text unchanged.
 
 ```python
 from sqlalchemy import select, literal_column

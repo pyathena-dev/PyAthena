@@ -53,8 +53,9 @@ class AthenaJSON(types.JSON):
 
     PyAthena's default converters decode results of the Athena ``json`` type,
     so this type returns them unchanged, and a JSON string scalar stays a
-    ``str``. With a custom converter that does not decode ``json`` results,
-    this type returns their text. Results of other Athena types, such as JSON
+    ``str``. If the cursor returns the text of a ``json`` result instead, for
+    example through a custom converter that does not decode it, this type
+    returns that text unchanged. Results of other Athena types, such as JSON
     text in a ``varchar`` column, are decoded with the dialect's JSON
     deserializer.
     """
