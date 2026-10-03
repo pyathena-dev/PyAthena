@@ -923,7 +923,8 @@ class S3FileSystem(AbstractFileSystem):
             if withdirs:
                 files = [self._directory_object(bucket, key), *files]
         elif key:
-            # As in fsspec, the path itself is returned if it is an object.
+            # As in fsspec, the path itself is returned if it is an object,
+            # or with withdirs if it is a directory.
             try:
                 files = [self.info(path, refresh=refresh)]
             except FileNotFoundError:
@@ -983,8 +984,8 @@ class S3FileSystem(AbstractFileSystem):
             **kwargs: Additional arguments including:
                 prefix: Key prefix, relative to the path, to filter the listed keys
                     by. Each slash in the prefix counts as one level of maxdepth.
-                    With withdirs, only the directories whose paths relative to the
-                    path start with the prefix are included.
+                    With withdirs, the directories above the prefix, such as
+                    ``sub`` for ``sub/deep/``, are not included.
                 refresh: If True, bypass the cache and list from S3.
 
         Returns:
