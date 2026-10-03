@@ -85,9 +85,13 @@ class TestAthenaPolarsResultSet:
     def test_csv_read_kwargs_replace_defaults(self, tmp_path, reader):
         """Read arguments given to execute() replace the ones the result set chooses."""
         path = tmp_path / "result.csv"
-        path.write_text("a;b\n1;x\n2;y\n")
+        path.write_text("1;x\n2;y\n")
         result_set = _chunked_result_set()
-        result_set._kwargs = {"separator": ";", "schema_overrides": {"a": pl.Utf8}}
+        result_set._kwargs = {
+            "separator": ";",
+            "has_header": False,
+            "schema_overrides": {"column_1": pl.Utf8},
+        }
         with (
             patch.object(
                 AthenaPolarsResultSet,
@@ -99,7 +103,7 @@ class TestAthenaPolarsResultSet:
                 AthenaPolarsResultSet,
                 "dtypes",
                 new_callable=PropertyMock,
-                return_value={"a;b": pl.Utf8},
+                return_value={"1;x": pl.Int64},
             ),
             patch.object(
                 AthenaPolarsResultSet,
@@ -117,7 +121,7 @@ class TestAthenaPolarsResultSet:
         ):
             result = getattr(result_set, reader)()
             df = result if isinstance(result, pl.DataFrame) else pl.concat(list(result))
-        assert df.to_dict(as_series=False) == {"a": ["1", "2"], "b": ["x", "y"]}
+        assert df.to_dict(as_series=False) == {"column_1": ["1", "2"], "column_2": ["x", "y"]}
 
     @pytest.mark.parametrize(
         ("reader", "function"),
@@ -130,7 +134,7 @@ class TestAthenaPolarsResultSet:
         ],
     )
     def test_storage_options_replace_defaults(self, reader, function):
-        """storage_options given to execute() replace PyAthena's as a whole."""
+        """storage_options given to execute() replace PyAthena's without computing them."""
         result_set = _chunked_result_set()
         result_set._unload_location = "s3://bucket/unload/"
         result_set._kwargs = {"storage_options": {"anon": True}}
@@ -148,13 +152,13 @@ class TestAthenaPolarsResultSet:
                 AthenaPolarsResultSet,
                 "_csv_storage_options",
                 new_callable=PropertyMock,
-                return_value={"connection": "pyathena"},
+                side_effect=AssertionError("replaced storage options were computed"),
             ),
             patch.object(
                 AthenaPolarsResultSet,
                 "_parquet_storage_options",
                 new_callable=PropertyMock,
-                return_value={"aws_region": "pyathena"},
+                side_effect=AssertionError("replaced storage options were computed"),
             ),
             patch.object(AthenaPolarsResultSet, "_is_csv_readable", return_value=True),
             patch.object(AthenaPolarsResultSet, "_prepare_parquet_location", return_value=True),
