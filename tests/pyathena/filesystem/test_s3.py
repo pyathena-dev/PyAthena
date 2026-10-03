@@ -220,20 +220,28 @@ class TestS3FileSystem:
         fs.invalidate_cache("s3://bucket/a/b/c.txt")
         assert list(fs.dircache) == kept
 
-    def test_invalidate_cache_version_drops_object_path(self):
+    @pytest.mark.parametrize(
+        ("path", "cache_key"),
+        [
+            ("s3://bucket/a/c.txt?versionId=v1", "bucket/a/c.txt?versionId=v1"),
+            # A directory marker object keeps the trailing slash before the query.
+            ("s3://bucket/a/c.txt/?versionId=v1", "bucket/a/c.txt/?versionId=v1"),
+        ],
+    )
+    def test_invalidate_cache_version_drops_object_path(self, path, cache_key):
         fs = self._make_fs()
         invalidated = [
-            "bucket/a/c.txt?versionId=v1",
+            cache_key,
             "bucket/a/c.txt",
             ("bucket/a", "/"),
             ("bucket", "/"),
         ]
         # Other versions of the object do not change.
         kept = ["bucket/a/c.txt?versionId=v2"]
-        for cache_key in invalidated + kept:
-            fs.dircache[cache_key] = []
+        for key in invalidated + kept:
+            fs.dircache[key] = []
 
-        fs.invalidate_cache("s3://bucket/a/c.txt?versionId=v1")
+        fs.invalidate_cache(path)
         assert list(fs.dircache) == kept
 
     @pytest.mark.parametrize(

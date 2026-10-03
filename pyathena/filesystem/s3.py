@@ -1918,11 +1918,10 @@ class S3FileSystem(AbstractFileSystem):
         if path is None:
             self.dircache.clear()
         else:
-            stripped = self._strip_protocol(path)
             # _head_object caches a version-qualified path under its own name.
-            self.dircache.pop(stripped, None)
+            self.dircache.pop(self._strip_protocol(path), None)
             # Keys cannot contain "?", so it starts the versionId query.
-            path = stripped.split("?", 1)[0]
+            path = self._strip_protocol(path.split("?", 1)[0])
             while path:
                 self.dircache.pop(path, None)
                 # _ls_dirs caches listings under (path, delimiter).
