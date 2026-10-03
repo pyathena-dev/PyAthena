@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from itertools import product
 from typing import TYPE_CHECKING, Any, cast
 
@@ -74,6 +74,12 @@ if TYPE_CHECKING:
 # storage, so their CREATE TABLE statements must not include a LOCATION clause.
 # https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-integrations-query-athena.html
 S3_TABLES_CATALOG_PREFIX = "s3tablescatalog/"
+
+# A ``'key' = 'value'`` pair in TBLPROPERTIES given as a string. A backslash
+# escapes the next character in a literal.
+_TABLE_PROPERTY_PATTERN = re.compile(
+    r"'(?P<key>(?:[^'\\]|\\.)*)'\s*=\s*'(?P<value>(?:[^'\\]|\\.)*)'", re.DOTALL
+)
 
 
 class AthenaTypeCompiler(GenericTypeCompiler):
@@ -1334,12 +1340,23 @@ class AthenaDDLCompiler(DDLCompiler):
             connect_opts: The dialect connection options.
 
         Returns:
-            True if the rendered TBLPROPERTIES set ``table_type`` to Iceberg.
+            True if the ``table_type`` property is ``ICEBERG``, compared
+            case-insensitively. Other properties do not affect the result.
         """
-        table_properties = self._get_table_properties_specification(
-            dialect_opts, connect_opts
-        ).lower()
-        return ("table_type" in table_properties) and ("iceberg" in table_properties)
+        properties = self._get_table_properties(dialect_opts, connect_opts)
+        if not properties:
+            return False
+        if isinstance(properties, dict):
+            items: Iterable[tuple[Any, Any]] = properties.items()
+        else:
+            items = (
+                (m.group("key"), m.group("value"))
+                for m in _TABLE_PROPERTY_PATTERN.finditer(properties)
+            )
+        return any(
+            str(key).lower() == "table_type" and str(value).lower() == "iceberg"
+            for key, value in items
+        )
 
     def _validate_s3_tables_create_table(
         self, dialect_opts: _DialectArgDict, connect_opts: Mapping[str, Any]
