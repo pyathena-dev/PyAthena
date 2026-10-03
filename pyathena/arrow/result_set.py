@@ -308,7 +308,8 @@ class AthenaArrowResultSet(AthenaResultSet):
             parse_opts = csv.ParseOptions(
                 delimiter=",",
                 quote_char='"',
-                ignore_empty_lines=not binary_columns,
+                # Athena writes a single-column row with a NULL value as an empty line.
+                ignore_empty_lines=False,
                 double_quote=True,
                 escape_char=False,
             )
