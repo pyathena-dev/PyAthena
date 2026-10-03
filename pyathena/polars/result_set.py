@@ -262,7 +262,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         # Note: _as_polars() and _create_dataframe_iterator() update _metadata for unload
         # queries, so the converters and column names must be read AFTER them.
         self._df: pl.DataFrame | None = None
-        # Converters for the rows of self._df. GetQueryResults values are already converted.
+        # Converters for the rows of self._df.
         self._df_converters: dict[str, Callable[[str | None], Any | None]] = {}
         if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
             if self._chunksize is None:
@@ -272,6 +272,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 self._df_iter = self._create_dataframe_iterator()
         elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
             self._df = self._as_polars_from_api()
+            # GetQueryResults values are already converted, except json values kept as text.
+            self._df_converters = self._json_converters(self.converters)
         else:
             self._df = pl.DataFrame()
         if self._df is not None:
@@ -539,11 +541,12 @@ class AthenaPolarsResultSet(AthenaResultSet):
 
         Args:
             converter: Type converter for result values. Defaults to
-                ``DefaultTypeConverter`` if not specified.
+                ``DefaultTypeConverter`` with json values kept as text, as in
+                the CSV result file.
         """
         import polars as pl
 
-        rows = self._fetch_all_rows(converter)
+        rows = self._fetch_all_rows(converter or self._json_text_converter())
         if not rows:
             return pl.DataFrame()
         description = self.description if self.description else []

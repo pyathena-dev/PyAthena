@@ -12,7 +12,7 @@ from typing import (
 
 from pyathena import OperationalError
 from pyathena.arrow.util import to_column_info
-from pyathena.converter import Converter
+from pyathena.converter import Converter, _to_default
 from pyathena.error import ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet
@@ -146,8 +146,8 @@ class AthenaArrowResultSet(AthenaResultSet):
             import pyarrow as pa
 
             self._table = pa.Table.from_pydict({})
-        # The fetch methods convert only the values read from a result file.
-        # GetQueryResults values are already converted.
+        # The fetch methods convert the values read from a result file. GetQueryResults
+        # values are already converted, except json values, which stay text.
         self._convert_rows = bool(self.output_location)
         self._batches = iter(self._table.to_batches(arraysize))
 
@@ -254,11 +254,16 @@ class AthenaArrowResultSet(AthenaResultSet):
             return
         else:
             dict_rows = rows.to_pydict()
-            if self._convert_rows:
-                converters = self.converters
+            converters = (
+                self.converters if self._convert_rows else self._json_converters(self.converters)
+            )
+            if converters:
                 column_names = dict_rows.keys()
                 processed_rows = [
-                    tuple(converters[k](v) for k, v in zip(column_names, row, strict=False))
+                    tuple(
+                        converters.get(k, _to_default)(v)
+                        for k, v in zip(column_names, row, strict=False)
+                    )
                     for row in zip(*dict_rows.values(), strict=False)
                 ]
             else:
@@ -381,11 +386,12 @@ class AthenaArrowResultSet(AthenaResultSet):
 
         Args:
             converter: Type converter for result values. Defaults to
-                ``DefaultTypeConverter`` if not specified.
+                ``DefaultTypeConverter`` with json values kept as text, as in
+                the CSV result file.
         """
         import pyarrow as pa
 
-        rows = self._fetch_all_rows(converter)
+        rows = self._fetch_all_rows(converter or self._json_text_converter())
         if not rows:
             return pa.Table.from_pydict({})
         description = self.description if self.description else []

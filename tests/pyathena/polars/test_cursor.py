@@ -754,8 +754,12 @@ class TestPolarsCursor:
         polars_cursor.execute(
             "SELECT 1 AS col, CAST('12:34:56' AS TIME) AS col_time, X'0001' AS col_binary, "
             "json_parse('{\"a\": 1}') AS col_json, CAST('[1, 2]' AS JSON) AS col_json_string, "
-            "CAST(NULL AS JSON) AS col_json_null"
+            "CAST(NULL AS JSON) AS col_json_null "
+            "UNION ALL SELECT 2, CAST('12:34:56' AS TIME), X'0001', json_parse('[1, \"x\"]'), "
+            "json_parse('\"s\"'), NULL ORDER BY col"
         )
         assert polars_cursor.fetchall() == [
-            (1, datetime(2017, 1, 1, 12, 34, 56).time(), b"\x00\x01", {"a": 1}, "[1, 2]", None)
+            (1, datetime(2017, 1, 1, 12, 34, 56).time(), b"\x00\x01", {"a": 1}, "[1, 2]", None),
+            (2, datetime(2017, 1, 1, 12, 34, 56).time(), b"\x00\x01", [1, "x"], "s", None),
         ]
+        assert polars_cursor.as_polars()["col_json"].dtype == pl.String
