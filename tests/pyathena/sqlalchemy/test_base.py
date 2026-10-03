@@ -891,67 +891,36 @@ class TestSQLAlchemyAthena:
         assert rows[0].number_of_rows == 1
         assert len(rows[0]) == 1
 
-    def test_json_type_with_cast(self, engine):
-        """Test JSON type support with CAST operation in SELECT query."""
+    def test_json_type(self, engine):
         engine, conn = engine
-        # Note: Athena JSON type support has limitations
-        # - JSON objects are supported
-        # - Direct CAST of JSON arrays is not supported
-        # - JSON is primarily used with DML operations, not DDL
-
-        # Test 1: Simple JSON object with type_coerce for proper type handling
-        result = conn.execute(
-            select(
-                type_coerce(
-                    literal_column('CAST(\'{"name": "test", "value": 123}\' AS JSON)'),
-                    types.JSON,
-                ).label("json_col")
-            )
-        ).fetchone()
-        assert result.json_col == {"name": "test", "value": 123}
-        assert isinstance(result.json_col, dict)
-
-        # Test 2: Nested JSON object with arrays inside
-        # (Arrays are supported as part of JSON objects, just not as top-level CAST)
-        nested_json_str = '{"user": {"id": 1, "name": "Alice"}, "scores": [95, 87, 92]}'
-        result = conn.execute(
-            select(
-                type_coerce(literal_column(f"CAST('{nested_json_str}' AS JSON)"), types.JSON).label(
-                    "nested_json"
-                )
-            )
-        ).fetchone()
-        assert result.nested_json == {
-            "user": {"id": 1, "name": "Alice"},
-            "scores": [95, 87, 92],
+        nested = '{"user": {"id": 1, "name": "Alice"}, "scores": [95, 87, 92]}'
+        scalars = '{"str": "value", "num": 42, "bool": true, "nil": null}'
+        columns = {
+            "obj": f"json_parse('{nested}')",
+            "arr": "json_parse('[1, 2, 3]')",
+            "scalars": f"json_parse('{scalars}')",
+            # Athena returns a cast of text as a JSON string scalar.
+            "cast_text": "CAST('{\"a\": 1}' AS JSON)",
+            "missing": "CAST(NULL AS JSON)",
+            # JSON text in a varchar column is decoded.
+            "text_obj": "'{\"a\": 1}'",
         }
-        assert result.nested_json["user"]["name"] == "Alice"
-        assert result.nested_json["scores"][0] == 95
-        assert isinstance(result.nested_json["scores"], list)
-
-        # Test 3: JSON with null value
         result = conn.execute(
             select(
-                type_coerce(literal_column("CAST('{\"key\": null}' AS JSON)"), types.JSON).label(
-                    "json_with_null"
+                *(
+                    type_coerce(literal_column(expr), types.JSON).label(name)
+                    for name, expr in columns.items()
                 )
             )
-        ).fetchone()
-        assert result.json_with_null == {"key": None}
-        assert result.json_with_null["key"] is None
-
-        # Test 4: JSON with various types
-        result = conn.execute(
-            select(
-                type_coerce(
-                    literal_column(
-                        'CAST(\'{"str": "value", "num": 42, "bool": true, "nil": null}\' AS JSON)'
-                    ),
-                    types.JSON,
-                ).label("json_types")
-            )
-        ).fetchone()
-        assert result.json_types == {"str": "value", "num": 42, "bool": True, "nil": None}
+        ).one()
+        assert result._asdict() == {
+            "obj": {"user": {"id": 1, "name": "Alice"}, "scores": [95, 87, 92]},
+            "arr": [1, 2, 3],
+            "scalars": {"str": "value", "num": 42, "bool": True, "nil": None},
+            "cast_text": '{"a": 1}',
+            "missing": None,
+            "text_obj": {"a": 1},
+        }
 
     def test_select_nested_struct_query(self, engine):
         """Test SELECT query with nested STRUCT (ROW) types (Issue #627)."""
