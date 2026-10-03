@@ -361,7 +361,6 @@ class AioS3FileSystem(AsyncFileSystem):
             self._sync_fs,
             path,
             mode,
-            version_id=None,
             max_workers=max_workers,
             executor=S3AioExecutor(loop=self._loop),
             block_size=block_size,

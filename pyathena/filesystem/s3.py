@@ -1420,14 +1420,19 @@ class S3FileSystem(AbstractFileSystem):
                 from the end of the object.
             end: Byte offset to stop reading at (exclusive). A negative value
                 counts from the end of the object.
-            **kwargs: Additional parameters passed to the GetObject API.
+            **kwargs: Additional parameters passed to the GetObject API,
+                except ``version_id``: the version ID to read when the path
+                has none.
 
         Returns:
             The bytes read from the object.
         """
-        bucket, key, version_id = self.parse_path(path)
+        bucket, key, path_version_id = self.parse_path(path)
+        version_id = kwargs.pop("version_id", None)
+        if path_version_id:
+            version_id = path_version_id
         if start is not None or end is not None:
-            size = self.info(path).get("size", 0)
+            size = self.info(path, version_id=version_id).get("size", 0)
             if start is None:
                 range_start = 0
             elif start < 0:
@@ -1998,7 +2003,6 @@ class S3FileSystem(AbstractFileSystem):
             self,
             path,
             mode,
-            version_id=None,
             max_workers=max_workers,
             executor=self._create_executor(max_workers=max_workers),
             block_size=block_size,
@@ -2184,7 +2188,8 @@ class S3File(AbstractBufferedFile):
             path: S3 path (s3://bucket/key) of the file.
             mode: The file mode, such as ``rb``, ``wb`` or ``ab``.
             version_id: The version ID to read. Must match the version ID in
-                the path if both are given.
+                the path if both are given. A version cannot be given, in
+                either form, for writing or appending.
             max_workers: The number of parallel workers for range reads and
                 part copies.
             executor: The executor for parallel operations. If None, a new
@@ -2203,22 +2208,13 @@ class S3File(AbstractBufferedFile):
 
         Raises:
             ValueError: If the path has no key, the version IDs do not match,
-                or the block size is too small for writing.
+                a version is given for writing, or the block size is too small
+                for writing.
         """
         self.max_workers = max_workers
         self._executor: S3Executor = executor or S3ThreadPoolExecutor(max_workers=max_workers)
         self.s3_additional_kwargs = s3_additional_kwargs if s3_additional_kwargs else {}
 
-        super().__init__(
-            fs=fs,
-            path=path,
-            mode=mode,
-            block_size=block_size,
-            autocommit=autocommit,
-            cache_type=cache_type,
-            cache_options=cache_options,
-            size=size,
-        )
         bucket, key, path_version_id = S3FileSystem.parse_path(path)
         self.bucket = bucket
         if not key:
@@ -2235,16 +2231,19 @@ class S3File(AbstractBufferedFile):
             self.version_id = path_version_id
         else:
             self.version_id = version_id
-        if "r" not in mode and block_size < self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE:
-            # When writing occurs, the block size should not be smaller
-            # than the minimum size of a part in a multipart upload.
-            raise ValueError(f"Block size must be >= {self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE}MB.")
+        if self.version_id and "r" not in mode:
+            raise ValueError("Cannot write to the file with the version specified.")
+        if self.version_id and not path_version_id:
+            # Carry the version in the path, as with the ?versionId= suffix,
+            # so that a reopened (e.g., unpickled) file reads the same version.
+            path = f"{path}?versionId={self.version_id}"
 
-        self.append_block = False
-        self._details: S3Object | dict[str, Any]
+        self._details: S3Object | dict[str, Any] = {}
         if "r" in mode:
-            info = self.fs.info(self.path, version_id=self.version_id)
-            if self.fs.version_aware and not self.version_id:
+            # Looked up before the base class initializer, which would
+            # otherwise take the size from the latest version of the object.
+            info = fs.info(path, version_id=self.version_id)
+            if fs.version_aware and not self.version_id:
                 # Pin the version observed at open time so that reads are
                 # consistent even if the object is overwritten. info() heads
                 # the object when the cached entry carries no version.
@@ -2252,7 +2251,26 @@ class S3File(AbstractBufferedFile):
             if etag := info.get("etag"):
                 self.s3_additional_kwargs.update({"IfMatch": etag})
             self._details = info
-        elif "a" in mode and self.fs.exists(path):
+            if size is None:
+                size = info.get("size")
+
+        super().__init__(
+            fs=fs,
+            path=path,
+            mode=mode,
+            block_size=block_size,
+            autocommit=autocommit,
+            cache_type=cache_type,
+            cache_options=cache_options,
+            size=size,
+        )
+        if "r" not in mode and block_size < self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE:
+            # When writing occurs, the block size should not be smaller
+            # than the minimum size of a part in a multipart upload.
+            raise ValueError(f"Block size must be >= {self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE}MB.")
+
+        self.append_block = False
+        if "a" in mode and self.fs.exists(path):
             info = self.fs.info(self.path, version_id=self.version_id)
             loc = info.get("size", 0)
             if loc < self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE:
@@ -2265,8 +2283,6 @@ class S3File(AbstractBufferedFile):
             self.loc = loc
             self.s3_additional_kwargs.update(info.to_api_repr())
             self._details = info
-        else:
-            self._details = {}
 
         self.multipart_upload: S3MultipartUpload | None = None
         self.multipart_upload_parts: list[Future[S3MultipartUploadPart]] = []
