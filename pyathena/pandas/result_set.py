@@ -111,7 +111,7 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
 
         Args:
             reader: Either a TextFileReader (for chunked) or a single DataFrame.
-            trunc_date: Function to apply date truncation to each chunk.
+            trunc_date: Function to apply to each chunk, such as date truncation.
             csv_stream: Optional CSV stream owned and closed by this iterator.
         """
         from pandas import DataFrame
@@ -567,11 +567,23 @@ class AthenaPandasResultSet(AthenaResultSet):
         for i in range(df.shape[1]):
             if (values := _unwrap_csv_objects(df.iloc[:, i])) is not None:
                 df.isetitem(i, pd.Series(values, index=df.index, dtype=object))
-        if (
-            not isinstance(df.index, pd.MultiIndex)
-            and (values := _unwrap_csv_objects(df.index)) is not None
-        ):
-            df.index = pd.Index(values, dtype=object, name=df.index.name)
+        index = df.index
+        levels = (
+            [index.get_level_values(i) for i in range(index.nlevels)]
+            if isinstance(index, pd.MultiIndex)
+            else [index]
+        )
+        unwrapped = [_unwrap_csv_objects(level) for level in levels]
+        if any(values is not None for values in unwrapped):
+            levels = [
+                level if values is None else pd.Index(values, dtype=object, name=level.name)
+                for level, values in zip(levels, unwrapped, strict=True)
+            ]
+            df.index = (
+                pd.MultiIndex.from_arrays(levels, names=index.names)
+                if isinstance(index, pd.MultiIndex)
+                else levels[0]
+            )
         return self._trunc_date(df)
 
     def _get_csv_converter(self, type_: str) -> Callable[[str | None], Any]:

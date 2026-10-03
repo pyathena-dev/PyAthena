@@ -1678,6 +1678,12 @@ class TestPandasCursor:
             pytest.param({}, {}, id="default"),
             pytest.param({}, {"chunksize": 1}, id="chunked"),
             pytest.param({}, {"index_col": "col_json_index"}, id="index"),
+            pytest.param({}, {"index_col": ["col_int", "col_json_index"]}, id="multi_index"),
+            pytest.param(
+                {},
+                {"usecols": ["col_int", "col_bigint", "col_json", "col_binary", "col_json_index"]},
+                id="usecols",
+            ),
             pytest.param(
                 {"work_group": ENV.managed_work_group, "s3_staging_dir": ""},
                 {},
@@ -1705,15 +1711,17 @@ class TestPandasCursor:
         df = pandas_cursor.as_pandas()
         if "chunksize" in kwargs:
             df = pd.concat(list(df))
-        if "index_col" in kwargs:
-            assert df.index.dtype == np.object_
-            assert df.index.tolist() == [9007199254740995, 9007199254740997]
-        else:
-            assert df["col_json_index"].dtype == np.object_
-            assert df["col_json_index"].tolist() == [9007199254740995, 9007199254740997]
-        assert df["col_int"].dtype == pd.Int64Dtype()
-        assert df["col_bigint"].dtype == pd.Int64Dtype()
-        assert df["col_json"].dtype == np.object_
-        assert df["col_bigint"].tolist() == [9007199254740993, pd.NA]
-        assert df["col_json"].tolist() == [9007199254740993, None]
-        assert df["col_binary"].tolist() == [b"\x01", None]
+
+        def column(name):
+            if name in df.index.names:
+                return df.index.get_level_values(name)
+            return df[name]
+
+        assert column("col_int").dtype == pd.Int64Dtype()
+        assert column("col_bigint").dtype == pd.Int64Dtype()
+        assert column("col_json").dtype == np.object_
+        assert column("col_json_index").dtype == np.object_
+        assert column("col_bigint").tolist() == [9007199254740993, pd.NA]
+        assert column("col_json").tolist() == [9007199254740993, None]
+        assert column("col_json_index").tolist() == [9007199254740995, 9007199254740997]
+        assert column("col_binary").tolist() == [b"\x01", None]
