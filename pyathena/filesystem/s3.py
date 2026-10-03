@@ -51,47 +51,40 @@ from pyathena.util import RetryConfig, override, retry_api_call
 _logger = logging.getLogger(__name__)
 
 
-class _CompressedBuffer(BytesIO):
-    """A buffer that keeps its data when a codec closes it.
+class CompressedBuffer(BytesIO):
+    """An in-memory buffer of data compressed with a codec of fsspec.
 
-    Some codecs, such as the ``zstandard`` stream writer, close the file
-    that they write to when they are closed.
+    The buffer keeps its data when it is closed, as some codecs, such as
+    the ``zstandard`` stream writer, close the file that they write to.
     """
 
     @override
     def close(self) -> None:
         pass
 
+    @classmethod
+    def compress(cls, value: bytes | bytearray | memoryview, compression: str) -> bytes:
+        """Compress a value with a codec of fsspec.
 
-def _compress(
-    path: str, value: bytes | bytearray | memoryview, compression: str
-) -> bytes | bytearray | memoryview:
-    """Compress a value with the codec that ``open()`` uses for a compression.
+        Args:
+            value: The bytes to compress.
+            compression: Name of a codec in ``fsspec.compression.compr``.
 
-    Args:
-        path: Path of the file without the protocol, as ``open()`` strips
-            it, from which ``"infer"`` takes the codec.
-        value: The bytes to compress.
-        compression: Name of a codec in ``fsspec.compression.compr``, or
-            ``"infer"`` to take it from the extension of the path.
+        Returns:
+            The compressed bytes.
 
-    Returns:
-        The compressed bytes, or the value itself when ``"infer"`` finds no
-        codec for the path.
-
-    Raises:
-        ValueError: If the codec is not supported.
-    """
-    compression = get_compression(path, compression)
-    if compression is None:
-        return value
-    if isinstance(value, memoryview) and not value.c_contiguous:
-        # Codecs cannot compress a non-contiguous memoryview.
-        value = value.tobytes()
-    buffer = _CompressedBuffer()
-    with compr[compression](buffer, mode="w") as f:
-        f.write(value)
-    return buffer.getvalue()
+        Raises:
+            ValueError: If the codec is not supported.
+        """
+        if compression not in compr:
+            raise ValueError(f"Compression type {compression} not supported")
+        if isinstance(value, memoryview) and not value.c_contiguous:
+            # Codecs cannot compress a non-contiguous memoryview.
+            value = value.tobytes()
+        buffer = cls()
+        with compr[compression](buffer, mode="w") as f:
+            f.write(value)
+        return buffer.getvalue()
 
 
 class S3FileSystem(AbstractFileSystem):
@@ -1818,11 +1811,13 @@ class S3FileSystem(AbstractFileSystem):
                 version, if the compression is not supported, or if the data
                 takes more than ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
         """
-        compression = kwargs.pop("compression", None)
+        # The codec is taken as open() takes it, also from the extension of
+        # the path without the protocol for "infer".
+        compression = get_compression(self._strip_protocol(path), kwargs.pop("compression", None))
         if compression is not None:
             # Compressed up front, so that every path uploads the compressed
             # bytes, and open() returns the file instead of a wrapper.
-            value = _compress(self._strip_protocol(path), value, compression)
+            value = CompressedBuffer.compress(value, compression)
         block_size = kwargs.get("block_size") or self.default_block_size
         # The size in bytes; the length of a memoryview counts its items.
         size = memoryview(value).nbytes

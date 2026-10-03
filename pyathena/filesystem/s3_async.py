@@ -18,8 +18,9 @@ from typing import TYPE_CHECKING, Any, cast
 
 from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.callbacks import _DEFAULT_CALLBACK
+from fsspec.core import get_compression
 
-from pyathena.filesystem.s3 import S3File, S3FileSystem, _compress
+from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3Executor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import (
     S3Metadata,
@@ -197,10 +198,10 @@ class AioS3FileSystem(AsyncFileSystem):
             ValueError: If the compression is not supported, or if the data
                 takes more than ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
         """
-        compression = kwargs.pop("compression", None)
+        # See S3FileSystem.pipe_file.
+        compression = get_compression(self._strip_protocol(path), kwargs.pop("compression", None))
         if compression is not None:
-            # See S3FileSystem.pipe_file.
-            value = _compress(self._strip_protocol(path), value, compression)
+            value = CompressedBuffer.compress(value, compression)
         block_size = kwargs.get("block_size") or self._sync_fs.default_block_size
         # The size in bytes; the length of a memoryview counts its items.
         self._sync_fs._check_multipart_upload_size(path, memoryview(value).nbytes, block_size)

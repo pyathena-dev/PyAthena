@@ -1,9 +1,11 @@
 import asyncio
+import bz2
 import contextlib
 import functools
 import gc
 import gzip
 import io
+import lzma
 import os
 import re
 import sys
@@ -31,7 +33,7 @@ from fsspec.implementations.dirfs import DirFileSystem
 
 import pyathena
 from pyathena.filesystem import register_s3_filesystem
-from pyathena.filesystem.s3 import S3File, S3FileSystem, _compress
+from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
 from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import S3Object, S3ObjectType, S3StorageClass
@@ -4673,14 +4675,33 @@ class TestS3File:
         file.fs._put_object.assert_not_called()
 
 
-def test_compress_codec_closing_its_file():
-    # GH-1037: some codecs, such as the zstandard stream writer, close the
-    # file that they write to when they are closed.
-    def closing_gzip(f, mode):
-        g = gzip.GzipFile(fileobj=f, mode=mode)
-        close = g.close
-        g.close = lambda: (close(), f.close())
-        return g
+class TestCompressedBuffer:
+    @pytest.mark.parametrize(
+        ("compression", "decompress"),
+        [("gzip", gzip.decompress), ("bz2", bz2.decompress), ("xz", lzma.decompress)],
+    )
+    def test_compress(self, compression, decompress):
+        assert decompress(CompressedBuffer.compress(b"a" * 100, compression)) == b"a" * 100
 
-    with mock.patch.dict(compr, {"closing": closing_gzip}):
-        assert gzip.decompress(_compress("s3://bucket/key", b"a", "closing")) == b"a"
+    def test_compress_non_contiguous_memoryview(self):
+        value = memoryview(b"ab" * 4)[::2]
+
+        assert gzip.decompress(CompressedBuffer.compress(value, "gzip")) == b"aaaa"
+
+    @pytest.mark.parametrize("compression", ["unknown", "infer"])
+    def test_compress_unsupported(self, compression):
+        # "infer" is resolved from a path by the caller, as open() does.
+        with pytest.raises(ValueError, match="not supported"):
+            CompressedBuffer.compress(b"a", compression)
+
+    def test_compress_codec_closing_its_file(self):
+        # GH-1037: some codecs, such as the zstandard stream writer, close the
+        # file that they write to when they are closed.
+        def closing_gzip(f, mode):
+            g = gzip.GzipFile(fileobj=f, mode=mode)
+            close = g.close
+            g.close = lambda: (close(), f.close())
+            return g
+
+        with mock.patch.dict(compr, {"closing": closing_gzip}):
+            assert gzip.decompress(CompressedBuffer.compress(b"a", "closing")) == b"a"
