@@ -340,6 +340,14 @@ class S3FileSystem(AbstractFileSystem):
     ) -> S3Object | None:
         bucket, key, path_version_id = self.parse_path(path)
         version_id = path_version_id if path_version_id else version_id
+        if version_id and not path_version_id:
+            # Cache an explicit version under its version-qualified path so
+            # that it neither reuses nor replaces the entry of another version.
+            path = f"{path}?versionId={version_id}"
+        # Writes invalidate only the path without the version, and an
+        # overwrite replaces the "null" version of a bucket without
+        # versioning, so that version is looked up every time.
+        cacheable = version_id != "null"
         if path not in self.dircache or refresh:
             try:
                 request = {
@@ -366,7 +374,8 @@ class S3FileSystem(AbstractFileSystem):
                 key=key,
                 version_id=version_id,
             )
-            self.dircache[path] = file
+            if cacheable:
+                self.dircache[path] = file
         else:
             file = self.dircache[path]
         return file
@@ -585,7 +594,11 @@ class S3FileSystem(AbstractFileSystem):
         exists, with a ListObjectsV2 request (``Delimiter="/"``,
         ``MaxKeys=1``) that checks whether it is a key prefix; a bucket path
         is looked up with HeadBucket. With ``version_aware``, a cached file
-        entry without a version ID is looked up again.
+        entry without a version ID is looked up again. With an explicit
+        version, the cached entries of the path are skipped, and the
+        HeadObject result is cached under the version-qualified path apart
+        from other versions, except for the ``null`` version, which an
+        overwrite replaces.
 
         Args:
             path: S3 path (e.g., "s3://bucket" or "s3://bucket/key").
@@ -617,7 +630,9 @@ class S3FileSystem(AbstractFileSystem):
                 key=None,
                 version_id=None,
             )
-        if not refresh:
+        # Cached entries describe the current version of a path, so an
+        # explicit version uses only the HeadObject cache of that version.
+        if not refresh and not version_id:
             caches: list[S3Object] | S3Object | None = self._ls_from_cache(path)
             if caches is not None:
                 if isinstance(caches, list):
@@ -630,7 +645,6 @@ class S3FileSystem(AbstractFileSystem):
                 if cache:
                     if (
                         self.version_aware
-                        and not version_id
                         and cache.get("type") == S3ObjectType.S3_OBJECT_TYPE_FILE
                         and not cache.get("version_id")
                     ):
