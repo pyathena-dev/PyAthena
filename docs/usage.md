@@ -286,7 +286,7 @@ cursor.execute("SELECT * FROM one_row", cache_size=100, cache_expiration_time=36
 
 Results will only be re-used from a succeeded DML query (the assumption being that you always want to re-run queries like `CREATE TABLE` and `DROP TABLE`)
 whose query string (with `pyformat` parameters substituted) matches *exactly*, and that ran with the same schema and catalog as the cursor.
-A `qmark` query with parameters always runs, because Athena does not return the parameters of earlier executions to compare them.
+The cache is not used for a `qmark` query with parameters.
 With `unload=True` on the pandas, Arrow, and Polars cursors, a query that is wrapped in `UNLOAD` is written to a new location each time, so the cache never matches it.
 
 The S3 staging directory is not checked, so it's possible that the location of the results is not in your provided `s3_staging_dir`.
