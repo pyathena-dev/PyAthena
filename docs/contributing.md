@@ -88,9 +88,6 @@ Code under `pyathena/` uses [Google-style docstrings](https://google.github.io/s
 - New or changed private functions and methods use the same style.
   ruff does not require them to have a docstring, but checks the docstrings they have.
 
-`per-file-ignores` in `pyproject.toml` lists the `D` codes that each file still has findings for.
-Remove a file's `D` codes when its docstrings are complete, and keep its other codes.
-
 ## Open a pull request
 
 Open a draft pull request with the repository's template completed.
