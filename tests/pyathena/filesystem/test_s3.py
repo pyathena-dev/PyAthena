@@ -1854,8 +1854,8 @@ class TestS3FileSystem:
             {"Bucket": "bucket", "Key": "key", **other_key},
         ]
         # The cache does not keep the customer-provided keys.
-        assert "k" * 32 not in repr(fs.dircache)
-        assert "j" * 32 not in repr(fs.dircache)
+        assert "k" * 32 not in repr(dict(fs.dircache))
+        assert "j" * 32 not in repr(dict(fs.dircache))
 
         fs.invalidate_cache(path)
         fs.info(path, **self.LOOKUP_KWARGS)
