@@ -786,6 +786,44 @@ class TestS3FileSystem:
             ("m1", True),
         ]
 
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            # The key itself wins over the keys under it.
+            ("s3://bucket/a.csv", ["a.csv"]),
+            # Without an object, the keys under the path are returned.
+            ("s3://bucket/dir", ["dir/", "dir/x"]),
+            ("s3://bucket/dir/", ["dir/", "dir/x"]),
+            # A trailing slash selects the keys under the path even if the
+            # key without it exists.
+            ("s3://bucket/a.csv/", ["a.csv/x"]),
+            ("s3://bucket", ["a.csv", "a.csv.bak", "a.csv/x", "dir/", "dir/x", "dir2/y"]),
+        ],
+    )
+    def test_object_version_info_excludes_sibling_keys(self, path, expected):
+        fs = self._make_fs()
+        keys = ["a.csv", "a.csv.bak", "a.csv/x", "dir/", "dir/x", "dir2/y"]
+        # S3 matches Prefix as a plain string prefix.
+        fs._call.side_effect = lambda _, **request: {
+            "Versions": [
+                {"Key": k, "VersionId": f"v-{k}", "IsLatest": True}
+                for k in keys
+                if k.startswith(request["Prefix"])
+            ],
+            "DeleteMarkers": [
+                {"Key": k, "VersionId": f"m-{k}", "IsLatest": False}
+                for k in keys
+                if k.startswith(request["Prefix"])
+            ],
+            "IsTruncated": False,
+        }
+
+        actual = fs.object_version_info(path)
+        assert [v.key for v in actual] == expected
+        actual = fs.object_version_info(path, delete_markers=True)
+        assert sorted(v.key for v in actual if not v.is_delete_marker) == expected
+        assert sorted(v.key for v in actual if v.is_delete_marker) == expected
+
     def test_ls_versions_requires_version_aware(self):
         fs = self._make_fs()
         with pytest.raises(ValueError, match="version aware"):
@@ -907,6 +945,39 @@ class TestS3FileSystem:
             KeyMarker="key1",
             UploadIdMarker="upload1",
         )
+
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            ("s3://bucket/data", ["data", "data/part.csv"]),
+            ("s3://bucket/data/", ["data/part.csv"]),
+            ("s3://bucket", ["data", "data.csv", "data/part.csv", "data2/other.csv"]),
+        ],
+    )
+    def test_list_and_clear_multipart_uploads_exclude_sibling_keys(self, path, expected):
+        fs = self._make_fs()
+        keys = ["data", "data.csv", "data/part.csv", "data2/other.csv"]
+        aborted = []
+
+        def call(method, **request):
+            if method is fs._client.abort_multipart_upload:
+                aborted.append(request["Key"])
+                return {}
+            # S3 matches Prefix as a plain string prefix.
+            return {
+                "Uploads": [
+                    {"Key": k, "UploadId": f"u-{k}"}
+                    for k in keys
+                    if k.startswith(request.get("Prefix", ""))
+                ],
+                "IsTruncated": False,
+            }
+
+        fs._call.side_effect = call
+
+        assert [u.key for u in fs.list_multipart_uploads(path)] == expected
+        fs.clear_multipart_uploads(path)
+        assert sorted(aborted) == expected
 
     @pytest.fixture(scope="class")
     def fs(self, request):
@@ -1879,17 +1950,24 @@ class TestS3FileSystem:
         prefix_path = f"s3://{bucket}/{prefix}"
         key = f"{prefix}/file"
         upload = fs._create_multipart_upload(bucket=bucket, key=key)
+        # A sibling key that starts with the same characters as the prefix.
+        sibling = fs._create_multipart_upload(bucket=bucket, key=f"{prefix}2/file")
+        try:
+            uploads = fs.list_multipart_uploads(prefix_path)
+            listed = next((u for u in uploads if u.upload_id == upload.upload_id), None)
+            assert listed
+            assert listed.bucket == bucket
+            assert listed.key == key
+            assert listed.initiated
+            assert not any(u.upload_id == sibling.upload_id for u in uploads)
 
-        uploads = fs.list_multipart_uploads(prefix_path)
-        listed = next((u for u in uploads if u.upload_id == upload.upload_id), None)
-        assert listed
-        assert listed.bucket == bucket
-        assert listed.key == key
-        assert listed.initiated
-
-        fs.clear_multipart_uploads(prefix_path)
-        uploads = fs.list_multipart_uploads(prefix_path)
-        assert not any(u.upload_id == upload.upload_id for u in uploads)
+            fs.clear_multipart_uploads(prefix_path)
+            uploads = fs.list_multipart_uploads(prefix_path)
+            assert not any(u.upload_id == upload.upload_id for u in uploads)
+            uploads = fs.list_multipart_uploads(f"{prefix_path}2")
+            assert any(u.upload_id == sibling.upload_id for u in uploads)
+        finally:
+            fs.clear_multipart_uploads(f"{prefix_path}2")
 
     def test_object_version_info(self, fs):
         path = (
@@ -1897,6 +1975,8 @@ class TestS3FileSystem:
             f"filesystem/test_object_version_info/{uuid.uuid4()}"
         )
         fs.pipe(path, b"data")
+        # A sibling key that starts with the same characters as the path.
+        fs.pipe(f"{path}.bak", b"backup")
 
         versions = fs.object_version_info(path)
         assert len(versions) == 1

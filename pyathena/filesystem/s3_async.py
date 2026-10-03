@@ -484,7 +484,7 @@ class AioS3FileSystem(AsyncFileSystem):
     def object_version_info(
         self, path: str, delete_markers: bool = False, **kwargs
     ) -> list[S3ObjectVersion]:
-        """List the versions of the objects under the path.
+        """List the versions of the object or of the objects under the path.
 
         See :meth:`S3FileSystem.object_version_info`.
 
@@ -504,7 +504,7 @@ class AioS3FileSystem(AsyncFileSystem):
         See :meth:`S3FileSystem.list_multipart_uploads`.
 
         Args:
-            path: S3 bucket or prefix path (e.g., "s3://bucket" or "s3://bucket/prefix").
+            path: S3 bucket or key path (e.g., "s3://bucket" or "s3://bucket/prefix").
 
         Returns:
             List of S3MultipartUpload instances describing the uploads.
@@ -517,7 +517,7 @@ class AioS3FileSystem(AsyncFileSystem):
         See :meth:`S3FileSystem.clear_multipart_uploads`.
 
         Args:
-            path: S3 bucket or prefix path (e.g., "s3://bucket" or "s3://bucket/prefix").
+            path: S3 bucket or key path (e.g., "s3://bucket" or "s3://bucket/prefix").
         """
         self._sync_fs.clear_multipart_uploads(path)
 
