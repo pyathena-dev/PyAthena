@@ -2367,12 +2367,13 @@ class S3File(AbstractBufferedFile):
         if self.multipart_upload:
             for f in self.multipart_upload_parts:
                 f.cancel()
+            # s3_additional_kwargs holds object parameters (e.g., the existing
+            # object's metadata in append mode) that AbortMultipartUpload rejects.
             self.fs._call(
                 "abort_multipart_upload",
                 Bucket=self.bucket,
                 Key=self.key,
                 UploadId=self.multipart_upload.upload_id,
-                **self.s3_additional_kwargs,
             )
 
         self.multipart_upload = None

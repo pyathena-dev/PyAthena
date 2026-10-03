@@ -701,6 +701,29 @@ class TestS3FileSystem:
         assert len(actual) == len(data + extra)
         assert actual == data + extra
 
+    @pytest.mark.parametrize("block_size", [None, 16 * 2**20])
+    def test_append_transaction_rollback(self, fs, block_size):
+        # Raising inside the transaction aborts the multipart upload that
+        # copies the existing object and leaves the object unchanged.
+        data = b"a" * (6 * 2**20)
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_append_transaction_rollback/{uuid.uuid4()}"
+        )
+        fs.pipe_file(path, data)
+
+        def append_then_fail():
+            with fs.transaction:
+                f = fs.open(path, "ab", block_size=block_size)
+                f.write(b"b" * 5)
+                f.close()
+                raise RuntimeError("rollback")
+
+        with pytest.raises(RuntimeError):
+            append_then_fail()
+        assert fs.cat_file(path) == data
+        assert not fs.list_multipart_uploads(path)
+
     def test_ls_buckets(self, fs):
         fs.invalidate_cache()
         actual = fs.ls("s3://")
@@ -1626,6 +1649,22 @@ class TestS3File:
         assert fs._create_multipart_upload.called is multipart
         assert fs._upload_part_copy.called is part_copy
         fs.touch.assert_not_called()
+
+    def test_append_discard(self):
+        # Rolling back an append aborts its multipart upload without the
+        # existing object's metadata, which AbortMultipartUpload rejects.
+        fs = self._make_append_fs(b"a" * 6)
+        f = S3File(fs, "s3://bucket/key.txt", mode="ab", block_size=16, autocommit=False)
+        f.write(b"bb")
+        f.close()
+
+        f.discard()
+
+        fs._call.assert_called_once_with(
+            "abort_multipart_upload", Bucket="bucket", Key="key.txt", UploadId="uploadid"
+        )
+        fs._finish_multipart_upload.assert_not_called()
+        fs._put_object.assert_not_called()
 
     @pytest.mark.parametrize(
         ("objects", "target"),
