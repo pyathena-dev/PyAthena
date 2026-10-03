@@ -16,6 +16,7 @@ from io import BytesIO
 from multiprocessing import cpu_count
 from re import Pattern
 from typing import Any, cast
+from urllib.parse import unquote_plus
 
 import botocore.exceptions
 from boto3 import Session
@@ -2130,15 +2131,20 @@ class S3FileSystem(AbstractFileSystem):
         to abort all of them.
 
         Args:
-            path: S3 bucket or prefix path (e.g., "bucket", "s3://bucket" or
-                "s3://bucket/prefix"). If the path contains a key prefix,
-                only the uploads under that prefix are listed.
+            path: S3 bucket or key path (e.g., "bucket", "s3://bucket" or
+                "s3://bucket/prefix"). If the path contains a key, only the
+                uploads to that key and to the keys under ``key/`` are
+                listed, not those to sibling keys that merely start with the
+                same characters (e.g., ``prefix2/a``).
 
         Returns:
             List of S3MultipartUpload instances describing the in-progress
             multipart uploads.
         """
         bucket, key, _ = self.parse_path(path)
+        # S3 matches Prefix as a plain string, so the uploads are filtered to
+        # the key itself and the keys under it.
+        prefix = f"{key.rstrip('/')}/" if key else ""
 
         _logger.debug(f"List multipart uploads: s3://{bucket}/{key}")
         uploads: list[S3MultipartUpload] = []
@@ -2157,7 +2163,9 @@ class S3FileSystem(AbstractFileSystem):
                 **request,
             )
             uploads.extend(
-                S3MultipartUpload({**u, "Bucket": bucket}) for u in response.get("Uploads", [])
+                S3MultipartUpload({**u, "Bucket": bucket})
+                for u in response.get("Uploads", [])
+                if u["Key"] == key or u["Key"].startswith(prefix)
             )
             if not response.get("IsTruncated"):
                 break
@@ -2170,7 +2178,15 @@ class S3FileSystem(AbstractFileSystem):
     def object_version_info(
         self, path: str, delete_markers: bool = False, **kwargs
     ) -> list[S3ObjectVersion]:
-        """List the versions of the objects under the path.
+        """List the versions of the object or of the objects under the path.
+
+        A key path without a trailing slash selects that key if it has any
+        versions or delete markers, and otherwise the keys under ``key/``.
+        The choice does not depend on ``delete_markers``, so a key that has
+        only delete markers yields no versions without them. A key path with
+        a trailing slash selects the keys under it, and a bucket path selects
+        all the keys in the bucket. Sibling keys that merely start with the
+        same characters (e.g., ``key.bak``) are never included.
 
         Args:
             path: S3 path (s3://bucket/key or a key prefix) to list the
@@ -2183,6 +2199,9 @@ class S3FileSystem(AbstractFileSystem):
             List of S3ObjectVersion instances describing the versions.
         """
         bucket, key, _ = self.parse_path(path)
+        # S3 matches Prefix as a plain string, so the versions are filtered to
+        # the key itself or the keys under it.
+        prefix = f"{key.rstrip('/')}/" if key else ""
 
         _logger.debug(f"List object versions: s3://{bucket}/{key}")
         versions: list[S3ObjectVersion] = []
@@ -2191,20 +2210,30 @@ class S3FileSystem(AbstractFileSystem):
                 S3ObjectVersion(bucket=bucket, is_delete_marker=False, response=v)
                 for v in response.get("Versions", [])
             )
-            if delete_markers:
-                versions.extend(
-                    S3ObjectVersion(bucket=bucket, is_delete_marker=True, response=m)
-                    for m in response.get("DeleteMarkers", [])
-                )
-        return versions
+            # Delete markers are kept until the key is chosen, so that the
+            # choice is the same with and without them.
+            versions.extend(
+                S3ObjectVersion(bucket=bucket, is_delete_marker=True, response=m)
+                for m in response.get("DeleteMarkers", [])
+            )
+        # botocore decodes the keys only when it sets EncodingType itself, so
+        # the keys of an explicit EncodingType="url" are decoded for matching.
+        url_encoded = kwargs.get("EncodingType") == "url"
+        keys = [unquote_plus(v.key) if url_encoded else v.key for v in versions]
+        if key and not key.endswith("/") and key in keys:
+            selected = [v for v, k in zip(versions, keys, strict=True) if k == key]
+        else:
+            selected = [v for v, k in zip(versions, keys, strict=True) if k.startswith(prefix)]
+        return [v for v in selected if delete_markers or not v.is_delete_marker]
 
     def clear_multipart_uploads(self, path: str) -> None:
         """Abort any incomplete multipart uploads in the bucket.
 
         Args:
-            path: S3 bucket or prefix path (e.g., "bucket", "s3://bucket" or
-                "s3://bucket/prefix"). If the path contains a key prefix,
-                only the uploads under that prefix are aborted.
+            path: S3 bucket or key path (e.g., "bucket", "s3://bucket" or
+                "s3://bucket/prefix"). If the path contains a key, only the
+                uploads to that key and to the keys under ``key/`` are
+                aborted, as listed by :meth:`list_multipart_uploads`.
         """
         uploads = self.list_multipart_uploads(path)
         if not uploads:

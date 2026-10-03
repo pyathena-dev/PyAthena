@@ -172,7 +172,7 @@ uploads = fs.list_multipart_uploads("s3://YOUR_S3_BUCKET")
 for upload in uploads:
     print(upload.key, upload.upload_id, upload.initiated)
 
-# Abort all incomplete uploads under a bucket or key prefix.
+# Abort all incomplete uploads to a key and the keys under it.
 fs.clear_multipart_uploads("s3://YOUR_S3_BUCKET/path/to/")
 ```
 
