@@ -242,6 +242,37 @@ class TestAioCursor:
             cache_expiration_time=100,
         )
 
+    async def test_execute_qmark_parameters_skip_cache(self):
+        """A qmark query with parameters never searches the cache (no AWS, #941).
+
+        Mirrors the synchronous cursor test.
+        """
+        cursor = AioCursor.__new__(AioCursor)  # bypass __init__ to avoid AWS calls
+        cursor._connection = MagicMock()
+        cursor._connection.client.start_query_execution.return_value = {
+            "QueryExecutionId": "test_query_id"
+        }
+        cursor._retry_config = RetryConfig()
+        cursor._kill_on_interrupt = True
+
+        with (
+            patch.object(
+                AioCursor,
+                "_build_start_query_execution_request",
+                return_value={"ExecutionParameters": ["'1'"]},
+            ) as request_mock,
+            patch.object(
+                AioCursor, "_find_previous_query_id", new_callable=AsyncMock, return_value="cached"
+            ) as cache_mock,
+        ):
+            query_id = await cursor._execute(
+                "SELECT ?", ["'1'"], paramstyle="qmark", cache_size=10, cache_expiration_time=100
+            )
+
+        assert query_id == "test_query_id"
+        assert request_mock.call_args.kwargs["execution_parameters"] == ["'1'"]
+        cache_mock.assert_not_awaited()
+
     @pytest.mark.parametrize(
         "final_state",
         [AthenaQueryExecution.STATE_CANCELLED, AthenaQueryExecution.STATE_SUCCEEDED],
