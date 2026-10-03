@@ -474,6 +474,21 @@ class TestPolarsCursor:
         assert isinstance(chunks[0], pl.DataFrame)
         assert chunks[0].height == 1
 
+    def test_whole_result_reused(self, polars_cursor):
+        """Test that as_polars(), as_arrow(), and iter_chunks() do not consume the rows."""
+        polars_cursor.execute("SELECT number FROM (VALUES (1), (2), (3)) AS t(number)")
+        df = polars_cursor.as_polars()
+        assert df["number"].to_list() == [1, 2, 3]
+        assert polars_cursor.as_polars() is df
+        assert polars_cursor.as_arrow().column("number").to_pylist() == [1, 2, 3]
+        df[0, "number"] = 0
+
+        assert polars_cursor.fetchone() == (1,)
+        assert [chunk.height for chunk in polars_cursor.iter_chunks()] == [3]
+        assert [chunk.height for chunk in polars_cursor.iter_chunks()] == [3]
+        assert polars_cursor.as_polars() is df
+        assert polars_cursor.fetchall() == [(2,), (3,)]
+
     def test_iter_chunks_many_rows(self):
         """Test chunked iteration with many rows."""
         with contextlib.closing(connect(schema_name=ENV.schema)) as conn:

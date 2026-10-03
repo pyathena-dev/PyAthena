@@ -254,23 +254,30 @@ class AthenaPolarsResultSet(AthenaResultSet):
         self._chunksize = chunksize
         self._kwargs = kwargs
 
-        # Build DataFrame iterator (handles both chunked and non-chunked cases)
-        # Note: _create_dataframe_iterator() calls _as_polars() which may update
-        # _metadata for unload queries, so we must cache column names AFTER this.
-        if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
-            self._df_iter = self._create_dataframe_iterator()
-        elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
-            df = self._as_polars_from_api()
-            self._df_iter = PolarsDataFrameIterator(df, self.converters, self._get_column_names())
-        else:
-            import polars as pl
+        import polars as pl
 
+        # The whole result when it was not read in chunks.
+        # Note: _as_polars() may update _metadata for unload queries, so the converters
+        # and column names must be read AFTER it.
+        self._df: pl.DataFrame | None = None
+        if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
+            if self._chunksize is None:
+                self._df = self._as_polars()
+            else:
+                self._df_iter = self._create_dataframe_iterator()
+        elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
+            self._df = self._as_polars_from_api()
+        else:
+            self._df = pl.DataFrame()
+        if self._df is not None:
+            # A clone keeps changes to the DataFrame from as_polars()
+            # out of the rows that the fetch methods return.
             self._df_iter = PolarsDataFrameIterator(
-                pl.DataFrame(), self.converters, self._get_column_names()
+                self._df.clone(), self.converters, self._get_column_names()
             )
 
         # Cache column names for efficient access in fetchone()
-        # Must be after _create_dataframe_iterator() which updates _metadata for unload
+        # Must be after _as_polars() which updates _metadata for unload
         self._column_names_cache: list[str] = self._get_column_names()
         self._iterrows = self._df_iter.iterrows()
 
@@ -343,20 +350,12 @@ class AthenaPolarsResultSet(AthenaResultSet):
         return [d[0] for d in description]
 
     def _create_dataframe_iterator(self) -> PolarsDataFrameIterator:
-        """Create a DataFrame iterator for the result set.
+        """Create a DataFrame iterator that reads the result file in chunks.
 
         Returns:
-            PolarsDataFrameIterator that handles both chunked and non-chunked cases.
+            PolarsDataFrameIterator that reads each chunk lazily.
         """
-        if self._chunksize is not None:
-            # Chunked mode: create lazy iterator
-            reader: Iterator[pl.DataFrame] | pl.DataFrame = (
-                self._iter_parquet_chunks() if self.is_unload else self._iter_csv_chunks()
-            )
-        else:
-            # Non-chunked mode: load entire DataFrame
-            reader = self._as_polars()
-
+        reader = self._iter_parquet_chunks() if self.is_unload else self._iter_csv_chunks()
         return PolarsDataFrameIterator(reader, self.converters, self._get_column_names())
 
     @override
@@ -538,12 +537,15 @@ class AthenaPolarsResultSet(AthenaResultSet):
         method for accessing results with PolarsCursor.
 
         Note:
-            When chunksize is set, calling this method will collect all chunks
-            into a single DataFrame, loading all data into memory. Use
-            iter_chunks() for memory-efficient processing of large datasets.
+            When chunksize is set, calling this method will collect the chunks that
+            the fetch methods and iter_chunks() have not yet read into a single
+            DataFrame, loading them all into memory, and a later call returns an
+            empty DataFrame. Use iter_chunks() for memory-efficient processing of
+            large datasets.
 
         Returns:
-            Polars DataFrame containing all query results.
+            Polars DataFrame containing all query results. Without chunksize, it is
+            the same DataFrame on every call.
 
         Example:
             >>> cursor = connection.cursor(PolarsCursor)
@@ -552,6 +554,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
             >>> print(f"DataFrame has {df.height} rows")
             >>> filtered = df.filter(pl.col("value") > 100)
         """
+        if self._df is not None:
+            return self._df
         return self._df_iter.as_polars()
 
     def as_arrow(self) -> Table:
@@ -561,7 +565,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
         interoperability with other Arrow-compatible tools and libraries.
 
         Returns:
-            Apache Arrow Table containing all query results.
+            Apache Arrow Table containing all query results. When chunksize is set,
+            it contains the chunks that have not yet been read, as with as_polars().
 
         Raises:
             ImportError: If pyarrow is not installed.
@@ -573,7 +578,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             >>> # Use with other Arrow-compatible libraries
         """
         try:
-            return self._df_iter.as_polars().to_arrow()
+            return self.as_polars().to_arrow()
         except ImportError as e:
             raise ImportError(
                 "pyarrow is required for as_arrow(). Install it with: pip install pyarrow"
@@ -667,8 +672,11 @@ class AthenaPolarsResultSet(AthenaResultSet):
 
         This method provides an iterator interface for processing large result sets.
         When chunksize is specified, it yields DataFrames in chunks using lazy
-        evaluation for memory-efficient processing. When chunksize is not specified,
-        it yields the entire result as a single DataFrame.
+        evaluation for memory-efficient processing. These chunks come from the same
+        iterator as the fetch methods, so a chunk that one of them reads is not
+        available to the other. When chunksize is not specified, each call returns
+        a new iterator that yields the entire result as a single DataFrame, and the
+        fetch methods keep their position.
 
         Returns:
             PolarsDataFrameIterator that yields Polars DataFrames for each chunk
@@ -687,6 +695,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
             >>> for df in cursor.iter_chunks():
             ...     process(df)  # Single DataFrame with all data
         """
+        if self._df is not None:
+            return PolarsDataFrameIterator(self._df, self.converters, self._get_column_names())
         return self._df_iter
 
     @override
@@ -695,5 +705,6 @@ class AthenaPolarsResultSet(AthenaResultSet):
         import polars as pl
 
         super().close()
-        self._df_iter = PolarsDataFrameIterator(pl.DataFrame(), {}, [])
+        self._df = pl.DataFrame()
+        self._df_iter = PolarsDataFrameIterator(self._df, {}, [])
         self._iterrows = iter([])

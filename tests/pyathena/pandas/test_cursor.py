@@ -1416,6 +1416,20 @@ class TestPandasCursor:
         # Should yield exactly one chunk (the entire DataFrame)
         assert chunk_count == 1
 
+    def test_pandas_cursor_whole_result_reused(self, pandas_cursor):
+        """Test that as_pandas() and iter_chunks() do not consume the fetched rows."""
+        pandas_cursor.execute("SELECT number FROM (VALUES (1), (2), (3)) AS t(number)")
+        df = pandas_cursor.as_pandas()
+        assert df["number"].tolist() == [1, 2, 3]
+        assert pandas_cursor.as_pandas() is df
+        df["number"] = 0
+
+        assert pandas_cursor.fetchone() == (1,)
+        assert [len(chunk) for chunk in pandas_cursor.iter_chunks()] == [3]
+        assert [len(chunk) for chunk in pandas_cursor.iter_chunks()] == [3]
+        assert pandas_cursor.as_pandas() is df
+        assert pandas_cursor.fetchall() == [(2,), (3,)]
+
     def test_pandas_cursor_chunked_vs_regular_same_data(self, pandas_cursor):
         """Test that chunked and regular reading produce the same data."""
         query = "SELECT * FROM many_rows LIMIT 100"  # Use a reasonable size for testing
