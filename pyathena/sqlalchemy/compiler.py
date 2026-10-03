@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from itertools import product
 from typing import TYPE_CHECKING, Any, cast
 
@@ -1347,15 +1347,11 @@ class AthenaDDLCompiler(DDLCompiler):
         if not properties:
             return False
         if isinstance(properties, dict):
-            items: Iterable[tuple[Any, Any]] = properties.items()
+            pairs = [(str(key), str(value)) for key, value in properties.items()]
         else:
-            items = (
-                (m.group("key"), m.group("value"))
-                for m in _TABLE_PROPERTY_PATTERN.finditer(properties)
-            )
+            pairs = _TABLE_PROPERTY_PATTERN.findall(properties)
         return any(
-            str(key).lower() == "table_type" and str(value).lower() == "iceberg"
-            for key, value in items
+            key.lower() == "table_type" and value.lower() == "iceberg" for key, value in pairs
         )
 
     def _validate_s3_tables_create_table(
