@@ -15,6 +15,7 @@ import pytest
 from pandas.io.parsers import TextFileReader
 
 from pyathena.error import DatabaseError, ProgrammingError
+from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.pandas.converter import DefaultPandasTypeConverter
 from pyathena.pandas.cursor import PandasCursor
 from pyathena.pandas.result_set import AthenaPandasResultSet, PandasDataFrameIterator
@@ -232,16 +233,28 @@ class TestPandasCursor:
         assert pandas_cursor.fetchone() is None
 
     @pytest.mark.parametrize(
-        "pandas_cursor",
-        [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
-        indirect=True,
+        ("pandas_cursor", "chunksize"),
+        [
+            ({"cursor_kwargs": {"unload": False}}, None),
+            ({"cursor_kwargs": {"unload": False}}, 1_000),
+            ({"cursor_kwargs": {"unload": True}}, None),
+        ],
+        indirect=["pandas_cursor"],
     )
-    def test_result_set_file_system_not_cached(self, pandas_cursor):
+    def test_result_set_file_system(self, pandas_cursor, chunksize):
         # GH-978: the filesystems that read the results were kept in the fsspec
         # instance cache with the connection, so the connection was never freed.
-        pandas_cursor.execute("SELECT * FROM one_row")
-        assert pandas_cursor.fetchall() == [(1,)]
+        # The result set reads through its own filesystem instead of creating
+        # another one from storage_options.
+        with patch.object(
+            S3FileSystem, "__init__", autospec=True, side_effect=S3FileSystem.__init__
+        ) as init:
+            pandas_cursor.execute("SELECT * FROM one_row", chunksize=chunksize)
+            assert pandas_cursor.fetchall() == [(1,)]
+        assert init.call_count == 1
         assert not cached_file_systems(pandas_cursor.connection)
+        if not pandas_cursor.result_set.is_unload:
+            assert pandas_cursor.result_set._csv_stream.closed
 
     @pytest.mark.parametrize(
         ("pandas_cursor", "parquet_engine", "chunksize"),

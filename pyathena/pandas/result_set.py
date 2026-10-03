@@ -8,7 +8,7 @@ from collections import abc
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack
 from functools import partial
-from io import BufferedReader, StringIO, TextIOWrapper
+from io import BufferedReader, IOBase, StringIO, TextIOWrapper
 from multiprocessing import cpu_count
 from typing import (
     TYPE_CHECKING,
@@ -72,7 +72,7 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         self,
         reader: TextFileReader | DataFrame,
         trunc_date: Callable[[DataFrame], DataFrame],
-        csv_stream: TextIOWrapper | None = None,
+        csv_stream: IOBase | None = None,
     ) -> None:
         """Initialize the iterator.
 
@@ -335,7 +335,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         self._data_manifest: list[str] = []
         self._kwargs = kwargs
         self._fs = self._create_s3_file_system()
-        self._csv_stream: TextIOWrapper | None = None
+        self._csv_stream: IOBase | None = None
 
         # Cache time column names for efficient _trunc_date processing
         description = self.description if self.description else []
@@ -561,15 +561,17 @@ class AthenaPandasResultSet(AthenaResultSet):
 
         try:
             with ExitStack() as stack:
-                source: str | TextIOWrapper = self.output_location
                 binary_columns = self._configure_binary_csv_read(read_csv_kwargs, pd.read_csv)
+                storage_options = read_csv_kwargs.pop("storage_options", None)
                 if binary_columns:
-                    storage_options = read_csv_kwargs.pop("storage_options", None) or {}
                     self._csv_stream = stack.enter_context(
                         self._open_binary_csv_stream(binary_columns, storage_options)
                     )
-                    source = self._csv_stream
-                result = pd.read_csv(source, **read_csv_kwargs)
+                else:
+                    self._csv_stream = stack.enter_context(
+                        self._open_output_location(storage_options, mode="rb")
+                    )
+                result = pd.read_csv(self._csv_stream, **read_csv_kwargs)
                 if not isinstance(result, pd.DataFrame):
                     # The chunk iterator takes ownership of the stream.
                     stack.pop_all()
@@ -611,13 +613,6 @@ class AthenaPandasResultSet(AthenaResultSet):
             "keep_default_na": self._keep_default_na,
             "na_values": self._na_values,
             "quoting": self._quoting,
-            "storage_options": {
-                "connection": self.connection,
-                "default_block_size": self._block_size,
-                "default_cache_type": self._cache_type,
-                "max_workers": self._max_workers,
-                "skip_instance_cache": True,
-            },
             "chunksize": chunksize,
             "engine": csv_engine,
         }
@@ -739,19 +734,29 @@ class AthenaPandasResultSet(AthenaResultSet):
             read_csv_kwargs["converters"] = converters
         return binary_columns
 
+    def _open_output_location(self, storage_options: dict[str, Any] | None, **kwargs: Any) -> Any:
+        """Open the CSV output location for reading.
+
+        Args:
+            storage_options: The ``storage_options`` given in the read options. Without
+                them, the file is opened through the filesystem of this result set;
+                with them, through fsspec with these options.
+            **kwargs: The mode and text options to open the file with.
+
+        Returns:
+            A context manager that returns the open file.
+        """
+        if storage_options is None:
+            return self._fs.open(self.output_location, **kwargs)
+        return filesystem_open(self.output_location, **kwargs, **storage_options)
+
     def _open_binary_csv_stream(
-        self, binary_columns: set[int], storage_options: dict[str, Any]
+        self, binary_columns: set[int], storage_options: dict[str, Any] | None
     ) -> TextIOWrapper:
         """Open a stream that preserves binary NULL fields and original CSV newlines."""
         with ExitStack() as stack:
             source = stack.enter_context(
-                filesystem_open(
-                    self.output_location,
-                    mode="rt",
-                    encoding="utf-8",
-                    newline="",
-                    **storage_options,
-                )
+                self._open_output_location(storage_options, mode="rt", encoding="utf-8", newline="")
             )
             reader = stack.enter_context(BinaryCSVReader(source, binary_columns))
             buffer = stack.enter_context(BufferedReader(reader))
@@ -769,7 +774,9 @@ class AthenaPandasResultSet(AthenaResultSet):
             self._unload_location = "/".join(self._data_manifest[0].split("/")[:-1]) + "/"
 
         if engine == "pyarrow":
-            unload_location = self._unload_location
+            # pyarrow takes the path without the scheme with an fsspec filesystem.
+            bucket, key = parse_output_location(self._unload_location)
+            unload_location = f"{bucket}/{key}"
             kwargs = {
                 "use_threads": True,
             }
@@ -781,13 +788,7 @@ class AthenaPandasResultSet(AthenaResultSet):
             return pd.read_parquet(
                 unload_location,
                 engine=self._engine,
-                storage_options={
-                    "connection": self.connection,
-                    "default_block_size": self._block_size,
-                    "default_cache_type": self._cache_type,
-                    "max_workers": self._max_workers,
-                    "skip_instance_cache": True,
-                },
+                filesystem=self._fs,
                 **kwargs,
             )
         except Exception as e:
