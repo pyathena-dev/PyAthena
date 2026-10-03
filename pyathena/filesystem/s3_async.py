@@ -281,7 +281,7 @@ class AioS3FileSystem(AsyncFileSystem):
             block_size < S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE
             or block_size > S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE
         ):
-            raise ValueError("Block size must be greater than 5MiB and less than 5GiB.")
+            raise ValueError("Block size must be at least 5 MiB (5242880 bytes) and at most 5 GiB (5368709120 bytes).")
 
         copy_source: dict[str, Any] = {
             "Bucket": bucket1,

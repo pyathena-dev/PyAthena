@@ -1275,7 +1275,7 @@ class S3FileSystem(AbstractFileSystem):
             block_size < self.MULTIPART_UPLOAD_MIN_PART_SIZE
             or block_size > self.MULTIPART_UPLOAD_MAX_PART_SIZE
         ):
-            raise ValueError("Block size must be greater than 5MiB and less than 5GiB.")
+            raise ValueError("Block size must be at least 5 MiB (5242880 bytes) and at most 5 GiB (5368709120 bytes).")
 
         copy_source = {
             "Bucket": bucket1,
@@ -2322,7 +2322,7 @@ class S3File(AbstractBufferedFile):
         if "r" not in mode and block_size < self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE:
             # When writing occurs, the block size should not be smaller
             # than the minimum size of a part in a multipart upload.
-            raise ValueError(f"Block size must be >= {self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE}MB.")
+            raise ValueError(f"Block size must be >= 5 MiB ({self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE} bytes).")
 
         self.append_block = False
         if "a" in mode and self.fs.exists(path):
