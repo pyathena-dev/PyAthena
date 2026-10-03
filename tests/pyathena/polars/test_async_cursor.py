@@ -4,6 +4,7 @@ import string
 import time
 from datetime import datetime
 from random import randint
+from unittest.mock import MagicMock, patch
 
 import polars as pl
 import pytest
@@ -12,6 +13,7 @@ from pyathena.error import NotSupportedError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.polars.async_cursor import AsyncPolarsCursor
 from pyathena.result_set import AthenaResultSet
+from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
 
@@ -323,3 +325,37 @@ class TestAsyncPolarsCursor:
         df = future.result().as_polars()
         assert df.height == 0
         assert df.width == 0
+
+    @pytest.mark.parametrize(
+        "execute_kwargs",
+        [{}, {"block_size": 2048, "cache_type": "none", "max_workers": 3, "chunksize": 20}],
+    )
+    def test_read_options(self, execute_kwargs):
+        """The cursor's read options reach the result set, and execute() overrides them.
+
+        No AWS calls; the query and its result set are mocked.
+        """
+        cursor_kwargs = {
+            "block_size": 1024,
+            "cache_type": "bytes",
+            "max_workers": 2,
+            "chunksize": 10,
+        }
+        query_execution = MagicMock(state=AthenaQueryExecution.STATE_SUCCEEDED)
+        with (
+            AsyncPolarsCursor(
+                connection=MagicMock(),
+                converter=MagicMock(),
+                formatter=MagicMock(),
+                retry_config=RetryConfig(),
+                **cursor_kwargs,
+            ) as cursor,
+            patch.object(AsyncPolarsCursor, "_execute", return_value="query_id"),
+            patch.object(AsyncPolarsCursor, "_poll", return_value=query_execution),
+            patch("pyathena.polars.async_cursor.AthenaPolarsResultSet") as result_set_class,
+        ):
+            _, future = cursor.execute("SELECT 1", **execute_kwargs)
+            future.result()
+        kwargs = result_set_class.call_args.kwargs
+        expected = {**cursor_kwargs, **execute_kwargs}
+        assert {key: kwargs[key] for key in expected} == expected

@@ -5,6 +5,7 @@ import string
 import time
 from datetime import datetime
 from random import randint
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
@@ -13,7 +14,9 @@ import pytest
 from pyathena.error import NotSupportedError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.pandas.async_cursor import AsyncPandasCursor
+from pyathena.pandas.result_set import AthenaPandasResultSet
 from pyathena.result_set import AthenaResultSet
+from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
 
@@ -626,3 +629,58 @@ class TestAsyncPandasCursor:
         )
         result_set = future.result()
         assert result_set.fetchall() == [(None,)]
+
+    @pytest.mark.parametrize(
+        "execute_kwargs",
+        [
+            {},
+            {
+                "block_size": 2048,
+                "cache_type": "none",
+                "max_workers": 3,
+                "auto_optimize_chunksize": False,
+            },
+        ],
+    )
+    def test_read_options(self, execute_kwargs):
+        """The cursor's read options reach the result set, and execute() overrides them.
+
+        No AWS calls; the query and its result set are mocked.
+        """
+        cursor_kwargs = {"block_size": 1024, "cache_type": "bytes", "auto_optimize_chunksize": True}
+        query_execution = MagicMock(state=AthenaQueryExecution.STATE_SUCCEEDED)
+        with (
+            AsyncPandasCursor(
+                connection=MagicMock(),
+                converter=MagicMock(),
+                formatter=MagicMock(),
+                retry_config=RetryConfig(),
+                **cursor_kwargs,
+            ) as cursor,
+            patch.object(AsyncPandasCursor, "_execute", return_value="query_id"),
+            patch.object(AsyncPandasCursor, "_poll", return_value=query_execution),
+            patch("pyathena.pandas.async_cursor.AthenaPandasResultSet") as result_set_class,
+        ):
+            _, future = cursor.execute("SELECT 1", **execute_kwargs)
+            future.result()
+        kwargs = result_set_class.call_args.kwargs
+        expected = {**cursor_kwargs, **execute_kwargs}
+        assert {key: kwargs[key] for key in expected} == expected
+
+    @pytest.mark.parametrize(
+        "async_pandas_cursor",
+        [{"cursor_kwargs": {"auto_optimize_chunksize": True}}],
+        indirect=True,
+    )
+    def test_auto_optimize_chunksize(self, async_pandas_cursor, monkeypatch):
+        """auto_optimize_chunksize given to the cursor chunks the CSV result."""
+        # Make the five-row result exceed the threshold and read it two rows at a time.
+        monkeypatch.setattr(AthenaPandasResultSet, "LARGE_FILE_THRESHOLD_BYTES", 0)
+        monkeypatch.setattr(AthenaPandasResultSet, "ESTIMATED_BYTES_PER_ROW", 1)
+        monkeypatch.setattr(AthenaPandasResultSet, "AUTO_CHUNK_THRESHOLD_MEDIUM", 0)
+        monkeypatch.setattr(AthenaPandasResultSet, "AUTO_CHUNK_SIZE_MEDIUM", 2)
+        _, future = async_pandas_cursor.execute(
+            "SELECT number FROM (VALUES (1), (2), (3), (4), (5)) AS t(number)"
+        )
+        result_set = future.result()
+        assert [df["number"].tolist() for df in result_set.iter_chunks()] == [[1, 2], [3, 4], [5]]

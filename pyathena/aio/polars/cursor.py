@@ -151,6 +151,8 @@ class AioPolarsCursor(WithAsyncFetch):
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.
             **kwargs: Additional execution parameters passed to Polars read functions.
+                ``block_size``, ``cache_type``, ``max_workers``, and ``chunksize``
+                override the cursor's values for this query.
 
         Returns:
             Self reference for method chaining.
@@ -189,10 +191,10 @@ class AioPolarsCursor(WithAsyncFetch):
                 retry_config=self._retry_config,
                 unload=self._unload,
                 unload_location=unload_location,
-                block_size=self._block_size,
-                cache_type=self._cache_type,
-                max_workers=self._max_workers,
-                chunksize=self._chunksize,
+                block_size=kwargs.pop("block_size", self._block_size),
+                cache_type=kwargs.pop("cache_type", self._cache_type),
+                max_workers=kwargs.pop("max_workers", self._max_workers),
+                chunksize=kwargs.pop("chunksize", self._chunksize),
                 result_set_type_hints=options.result_set_type_hints,
                 **kwargs,
             )

@@ -167,6 +167,8 @@ class AioPandasCursor(WithAsyncFetch):
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.
             **kwargs: Additional pandas read_csv/read_parquet parameters.
+                ``engine``, ``chunksize``, ``block_size``, ``cache_type``, ``max_workers``,
+                and ``auto_optimize_chunksize`` override the cursor's values for this query.
 
         Returns:
             Self reference for method chaining.
@@ -213,7 +215,9 @@ class AioPandasCursor(WithAsyncFetch):
                 block_size=kwargs.pop("block_size", self._block_size),
                 cache_type=kwargs.pop("cache_type", self._cache_type),
                 max_workers=kwargs.pop("max_workers", self._max_workers),
-                auto_optimize_chunksize=self._auto_optimize_chunksize,
+                auto_optimize_chunksize=kwargs.pop(
+                    "auto_optimize_chunksize", self._auto_optimize_chunksize
+                ),
                 result_set_type_hints=options.result_set_type_hints,
                 **kwargs,
             )
