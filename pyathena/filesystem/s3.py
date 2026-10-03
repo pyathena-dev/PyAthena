@@ -987,8 +987,8 @@ class S3FileSystem(AbstractFileSystem):
         Recursively searches for files under the specified path, with optional
         depth limiting and directory inclusion. Uses efficient S3 list operations
         with delimiter handling for performance. As in fsspec, the result
-        includes the path itself if it is a directory and withdirs is True, or
-        if it is an object and nothing is listed below it.
+        includes the path itself if withdirs is True and objects exist below
+        it, or if it is an object and nothing is listed below it.
 
         Args:
             path: S3 path to search under (e.g., "s3://bucket/prefix").

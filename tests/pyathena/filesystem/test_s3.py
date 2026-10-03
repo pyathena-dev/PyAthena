@@ -858,14 +858,26 @@ class TestS3FileSystem:
         expected = [p.lstrip("/") for p in memory.find(f"/bucket/{path}", maxdepth, withdirs)]
         assert sorted(fs.find(f"s3://bucket/{path}", maxdepth, withdirs)) == expected
 
-    @pytest.mark.parametrize("pattern", ["dir/**", "dir/*", "dir/*/*", "dir/s*", "dir/**/file"])
-    def test_glob_matches_fsspec(self, pattern):
+    @pytest.mark.parametrize(
+        ("pattern", "maxdepth"),
+        [
+            ("dir/**", None),
+            ("dir/**", 1),
+            ("dir/**", 2),
+            ("dir/*", None),
+            ("dir/*/*", None),
+            ("dir/s*", None),
+            ("dir/**/file", None),
+            ("missing/*", None),
+        ],
+    )
+    def test_glob_matches_fsspec(self, pattern, maxdepth):
         fs = self._make_fs()
         self._serve_keys(fs, self.FIND_KEYS)
         memory = self._memory_fs(self.FIND_KEYS)
 
-        expected = [p.lstrip("/") for p in memory.glob(f"/bucket/{pattern}")]
-        assert sorted(fs.glob(f"s3://bucket/{pattern}")) == expected
+        expected = [p.lstrip("/") for p in memory.glob(f"/bucket/{pattern}", maxdepth=maxdepth)]
+        assert sorted(fs.glob(f"s3://bucket/{pattern}", maxdepth=maxdepth)) == expected
 
     def test_find_withdirs_lists_root_without_extra_requests(self):
         fs = self._make_fs()
