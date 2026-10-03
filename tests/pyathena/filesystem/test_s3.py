@@ -523,6 +523,16 @@ class TestS3FileSystem:
         # The second round is served from the cache.
         assert fs._call.call_count == 3
 
+    def test_info_does_not_cache_null_version(self):
+        fs = self._make_fs()
+        fs._call.return_value = {"ContentLength": 4, "ETag": '"etag"', "VersionId": "null"}
+
+        for _ in range(2):
+            assert fs.info("s3://bucket/key", version_id="null").size == 4
+            assert fs.info("s3://bucket/key?versionId=null").size == 4
+        # An overwrite can replace the null version, so it is looked up every time.
+        assert fs._call.call_count == 4
+
     def test_object_version_info_paginates(self):
         fs = self._make_fs()
         fs._call.side_effect = [
@@ -1703,13 +1713,18 @@ class TestS3FileSystem:
         with fs.open(path, "rb") as f:
             assert f.read() == b"0123456789"
 
-    def test_read_version_twice(self, fs):
-        # An unversioned bucket stores each object as the "null" version.
-        path = f"s3://{ENV.s3_staging_bucket}/{ENV.s3_filesystem_test_file_key}?versionId=null"
-        # The second open reads the metadata cached by the first one.
-        for _ in range(2):
-            with fs.open(path, "rb") as f:
-                assert f.read() == b"0123456789"
+    def test_read_null_version(self, fs):
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_read_null_version/{uuid.uuid4()}"
+        )
+        # An unversioned bucket stores each object as the "null" version,
+        # which an overwrite replaces.
+        for data in (b"1", b"22"):
+            fs.pipe(path, data)
+            for _ in range(2):
+                with fs.open(f"{path}?versionId=null", "rb") as f:
+                    assert f.read() == data
 
     def test_file_url_metadata_getxattr_setxattr(self, fs):
         path = (

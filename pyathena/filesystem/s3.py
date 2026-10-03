@@ -366,7 +366,11 @@ class S3FileSystem(AbstractFileSystem):
                 key=key,
                 version_id=version_id,
             )
-            self.dircache[path] = file
+            # Writes invalidate only the path without the version, and an
+            # overwrite replaces the "null" version of a bucket without
+            # versioning, so that version is looked up every time.
+            if path_version_id != "null":
+                self.dircache[path] = file
         else:
             file = self.dircache[path]
         return file
