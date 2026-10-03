@@ -413,7 +413,11 @@ class AthenaPandasResultSet(AthenaResultSet):
 
         # Cache time column names for efficient _trunc_date processing
         description = self.description if self.description else []
-        self._time_columns: list[str] = [d[0] for d in description if d[1] == "time"]
+        self._time_columns: list[str] = [
+            name
+            for name, d in zip(self._get_column_names(), description, strict=True)
+            if d[1] == "time"
+        ]
 
         import pandas as pd
 
@@ -436,6 +440,9 @@ class AthenaPandasResultSet(AthenaResultSet):
             # out of the rows that the fetch methods return. Mutable values in its
             # cells, such as lists from JSON columns, are still shared.
             self._df_iter = PandasDataFrameIterator(self._df.copy(deep=False), _no_trunc_date)
+        # Cache column names for fetchone(), after _as_pandas(), which replaces the
+        # metadata of unload queries.
+        self._column_names_cache = self._get_column_names()
         self._iterrows = self._df_iter.iterrows()
 
     def _get_parquet_engine(self) -> str:
@@ -471,10 +478,13 @@ class AthenaPandasResultSet(AthenaResultSet):
         # checks pass; otherwise fall through to the C engine default.
         if self._engine == "pyarrow":
             effective_chunksize = chunksize if chunksize is not None else self._chunksize
+            column_names = [d[0] for d in self.description or []]
             is_compatible = (
                 effective_chunksize is None
                 and self._quoting == 1
                 and not self.converters
+                # The pyarrow engine does not rename columns with the same name.
+                and len(set(column_names)) == len(column_names)
                 and (file_size_bytes is None or file_size_bytes >= self.PYARROW_MIN_FILE_SIZE_BYTES)
             )
             if is_compatible:
@@ -567,8 +577,8 @@ class AthenaPandasResultSet(AthenaResultSet):
         """
         description = self.description if self.description else []
         return {
-            d[0]: dtype
-            for d in description
+            name: dtype
+            for name, d in zip(self._get_column_names(), description, strict=True)
             if (dtype := self._converter.get_dtype(d[1], d[4], d[5])) is not None
         }
 
@@ -579,14 +589,37 @@ class AthenaPandasResultSet(AthenaResultSet):
         """The conversion functions for the result columns the converter maps, keyed by name."""
         description = self.description if self.description else []
         return {
-            d[0]: self._converter.get(d[1]) for d in description if d[1] in self._converter.mappings
+            name: self._converter.get(d[1])
+            for name, d in zip(self._get_column_names(), description, strict=True)
+            if d[1] in self._converter.mappings
         }
 
     @property
     def parse_dates(self) -> list[Any | None]:
         """The names of the result columns with date, time, or timestamp types."""
         description = self.description if self.description else []
-        return [d[0] for d in description if d[1] in self._PARSE_DATES]
+        return [
+            name
+            for name, d in zip(self._get_column_names(), description, strict=True)
+            if d[1] in self._PARSE_DATES
+        ]
+
+    def _get_column_names(self) -> list[Any]:
+        """Get the names of the result columns in the DataFrame.
+
+        Columns with the same name are renamed as pandas renames them when it reads
+        the header of a CSV file, such as ``x`` and ``x.1``.
+
+        Returns:
+            List of column names.
+        """
+        import pandas as pd
+
+        description = self.description if self.description else []
+        names = [d[0] for d in description]
+        if len(set(names)) == len(names):
+            return names
+        return self._resolve_csv_column_names(names, {}, pd.read_csv)[0]
 
     def _finish_csv_frame(self, df: DataFrame) -> DataFrame:
         """Finish a DataFrame read from the CSV result file.
@@ -641,8 +674,7 @@ class AthenaPandasResultSet(AthenaResultSet):
             return None
         else:
             self._rownumber = row[0] + 1
-            description = self.description if self.description else []
-            return tuple([row[1][d[0]] for d in description])
+            return tuple([row[1][name] for name in self._column_names_cache])
 
     def _read_csv(self) -> TextFileReader | DataFrame:
         import pandas as pd
@@ -721,7 +753,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         if self.output_location and self.output_location.endswith(".txt"):
             sep = "\t"
             header = None
-            names = [d[0] for d in self.description or []]
+            names = self._get_column_names()
         else:
             sep = ","
             header = 0
@@ -957,24 +989,20 @@ class AthenaPandasResultSet(AthenaResultSet):
         if not rows:
             return pd.DataFrame()
         description = self.description if self.description else []
-        columns = [d[0] for d in description]
-        columnar = self._rows_to_columnar(rows, columns)
+        # Positional, so that columns with the same name keep their own values.
+        columns = [list(column) for column in zip(*rows, strict=True)]
         # Integer columns get the dtype that the CSV result file reads them with,
         # and json columns with NULL stay objects as there, so that NULL does not
         # make their values floats.
-        dtypes: dict[str, Any] = {}
-        for d in description:
+        data: dict[Any, Any] = {}
+        for name, values, d in zip(self._get_column_names(), columns, description, strict=True):
+            dtype = None
             if d[1] in self._INTEGER_TYPES:
-                if (dtype := self._converter.get_dtype(d[1], d[4], d[5])) is not None:
-                    dtypes[d[0]] = dtype
-            elif d[1] == "json" and None in columnar[d[0]]:
-                dtypes[d[0]] = object
-        return pd.DataFrame(
-            {
-                name: values if name not in dtypes else pd.array(values, dtype=dtypes[name])
-                for name, values in columnar.items()
-            }
-        )
+                dtype = self._converter.get_dtype(d[1], d[4], d[5])
+            elif d[1] == "json" and None in values:
+                dtype = object
+            data[name] = values if dtype is None else pd.array(values, dtype=dtype)
+        return pd.DataFrame(data)
 
     def as_pandas(self) -> PandasDataFrameIterator | DataFrame:
         """Return the query results as a DataFrame or an iterator of DataFrame chunks.

@@ -1638,6 +1638,47 @@ class TestPandasCursor:
         assert pandas_cursor.fetchall() == [CONVERTED_VALUES_ROW]
 
     @pytest.mark.parametrize(
+        "pandas_cursor",
+        [
+            pytest.param({}, id="default"),
+            pytest.param(
+                {"work_group": ENV.managed_work_group, "s3_staging_dir": ""},
+                id="managed",
+                marks=pytest.mark.skipif(
+                    not ENV.managed_work_group,
+                    reason="AWS_ATHENA_MANAGED_WORKGROUP not set",
+                ),
+            ),
+        ],
+        indirect=["pandas_cursor"],
+    )
+    def test_duplicate_column_names(self, pandas_cursor):
+        pandas_cursor.execute(
+            "SELECT 1 AS x, 2 AS x, 'a' AS y, json_parse('[1]') AS j, json_parse('[2]') AS j, "
+            "CAST('12:34:56' AS TIME) AS t, CAST('01:02:03' AS TIME) AS t"
+        )
+        assert pandas_cursor.fetchall() == [
+            (
+                1,
+                2,
+                "a",
+                [1],
+                [2],
+                datetime(2017, 1, 1, 12, 34, 56).time(),
+                datetime(2017, 1, 1, 1, 2, 3).time(),
+            )
+        ]
+        assert pandas_cursor.as_pandas().columns.tolist() == [
+            "x",
+            "x.1",
+            "y",
+            "j",
+            "j.1",
+            "t",
+            "t.1",
+        ]
+
+    @pytest.mark.parametrize(
         "execute_kwargs",
         [
             {},
