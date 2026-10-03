@@ -462,10 +462,6 @@ class TestAioS3FileSystem:
         assert len(result) == 3
         assert fs._strip_protocol(f"{dir_}/level1/level2/file2.txt") in result
 
-        # Test maxdepth on an object path (the object itself)
-        result = await fs._find(f"{dir_}/file0.txt", maxdepth=1)
-        assert result == [fs._strip_protocol(f"{dir_}/file0.txt")]
-
         # Test no maxdepth (all files)
         result = await fs._find(dir_)
         assert len(result) == 4

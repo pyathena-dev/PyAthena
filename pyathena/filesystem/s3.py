@@ -749,13 +749,6 @@ class S3FileSystem(AbstractFileSystem):
 
             # List files and directories at current level
             current_items = self._ls_dirs(path, prefix=prefix, delimiter="/", refresh=refresh)
-            if not current_items and key:
-                # The path itself may be an object, as without maxdepth.
-                try:
-                    info = self.info(path, refresh=refresh)
-                except FileNotFoundError:
-                    return []
-                return [info] if info.type == S3ObjectType.S3_OBJECT_TYPE_FILE else []
 
             for item in current_items:
                 if item.type == S3ObjectType.S3_OBJECT_TYPE_FILE:
@@ -818,8 +811,8 @@ class S3FileSystem(AbstractFileSystem):
             detail: If True, return dict of {path: S3Object}; if False, return list of paths.
             **kwargs: Additional arguments including:
                 prefix: Key prefix, relative to the path, to filter the listed keys
-                    by. If nothing is listed and the path itself is an object,
-                    that object is returned regardless of the prefix.
+                    by. Without maxdepth, if nothing is listed and the path itself is
+                    an object, that object is returned regardless of the prefix.
                 refresh: If True, bypass the cache and list from S3.
 
         Returns:

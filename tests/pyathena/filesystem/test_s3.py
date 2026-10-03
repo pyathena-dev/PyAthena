@@ -315,14 +315,6 @@ class TestS3FileSystem:
             "bucket/dir/sub/nested",
         ]
 
-    def test_find_maxdepth_returns_object_path(self):
-        fs = self._make_fs()
-        fs.dircache["bucket/dir/file"] = self._file_object("dir/file")
-        fs._call.return_value = {}
-
-        assert fs.find("s3://bucket/dir/file", maxdepth=1) == ["bucket/dir/file"]
-        assert fs.find("s3://bucket/dir/file") == ["bucket/dir/file"]
-
     def test_refresh_evicts_cached_object_and_bucket_not_found(self):
         fs = self._make_fs()
         fs.dircache["bucket/key"] = self._file_object("key")
@@ -1150,10 +1142,6 @@ class TestS3FileSystem:
         result = fs.find(dir_, maxdepth=3)
         assert len(result) == 3
         assert fs._strip_protocol(f"{dir_}/level1/level2/file2.txt") in result
-
-        # Test maxdepth on an object path (the object itself)
-        result = fs.find(f"{dir_}/file0.txt", maxdepth=1)
-        assert result == [fs._strip_protocol(f"{dir_}/file0.txt")]
 
         # Test no maxdepth (all files)
         result = fs.find(dir_)
