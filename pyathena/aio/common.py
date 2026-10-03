@@ -815,7 +815,8 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
         blocking the event loop.
 
         Args:
-            size: Maximum number of rows to fetch. Defaults to arraysize.
+            size: Maximum number of rows to fetch. If None or not positive,
+                ``arraysize`` is used.
 
         Returns:
             List of tuples representing the fetched rows.
