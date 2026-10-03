@@ -10,7 +10,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from itertools import chain
 from pathlib import Path
@@ -716,20 +716,25 @@ class TestS3FileSystem:
         failed: Future[SimpleNamespace] = Future()
         failed.set_exception(RuntimeError("upload failed"))
         started = threading.Event()
-        cancelled = threading.Event()
+        release = threading.Event()
 
         def upload_part():
             started.set()
-            # Uploading until the pending part is cancelled, and a little
-            # longer, so that an abort that does not wait comes first.
-            cancelled.wait(5)
-            time.sleep(0.05)
+            # Uploading until the abort waits for it, so that an abort that
+            # does not wait comes first.
+            release.wait(5)
             events.append("part 2 stored")
 
-        with ThreadPoolExecutor(max_workers=1) as executor:
+        def wait_parts(futures):
+            release.set()
+            return wait(futures)
+
+        with (
+            ThreadPoolExecutor(max_workers=1) as executor,
+            mock.patch("pyathena.filesystem.s3.wait", side_effect=wait_parts) as waited,
+        ):
             running = executor.submit(upload_part)
             pending = executor.submit(events.append, "part 3 stored")
-            pending.add_done_callback(lambda _: cancelled.set())
             started.wait(5)
             with pytest.raises(RuntimeError, match="upload failed"):
                 fs._finish_multipart_upload(
@@ -740,6 +745,7 @@ class TestS3FileSystem:
                 )
 
         assert events == ["part 2 stored", "abort"]
+        waited.assert_called_once_with([failed, running])
         assert pending.cancelled()
 
     def test_finish_multipart_upload_does_not_wait_for_cancelled_parts(self):
@@ -2475,25 +2481,31 @@ class TestS3File:
         events = []
         file.fs._call.side_effect = lambda *args, **kwargs: events.append("abort")
         started = threading.Event()
-        cancelled = threading.Event()
+        release = threading.Event()
 
         def upload_part():
             started.set()
-            # Uploading until the pending part is cancelled, and a little
-            # longer, so that an abort that does not wait comes first.
-            cancelled.wait(5)
-            time.sleep(0.05)
+            # Uploading until the abort waits for it, so that an abort that
+            # does not wait comes first.
+            release.wait(5)
             events.append("part 1 stored")
 
-        with ThreadPoolExecutor(max_workers=1) as executor:
+        def wait_parts(futures):
+            release.set()
+            return wait(futures)
+
+        with (
+            ThreadPoolExecutor(max_workers=1) as executor,
+            mock.patch("pyathena.filesystem.s3.wait", side_effect=wait_parts) as waited,
+        ):
             running = executor.submit(upload_part)
             pending = executor.submit(events.append, "part 2 stored")
-            pending.add_done_callback(lambda _: cancelled.set())
             file.multipart_upload_parts = [running, pending]
             started.wait(5)
             file.discard()
 
         assert events == ["part 1 stored", "abort"]
+        waited.assert_called_once_with([running])
         assert pending.cancelled()
 
     def test_discard_on_event_loop_thread(self):
