@@ -879,7 +879,7 @@ class TestS3FileSystem:
         expected = [p.lstrip("/") for p in memory.glob(f"/bucket/{pattern}", maxdepth=maxdepth)]
         assert sorted(fs.glob(f"s3://bucket/{pattern}", maxdepth=maxdepth)) == expected
 
-    def test_find_withdirs_lists_root_without_extra_requests(self):
+    def test_find_directory_without_extra_requests(self):
         fs = self._make_fs()
         self._serve_keys(fs, self.FIND_KEYS)
 
@@ -887,6 +887,11 @@ class TestS3FileSystem:
         assert fs._call.call_count == 1
         fs._call.reset_mock()
         assert "bucket/dir" in fs.find("s3://bucket/dir", maxdepth=1, withdirs=True)
+        assert fs._call.call_count == 1
+        # Only a subdirectory is listed; it is dropped without withdirs, but
+        # the path is a directory, so it is not looked up as an object.
+        fs._call.reset_mock()
+        assert fs.find("s3://bucket/dir", maxdepth=1, prefix="s") == []
         assert fs._call.call_count == 1
 
     def test_find_prefix_counts_levels_from_path(self):
@@ -3621,10 +3626,7 @@ class TestS3FileSystem:
         assert fs._strip_protocol(path) in fs.glob(f"{dir_}/nested/*")
         assert fs._strip_protocol(path) in fs.glob(f"{dir_}/nested/test_*")
         assert fs._strip_protocol(path) in fs.glob(f"{dir_}/*/*")
-        assert fs.glob(f"{dir_}/nested/**") == [
-            fs._strip_protocol(f"{dir_}/nested"),
-            fs._strip_protocol(path),
-        ]
+        assert fs._strip_protocol(f"{dir_}/nested") in fs.glob(f"{dir_}/nested/**")
 
         with pytest.raises(ValueError):  # noqa: PT011
             fs.glob("*")

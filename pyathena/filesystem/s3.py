@@ -906,7 +906,7 @@ class S3FileSystem(AbstractFileSystem):
             # below the path as the prefix has slashes.
             levels = maxdepth - prefix.count("/")
             files = (
-                self._find_levels(path, levels, withdirs, prefix=prefix, refresh=refresh)
+                self._find_levels(path, levels, prefix=prefix, refresh=refresh)
                 if levels >= 1
                 else []
             )
@@ -935,43 +935,28 @@ class S3FileSystem(AbstractFileSystem):
         return files
 
     def _find_levels(
-        self,
-        path: str,
-        maxdepth: int,
-        withdirs: bool | None,
-        prefix: str = "",
-        refresh: bool = False,
+        self, path: str, maxdepth: int, prefix: str = "", refresh: bool = False
     ) -> list[S3Object]:
-        """List the objects below a path level by level with ``Delimiter="/"``.
+        """List the entries below a path level by level with ``Delimiter="/"``.
 
         Args:
             path: S3 path to search under.
             maxdepth: Number of levels to list, at least 1.
-            withdirs: Whether to include directories in the result.
             prefix: Key prefix, relative to the path, to filter the first
                 level by.
             refresh: If True, bypass the cache and list from S3.
 
         Returns:
-            The objects found, and the directories if ``withdirs`` is True.
+            The objects and directories found.
         """
         bucket, _, _ = self.parse_path(path)
         result: list[S3Object] = []
         for item in self._ls_dirs(path, prefix=prefix, delimiter="/", refresh=refresh):
-            if item.type == S3ObjectType.S3_OBJECT_TYPE_FILE:
-                result.append(item)
-            elif item.type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
-                if withdirs:
-                    result.append(item)
-                if maxdepth > 1:
-                    result.extend(
-                        self._find_levels(
-                            f"s3://{bucket}/{item.key}",
-                            maxdepth - 1,
-                            withdirs,
-                            refresh=refresh,
-                        )
-                    )
+            result.append(item)
+            if item.type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY and maxdepth > 1:
+                result.extend(
+                    self._find_levels(f"s3://{bucket}/{item.key}", maxdepth - 1, refresh=refresh)
+                )
         return result
 
     def find(
