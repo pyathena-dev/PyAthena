@@ -863,6 +863,15 @@ class TestS3FileSystem:
         expected = [p.lstrip("/") for p in memory.glob(f"/bucket/{pattern}", maxdepth=maxdepth)]
         assert sorted(fs.glob(f"s3://bucket/{pattern}", maxdepth=maxdepth)) == expected
 
+    def test_find_withdirs_omits_bucket(self):
+        fs = self._make_fs()
+        self._serve_keys(fs, self.FIND_KEYS)
+
+        # A recursive copy of the expanded paths cannot copy a bucket.
+        assert "bucket" not in fs.find("s3://bucket", withdirs=True)
+        assert "bucket" not in fs.find("s3://bucket", maxdepth=1, withdirs=True)
+        assert "bucket" not in fs.expand_path("s3://bucket/**", recursive=True)
+
     def test_find_directory_without_extra_requests(self):
         fs = self._make_fs()
         self._serve_keys(fs, self.FIND_KEYS)

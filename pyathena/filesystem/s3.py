@@ -919,8 +919,9 @@ class S3FileSystem(AbstractFileSystem):
 
         if files:
             # Something is listed below the path, so the path is a directory,
-            # which fsspec includes with the directories.
-            if withdirs:
+            # which fsspec includes with the directories. A bucket is not
+            # included, since cp_file() cannot copy it in a recursive copy.
+            if withdirs and key:
                 files = [self._directory_object(bucket, key), *files]
         elif key:
             # As in fsspec, the path itself is returned if it is an object,
@@ -972,7 +973,8 @@ class S3FileSystem(AbstractFileSystem):
         depth limiting and directory inclusion. Uses efficient S3 list operations
         with delimiter handling for performance. As in fsspec, the result
         includes the path itself if withdirs is True and objects exist below
-        it, or if it is an object and nothing is listed below it.
+        it, unless it is a bucket, or if it is an object and nothing is listed
+        below it.
 
         Args:
             path: S3 path to search under (e.g., "s3://bucket/prefix").
