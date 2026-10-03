@@ -1,3 +1,5 @@
+"""fsspec filesystem and file implementations for Amazon S3."""
+
 from __future__ import annotations
 
 import logging
@@ -255,6 +257,22 @@ class S3FileSystem(AbstractFileSystem):
 
     @staticmethod
     def parse_path(path: str) -> tuple[str, str | None, str | None]:
+        """Parse an S3 path into its bucket, key and version ID.
+
+        The path may have an ``s3://`` or ``s3a://`` scheme and a version ID
+        query (``?versionId=``, ``?versionID=``, ``?versionid=`` or
+        ``?version_id=``).
+
+        Args:
+            path: The S3 path (e.g., "s3://bucket/key?versionId=...").
+
+        Returns:
+            Tuple of the bucket, the key (None for a bucket path) and the
+            version ID (None if the path has none).
+
+        Raises:
+            ValueError: If the path is not a valid S3 path.
+        """
         match = S3FileSystem.PATTERN_PATH.search(path)
         if match:
             return match.group("bucket"), match.group("key"), match.group("version_id")
@@ -532,6 +550,27 @@ class S3FileSystem(AbstractFileSystem):
                 break
 
     def info(self, path: str, **kwargs) -> S3Object:
+        """Return information about an S3 path.
+
+        Returns a matching entry from the directory cache when one exists.
+        Otherwise, a key path is looked up with HeadObject and, if no object
+        exists, with a ListObjectsV2 request (``Delimiter="/"``,
+        ``MaxKeys=1``) that checks whether it is a key prefix; a bucket path
+        is looked up with HeadBucket. With ``version_aware``, a cached file
+        entry without a version ID is looked up again.
+
+        Args:
+            path: S3 path (e.g., "s3://bucket" or "s3://bucket/key").
+            **kwargs: Additional arguments including:
+                refresh: If True, bypass the cache and query S3.
+                version_id: The version ID to look up when the path has none.
+
+        Returns:
+            S3Object describing the bucket, directory, or file.
+
+        Raises:
+            FileNotFoundError: If the path does not exist.
+        """
         refresh = kwargs.pop("refresh", False)
         path = self._strip_protocol(path)
         bucket, key, path_version_id = self.parse_path(path)
@@ -778,6 +817,16 @@ class S3FileSystem(AbstractFileSystem):
             return bool(file)
 
     def rm_file(self, path: str, **kwargs) -> None:
+        """Delete an S3 object with DeleteObject.
+
+        Does nothing for a bucket path. If the path has a version ID, that
+        version is deleted.
+
+        Args:
+            path: S3 path (s3://bucket/key) of the object to delete.
+            **kwargs: Accepted for fsspec compatibility; not used in the
+                request.
+        """
         bucket, key, version_id = self.parse_path(path)
         if not key:
             return
@@ -785,6 +834,21 @@ class S3FileSystem(AbstractFileSystem):
         self.invalidate_cache(path)
 
     def rm(self, path, recursive=False, maxdepth=None, **kwargs) -> None:
+        """Delete objects with DeleteObjects requests.
+
+        Expands the path with ``expand_path`` and deletes the matched objects
+        in parallel requests of up to ``DELETE_OBJECTS_MAX_KEYS`` keys each.
+
+        Args:
+            path: S3 path (s3://bucket/key) to delete.
+            recursive: Whether to delete all objects below the path.
+            maxdepth: Maximum depth to expand when ``recursive`` is True.
+            **kwargs: Additional parameters passed to the DeleteObjects API.
+                ``Quiet`` (default True) sets the quiet mode of the requests.
+
+        Raises:
+            ValueError: If the path is a bucket.
+        """
         bucket, key, version_id = self.parse_path(path)
         if not key:
             raise ValueError("Cannot delete the bucket.")
@@ -1002,6 +1066,22 @@ class S3FileSystem(AbstractFileSystem):
         self.dircache.pop("", None)
 
     def touch(self, path: str, truncate: bool = True, **kwargs) -> dict[str, Any]:
+        """Create an empty object with PutObject.
+
+        Args:
+            path: S3 path (s3://bucket/key) of the object.
+            truncate: If True, replace an existing object with an empty one;
+                if False, raise if the object exists.
+            **kwargs: Additional parameters passed to the PutObject API.
+
+        Returns:
+            The PutObject response as a dictionary (see
+            :meth:`S3PutObject.to_dict`).
+
+        Raises:
+            ValueError: If the path has a version ID, is a bucket, or exists
+                while ``truncate`` is False.
+        """
         bucket, key, version_id = self.parse_path(path)
         if version_id:
             raise ValueError("Cannot touch the file with the version specified.")
@@ -1269,6 +1349,19 @@ class S3FileSystem(AbstractFileSystem):
     def cat_file(
         self, path: str, start: int | None = None, end: int | None = None, **kwargs
     ) -> bytes:
+        """Read the contents of an S3 object with GetObject.
+
+        Args:
+            path: S3 path (s3://bucket/key) of the object.
+            start: Byte offset to start reading at. A negative value counts
+                from the end of the object.
+            end: Byte offset to stop reading at (exclusive). A negative value
+                counts from the end of the object.
+            **kwargs: Additional parameters passed to the GetObject API.
+
+        Returns:
+            The bytes read from the object.
+        """
         bucket, key, version_id = self.parse_path(path)
         if start is not None or end is not None:
             size = self.info(path).get("size", 0)
@@ -1750,13 +1843,37 @@ class S3FileSystem(AbstractFileSystem):
                 future.result()
 
     def created(self, path: str) -> datetime:
+        """Return the creation time of the path.
+
+        Returns the same value as :meth:`modified`.
+
+        Args:
+            path: S3 path (s3://bucket/key).
+
+        Returns:
+            The last-modified time of the object.
+        """
         return self.modified(path)
 
     def modified(self, path: str) -> datetime:
+        """Return the last-modified time of the path.
+
+        Args:
+            path: S3 path (s3://bucket/key).
+
+        Returns:
+            The ``last_modified`` field from :meth:`info`, which is None for
+            buckets and directories.
+        """
         info = self.info(path)
         return cast(datetime, info.get("last_modified"))
 
     def invalidate_cache(self, path: str | None = None) -> None:
+        """Remove the cached entries of the path and its parent paths.
+
+        Args:
+            path: The path to invalidate. If None, clear the whole cache.
+        """
         if path is None:
             self.dircache.clear()
         else:
@@ -1987,6 +2104,40 @@ class S3File(AbstractBufferedFile):
         s3_additional_kwargs: dict[str, Any] | None = None,
         **kwargs,
     ) -> None:
+        """Initialize the file for the path and mode.
+
+        In read mode, the object is looked up with ``info()`` and the reads
+        are made conditional on its ETag (``IfMatch``). In append mode, an
+        existing object smaller than ``MULTIPART_UPLOAD_MIN_PART_SIZE`` is
+        read into the write buffer, and a larger one is copied as the first
+        parts of the multipart upload.
+
+        Args:
+            fs: The filesystem that the file belongs to.
+            path: S3 path (s3://bucket/key) of the file.
+            mode: The file mode, such as ``rb``, ``wb`` or ``ab``.
+            version_id: The version ID to read. Must match the version ID in
+                the path if both are given.
+            max_workers: The number of parallel workers for range reads and
+                part copies.
+            executor: The executor for parallel operations. If None, a new
+                ``S3ThreadPoolExecutor`` is created.
+            block_size: The block size for reads and writes. Must be at least
+                ``MULTIPART_UPLOAD_MIN_PART_SIZE`` unless reading.
+            cache_type: The fsspec cache type for reads.
+            autocommit: Whether to commit the written data when the file is
+                closed. If False, :meth:`commit` must be called.
+            cache_options: Options for the fsspec cache.
+            size: The size of the object, if known. Passed to
+                ``fsspec.spec.AbstractBufferedFile``.
+            s3_additional_kwargs: Additional parameters for the object requests
+                of the file.
+            **kwargs: Accepted for compatibility; not used.
+
+        Raises:
+            ValueError: If the path has no key, the version IDs do not match,
+                or the block size is too small for writing.
+        """
         self.max_workers = max_workers
         self._executor: S3Executor = executor or S3ThreadPoolExecutor(max_workers=max_workers)
         self.s3_additional_kwargs = s3_additional_kwargs if s3_additional_kwargs else {}
@@ -2050,6 +2201,7 @@ class S3File(AbstractBufferedFile):
         self.multipart_upload_parts: list[Future[S3MultipartUploadPart]] = []
 
     def close(self) -> None:
+        """Close the file, flushing any written data, and shut down its executor."""
         super().close()
         self._executor.shutdown()
 
@@ -2155,6 +2307,17 @@ class S3File(AbstractBufferedFile):
         return not final
 
     def commit(self) -> None:
+        """Complete the upload of the written data.
+
+        Creates an empty object if nothing was written, uploads the buffered
+        data with PutObject if no multipart upload part was submitted, and
+        otherwise completes the multipart upload, which is aborted if the
+        completion fails. Invalidates the cache of the path afterwards.
+
+        Raises:
+            RuntimeError: If parts were submitted but no multipart upload is
+                initialized.
+        """
         if self.tell() == 0:
             if self.buffer is not None:
                 self.discard()
@@ -2191,6 +2354,7 @@ class S3File(AbstractBufferedFile):
         self.fs.invalidate_cache(self.path)
 
     def discard(self) -> None:
+        """Cancel pending part uploads and abort the multipart upload, if any."""
         if self.multipart_upload:
             for f in self.multipart_upload_parts:
                 f.cancel()

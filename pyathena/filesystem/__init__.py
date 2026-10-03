@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""fsspec filesystem implementations for Amazon S3."""
+
 import logging
 
 import fsspec
