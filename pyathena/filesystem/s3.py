@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import math
 import mimetypes
 import os.path
 import re
 from collections.abc import Callable, Iterator
-from concurrent.futures import Future, as_completed
+from concurrent.futures import Future, as_completed, wait
 from copy import deepcopy
 from datetime import datetime
+from io import BytesIO
 from multiprocessing import cpu_count
 from re import Pattern
 from typing import Any, cast
@@ -104,6 +107,9 @@ class S3FileSystem(AbstractFileSystem):
     # https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
     # The maximum size of a part in a multipart upload is 5GiB.
     MULTIPART_UPLOAD_MAX_PART_SIZE: int = 5 * 2**30  # 5GiB
+    # https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
+    # The maximum number of parts per multipart upload is 10,000.
+    MULTIPART_UPLOAD_MAX_PARTS: int = 10_000
     # https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjects.html
     DELETE_OBJECTS_MAX_KEYS: int = 1000
     DEFAULT_BLOCK_SIZE: int = 5 * 2**20  # 5MiB
@@ -307,18 +313,31 @@ class S3FileSystem(AbstractFileSystem):
         )
 
     def _head_bucket(self, bucket, refresh: bool = False) -> S3Object | None:
-        if bucket not in self.dircache or refresh:
+        """Get the bucket as a directory object with HeadBucket.
+
+        The result is cached under the bucket name. A missing bucket evicts
+        its entry and the cached bucket listing that still lists it.
+
+        Args:
+            bucket: The bucket name.
+            refresh: If True, bypass the cache and call HeadBucket.
+
+        Returns:
+            The bucket object, or None if the bucket does not exist.
+        """
+        file = None if refresh else self.dircache.get(bucket)
+        if file is None:
             try:
                 self._call(
                     self._client.head_bucket,
                     Bucket=bucket,
                 )
             except FileNotFoundError:
-                self.dircache.pop(bucket, None)
+                self._evict_cache(bucket)
                 # Evict the cached bucket listing only if it still lists the bucket.
                 buckets = self.dircache.get("")
                 if buckets and any(b.name == bucket for b in buckets):
-                    self.dircache.pop("", None)
+                    self._evict_cache("")
                 return None
             file = S3Object(
                 init={
@@ -334,13 +353,25 @@ class S3FileSystem(AbstractFileSystem):
                 version_id=None,
             )
             self.dircache[bucket] = file
-        else:
-            file = self.dircache[bucket]
         return file
 
     def _head_object(
         self, path: str, version_id: str | None = None, refresh: bool = False
     ) -> S3Object | None:
+        """Get the object with HeadObject.
+
+        The result is cached under the path, or under the version-qualified
+        path for an explicit version. An explicitly requested ``"null"``
+        version is not cached. A missing object evicts its entry.
+
+        Args:
+            path: The object path, optionally with a versionId query.
+            version_id: The version to get when the path has no version.
+            refresh: If True, bypass the cache and call HeadObject.
+
+        Returns:
+            The object, or None if it does not exist.
+        """
         bucket, key, path_version_id = self.parse_path(path)
         version_id = path_version_id if path_version_id else version_id
         if version_id and not path_version_id:
@@ -351,7 +382,8 @@ class S3FileSystem(AbstractFileSystem):
         # overwrite replaces the "null" version of a bucket without
         # versioning, so that version is looked up every time.
         cacheable = version_id != "null"
-        if path not in self.dircache or refresh:
+        file = None if refresh else self.dircache.get(path)
+        if file is None:
             try:
                 request = {
                     "Bucket": bucket,
@@ -364,7 +396,7 @@ class S3FileSystem(AbstractFileSystem):
                     **request,
                 )
             except FileNotFoundError:
-                self.dircache.pop(path, None)
+                self._evict_cache(path)
                 return None
             if self.version_aware and not version_id:
                 # Pin the version of the object so that subsequent reads see
@@ -379,12 +411,21 @@ class S3FileSystem(AbstractFileSystem):
             )
             if cacheable:
                 self.dircache[path] = file
-        else:
-            file = self.dircache[path]
         return file
 
     def _ls_buckets(self, refresh: bool = False) -> list[S3Object]:
-        if "" not in self.dircache or refresh:
+        """List the buckets with ListBuckets.
+
+        The listing is cached under ``""``.
+
+        Args:
+            refresh: If True, bypass the cache and call ListBuckets.
+
+        Returns:
+            The buckets as directory objects.
+        """
+        buckets = None if refresh else self.dircache.get("")
+        if buckets is None:
             response = self._call(
                 self._client.list_buckets,
             )
@@ -405,8 +446,6 @@ class S3FileSystem(AbstractFileSystem):
                 for b in response["Buckets"]
             ]
             self.dircache[""] = buckets
-        else:
-            buckets = self.dircache[""]
         return buckets
 
     def _ls_dirs(
@@ -445,8 +484,9 @@ class S3FileSystem(AbstractFileSystem):
             prefix = f"{key}/{prefix if prefix else ''}"
 
         cache_key = (path, delimiter)
-        if use_cache and cache_key in self.dircache and not refresh:
-            return cast(list[S3Object], self.dircache[cache_key])
+        cached = self.dircache.get(cache_key) if use_cache and not refresh else None
+        if cached is not None:
+            return cast(list[S3Object], cached)
 
         files: list[S3Object] = []
         while True:
@@ -483,7 +523,7 @@ class S3FileSystem(AbstractFileSystem):
             if files:
                 self.dircache[cache_key] = files
             else:
-                self.dircache.pop(cache_key, None)
+                self._evict_cache(cache_key)
         return files
 
     def ls(
@@ -913,27 +953,60 @@ class S3FileSystem(AbstractFileSystem):
     def rm(self, path, recursive=False, maxdepth=None, **kwargs) -> None:
         """Delete objects with DeleteObjects requests.
 
-        Expands the path with ``expand_path`` and deletes the matched objects
-        in parallel requests of up to ``DELETE_OBJECTS_MAX_KEYS`` keys each.
+        Expands the paths with ``expand_path`` and deletes the matched objects
+        in parallel requests of up to ``DELETE_OBJECTS_MAX_KEYS`` keys each,
+        one set of requests per bucket. A path with a version ID deletes that
+        version without expansion.
 
         Args:
-            path: S3 path (s3://bucket/key) to delete.
-            recursive: Whether to delete all objects below the path.
+            path: S3 path (s3://bucket/key) or list of paths to delete.
+            recursive: Whether to delete all objects below the paths.
             maxdepth: Maximum depth to expand when ``recursive`` is True.
             **kwargs: Additional parameters passed to the DeleteObjects API.
                 ``Quiet`` (default True) sets the quiet mode of the requests.
 
         Raises:
-            ValueError: If the path is a bucket.
+            ValueError: If a path is a bucket.
+            OSError: If S3 could not delete some of the objects.
         """
-        bucket, key, version_id = self.parse_path(path)
-        if not key:
-            raise ValueError("Cannot delete the bucket.")
+        paths = self._expand_delete_paths(path, recursive=recursive, maxdepth=maxdepth)
+        self._delete_objects(paths, **kwargs)
 
-        expand_path = self.expand_path(path, recursive=recursive, maxdepth=maxdepth)
-        self._delete_objects(bucket, expand_path, **kwargs)
-        for p in expand_path:
-            self.invalidate_cache(p)
+    def _expand_delete_paths(
+        self, path: str | list[str], recursive: bool = False, maxdepth: int | None = None
+    ) -> list[str]:
+        """Expand the paths that ``rm`` deletes.
+
+        Args:
+            path: S3 path or list of paths.
+            recursive: Whether to include all objects below the paths.
+            maxdepth: Maximum depth to expand when ``recursive`` is True.
+
+        Returns:
+            The paths with a version ID as given, followed by the expansion
+            of the other paths by ``expand_path``.
+
+        Raises:
+            ValueError: If a path is a bucket.
+        """
+        paths = [path] if isinstance(path, str) else list(path)
+        versioned_paths, unversioned_paths = [], []
+        for p in paths:
+            _, key, version_id = self.parse_path(p)
+            # expand_path strips the slashes of "bucket//" to the bucket.
+            if not key or not key.strip("/"):
+                raise ValueError("Cannot delete the bucket.")
+            if version_id:
+                versioned_paths.append(p)
+            else:
+                unversioned_paths.append(p)
+
+        if unversioned_paths:
+            # expand_path treats "?" as a wildcard, so versioned paths skip it.
+            unversioned_paths = self.expand_path(
+                unversioned_paths, recursive=recursive, maxdepth=maxdepth
+            )
+        return versioned_paths + unversioned_paths
 
     def _delete_object(
         self, bucket: str, key: str, version_id: str | None = None, **kwargs
@@ -965,41 +1038,137 @@ class S3FileSystem(AbstractFileSystem):
         """
         return S3ThreadPoolExecutor(max_workers=max_workers)
 
-    def _delete_objects(
-        self, bucket: str, paths: list[str], max_workers: int | None = None, **kwargs
-    ) -> None:
-        if not paths:
+    def _delete_objects(self, paths: list[str], max_workers: int | None = None, **kwargs) -> None:
+        """Delete objects with DeleteObjects requests grouped by bucket.
+
+        Args:
+            paths: Paths of the objects to delete. Bucket paths are skipped.
+            max_workers: Maximum number of parallel requests. Defaults to
+                ``self.max_workers``.
+            **kwargs: Additional parameters passed to the DeleteObjects API.
+                ``Quiet`` (default True) sets the quiet mode of the requests.
+
+        Raises:
+            OSError: If S3 could not delete some of the objects.
+        """
+        requests = self._delete_objects_requests(paths, **kwargs)
+        if not requests:
             return
 
         max_workers = max_workers if max_workers else self.max_workers
+        with self._create_executor(max_workers=max_workers) as executor:
+            fs = [executor.submit(self._delete_objects_request, request) for request in requests]
+        # The executor has waited for every request, also after a failure.
+        self._raise_delete_objects_errors(requests, [f.exception() or f.result() for f in fs])
+
+    def _delete_objects_requests(self, paths: list[str], **kwargs) -> list[dict[str, Any]]:
+        """Build the DeleteObjects requests that delete the objects.
+
+        Args:
+            paths: Paths of the objects to delete. Bucket paths are skipped.
+            **kwargs: Additional parameters of the requests. ``Quiet``
+                (default True) sets the quiet mode of the requests.
+
+        Returns:
+            Requests of up to ``DELETE_OBJECTS_MAX_KEYS`` keys of one bucket each.
+
+        Raises:
+            TypeError: If kwargs has ``Bucket`` or ``Delete``.
+        """
+        for name in ("Bucket", "Delete"):
+            if name in kwargs:
+                raise TypeError(f"rm() got an unexpected keyword argument '{name}'")
         quiet = kwargs.pop("Quiet", True)
-        delete_objects = []
+        delete_objects: dict[str, list[dict[str, str]]] = {}
         for p in paths:
             bucket, key, version_id = self.parse_path(p)
             if key:
                 object_ = {"Key": key}
                 if version_id:
                     object_.update({"VersionId": version_id})
-                delete_objects.append(object_)
+                delete_objects.setdefault(bucket, []).append(object_)
+        return [
+            {
+                "Bucket": bucket,
+                "Delete": {
+                    "Objects": objects[i : i + self.DELETE_OBJECTS_MAX_KEYS],
+                    "Quiet": quiet,
+                },
+                **kwargs,
+            }
+            for bucket, objects in delete_objects.items()
+            for i in range(0, len(objects), self.DELETE_OBJECTS_MAX_KEYS)
+        ]
 
-        with self._create_executor(max_workers=max_workers) as executor:
-            fs = []
-            for delete in [
-                delete_objects[i : i + self.DELETE_OBJECTS_MAX_KEYS]
-                for i in range(0, len(delete_objects), self.DELETE_OBJECTS_MAX_KEYS)
-            ]:
-                request = {
-                    "Bucket": bucket,
-                    "Delete": {
-                        "Objects": delete,
-                        "Quiet": quiet,
-                    },
-                }
-                fs.append(
-                    executor.submit(self._call, self._client.delete_objects, **request, **kwargs)
-                )
-            for f in as_completed(fs):
-                f.result()
+    def _delete_objects_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Send a DeleteObjects request and invalidate the cache of its objects.
+
+        The cache is invalidated when the request has finished, also when it
+        fails, because S3 may have deleted some of the objects.
+
+        Args:
+            request: The DeleteObjects request.
+
+        Returns:
+            The DeleteObjects response.
+        """
+        try:
+            return self._call(self._client.delete_objects, **request)
+        finally:
+            for object_ in request["Delete"]["Objects"]:
+                self.invalidate_cache(self._delete_objects_path(request["Bucket"], object_))
+
+    @staticmethod
+    def _delete_objects_path(bucket: str, object_: dict[str, Any]) -> str:
+        """Build the path of a DeleteObjects object or error entry.
+
+        Args:
+            bucket: The bucket of the request.
+            object_: An entry with ``Key`` and an optional ``VersionId``.
+
+        Returns:
+            The path, with a ``?versionId=`` query if the entry has a version.
+        """
+        path = f"{bucket}/{object_['Key']}"
+        if object_.get("VersionId"):
+            path += f"?versionId={object_['VersionId']}"
+        return path
+
+    @staticmethod
+    def _raise_delete_objects_errors(
+        requests: list[dict[str, Any]], results: list[dict[str, Any] | BaseException]
+    ) -> None:
+        """Raise an error for the DeleteObjects requests that failed.
+
+        S3 reports the objects it could not delete in the ``Errors`` of a
+        successful response.
+
+        Args:
+            requests: The DeleteObjects requests.
+            results: The response or the exception of each request, in the
+                order of the requests.
+
+        Raises:
+            BaseException: The first exception of the requests, with a note
+                that lists the objects of ``Errors``, if any.
+            OSError: If no request raised and a response has errors.
+        """
+        exceptions = []
+        errors = []
+        for request, result in zip(requests, results, strict=True):
+            if isinstance(result, BaseException):
+                exceptions.append(result)
+                continue
+            for error in result.get("Errors", []):
+                path = S3FileSystem._delete_objects_path(request["Bucket"], error)
+                errors.append(f"{path} ({error.get('Code')}: {error.get('Message')})")
+        message = f"Failed to delete objects: {', '.join(sorted(errors))}" if errors else None
+        if exceptions:
+            if message:
+                exceptions[0].add_note(message)
+            raise exceptions[0]
+        if message:
+            raise OSError(message)
 
     def mkdir(self, path: str, create_parents: bool = True, **kwargs) -> None:
         """Create an S3 bucket.
@@ -1067,7 +1236,7 @@ class S3FileSystem(AbstractFileSystem):
                 raise ValueError(f"Bucket create failed {bucket!r}: {e}") from e
             # invalidate_cache walks parent paths and never pops the root
             # entry itself, so evict the cached bucket listing directly.
-            self.dircache.pop("", None)
+            self._evict_cache("")
             self.invalidate_cache(bucket)
         else:
             # exists() has already confirmed the bucket does not exist,
@@ -1140,7 +1309,7 @@ class S3FileSystem(AbstractFileSystem):
         self.invalidate_cache(bucket)
         # invalidate_cache walks parent paths and never pops the root
         # entry itself, so evict the cached bucket listing directly.
-        self.dircache.pop("", None)
+        self._evict_cache("")
 
     def touch(self, path: str, truncate: bool = True, **kwargs) -> dict[str, Any]:
         """Create an empty object with PutObject.
@@ -1278,7 +1447,11 @@ class S3FileSystem(AbstractFileSystem):
             block_size < self.MULTIPART_UPLOAD_MIN_PART_SIZE
             or block_size > self.MULTIPART_UPLOAD_MAX_PART_SIZE
         ):
-            raise ValueError("Block size must be greater than 5MiB and less than 5GiB.")
+            raise ValueError(
+                "Block size must be between "
+                f"5 MiB ({self.MULTIPART_UPLOAD_MIN_PART_SIZE} bytes) and "
+                f"5 GiB ({self.MULTIPART_UPLOAD_MAX_PART_SIZE} bytes), inclusive: {block_size}."
+            )
 
         copy_source = {
             "Bucket": bucket1,
@@ -1317,7 +1490,8 @@ class S3FileSystem(AbstractFileSystem):
         """Split an object into the source ranges of a multipart copy.
 
         The object is split into ranges of ``block_size`` bytes, whatever the
-        number of workers. A last range shorter than
+        number of workers, or of a larger size that splits it into at most
+        ``MULTIPART_UPLOAD_MAX_PARTS`` ranges. A last range shorter than
         ``MULTIPART_UPLOAD_MIN_PART_SIZE`` is merged into the previous one,
         which is split in half if the result exceeds
         ``MULTIPART_UPLOAD_MAX_PART_SIZE``. Every range is then within the
@@ -1329,20 +1503,47 @@ class S3FileSystem(AbstractFileSystem):
             size: The size of the source object in bytes.
             block_size: The size in bytes to split the object by, between
                 ``MULTIPART_UPLOAD_MIN_PART_SIZE`` and
-                ``MULTIPART_UPLOAD_MAX_PART_SIZE``. The range that a short
-                last range is merged into can be longer, up to
-                ``MULTIPART_UPLOAD_MAX_PART_SIZE``.
+                ``MULTIPART_UPLOAD_MAX_PART_SIZE``. It is raised to
+                ``size`` divided by ``MULTIPART_UPLOAD_MAX_PARTS``, rounded
+                up, if smaller. The range that a short last range is merged
+                into can be longer, up to ``MULTIPART_UPLOAD_MAX_PART_SIZE``.
 
         Returns:
             The ``(start, end)`` byte ranges, with an exclusive end, that
             cover the whole object in order.
         """
+        block_size = max(block_size, math.ceil(size / self.MULTIPART_UPLOAD_MAX_PARTS))
         starts = list(range(0, size, block_size))
         if len(starts) > 1 and size - starts[-1] < self.MULTIPART_UPLOAD_MIN_PART_SIZE:
             starts.pop()
             if size - starts[-1] > self.MULTIPART_UPLOAD_MAX_PART_SIZE:
                 starts.append(starts[-1] + (size - starts[-1]) // 2)
         return list(zip(starts, [*starts[1:], size], strict=True))
+
+    def _check_multipart_upload_size(self, path: str, size: int, block_size: int) -> None:
+        """Check that data fits in a multipart upload before uploading it.
+
+        Args:
+            path: The path that the data is written to.
+            size: The size of the data in bytes.
+            block_size: The block size of the write in bytes.
+
+        Raises:
+            ValueError: If the data takes more than
+                ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
+        """
+        if size > block_size * self.MULTIPART_UPLOAD_MAX_PARTS:
+            min_block_size = max(
+                math.ceil(size / self.MULTIPART_UPLOAD_MAX_PARTS),
+                self.MULTIPART_UPLOAD_MIN_PART_SIZE,
+            )
+            raise ValueError(
+                f"Cannot upload {size} bytes to {path} in "
+                f"{self.MULTIPART_UPLOAD_MAX_PARTS} parts with a block size of "
+                f"{block_size} bytes. Write the file with a block_size, or a "
+                "default_block_size of the filesystem, of at least "
+                f"{min_block_size} bytes."
+            )
 
     def pipe_file(
         self, path: str, value: bytes | bytearray | memoryview, mode: str = "overwrite", **kwargs
@@ -1370,9 +1571,12 @@ class S3FileSystem(AbstractFileSystem):
             FileExistsError: If the mode is "create" and the path already
                 exists.
             ValueError: If the path does not contain a key or specifies a
-                version.
+                version, or if the data takes more than
+                ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
         """
         block_size = kwargs.get("block_size") or self.default_block_size
+        # The size in bytes; the length of a memoryview counts its items.
+        self._check_multipart_upload_size(path, memoryview(value).nbytes, block_size)
         if self._intrans or len(value) > min(block_size, self.MULTIPART_UPLOAD_MAX_PART_SIZE):
             # Defer to the buffered open() path, which keeps the
             # deferred-commit semantics of fsspec transactions and uploads
@@ -1410,9 +1614,10 @@ class S3FileSystem(AbstractFileSystem):
     ) -> S3CompleteMultipartUpload:
         """Collect the uploaded parts and complete the multipart upload.
 
-        When any part fails, the remaining parts are cancelled and the
-        multipart upload is aborted so that no incomplete upload is left
-        behind, then the original error is re-raised.
+        When any part or the completion fails, the parts that have not
+        started are cancelled, the running ones are waited for, and the
+        multipart upload is aborted so that no incomplete upload or part is
+        left behind. The original error is then re-raised.
 
         Args:
             bucket: S3 bucket name.
@@ -1434,8 +1639,10 @@ class S3FileSystem(AbstractFileSystem):
                 parts=parts,
             )
         except Exception:
-            for future in futures:
-                future.cancel()
+            # A part that is still uploading when the upload is aborted may
+            # be stored after the abort, so wait for the parts that could not
+            # be cancelled first.
+            wait([future for future in futures if not future.cancel()])
             try:
                 self._call(
                     self._client.abort_multipart_upload,
@@ -1454,6 +1661,15 @@ class S3FileSystem(AbstractFileSystem):
     ) -> bytes:
         """Read the contents of an S3 object with GetObject.
 
+        ``start`` and ``end`` select bytes like a slice of the object: an
+        empty range, or one that starts at or past the end of the object,
+        returns ``b""``, and an end past the object reads up to its end.
+        Non-negative offsets are sent to S3 as they are, and so is a negative
+        ``start`` without an ``end``, as a suffix range of the last bytes.
+        Other negative offsets are resolved against the size from
+        :meth:`info`, which also checks that the object exists for an empty
+        range.
+
         Args:
             path: S3 path (s3://bucket/key) of the object.
             start: Byte offset to start reading at. A negative value counts
@@ -1466,38 +1682,59 @@ class S3FileSystem(AbstractFileSystem):
 
         Returns:
             The bytes read from the object.
+
+        Raises:
+            FileNotFoundError: If the path has no key or the key does not
+                exist.
         """
         bucket, key, path_version_id = self.parse_path(path)
+        if not key:
+            raise FileNotFoundError(path)
         version_id = kwargs.pop("version_id", None)
         if path_version_id:
             version_id = path_version_id
-        if start is not None or end is not None:
-            size = self.info(path, version_id=version_id).get("size", 0)
-            if start is None:
-                range_start = 0
-            elif start < 0:
-                range_start = size + start
-            else:
-                range_start = start
-
-            if end is None:
-                range_end = size
-            elif end < 0:
-                range_end = size + end
-            else:
-                range_end = end
-
-            ranges = (range_start, range_end)
+        ranges: tuple[int, int | None] | None = None
+        if start is not None and start < 0 and end is None:
+            # S3 returns the last bytes, or the whole object when it is
+            # shorter, without the size of the object.
+            ranges = (start, None)
         else:
-            ranges = None
-
-        return self._get_object(
-            bucket=bucket,
-            key=cast(str, key),
-            ranges=ranges,
-            version_id=version_id,
-            **kwargs,
-        )[1]
+            if (start is not None and start < 0) or (
+                end is not None and (end < 0 or (start or 0) >= end)
+            ):
+                # A negative offset needs the size of the object, and an
+                # empty range sends no GetObject request that would report a
+                # missing object.
+                info = self.info(path, version_id=version_id)
+                if info.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY or info.key != key:
+                    # There is no object to read, as GetObject reports for
+                    # the other ranges, or info() describes the key without
+                    # the trailing slash of this one.
+                    raise FileNotFoundError(path)
+                start, end, _ = slice(start, end).indices(info.get("size", 0))
+            if start is not None or end is not None:
+                start = start or 0
+                if end is not None and start >= end:
+                    # S3 would return the whole object for an empty range.
+                    return b""
+                ranges = (start, end)
+        try:
+            return self._get_object(
+                bucket=bucket,
+                key=key,
+                ranges=ranges,
+                version_id=version_id,
+                **kwargs,
+            )[1]
+        except OSError as e:
+            if (
+                ranges
+                and isinstance(e.__cause__, botocore.exceptions.ClientError)
+                and S3ClientError(e.__cause__).code == "InvalidRange"
+            ):
+                # The range starts at or past the end of the object.
+                return b""
+            raise
 
     def put_file(self, lpath: str, rpath: str, callback=_DEFAULT_CALLBACK, **kwargs):
         """Upload a local file to S3.
@@ -1511,6 +1748,11 @@ class S3FileSystem(AbstractFileSystem):
             rpath: S3 destination path (s3://bucket/key).
             callback: Progress callback for tracking upload progress.
             **kwargs: Additional S3 parameters (e.g., ContentType, StorageClass).
+                The ``block_size`` parameter of ``open()`` is also accepted.
+
+        Raises:
+            ValueError: If the file takes more than
+                ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
 
         Note:
             Directories are not supported for upload. If lpath is a directory,
@@ -1527,6 +1769,8 @@ class S3FileSystem(AbstractFileSystem):
             return
 
         size = os.path.getsize(lpath)
+        block_size = kwargs.pop("block_size", None) or self.default_block_size
+        self._check_multipart_upload_size(rpath, size, block_size)
         callback.set_size(size)
         if "ContentType" not in kwargs:
             content_type, _ = mimetypes.guess_type(lpath)
@@ -1534,7 +1778,7 @@ class S3FileSystem(AbstractFileSystem):
                 kwargs["ContentType"] = content_type
 
         with (
-            self.open(rpath, "wb", s3_additional_kwargs=kwargs) as remote,
+            self.open(rpath, "wb", block_size=block_size, s3_additional_kwargs=kwargs) as remote,
             open(lpath, "rb") as local,
         ):
             while data := local.read(remote.blocksize):
@@ -1563,7 +1807,9 @@ class S3FileSystem(AbstractFileSystem):
         if os.path.isdir(lpath):
             return
 
-        with open(lpath, "wb") as local, self.open(rpath, "rb", **kwargs) as remote:
+        # The remote file is opened first so that no local file is created
+        # when open() finds no object at the path.
+        with self.open(rpath, "rb", **kwargs) as remote, open(lpath, "wb") as local:
             callback.set_size(remote.size)
             while data := remote.read(remote.blocksize):
                 local.write(data)
@@ -2003,13 +2249,28 @@ class S3FileSystem(AbstractFileSystem):
                         for name in ("versionId", "versionID", "versionid", "version_id")
                     )
                 for cache_path in cache_paths:
-                    self.dircache.pop(cache_path, None)
                     # _ls_dirs caches listings under (path, delimiter).
-                    for delimiter in ("/", ""):
-                        self.dircache.pop((cache_path, delimiter), None)
+                    for cache_key in (cache_path, (cache_path, "/"), (cache_path, "")):
+                        self._evict_cache(cache_key)
                 # A version-qualified path continues with the path without
                 # the version.
                 path = self._strip_protocol(base) if query else self._parent(path)
+
+    def _evict_cache(self, key: str | tuple[str, str]) -> None:
+        """Remove a dircache entry if it exists.
+
+        ``DirCache.pop()`` reads and then deletes the entry, so it raises
+        KeyError when another thread removes the same entry in between,
+        such as the request threads of ``rm()`` invalidating a shared parent
+        at once. A single ``del`` raises KeyError only when the entry is
+        already gone, which this ignores.
+
+        Args:
+            key: The dircache key, a path or a ``(path, delimiter)`` listing
+                key.
+        """
+        with contextlib.suppress(KeyError):
+            del self.dircache[key]
 
     def _ls_from_cache(self, path: str) -> list[S3Object] | S3Object | None:
         """Check the dircache for a cached entry of the path.
@@ -2075,12 +2336,34 @@ class S3FileSystem(AbstractFileSystem):
         self,
         bucket: str,
         key: str,
-        ranges: tuple[int, int] | None = None,
+        ranges: tuple[int, int | None] | None = None,
         version_id: str | None = None,
         **kwargs,
     ) -> tuple[int, bytes]:
+        """Read an object or a byte range of it with GetObject.
+
+        Args:
+            bucket: The bucket name.
+            key: The object key.
+            ranges: The ``(start, end)`` byte range to read, with an exclusive
+                end or ``None`` to read to the end of the object (the last
+                ``-start`` bytes for a negative start), or ``None`` to read
+                the whole object.
+            version_id: The version ID to read, or ``None`` for the latest.
+            **kwargs: Additional parameters passed to the GetObject API.
+
+        Returns:
+            Tuple of the start of the range as given (0 for the whole
+            object) and the bytes read.
+
+        Raises:
+            ValueError: If the range is empty. S3 ignores a range whose last
+                byte precedes its first byte and returns the whole object.
+        """
         request = {"Bucket": bucket, "Key": key}
         if ranges:
+            if ranges[1] is not None and ranges[0] >= ranges[1]:
+                raise ValueError(f"Invalid empty range: {ranges}.")
             range_ = S3File._format_ranges(ranges)
             request.update({"Range": range_})
         else:
@@ -2215,6 +2498,7 @@ class S3File(AbstractBufferedFile):
     """
 
     fs: S3FileSystem
+    buffer: BytesIO | None
 
     def __init__(
         self,
@@ -2252,8 +2536,9 @@ class S3File(AbstractBufferedFile):
                 part copies.
             executor: The executor for parallel operations. If None, a new
                 ``S3ThreadPoolExecutor`` is created.
-            block_size: The block size for reads and writes. Must be at least
-                ``MULTIPART_UPLOAD_MIN_PART_SIZE`` unless reading.
+            block_size: The block size for reads and writes. Must be between
+                ``MULTIPART_UPLOAD_MIN_PART_SIZE`` and
+                ``MULTIPART_UPLOAD_MAX_PART_SIZE``, inclusive, unless reading.
             cache_type: The fsspec cache type for reads.
             autocommit: Whether to commit the written data when the file is
                 closed. If False, :meth:`commit` must be called.
@@ -2265,14 +2550,19 @@ class S3File(AbstractBufferedFile):
             **kwargs: Accepted for compatibility; not used.
 
         Raises:
+            FileNotFoundError: If no object exists at the path when reading,
+                including when the path is a prefix.
             ValueError: If the path has no key, the version IDs do not match,
-                a version is given for writing, or the block size is too small
-                for writing.
+                a version is given for writing, or the block size is not
+                between ``MULTIPART_UPLOAD_MIN_PART_SIZE`` and
+                ``MULTIPART_UPLOAD_MAX_PART_SIZE`` for writing.
         """
         self.max_workers = max_workers
-        self._executor: S3Executor = executor or S3ThreadPoolExecutor(max_workers=max_workers)
         self.s3_additional_kwargs = s3_additional_kwargs if s3_additional_kwargs else {}
 
+        # The arguments are validated, and the objects looked up, before the
+        # base class initializer: a file that fails here is never opened, so
+        # its garbage collection does not close (flush and commit) it.
         bucket, key, path_version_id = S3FileSystem.parse_path(path)
         self.bucket = bucket
         if not key:
@@ -2295,12 +2585,27 @@ class S3File(AbstractBufferedFile):
             # Carry the version in the path, as with the ?versionId= suffix,
             # so that a reopened (e.g., unpickled) file reads the same version.
             path = f"{path}?versionId={self.version_id}"
+        if "r" not in mode and not (
+            fs.MULTIPART_UPLOAD_MIN_PART_SIZE <= block_size <= fs.MULTIPART_UPLOAD_MAX_PART_SIZE
+        ):
+            # When writing, every full block is uploaded as a part of a
+            # multipart upload.
+            raise ValueError(
+                "Block size for writing must be between "
+                f"5 MiB ({fs.MULTIPART_UPLOAD_MIN_PART_SIZE} bytes) and "
+                f"5 GiB ({fs.MULTIPART_UPLOAD_MAX_PART_SIZE} bytes), inclusive: {block_size}."
+            )
 
         self._details: S3Object | dict[str, Any] = {}
+        append_info: S3Object | None = None
+        append_data: bytes | None = None
         if "r" in mode:
             # Looked up before the base class initializer, which would
             # otherwise take the size from the latest version of the object.
             info = fs.info(path, version_id=self.version_id)
+            if info.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
+                # A prefix has no object to read.
+                raise FileNotFoundError(path)
             if fs.version_aware and not self.version_id:
                 # Pin the version observed at open time so that reads are
                 # consistent even if the object is overwritten. info() heads
@@ -2311,7 +2616,14 @@ class S3File(AbstractBufferedFile):
             self._details = info
             if size is None:
                 size = info.get("size")
+        elif "a" in mode and fs.exists(path):
+            append_info = fs.info(path)
+            if append_info.get("size", 0) < fs.MULTIPART_UPLOAD_MIN_PART_SIZE:
+                # Too small to be a part of a multipart upload: rewritten
+                # from the buffer.
+                append_data = fs.cat(path)
 
+        self._executor: S3Executor = executor or S3ThreadPoolExecutor(max_workers=max_workers)
         super().__init__(
             fs=fs,
             path=path,
@@ -2322,33 +2634,27 @@ class S3File(AbstractBufferedFile):
             cache_options=cache_options,
             size=size,
         )
-        if "r" not in mode and block_size < self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE:
-            # When writing occurs, the block size should not be smaller
-            # than the minimum size of a part in a multipart upload.
-            raise ValueError(f"Block size must be >= {self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE}MB.")
 
         self.append_block = False
-        if "a" in mode and self.fs.exists(path):
-            info = self.fs.info(self.path, version_id=self.version_id)
-            loc = info.get("size", 0)
-            if loc < self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE:
-                # Too small to be a part of a multipart upload: rewrite it
-                # from the buffer.
-                self.write(self.fs.cat(self.path))
+        self.multipart_upload: S3MultipartUpload | None = None
+        self.multipart_upload_parts: list[Future[S3MultipartUploadPart]] = []
+        if append_info is not None:
+            if append_data is not None:
+                self.write(append_data)
             else:
                 # Copied with UploadPartCopy as the leading part(s).
                 self.append_block = True
-            self.loc = loc
-            self.s3_additional_kwargs.update(info.to_api_repr())
-            self._details = info
-
-        self.multipart_upload: S3MultipartUpload | None = None
-        self.multipart_upload_parts: list[Future[S3MultipartUploadPart]] = []
+            self.loc = append_info.get("size", 0)
+            self.s3_additional_kwargs.update(append_info.to_api_repr())
+            self._details = append_info
 
     def close(self) -> None:
         """Close the file, flushing any written data, and shut down its executor."""
-        super().close()
-        self._executor.shutdown()
+        try:
+            super().close()
+        finally:
+            # The executor is shut down even if the final flush fails.
+            self._executor.shutdown()
 
     def _initiate_upload(self) -> None:
         if not self.append_block and self.tell() < self.blocksize:
@@ -2411,15 +2717,18 @@ class S3File(AbstractBufferedFile):
         if not self.multipart_upload:
             raise RuntimeError("Multipart upload is not initialized.")
 
+        # fsspec's flush() never calls this on a closed file, whose buffer
+        # may have been dropped.
+        buffer = cast(BytesIO, self.buffer)
         part_number = len(self.multipart_upload_parts)
-        self.buffer.seek(0)
-        data = self.buffer.read(self.blocksize)
+        buffer.seek(0)
+        data = buffer.read(self.blocksize)
         while data:
             # Only the last part of a multipart upload may be smaller than the
             # minimum part size, and more data may follow a mid-stream chunk.
             # A single write() can leave several blocks in the buffer, so look
             # ahead one block and merge a short last block into this one.
-            next_data = self.buffer.read(self.blocksize)
+            next_data = buffer.read(self.blocksize)
             next_data_size = len(next_data)
             if 0 < next_data_size < self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE:
                 upload_data = data + next_data
@@ -2434,6 +2743,32 @@ class S3File(AbstractBufferedFile):
                 uploads = [data]
 
             for upload in uploads:
+                if part_number >= self.fs.MULTIPART_UPLOAD_MAX_PARTS:
+                    # Close the file without the buffered data, so that
+                    # neither close() nor commit() uploads it, and abort the
+                    # upload. An abort failure does not mask this error, and
+                    # commit() does not complete the upload afterwards. The
+                    # executor is shut down here, as fsspec does not close a
+                    # closed file again when it is garbage collected.
+                    self.buffer = None
+                    self.closed = True
+                    try:
+                        self.discard()
+                    except Exception:
+                        _logger.exception(
+                            f"Failed to abort multipart upload to s3://{self.bucket}/{self.key}."
+                        )
+                        self.multipart_upload = None
+                        self.multipart_upload_parts = []
+                    self._executor.shutdown()
+                    raise ValueError(
+                        f"Cannot upload more than {self.fs.MULTIPART_UPLOAD_MAX_PARTS} "
+                        f"parts to s3://{self.bucket}/{self.key} with a block size of "
+                        f"{self.blocksize} bytes. Write the file with a block_size, or "
+                        "a default_block_size of the filesystem, large enough for it to "
+                        f"fit in {self.fs.MULTIPART_UPLOAD_MAX_PARTS} parts, including "
+                        "the parts copied from the existing object in an append."
+                    )
                 part_number += 1
                 self.multipart_upload_parts.append(
                     self._executor.submit(
@@ -2500,10 +2835,16 @@ class S3File(AbstractBufferedFile):
         self.fs.invalidate_cache(self.path)
 
     def discard(self) -> None:
-        """Cancel pending part uploads and abort the multipart upload, if any."""
+        """Abort the multipart upload, if any.
+
+        The part uploads that have not started are cancelled, and the
+        running ones are waited for before the abort.
+        """
         if self.multipart_upload:
-            for f in self.multipart_upload_parts:
-                f.cancel()
+            # A part that is still uploading when the upload is aborted may
+            # be stored after the abort, so wait for the parts that could not
+            # be cancelled first.
+            wait([f for f in self.multipart_upload_parts if not f.cancel()])
             # s3_additional_kwargs also holds object parameters (e.g., the
             # existing object's metadata in append mode) that
             # AbortMultipartUpload rejects.
@@ -2578,6 +2919,23 @@ class S3File(AbstractBufferedFile):
         self.fs.setxattr(self.path, copy_kwargs=copy_kwargs, **kwargs)
 
     def _fetch_range(self, start: int, end: int) -> bytes:
+        """Read a byte range of the object for the fsspec cache.
+
+        The range is clamped to the size of the object, since fsspec caches
+        may request a range that is empty or reaches past the end of the
+        object. S3 would answer the former with the whole object and a range
+        starting past the end with an ``InvalidRange`` error.
+
+        Args:
+            start: The offset of the first byte to read.
+            end: The offset to stop reading at (exclusive).
+
+        Returns:
+            The bytes read, empty if the clamped range is empty.
+        """
+        end = min(end, self.size)
+        if start >= end:
+            return b""
         ranges = self._get_ranges(
             start, end, max_workers=self.max_workers, worker_block_size=self.blocksize
         )
@@ -2605,8 +2963,21 @@ class S3File(AbstractBufferedFile):
         return object_
 
     @staticmethod
-    def _format_ranges(ranges: tuple[int, int]):
-        return f"bytes={ranges[0]}-{ranges[1] - 1}"
+    def _format_ranges(ranges: tuple[int, int | None]) -> str:
+        """Format a byte range as the value of an HTTP ``Range`` header.
+
+        Args:
+            ranges: The ``(start, end)`` byte range, with an exclusive end or
+                ``None`` for the end of the object. A negative start with no
+                end selects the last ``-start`` bytes.
+
+        Returns:
+            The range, such as ``bytes=0-99``, ``bytes=100-`` or ``bytes=-8``.
+        """
+        start, end = ranges
+        if end is None:
+            return f"bytes={start}" if start < 0 else f"bytes={start}-"
+        return f"bytes={start}-{end - 1}"
 
     @staticmethod
     def _get_ranges(

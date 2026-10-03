@@ -1,5 +1,7 @@
+import asyncio
 import os
 import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -16,7 +18,12 @@ from fsspec import Callback
 
 from pyathena.filesystem.s3 import S3File, S3FileSystem
 from pyathena.filesystem.s3_async import AioS3File, AioS3FileSystem
-from pyathena.filesystem.s3_object import S3Object, S3ObjectType, S3StorageClass
+from pyathena.filesystem.s3_object import (
+    S3MultipartUploadPart,
+    S3Object,
+    S3ObjectType,
+    S3StorageClass,
+)
 from tests import ENV
 from tests.pyathena.conftest import connect
 
@@ -165,6 +172,233 @@ class TestAioS3FileSystem:
             (1, (0, 5 * 2**29 + 2**19)),
             (2, (5 * 2**29 + 2**19, 5 * 2**30 + 2**20)),
         ]
+
+    @pytest.mark.parametrize(
+        "block_size",
+        [
+            S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE - 1,
+            S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE + 1,
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_copy_object_with_multipart_upload_invalid_block_size(self, block_size):
+        # GH-926: the message states the accepted range.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs._sync_fs._call = mock.MagicMock()
+
+        with pytest.raises(
+            ValueError,
+            match=r"between 5 MiB \(5242880 bytes\) and 5 GiB \(5368709120 bytes\), inclusive",
+        ):
+            await fs._copy_object_with_multipart_upload(
+                bucket1="bucket",
+                key1="src",
+                size1=5 * 2**30 + 2**20,
+                bucket2="bucket",
+                key2="dst",
+                block_size=block_size,
+            )
+        fs._sync_fs._call.assert_not_called()
+
+    @pytest.mark.parametrize("commit", [True, False])
+    def test_transaction_pipe_put_file(self, tmp_path, commit):
+        # GH-977: pipe_file() and put_file() join the transaction of this
+        # filesystem; they used to write through the internal S3FileSystem,
+        # which is not in the transaction, and were not rolled back.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        put_object = fs._sync_fs._put_object = mock.MagicMock()
+        local = tmp_path / "local.txt"
+        local.write_bytes(b"local")
+
+        def write():
+            with fs.transaction:
+                fs.pipe_file("s3://bucket/k1", b"data")
+                fs.put_file(str(local), "s3://bucket/k2")
+                put_object.assert_not_called()
+                if not commit:
+                    raise RuntimeError("rollback")
+
+        if commit:
+            write()
+            assert [
+                (c.kwargs["key"], c.kwargs["body"], c.kwargs.get("ContentType"))
+                for c in put_object.call_args_list
+            ] == [("k1", b"data", None), ("k2", b"local", "text/plain")]
+        else:
+            with pytest.raises(RuntimeError, match="rollback"):
+                write()
+            put_object.assert_not_called()
+
+    def test_transaction_pipe_file_create_existing(self):
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs._sync_fs.exists = mock.MagicMock(return_value=True)
+        with fs.transaction, pytest.raises(FileExistsError):
+            fs.pipe_file("s3://bucket/key", b"data", mode="create")
+        fs._sync_fs.exists.assert_called_once_with("s3://bucket/key")
+
+    @pytest.mark.parametrize("kwargs", [{"block_size": 4}, {}])
+    def test_transaction_pipe_put_file_exceeding_max_parts(self, tmp_path, kwargs):
+        # GH-953: in a transaction, as outside one, pipe_file() and put_file()
+        # reject data that does not fit in the maximum number of parts before
+        # opening the file.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs._sync_fs.MULTIPART_UPLOAD_MAX_PARTS = 3
+        fs._sync_fs.default_block_size = 4
+        fs._sync_fs._call = mock.MagicMock()
+        fs.open = mock.MagicMock()
+        local = tmp_path / "local"
+        local.write_bytes(b"a" * 13)
+
+        with fs.transaction:
+            with pytest.raises(ValueError, match="block_size"):
+                fs.pipe_file("s3://bucket/k1", b"a" * 13, **kwargs)
+            with pytest.raises(ValueError, match="block_size"):
+                fs.put_file(str(local), "s3://bucket/k2", **kwargs)
+        fs.open.assert_not_called()
+        fs._sync_fs._call.assert_not_called()
+
+    def test_transaction_put_file_block_size(self, tmp_path):
+        # In a transaction, put_file() passes block_size to open() instead of
+        # the S3 API, as outside one.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs.open = mock.MagicMock()
+        fs.open.return_value.__enter__.return_value.blocksize = 8
+        local = tmp_path / "local"
+        local.write_bytes(b"a" * 13)
+
+        with fs.transaction:
+            fs.put_file(str(local), "s3://bucket/key", block_size=8)
+
+        fs.open.assert_called_once_with(
+            "s3://bucket/key", "wb", block_size=8, s3_additional_kwargs={}
+        )
+
+    def test_touch_sync_wrapper(self):
+        # GH-977: touch() used to be fsspec's open()-based default, which
+        # dropped the PutObject parameters and returned None.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs._sync_fs._call = mock.MagicMock(return_value={"ETag": '"e"'})
+
+        actual = fs.touch("s3://bucket/key", ContentType="text/plain")
+        assert isinstance(actual, dict)
+        assert fs._sync_fs._call.call_args.kwargs == {
+            "Bucket": "bucket",
+            "Key": "key",
+            "ContentType": "text/plain",
+        }
+
+        fs._sync_fs.exists = mock.MagicMock(return_value=True)
+        with pytest.raises(ValueError, match="Cannot touch the existing file"):
+            fs.touch("s3://bucket/key", truncate=False)
+
+    @pytest.mark.asyncio
+    async def test_rm_requests(self):
+        # GH-971: _rm() sent the keys of every bucket to the bucket of the
+        # first path, dropped the DeleteObjects parameters, ignored per-key
+        # errors and emptied a bucket path.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        sync_fs._call = mock.MagicMock(return_value={})
+
+        await fs._rm(["s3://b1/a", "s3://b2/b"], ExpectedBucketOwner="111122223333")
+        assert sorted(
+            (c.kwargs["Bucket"], c.kwargs["Delete"]["Objects"], c.kwargs["ExpectedBucketOwner"])
+            for c in sync_fs._call.call_args_list
+        ) == [
+            ("b1", [{"Key": "a"}], "111122223333"),
+            ("b2", [{"Key": "b"}], "111122223333"),
+        ]
+
+        sync_fs._call.reset_mock()
+        with pytest.raises(ValueError, match="Cannot delete the bucket"):
+            await fs._rm("s3://bucket", recursive=True)
+        sync_fs._call.assert_not_called()
+
+        sync_fs._call.return_value = {
+            "Errors": [{"Key": "locked", "Code": "AccessDenied", "Message": "Access Denied"}]
+        }
+        with pytest.raises(OSError, match=r"bucket/locked \(AccessDenied: Access Denied\)"):
+            await fs._rm("s3://bucket/locked")
+
+        sync_fs._call.side_effect = PermissionError("Access Denied")
+        sync_fs.dircache["bucket/a"] = []
+        with pytest.raises(PermissionError, match="Access Denied"):
+            await fs._rm("s3://bucket/a")
+        assert "bucket/a" not in sync_fs.dircache
+
+    @pytest.mark.asyncio
+    async def test_rm_request_error_keeps_errors(self):
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+
+        def call(method, **request):
+            if request["Bucket"] == "b1":
+                raise PermissionError("Access Denied")
+            return {"Errors": [{"Key": "b", "Code": "AccessDenied", "Message": "Access Denied"}]}
+
+        fs._sync_fs._call = call
+        with pytest.raises(PermissionError, match="Access Denied") as exc_info:
+            await fs._rm(["s3://b1/a", "s3://b2/b"])
+        assert exc_info.value.__notes__ == [
+            "Failed to delete objects: b2/b (AccessDenied: Access Denied)"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_rm_cancel_invalidates_cache_after_each_request(self):
+        # The request threads keep running after _rm() is cancelled, so each
+        # request invalidates the cache of its objects when it finishes.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        started = {"b1": threading.Event(), "b2": threading.Event()}
+        release = {"b1": threading.Event(), "b2": threading.Event()}
+
+        def call(method, **request):
+            started[request["Bucket"]].set()
+            release[request["Bucket"]].wait(10)
+            return {}
+
+        async def wait_invalidated(path):
+            for _ in range(100):
+                if path not in fs.dircache:
+                    return
+                await asyncio.sleep(0.01)
+
+        fs._sync_fs._call = call
+        task = asyncio.create_task(fs._rm(["s3://b1/a", "s3://b2/b"]))
+        for event in started.values():
+            await asyncio.to_thread(event.wait, 10)
+        # Cancel every other task, as asyncio.run() does at shutdown, so the
+        # request tasks are cancelled directly, not only through _rm().
+        for other in asyncio.all_tasks():
+            if other is not asyncio.current_task():
+                other.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # Cached while the requests still run, e.g. by a concurrent info().
+        fs.dircache["b1/a"] = []
+        fs.dircache["b2/b"] = []
+
+        release["b1"].set()
+        await wait_invalidated("b1/a")
+        assert "b1/a" not in fs.dircache
+        assert "b2/b" in fs.dircache
+
+        release["b2"].set()
+        await wait_invalidated("b2/b")
+        assert "b2/b" not in fs.dircache
+
+    @pytest.mark.asyncio
+    async def test_rm_maxdepth(self):
+        # GH-962: _rm() did not pass maxdepth when expanding the path.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        sync_fs._call = mock.MagicMock(return_value={})
+        sync_fs.find = mock.MagicMock(return_value=["bucket/dir/a"])
+        sync_fs.exists = mock.MagicMock(return_value=True)
+
+        # batch_size is part of fsspec's async _rm() signature.
+        await fs._rm("s3://bucket/dir", recursive=True, maxdepth=1, batch_size=10)
+        sync_fs.find.assert_called_once_with("bucket/dir", maxdepth=1, withdirs=True, detail=False)
+        (call,) = sync_fs._call.call_args_list
+        assert call.kwargs["Delete"]["Objects"] == [{"Key": "dir"}, {"Key": "dir/a"}]
 
     @pytest.fixture(scope="class")
     def fs(self, request):
@@ -940,6 +1174,82 @@ class TestAioS3File:
         with fs.open("s3://bucket/key", "wb", max_workers=2) as f:
             assert isinstance(f, AioS3File)
             assert f.max_workers == 2
+
+    @pytest.mark.parametrize("asynchronous", [False, True])
+    @pytest.mark.asyncio
+    async def test_open_parallel_requests(self, asynchronous):
+        # GH-954: max_workers bounds the parallel part uploads and range
+        # reads. GH-977: a filesystem created with asynchronous=True has no
+        # event loop of its own and used to fail to run them.
+        fs = AioS3FileSystem(
+            connection=mock.MagicMock(), asynchronous=asynchronous, skip_instance_cache=True
+        )
+        block_size = S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE
+        size = block_size * 4
+        condition = threading.Condition()
+        state = {"active": 0, "peak": 0}
+
+        def track(result):
+            def call(**kwargs):
+                with condition:
+                    state["active"] += 1
+                    state["peak"] = max(state["peak"], state["active"])
+                    condition.notify_all()
+                    # Hold the call until another one overlaps it, then
+                    # briefly for a third one, which only an executor
+                    # without the limit runs.
+                    condition.wait_for(lambda: state["active"] >= 2, timeout=5)
+                    condition.wait_for(lambda: state["active"] >= 3, timeout=0.2)
+                with condition:
+                    state["active"] -= 1
+                return result(**kwargs)
+
+            return mock.MagicMock(side_effect=call)
+
+        sync_fs = fs._sync_fs
+        sync_fs._create_multipart_upload = mock.MagicMock(
+            return_value=SimpleNamespace(upload_id="uploadid")
+        )
+        sync_fs._upload_part = track(
+            lambda **kw: S3MultipartUploadPart(kw["part_number"], {"ETag": '"e"'})
+        )
+        sync_fs._complete_multipart_upload = mock.MagicMock()
+        sync_fs._get_object = track(
+            lambda **kw: (kw["ranges"][0], b"a" * (kw["ranges"][1] - kw["ranges"][0]))
+        )
+        sync_fs.info = mock.MagicMock(
+            return_value=S3Object(
+                init={"Key": "key"},
+                type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+                bucket="bucket",
+                key="key",
+            )
+        )
+        sync_fs.info.return_value.size = size
+
+        def write():
+            with fs.open("s3://bucket/key", "wb", block_size=block_size, max_workers=2) as f:
+                f.write(b"a" * size)
+
+        await asyncio.to_thread(write)
+        assert sync_fs._upload_part.call_count == 4
+        assert state["peak"] == 2
+
+        def read():
+            with fs.open(
+                "s3://bucket/key", "rb", block_size=block_size, cache_type="none", max_workers=2
+            ) as f:
+                return f.read()
+
+        state["peak"] = 0
+        assert await asyncio.to_thread(read) == b"a" * size
+        assert sync_fs._get_object.call_count == 4
+        assert state["peak"] == 2
+
+    def test_open_invalid_max_workers(self):
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        with pytest.raises(ValueError, match="max_workers must be greater than 0"):
+            fs.open("s3://bucket/key", "wb", max_workers=0)
 
     def test_open_version_id(self):
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
