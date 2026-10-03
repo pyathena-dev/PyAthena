@@ -1671,3 +1671,49 @@ class TestPandasCursor:
         kwargs = result_set_class.call_args.kwargs
         expected = {**cursor_kwargs, **execute_kwargs}
         assert {key: kwargs[key] for key in expected} == expected
+
+    @pytest.mark.parametrize(
+        ("pandas_cursor", "kwargs"),
+        [
+            pytest.param({}, {}, id="default"),
+            pytest.param({}, {"chunksize": 1}, id="chunked"),
+            pytest.param({}, {"index_col": "col_json_index"}, id="index"),
+            pytest.param(
+                {"work_group": ENV.managed_work_group, "s3_staging_dir": ""},
+                {},
+                id="managed",
+                marks=pytest.mark.skipif(
+                    not ENV.managed_work_group,
+                    reason="AWS_ATHENA_MANAGED_WORKGROUP not set",
+                ),
+            ),
+        ],
+        indirect=["pandas_cursor"],
+    )
+    def test_integer_and_json_with_null(self, pandas_cursor, kwargs):
+        pandas_cursor.execute(
+            """
+            SELECT * FROM (VALUES
+              (1, BIGINT '9007199254740993', json_parse('9007199254740993'), X'01',
+               json_parse('9007199254740995')),
+              (2, NULL, NULL, NULL, json_parse('9007199254740997'))
+            ) AS t(col_int, col_bigint, col_json, col_binary, col_json_index)
+            ORDER BY col_int
+            """,
+            **kwargs,
+        )
+        df = pandas_cursor.as_pandas()
+        if "chunksize" in kwargs:
+            df = pd.concat(list(df))
+        if "index_col" in kwargs:
+            assert df.index.dtype == np.object_
+            assert df.index.tolist() == [9007199254740995, 9007199254740997]
+        else:
+            assert df["col_json_index"].dtype == np.object_
+            assert df["col_json_index"].tolist() == [9007199254740995, 9007199254740997]
+        assert df["col_int"].dtype == pd.Int64Dtype()
+        assert df["col_bigint"].dtype == pd.Int64Dtype()
+        assert df["col_json"].dtype == np.object_
+        assert df["col_bigint"].tolist() == [9007199254740993, pd.NA]
+        assert df["col_json"].tolist() == [9007199254740993, None]
+        assert df["col_binary"].tolist() == [b"\x01", None]

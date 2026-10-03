@@ -27,7 +27,7 @@ from pyathena.result_set import AthenaResultSet
 from pyathena.util import RetryConfig, override, parse_output_location
 
 if TYPE_CHECKING:
-    from pandas import DataFrame
+    from pandas import DataFrame, Index, Series
     from pandas.io.parsers import TextFileReader
 
     from pyathena.connection import Connection
@@ -41,6 +41,39 @@ def _convert_binary_csv(converter: Callable[[str | None], Any], value: str) -> A
 
 def _no_trunc_date(df: DataFrame) -> DataFrame:
     return df
+
+
+class _CSVObject:
+    """A converted CSV value that pandas keeps as is instead of inferring a dtype from it."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: Any) -> None:
+        """Wrap a converted value.
+
+        Args:
+            value: The value that a converter returned.
+        """
+        self.value = value
+
+
+def _convert_csv_object(converter: Callable[[str | None], Any], value: str) -> _CSVObject:
+    return _CSVObject(converter(value))
+
+
+def _unwrap_csv_objects(values: Series | Index) -> list[Any] | None:
+    """Unwrap the values of a column whose CSV values a converter kept as objects.
+
+    Args:
+        values: The values of a column or an index.
+
+    Returns:
+        The converted values, or None if the values are not wrapped.
+    """
+    array = values.array
+    if values.dtype != object or not len(array) or not isinstance(array[0], _CSVObject):
+        return None
+    return [v.value if isinstance(v, _CSVObject) else v for v in array]
 
 
 class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
@@ -254,6 +287,7 @@ class AthenaPandasResultSet(AthenaResultSet):
     AUTO_CHUNK_SIZE_LARGE: int = 100_000
     AUTO_CHUNK_SIZE_MEDIUM: int = 50_000
 
+    _INTEGER_TYPES: ClassVar[tuple[str, ...]] = ("tinyint", "smallint", "integer", "bigint")
     _PARSE_DATES: ClassVar[list[str]] = [
         "date",
         "time",
@@ -349,7 +383,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         self._df: DataFrame | None = None
         if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
             result = self._as_pandas()
-            trunc_date = _no_trunc_date if self.is_unload else self._trunc_date
+            trunc_date = _no_trunc_date if self.is_unload else self._finish_csv_frame
             if isinstance(result, pd.DataFrame):
                 self._df = trunc_date(result)
             else:
@@ -516,6 +550,47 @@ class AthenaPandasResultSet(AthenaResultSet):
         description = self.description if self.description else []
         return [d[0] for d in description if d[1] in self._PARSE_DATES]
 
+    def _finish_csv_frame(self, df: DataFrame) -> DataFrame:
+        """Finish a DataFrame read from the CSV result file.
+
+        Unwraps the values that converters kept as objects and truncates the time
+        columns.
+
+        Args:
+            df: The DataFrame or chunk that ``pandas.read_csv()`` returned.
+
+        Returns:
+            The same DataFrame.
+        """
+        import pandas as pd
+
+        for i in range(df.shape[1]):
+            if (values := _unwrap_csv_objects(df.iloc[:, i])) is not None:
+                df.isetitem(i, pd.Series(values, index=df.index, dtype=object))
+        if (
+            not isinstance(df.index, pd.MultiIndex)
+            and (values := _unwrap_csv_objects(df.index)) is not None
+        ):
+            df.index = pd.Index(values, dtype=object, name=df.index.name)
+        return self._trunc_date(df)
+
+    def _get_csv_converter(self, type_: str) -> Callable[[str | None], Any]:
+        """Get the converter that ``pandas.read_csv()`` applies to a column type.
+
+        The values of json columns are wrapped, so that pandas does not infer a
+        numeric dtype from them, and ``_finish_csv_frame()`` unwraps them.
+
+        Args:
+            type_: The Athena type of the column.
+
+        Returns:
+            The conversion function.
+        """
+        converter = self._converter.get(type_)
+        if type_ == "json":
+            return partial(_convert_csv_object, converter)
+        return converter
+
     def _trunc_date(self, df: DataFrame) -> DataFrame:
         if self._time_columns:
             # A NULL is None, as with the GetQueryResults fallback and the other types.
@@ -626,7 +701,11 @@ class AthenaPandasResultSet(AthenaResultSet):
             "header": header,
             "names": names,
             "dtype": self.dtypes,
-            "converters": self.converters,
+            "converters": {
+                d[0]: self._get_csv_converter(d[1])
+                for d in self.description or []
+                if d[1] in self._converter.mappings
+            },
             "parse_dates": self.parse_dates,
             "skip_blank_lines": False,
             "keep_default_na": self._keep_default_na,
@@ -740,7 +819,7 @@ class AthenaPandasResultSet(AthenaResultSet):
             if len(column_names) != len(description):
                 return set()
             converters = {
-                name: self._converter.get(d[1])
+                name: self._get_csv_converter(d[1])
                 for name, d in zip(column_names, description, strict=True)
                 if d[1] in self._converter.mappings and name in selected_names
             }
@@ -848,7 +927,18 @@ class AthenaPandasResultSet(AthenaResultSet):
             return pd.DataFrame()
         description = self.description if self.description else []
         columns = [d[0] for d in description]
-        return pd.DataFrame(self._rows_to_columnar(rows, columns))
+        columnar = self._rows_to_columnar(rows, columns)
+        # Integer columns get the dtype that the CSV result file reads them with,
+        # and json values stay as decoded, so that NULL does not make them floats.
+        dtypes: dict[str, Any] = {}
+        for d in description:
+            if d[1] in self._INTEGER_TYPES:
+                dtypes[d[0]] = self._converter.get_dtype(d[1], d[4], d[5])
+            elif d[1] == "json":
+                dtypes[d[0]] = object
+        return pd.DataFrame(
+            {name: pd.Series(values, dtype=dtypes.get(name)) for name, values in columnar.items()}
+        )
 
     def as_pandas(self) -> PandasDataFrameIterator | DataFrame:
         """Return the query results as a DataFrame or an iterator of DataFrame chunks.
