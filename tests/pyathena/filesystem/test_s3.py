@@ -18,8 +18,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import boto3
 import botocore.exceptions
 import pytest
+from botocore.stub import Stubber
 from fsspec import Callback
 from fsspec.dircache import DirCache
 
@@ -31,6 +33,12 @@ from pyathena.filesystem.s3_object import S3Object, S3ObjectType, S3StorageClass
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
+
+# A client that sends no requests; its service model selects the parameters
+# that each S3 operation accepts.
+S3_CLIENT = boto3.client(
+    "s3", region_name="us-east-1", aws_access_key_id="dummy", aws_secret_access_key="dummy"
+)
 
 
 @pytest.fixture(scope="class")
@@ -145,6 +153,8 @@ class TestS3FileSystem:
         fs = S3FileSystem.__new__(S3FileSystem)
         fs.dircache = {}
         fs._client = mock.MagicMock()
+        fs._client.meta.method_to_api_mapping = S3_CLIENT.meta.method_to_api_mapping
+        fs._client.meta.service_model = S3_CLIENT.meta.service_model
         fs._call = mock.MagicMock()
         fs._retry_config = RetryConfig()
         fs.request_kwargs = {}
@@ -646,6 +656,283 @@ class TestS3FileSystem:
             ContentType="text/plain",
         )
 
+    @pytest.mark.parametrize(
+        ("method", "kwargs", "expected"),
+        [
+            (
+                "get_object",
+                {"ServerSideEncryption": "AES256", "RequestPayer": "requester", "IfMatch": '"e"'},
+                {"RequestPayer": "requester", "IfMatch": '"e"'},
+            ),
+            ("head_bucket", {"RequestPayer": "requester"}, {}),
+            (
+                "upload_part",
+                {"ContentType": "text/csv", "SSECustomerAlgorithm": "AES256"},
+                {"SSECustomerAlgorithm": "AES256"},
+            ),
+            # Not an S3 API operation.
+            ("generate_presigned_url", {"RequestPayer": "requester"}, {}),
+        ],
+    )
+    def test_get_operation_kwargs(self, method, kwargs, expected):
+        assert self._make_fs()._get_operation_kwargs(method, kwargs) == expected
+
+    def test_requester_pays(self):
+        # GH-969: RequestPayer is sent only with the operations that accept
+        # it, and one given to a call does not conflict with it (GH-946).
+        fs = S3FileSystem(
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            requester_pays=True,
+            skip_instance_cache=True,
+        )
+        head_object = {"ContentLength": 1, "ETag": '"e"'}
+        with Stubber(fs._client) as stubber:
+            stubber.add_response("head_bucket", {}, {"Bucket": "bucket"})
+            stubber.add_response(
+                "head_object",
+                head_object,
+                {"Bucket": "bucket", "Key": "key", "RequestPayer": "requester"},
+            )
+            stubber.add_response(
+                "head_object",
+                head_object,
+                {"Bucket": "bucket", "Key": "key2", "RequestPayer": "requester"},
+            )
+            fs.info("s3://bucket")
+            fs.metadata("s3://bucket/key")
+            fs.metadata("s3://bucket/key2", RequestPayer="requester")
+            stubber.assert_no_pending_responses()
+        assert fs.sign("s3://bucket/key").startswith("https://")
+
+    def test_open_s3_additional_kwargs(self):
+        # GH-969: the parameters of the call take precedence over those of
+        # the filesystem, keyword parameters are added to them, each request
+        # receives those that it accepts, and the caller's dictionary is not
+        # modified.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs.s3_additional_kwargs = {"ServerSideEncryption": "AES256", "StorageClass": "STANDARD"}
+        fs.info = mock.MagicMock(
+            return_value=S3Object(
+                init={"ContentLength": 3, "ETag": '"e"'},
+                type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+                bucket="bucket",
+                key="key",
+            )
+        )
+        fs._get_object = mock.MagicMock(return_value=(0, b"abc"))
+        fs._put_object = mock.MagicMock()
+        kwargs = {"StorageClass": "GLACIER_IR", "ExpectedBucketOwner": "111122223333"}
+
+        with fs.open("s3://bucket/key", "rb", s3_additional_kwargs=kwargs) as f:
+            assert f.read() == b"abc"
+        with fs.open(
+            "s3://bucket/key", "wb", s3_additional_kwargs=kwargs, ContentType="text/csv"
+        ) as f:
+            f.write(b"x")
+
+        assert kwargs == {"StorageClass": "GLACIER_IR", "ExpectedBucketOwner": "111122223333"}
+        fs._get_object.assert_called_once_with(
+            "bucket", "key", (0, 3), None, ExpectedBucketOwner="111122223333", IfMatch='"e"'
+        )
+        fs._put_object.assert_called_once_with(
+            bucket="bucket",
+            key="key",
+            body=b"x",
+            ServerSideEncryption="AES256",
+            StorageClass="GLACIER_IR",
+            ExpectedBucketOwner="111122223333",
+            ContentType="text/csv",
+        )
+
+    @pytest.mark.parametrize("transaction", [False, True])
+    def test_pipe_file_buffered_s3_parameters(self, transaction):
+        # GH-969: the parameters of the call reach the upload when the data
+        # goes through the buffered path, as on the single-request path.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        fs._create_multipart_upload = mock.MagicMock(
+            return_value=SimpleNamespace(upload_id="uploadid")
+        )
+        fs._upload_part = mock.MagicMock(
+            side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
+        )
+        fs._complete_multipart_upload = mock.MagicMock()
+        fs._put_object = mock.MagicMock()
+        data = b"x" * (fs.MULTIPART_UPLOAD_MIN_PART_SIZE + 1)
+
+        if transaction:
+            with fs.transaction:
+                fs.pipe_file("s3://bucket/key", b"x", ContentType="text/csv")
+            fs._put_object.assert_called_once_with(
+                bucket="bucket", key="key", body=b"x", ContentType="text/csv"
+            )
+        else:
+            fs.pipe_file("s3://bucket/key", data, ContentType="text/csv")
+            fs._create_multipart_upload.assert_called_once_with(
+                bucket="bucket", key="key", ContentType="text/csv"
+            )
+
+    def test_put_file_open_parameters(self, tmp_path):
+        # GH-969: the open() parameters of put_file() go to open(), and the
+        # other parameters, also in s3_additional_kwargs, to S3.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        lpath = tmp_path / "data.csv"
+        lpath.write_bytes(b"a")
+        block_size = fs.MULTIPART_UPLOAD_MIN_PART_SIZE
+
+        with (
+            mock.patch.object(fs, "open", wraps=fs.open) as open_,
+            Stubber(fs._client) as stubber,
+        ):
+            stubber.add_response(
+                "put_object",
+                {"ETag": '"e"'},
+                {
+                    "Bucket": "bucket",
+                    "Key": "key",
+                    "Body": b"a",
+                    "ContentType": "text/csv",
+                    "StorageClass": "STANDARD_IA",
+                },
+            )
+            fs.put_file(
+                str(lpath),
+                "s3://bucket/key",
+                block_size=block_size,
+                max_workers=2,
+                s3_additional_kwargs={"StorageClass": "STANDARD_IA"},
+            )
+            stubber.assert_no_pending_responses()
+
+        open_.assert_called_once_with(
+            "s3://bucket/key",
+            "wb",
+            block_size=block_size,
+            max_workers=2,
+            s3_additional_kwargs={"StorageClass": "STANDARD_IA", "ContentType": "text/csv"},
+        )
+
+    def test_finish_multipart_upload_request_parameters(self):
+        # GH-946: the completion and the abort receive the parameters of the
+        # upload that they accept.
+        fs = self._make_fs()
+        fs._complete_multipart_upload = mock.MagicMock()
+        kwargs = {
+            "ContentType": "text/csv",
+            "RequestPayer": "requester",
+            "SSECustomerAlgorithm": "AES256",
+        }
+        part: Future[SimpleNamespace] = Future()
+        part.set_result(SimpleNamespace(etag='"e1"', part_number=1))
+
+        fs._finish_multipart_upload(
+            bucket="bucket", key="key", upload_id="uploadid", futures=[part], **kwargs
+        )
+        failed: Future[SimpleNamespace] = Future()
+        failed.set_exception(RuntimeError("upload failed"))
+        with pytest.raises(RuntimeError, match="upload failed"):
+            fs._finish_multipart_upload(
+                bucket="bucket", key="key", upload_id="uploadid", futures=[failed], **kwargs
+            )
+
+        fs._complete_multipart_upload.assert_called_once_with(
+            bucket="bucket",
+            key="key",
+            upload_id="uploadid",
+            parts=[{"ETag": '"e1"', "PartNumber": 1}],
+            RequestPayer="requester",
+            SSECustomerAlgorithm="AES256",
+        )
+        fs._call.assert_called_once_with(
+            fs._client.abort_multipart_upload,
+            Bucket="bucket",
+            Key="key",
+            UploadId="uploadid",
+            RequestPayer="requester",
+        )
+
+    @pytest.mark.parametrize("size", [10, 5 * 2**30 + 1])
+    def test_cp_file_multipart_parameters(self, size):
+        # GH-967: block_size and max_workers control a multipart copy and are
+        # not sent to S3, whatever the size of the object.
+        fs = self._make_fs()
+        fs.info = mock.MagicMock(
+            return_value=S3Object(
+                init={"ContentLength": size},
+                type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+                bucket="bucket",
+                key="src",
+            )
+        )
+        fs._copy_object = mock.MagicMock()
+        fs._copy_object_with_multipart_upload = mock.MagicMock()
+
+        fs.cp_file(
+            "s3://bucket/src",
+            "s3://bucket/dst",
+            block_size=fs.MULTIPART_UPLOAD_MIN_PART_SIZE,
+            max_workers=2,
+            RequestPayer="requester",
+        )
+
+        if size <= fs.MULTIPART_UPLOAD_MAX_PART_SIZE:
+            fs._copy_object.assert_called_once_with(
+                bucket1="bucket",
+                key1="src",
+                version_id1=None,
+                bucket2="bucket",
+                key2="dst",
+                RequestPayer="requester",
+            )
+        else:
+            fs._copy_object_with_multipart_upload.assert_called_once_with(
+                bucket1="bucket",
+                key1="src",
+                version_id1=None,
+                size1=size,
+                bucket2="bucket",
+                key2="dst",
+                max_workers=2,
+                block_size=fs.MULTIPART_UPLOAD_MIN_PART_SIZE,
+                RequestPayer="requester",
+            )
+
+    def test_copy_object_with_multipart_upload_request_parameters(self):
+        # GH-946: the part copies receive the parameters of the copy that
+        # they accept, and the completion and the abort get them all.
+        fs = self._make_fs()
+        fs._create_multipart_upload = mock.MagicMock(
+            return_value=SimpleNamespace(upload_id="uploadid")
+        )
+        fs._upload_part_copy = mock.MagicMock(
+            side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
+        )
+        fs._finish_multipart_upload = mock.MagicMock()
+        kwargs = {"ContentType": "text/csv", "RequestPayer": "requester"}
+
+        fs._copy_object_with_multipart_upload(
+            bucket1="bucket",
+            key1="src",
+            size1=5 * 2**30 + 2**20,
+            bucket2="bucket",
+            key2="dst",
+            **kwargs,
+        )
+
+        fs._create_multipart_upload.assert_called_once_with(bucket="bucket", key="dst", **kwargs)
+        assert all(
+            c.kwargs["RequestPayer"] == "requester" and "ContentType" not in c.kwargs
+            for c in fs._upload_part_copy.call_args_list
+        )
+        assert fs._finish_multipart_upload.call_args.kwargs["ContentType"] == "text/csv"
+        assert fs._finish_multipart_upload.call_args.kwargs["RequestPayer"] == "requester"
+
     def test_pipe_file_invalid_path_raises(self):
         fs = self._make_fs()
         with pytest.raises(ValueError, match="Cannot write to a bucket"):
@@ -712,7 +999,8 @@ class TestS3FileSystem:
         fs._call.assert_not_called()
 
     def test_put_file_block_size(self, tmp_path):
-        # block_size is passed to open() instead of the S3 API.
+        # block_size and max_workers are passed to open() instead of the S3
+        # API.
         fs = self._make_fs()
         fs.open = mock.MagicMock()
         fs.open.return_value.__enter__.return_value.blocksize = 8
@@ -722,7 +1010,11 @@ class TestS3FileSystem:
         fs.put_file(str(lpath), "s3://bucket/key", block_size=8)
 
         fs.open.assert_called_once_with(
-            "s3://bucket/key", "wb", block_size=8, s3_additional_kwargs={}
+            "s3://bucket/key",
+            "wb",
+            block_size=8,
+            max_workers=fs.max_workers,
+            s3_additional_kwargs={},
         )
 
     @pytest.mark.parametrize(
@@ -2662,11 +2954,22 @@ class TestS3FileSystem:
 
 class TestS3File:
     @staticmethod
+    def _make_mock_fs():
+        # A mocked filesystem that selects the request parameters of each
+        # operation as the real one does.
+        fs = mock.MagicMock(spec=S3FileSystem)
+        fs._client = S3_CLIENT
+        fs._get_operation_kwargs.side_effect = functools.partial(
+            S3FileSystem._get_operation_kwargs, fs
+        )
+        return fs
+
+    @staticmethod
     def _make_write_file(data: bytes, autocommit: bool):
         # Build a minimal write-mode S3File without touching AWS, bypassing
         # __init__ which would require a real connection.
         file = S3File.__new__(S3File)
-        file.fs = mock.MagicMock(spec=S3FileSystem)
+        file.fs = TestS3File._make_mock_fs()
         file.path = "s3://bucket/key.txt"
         file.bucket = "bucket"
         file.key = "key.txt"
@@ -2703,7 +3006,7 @@ class TestS3File:
         # A mocked filesystem holding an existing object, with a minimum part
         # size of 4 bytes so that the write and append paths can be exercised
         # with tiny data and no AWS access.
-        fs = mock.MagicMock(spec=S3FileSystem)
+        fs = TestS3File._make_mock_fs()
         fs.MULTIPART_UPLOAD_MIN_PART_SIZE = 4
         fs.MULTIPART_UPLOAD_MAX_PART_SIZE = 64
         fs.MULTIPART_UPLOAD_MAX_PARTS = S3FileSystem.MULTIPART_UPLOAD_MAX_PARTS
@@ -2938,6 +3241,35 @@ class TestS3File:
 
         assert f.closed
         executor.shutdown.assert_called_once()
+
+    def test_multipart_write_request_parameters(self):
+        # GH-946: the parts receive the parameters of the file that they
+        # accept, such as RequestPayer and SSE-C, and the completion receives
+        # them all.
+        fs = self._make_append_fs(b"")
+        kwargs = {
+            "ContentType": "text/csv",
+            "RequestPayer": "requester",
+            "SSECustomerAlgorithm": "AES256",
+            "SSECustomerKey": "key",
+        }
+
+        with S3File(
+            fs, "s3://bucket/key.txt", mode="wb", block_size=4, s3_additional_kwargs=kwargs
+        ) as f:
+            f.write(b"x" * 8)
+
+        fs._create_multipart_upload.assert_called_once_with(
+            bucket="bucket", key="key.txt", **kwargs
+        )
+        assert fs._upload_part.call_count == 2
+        for c in fs._upload_part.call_args_list:
+            assert {k: v for k, v in c.kwargs.items() if k[0].isupper()} == {
+                "RequestPayer": "requester",
+                "SSECustomerAlgorithm": "AES256",
+                "SSECustomerKey": "key",
+            }
+        assert fs._finish_multipart_upload.call_args.kwargs["ContentType"] == "text/csv"
 
     def test_append_discard(self):
         # Rolling back an append aborts its multipart upload without the

@@ -205,7 +205,10 @@ class TestAioS3FileSystem:
         # GH-977: pipe_file() and put_file() join the transaction of this
         # filesystem; they used to write through the internal S3FileSystem,
         # which is not in the transaction, and were not rolled back.
-        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        # A real client selects the request parameters of each operation.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
         put_object = fs._sync_fs._put_object = mock.MagicMock()
         local = tmp_path / "local.txt"
         local.write_bytes(b"local")
@@ -399,6 +402,102 @@ class TestAioS3FileSystem:
         sync_fs.find.assert_called_once_with("bucket/dir", maxdepth=1, withdirs=True, detail=False)
         (call,) = sync_fs._call.call_args_list
         assert call.kwargs["Delete"]["Objects"] == [{"Key": "dir"}, {"Key": "dir/a"}]
+
+    def test_put_file_in_transaction_open_parameters(self, tmp_path):
+        # GH-969: the open() parameters of put_file() go to open(), and the
+        # other parameters, also in s3_additional_kwargs, to S3.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs.open = mock.MagicMock()
+        fs.open.return_value.__enter__.return_value.blocksize = 4
+        lpath = tmp_path / "data.csv"
+        lpath.write_bytes(b"a")
+
+        fs._put_file_in_transaction(
+            str(lpath),
+            "s3://bucket/key",
+            Callback(),
+            block_size=S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE,
+            max_workers=2,
+            StorageClass="STANDARD_IA",
+        )
+
+        fs.open.assert_called_once_with(
+            "s3://bucket/key",
+            "wb",
+            block_size=S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE,
+            max_workers=2,
+            s3_additional_kwargs={"StorageClass": "STANDARD_IA", "ContentType": "text/csv"},
+        )
+
+    @pytest.mark.parametrize("size", [10, 5 * 2**30 + 1])
+    @pytest.mark.asyncio
+    async def test_cp_file_multipart_parameters(self, size):
+        # GH-967: block_size and max_workers control a multipart copy and are
+        # not sent to S3, whatever the size of the object.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        fs._info = mock.AsyncMock(
+            return_value=S3Object(
+                init={"ContentLength": size},
+                type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+                bucket="bucket",
+                key="src",
+            )
+        )
+        sync_fs = fs._sync_fs
+        sync_fs._copy_object = mock.MagicMock()
+        sync_fs._create_multipart_upload = mock.MagicMock(
+            return_value=SimpleNamespace(upload_id="uploadid")
+        )
+        running = []
+        concurrency = []
+
+        def upload_part_copy(**kw):
+            running.append(kw["part_number"])
+            concurrency.append(len(running))
+            time.sleep(0.01)
+            running.remove(kw["part_number"])
+            return SimpleNamespace(etag='"e"', part_number=kw["part_number"])
+
+        sync_fs._upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
+        sync_fs._complete_multipart_upload = mock.MagicMock()
+
+        await fs._cp_file(
+            "s3://bucket/src",
+            "s3://bucket/dst",
+            block_size=S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE // 2,
+            max_workers=1,
+            RequestPayer="requester",
+            ContentType="text/csv",
+        )
+
+        if size <= S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE:
+            sync_fs._copy_object.assert_called_once_with(
+                bucket1="bucket",
+                key1="src",
+                version_id1=None,
+                bucket2="bucket",
+                key2="dst",
+                RequestPayer="requester",
+                ContentType="text/csv",
+            )
+        else:
+            sync_fs._create_multipart_upload.assert_called_once_with(
+                bucket="bucket", key="dst", RequestPayer="requester", ContentType="text/csv"
+            )
+            # The part copies receive the parameters that they accept, and
+            # max_workers limits how many run at once.
+            # Two parts, the second with the 1-byte tail.
+            assert sync_fs._upload_part_copy.call_count == 2
+            assert all(
+                c.kwargs["RequestPayer"] == "requester" and "ContentType" not in c.kwargs
+                for c in sync_fs._upload_part_copy.call_args_list
+            )
+            assert max(concurrency) == 1
+            assert (
+                sync_fs._complete_multipart_upload.call_args.kwargs["RequestPayer"] == "requester"
+            )
 
     @pytest.fixture(scope="class")
     def fs(self, request):

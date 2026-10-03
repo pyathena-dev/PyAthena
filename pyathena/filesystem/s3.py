@@ -8,7 +8,7 @@ import math
 import mimetypes
 import os.path
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import Future, as_completed, wait
 from copy import deepcopy
 from datetime import datetime
@@ -162,7 +162,8 @@ class S3FileSystem(AbstractFileSystem):
             max_workers: The number of threads for parallel transfers.
             s3_additional_kwargs: Extra arguments for the object requests of
                 ``open()`` and ``pipe_file()``; listings and other requests do
-                not use them.
+                not use them. Each request receives those that its operation
+                accepts, and the parameters of a call take precedence.
             allow_bucket_creation: Whether ``mkdir``/``makedirs`` may create a
                 bucket.
             allow_bucket_deletion: Whether ``rmdir`` may delete a bucket.
@@ -171,7 +172,8 @@ class S3FileSystem(AbstractFileSystem):
             *args: Passed to ``fsspec.AbstractFileSystem``.
             **kwargs: Passed to ``fsspec.AbstractFileSystem``; without a
                 ``connection``, also s3fs-compatible client arguments.
-                ``requester_pays=True`` sends requester-pays requests.
+                ``requester_pays=True`` sends requester-pays requests with
+                the operations that accept ``RequestPayer``.
         """
         super().__init__(*args, **kwargs)
         if connection:
@@ -1318,7 +1320,9 @@ class S3FileSystem(AbstractFileSystem):
             recursive: Unused parameter for fsspec compatibility.
             maxdepth: Unused parameter for fsspec compatibility.
             on_error: Unused parameter for fsspec compatibility.
-            **kwargs: Additional S3 copy parameters (e.g., metadata, storage class).
+            **kwargs: Additional S3 copy parameters (e.g., metadata, storage
+                class). The ``block_size`` and ``max_workers`` parameters
+                control a multipart copy and are not sent to S3.
 
         Raises:
             ValueError: If trying to copy to a versioned file or copy buckets.
@@ -1335,6 +1339,9 @@ class S3FileSystem(AbstractFileSystem):
         # >= 2026.6.0, where mv() passes on_error correctly.
         # https://github.com/fsspec/filesystem_spec/commit/346a589fef9308550ffa3d0d510f2db67281bb05
         kwargs.pop("onerror", None)
+        # Parameters of the multipart copy, not of the S3 requests.
+        block_size = kwargs.pop("block_size", None)
+        max_workers = kwargs.pop("max_workers", None)
         bucket1, key1, version_id1 = self.parse_path(path1)
         bucket2, key2, version_id2 = self.parse_path(path2)
         if version_id2:
@@ -1361,6 +1368,8 @@ class S3FileSystem(AbstractFileSystem):
                 size1=size1,
                 bucket2=bucket2,
                 key2=key2,
+                max_workers=max_workers,
+                block_size=block_size,
                 **kwargs,
             )
         self.invalidate_cache(path2)
@@ -1439,6 +1448,7 @@ class S3FileSystem(AbstractFileSystem):
                     upload_id=cast(str, multipart_upload.upload_id),
                     part_number=i + 1,
                     copy_source_ranges=range_,
+                    **self._get_operation_kwargs("upload_part_copy", kwargs),
                 )
                 for i, range_ in enumerate(ranges)
             ]
@@ -1447,6 +1457,7 @@ class S3FileSystem(AbstractFileSystem):
                 key=key2,
                 upload_id=cast(str, multipart_upload.upload_id),
                 futures=futures,
+                **kwargs,
             )
 
     def _get_copy_ranges(self, size: int, block_size: int) -> list[tuple[int, int]]:
@@ -1561,7 +1572,7 @@ class S3FileSystem(AbstractFileSystem):
         kwargs.pop("block_size", None)
         kwargs.pop("max_workers", None)
         request_kwargs = {
-            **self.s3_additional_kwargs,
+            **self._get_operation_kwargs("put_object", self.s3_additional_kwargs),
             **kwargs.pop("s3_additional_kwargs", {}),
             **kwargs,
         }
@@ -1574,6 +1585,7 @@ class S3FileSystem(AbstractFileSystem):
         key: str,
         upload_id: str,
         futures: list[Future[S3MultipartUploadPart]],
+        **kwargs,
     ) -> S3CompleteMultipartUpload:
         """Collect the uploaded parts and complete the multipart upload.
 
@@ -1587,6 +1599,9 @@ class S3FileSystem(AbstractFileSystem):
             key: Object key being uploaded.
             upload_id: Unique identifier for the multipart upload.
             futures: Futures of the part uploads, in part-number order.
+            **kwargs: Parameters of the upload, such as ``RequestPayer`` or
+                the SSE-C parameters; the completion and the abort receive
+                those that they accept.
 
         Returns:
             S3CompleteMultipartUpload of the completed upload.
@@ -1600,6 +1615,7 @@ class S3FileSystem(AbstractFileSystem):
                 key=key,
                 upload_id=upload_id,
                 parts=parts,
+                **self._get_operation_kwargs("complete_multipart_upload", kwargs),
             )
         except Exception:
             # A part that is still uploading when the upload is aborted may
@@ -1612,6 +1628,7 @@ class S3FileSystem(AbstractFileSystem):
                     Bucket=bucket,
                     Key=key,
                     UploadId=upload_id,
+                    **self._get_operation_kwargs("abort_multipart_upload", kwargs),
                 )
             except Exception:
                 _logger.exception(
@@ -1711,7 +1728,8 @@ class S3FileSystem(AbstractFileSystem):
             rpath: S3 destination path (s3://bucket/key).
             callback: Progress callback for tracking upload progress.
             **kwargs: Additional S3 parameters (e.g., ContentType, StorageClass).
-                The ``block_size`` parameter of ``open()`` is also accepted.
+                The ``block_size``, ``max_workers``, and ``s3_additional_kwargs``
+                parameters of ``open()`` are also accepted.
 
         Raises:
             ValueError: If the file takes more than
@@ -1733,15 +1751,24 @@ class S3FileSystem(AbstractFileSystem):
 
         size = os.path.getsize(lpath)
         block_size = kwargs.pop("block_size", None) or self.default_block_size
+        max_workers = kwargs.pop("max_workers", self.max_workers)
+        # The other parameters are S3 request parameters, as in pipe_file().
+        s3_additional_kwargs = {**kwargs.pop("s3_additional_kwargs", {}), **kwargs}
         self._check_multipart_upload_size(rpath, size, block_size)
         callback.set_size(size)
-        if "ContentType" not in kwargs:
+        if "ContentType" not in s3_additional_kwargs:
             content_type, _ = mimetypes.guess_type(lpath)
             if content_type is not None:
-                kwargs["ContentType"] = content_type
+                s3_additional_kwargs["ContentType"] = content_type
 
         with (
-            self.open(rpath, "wb", block_size=block_size, s3_additional_kwargs=kwargs) as remote,
+            self.open(
+                rpath,
+                "wb",
+                block_size=block_size,
+                max_workers=max_workers,
+                s3_additional_kwargs=s3_additional_kwargs,
+            ) as remote,
             open(lpath, "rb") as local,
         ):
             while data := local.read(remote.blocksize):
@@ -2266,8 +2293,12 @@ class S3FileSystem(AbstractFileSystem):
         if cache_type is None:
             cache_type = self.default_cache_type
         max_workers = kwargs.pop("max_workers", self.max_workers)
-        s3_additional_kwargs = kwargs.pop("s3_additional_kwargs", {})
-        s3_additional_kwargs.update(self.s3_additional_kwargs)
+        # The parameters of the call take precedence over those of the
+        # filesystem; the caller's dictionary is not modified.
+        s3_additional_kwargs = {
+            **self.s3_additional_kwargs,
+            **kwargs.pop("s3_additional_kwargs", {}),
+        }
 
         return S3File(
             self,
@@ -2431,12 +2462,41 @@ class S3FileSystem(AbstractFileSystem):
         )
         return S3CompleteMultipartUpload(response)
 
+    def _get_operation_kwargs(self, method: str, kwargs: Mapping[str, Any]) -> dict[str, Any]:
+        """Select the parameters that an S3 operation accepts.
+
+        Parameters that are inherited by several requests (the
+        ``requester_pays`` parameter, ``s3_additional_kwargs``, or the
+        parameters of a file or a multipart copy) are filtered by the input
+        shape of each operation, so that, e.g., ``ServerSideEncryption`` for
+        writes is not sent with GetObject.
+
+        Args:
+            method: The name of the client method, such as ``get_object``.
+            kwargs: The parameters to select from.
+
+        Returns:
+            The parameters that the operation accepts. Empty for a method
+            that is not an S3 API operation, such as
+            ``generate_presigned_url``.
+        """
+        operation = self._client.meta.method_to_api_mapping.get(method)
+        if not kwargs or operation is None:
+            return {}
+        members = self._client.meta.service_model.operation_model(operation).input_shape.members
+        return {k: v for k, v in kwargs.items() if k in members}
+
     def _call(self, method: str | Callable[..., Any], **kwargs) -> dict[str, Any]:
         func = getattr(self._client, method) if isinstance(method, str) else method
+        # The requester_pays parameter goes only to the operations that
+        # accept it, and a parameter of the call takes precedence.
+        request = (
+            {**self._get_operation_kwargs(func.__name__, self.request_kwargs), **kwargs}
+            if self.request_kwargs
+            else kwargs
+        )
         try:
-            response = retry_api_call(
-                func, config=self._retry_config, logger=_logger, **kwargs, **self.request_kwargs
-            )
+            response = retry_api_call(func, config=self._retry_config, logger=_logger, **request)
         except botocore.exceptions.ClientError as e:
             raise S3ClientError(e).os_error from e
         return cast(dict[str, Any], response)
@@ -2496,9 +2556,11 @@ class S3File(AbstractBufferedFile):
             cache_options: Options for the fsspec cache.
             size: The size of the object, if known. Passed to
                 ``fsspec.spec.AbstractBufferedFile``.
-            s3_additional_kwargs: Additional parameters for the object requests
-                of the file.
-            **kwargs: Accepted for compatibility; not used.
+            s3_additional_kwargs: Additional parameters for the S3 requests of
+                the file, such as ``ContentType`` or ``RequestPayer``. Each
+                request receives those that its operation accepts.
+            **kwargs: Additional parameters for the S3 requests of the file,
+                which take precedence over ``s3_additional_kwargs``.
 
         Raises:
             FileNotFoundError: If no object exists at the path when reading,
@@ -2509,7 +2571,8 @@ class S3File(AbstractBufferedFile):
                 ``MULTIPART_UPLOAD_MAX_PART_SIZE`` for writing.
         """
         self.max_workers = max_workers
-        self.s3_additional_kwargs = s3_additional_kwargs if s3_additional_kwargs else {}
+        # A new dictionary, so that the caller's is not modified.
+        self.s3_additional_kwargs: dict[str, Any] = {**(s3_additional_kwargs or {}), **kwargs}
 
         # The arguments are validated, and the objects looked up, before the
         # base class initializer: a file that fails here is never opened, so
@@ -2599,6 +2662,18 @@ class S3File(AbstractBufferedFile):
             self.s3_additional_kwargs.update(append_info.to_api_repr())
             self._details = append_info
 
+    def _get_request_kwargs(self, method: str) -> dict[str, Any]:
+        """Select the parameters of the file that an S3 operation accepts.
+
+        Args:
+            method: The name of the client method, such as ``upload_part``.
+
+        Returns:
+            The parameters in ``s3_additional_kwargs`` that the operation
+            accepts.
+        """
+        return self.fs._get_operation_kwargs(method, self.s3_additional_kwargs)
+
     def close(self) -> None:
         """Close the file, flushing any written data, and shut down its executor."""
         try:
@@ -2617,7 +2692,7 @@ class S3File(AbstractBufferedFile):
         self.multipart_upload = self.fs._create_multipart_upload(
             bucket=self.bucket,
             key=self.key,
-            **self.s3_additional_kwargs,
+            **self._get_request_kwargs("create_multipart_upload"),
         )
         if self.append_block:
             if self.tell() > self.fs.MULTIPART_UPLOAD_MAX_PART_SIZE:
@@ -2637,6 +2712,7 @@ class S3File(AbstractBufferedFile):
                             upload_id=cast(str, self.multipart_upload.upload_id),
                             part_number=i + 1,
                             copy_source_ranges=range_,
+                            **self._get_request_kwargs("upload_part_copy"),
                         )
                     )
             else:
@@ -2648,6 +2724,7 @@ class S3File(AbstractBufferedFile):
                         copy_source=self.path,
                         upload_id=cast(str, self.multipart_upload.upload_id),
                         part_number=1,
+                        **self._get_request_kwargs("upload_part_copy"),
                     )
                 )
 
@@ -2729,6 +2806,7 @@ class S3File(AbstractBufferedFile):
                         upload_id=cast(str, self.multipart_upload.upload_id),
                         part_number=part_number,
                         body=upload,
+                        **self._get_request_kwargs("upload_part"),
                     )
                 )
 
@@ -2753,7 +2831,7 @@ class S3File(AbstractBufferedFile):
         if self.tell() == 0:
             if self.buffer is not None:
                 self.discard()
-                self.fs.touch(self.path, **self.s3_additional_kwargs)
+                self.fs.touch(self.path, **self._get_request_kwargs("put_object"))
         elif not self.multipart_upload_parts:
             if self.buffer is not None:
                 # Upload files smaller than block size.
@@ -2763,7 +2841,7 @@ class S3File(AbstractBufferedFile):
                     bucket=self.bucket,
                     key=self.key,
                     body=data,
-                    **self.s3_additional_kwargs,
+                    **self._get_request_kwargs("put_object"),
                 )
         else:
             if not self.multipart_upload:
@@ -2775,6 +2853,7 @@ class S3File(AbstractBufferedFile):
                     key=self.key,
                     upload_id=cast(str, self.multipart_upload.upload_id),
                     futures=self.multipart_upload_parts,
+                    **self.s3_additional_kwargs,
                 )
             except Exception:
                 # The multipart upload has been aborted by the helper;
@@ -2796,19 +2875,12 @@ class S3File(AbstractBufferedFile):
             # be stored after the abort, so wait for the parts that could not
             # be cancelled first.
             wait([f for f in self.multipart_upload_parts if not f.cancel()])
-            # s3_additional_kwargs also holds object parameters (e.g., the
-            # existing object's metadata in append mode) that
-            # AbortMultipartUpload rejects.
             self.fs._call(
                 "abort_multipart_upload",
                 Bucket=self.bucket,
                 Key=self.key,
                 UploadId=self.multipart_upload.upload_id,
-                **{
-                    k: v
-                    for k, v in self.s3_additional_kwargs.items()
-                    if k in ("RequestPayer", "ExpectedBucketOwner")
-                },
+                **self._get_request_kwargs("abort_multipart_upload"),
             )
 
         self.multipart_upload = None
@@ -2898,7 +2970,7 @@ class S3File(AbstractBufferedFile):
                     key=self.key,
                     ranges=r,
                     version_id=self.version_id,
-                    **self.s3_additional_kwargs,
+                    **self._get_request_kwargs("get_object"),
                 )
                 for r in ranges
             ]
@@ -2909,7 +2981,7 @@ class S3File(AbstractBufferedFile):
                 self.key,
                 ranges[0],
                 self.version_id,
-                **self.s3_additional_kwargs,
+                **self._get_request_kwargs("get_object"),
             )[1]
         return object_
 

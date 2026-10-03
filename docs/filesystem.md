@@ -109,6 +109,20 @@ entry. `cat_file` uses the key as written. Without a `?versionId=` suffix, it re
 such an object without a range, with a non-empty range of non-negative offsets, or with
 a negative `start` and no `end`, and raises `FileNotFoundError` for other ranges.
 
+S3 request parameters, such as `ContentType`, `ServerSideEncryption`, or `RequestPayer`,
+can be given to `open`, `pipe`, and `put` as keyword arguments or in
+`s3_additional_kwargs`, and to all of them through the `s3_additional_kwargs` argument
+of `S3FileSystem`. The parameters of a call take precedence over those of the
+filesystem.
+Each request receives only the parameters that its S3 operation accepts, so, for
+example, `ServerSideEncryption` for writes is not sent with reads.
+
+```python
+fs = S3FileSystem(s3_additional_kwargs={"ServerSideEncryption": "AES256"})
+with fs.open("s3://YOUR_S3_BUCKET/path/to/data.csv", "wb", ContentType="text/csv") as f:
+    f.write(b"col1\n1\n")
+```
+
 ## Error translation
 
 S3 error responses are translated into standard Python exceptions, so filesystem
