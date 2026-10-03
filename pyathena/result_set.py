@@ -901,6 +901,14 @@ class WithResultSet:
     def query_id(self, val: str | None) -> None:
         self._query_id = val
 
+    def _set_interrupted_execution_id(self, execution_id: str) -> None:
+        """Keep the ID of a query started by an interrupted start request.
+
+        Args:
+            execution_id: The query execution ID.
+        """
+        self.query_id = execution_id
+
     @property
     def query(self) -> str | None:
         if not self.result_set:

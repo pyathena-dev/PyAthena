@@ -280,6 +280,11 @@ class TestAioSparkCursor:
             kill_on_interrupt=True,
             final_state=AthenaCalculationExecutionStatus.STATE_COMPLETED,
         )
+        # Left by a previous calculation on the same cursor.
+        cursor._calculation_id = "previous_calculation_id"
+        cursor._calculation_execution = MagicMock(
+            state=AthenaCalculationExecutionStatus.STATE_COMPLETED
+        )
         # Raise the cancellation from the first status request directly, so that the
         # test receives the re-raised exception itself rather than one made by a task.
         cursor._get_calculation_execution_status = AsyncMock(
@@ -292,6 +297,7 @@ class TestAioSparkCursor:
 
         assert exc_info.value.__cause__ is error
         cancel.assert_awaited_once_with("calculation_id")
+        assert cursor.calculation_id == "calculation_id"
         assert cursor.calculation_execution is None
 
     async def test_execute_cancellation_without_kill_on_interrupt(self):
@@ -389,16 +395,36 @@ class TestAioSparkCursor:
         assert cursor.calculation_id == "calculation_id"
         assert cursor.state == AthenaCalculationExecutionStatus.STATE_CANCELED
 
+    async def test_execute_cancelled_before_request_is_sent(self):
+        """Cancellation before the start task begins sends no request (no AWS)."""
+        cursor, cancel, started, release = _starting_cursor()
+        release.set()
+        task = asyncio.create_task(cursor.execute("code"))
+        # The task runs until it awaits the start task, which has not begun yet.
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert task.cancelled()
+        assert not started.is_set()
+        cursor._connection.client.start_calculation_execution.assert_not_called()
+        cancel.assert_not_awaited()
+        assert cursor.calculation_id is None
+
     async def test_execute_timeout_while_starting(self):
         cursor, cancel, started, release = _starting_cursor()
-        timer = threading.Timer(0.2, release.set)
-        timer.start()
+        task = asyncio.create_task(asyncio.wait_for(cursor.execute("code"), timeout=0.05))
         try:
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(cursor.execute("code"), timeout=0.05)
+            assert await asyncio.to_thread(started.wait, _TIMEOUT)
+            # The timeout is due before this sleep ends, so the event loop handles it
+            # while the start request is still blocked.
+            await asyncio.sleep(0.1)
+            assert not task.done()
         finally:
-            timer.cancel()
             release.set()
+        with pytest.raises(asyncio.TimeoutError):
+            await task
 
         assert started.is_set()
         cancel.assert_awaited_once_with("calculation_id")

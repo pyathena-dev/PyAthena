@@ -130,6 +130,38 @@ async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
         await cursor.cancel()
 ```
 
+(aio-task-cancellation)=
+
+### Task cancellation
+
+With `kill_on_interrupt` enabled, which is the default, cancelling the task while `execute()` waits for the query
+requests cancellation of the query, waits until it reaches a terminal state, and then raises `asyncio.CancelledError`.
+Cancellation is a best-effort request, so the query can still end as `SUCCEEDED` or `FAILED`.
+The `query_id` property keeps the ID of the cancelled query.
+If the cancellation request fails, `asyncio.CancelledError` is raised with the error as its cause.
+Cancelling the task while `execute()` is still starting the query first waits for the start request to finish,
+and then cancels the query it started in the same way.
+If the task is cancelled before `execute()` begins the request, the request is never sent.
+Cancelling the task again during the cancellation request or these waits raises `asyncio.CancelledError` immediately, and the query can keep running.
+With `kill_on_interrupt=False`, `asyncio.CancelledError` is raised immediately, and a query that has already started keeps running.
+
+With `kill_on_interrupt` enabled, a timeout from `asyncio.wait_for()` while `execute()` starts or waits for the query therefore cancels it and raises `asyncio.TimeoutError`.
+If the timeout expires while `execute()` is still looking up a cached result, no query is started and `query_id` is `None`.
+
+```python
+import asyncio
+
+from pyathena import aio_connect
+
+async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                          region_name="us-west-2") as conn:
+    async with conn.cursor() as cursor:
+        try:
+            await asyncio.wait_for(cursor.execute("SELECT * FROM many_rows"), timeout=60)
+        except asyncio.TimeoutError:
+            print(f"Query timed out: {cursor.query_id}")
+```
+
 (aio-dict-cursor)=
 
 ## AioDictCursor

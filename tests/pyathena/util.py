@@ -6,7 +6,9 @@
 # SPDX-License-Identifier: MIT
 
 import time
+from concurrent.futures import wait
 from pathlib import Path
+from unittest.mock import patch
 
 from botocore.config import Config
 from botocore.exceptions import ClientError
@@ -161,3 +163,34 @@ def wait_for_spark_session_state(client, session_id, state, timeout=120):
             return
         time.sleep(1)
     raise AssertionError(f"Session {session_id} did not become {state} in {timeout} seconds.")
+
+
+# Seconds a test waits for an event from a helper thread before failing.
+EVENT_TIMEOUT = 10
+
+
+def interrupt_start_waits(started, release, interrupts=1):
+    """Patch the wait for a start request on a helper thread to raise KeyboardInterrupt.
+
+    The first ``interrupts`` waits raise ``KeyboardInterrupt`` once the request
+    has started; later waits release the request and wait for it.
+
+    Args:
+        started: Set when the start request starts.
+        release: Releases the start request.
+        interrupts: How many waits raise.
+
+    Returns:
+        The patcher, and the list of raised interrupts.
+    """
+    raised = []
+
+    def interrupting_wait(futures, timeout=None):
+        if len(raised) < interrupts:
+            assert started.wait(EVENT_TIMEOUT)
+            raised.append(KeyboardInterrupt())
+            raise raised[-1]
+        release.set()
+        return wait(futures, timeout)
+
+    return patch("pyathena.common.wait", side_effect=interrupting_wait), raised

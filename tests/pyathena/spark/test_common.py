@@ -9,7 +9,6 @@ import asyncio
 import logging
 import threading
 import uuid
-from concurrent.futures import wait
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -22,6 +21,7 @@ from pyathena.spark.async_cursor import AsyncSparkCursor
 from pyathena.spark.common import SparkBaseCursor
 from pyathena.spark.cursor import SparkCursor
 from pyathena.util import RetryConfig
+from tests.pyathena.util import interrupt_start_waits
 
 SPARK_CURSOR_CLASSES = [SparkCursor, AsyncSparkCursor, AioSparkCursor]
 SYNC_SPARK_CURSOR_CLASSES = [SparkCursor, AsyncSparkCursor]
@@ -108,33 +108,6 @@ def _block_start(cursor, response=None):
 
     cursor._connection.client.start_calculation_execution.side_effect = start_calculation_execution
     return started, release
-
-
-def _interrupt_waits(started, release, interrupts=1):
-    """Patch the wait for the start request to raise KeyboardInterrupt.
-
-    The first ``interrupts`` waits raise ``KeyboardInterrupt`` once the request
-    has started; later waits release the request and wait for it.
-
-    Args:
-        started: Set when the start request starts.
-        release: Releases the start request.
-        interrupts: How many waits raise.
-
-    Returns:
-        The patcher, and the list of raised interrupts.
-    """
-    raised = []
-
-    def interrupting_wait(futures, timeout=None):
-        if len(raised) < interrupts:
-            assert started.wait(_TIMEOUT)
-            raised.append(KeyboardInterrupt())
-            raise raised[-1]
-        release.set()
-        return wait(futures, timeout)
-
-    return patch("pyathena.spark.common.wait", side_effect=interrupting_wait), raised
 
 
 def _init_cursor(cursor_class, connection, **kwargs):
@@ -261,7 +234,7 @@ class TestSparkBaseCursor:
         assert tokens[0] == tokens[1]
         uuid.UUID(tokens[0])
         for thread in threading.enumerate():
-            if thread.name == "pyathena-spark-start":
+            if thread.name == "pyathena-start":
                 thread.join(_TIMEOUT)
                 assert not thread.is_alive()
 
@@ -302,7 +275,7 @@ class TestSparkBaseCursor:
         final_execution = MagicMock(state=final_state)
         cursor._get_calculation_execution.return_value = final_execution
         started, release = _block_start(cursor)
-        waits, raised = _interrupt_waits(started, release)
+        waits, raised = interrupt_start_waits(started, release)
 
         with waits, pytest.raises(KeyboardInterrupt) as exc_info:
             cursor._calculate(session_id="session_id", code_block="code")
@@ -332,7 +305,7 @@ class TestSparkBaseCursor:
             cursor._cancel.side_effect = error
         if failing == "wait":
             cursor._get_calculation_execution_status.side_effect = error
-        waits, raised = _interrupt_waits(started, release)
+        waits, raised = interrupt_start_waits(started, release)
 
         with waits, pytest.raises(KeyboardInterrupt) as exc_info:
             cursor._calculate(session_id="session_id", code_block="code")
@@ -352,7 +325,7 @@ class TestSparkBaseCursor:
     def test_calculate_second_interrupt_while_starting(self, cursor_class):
         cursor = _calculation_cursor(cursor_class)
         started, release = _block_start(cursor)
-        waits, raised = _interrupt_waits(started, release, interrupts=2)
+        waits, raised = interrupt_start_waits(started, release, interrupts=2)
 
         try:
             with waits, pytest.raises(KeyboardInterrupt) as exc_info:
@@ -380,7 +353,7 @@ class TestSparkBaseCursor:
                 raise KeyboardInterrupt
 
         with (
-            patch("pyathena.spark.common.threading.Thread", InterruptedThread),
+            patch("pyathena.common.threading.Thread", InterruptedThread),
             pytest.raises(KeyboardInterrupt) as exc_info,
         ):
             cursor._calculate(session_id="session_id", code_block="code")
@@ -399,7 +372,7 @@ class TestSparkBaseCursor:
         cursor._connection.client.start_calculation_execution.side_effect = KeyboardInterrupt()
 
         with (
-            patch("pyathena.spark.common.threading.Thread") as thread,
+            patch("pyathena.common.threading.Thread") as thread,
             pytest.raises(KeyboardInterrupt),
         ):
             cursor._calculate(session_id="session_id", code_block="code")
@@ -411,7 +384,7 @@ class TestSparkBaseCursor:
     def test_execute_interrupted_while_starting(self):
         cursor = _calculation_cursor(SparkCursor)
         started, release = _block_start(cursor)
-        waits, _ = _interrupt_waits(started, release)
+        waits, _ = interrupt_start_waits(started, release)
 
         with waits, pytest.raises(KeyboardInterrupt):
             cursor.execute("code")

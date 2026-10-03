@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
+from botocore.exceptions import ClientError
 
 from pyathena import BINARY, Binary, ExecuteOptions
 from pyathena.aio.cursor import AioCursor
@@ -15,7 +16,93 @@ from pyathena.result_set import AthenaResultSet
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.aio.conftest import _aio_connect
-from tests.pyathena.util import succeeded_query_execution, throttle_metadata_api
+from tests.pyathena.util import (
+    EVENT_TIMEOUT,
+    succeeded_query_execution,
+    throttle_metadata_api,
+)
+
+
+def _offline_cursor(kill_on_interrupt, final_state):
+    """An AioCursor whose first status request blocks until the task is cancelled.
+
+    Later status requests report ``RUNNING`` once, then ``final_state``.
+
+    Args:
+        kill_on_interrupt: Whether the cursor cancels the query on cancellation.
+        final_state: The state of the query after cancellation.
+
+    Returns:
+        The cursor, the mock of its cancellation request, and an event set when the
+        first status request starts.
+    """
+    polling = asyncio.Event()
+    states = iter([AthenaQueryExecution.STATE_RUNNING, final_state])
+
+    async def get_query_execution(query_id):
+        if not polling.is_set():
+            polling.set()
+            await asyncio.Event().wait()
+        return MagicMock(state=next(states))
+
+    cursor = AioCursor.__new__(AioCursor)  # bypass __init__ to avoid AWS calls
+    cursor._rowcount = -1
+    cursor._result_set = None
+    cursor._poll_interval = 0
+    cursor._kill_on_interrupt = kill_on_interrupt
+    cursor._on_poll = None
+    cursor._on_start_query_execution = None
+    cursor._execute = AsyncMock(return_value="query_id")
+    cursor._get_query_execution = get_query_execution
+    # A successful query builds a result set from these.
+    cursor._connection = MagicMock()
+    cursor._converter = MagicMock()
+    cursor._arraysize = 1
+    cursor._retry_config = RetryConfig()
+    cursor._result_set_class = MagicMock(create=AsyncMock())
+    cancel = cursor._cancel = AsyncMock()
+    return cursor, cancel, polling
+
+
+def _starting_cursor(kill_on_interrupt=True, response=None):
+    """An AioCursor whose StartQueryExecution request blocks in a thread until released.
+
+    Status requests report ``RUNNING`` once, then ``CANCELLED``.
+
+    Args:
+        kill_on_interrupt: Whether the cursor cancels the query on cancellation.
+        response: The exception the start request raises once released; the
+            default returns ``query_id``.
+
+    Returns:
+        The cursor, the mock of its cancellation request, an event set when the
+        start request starts, and an event that releases it.
+    """
+    started = threading.Event()
+    release = threading.Event()
+
+    def start_query_execution(**kwargs):
+        started.set()
+        assert release.wait(EVENT_TIMEOUT)
+        if response:
+            raise response
+        return {"QueryExecutionId": "query_id"}
+
+    cursor, cancel, _ = _offline_cursor(kill_on_interrupt, AthenaQueryExecution.STATE_CANCELLED)
+    del cursor._execute  # use the real _execute()
+    cursor._query_id = None
+    cursor._prepare_query = MagicMock(return_value=("SELECT 1", None))
+    cursor._build_start_query_execution_request = MagicMock(return_value={})
+    cursor._find_previous_query_id = AsyncMock(return_value=None)
+    cursor._connection.client.start_query_execution.side_effect = start_query_execution
+    cursor._retry_config = RetryConfig(attempt=2, multiplier=0)
+    cursor._get_query_execution = AsyncMock(
+        side_effect=[
+            MagicMock(state=AthenaQueryExecution.STATE_RUNNING),
+            MagicMock(state=AthenaQueryExecution.STATE_CANCELLED),
+        ]
+    )
+    return cursor, cancel, started, release
 
 
 class TestAioCursor:
@@ -115,6 +202,7 @@ class TestAioCursor:
             "QueryExecutionId": "test_query_id"
         }
         cursor._retry_config = RetryConfig()
+        cursor._kill_on_interrupt = True
 
         with (
             patch.object(
@@ -151,6 +239,191 @@ class TestAioCursor:
             cache_size=10,
             cache_expiration_time=100,
         )
+
+    @pytest.mark.parametrize(
+        "final_state",
+        [AthenaQueryExecution.STATE_CANCELLED, AthenaQueryExecution.STATE_SUCCEEDED],
+    )
+    async def test_execute_kill_on_interrupt(self, final_state):
+        """Task cancellation cancels the query, waits for it, and is re-raised (no AWS)."""
+        polled = []
+        cursor, cancel, polling = _offline_cursor(kill_on_interrupt=True, final_state=final_state)
+        cursor._on_poll = polled.append
+        task = asyncio.create_task(cursor.execute("SELECT 1"))
+        await polling.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert task.cancelled()
+        cancel.assert_awaited_once_with("query_id")
+        # The cancellation is re-raised only after the query reaches a terminal state.
+        assert [execution.state for execution in polled] == [
+            AthenaQueryExecution.STATE_RUNNING,
+            final_state,
+        ]
+        assert cursor.query_id == "query_id"
+        assert cursor.result_set is None
+
+    async def test_execute_kill_on_interrupt_timeout(self):
+        """A timeout cancels the query and raises TimeoutError (no AWS)."""
+        cursor, cancel, _ = _offline_cursor(
+            kill_on_interrupt=True, final_state=AthenaQueryExecution.STATE_CANCELLED
+        )
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(cursor.execute("SELECT 1"), timeout=0.01)
+
+        cancel.assert_awaited_once_with("query_id")
+
+    @pytest.mark.parametrize("failing", ["cancel", "wait"])
+    async def test_execute_kill_on_interrupt_failure(self, failing):
+        """A failure to cancel or wait becomes the cause of the cancellation (no AWS)."""
+        error = OperationalError("failed")
+        cursor, cancel, _ = _offline_cursor(
+            kill_on_interrupt=True, final_state=AthenaQueryExecution.STATE_SUCCEEDED
+        )
+        # Raise the cancellation from the first status request directly, so that the
+        # test receives the re-raised exception itself rather than one made by a task.
+        cursor._get_query_execution = AsyncMock(side_effect=[asyncio.CancelledError(), error])
+        if failing == "cancel":
+            cancel.side_effect = error
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await cursor.execute("SELECT 1")
+
+        assert exc_info.value.__cause__ is error
+        cancel.assert_awaited_once_with("query_id")
+
+    async def test_execute_without_kill_on_interrupt(self):
+        """Without kill_on_interrupt, cancellation propagates at once (no AWS)."""
+        cursor, cancel, polling = _offline_cursor(
+            kill_on_interrupt=False, final_state=AthenaQueryExecution.STATE_SUCCEEDED
+        )
+        task = asyncio.create_task(cursor.execute("SELECT 1"))
+        await polling.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        cancel.assert_not_awaited()
+        assert cursor.query_id == "query_id"
+
+    async def test_execute_cancelled_while_starting(self):
+        """Cancellation during the start request stops the query it starts (no AWS)."""
+        polled = []
+        cursor, cancel, started, release = _starting_cursor()
+        cursor._on_poll = polled.append
+        task = asyncio.create_task(cursor.execute("SELECT 1"))
+        assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+        task.cancel()
+        # Let the task handle the cancellation before the start request finishes.
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert task.cancelled()
+        cursor._connection.client.start_query_execution.assert_called_once()
+        cancel.assert_awaited_once_with("query_id")
+        assert [execution.state for execution in polled] == [
+            AthenaQueryExecution.STATE_RUNNING,
+            AthenaQueryExecution.STATE_CANCELLED,
+        ]
+        assert cursor.query_id == "query_id"
+        assert cursor.result_set is None
+
+    async def test_execute_cancelled_before_request_is_sent(self):
+        """Cancellation before the start task begins sends no request (no AWS)."""
+        cursor, cancel, started, release = _starting_cursor()
+        release.set()
+        task = asyncio.create_task(cursor.execute("SELECT 1"))
+        # The task runs until it awaits the start task, which has not begun yet.
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert task.cancelled()
+        assert not started.is_set()
+        cursor._connection.client.start_query_execution.assert_not_called()
+        cancel.assert_not_awaited()
+        assert cursor.query_id is None
+
+    async def test_execute_timeout_while_starting(self):
+        """A timeout during the start request stops the query and raises TimeoutError (no AWS)."""
+        cursor, cancel, started, release = _starting_cursor()
+        task = asyncio.create_task(asyncio.wait_for(cursor.execute("SELECT 1"), timeout=0.05))
+        try:
+            assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+            # The timeout is due before this sleep ends, so the event loop handles it
+            # while the start request is still blocked.
+            await asyncio.sleep(0.1)
+            assert not task.done()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.TimeoutError):
+            await task
+
+        assert started.is_set()
+        cancel.assert_awaited_once_with("query_id")
+        assert cursor.query_id == "query_id"
+
+    @pytest.mark.parametrize("failing", ["start", "cancel"])
+    async def test_execute_cancelled_while_starting_failure(self, failing):
+        """A failure to start or cancel becomes the cause of the cancellation (no AWS)."""
+        error = OperationalError("failed")
+        cursor, cancel, started, release = _starting_cursor(
+            response=ClientError(
+                {"Error": {"Code": "InvalidRequestException", "Message": "failed"}},
+                "StartQueryExecution",
+            )
+            if failing == "start"
+            else None
+        )
+        if failing == "cancel":
+            cancel.side_effect = error
+        raised = []
+
+        async def execute():
+            try:
+                await cursor.execute("SELECT 1")
+            except asyncio.CancelledError as e:
+                raised.append(e)
+                raise
+
+        task = asyncio.create_task(execute())
+        assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert task.cancelled()
+        if failing == "start":
+            assert isinstance(raised[0].__cause__, DatabaseError)
+            cancel.assert_not_awaited()
+            assert cursor.query_id is None
+        else:
+            assert raised[0].__cause__ is error
+            cancel.assert_awaited_once_with("query_id")
+            assert cursor.query_id == "query_id"
+
+    async def test_execute_cancelled_while_starting_without_kill_on_interrupt(self):
+        """Without kill_on_interrupt, cancellation during the start propagates at once (no AWS)."""
+        cursor, cancel, started, release = _starting_cursor(kill_on_interrupt=False)
+        task = asyncio.create_task(cursor.execute("SELECT 1"))
+        assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+        try:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release.set()
+
+        assert task.cancelled()
+        cancel.assert_not_awaited()
+        assert cursor.query_id is None
 
     async def test_cache_size_different_schema(self):
         """A cached result is only reused when it ran against the same schema (#739).
