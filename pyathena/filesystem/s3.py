@@ -25,7 +25,7 @@ from botocore.client import BaseClient, Config
 from fsspec import AbstractFileSystem
 from fsspec.callbacks import _DEFAULT_CALLBACK
 from fsspec.spec import AbstractBufferedFile
-from fsspec.utils import tokenize
+from fsspec.utils import isfilelike, tokenize
 
 import pyathena
 from pyathena.connection import Connection
@@ -1839,32 +1839,50 @@ class S3FileSystem(AbstractFileSystem):
 
         self.invalidate_cache(rpath)
 
-    def get_file(self, rpath: str, lpath: str, callback=_DEFAULT_CALLBACK, outfile=None, **kwargs):
+    def get_file(self, rpath: str, lpath=None, callback=_DEFAULT_CALLBACK, outfile=None, **kwargs):
         """Download an S3 file to local filesystem.
 
         Downloads a file from S3 to the local filesystem with progress tracking.
         Reads the file in chunks to handle large files efficiently.
 
+        As with fsspec's ``AbstractFileSystem.get_file()``, a directory
+        ``rpath`` creates the local directory ``lpath``, and the parent
+        directories of a local file ``lpath`` are created as needed.
+
         Args:
             rpath: S3 source path (s3://bucket/key).
-            lpath: Local destination file path.
+            lpath: Local destination path, or a file-like object to write to.
+                Not needed when ``outfile`` is given.
             callback: Progress callback for tracking download progress.
-            outfile: Unused parameter for fsspec compatibility.
+            outfile: A file-like object to write to instead of ``lpath``.
             **kwargs: Additional S3 parameters passed to open().
-
-        Note:
-            If lpath is a directory, the method returns without performing
-            any operation.
         """
-        if os.path.isdir(lpath):
+        _, _, path_version_id = self.parse_path(self._strip_protocol(rpath))
+        if outfile is None and isfilelike(lpath):
+            outfile = lpath
+        elif (
+            outfile is None
+            and not (path_version_id or kwargs.get("version_id"))
+            and self.isdir(rpath)
+        ):
+            # A requested version always names an object, while isdir()
+            # would look up the latest version, or the prefix of the same
+            # name when the version does not exist.
+            os.makedirs(lpath, exist_ok=True)
             return
 
         # The remote file is opened first so that no local file is created
         # when open() finds no object at the path.
-        with self.open(rpath, "rb", **kwargs) as remote, open(lpath, "wb") as local:
+        with contextlib.ExitStack() as stack:
+            remote = stack.enter_context(self.open(rpath, "rb", **kwargs))
+            if outfile is None:
+                # Not abspath(), which would resolve ".." before symlinks.
+                if parent := os.path.dirname(lpath):
+                    os.makedirs(parent, exist_ok=True)
+                outfile = stack.enter_context(open(lpath, "wb"))
             callback.set_size(remote.size)
             while data := remote.read(remote.blocksize):
-                local.write(data)
+                outfile.write(data)
                 callback.relative_update(len(data))
 
     def checksum(self, path: str, **kwargs):
