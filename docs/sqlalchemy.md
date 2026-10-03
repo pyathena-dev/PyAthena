@@ -754,7 +754,7 @@ Athena parses DDL statements such as `CREATE TABLE` with Hive type syntax, and q
 | `AthenaArray`, `ARRAY` | `ARRAY<item>` | `ARRAY(item)` |
 
 Complex types apply the same syntax to their nested types.
-An `AthenaStruct` without fields raises `CompileError` in both, because Athena has no empty STRUCT type.
+An `AthenaStruct` without fields raises `CompileError` in both.
 
 ## Floating-point types
 
@@ -1139,7 +1139,7 @@ An outer `TypeDecorator` retains its result processor as well as native ARRAY or
 Raw `text()` queries and direct DB API queries retain the cursor's existing conversion behavior described below; they do not receive this projection automatically.
 
 Compared with earlier releases, reflected ARRAY columns are no longer reported as `String`.
-ARRAY DDL now renders integer elements as `INT` and row elements as `STRUCT<...>`, which Athena requires for nested DDL types.
+ARRAY DDL now renders integer elements as `INT` and row elements as `STRUCT<...>`.
 Code that inspects reflected types or compares compiled SQL strings should account for these changes.
 
 #### Basic Usage
