@@ -221,8 +221,8 @@ class DictCursor(Cursor):
 
         Args:
             **kwargs: Arguments forwarded to ``Cursor.__init__``. If they include
-                ``dict_type``, it is the type used to build each row of this
-                cursor's result sets; other cursors are not affected.
+                ``dict_type`` other than None, it is the type used to build each
+                row of this cursor's result sets; other cursors are not affected.
         """
         self._dict_type: type[Any] | None = kwargs.get("dict_type")
         super().__init__(**kwargs)
