@@ -22,6 +22,7 @@ import botocore.exceptions
 import pytest
 from fsspec import Callback
 from fsspec.dircache import DirCache
+from fsspec.implementations.dirfs import DirFileSystem
 
 import pyathena
 from pyathena.filesystem import register_s3_filesystem
@@ -1550,6 +1551,33 @@ class TestS3FileSystem:
             ("bucket/path/key", "v2", 4),
             ("bucket/path/key", "v1", 2),
         ]
+
+    def test_dir_filesystem(self):
+        # DirFileSystem copies every entry with copy() before renaming it.
+        fs = self._make_fs()
+        fs._call.side_effect = [
+            {
+                "CommonPrefixes": [{"Prefix": "path/dir/"}],
+                "Contents": [{"Key": "path/key", "Size": 4}],
+                "IsTruncated": False,
+            },
+            {"ContentLength": 4, "ETag": '"etag"'},
+        ]
+        dir_fs = DirFileSystem(path="bucket/path", fs=fs)
+
+        actual = dir_fs.ls("", detail=True)
+        assert [(f["name"], f["type"]) for f in actual] == [("dir", "directory"), ("key", "file")]
+        assert all(isinstance(f, S3Object) for f in actual)
+        actual = dir_fs.info("key")
+        assert isinstance(actual, S3Object)
+        assert (actual.name, actual.size) == ("key", 4)
+        # The cached entries keep their full names.
+        assert [f.name for f in fs.ls("bucket/path", detail=True)] == [
+            "bucket/path/dir",
+            "bucket/path/key",
+        ]
+        assert fs.info("bucket/path/key").name == "bucket/path/key"
+        assert fs._call.call_count == 2
 
     def test_metadata_with_version_id(self):
         fs = self._make_fs()
