@@ -217,6 +217,39 @@ class TestS3FileSystem:
         )
         assert fs._client.meta.endpoint_url == "http://localhost:9000"
 
+    @pytest.mark.parametrize(
+        ("kwargs", "expected"),
+        [
+            ({}, "DEFAULTKEY"),
+            # s3fs names the boto3 profile_name argument "profile".
+            ({"profile": "other"}, "OTHERKEY"),
+            ({"profile_name": "other"}, "OTHERKEY"),
+            ({"profile": "other", "profile_name": "default"}, "DEFAULTKEY"),
+        ],
+    )
+    def test_get_client_compatible_with_s3fs_profile(self, monkeypatch, tmp_path, kwargs, expected):
+        # Only constructs a boto3 client from local profile files; no AWS access.
+        config = tmp_path / "config"
+        config.write_text("[default]\n[profile other]\n")
+        credentials = tmp_path / "credentials"
+        credentials.write_text(
+            "[default]\naws_access_key_id = DEFAULTKEY\naws_secret_access_key = secret\n"
+            "[other]\naws_access_key_id = OTHERKEY\naws_secret_access_key = secret\n"
+        )
+        for name in (
+            "AWS_PROFILE",
+            "AWS_DEFAULT_PROFILE",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(credentials))
+
+        fs = S3FileSystem(region_name="us-east-1", skip_instance_cache=True, **kwargs)
+        assert fs._client._request_signer._credentials.access_key == expected
+
     def test_ls_from_cache_with_cached_object(self):
         fs = self._make_fs()
         obj = S3Object(
