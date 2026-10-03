@@ -347,4 +347,5 @@ class AsyncDictCursor(AsyncCursor):
         """
         super().__init__(**kwargs)
         self._result_set_class = AthenaDictResultSet
-        self._result_set_kwargs = {"dict_type": dict_type}
+        if dict_type is not None:
+            self._result_set_kwargs = {"dict_type": dict_type}

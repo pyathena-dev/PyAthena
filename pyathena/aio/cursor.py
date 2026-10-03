@@ -258,4 +258,5 @@ class AioDictCursor(AioCursor):
         """
         super().__init__(**kwargs)
         self._result_set_class = AthenaAioDictResultSet
-        self._result_set_kwargs = {"dict_type": dict_type}
+        if dict_type is not None:
+            self._result_set_kwargs = {"dict_type": dict_type}
