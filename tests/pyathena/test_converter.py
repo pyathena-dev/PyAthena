@@ -8,6 +8,7 @@ from pyathena.converter import (
     _to_array,
     _to_datetime,
     _to_datetime_with_tz,
+    _to_default,
     _to_json,
     _to_map,
     _to_struct,
@@ -660,3 +661,28 @@ def test_typed_json_elements(type_hint, value, expected):
     """JSON elements of typed complex values decode their original JSON text."""
     type_ = type_hint.split("(", 1)[0]
     assert DefaultTypeConverter().convert(type_, value, type_hint=type_hint) == expected
+
+
+def test_typed_time_with_tz_elements():
+    """Parameterized time zone types in type hints keep their time zone."""
+    converter = DefaultTypeConverter()
+    jst = timezone(timedelta(hours=9))
+    assert converter.convert(
+        "array", "[12:34:56.789+09:00, null]", type_hint="array(time(3) with time zone)"
+    ) == [time(12, 34, 56, 789000, tzinfo=jst), None]
+    assert converter.convert(
+        "map", "{a=12:34:56+09:00}", type_hint="map(varchar, time(0) with time zone)"
+    ) == {"a": time(12, 34, 56, tzinfo=jst)}
+
+
+def test_set_applies_to_nested_values():
+    """A conversion function set on a converter also converts nested values."""
+    converter = DefaultTypeConverter()
+    converter.set("time with time zone", _to_default)
+    assert converter.convert(
+        "array", "[12:34:56.789+09:00]", type_hint="array(time with time zone)"
+    ) == ["12:34:56.789+09:00"]
+    # Other converters keep the default mappings.
+    assert DefaultTypeConverter().convert(
+        "array", "[12:34:56.789+09:00]", type_hint="array(time with time zone)"
+    ) == [time(12, 34, 56, 789000, tzinfo=timezone(timedelta(hours=9)))]

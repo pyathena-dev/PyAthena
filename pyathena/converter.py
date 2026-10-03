@@ -710,8 +710,9 @@ class DefaultTypeConverter(Converter):
         """Initialize the converter with the default conversion functions."""
         super().__init__(mappings=deepcopy(_DEFAULT_CONVERTERS), default=_to_default)
         self._parser = TypeSignatureParser()
+        # Nested values use the same mappings, so set() and remove() apply to them too.
         self._typed_converter = TypedValueConverter(
-            converters=_DEFAULT_CONVERTERS,
+            converters=self.mappings,
             default_converter=_to_default,
             struct_parser=_to_struct,
         )

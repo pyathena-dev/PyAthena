@@ -141,7 +141,11 @@ class TypeSignatureParser:
                 return TypeNode(type_name=type_name, children=[key_type, value_type])
             return TypeNode(type_name=type_name)
 
-        # Types with parameters like decimal(10, 2), varchar(255)
+        # Types with parameters like decimal(10, 2), varchar(255), or
+        # time(3) with time zone, whose suffix is part of the type name.
+        # Other trailing text is ignored.
+        if " ".join(type_str[close_idx + 1 :].lower().split()) == "with time zone":
+            type_name = f"{type_name} with time zone"
         return TypeNode(type_name=type_name)
 
     def _split_type_args(self, s: str) -> list[str]:
