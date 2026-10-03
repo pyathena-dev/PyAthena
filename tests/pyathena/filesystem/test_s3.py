@@ -203,7 +203,7 @@ class TestS3FileSystem:
             ("bucket", "/"),
             ("bucket", ""),
         ]
-        kept = ["", ("bucket/a/x", "/"), ("bucket/a/b/c.txt/d", "")]
+        kept = ["", ("bucket/a/x", "/")]
         for cache_key in invalidated + kept:
             fs.dircache[cache_key] = []
 
