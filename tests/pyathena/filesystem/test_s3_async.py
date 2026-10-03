@@ -1049,10 +1049,10 @@ class TestAioS3File:
                     state["active"] += 1
                     state["peak"] = max(state["peak"], state["active"])
                     condition.notify_all()
-                    # Wait for a second call so that the calls overlap
-                    # whatever the scheduling, then leave time for more.
-                    condition.wait_for(lambda: state["active"] >= 2, timeout=5)
-                time.sleep(0.05)
+                    # Hold the call until a third one runs alongside it, so
+                    # that the calls overlap and an unbounded executor
+                    # exceeds max_workers=2 whatever the scheduling.
+                    condition.wait_for(lambda: state["active"] >= 3, timeout=0.5)
                 with condition:
                     state["active"] -= 1
                 return result(**kwargs)

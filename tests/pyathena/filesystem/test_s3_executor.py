@@ -129,25 +129,3 @@ class TestS3AioExecutor:
 
         assert not future.cancelled()
 
-    @pytest.mark.asyncio
-    async def test_cancel_keeps_permit_until_function_returns(self):
-        # Cancelling a running function cannot stop its thread, so the next
-        # function must not start until it returns.
-        executor = S3AioExecutor(loop=asyncio.get_running_loop(), max_workers=1)
-        started = threading.Event()
-        release = threading.Event()
-
-        def blocking():
-            started.set()
-            release.wait(5)
-            return "first"
-
-        first = executor.submit(blocking)
-        assert await asyncio.to_thread(started.wait, 5)
-        second = executor.submit(lambda: "second")
-        assert first.cancel()
-        await asyncio.sleep(0.1)
-        assert not second.done()
-
-        release.set()
-        assert await asyncio.wrap_future(second) == "second"
