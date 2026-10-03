@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""Type converters for Polars cursor results."""
+
 from __future__ import annotations
 
 import logging
@@ -59,6 +61,7 @@ class DefaultPolarsTypeConverter(Converter):
     """
 
     def __init__(self) -> None:
+        """Initialize the converter with the default Polars conversion functions and dtypes."""
         super().__init__(
             mappings=deepcopy(_DEFAULT_POLARS_CONVERTERS),
             default=_to_default,
@@ -132,6 +135,7 @@ class DefaultPolarsUnloadTypeConverter(Converter):
     """
 
     def __init__(self) -> None:
+        """Initialize the converter with no type mappings."""
         super().__init__(
             mappings={},
             default=_to_default,

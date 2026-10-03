@@ -1,3 +1,5 @@
+"""Native asyncio cursor that returns Athena query results as pandas DataFrames."""
+
 from __future__ import annotations
 
 import asyncio
@@ -63,6 +65,32 @@ class AioPandasCursor(WithAsyncFetch):
         auto_optimize_chunksize: bool = False,
         **kwargs,
     ) -> None:
+        """Initialize an AioPandasCursor.
+
+        Args:
+            s3_staging_dir: S3 location for query results.
+            schema_name: Default schema name.
+            catalog_name: Default catalog name.
+            work_group: Athena workgroup name.
+            poll_interval: Query status polling interval in seconds.
+            encryption_option: S3 encryption option for query results.
+            kms_key: KMS key for encrypting query results.
+            kill_on_interrupt: Whether to stop the running query when the waiting
+                task is cancelled.
+            unload: Whether to wrap queries in ``UNLOAD`` and read the Parquet output.
+            engine: Parsing engine (``auto``, ``c``, ``python``, or ``pyarrow``).
+            chunksize: Number of rows per DataFrame chunk. If set, it takes precedence
+                over ``auto_optimize_chunksize``.
+            block_size: Default block size of the S3 filesystem that reads the results.
+            cache_type: Default cache type of the S3 filesystem that reads the results.
+            max_workers: Maximum number of workers of the S3 filesystem.
+            result_reuse_enable: Whether to enable Athena query result reuse.
+            result_reuse_minutes: Maximum age of a reused query result in minutes.
+            auto_optimize_chunksize: Whether to choose a chunk size from the size of the
+                CSV result file when ``chunksize`` is None.
+            **kwargs: Other cursor arguments, such as ``connection`` and ``arraysize``,
+                passed to the parent ``__init__``.
+        """
         super().__init__(
             s3_staging_dir=s3_staging_dir,
             schema_name=schema_name,

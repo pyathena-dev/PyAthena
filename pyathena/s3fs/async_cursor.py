@@ -1,3 +1,5 @@
+"""Asynchronous cursor that reads Athena CSV query results through PyAthena's S3 filesystem."""
+
 from __future__ import annotations
 
 import logging

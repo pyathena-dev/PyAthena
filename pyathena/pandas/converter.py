@@ -1,3 +1,5 @@
+"""Type converters for pandas cursor results."""
+
 from __future__ import annotations
 
 import logging
@@ -53,6 +55,7 @@ class DefaultPandasTypeConverter(Converter):
     """
 
     def __init__(self) -> None:
+        """Initialize the converter with the default pandas conversion functions and dtypes."""
         super().__init__(
             mappings=deepcopy(_DEFAULT_PANDAS_CONVERTERS),
             default=_to_default,
@@ -101,6 +104,7 @@ class DefaultPandasUnloadTypeConverter(Converter):
     """
 
     def __init__(self) -> None:
+        """Initialize the converter with no type mappings."""
         super().__init__(
             mappings={},
             default=_to_default,

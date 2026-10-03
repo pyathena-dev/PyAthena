@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""Cursor that runs PySpark code in an Athena for Apache Spark session."""
+
 from __future__ import annotations
 
 import logging
@@ -127,6 +129,12 @@ class SparkCursor(SparkBaseCursor, WithCalculationExecution):
         return self
 
     def cancel(self) -> None:
+        """Stop the calculation that ``execute()`` last started.
+
+        Raises:
+            ProgrammingError: If no calculation ID is set.
+            OperationalError: If the ``StopCalculationExecution`` request fails.
+        """
         if not self.calculation_id:
             raise ProgrammingError("CalculationExecutionId is none or empty.")
         self._cancel(self.calculation_id)

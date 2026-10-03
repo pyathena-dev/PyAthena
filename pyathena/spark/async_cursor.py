@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""Asynchronous cursor that runs PySpark code in an Athena for Apache Spark session."""
+
 import logging
 from concurrent.futures import Future, ThreadPoolExecutor
 from multiprocessing import cpu_count
@@ -138,11 +140,29 @@ class AsyncSparkCursor(SparkBaseCursor):
             self._executor.shutdown(wait=wait)
 
     def calculation_execution(self, query_id: str) -> "Future[AthenaCalculationExecution]":
+        """Get calculation execution details asynchronously.
+
+        Args:
+            query_id: The calculation execution ID.
+
+        Returns:
+            Future object containing the ``AthenaCalculationExecution``.
+        """
         return self._executor.submit(self._get_calculation_execution, query_id)
 
     def get_std_out(
         self, calculation_execution: AthenaCalculationExecution
     ) -> "Future[str] | None":
+        """Read the standard output of a calculation from S3 asynchronously.
+
+        Args:
+            calculation_execution: The calculation execution whose
+                ``std_out_s3_uri`` is read.
+
+        Returns:
+            Future object containing the output text with leading and trailing
+            whitespace removed, or None if the calculation has no ``std_out_s3_uri``.
+        """
         if not calculation_execution.std_out_s3_uri:
             return None
         return self._executor.submit(
@@ -152,6 +172,16 @@ class AsyncSparkCursor(SparkBaseCursor):
     def get_std_error(
         self, calculation_execution: AthenaCalculationExecution
     ) -> "Future[str] | None":
+        """Read the standard error output of a calculation from S3 asynchronously.
+
+        Args:
+            calculation_execution: The calculation execution whose
+                ``std_error_s3_uri`` is read.
+
+        Returns:
+            Future object containing the error output text with leading and trailing
+            whitespace removed, or None if the calculation has no ``std_error_s3_uri``.
+        """
         if not calculation_execution.std_error_s3_uri:
             return None
         return self._executor.submit(
@@ -159,6 +189,14 @@ class AsyncSparkCursor(SparkBaseCursor):
         )
 
     def poll(self, query_id: str) -> "Future[AthenaCalculationExecution]":
+        """Wait for a calculation to reach a terminal state asynchronously.
+
+        Args:
+            query_id: The calculation execution ID.
+
+        Returns:
+            Future object containing the calculation execution in a terminal state.
+        """
         return cast(
             "Future[AthenaCalculationExecution]", self._executor.submit(self._poll, query_id)
         )
@@ -183,4 +221,13 @@ class AsyncSparkCursor(SparkBaseCursor):
         return calculation_id, self._executor.submit(self._poll, calculation_id)
 
     def cancel(self, query_id: str) -> "Future[None]":
+        """Stop a calculation execution asynchronously.
+
+        Args:
+            query_id: The calculation execution ID.
+
+        Returns:
+            Future object that completes when the ``StopCalculationExecution``
+            request has been sent.
+        """
         return self._executor.submit(self._cancel, query_id)

@@ -1,3 +1,5 @@
+"""Cursor that returns Athena query results as pandas DataFrames."""
+
 from __future__ import annotations
 
 import logging

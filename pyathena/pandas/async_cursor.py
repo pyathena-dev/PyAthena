@@ -1,3 +1,5 @@
+"""Asynchronous cursor that returns Athena query results as pandas DataFrames."""
+
 from __future__ import annotations
 
 import logging
@@ -80,6 +82,27 @@ class AsyncPandasCursor(AsyncCursor):
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
         **kwargs,
     ) -> None:
+        """Initialize an AsyncPandasCursor.
+
+        Args:
+            s3_staging_dir: S3 location for query results.
+            schema_name: Default schema name.
+            catalog_name: Default catalog name.
+            work_group: Athena workgroup name.
+            poll_interval: Query status polling interval in seconds.
+            encryption_option: S3 encryption option for query results.
+            kms_key: KMS key for encrypting query results.
+            kill_on_interrupt: Whether to stop the running query on ``KeyboardInterrupt``.
+            max_workers: Maximum number of threads that run queries concurrently.
+            arraysize: Number of rows to fetch per batch. Must be a positive integer.
+            unload: Whether to wrap queries in ``UNLOAD`` and read the Parquet output.
+            engine: Parsing engine (``auto``, ``c``, ``python``, or ``pyarrow``).
+            chunksize: Number of rows per DataFrame chunk.
+            result_reuse_enable: Whether to enable Athena query result reuse.
+            result_reuse_minutes: Maximum age of a reused query result in minutes.
+            **kwargs: Other cursor arguments, such as ``connection`` and ``converter``,
+                passed to ``AsyncCursor.__init__``.
+        """
         super().__init__(
             s3_staging_dir=s3_staging_dir,
             schema_name=schema_name,

@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""Raw CSV stream that marks binary NULL fields for the pandas CSV reader."""
+
 from __future__ import annotations
 
 import re
@@ -27,6 +29,13 @@ class BinaryCSVReader(RawIOBase):
     """
 
     def __init__(self, stream: Any, binary_columns: set[int]) -> None:
+        """Initialize the reader.
+
+        Args:
+            stream: Text stream of Athena CSV output, read with ``AthenaCSVReader``.
+            binary_columns: Zero-based indexes of the binary columns whose unquoted
+                empty fields are replaced with the binary NULL marker.
+        """
         super().__init__()
         self._reader = AthenaCSVReader(stream)
         self._binary_columns = binary_columns

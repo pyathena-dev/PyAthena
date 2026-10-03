@@ -1,3 +1,5 @@
+"""Asynchronous cursor that returns Athena query results as Polars DataFrames."""
+
 from __future__ import annotations
 
 import logging

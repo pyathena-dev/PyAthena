@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""Base classes shared by the Athena for Apache Spark cursors."""
+
 from __future__ import annotations
 
 import contextlib
@@ -123,14 +125,22 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
 
     @property
     def session_id(self) -> str:
+        """The ID of the Spark session that this cursor runs calculations in."""
         return self._session_id
 
     @property
     def calculation_id(self) -> str | None:
+        """The ID of the calculation tracked by this cursor, or None if there is none."""
         return self._calculation_id
 
     @staticmethod
     def get_default_engine_configuration() -> dict[str, Any]:
+        """Return the engine configuration used when none is given.
+
+        Returns:
+            The ``EngineConfiguration`` of a new session: a coordinator DPU size of 1,
+            at most 2 concurrent DPUs, and a default executor DPU size of 1.
+        """
         return {
             "CoordinatorDpuSize": 1,
             "MaxConcurrentDpus": 2,
@@ -496,91 +506,107 @@ class WithCalculationExecution:
     """
 
     def __init__(self):
+        """Initialize the mixin, which keeps no state of its own."""
         super().__init__()
 
     @property
     @abstractmethod
     def calculation_execution(self) -> AthenaCalculationExecution | None:
+        """The calculation execution that the other properties read, or None."""
         raise NotImplementedError  # pragma: no cover
 
     @property
     @abstractmethod
     def session_id(self) -> str:
+        """The ID of the Spark session that runs the calculations."""
         raise NotImplementedError  # pragma: no cover
 
     @property
     @abstractmethod
     def calculation_id(self) -> str | None:
+        """The ID of the current calculation, or None."""
         raise NotImplementedError  # pragma: no cover
 
     @property
     def description(self) -> str | None:
+        """The ``Description`` of the calculation, or None if there is none."""
         if not self.calculation_execution:
             return None
         return self.calculation_execution.description
 
     @property
     def working_directory(self) -> str | None:
+        """The ``WorkingDirectory`` of the calculation, or None if there is none."""
         if not self.calculation_execution:
             return None
         return self.calculation_execution.working_directory
 
     @property
     def state(self) -> str | None:
+        """The ``State`` of the calculation, or None if there is none."""
         if not self.calculation_execution:
             return None
         return self.calculation_execution.state
 
     @property
     def state_change_reason(self) -> str | None:
+        """The ``StateChangeReason`` of the calculation, or None if there is none."""
         if not self.calculation_execution:
             return None
         return self.calculation_execution.state_change_reason
 
     @property
     def submission_date_time(self) -> datetime | None:
+        """The ``SubmissionDateTime`` of the calculation, or None if there is none."""
         if not self.calculation_execution:
             return None
         return self.calculation_execution.submission_date_time
 
     @property
     def completion_date_time(self) -> datetime | None:
+        """The ``CompletionDateTime`` of the calculation, or None if there is none."""
         if not self.calculation_execution:
             return None
         return self.calculation_execution.completion_date_time
 
     @property
     def dpu_execution_in_millis(self) -> int | None:
+        """The ``DpuExecutionInMillis`` statistic of the calculation, or None if there is none."""
         if not self.calculation_execution:
             return None
         return self.calculation_execution.dpu_execution_in_millis
 
     @property
     def progress(self) -> str | None:
+        """The ``Progress`` statistic of the calculation, or None if there is none."""
         if not self.calculation_execution:
             return None
         return self.calculation_execution.progress
 
     @property
     def std_out_s3_uri(self) -> str | None:
+        """The ``StdOutS3Uri`` of the calculation, or None if there is none."""
         if not self.calculation_execution:
             return None
         return self.calculation_execution.std_out_s3_uri
 
     @property
     def std_error_s3_uri(self) -> str | None:
+        """The ``StdErrorS3Uri`` of the calculation, or None if there is none."""
         if not self.calculation_execution:
             return None
         return self.calculation_execution.std_error_s3_uri
 
     @property
     def result_s3_uri(self) -> str | None:
+        """The ``ResultS3Uri`` of the calculation, or None if there is none."""
         if not self.calculation_execution:
             return None
         return self.calculation_execution.result_s3_uri
 
     @property
     def result_type(self) -> str | None:
+        """The ``ResultType`` of the calculation, or None if there is none."""
         if not self.calculation_execution:
             return None
         return self.calculation_execution.result_type

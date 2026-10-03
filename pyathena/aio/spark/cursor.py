@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""Native asyncio cursor that runs PySpark code in an Athena for Apache Spark session."""
+
 from __future__ import annotations
 
 import asyncio

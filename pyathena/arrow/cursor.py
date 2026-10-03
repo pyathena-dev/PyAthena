@@ -1,3 +1,5 @@
+"""Cursor that returns Athena query results as Apache Arrow tables."""
+
 from __future__ import annotations
 
 import logging
