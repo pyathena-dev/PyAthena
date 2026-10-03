@@ -1806,6 +1806,23 @@ class TestS3FileSystem:
         assert fs._get_cached_lookup(path, lookup_kwargs) is fresh
         assert fs._get_cached_lookup(path, other_key) is other
 
+    def test_cache_lookup_renews_expiry(self, monkeypatch):
+        # GH-1004: caching a lookup renews the expiry time of the cached
+        # lookups of the path, as caching other entries does.
+        fs = self._make_fs()
+        fs.dircache = DirCache(listings_expiry_time=60)
+        now = [0.0]
+        monkeypatch.setattr("fsspec.dircache.time.time", lambda: now[0])
+        path = "bucket/key"
+        stale, fresh = (fs._directory_object("bucket", "key") for _ in range(2))
+
+        fs._cache_lookup(path, self.LOOKUP_KWARGS, stale)
+        now[0] = 59.0
+        fs._cache_lookup(path, self.LOOKUP_KWARGS, fresh)
+        now[0] = 61.0
+
+        assert fs._get_cached_lookup(path, self.LOOKUP_KWARGS) is fresh
+
     def test_info_lookup_parameters_cache(self):
         # GH-1004: a cached result serves only lookups with the same lookup
         # parameters, on which the authorization of the requests depends.

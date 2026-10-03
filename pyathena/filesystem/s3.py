@@ -2548,10 +2548,11 @@ class S3FileSystem(AbstractFileSystem):
         lookups = self.dircache.get(key)
         if lookups is None:
             lookups = {}
-            self.dircache[key] = lookups
         # Updated in place: a copy written back could replace a result that
         # another thread has cached since for other parameters.
         lookups[self._get_lookup_cache_id(lookup_kwargs)] = file
+        # Set again so that the expiry time of the entry is renewed.
+        self.dircache[key] = lookups
 
     @staticmethod
     def _get_lookup_cache_id(lookup_kwargs: Mapping[str, Any]) -> tuple[tuple[str, Any], ...]:
