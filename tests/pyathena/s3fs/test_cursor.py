@@ -9,12 +9,12 @@ from decimal import Decimal
 import pytest
 
 from pyathena.error import DatabaseError, ProgrammingError
-from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.s3fs.cursor import S3FSCursor
 from pyathena.s3fs.reader import AthenaCSVReader, DefaultCSVReader
 from pyathena.s3fs.result_set import AthenaS3FSResultSet
 from tests import ENV
 from tests.pyathena.conftest import connect
+from tests.pyathena.util import cached_file_systems
 
 
 class TestS3FSCursor:
@@ -30,11 +30,7 @@ class TestS3FSCursor:
         # instance cache with the connection, so the connection was never freed.
         s3fs_cursor.execute("SELECT * FROM one_row")
         assert s3fs_cursor.fetchall() == [(1,)]
-        assert not [
-            fs
-            for fs in S3FileSystem._cache.values()
-            if fs.storage_options.get("connection") is s3fs_cursor.connection
-        ]
+        assert not cached_file_systems(s3fs_cursor.connection)
 
     def test_fetchmany(self, s3fs_cursor):
         s3fs_cursor.execute("SELECT * FROM many_rows LIMIT 15")

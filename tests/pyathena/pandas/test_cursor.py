@@ -15,12 +15,12 @@ import pytest
 from pandas.io.parsers import TextFileReader
 
 from pyathena.error import DatabaseError, ProgrammingError
-from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.pandas.converter import DefaultPandasTypeConverter
 from pyathena.pandas.cursor import PandasCursor
 from pyathena.pandas.result_set import AthenaPandasResultSet, PandasDataFrameIterator
 from tests import ENV
 from tests.pyathena.conftest import connect
+from tests.pyathena.util import cached_file_systems
 
 
 class TestPandasCursor:
@@ -241,11 +241,7 @@ class TestPandasCursor:
         # instance cache with the connection, so the connection was never freed.
         pandas_cursor.execute("SELECT * FROM one_row")
         assert pandas_cursor.fetchall() == [(1,)]
-        assert not [
-            fs
-            for fs in S3FileSystem._cache.values()
-            if fs.storage_options.get("connection") is pandas_cursor.connection
-        ]
+        assert not cached_file_systems(pandas_cursor.connection)
 
     @pytest.mark.parametrize(
         ("pandas_cursor", "parquet_engine", "chunksize"),

@@ -17,11 +17,11 @@ import polars as pl
 import pytest
 
 from pyathena.error import DatabaseError, ProgrammingError
-from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.polars.cursor import PolarsCursor
 from pyathena.polars.result_set import AthenaPolarsResultSet
 from tests import ENV
 from tests.pyathena.conftest import connect
+from tests.pyathena.util import cached_file_systems
 
 
 class TestPolarsCursor:
@@ -42,11 +42,7 @@ class TestPolarsCursor:
         # instance cache with the connection, so the connection was never freed.
         polars_cursor.execute("SELECT * FROM one_row")
         assert polars_cursor.fetchall() == [(1,)]
-        assert not [
-            fs
-            for fs in S3FileSystem._cache.values()
-            if fs.storage_options.get("connection") is polars_cursor.connection
-        ]
+        assert not cached_file_systems(polars_cursor.connection)
 
     @pytest.mark.parametrize(
         "polars_cursor",
