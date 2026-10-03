@@ -1800,7 +1800,9 @@ class S3FileSystem(AbstractFileSystem):
         are listed before the upload is created and copied onto the
         destination after it completes.
         A failed part or completion aborts the upload; a failed annotation
-        copy is raised and leaves the destination in place.
+        copy is raised and leaves the destination in place. If HeadObject
+        reports a size that fits in a single CopyObject request, the
+        reported version is copied with CopyObject instead.
 
         Args:
             bucket1: Source S3 bucket name.
@@ -1833,8 +1835,20 @@ class S3FileSystem(AbstractFileSystem):
         create_kwargs, version_id1, head_size = self._get_multipart_copy_kwargs(
             bucket1, key1, version_id1, kwargs
         )
-        # The size of the copied version, not the one that the caller found,
-        # which may come from a cached listing.
+        if head_size is not None and head_size <= self.MULTIPART_UPLOAD_MAX_PART_SIZE:
+            # The size that the caller found, which may come from a cached
+            # listing, was larger than the copied version, which fits in a
+            # single CopyObject request.
+            self._copy_object(
+                bucket1=bucket1,
+                key1=key1,
+                version_id1=version_id1,
+                bucket2=bucket2,
+                key2=key2,
+                **kwargs,
+            )
+            return
+        # The size of the copied version, not the one that the caller found.
         ranges = self._get_copy_ranges(size1 if head_size is None else head_size, block_size)
         copy_source = {
             "Bucket": bucket1,
@@ -1946,7 +1960,9 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             The parameters for CreateMultipartUpload, the version of the
             source to copy (the given one, the one that HeadObject reported,
-            or None), and the size of that version from HeadObject.
+            or None), and the size of that version from HeadObject. The
+            parameters are empty, without reading the tags, if the size fits
+            in a single CopyObject request.
 
         Raises:
             ValueError: If a directive has a value that CopyObject does not
@@ -1978,6 +1994,12 @@ class S3FileSystem(AbstractFileSystem):
         if not version_id and head.version_id and head.version_id != "null":
             version_id = head.version_id
             source.update({"VersionId": version_id})
+        if (
+            head.content_length is not None
+            and head.content_length <= self.MULTIPART_UPLOAD_MAX_PART_SIZE
+        ):
+            # Copied with CopyObject instead, which applies the directives.
+            return {}, version_id, head.content_length
         if metadata_directive == "COPY":
             for name in self._COPY_METADATA_PARAMS:
                 request.pop(name, None)

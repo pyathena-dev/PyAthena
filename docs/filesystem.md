@@ -105,7 +105,9 @@ limit raises `ValueError` and aborts its multipart upload. Multipart copies with
 use parts large enough to stay within the limit.
 
 `cp` copies an object larger than 5 GiB with a multipart upload instead of a single
-CopyObject request, with the same result as CopyObject. CopyObject parameters given as
+CopyObject request, with the same result as CopyObject. If HeadObject reports a size
+of at most 5 GiB when the copy starts, for example because the size that `cp` found
+came from a cached listing, the object is copied with CopyObject instead. CopyObject parameters given as
 keyword arguments are sent to the multipart requests that accept them, such as
 `CopySourceIfMatch` to each part copy. With the default `COPY` value of
 `MetadataDirective`, `TaggingDirective`, and `AnnotationDirective`, the content headers

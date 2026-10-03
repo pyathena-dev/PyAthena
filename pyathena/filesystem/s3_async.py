@@ -526,6 +526,18 @@ class AioS3FileSystem(AsyncFileSystem):
         create_kwargs, version_id1, head_size = await asyncio.to_thread(
             self._sync_fs._get_multipart_copy_kwargs, bucket1, key1, version_id1, kwargs
         )
+        if head_size is not None and head_size <= S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE:
+            # See S3FileSystem._copy_object_with_multipart_upload.
+            await asyncio.to_thread(
+                self._sync_fs._copy_object,
+                bucket1=bucket1,
+                key1=key1,
+                version_id1=version_id1,
+                bucket2=bucket2,
+                key2=key2,
+                **kwargs,
+            )
+            return
         # The size of the copied version; see S3FileSystem.
         ranges = self._sync_fs._get_copy_ranges(
             size1 if head_size is None else head_size, block_size

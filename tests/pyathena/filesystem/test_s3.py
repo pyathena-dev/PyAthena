@@ -41,7 +41,12 @@ from pyathena.filesystem.s3_object import S3Object, S3ObjectType, S3StorageClass
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
-from tests.pyathena.util import MULTIPART_COPY_KWARGS, MULTIPART_COPY_SIZE, stub_multipart_copy
+from tests.pyathena.util import (
+    MULTIPART_COPY_BLOCK_SIZE,
+    MULTIPART_COPY_KWARGS,
+    MULTIPART_COPY_SIZE,
+    stub_multipart_copy,
+)
 
 # A client that sends no requests; its service model selects the parameters
 # that each S3 operation accepts.
@@ -1766,7 +1771,7 @@ class TestS3FileSystem:
             size1=MULTIPART_COPY_SIZE,
             bucket2="bucket",
             key2="dst",
-            block_size=S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE,
+            block_size=MULTIPART_COPY_BLOCK_SIZE,
             **kwargs,
         )
 
@@ -1829,8 +1834,9 @@ class TestS3FileSystem:
         # copied object, not a cached size, and the "null" version of a
         # bucket with versioning suspended is not pinned.
         fs = self._make_fs()
+        block_size = MULTIPART_COPY_BLOCK_SIZE
         fs._call.return_value = {
-            "ContentLength": 3 * S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE,
+            "ContentLength": 2 * block_size + S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE,
             "VersionId": "null",
         }
         fs._create_multipart_upload = mock.MagicMock(
@@ -1846,15 +1852,42 @@ class TestS3FileSystem:
             AnnotationDirective="EXCLUDE",
         )
 
-        size = S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE
         # The parts are copied in parallel, in any order.
         parts = sorted(
             (c.kwargs["copy_source_ranges"], c.kwargs["copy_source"])
             for c in fs._upload_part_copy.call_args_list
         )
+        source = {"Bucket": "bucket", "Key": "src"}
         assert parts == [
-            ((i * size, (i + 1) * size), {"Bucket": "bucket", "Key": "src"}) for i in range(3)
+            ((0, block_size), source),
+            ((block_size, 2 * block_size), source),
+            ((2 * block_size, fs._call.return_value["ContentLength"]), source),
         ]
+
+    @pytest.mark.parametrize("size", [0, 10])
+    def test_copy_object_with_multipart_upload_small_head_object_size(self, size):
+        # GH-973: when a cached size over 5 GiB is stale and HeadObject
+        # reports a size that fits in a single CopyObject request, including
+        # an empty object, the reported version is copied with CopyObject.
+        fs = self._make_fs()
+        fs._call.return_value = {"ContentLength": size, "VersionId": "v1"}
+        fs._copy_object = mock.MagicMock()
+        fs._create_multipart_upload = mock.MagicMock()
+
+        self._multipart_copy(fs, ContentType="text/csv", RequestPayer="requester")
+
+        fs._copy_object.assert_called_once_with(
+            bucket1="bucket",
+            key1="src",
+            version_id1="v1",
+            bucket2="bucket",
+            key2="dst",
+            ContentType="text/csv",
+            RequestPayer="requester",
+        )
+        fs._create_multipart_upload.assert_not_called()
+        # Only HeadObject; the tags are not read for the multipart upload.
+        assert fs._call.call_count == 1
 
     def test_copy_object_with_multipart_upload_replace_directives(self):
         # GH-973: REPLACE uses the values of the copy without reading the

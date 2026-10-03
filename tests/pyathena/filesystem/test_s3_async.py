@@ -30,7 +30,12 @@ from pyathena.filesystem.s3_object import (
 )
 from tests import ENV
 from tests.pyathena.conftest import connect
-from tests.pyathena.util import MULTIPART_COPY_KWARGS, MULTIPART_COPY_SIZE, stub_multipart_copy
+from tests.pyathena.util import (
+    MULTIPART_COPY_BLOCK_SIZE,
+    MULTIPART_COPY_KWARGS,
+    MULTIPART_COPY_SIZE,
+    stub_multipart_copy,
+)
 
 
 @pytest.fixture(scope="class")
@@ -203,11 +208,45 @@ class TestAioS3FileSystem:
                     size1=MULTIPART_COPY_SIZE,
                     bucket2="bucket",
                     key2="dst",
-                    block_size=S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE,
+                    block_size=MULTIPART_COPY_BLOCK_SIZE,
                     **MULTIPART_COPY_KWARGS,
                 )
             finally:
                 stubber.assert_no_pending_responses()
+
+    @pytest.mark.parametrize("size", [0, 10])
+    @pytest.mark.asyncio
+    async def test_copy_object_with_multipart_upload_small_head_object_size(self, size):
+        # GH-973: see
+        # TestS3FileSystem.test_copy_object_with_multipart_upload_small_head_object_size.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        sync_fs._call = mock.MagicMock(return_value={"ContentLength": size, "VersionId": "v1"})
+        sync_fs._copy_object = mock.MagicMock()
+        sync_fs._create_multipart_upload = mock.MagicMock()
+
+        await fs._copy_object_with_multipart_upload(
+            bucket1="bucket",
+            key1="src",
+            size1=MULTIPART_COPY_SIZE,
+            bucket2="bucket",
+            key2="dst",
+            ContentType="text/csv",
+            RequestPayer="requester",
+        )
+
+        sync_fs._copy_object.assert_called_once_with(
+            bucket1="bucket",
+            key1="src",
+            version_id1="v1",
+            bucket2="bucket",
+            key2="dst",
+            ContentType="text/csv",
+            RequestPayer="requester",
+        )
+        sync_fs._create_multipart_upload.assert_not_called()
+        # Only HeadObject; the tags are not read for the multipart upload.
+        assert sync_fs._call.call_count == 1
 
     @pytest.mark.asyncio
     async def test_copy_object_with_multipart_upload_copies_source(self):

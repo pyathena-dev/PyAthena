@@ -244,9 +244,11 @@ def interrupt_start_waits(started, release, interrupts=1):
     return patch("pyathena.common.wait", side_effect=interrupting_wait), raised
 
 
-# A source object of two minimum-size parts, copied from bucket/src to
-# bucket/dst by a multipart copy with the minimum block size (GH-973).
-MULTIPART_COPY_SIZE = 2 * S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE
+# A source object larger than a single CopyObject request allows, copied
+# from bucket/src to bucket/dst by a multipart copy of two parts with the
+# maximum block size (GH-973).
+MULTIPART_COPY_BLOCK_SIZE = S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE
+MULTIPART_COPY_SIZE = MULTIPART_COPY_BLOCK_SIZE + S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE
 MULTIPART_COPY_EXPIRES = datetime(2030, 1, 1, tzinfo=UTC)
 MULTIPART_COPY_KWARGS = {
     # Ignored with the default COPY directives, as CopyObject ignores them.
@@ -338,14 +340,17 @@ def stub_multipart_copy(stubber, fail_list=False, fail_part=False, fail_annotati
             "StorageClass": "STANDARD_IA",
         },
     )
-    size = S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE
+    ranges = {
+        1: (0, MULTIPART_COPY_BLOCK_SIZE - 1),
+        2: (MULTIPART_COPY_BLOCK_SIZE, MULTIPART_COPY_SIZE - 1),
+    }
     for part_number in (1, 2):
         part = {
             **destination,
             "CopySource": {"Bucket": "bucket", "Key": "src", "VersionId": "v-src"},
             "UploadId": "u",
             "PartNumber": part_number,
-            "CopySourceRange": f"bytes={(part_number - 1) * size}-{part_number * size - 1}",
+            "CopySourceRange": "bytes={}-{}".format(*ranges[part_number]),
             "CopySourceIfMatch": '"src"',
             "ExpectedSourceBucketOwner": "222222222222",
         }
