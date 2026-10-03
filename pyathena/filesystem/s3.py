@@ -315,6 +315,7 @@ class S3FileSystem(AbstractFileSystem):
                     Bucket=bucket,
                 )
             except FileNotFoundError:
+                self.dircache.pop(bucket, None)
                 return None
             file = S3Object(
                 init={
@@ -352,6 +353,7 @@ class S3FileSystem(AbstractFileSystem):
                     **request,
                 )
             except FileNotFoundError:
+                self.dircache.pop(path, None)
                 return None
             if self.version_aware and not version_id:
                 # Pin the version of the object so that subsequent reads see
@@ -720,13 +722,15 @@ class S3FileSystem(AbstractFileSystem):
             raise ValueError("Cannot traverse all files in S3.")
         bucket, key, _ = self.parse_path(path)
         prefix = kwargs.pop("prefix", "")
+        # Keep refresh in kwargs so that the recursive calls also refresh.
+        refresh = kwargs.get("refresh", False)
 
         # When maxdepth is specified, use a recursive approach with delimiter
         if maxdepth is not None:
             result: list[S3Object] = []
 
             # List files and directories at current level
-            current_items = self._ls_dirs(path, prefix=prefix, delimiter="/")
+            current_items = self._ls_dirs(path, prefix=prefix, delimiter="/", refresh=refresh)
 
             for item in current_items:
                 if item.type == S3ObjectType.S3_OBJECT_TYPE_FILE:
@@ -748,10 +752,10 @@ class S3FileSystem(AbstractFileSystem):
             return result
 
         # For unlimited depth, use the original approach (get all files at once)
-        files = self._ls_dirs(path, prefix=prefix, delimiter="")
+        files = self._ls_dirs(path, prefix=prefix, delimiter="", refresh=refresh)
         if not files and key:
             try:
-                files = [self.info(path)]
+                files = [self.info(path, refresh=refresh)]
             except FileNotFoundError:
                 files = []
 
