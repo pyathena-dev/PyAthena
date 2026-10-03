@@ -254,6 +254,56 @@ class TestAioS3FileSystem:
         with pytest.raises(ValueError, match="Cannot touch the existing file"):
             fs.touch("s3://bucket/key", truncate=False)
 
+    @pytest.mark.asyncio
+    async def test_rm_requests(self):
+        # GH-971: _rm() sent the keys of every bucket to the bucket of the
+        # first path, dropped the DeleteObjects parameters, ignored per-key
+        # errors and emptied a bucket path.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        sync_fs._call = mock.MagicMock(return_value={})
+
+        await fs._rm(["s3://b1/a", "s3://b2/b"], ExpectedBucketOwner="111122223333")
+        assert sorted(
+            (c.kwargs["Bucket"], c.kwargs["Delete"]["Objects"], c.kwargs["ExpectedBucketOwner"])
+            for c in sync_fs._call.call_args_list
+        ) == [
+            ("b1", [{"Key": "a"}], "111122223333"),
+            ("b2", [{"Key": "b"}], "111122223333"),
+        ]
+
+        sync_fs._call.reset_mock()
+        with pytest.raises(ValueError, match="Cannot delete the bucket"):
+            await fs._rm("s3://bucket", recursive=True)
+        sync_fs._call.assert_not_called()
+
+        sync_fs._call.return_value = {
+            "Errors": [{"Key": "locked", "Code": "AccessDenied", "Message": "Access Denied"}]
+        }
+        with pytest.raises(OSError, match=r"bucket/locked \(AccessDenied: Access Denied\)"):
+            await fs._rm("s3://bucket/locked")
+
+        sync_fs._call.side_effect = PermissionError("Access Denied")
+        sync_fs.dircache["bucket/a"] = []
+        with pytest.raises(PermissionError, match="Access Denied"):
+            await fs._rm("s3://bucket/a")
+        assert "bucket/a" not in sync_fs.dircache
+
+    @pytest.mark.asyncio
+    async def test_rm_maxdepth(self):
+        # GH-962: _rm() did not pass maxdepth when expanding the path.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        sync_fs._call = mock.MagicMock(return_value={})
+        sync_fs.find = mock.MagicMock(return_value=["bucket/dir/a"])
+        sync_fs.exists = mock.MagicMock(return_value=True)
+
+        # batch_size is part of fsspec's async _rm() signature.
+        await fs._rm("s3://bucket/dir", recursive=True, maxdepth=1, batch_size=10)
+        sync_fs.find.assert_called_once_with("bucket/dir", maxdepth=1, withdirs=True, detail=False)
+        (call,) = sync_fs._call.call_args_list
+        assert call.kwargs["Delete"]["Objects"] == [{"Key": "dir"}, {"Key": "dir/a"}]
+
     @pytest.fixture(scope="class")
     def fs(self, request):
         if not hasattr(request, "param"):

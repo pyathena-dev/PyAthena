@@ -915,27 +915,64 @@ class S3FileSystem(AbstractFileSystem):
     def rm(self, path, recursive=False, maxdepth=None, **kwargs) -> None:
         """Delete objects with DeleteObjects requests.
 
-        Expands the path with ``expand_path`` and deletes the matched objects
-        in parallel requests of up to ``DELETE_OBJECTS_MAX_KEYS`` keys each.
+        Expands the paths with ``expand_path`` and deletes the matched objects
+        in parallel requests of up to ``DELETE_OBJECTS_MAX_KEYS`` keys each,
+        one set of requests per bucket. A path with a version ID deletes that
+        version without expansion.
 
         Args:
-            path: S3 path (s3://bucket/key) to delete.
-            recursive: Whether to delete all objects below the path.
+            path: S3 path (s3://bucket/key) or list of paths to delete.
+            recursive: Whether to delete all objects below the paths.
             maxdepth: Maximum depth to expand when ``recursive`` is True.
             **kwargs: Additional parameters passed to the DeleteObjects API.
                 ``Quiet`` (default True) sets the quiet mode of the requests.
 
         Raises:
-            ValueError: If the path is a bucket.
+            ValueError: If a path is a bucket.
+            OSError: If S3 could not delete some of the objects.
         """
-        bucket, key, version_id = self.parse_path(path)
-        if not key:
-            raise ValueError("Cannot delete the bucket.")
+        paths = self._expand_delete_paths(path, recursive=recursive, maxdepth=maxdepth)
+        try:
+            self._delete_objects(paths, **kwargs)
+        finally:
+            # A failed request may follow requests that deleted objects.
+            for p in paths:
+                self.invalidate_cache(p)
 
-        expand_path = self.expand_path(path, recursive=recursive, maxdepth=maxdepth)
-        self._delete_objects(bucket, expand_path, **kwargs)
-        for p in expand_path:
-            self.invalidate_cache(p)
+    def _expand_delete_paths(
+        self, path: str | list[str], recursive: bool = False, maxdepth: int | None = None
+    ) -> list[str]:
+        """Expand the paths that ``rm`` deletes.
+
+        Args:
+            path: S3 path or list of paths.
+            recursive: Whether to include all objects below the paths.
+            maxdepth: Maximum depth to expand when ``recursive`` is True.
+
+        Returns:
+            The paths with a version ID as given, followed by the expansion
+            of the other paths by ``expand_path``.
+
+        Raises:
+            ValueError: If a path is a bucket.
+        """
+        paths = [path] if isinstance(path, str) else list(path)
+        versioned_paths, unversioned_paths = [], []
+        for p in paths:
+            _, key, version_id = self.parse_path(p)
+            if not key:
+                raise ValueError("Cannot delete the bucket.")
+            if version_id:
+                versioned_paths.append(p)
+            else:
+                unversioned_paths.append(p)
+
+        if unversioned_paths:
+            # expand_path treats "?" as a wildcard, so versioned paths skip it.
+            unversioned_paths = self.expand_path(
+                unversioned_paths, recursive=recursive, maxdepth=maxdepth
+            )
+        return versioned_paths + unversioned_paths
 
     def _delete_object(
         self, bucket: str, key: str, version_id: str | None = None, **kwargs
@@ -967,41 +1004,89 @@ class S3FileSystem(AbstractFileSystem):
         """
         return S3ThreadPoolExecutor(max_workers=max_workers)
 
-    def _delete_objects(
-        self, bucket: str, paths: list[str], max_workers: int | None = None, **kwargs
-    ) -> None:
-        if not paths:
+    def _delete_objects(self, paths: list[str], max_workers: int | None = None, **kwargs) -> None:
+        """Delete objects with DeleteObjects requests grouped by bucket.
+
+        Args:
+            paths: Paths of the objects to delete. Bucket paths are skipped.
+            max_workers: Maximum number of parallel requests. Defaults to
+                ``self.max_workers``.
+            **kwargs: Additional parameters passed to the DeleteObjects API.
+                ``Quiet`` (default True) sets the quiet mode of the requests.
+
+        Raises:
+            OSError: If S3 could not delete some of the objects.
+        """
+        requests = self._delete_objects_requests(paths, **kwargs)
+        if not requests:
             return
 
         max_workers = max_workers if max_workers else self.max_workers
+        with self._create_executor(max_workers=max_workers) as executor:
+            fs = [
+                executor.submit(self._call, self._client.delete_objects, **request)
+                for request in requests
+            ]
+        # The executor has waited for every request, also after a failure.
+        self._raise_delete_objects_errors(requests, [f.result() for f in fs])
+
+    def _delete_objects_requests(self, paths: list[str], **kwargs) -> list[dict[str, Any]]:
+        """Build the DeleteObjects requests that delete the objects.
+
+        Args:
+            paths: Paths of the objects to delete. Bucket paths are skipped.
+            **kwargs: Additional parameters of the requests. ``Quiet``
+                (default True) sets the quiet mode of the requests.
+
+        Returns:
+            One request per bucket and up to ``DELETE_OBJECTS_MAX_KEYS`` keys.
+        """
         quiet = kwargs.pop("Quiet", True)
-        delete_objects = []
+        delete_objects: dict[str, list[dict[str, str]]] = {}
         for p in paths:
             bucket, key, version_id = self.parse_path(p)
             if key:
                 object_ = {"Key": key}
                 if version_id:
                     object_.update({"VersionId": version_id})
-                delete_objects.append(object_)
+                delete_objects.setdefault(bucket, []).append(object_)
+        return [
+            {
+                "Bucket": bucket,
+                "Delete": {
+                    "Objects": objects[i : i + self.DELETE_OBJECTS_MAX_KEYS],
+                    "Quiet": quiet,
+                },
+                **kwargs,
+            }
+            for bucket, objects in delete_objects.items()
+            for i in range(0, len(objects), self.DELETE_OBJECTS_MAX_KEYS)
+        ]
 
-        with self._create_executor(max_workers=max_workers) as executor:
-            fs = []
-            for delete in [
-                delete_objects[i : i + self.DELETE_OBJECTS_MAX_KEYS]
-                for i in range(0, len(delete_objects), self.DELETE_OBJECTS_MAX_KEYS)
-            ]:
-                request = {
-                    "Bucket": bucket,
-                    "Delete": {
-                        "Objects": delete,
-                        "Quiet": quiet,
-                    },
-                }
-                fs.append(
-                    executor.submit(self._call, self._client.delete_objects, **request, **kwargs)
-                )
-            for f in as_completed(fs):
-                f.result()
+    @staticmethod
+    def _raise_delete_objects_errors(
+        requests: list[dict[str, Any]], responses: list[dict[str, Any]]
+    ) -> None:
+        """Raise an error for the objects that DeleteObjects could not delete.
+
+        S3 reports these objects in the ``Errors`` of a successful response.
+
+        Args:
+            requests: The DeleteObjects requests.
+            responses: The responses, in the order of the requests.
+
+        Raises:
+            OSError: If a response has errors.
+        """
+        errors = []
+        for request, response in zip(requests, responses, strict=True):
+            for error in response.get("Errors", []):
+                path = f"{request['Bucket']}/{error.get('Key')}"
+                if error.get("VersionId"):
+                    path += f"?versionId={error['VersionId']}"
+                errors.append(f"{path} ({error.get('Code')}: {error.get('Message')})")
+        if errors:
+            raise OSError(f"Failed to delete objects: {', '.join(sorted(errors))}")
 
     def mkdir(self, path: str, create_parents: bool = True, **kwargs) -> None:
         """Create an S3 bucket.

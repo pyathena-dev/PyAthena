@@ -242,59 +242,53 @@ class AioS3FileSystem(AsyncFileSystem):
     async def _makedirs(self, path: str, exist_ok: bool = False) -> None:
         await asyncio.to_thread(self._sync_fs.makedirs, path, exist_ok=exist_ok)
 
-    async def _rm(self, path: str | list[str], recursive: bool = False, **kwargs) -> None:
-        """Remove files or directories using async parallel batch deletion.
+    async def _rm(
+        self,
+        path: str | list[str],
+        recursive: bool = False,
+        batch_size: int | None = None,
+        maxdepth: int | None = None,
+        **kwargs,
+    ) -> None:
+        """Delete objects with DeleteObjects requests.
 
-        For multiple paths, chunks into batches of 1000 (S3 API limit) and uses
-        ``asyncio.gather`` with ``asyncio.to_thread`` instead of ThreadPoolExecutor.
+        See :meth:`S3FileSystem.rm`. The requests run in parallel with
+        ``asyncio.gather`` and ``asyncio.to_thread``.
+
+        Args:
+            path: S3 path (s3://bucket/key) or list of paths to delete.
+            recursive: Whether to delete all objects below the paths.
+            batch_size: Accepted for fsspec compatibility; not used.
+            maxdepth: Maximum depth to expand when ``recursive`` is True.
+            **kwargs: Additional parameters passed to the DeleteObjects API.
+                ``Quiet`` (default True) sets the quiet mode of the requests.
+
+        Raises:
+            ValueError: If a path is a bucket.
+            OSError: If S3 could not delete some of the objects.
         """
-        if isinstance(path, str):
-            path = [path]
-
-        bucket, _, _ = self.parse_path(path[0])
-
-        expand_paths: list[str] = []
-        for p in path:
-            expanded = await asyncio.to_thread(self._sync_fs.expand_path, p, recursive=recursive)
-            expand_paths.extend(expanded)
-
-        if not expand_paths:
-            return
-
-        quiet = kwargs.pop("Quiet", True)
-        delete_objects: list[dict[str, Any]] = []
-        for p in expand_paths:
-            _, key, version_id = self.parse_path(p)
-            if key:
-                object_: dict[str, Any] = {"Key": key}
-                if version_id:
-                    object_["VersionId"] = version_id
-                delete_objects.append(object_)
-
-        if not delete_objects:
-            return
-
-        chunks = [
-            delete_objects[i : i + self.DELETE_OBJECTS_MAX_KEYS]
-            for i in range(0, len(delete_objects), self.DELETE_OBJECTS_MAX_KEYS)
-        ]
-
-        async def _delete_chunk(chunk: list[dict[str, Any]]) -> None:
-            request = {
-                "Bucket": bucket,
-                "Delete": {
-                    "Objects": chunk,
-                    "Quiet": quiet,
-                },
-            }
-            await asyncio.to_thread(
-                self._sync_fs._call, self._sync_fs._client.delete_objects, **request
+        paths = await asyncio.to_thread(
+            self._sync_fs._expand_delete_paths, path, recursive=recursive, maxdepth=maxdepth
+        )
+        requests = self._sync_fs._delete_objects_requests(paths, **kwargs)
+        try:
+            responses = await asyncio.gather(
+                *[
+                    asyncio.to_thread(
+                        self._sync_fs._call, self._sync_fs._client.delete_objects, **request
+                    )
+                    for request in requests
+                ],
+                return_exceptions=True,
             )
-
-        await asyncio.gather(*[_delete_chunk(chunk) for chunk in chunks])
-
-        for p in expand_paths:
-            self._sync_fs.invalidate_cache(p)
+        finally:
+            # A failed request may run beside requests that deleted objects.
+            for p in paths:
+                self._sync_fs.invalidate_cache(p)
+        for response in responses:
+            if isinstance(response, BaseException):
+                raise response
+        self._sync_fs._raise_delete_objects_errors(requests, cast(list[dict[str, Any]], responses))
 
     async def _cp_file(self, path1: str, path2: str, **kwargs) -> None:
         """Copy an S3 object, using async parallel multipart upload for large files."""
