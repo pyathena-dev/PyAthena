@@ -2045,7 +2045,7 @@ class S3FileSystem(AbstractFileSystem):
         ``ContentType`` and ``CacheControl``), the storage class, and the
         server-side encryption algorithm and KMS key of the object are kept.
         HeadObject does not return the KMS encryption context, and an
-        ``Expires`` value that is not a valid HTTP date is not kept.
+        ``Expires`` value that botocore cannot parse as a date is not kept.
 
         Args:
             path: S3 path (s3://bucket/key) to set metadata for. A path with

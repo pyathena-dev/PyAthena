@@ -169,9 +169,9 @@ time. The copy keeps the system-defined metadata (such as `ContentType` and
 key of the object; parameters given in `copy_kwargs` take precedence over them, and any
 encryption parameter replaces all of the kept encryption settings. HeadObject does not
 return the KMS encryption context, so pass it in `copy_kwargs` together with the other
-encryption parameters. An `Expires` value that is not a valid HTTP date is not kept. A
-path with a `?versionId=` suffix raises `ValueError`, since the metadata of an existing
-version cannot be changed.
+encryption parameters. An `Expires` value that botocore cannot parse as a date is not
+kept. A path with a `?versionId=` suffix raises `ValueError`, since the metadata of an
+existing version cannot be changed.
 
 ## Multipart upload management
 
