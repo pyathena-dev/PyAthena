@@ -219,6 +219,25 @@ class TestAthenaTypeCompiler:
         assert str(cast(column("x"), type_).compile(dialect=dialect)) == f"CAST(x AS {cast_type})"
 
     @pytest.mark.parametrize(
+        "type_",
+        [
+            types.NullType(),
+            AthenaArray(types.NullType()),
+            AthenaMap(Integer, types.NullType()),
+            AthenaStruct(("a", Integer), ("b", types.NullType())),
+        ],
+    )
+    def test_null_type_is_rejected_in_ddl(self, type_):
+        dialect = AthenaDialect()
+        with pytest.raises(exc.CompileError, match="Can't generate DDL for NullType"):
+            dialect.type_compiler_instance.process(type_)
+
+    def test_null_type_cast_is_unchanged(self):
+        assert str(cast(column("x"), types.NullType()).compile(dialect=AthenaDialect())) == (
+            "CAST(x AS NULL)"
+        )
+
+    @pytest.mark.parametrize(
         "type_", [types.JSON(), AthenaArray(types.JSON), AthenaMap(String, types.JSON)]
     )
     def test_json_is_rejected_in_ddl_and_kept_in_cast(self, type_):

@@ -90,8 +90,8 @@ class AthenaTypeCompiler(GenericTypeCompiler):
     without a length render as STRING; with a length, CHAR, NCHAR, VARCHAR,
     and NVARCHAR render as CHAR(n) or VARCHAR(n). Complex
     types render as ``STRUCT<name:type>``, ``MAP<key, value>``, and
-    ``ARRAY<item>``. TIME, JSON, and a STRUCT without fields have no Athena
-    DDL type and raise ``CompileError``.
+    ``ARRAY<item>``. TIME, JSON, a STRUCT without fields, and ``NullType``
+    have no Athena DDL type and raise ``CompileError``.
 
     See Also:
         AWS Athena Data Types:
@@ -237,10 +237,6 @@ class AthenaTypeCompiler(GenericTypeCompiler):
     @override
     def visit_unicode_text(self, type_, **kw):
         return "STRING"
-
-    @override
-    def visit_null(self, type_, **kw):
-        return "NULL"
 
     def visit_tinyint(self, type_, **kw):
         """Render a tinyint type through ``visit_TINYINT``.
