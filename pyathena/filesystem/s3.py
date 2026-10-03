@@ -199,10 +199,11 @@ class S3FileSystem(AbstractFileSystem):
 
         Accepts the constructor arguments that s3fs users pass through fsspec
         storage options — ``key``/``username``, ``secret``/``password``,
-        ``token``, ``anon``, ``use_ssl``, ``endpoint_url``,
+        ``token``, ``profile``, ``anon``, ``use_ssl``, ``endpoint_url``,
         ``connect_timeout``/``read_timeout``, and the ``client_kwargs`` /
         ``config_kwargs`` dictionaries — in addition to boto3 session
-        arguments such as ``region_name`` and ``profile_name``.
+        arguments such as ``region_name`` and ``profile_name``. ``profile``
+        is used as ``profile_name`` when ``profile_name`` is not given.
 
         Args:
             **kwargs: The filesystem constructor arguments.
@@ -241,6 +242,8 @@ class S3FileSystem(AbstractFileSystem):
             }
             kwargs.update(creds)
             client_kwargs.update(creds)
+        if profile := kwargs.pop("profile", None):
+            kwargs.setdefault("profile_name", profile)
 
         session = Session(
             **{k: v for k, v in kwargs.items() if k in Connection._SESSION_PASSING_ARGS}

@@ -54,6 +54,9 @@ fs = S3FileSystem(connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 # Or with direct credentials (s3fs-compatible arguments).
 fs = S3FileSystem(key="YOUR_ACCESS_KEY", secret="YOUR_SECRET_KEY")
 
+# Or with a named profile.
+fs = S3FileSystem(profile="YOUR_PROFILE")
+
 # Or anonymously for public buckets.
 fs = S3FileSystem(anon=True)
 ```
