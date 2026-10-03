@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import mimetypes
+import os
 from multiprocessing import cpu_count
 from typing import TYPE_CHECKING, Any, cast
 
@@ -18,7 +20,7 @@ from fsspec.asyn import AsyncFileSystem
 from fsspec.callbacks import _DEFAULT_CALLBACK
 
 from pyathena.filesystem.s3 import S3File, S3FileSystem
-from pyathena.filesystem.s3_executor import S3AioExecutor
+from pyathena.filesystem.s3_executor import S3AioExecutor, S3Executor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import (
     S3Metadata,
     S3MultipartUpload,
@@ -48,6 +50,8 @@ class AioS3FileSystem(AsyncFileSystem):
     File handles created by ``_open`` use ``S3AioExecutor`` so that parallel
     operations (range reads, multipart uploads) are dispatched through the event
     loop with ``asyncio.to_thread`` instead of a ``ThreadPoolExecutor`` per file.
+    An instance created with ``asynchronous=True`` has no event loop of its own,
+    so its file handles use a ``ThreadPoolExecutor``.
 
     Attributes:
         _sync_fs: The internal synchronous S3FileSystem instance.
@@ -161,10 +165,92 @@ class AioS3FileSystem(AsyncFileSystem):
     async def _pipe_file(
         self, path: str, value: bytes | bytearray | memoryview, mode: str = "overwrite", **kwargs
     ) -> None:
+        if self._intrans:
+            # The transaction belongs to this filesystem, not to the internal
+            # S3FileSystem, so defer the commit to it.
+            await asyncio.to_thread(self._pipe_file_in_transaction, path, value, mode, **kwargs)
+            return
         await asyncio.to_thread(self._sync_fs.pipe_file, path, value, mode=mode, **kwargs)
 
+    def _open_in_transaction(self, path: str, **kwargs) -> S3File:
+        """Open a file to write that commits with this filesystem's transaction.
+
+        The file belongs to the internal ``S3FileSystem`` and uploads its
+        parts with its own thread pool. A file of this filesystem would
+        dispatch them to the event loop's default executor, whose threads
+        the callers of this method occupy while they wait.
+
+        Args:
+            path: S3 path (s3://bucket/key) to write to.
+            **kwargs: Additional parameters passed to ``S3FileSystem._open``.
+
+        Returns:
+            The file, registered with the transaction of this filesystem.
+        """
+        f = self._sync_fs._open(self._strip_protocol(path), "wb", autocommit=False, **kwargs)
+        self.transaction.files.append(f)
+        return f
+
+    def _pipe_file_in_transaction(
+        self, path: str, value: bytes | bytearray | memoryview, mode: str, **kwargs
+    ) -> None:
+        """Write bytes into the path as a file of this filesystem's transaction.
+
+        Args:
+            path: S3 path (s3://bucket/key) to write to.
+            value: The bytes to write.
+            mode: "overwrite" or "create". With "create", raise
+                FileExistsError when the object already exists.
+            **kwargs: Additional parameters passed to ``S3FileSystem._open``.
+
+        Raises:
+            FileExistsError: If the mode is "create" and the path already
+                exists.
+        """
+        if mode == "create" and self._sync_fs.exists(path):
+            raise FileExistsError(path)
+        with self._open_in_transaction(path, **kwargs) as f:
+            f.write(value)
+
     async def _put_file(self, lpath: str, rpath: str, callback=_DEFAULT_CALLBACK, **kwargs) -> None:
+        if self._intrans:
+            # See _pipe_file.
+            await asyncio.to_thread(self._put_file_in_transaction, lpath, rpath, callback, **kwargs)
+            return
         await asyncio.to_thread(self._sync_fs.put_file, lpath, rpath, callback=callback, **kwargs)
+
+    def _put_file_in_transaction(self, lpath: str, rpath: str, callback, **kwargs) -> None:
+        """Upload a local file as a file of this filesystem's transaction.
+
+        Mirrors :meth:`S3FileSystem.put_file`, but defers the commit to the
+        transaction of this filesystem.
+
+        Args:
+            lpath: Local file path to upload.
+            rpath: S3 destination path (s3://bucket/key).
+            callback: Progress callback for tracking upload progress.
+            **kwargs: Additional S3 parameters (e.g., ContentType, StorageClass).
+        """
+        if os.path.isdir(lpath):
+            return
+        _, key, _ = self.parse_path(rpath)
+        if not key:
+            return
+
+        callback.set_size(os.path.getsize(lpath))
+        if "ContentType" not in kwargs:
+            content_type, _ = mimetypes.guess_type(lpath)
+            if content_type is not None:
+                kwargs["ContentType"] = content_type
+
+        with (
+            self._open_in_transaction(rpath, s3_additional_kwargs=kwargs) as remote,
+            open(lpath, "rb") as local,
+        ):
+            while data := local.read(remote.blocksize):
+                remote.write(data)
+                callback.relative_update(len(data))
+        self.invalidate_cache(rpath)
 
     async def _get_file(self, rpath: str, lpath: str, callback=_DEFAULT_CALLBACK, **kwargs) -> None:
         await asyncio.to_thread(self._sync_fs.get_file, rpath, lpath, callback=callback, **kwargs)
@@ -344,6 +430,23 @@ class AioS3FileSystem(AsyncFileSystem):
             return {f.name: f for f in files}
         return [f.name for f in files]
 
+    def _create_executor(self, max_workers: int) -> S3Executor:
+        """Create the executor for the parallel operations of a file.
+
+        An instance created with ``asynchronous=True`` has no event loop of
+        its own, so its files run the operations in a thread pool.
+
+        Args:
+            max_workers: The maximum number of operations that run at once.
+
+        Returns:
+            An ``S3AioExecutor`` on the event loop of this filesystem, or an
+            ``S3ThreadPoolExecutor`` if it has none.
+        """
+        if self._loop is None:
+            return S3ThreadPoolExecutor(max_workers=max_workers)
+        return S3AioExecutor(loop=self._loop, max_workers=max_workers)
+
     def _open(
         self,
         path: str,
@@ -367,7 +470,7 @@ class AioS3FileSystem(AsyncFileSystem):
             path,
             mode,
             max_workers=max_workers,
-            executor=S3AioExecutor(loop=self._loop),
+            executor=self._create_executor(max_workers=max_workers),
             block_size=block_size,
             cache_type=cache_type,
             autocommit=autocommit,
@@ -576,8 +679,24 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         self._sync_fs.invalidate_cache(path)
 
-    async def _touch(self, path: str, truncate: bool = True, **kwargs) -> None:
-        await asyncio.to_thread(self._sync_fs.touch, path, truncate=truncate, **kwargs)
+    async def _touch(self, path: str, truncate: bool = True, **kwargs) -> dict[str, Any]:
+        return await asyncio.to_thread(self._sync_fs.touch, path, truncate=truncate, **kwargs)
+
+    def touch(self, path: str, truncate: bool = True, **kwargs) -> dict[str, Any]:
+        """Create an empty object with PutObject.
+
+        See :meth:`S3FileSystem.touch`.
+
+        Args:
+            path: S3 path (s3://bucket/key) of the object.
+            truncate: If True, replace an existing object with an empty one;
+                if False, raise if the object exists.
+            **kwargs: Additional parameters passed to the PutObject API.
+
+        Returns:
+            The PutObject response as a dictionary.
+        """
+        return self._sync_fs.touch(path, truncate=truncate, **kwargs)
 
 
 class AioS3File(S3File):
@@ -589,4 +708,6 @@ class AioS3File(S3File):
     through the ``S3Executor`` interface — the ``S3AioExecutor``
     provided by ``AioS3FileSystem`` dispatches them through the event loop with
     ``asyncio.to_thread`` instead of a ``ThreadPoolExecutor`` per file.
+    For an ``AioS3FileSystem`` created with ``asynchronous=True``, it is an
+    ``S3ThreadPoolExecutor``.
     """

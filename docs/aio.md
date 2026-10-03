@@ -280,6 +280,8 @@ parallel operations. Two implementations are provided:
 `AioS3FileSystem` automatically uses `S3AioExecutor` for file handles, so multipart
 uploads and parallel range reads are dispatched through the event loop with
 `asyncio.to_thread()` instead of a separate `ThreadPoolExecutor` per file.
+At most `max_workers` of them run at once.
+An instance created with `asynchronous=True` has no event loop of its own, so its file handles use `S3ThreadPoolExecutor`.
 
 ### Usage with AioS3FSCursor
 
