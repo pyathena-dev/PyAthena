@@ -81,6 +81,91 @@ class TestAthenaPolarsResultSet:
         ):
             list(result_set._iter_parquet_chunks())
 
+    @pytest.mark.parametrize("reader", ["_read_csv", "_iter_csv_chunks"])
+    def test_csv_read_kwargs_replace_defaults(self, tmp_path, reader):
+        """Read arguments given to execute() replace the ones the result set chooses."""
+        path = tmp_path / "result.csv"
+        path.write_text("a;b\n1;x\n2;y\n")
+        result_set = _chunked_result_set()
+        result_set._kwargs = {"separator": ";", "schema_overrides": {"a": pl.Utf8}}
+        with (
+            patch.object(
+                AthenaPolarsResultSet,
+                "output_location",
+                new_callable=PropertyMock,
+                return_value=str(path),
+            ),
+            patch.object(
+                AthenaPolarsResultSet,
+                "dtypes",
+                new_callable=PropertyMock,
+                return_value={"a;b": pl.Utf8},
+            ),
+            patch.object(
+                AthenaPolarsResultSet,
+                "_csv_storage_options",
+                new_callable=PropertyMock,
+                return_value={},
+            ),
+            patch.object(
+                AthenaPolarsResultSet,
+                "_parquet_storage_options",
+                new_callable=PropertyMock,
+                return_value={},
+            ),
+            patch.object(AthenaPolarsResultSet, "_is_csv_readable", return_value=True),
+        ):
+            result = getattr(result_set, reader)()
+            df = result if isinstance(result, pl.DataFrame) else pl.concat(list(result))
+        assert df.to_dict(as_series=False) == {"a": ["1", "2"], "b": ["x", "y"]}
+
+    @pytest.mark.parametrize(
+        ("reader", "function"),
+        [
+            ("_read_csv", "read_csv"),
+            ("_iter_csv_chunks", "scan_csv"),
+            ("_read_parquet", "read_parquet"),
+            ("_iter_parquet_chunks", "scan_parquet"),
+            ("_read_parquet_schema", "scan_parquet"),
+        ],
+    )
+    def test_storage_options_replace_defaults(self, reader, function):
+        """storage_options given to execute() replace PyAthena's as a whole."""
+        result_set = _chunked_result_set()
+        result_set._unload_location = "s3://bucket/unload/"
+        result_set._kwargs = {"storage_options": {"anon": True}}
+        with (
+            patch.object(
+                AthenaPolarsResultSet,
+                "output_location",
+                new_callable=PropertyMock,
+                return_value="s3://bucket/result.csv",
+            ),
+            patch.object(
+                AthenaPolarsResultSet, "dtypes", new_callable=PropertyMock, return_value={}
+            ),
+            patch.object(
+                AthenaPolarsResultSet,
+                "_csv_storage_options",
+                new_callable=PropertyMock,
+                return_value={"connection": "pyathena"},
+            ),
+            patch.object(
+                AthenaPolarsResultSet,
+                "_parquet_storage_options",
+                new_callable=PropertyMock,
+                return_value={"aws_region": "pyathena"},
+            ),
+            patch.object(AthenaPolarsResultSet, "_is_csv_readable", return_value=True),
+            patch.object(AthenaPolarsResultSet, "_prepare_parquet_location", return_value=True),
+            patch(f"polars.{function}") as read,
+            patch("pyathena.polars.result_set.to_column_info"),
+        ):
+            result = getattr(result_set, reader)()
+            if not isinstance(result, (pl.DataFrame, tuple)):
+                list(result)
+        assert read.call_args.kwargs["storage_options"] == {"anon": True}
+
 
 class TestPolarsDataFrameIterator:
     @pytest.mark.parametrize(

@@ -232,6 +232,9 @@ class AsyncPolarsCursor(AsyncCursor):
             **kwargs: Additional execution parameters passed to Polars read functions.
                 ``block_size``, ``cache_type``, ``max_workers``, and ``chunksize``
                 override the cursor's values for this query.
+                Read function arguments replace the ones the result set chooses, such as
+                ``separator``, ``has_header``, ``schema_overrides``, and ``storage_options``
+                (see :class:`~pyathena.polars.result_set.AthenaPolarsResultSet`).
 
         Returns:
             Tuple of (query_id, future) where future resolves to AthenaPolarsResultSet.

@@ -10,13 +10,16 @@ import random
 import time
 from datetime import datetime
 from decimal import Decimal
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from pyathena.error import ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.s3fs.async_cursor import AsyncS3FSCursor
+from pyathena.s3fs.reader import AthenaCSVReader, DefaultCSVReader
 from pyathena.s3fs.result_set import AthenaS3FSResultSet
+from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
 
@@ -179,3 +182,29 @@ class TestAsyncS3FSCursor:
         assert result_set.fetchmany() == []
         assert result_set.fetchmany(10) == []
         assert result_set.fetchall() == []
+
+    @pytest.mark.parametrize("execute_kwargs", [{}, {"csv_reader": AthenaCSVReader}])
+    def test_read_options(self, execute_kwargs):
+        """The cursor's read options reach the result set, and execute() overrides them.
+
+        No AWS calls; the query and its result set are mocked.
+        """
+        cursor_kwargs = {"csv_reader": DefaultCSVReader}
+        query_execution = MagicMock(state=AthenaQueryExecution.STATE_SUCCEEDED)
+        with (
+            AsyncS3FSCursor(
+                connection=MagicMock(),
+                converter=MagicMock(),
+                formatter=MagicMock(),
+                retry_config=RetryConfig(),
+                **cursor_kwargs,
+            ) as cursor,
+            patch.object(AsyncS3FSCursor, "_execute", return_value="query_id"),
+            patch.object(AsyncS3FSCursor, "_poll", return_value=query_execution),
+            patch("pyathena.s3fs.async_cursor.AthenaS3FSResultSet") as result_set_class,
+        ):
+            _, future = cursor.execute("SELECT 1", **execute_kwargs)
+            future.result()
+        kwargs = result_set_class.call_args.kwargs
+        expected = {**cursor_kwargs, **execute_kwargs}
+        assert {key: kwargs[key] for key in expected} == expected

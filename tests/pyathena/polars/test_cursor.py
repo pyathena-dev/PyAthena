@@ -118,6 +118,18 @@ class TestPolarsCursor:
         assert df.width == 1
         assert df.to_dicts() == [{"number_of_rows": 1}]
 
+    def test_as_polars_with_read_kwargs(self, polars_cursor):
+        """Read arguments given to execute() replace the ones the result set chooses."""
+        df = polars_cursor.execute(
+            "SELECT * FROM one_row",
+            schema_overrides={"number_of_rows": pl.Utf8},
+            storage_options={
+                "connection": polars_cursor.connection,
+                "skip_instance_cache": True,
+            },
+        ).as_polars()
+        assert df.to_dicts() == [{"number_of_rows": "1"}]
+
     @pytest.mark.parametrize(
         "polars_cursor",
         [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],

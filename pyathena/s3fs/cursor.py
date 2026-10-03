@@ -165,6 +165,8 @@ class S3FSCursor(WithFetch):
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.
             **kwargs: Additional execution parameters.
+                ``block_size`` sets the read block size for this query, and
+                ``csv_reader`` overrides the cursor's value.
 
         Returns:
             Self reference for method chaining.
@@ -203,7 +205,7 @@ class S3FSCursor(WithFetch):
                 query_execution=query_execution,
                 arraysize=self.arraysize,
                 retry_config=self._retry_config,
-                csv_reader=self._csv_reader,
+                csv_reader=kwargs.pop("csv_reader", self._csv_reader),
                 result_set_type_hints=options.result_set_type_hints,
                 **kwargs,
             )

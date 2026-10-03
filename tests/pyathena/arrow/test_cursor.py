@@ -12,6 +12,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from decimal import Decimal
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import polars as pl
@@ -21,6 +22,8 @@ import pytest
 from pyathena.arrow.cursor import ArrowCursor
 from pyathena.arrow.result_set import AthenaArrowResultSet
 from pyathena.error import DatabaseError, ProgrammingError
+from pyathena.model import AthenaQueryExecution
+from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
 
@@ -1005,3 +1008,30 @@ class TestArrowCursor:
             (2, datetime(2017, 1, 1, 12, 34, 56).time(), b"\x01\x02", [1, "x"], "s", None),
         ]
         assert arrow_cursor.as_arrow().schema.field("col_json").type == pa.string()
+
+    @pytest.mark.parametrize(
+        "execute_kwargs", [{}, {"connect_timeout": 3.0, "request_timeout": 4.0}]
+    )
+    def test_read_options(self, execute_kwargs):
+        """The cursor's read options reach the result set, and execute() overrides them.
+
+        No AWS calls; the query and its result set are mocked.
+        """
+        cursor_kwargs = {"connect_timeout": 1.0, "request_timeout": 2.0}
+        query_execution = MagicMock(state=AthenaQueryExecution.STATE_SUCCEEDED)
+        cursor = ArrowCursor(
+            connection=MagicMock(),
+            converter=MagicMock(),
+            formatter=MagicMock(),
+            retry_config=RetryConfig(),
+            **cursor_kwargs,
+        )
+        with (
+            patch.object(ArrowCursor, "_execute", return_value="query_id"),
+            patch.object(ArrowCursor, "_poll", return_value=query_execution),
+            patch("pyathena.arrow.cursor.AthenaArrowResultSet") as result_set_class,
+        ):
+            cursor.execute("SELECT 1", **execute_kwargs)
+        kwargs = result_set_class.call_args.kwargs
+        expected = {**cursor_kwargs, **execute_kwargs}
+        assert {key: kwargs[key] for key in expected} == expected
