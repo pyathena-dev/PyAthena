@@ -949,7 +949,10 @@ class AthenaPandasResultSet(AthenaResultSet):
             elif d[1] == "json":
                 dtypes[d[0]] = object
         return pd.DataFrame(
-            {name: pd.Series(values, dtype=dtypes.get(name)) for name, values in columnar.items()}
+            {
+                name: values if name not in dtypes else pd.array(values, dtype=dtypes[name])
+                for name, values in columnar.items()
+            }
         )
 
     def as_pandas(self) -> PandasDataFrameIterator | DataFrame:

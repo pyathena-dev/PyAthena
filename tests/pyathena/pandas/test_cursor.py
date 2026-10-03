@@ -1681,7 +1681,16 @@ class TestPandasCursor:
             pytest.param({}, {"index_col": ["col_int", "col_json_index"]}, id="multi_index"),
             pytest.param(
                 {},
-                {"usecols": ["col_int", "col_bigint", "col_json", "col_binary", "col_json_index"]},
+                {
+                    "usecols": [
+                        "col_int",
+                        "col_bigint",
+                        "col_json",
+                        "col_binary",
+                        "col_json_index",
+                        "col_time",
+                    ]
+                },
                 id="usecols",
             ),
             pytest.param(
@@ -1701,16 +1710,16 @@ class TestPandasCursor:
             """
             SELECT * FROM (VALUES
               (1, BIGINT '9007199254740993', json_parse('9007199254740993'), X'01',
-               json_parse('9007199254740995')),
-              (2, NULL, NULL, NULL, json_parse('9007199254740997'))
-            ) AS t(col_int, col_bigint, col_json, col_binary, col_json_index)
+               json_parse('9007199254740995'), CAST('01:02:03' AS TIME)),
+              (2, NULL, NULL, NULL, json_parse('9007199254740997'), CAST('04:05:06' AS TIME))
+            ) AS t(col_int, col_bigint, col_json, col_binary, col_json_index, col_time)
             ORDER BY col_int
             """,
             **kwargs,
         )
         df = pandas_cursor.as_pandas()
         if "chunksize" in kwargs:
-            df = pd.concat(list(df))
+            df = pd.concat([df.get_chunk(1), *df])
 
         def column(name):
             if name in df.index.names:
@@ -1725,3 +1734,7 @@ class TestPandasCursor:
         assert column("col_json").tolist() == [9007199254740993, None]
         assert column("col_json_index").tolist() == [9007199254740995, 9007199254740997]
         assert column("col_binary").tolist() == [b"\x01", None]
+        assert column("col_time").tolist() == [
+            datetime(2017, 1, 1, 1, 2, 3).time(),
+            datetime(2017, 1, 1, 4, 5, 6).time(),
+        ]
