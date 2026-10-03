@@ -1652,16 +1652,29 @@ class TestS3File:
 
     def test_append_discard(self):
         # Rolling back an append aborts its multipart upload without the
-        # existing object's metadata, which AbortMultipartUpload rejects.
+        # existing object's metadata, which AbortMultipartUpload rejects,
+        # but with the request parameters it accepts.
         fs = self._make_append_fs(b"a" * 6)
-        f = S3File(fs, "s3://bucket/key.txt", mode="ab", block_size=16, autocommit=False)
+        f = S3File(
+            fs,
+            "s3://bucket/key.txt",
+            mode="ab",
+            block_size=16,
+            autocommit=False,
+            s3_additional_kwargs={"RequestPayer": "requester", "ExpectedBucketOwner": "123"},
+        )
         f.write(b"bb")
         f.close()
 
         f.discard()
 
         fs._call.assert_called_once_with(
-            "abort_multipart_upload", Bucket="bucket", Key="key.txt", UploadId="uploadid"
+            "abort_multipart_upload",
+            Bucket="bucket",
+            Key="key.txt",
+            UploadId="uploadid",
+            RequestPayer="requester",
+            ExpectedBucketOwner="123",
         )
         fs._finish_multipart_upload.assert_not_called()
         fs._put_object.assert_not_called()
