@@ -1,3 +1,5 @@
+"""DB API 2.0 interface to Amazon Athena: ``connect()``, ``aio_connect()``, and type objects."""
+
 from __future__ import annotations
 
 import datetime

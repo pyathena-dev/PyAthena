@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""Native asyncio cursors that return rows as tuples or dictionaries."""
+
 from __future__ import annotations
 
 import logging
@@ -50,6 +52,24 @@ class AioCursor(WithAsyncFetch):
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
         **kwargs,
     ) -> None:
+        """Initialize an AioCursor.
+
+        Args:
+            s3_staging_dir: S3 location for query results.
+            schema_name: Default schema name.
+            catalog_name: Default catalog name.
+            work_group: Athena workgroup name.
+            poll_interval: Query status polling interval in seconds.
+            encryption_option: S3 encryption option (SSE_S3, SSE_KMS, CSE_KMS).
+            kms_key: KMS key for encryption.
+            kill_on_interrupt: Stop the running query when polling is cancelled
+                with ``asyncio.CancelledError``.
+            result_reuse_enable: Enable Athena query result reuse.
+            result_reuse_minutes: Maximum age in minutes of a reused result.
+            **kwargs: Arguments forwarded to ``WithResultSet.__init__`` and
+                ``AioBaseCursor.__init__``, such as ``arraysize``, ``connection``,
+                ``converter``, ``formatter``, and ``retry_config``.
+        """
         super().__init__(
             s3_staging_dir=s3_staging_dir,
             schema_name=schema_name,
@@ -225,6 +245,13 @@ class AioDictCursor(AioCursor):
     """
 
     def __init__(self, **kwargs) -> None:
+        """Initialize an AioDictCursor.
+
+        Args:
+            **kwargs: Arguments forwarded to ``AioCursor.__init__``. If they include
+                ``dict_type``, it is also assigned to the class attribute
+                ``AthenaAioDictResultSet.dict_type``, the type used to build each row.
+        """
         super().__init__(**kwargs)
         self._result_set_class = AthenaAioDictResultSet
         if "dict_type" in kwargs:

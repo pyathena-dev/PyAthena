@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""Asyncio helpers for retrying AWS API calls."""
+
 from __future__ import annotations
 
 import asyncio

@@ -1,3 +1,5 @@
+"""DB API 2.0 connection to Amazon Athena."""
+
 from __future__ import annotations
 
 import logging

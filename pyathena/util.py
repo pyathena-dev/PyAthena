@@ -1,3 +1,5 @@
+"""Helpers for S3 output locations, truth-value parsing, and retrying AWS API calls."""
+
 from __future__ import annotations
 
 import logging
@@ -168,6 +170,18 @@ class RetryConfig:
         max_delay: int = 100,
         exponential_base: int = 2,
     ) -> None:
+        """Initialize the retry configuration.
+
+        Args:
+            exceptions: AWS error code, or iterable of error codes, to retry on.
+                Stored as a tuple.
+            attempt: Maximum number of attempts, including the first call.
+            multiplier: Base multiplier for exponential backoff in seconds, and
+                the upper bound of the random jitter added to each wait.
+            max_delay: Maximum exponential delay between retries in seconds,
+                before jitter is added.
+            exponential_base: Base for exponential backoff calculation.
+        """
         self.exceptions = (exceptions,) if isinstance(exceptions, str) else tuple(exceptions)
         self.attempt = attempt
         self.multiplier = multiplier

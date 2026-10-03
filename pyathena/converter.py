@@ -1,3 +1,5 @@
+"""Conversion of Athena result values to Python objects."""
+
 from __future__ import annotations
 
 import binascii
@@ -509,6 +511,15 @@ class Converter(metaclass=ABCMeta):
         default: Callable[[str | None], Any | None] = _to_default,
         types: dict[str, type[Any]] | None = None,
     ) -> None:
+        """Initialize the converter.
+
+        Args:
+            mappings: Conversion functions keyed by Athena type name. An empty
+                value is replaced with an empty dict.
+            default: Conversion function for types not in ``mappings``.
+            types: Python types keyed by Athena type name, returned by
+                ``get_dtype()``. None is replaced with an empty dict.
+        """
         if mappings:
             self._mappings = mappings
         else:
@@ -591,6 +602,16 @@ class Converter(metaclass=ABCMeta):
 
     @abstractmethod
     def convert(self, type_: str, value: str | None, type_hint: str | None = None) -> Any | None:
+        """Convert a value returned by Athena to a Python object.
+
+        Args:
+            type_: The Athena data type name.
+            value: The string value to convert, or None.
+            type_hint: Optional Athena DDL type signature of the value.
+
+        Returns:
+            The converted value.
+        """
         raise NotImplementedError  # pragma: no cover
 
 
@@ -629,6 +650,7 @@ class DefaultTypeConverter(Converter):
     _HIVE_REPLACEMENTS: ClassVar[dict[str, str]] = {"<": "(", ">": ")", ":": " "}
 
     def __init__(self) -> None:
+        """Initialize the converter with the default conversion functions."""
         super().__init__(mappings=deepcopy(_DEFAULT_CONVERTERS), default=_to_default)
         self._parser = TypeSignatureParser()
         self._typed_converter = TypedValueConverter(

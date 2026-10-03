@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""Asyncio-aware connection to Amazon Athena."""
+
 from __future__ import annotations
 
 import asyncio
@@ -31,6 +33,12 @@ class AioConnection(Connection[AioCursor]):
     """
 
     def __init__(self, **kwargs: Any) -> None:
+        """Initialize the connection with ``AioCursor`` as the default cursor class.
+
+        Args:
+            **kwargs: Arguments forwarded to ``Connection.__init__``. If they do not
+                include ``cursor_class``, it is set to ``AioCursor``.
+        """
         if "cursor_class" not in kwargs:
             kwargs["cursor_class"] = AioCursor
         super().__init__(**kwargs)

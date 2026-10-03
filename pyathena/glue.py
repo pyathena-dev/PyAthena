@@ -54,6 +54,15 @@ class GlueMetadataClient:
         config: Config | None,
         client_kwargs: Mapping[str, Any],
     ) -> None:
+        """Initialize the client without building the Glue client.
+
+        Args:
+            session: The connection's boto3 session.
+            region_name: The connection's region.
+            config: The connection's botocore config.
+            client_kwargs: The connection's client arguments. Athena's
+                ``endpoint_url`` and ``api_version`` are not passed to Glue.
+        """
         self._session = session
         self._region_name = region_name
         self._config = config

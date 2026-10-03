@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""Options shared by the ``execute()`` methods of the SQL cursors."""
+
 from __future__ import annotations
 
 from collections.abc import Callable
