@@ -78,8 +78,8 @@ class AioPolarsCursor(WithAsyncFetch):
             block_size: Default block size of the S3 filesystem that reads the results.
             cache_type: Default cache type of the S3 filesystem that reads the results.
             max_workers: Maximum number of workers of the S3 filesystem.
-            chunksize: Number of rows per chunk. If set, results are read lazily
-                in chunks of this size.
+            chunksize: Number of rows per chunk. If set, result files in S3 are read
+                lazily in chunks of this size.
             **kwargs: Other cursor arguments, such as ``connection`` and ``arraysize``,
                 passed to the parent ``__init__``.
         """

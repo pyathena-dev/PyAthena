@@ -79,8 +79,8 @@ class AioPandasCursor(WithAsyncFetch):
                 ``execute()`` starts or waits for the query.
             unload: Whether to wrap queries in ``UNLOAD`` and read the Parquet output.
             engine: Parsing engine (``auto``, ``c``, ``python``, or ``pyarrow``).
-            chunksize: Number of rows per DataFrame chunk. If set, it takes precedence
-                over ``auto_optimize_chunksize``.
+            chunksize: Number of rows per DataFrame chunk when reading CSV results. If set,
+                it takes precedence over ``auto_optimize_chunksize``.
             block_size: Default block size of the S3 filesystem that reads the results.
             cache_type: Default cache type of the S3 filesystem that reads the results.
             max_workers: Maximum number of workers of the S3 filesystem.

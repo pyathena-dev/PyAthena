@@ -371,7 +371,10 @@ class AthenaResultSet(CursorIterator):
     def description(
         self,
     ) -> list[tuple[str, str, None, None, int, int, str]] | None:
-        """The DB API 2.0 column descriptions, or None without metadata or for DML."""
+        """The DB API 2.0 column descriptions.
+
+        None without result metadata, or for ``INSERT``, ``UPDATE``, ``DELETE``, and ``MERGE``.
+        """
         if self._metadata is None or (
             self.substatement_type
             and self.substatement_type.upper() in self._DML_SUBSTATEMENT_TYPES

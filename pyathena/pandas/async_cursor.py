@@ -99,7 +99,7 @@ class AsyncPandasCursor(AsyncCursor):
             arraysize: Number of rows to fetch per batch. Must be a positive integer.
             unload: Whether to wrap queries in ``UNLOAD`` and read the Parquet output.
             engine: Parsing engine (``auto``, ``c``, ``python``, or ``pyarrow``).
-            chunksize: Number of rows per DataFrame chunk.
+            chunksize: Number of rows per DataFrame chunk when reading CSV results.
             result_reuse_enable: Whether to enable Athena query result reuse.
             result_reuse_minutes: Maximum age of a reused query result in minutes.
             **kwargs: Other cursor arguments, such as ``connection`` and ``converter``,
