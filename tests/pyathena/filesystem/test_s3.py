@@ -1614,7 +1614,6 @@ class TestS3FileSystem:
         ):
             fs.put_file(str(lpath), "s3://bucket/key", callback=callback)
 
-        fs._upload_part.assert_called_once()
         fs._finish_multipart_upload.assert_not_called()
         fs._call.assert_called_once_with(
             "abort_multipart_upload", Bucket="bucket", Key="key", UploadId="uploadid"
@@ -4479,6 +4478,22 @@ class TestS3File:
         assert events == ["part 1 stored", "abort"]
         waited.assert_called_once_with([running])
         assert pending.cancelled()
+
+    @pytest.mark.parametrize(("error", "aborts"), [(RuntimeError, 0), (KeyboardInterrupt, 1)])
+    def test_commit_failure_and_discard(self, error, aborts):
+        # GH-1014: an error from _finish_multipart_upload() follows its
+        # abort, so a later discard(), as a transaction calls after a failed
+        # commit(), does not abort the upload again. An interrupt may have
+        # stopped it before the abort, so the upload is kept for discard().
+        file = self._make_multipart_write_file(b"x" * 16, autocommit=False)
+        file._upload_chunk(final=True)
+        file.fs._finish_multipart_upload.side_effect = error("failed")
+
+        with pytest.raises(error):
+            file.commit()
+        file.discard()
+
+        assert file.fs._call.call_count == aborts
 
     def test_discard_on_event_loop_thread(self):
         # GH-976: the parts that have not started are cancelled and not

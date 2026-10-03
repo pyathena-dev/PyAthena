@@ -3222,9 +3222,11 @@ class S3File(AbstractBufferedFile):
                     futures=self.multipart_upload_parts,
                     request_kwargs=self.s3_additional_kwargs,
                 )
-            except BaseException:
+            except Exception:
                 # The multipart upload has been aborted by the helper;
-                # prevent discard() from aborting it again.
+                # prevent discard() from aborting it again. An interrupt may
+                # have stopped the helper before the abort, so the upload is
+                # kept for discard() then.
                 self.multipart_upload = None
                 self.multipart_upload_parts = []
                 raise
