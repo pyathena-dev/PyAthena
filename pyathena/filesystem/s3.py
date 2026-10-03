@@ -1039,7 +1039,7 @@ class S3FileSystem(AbstractFileSystem):
                 (default True) sets the quiet mode of the requests.
 
         Returns:
-            One request per bucket and up to ``DELETE_OBJECTS_MAX_KEYS`` keys.
+            Requests of up to ``DELETE_OBJECTS_MAX_KEYS`` keys of one bucket each.
         """
         quiet = kwargs.pop("Quiet", True)
         delete_objects: dict[str, list[dict[str, str]]] = {}
