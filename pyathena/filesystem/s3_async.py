@@ -167,29 +167,10 @@ class AioS3FileSystem(AsyncFileSystem):
     ) -> None:
         if self._intrans:
             # The transaction belongs to this filesystem, not to the internal
-            # S3FileSystem, so defer the commit to it.
+            # S3FileSystem, so write through open() to defer the commit to it.
             await asyncio.to_thread(self._pipe_file_in_transaction, path, value, mode, **kwargs)
             return
         await asyncio.to_thread(self._sync_fs.pipe_file, path, value, mode=mode, **kwargs)
-
-    def _open_in_transaction(self, path: str, **kwargs) -> S3File:
-        """Open a file to write that commits with this filesystem's transaction.
-
-        The file belongs to the internal ``S3FileSystem`` and uploads its
-        parts with its own thread pool. A file of this filesystem would
-        dispatch them to the event loop's default executor, whose threads
-        the callers of this method occupy while they wait.
-
-        Args:
-            path: S3 path (s3://bucket/key) to write to.
-            **kwargs: Additional parameters passed to ``S3FileSystem._open``.
-
-        Returns:
-            The file, registered with the transaction of this filesystem.
-        """
-        f = self._sync_fs._open(self._strip_protocol(path), "wb", autocommit=False, **kwargs)
-        self.transaction.files.append(f)
-        return f
 
     def _pipe_file_in_transaction(
         self, path: str, value: bytes | bytearray | memoryview, mode: str, **kwargs
@@ -201,7 +182,7 @@ class AioS3FileSystem(AsyncFileSystem):
             value: The bytes to write.
             mode: "overwrite" or "create". With "create", raise
                 FileExistsError when the object already exists.
-            **kwargs: Additional parameters passed to ``S3FileSystem._open``.
+            **kwargs: Additional parameters passed to ``open()``.
 
         Raises:
             FileExistsError: If the mode is "create" and the path already
@@ -209,7 +190,7 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         if mode == "create" and self._sync_fs.exists(path):
             raise FileExistsError(path)
-        with self._open_in_transaction(path, **kwargs) as f:
+        with self.open(path, "wb", **kwargs) as f:
             f.write(value)
 
     async def _put_file(self, lpath: str, rpath: str, callback=_DEFAULT_CALLBACK, **kwargs) -> None:
@@ -222,8 +203,8 @@ class AioS3FileSystem(AsyncFileSystem):
     def _put_file_in_transaction(self, lpath: str, rpath: str, callback, **kwargs) -> None:
         """Upload a local file as a file of this filesystem's transaction.
 
-        Mirrors :meth:`S3FileSystem.put_file`, but defers the commit to the
-        transaction of this filesystem.
+        Mirrors :meth:`S3FileSystem.put_file`, but writes through ``open()``
+        of this filesystem.
 
         Args:
             lpath: Local file path to upload.
@@ -244,7 +225,7 @@ class AioS3FileSystem(AsyncFileSystem):
                 kwargs["ContentType"] = content_type
 
         with (
-            self._open_in_transaction(rpath, s3_additional_kwargs=kwargs) as remote,
+            self.open(rpath, "wb", s3_additional_kwargs=kwargs) as remote,
             open(lpath, "rb") as local,
         ):
             while data := local.read(remote.blocksize):
