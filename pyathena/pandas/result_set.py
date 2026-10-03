@@ -310,6 +310,10 @@ class AthenaPandasResultSet(AthenaResultSet):
             result_set_type_hints: Athena type signatures for complex-type columns,
                 keyed by column name (case-insensitive) or zero-based column index.
             **kwargs: Additional arguments passed to pandas.read_csv/read_parquet.
+                A given ``storage_options``, even None, replaces PyAthena's S3 filesystem
+                for reading the result files, and so does ``filesystem`` for UNLOAD results.
+                The UNLOAD manifest is still read with the connection's S3 client, and the
+                schema with PyAthena's filesystem.
         """
         super().__init__(
             connection=connection,
@@ -778,23 +782,22 @@ class AthenaPandasResultSet(AthenaResultSet):
             self._unload_location = "/".join(self._data_manifest[0].split("/")[:-1]) + "/"
 
         if engine == "pyarrow":
-            # pyarrow takes the path without the scheme with an fsspec filesystem.
-            bucket, key = parse_output_location(self._unload_location)
-            unload_location = f"{bucket}/{key}"
-            kwargs = {
-                "use_threads": True,
-            }
+            kwargs: dict[str, Any] = {"use_threads": True, **self._kwargs}
+            # Given storage_options, even None, pandas opens the files itself,
+            # as for CSV results.
+            if "filesystem" not in kwargs and "storage_options" not in kwargs:
+                kwargs["filesystem"] = self._fs
+            if kwargs.get("filesystem") is None:
+                unload_location = self._unload_location
+            else:
+                # pyarrow takes the path without the scheme with a filesystem.
+                bucket, key = parse_output_location(self._unload_location)
+                unload_location = f"{bucket}/{key}"
         else:
             raise ProgrammingError("Engine must be `pyarrow`.")
-        kwargs.update(self._kwargs)
 
         try:
-            return pd.read_parquet(
-                unload_location,
-                engine=self._engine,
-                filesystem=self._fs,
-                **kwargs,
-            )
+            return pd.read_parquet(unload_location, engine=self._engine, **kwargs)
         except Exception as e:
             _logger.exception(f"Failed to read {self.output_location}.")
             raise OperationalError(*e.args) from e

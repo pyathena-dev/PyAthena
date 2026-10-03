@@ -144,6 +144,8 @@ class AioArrowCursor(WithAsyncFetch):
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.
             **kwargs: Additional execution parameters.
+                ``block_size`` sets the read block size for this query, and
+                ``connect_timeout`` and ``request_timeout`` override the cursor's values.
 
         Returns:
             Self reference for method chaining.
@@ -182,8 +184,8 @@ class AioArrowCursor(WithAsyncFetch):
                 retry_config=self._retry_config,
                 unload=self._unload,
                 unload_location=unload_location,
-                connect_timeout=self._connect_timeout,
-                request_timeout=self._request_timeout,
+                connect_timeout=kwargs.pop("connect_timeout", self._connect_timeout),
+                request_timeout=kwargs.pop("request_timeout", self._request_timeout),
                 result_set_type_hints=options.result_set_type_hints,
                 **kwargs,
             )

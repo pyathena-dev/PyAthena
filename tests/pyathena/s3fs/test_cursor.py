@@ -5,15 +5,18 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from decimal import Decimal
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from pyathena.converter import _to_default
 from pyathena.error import DatabaseError, ProgrammingError
+from pyathena.model import AthenaQueryExecution
 from pyathena.s3fs.converter import DefaultS3FSTypeConverter
 from pyathena.s3fs.cursor import S3FSCursor
 from pyathena.s3fs.reader import AthenaCSVReader, DefaultCSVReader
 from pyathena.s3fs.result_set import AthenaS3FSResultSet
+from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import cached_file_systems
@@ -559,3 +562,28 @@ class TestS3FSCursor:
     def test_fetch_all_rows_custom_converter(self, s3fs_cursor):
         s3fs_cursor.execute("SELECT 1 AS col, json_parse('{\"a\": 1}') AS col_json")
         assert s3fs_cursor.fetchall() == [(1, '{"a":1}')]
+
+    @pytest.mark.parametrize("execute_kwargs", [{}, {"csv_reader": AthenaCSVReader}])
+    def test_read_options(self, execute_kwargs):
+        """The cursor's read options reach the result set, and execute() overrides them.
+
+        No AWS calls; the query and its result set are mocked.
+        """
+        cursor_kwargs = {"csv_reader": DefaultCSVReader}
+        query_execution = MagicMock(state=AthenaQueryExecution.STATE_SUCCEEDED)
+        cursor = S3FSCursor(
+            connection=MagicMock(),
+            converter=MagicMock(),
+            formatter=MagicMock(),
+            retry_config=RetryConfig(),
+            **cursor_kwargs,
+        )
+        with (
+            patch.object(S3FSCursor, "_execute", return_value="query_id"),
+            patch.object(S3FSCursor, "_poll", return_value=query_execution),
+            patch("pyathena.s3fs.cursor.AthenaS3FSResultSet") as result_set_class,
+        ):
+            cursor.execute("SELECT 1", **execute_kwargs)
+        kwargs = result_set_class.call_args.kwargs
+        expected = {**cursor_kwargs, **execute_kwargs}
+        assert {key: kwargs[key] for key in expected} == expected

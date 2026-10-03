@@ -7,7 +7,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from decimal import Decimal
-from unittest.mock import PropertyMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import numpy as np
 import pandas as pd
@@ -16,9 +16,11 @@ from pandas.io.parsers import TextFileReader
 
 from pyathena.error import DatabaseError, ProgrammingError
 from pyathena.filesystem.s3 import S3FileSystem
+from pyathena.model import AthenaQueryExecution
 from pyathena.pandas.converter import DefaultPandasTypeConverter
 from pyathena.pandas.cursor import PandasCursor
 from pyathena.pandas.result_set import AthenaPandasResultSet, PandasDataFrameIterator
+from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import cached_file_systems
@@ -1399,6 +1401,19 @@ class TestPandasCursor:
         assert callback_results[0] == pandas_cursor.query_id
         assert pandas_cursor.query_id is not None
 
+    @pytest.mark.parametrize("pandas_cursor", [{"cursor_kwargs": {"unload": True}}], indirect=True)
+    @pytest.mark.parametrize("option", ["filesystem", "storage_options"])
+    def test_unload_with_filesystem_options(self, pandas_cursor, option):
+        """filesystem or storage_options given to execute() read the UNLOAD result."""
+        fs_kwargs = {"connection": pandas_cursor.connection, "skip_instance_cache": True}
+        kwargs = (
+            {"filesystem": S3FileSystem(**fs_kwargs)}
+            if option == "filesystem"
+            else {"storage_options": fs_kwargs}
+        )
+        df = pandas_cursor.execute("SELECT * FROM one_row", **kwargs).as_pandas()
+        assert df.to_dict("records") == [{"number_of_rows": 1}]
+
     def test_pandas_cursor_iter_chunks_with_chunksize(self, pandas_cursor):
         """Test PandasCursor iter_chunks method with chunksize set."""
         cursor = pandas_cursor
@@ -1601,3 +1616,44 @@ class TestPandasCursor:
             (1, datetime(2017, 1, 1, 12, 34, 56).time(), b"\x00\x01", {"a": 1}, "[1, 2]", None),
             (2, datetime(2017, 1, 1, 12, 34, 56).time(), b"\x00\x01", [1, "x"], "s", None),
         ]
+
+    @pytest.mark.parametrize(
+        "execute_kwargs",
+        [
+            {},
+            {
+                "block_size": 2048,
+                "cache_type": "none",
+                "max_workers": 3,
+                "auto_optimize_chunksize": False,
+            },
+        ],
+    )
+    def test_read_options(self, execute_kwargs):
+        """The cursor's read options reach the result set, and execute() overrides them.
+
+        No AWS calls; the query and its result set are mocked.
+        """
+        cursor_kwargs = {
+            "block_size": 1024,
+            "cache_type": "bytes",
+            "max_workers": 2,
+            "auto_optimize_chunksize": True,
+        }
+        cursor = PandasCursor(
+            connection=MagicMock(),
+            converter=MagicMock(),
+            formatter=MagicMock(),
+            retry_config=RetryConfig(),
+            **cursor_kwargs,
+        )
+        query_execution = MagicMock(state=AthenaQueryExecution.STATE_SUCCEEDED)
+        with (
+            patch.object(PandasCursor, "_execute", return_value="query_id"),
+            patch.object(PandasCursor, "_poll", return_value=query_execution),
+            patch("pyathena.pandas.cursor.AthenaPandasResultSet") as result_set_class,
+        ):
+            cursor.execute("SELECT 1", **execute_kwargs)
+        kwargs = result_set_class.call_args.kwargs
+        expected = {**cursor_kwargs, **execute_kwargs}
+        assert {key: kwargs[key] for key in expected} == expected

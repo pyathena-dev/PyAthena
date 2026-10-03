@@ -172,7 +172,7 @@ class AsyncS3FSCursor(AsyncCursor):
             query_execution=query_execution,
             arraysize=self._arraysize,
             retry_config=self._retry_config,
-            csv_reader=self._csv_reader,
+            csv_reader=kwargs.pop("csv_reader", self._csv_reader),
             result_set_type_hints=result_set_type_hints,
             **kwargs,
         )
@@ -215,6 +215,8 @@ class AsyncS3FSCursor(AsyncCursor):
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.
             **kwargs: Additional execution parameters.
+                ``block_size`` sets the read block size for this query, and
+                ``csv_reader`` overrides the cursor's value.
 
         Returns:
             Tuple of (query_id, Future[AthenaS3FSResultSet]).

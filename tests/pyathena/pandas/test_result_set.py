@@ -6,11 +6,16 @@
 # SPDX-License-Identifier: MIT
 
 import io
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 
-from pyathena.pandas.result_set import PandasDataFrameIterator, _no_trunc_date
+from pyathena.pandas.result_set import (
+    AthenaPandasResultSet,
+    PandasDataFrameIterator,
+    _no_trunc_date,
+)
 
 
 class TestPandasDataFrameIterator:
@@ -64,3 +69,47 @@ class TestPandasDataFrameIterator:
         df_iter = PandasDataFrameIterator(df, _no_trunc_date)
 
         assert df_iter.as_pandas() is df
+
+
+_FS = MagicMock(name="pyathena_fs")
+_USER_FS = MagicMock(name="user_fs")
+
+
+class TestAthenaPandasResultSet:
+    @pytest.mark.parametrize(
+        ("execute_kwargs", "path", "filesystem_kwargs"),
+        [
+            ({}, "bucket/unload/", {"filesystem": _FS}),
+            ({"filesystem": _USER_FS}, "bucket/unload/", {"filesystem": _USER_FS}),
+            ({"filesystem": None}, "s3://bucket/unload/", {"filesystem": None}),
+            ({"storage_options": {"anon": True}}, "s3://bucket/unload/", {}),
+            ({"storage_options": None}, "s3://bucket/unload/", {}),
+        ],
+        ids=["default", "filesystem", "filesystem-none", "storage-options", "storage-options-none"],
+    )
+    def test_read_parquet_filesystem(self, execute_kwargs, path, filesystem_kwargs):
+        """filesystem or storage_options given to execute() replace PyAthena's filesystem.
+
+        No AWS calls; the manifest and pandas.read_parquet are mocked.
+        """
+        result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)  # bypass __init__
+        result_set._unload_location = None
+        result_set._engine = "pyarrow"
+        result_set._fs = _FS
+        result_set._kwargs = dict(execute_kwargs)
+        with (
+            patch.object(
+                AthenaPandasResultSet,
+                "_read_data_manifest",
+                return_value=["s3://bucket/unload/0.parquet"],
+            ),
+            patch("pandas.read_parquet") as read_parquet,
+        ):
+            result_set._read_parquet("pyarrow")
+        assert read_parquet.call_args.args == (path,)
+        assert read_parquet.call_args.kwargs == {
+            "engine": "pyarrow",
+            "use_threads": True,
+            **execute_kwargs,
+            **filesystem_kwargs,
+        }

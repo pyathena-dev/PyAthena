@@ -79,6 +79,9 @@ class AsyncPandasCursor(AsyncCursor):
         chunksize: int | None = None,
         result_reuse_enable: bool = False,
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
+        block_size: int | None = None,
+        cache_type: str | None = None,
+        auto_optimize_chunksize: bool = False,
         **kwargs,
     ) -> None:
         """Initialize an AsyncPandasCursor.
@@ -99,8 +102,13 @@ class AsyncPandasCursor(AsyncCursor):
             unload: Whether to wrap queries in ``UNLOAD`` and read the Parquet output.
             engine: Parsing engine (``auto``, ``c``, ``python``, or ``pyarrow``).
             chunksize: Number of rows per DataFrame chunk when reading CSV results.
+                If set, it takes precedence over ``auto_optimize_chunksize``.
             result_reuse_enable: Whether to enable Athena query result reuse.
             result_reuse_minutes: Maximum age of a reused query result in minutes.
+            block_size: Default block size of the S3 filesystem that reads the results.
+            cache_type: Default cache type of the S3 filesystem that reads the results.
+            auto_optimize_chunksize: Whether to choose a chunk size from the size of the
+                CSV result file when ``chunksize`` is None.
             **kwargs: Other cursor arguments, such as ``connection`` and ``converter``,
                 passed to ``AsyncCursor.__init__``.
         """
@@ -122,6 +130,9 @@ class AsyncPandasCursor(AsyncCursor):
         self._unload = unload
         self._engine = engine
         self._chunksize = chunksize
+        self._block_size = block_size
+        self._cache_type = cache_type
+        self._auto_optimize_chunksize = auto_optimize_chunksize
 
     @staticmethod
     @override
@@ -170,6 +181,11 @@ class AsyncPandasCursor(AsyncCursor):
             unload_location=unload_location,
             engine=kwargs.pop("engine", self._engine),
             chunksize=kwargs.pop("chunksize", self._chunksize),
+            block_size=kwargs.pop("block_size", self._block_size),
+            cache_type=kwargs.pop("cache_type", self._cache_type),
+            auto_optimize_chunksize=kwargs.pop(
+                "auto_optimize_chunksize", self._auto_optimize_chunksize
+            ),
             result_set_type_hints=result_set_type_hints,
             **kwargs,
         )
@@ -215,6 +231,12 @@ class AsyncPandasCursor(AsyncCursor):
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.
             **kwargs: Additional pandas read_csv/read_parquet parameters.
+                ``engine``, ``chunksize``, ``block_size``, ``cache_type``, and
+                ``auto_optimize_chunksize`` override the cursor's values for this query.
+                ``storage_options`` and, for UNLOAD results, ``filesystem`` replace
+                PyAthena's S3 filesystem (see
+                :class:`~pyathena.pandas.result_set.AthenaPandasResultSet`).
+                ``max_workers`` sets the number of S3 read workers for this query.
 
         Returns:
             Tuple of (query_id, future) where future resolves to AthenaPandasResultSet.

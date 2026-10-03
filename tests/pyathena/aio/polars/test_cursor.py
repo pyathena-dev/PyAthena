@@ -5,10 +5,15 @@
 #
 # SPDX-License-Identifier: MIT
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 
+from pyathena.aio.polars.cursor import AioPolarsCursor
 from pyathena.error import ProgrammingError
+from pyathena.model import AthenaQueryExecution
 from pyathena.polars.result_set import AthenaPolarsResultSet
+from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.aio.conftest import _aio_connect
 
@@ -128,3 +133,36 @@ class TestAioPolarsCursor:
         await aio_polars_cursor.execute("SELECT * FROM one_row")
         df = aio_polars_cursor.as_polars()
         assert df.height == 1
+
+    @pytest.mark.parametrize(
+        "execute_kwargs",
+        [{}, {"block_size": 2048, "cache_type": "none", "max_workers": 3, "chunksize": 20}],
+    )
+    async def test_read_options(self, execute_kwargs):
+        """The cursor's read options reach the result set, and execute() overrides them.
+
+        No AWS calls; the query and its result set are mocked.
+        """
+        cursor_kwargs = {
+            "block_size": 1024,
+            "cache_type": "bytes",
+            "max_workers": 2,
+            "chunksize": 10,
+        }
+        cursor = AioPolarsCursor(
+            connection=MagicMock(),
+            converter=MagicMock(),
+            formatter=MagicMock(),
+            retry_config=RetryConfig(),
+            **cursor_kwargs,
+        )
+        query_execution = MagicMock(state=AthenaQueryExecution.STATE_SUCCEEDED)
+        with (
+            patch.object(AioPolarsCursor, "_execute", return_value="query_id"),
+            patch.object(AioPolarsCursor, "_poll", return_value=query_execution),
+            patch("pyathena.aio.polars.cursor.AthenaPolarsResultSet") as result_set_class,
+        ):
+            await cursor.execute("SELECT 1", **execute_kwargs)
+        kwargs = result_set_class.call_args.kwargs
+        expected = {**cursor_kwargs, **execute_kwargs}
+        assert {key: kwargs[key] for key in expected} == expected

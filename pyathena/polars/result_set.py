@@ -237,6 +237,11 @@ class AthenaPolarsResultSet(AthenaResultSet):
             result_set_type_hints: Athena type signatures for complex-type columns,
                 keyed by column name (case-insensitive) or zero-based column index.
             **kwargs: Additional arguments passed to Polars read functions.
+                They replace the arguments the result set chooses, such as ``separator``,
+                ``has_header``, ``schema_overrides``, and ``storage_options``. A given
+                ``storage_options`` replaces PyAthena's S3 settings as a whole: non-chunked
+                CSV results are read through fsspec, and chunked CSV and UNLOAD results
+                through Polars' native object store.
         """
         super().__init__(
             connection=connection,
@@ -288,6 +293,42 @@ class AthenaPolarsResultSet(AthenaResultSet):
         # _metadata for unload
         self._column_names_cache: list[str] = self._get_column_names()
         self._iterrows = self._df_iter.iterrows()
+
+    def _storage_options(self, default: Callable[[], dict[str, Any]]) -> Any:
+        """Get the storage options for a Polars read function.
+
+        Args:
+            default: Returns the storage options that the result set chooses. It is called
+                only when ``execute()`` was not given ``storage_options``, so replaced
+                options do not fetch credentials.
+
+        Returns:
+            The ``storage_options`` given to ``execute()``, or else the default.
+        """
+        if "storage_options" in self._kwargs:
+            return self._kwargs["storage_options"]
+        return default()
+
+    def _read_kwargs(
+        self, storage_options: Callable[[], dict[str, Any]], **defaults: Any
+    ) -> dict[str, Any]:
+        """Combine the arguments of a Polars read function with the ones given to ``execute()``.
+
+        Args:
+            storage_options: Returns the storage options that the result set chooses;
+                see ``_storage_options()``.
+            **defaults: The other arguments that the result set chooses, such as
+                ``separator``.
+
+        Returns:
+            The arguments for the read function. A value given to ``execute()`` replaces
+            the one the result set chose, including the whole ``storage_options``.
+        """
+        return {
+            **defaults,
+            **self._kwargs,
+            "storage_options": self._storage_options(storage_options),
+        }
 
     @property
     def _csv_storage_options(self) -> dict[str, Any]:
@@ -456,11 +497,12 @@ class AthenaPolarsResultSet(AthenaResultSet):
         try:
             df = pl.read_csv(
                 self.output_location,
-                separator=separator,
-                has_header=has_header,
-                schema_overrides=self.dtypes,
-                storage_options=self._csv_storage_options,
-                **self._kwargs,
+                **self._read_kwargs(
+                    lambda: self._csv_storage_options,
+                    separator=separator,
+                    has_header=has_header,
+                    schema_overrides=self.dtypes,
+                ),
             )
             if new_columns:
                 df.columns = new_columns
@@ -489,8 +531,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         try:
             return pl.read_parquet(
                 self._unload_location,
-                storage_options=self._parquet_storage_options,
-                **self._kwargs,
+                **self._read_kwargs(lambda: self._parquet_storage_options),
             )
         except Exception as e:
             _logger.exception(f"Failed to read {self._unload_location}.")
@@ -507,7 +548,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             # Use scan_parquet to get schema without reading all data
             lazy_df = pl.scan_parquet(
                 self._unload_location,
-                storage_options=self._parquet_storage_options,
+                storage_options=self._storage_options(lambda: self._parquet_storage_options),
             )
             schema = lazy_df.collect_schema()
             return to_column_info(schema)
@@ -649,11 +690,12 @@ class AthenaPolarsResultSet(AthenaResultSet):
             # not fsspec, so we use the same storage options as Parquet
             lazy_df = pl.scan_csv(
                 self.output_location,
-                separator=separator,
-                has_header=has_header,
-                schema_overrides=self.dtypes,
-                storage_options=self._parquet_storage_options,
-                **self._kwargs,
+                **self._read_kwargs(
+                    lambda: self._parquet_storage_options,
+                    separator=separator,
+                    has_header=has_header,
+                    schema_overrides=self.dtypes,
+                ),
             )
             for batch in lazy_df.collect_batches(chunk_size=self._chunksize):
                 if new_columns:
@@ -683,8 +725,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         try:
             lazy_df = pl.scan_parquet(
                 self._unload_location,
-                storage_options=self._parquet_storage_options,
-                **self._kwargs,
+                **self._read_kwargs(lambda: self._parquet_storage_options),
             )
             yield from lazy_df.collect_batches(chunk_size=self._chunksize)
         except Exception as e:

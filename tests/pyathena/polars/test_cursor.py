@@ -12,13 +12,16 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from decimal import Decimal
+from unittest.mock import MagicMock, patch
 
 import polars as pl
 import pytest
 
 from pyathena.error import DatabaseError, ProgrammingError
+from pyathena.model import AthenaQueryExecution
 from pyathena.polars.cursor import PolarsCursor
 from pyathena.polars.result_set import AthenaPolarsResultSet
+from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import cached_file_systems
@@ -114,6 +117,18 @@ class TestPolarsCursor:
         assert df.height == 1
         assert df.width == 1
         assert df.to_dicts() == [{"number_of_rows": 1}]
+
+    def test_as_polars_with_read_kwargs(self, polars_cursor):
+        """Read arguments given to execute() replace the ones the result set chooses."""
+        df = polars_cursor.execute(
+            "SELECT * FROM one_row",
+            schema_overrides={"number_of_rows": pl.Utf8},
+            storage_options={
+                "connection": polars_cursor.connection,
+                "skip_instance_cache": True,
+            },
+        ).as_polars()
+        assert df.to_dicts() == [{"number_of_rows": "1"}]
 
     @pytest.mark.parametrize(
         "polars_cursor",
@@ -763,3 +778,36 @@ class TestPolarsCursor:
             (2, datetime(2017, 1, 1, 12, 34, 56).time(), b"\x00\x01", [1, "x"], "s", None),
         ]
         assert polars_cursor.as_polars()["col_json"].dtype == pl.String
+
+    @pytest.mark.parametrize(
+        "execute_kwargs",
+        [{}, {"block_size": 2048, "cache_type": "none", "max_workers": 3, "chunksize": 20}],
+    )
+    def test_read_options(self, execute_kwargs):
+        """The cursor's read options reach the result set, and execute() overrides them.
+
+        No AWS calls; the query and its result set are mocked.
+        """
+        cursor_kwargs = {
+            "block_size": 1024,
+            "cache_type": "bytes",
+            "max_workers": 2,
+            "chunksize": 10,
+        }
+        cursor = PolarsCursor(
+            connection=MagicMock(),
+            converter=MagicMock(),
+            formatter=MagicMock(),
+            retry_config=RetryConfig(),
+            **cursor_kwargs,
+        )
+        query_execution = MagicMock(state=AthenaQueryExecution.STATE_SUCCEEDED)
+        with (
+            patch.object(PolarsCursor, "_execute", return_value="query_id"),
+            patch.object(PolarsCursor, "_poll", return_value=query_execution),
+            patch("pyathena.polars.cursor.AthenaPolarsResultSet") as result_set_class,
+        ):
+            cursor.execute("SELECT 1", **execute_kwargs)
+        kwargs = result_set_class.call_args.kwargs
+        expected = {**cursor_kwargs, **execute_kwargs}
+        assert {key: kwargs[key] for key in expected} == expected

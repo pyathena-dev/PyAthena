@@ -5,10 +5,15 @@
 #
 # SPDX-License-Identifier: MIT
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 
+from pyathena.aio.pandas.cursor import AioPandasCursor
 from pyathena.error import ProgrammingError
+from pyathena.model import AthenaQueryExecution
 from pyathena.pandas.result_set import AthenaPandasResultSet
+from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.aio.conftest import _aio_connect
 
@@ -134,3 +139,44 @@ class TestAioPandasCursor:
         await aio_pandas_cursor.execute("SELECT * FROM one_row")
         df = aio_pandas_cursor.as_pandas()
         assert len(df) == 1
+
+    @pytest.mark.parametrize(
+        "execute_kwargs",
+        [
+            {},
+            {
+                "block_size": 2048,
+                "cache_type": "none",
+                "max_workers": 3,
+                "auto_optimize_chunksize": False,
+            },
+        ],
+    )
+    async def test_read_options(self, execute_kwargs):
+        """The cursor's read options reach the result set, and execute() overrides them.
+
+        No AWS calls; the query and its result set are mocked.
+        """
+        cursor_kwargs = {
+            "block_size": 1024,
+            "cache_type": "bytes",
+            "max_workers": 2,
+            "auto_optimize_chunksize": True,
+        }
+        cursor = AioPandasCursor(
+            connection=MagicMock(),
+            converter=MagicMock(),
+            formatter=MagicMock(),
+            retry_config=RetryConfig(),
+            **cursor_kwargs,
+        )
+        query_execution = MagicMock(state=AthenaQueryExecution.STATE_SUCCEEDED)
+        with (
+            patch.object(AioPandasCursor, "_execute", return_value="query_id"),
+            patch.object(AioPandasCursor, "_poll", return_value=query_execution),
+            patch("pyathena.aio.pandas.cursor.AthenaPandasResultSet") as result_set_class,
+        ):
+            await cursor.execute("SELECT 1", **execute_kwargs)
+        kwargs = result_set_class.call_args.kwargs
+        expected = {**cursor_kwargs, **execute_kwargs}
+        assert {key: kwargs[key] for key in expected} == expected
