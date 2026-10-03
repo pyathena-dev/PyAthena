@@ -264,19 +264,19 @@ class AioS3FileSystem(AsyncFileSystem):
             if content_type is not None:
                 s3_additional_kwargs["ContentType"] = content_type
 
-        with (
-            self.open(
-                rpath,
-                "xb" if mode == "create" else "wb",
-                block_size=block_size,
-                max_workers=max_workers,
-                s3_additional_kwargs=s3_additional_kwargs,
-            ) as remote,
-            open(lpath, "rb") as local,
-        ):
-            while data := local.read(remote.blocksize):
-                remote.write(data)
-                callback.relative_update(len(data))
+        # See S3FileSystem.put_file.
+        with open(lpath, "rb") as local:
+            self._sync_fs._write_file_and_close(
+                self.open(
+                    rpath,
+                    "xb" if mode == "create" else "wb",
+                    block_size=block_size,
+                    max_workers=max_workers,
+                    s3_additional_kwargs=s3_additional_kwargs,
+                ),
+                local,
+                callback,
+            )
         self.invalidate_cache(rpath)
 
     async def _get_file(self, rpath: str, lpath: str, callback=_DEFAULT_CALLBACK, **kwargs) -> None:
