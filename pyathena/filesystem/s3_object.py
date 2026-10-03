@@ -33,6 +33,19 @@ _API_FIELD_TO_S3_OBJECT_PROPERTY = {
     "Metadata": "metadata",
     "LastModified": "last_modified",
 }
+# Fields read as None through attribute access when the object does not have them.
+_S3_OBJECT_FIELDS = frozenset(
+    [
+        *_API_FIELD_TO_S3_OBJECT_PROPERTY.values(),
+        "name",
+        "type",
+        "bucket",
+        "key",
+        "size",
+        "version_id",
+        "is_latest",
+    ]
+)
 
 
 class S3ObjectType:
@@ -95,7 +108,10 @@ class S3Object(MutableMapping[str, Any]):
 
     The object supports both dictionary-style access and property-style
     access to metadata fields like content type, storage class, encryption
-    settings, and object lock configurations.
+    settings, and object lock configurations. Dictionary-style access
+    behaves like a dictionary, so a missing key raises KeyError. Property-style
+    access returns None for a known field that the object does not have,
+    and raises AttributeError for any other missing name.
 
     Example:
         >>> s3_obj = S3Object({"ContentType": "text/csv", "ContentLength": 1024})
@@ -163,10 +179,26 @@ class S3Object(MutableMapping[str, Any]):
 
     @override
     def __getitem__(self, item: str) -> Any:
-        return self.__dict__.get(item)
+        return self.__dict__[item]
 
-    def __getattr__(self, item: str):
-        return self.get(item)
+    def __getattr__(self, item: str) -> Any:
+        """Return None for a known field that the object does not have.
+
+        Called only when normal attribute lookup fails, so fields that the
+        object has are returned without reaching this method.
+
+        Args:
+            item: The attribute name.
+
+        Returns:
+            None, if ``item`` is a known S3 object field.
+
+        Raises:
+            AttributeError: If ``item`` is not a known S3 object field.
+        """
+        if item in _S3_OBJECT_FIELDS:
+            return None
+        raise AttributeError(f"{type(self).__name__!r} object has no attribute {item!r}")
 
     @override
     def __setitem__(self, key: str, value: Any) -> None:
@@ -191,6 +223,14 @@ class S3Object(MutableMapping[str, Any]):
     @override
     def __str__(self):
         return str(self.__dict__)
+
+    def copy(self) -> S3Object:
+        """Return a shallow copy of the object.
+
+        Returns:
+            A new S3Object with the same fields.
+        """
+        return copy.copy(self)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert S3Object to dictionary representation.

@@ -5,7 +5,11 @@
 #
 # SPDX-License-Identifier: MIT
 
+import copy
+import pickle
 from datetime import datetime
+
+import pytest
 
 from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
@@ -102,6 +106,61 @@ class TestS3Object:
             "ContentType": "application/json",
             "StorageClass": "STANDARD",
         }
+
+    @staticmethod
+    def _file_object():
+        return S3Object(
+            init={"ContentLength": 3, "ETag": '"etag"'},
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket="test-bucket",
+            key="path/to/object",
+        )
+
+    def test_mapping(self):
+        actual = self._file_object()
+        assert actual["etag"] == '"etag"'
+        with pytest.raises(KeyError):
+            actual["version_id"]
+        assert "etag" in actual
+        assert "version_id" not in actual
+        assert actual.get("etag") == '"etag"'
+        assert actual.get("version_id") is None
+        assert actual.get("version_id", "default") == "default"
+        assert actual.pop("version_id", "default") == "default"
+        assert actual.setdefault("version_id", "v1") == "v1"
+        assert actual["version_id"] == "v1"
+
+    def test_attribute(self):
+        actual = self._file_object()
+        assert actual.etag == '"etag"'
+        # Known fields that the object does not have read as None.
+        assert actual.version_id is None
+        assert actual.is_latest is None
+        assert actual.content_type is None
+        assert "content_type" not in actual
+        with pytest.raises(AttributeError):
+            _ = actual.unknown
+        assert not hasattr(actual, "__setstate__")
+
+    @pytest.mark.parametrize(
+        "func",
+        [
+            copy.copy,
+            copy.deepcopy,
+            lambda obj: pickle.loads(pickle.dumps(obj)),
+            lambda obj: obj.copy(),
+        ],
+        ids=["copy", "deepcopy", "pickle", "copy_method"],
+    )
+    def test_copy(self, func):
+        expected = self._file_object()
+        actual = func(expected)
+        assert isinstance(actual, S3Object)
+        assert actual is not expected
+        assert actual == expected
+        assert actual.name == "test-bucket/path/to/object"
+        actual["name"] = "renamed"
+        assert expected.name == "test-bucket/path/to/object"
 
 
 class TestS3Metadata:

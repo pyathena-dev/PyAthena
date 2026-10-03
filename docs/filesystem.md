@@ -81,6 +81,34 @@ through the buffered file path. Inside an
 [fsspec transaction](https://filesystem-spec.readthedocs.io/en/latest/features.html#transactions),
 writes are deferred until the transaction commits and are discarded on rollback.
 
+The block size for writing, given by the `block_size` argument of `open` or by the
+filesystem's `default_block_size`, must be between 5 MiB and 5 GiB, inclusive, the part
+size limits of a multipart upload. Otherwise, `open` raises `ValueError`.
+
+A multipart upload consists of at most 10,000 parts. `put` and `pipe` upload one part
+per block, so with the default block size they can upload up to about 48.8 GiB
+(10,000 × 5 MiB). To upload a larger object, use a block size of at least its size
+divided by 10,000, either with the `block_size` argument of `put`, `pipe`, and `open`
+or with the `default_block_size` argument of `S3FileSystem`. `put` and `pipe` check
+the size before uploading anything and raise `ValueError` with the minimum block size
+if the data needs more parts. A file written with `open` can take more parts, because
+each write that fills the buffer uploads the data beyond its last full block as a
+separate part when that data is at least 5 MiB. In an append, the parts copied from
+the existing object also count toward the limit. A write with `open` that reaches the
+limit raises `ValueError` and aborts its multipart upload. Multipart copies with `cp`
+use parts large enough to stay within the limit.
+
+Paths are normalized as in fsspec, which drops a trailing slash, so `info`, `isfile`,
+and `open` treat `s3://YOUR_S3_BUCKET/dir/` as `s3://YOUR_S3_BUCKET/dir`: the object
+`dir` if it exists, and otherwise the directory `dir`. An object whose key ends in a
+slash, such as a folder marker, is therefore not a file for these methods. Opening
+`dir/` for reading reads the object `dir` or raises `FileNotFoundError`, and opening it
+for writing writes the object `dir`. A path with a `?versionId=` suffix keeps the slash
+and refers to the object. `find`, and `ls` of the directory, list the object as a file
+entry. `cat_file` uses the key as written. Without a `?versionId=` suffix, it reads
+such an object without a range, with a non-empty range of non-negative offsets, or with
+a negative `start` and no `end`, and raises `FileNotFoundError` for other ranges.
+
 ## Error translation
 
 S3 error responses are translated into standard Python exceptions, so filesystem

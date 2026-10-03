@@ -737,6 +737,26 @@ engine_arrow = create_engine(
 )
 ```
 
+## DDL and CAST types
+
+Athena parses DDL statements such as `CREATE TABLE` with Hive type syntax, and queries with Trino type syntax.
+`CREATE TABLE` column types, and types compiled with `TypeEngine.compile()`, use the Hive syntax.
+`CAST` target types use the Trino syntax.
+
+| SQLAlchemy type | Table DDL | CAST |
+|---|---|---|
+| `Integer`, `INTEGER` | `INT` | `INTEGER` |
+| `String`, `Text`, `CLOB` | `STRING` | `VARCHAR` |
+| `LargeBinary`, `BINARY`, `VARBINARY` | `BINARY` | `VARBINARY` |
+| `JSON` | Raises `CompileError` | `JSON` |
+| `AthenaStruct` | `STRUCT<name:type, ...>` | `ROW(name type, ...)` |
+| `AthenaMap` | `MAP<key, value>` | `MAP(key, value)` |
+| `AthenaArray`, `ARRAY` | `ARRAY<item>` | `ARRAY(item)` |
+
+Complex types apply the same syntax to their nested types.
+An `AthenaStruct` without fields raises `CompileError` in both.
+`NullType`, including an unrecognized type that reflection reports as `NullType`, raises `CompileError` in DDL at any depth.
+
 ## Floating-point types
 
 | SQLAlchemy type | Table DDL | CAST |
@@ -824,10 +844,12 @@ CREATE TABLE users (
 )
 ```
 
-`CREATE TABLE` renders `AthenaStruct` columns with Hive `STRUCT<name:type, ...>` syntax at every nesting depth.
-That includes top-level columns, fields of a STRUCT, STRUCT values inside MAP, and STRUCT values inside ARRAY.
-Integer fields, and integer MAP keys and values, use `INT` in that DDL.
-`CAST` and other SQL expressions keep `ROW(...)`, `MAP(...)`, and `ARRAY(...)`, and spell integers as `INTEGER`.
+`CREATE TABLE` renders `AthenaStruct` columns with Hive `STRUCT<name:type, ...>` syntax at every nesting depth, and `CAST` renders them as `ROW(name type, ...)`.
+See [DDL and CAST types](#ddl-and-cast-types).
+
+Reflected STRUCT and ROW columns use `AthenaStruct` with their field names and types.
+A field type that the dialect does not recognize is reflected as `NullType` with a warning.
+Selecting such a column returns the value from the cursor, as described under Data format support below; SQLAlchemy does not convert it to the reflected field types.
 
 #### Querying STRUCT data
 
@@ -973,6 +995,10 @@ CREATE TABLE products (
 
 `CREATE TABLE` renders integer MAP keys and values as `INT`.
 `CAST` still spells those integers as `INTEGER`.
+
+Reflected MAP columns use `AthenaMap` with their key and value types.
+A key or value type that the dialect does not recognize is reflected as `NullType` with a warning.
+Selecting such a column returns the value from the cursor, as described under Data format support below; SQLAlchemy does not convert it to the reflected key and value types.
 
 #### Querying MAP data
 
@@ -1122,7 +1148,7 @@ An outer `TypeDecorator` retains its result processor as well as native ARRAY or
 Raw `text()` queries and direct DB API queries retain the cursor's existing conversion behavior described below; they do not receive this projection automatically.
 
 Compared with earlier releases, reflected ARRAY columns are no longer reported as `String`.
-ARRAY DDL now renders integer elements as `INT` and row elements as `STRUCT<...>`, which Athena requires for nested DDL types.
+ARRAY DDL now renders integer elements as `INT` and row elements as `STRUCT<...>`.
 Code that inspects reflected types or compares compiled SQL strings should account for these changes.
 
 #### Basic Usage
@@ -1367,7 +1393,7 @@ Athena's JSON type support has specific limitations:
 
 - **JSON objects and arrays are supported** - `CAST('...' AS JSON)` accepts an object or a top-level array such as `[1, 2, 3]`
 - **Arrays within objects are supported** - JSON objects can contain arrays as property values
-- **DML only** - JSON type is supported for SELECT queries but not in CREATE TABLE statements
+- **DML only** - JSON type is supported for SELECT queries but not in CREATE TABLE statements; compiling `CREATE TABLE` with a `JSON` column raises `CompileError`
 
 ```python
 # Supported: JSON object with nested array

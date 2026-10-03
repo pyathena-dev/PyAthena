@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import mimetypes
+import os
 from multiprocessing import cpu_count
 from typing import TYPE_CHECKING, Any, cast
 
@@ -18,7 +20,7 @@ from fsspec.asyn import AsyncFileSystem
 from fsspec.callbacks import _DEFAULT_CALLBACK
 
 from pyathena.filesystem.s3 import S3File, S3FileSystem
-from pyathena.filesystem.s3_executor import S3AioExecutor
+from pyathena.filesystem.s3_executor import S3AioExecutor, S3Executor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import (
     S3Metadata,
     S3MultipartUpload,
@@ -48,6 +50,8 @@ class AioS3FileSystem(AsyncFileSystem):
     File handles created by ``_open`` use ``S3AioExecutor`` so that parallel
     operations (range reads, multipart uploads) are dispatched through the event
     loop with ``asyncio.to_thread`` instead of a ``ThreadPoolExecutor`` per file.
+    An instance created with ``asynchronous=True`` has no event loop of its own,
+    so its file handles use a ``ThreadPoolExecutor``.
 
     Attributes:
         _sync_fs: The internal synchronous S3FileSystem instance.
@@ -161,10 +165,86 @@ class AioS3FileSystem(AsyncFileSystem):
     async def _pipe_file(
         self, path: str, value: bytes | bytearray | memoryview, mode: str = "overwrite", **kwargs
     ) -> None:
+        if self._intrans:
+            # The transaction belongs to this filesystem, not to the internal
+            # S3FileSystem, so write through open() to defer the commit to it.
+            await asyncio.to_thread(self._pipe_file_in_transaction, path, value, mode, **kwargs)
+            return
         await asyncio.to_thread(self._sync_fs.pipe_file, path, value, mode=mode, **kwargs)
 
+    def _pipe_file_in_transaction(
+        self, path: str, value: bytes | bytearray | memoryview, mode: str, **kwargs
+    ) -> None:
+        """Write bytes into the path as a file of this filesystem's transaction.
+
+        Args:
+            path: S3 path (s3://bucket/key) to write to.
+            value: The bytes to write.
+            mode: "overwrite" or "create". With "create", raise
+                FileExistsError when the object already exists.
+            **kwargs: Additional parameters passed to ``open()``.
+
+        Raises:
+            FileExistsError: If the mode is "create" and the path already
+                exists.
+            ValueError: If the data takes more than
+                ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
+        """
+        block_size = kwargs.get("block_size") or self._sync_fs.default_block_size
+        # The size in bytes; the length of a memoryview counts its items.
+        self._sync_fs._check_multipart_upload_size(path, memoryview(value).nbytes, block_size)
+        if mode == "create" and self._sync_fs.exists(path):
+            raise FileExistsError(path)
+        with self.open(path, "wb", **kwargs) as f:
+            f.write(value)
+
     async def _put_file(self, lpath: str, rpath: str, callback=_DEFAULT_CALLBACK, **kwargs) -> None:
+        if self._intrans:
+            # See _pipe_file.
+            await asyncio.to_thread(self._put_file_in_transaction, lpath, rpath, callback, **kwargs)
+            return
         await asyncio.to_thread(self._sync_fs.put_file, lpath, rpath, callback=callback, **kwargs)
+
+    def _put_file_in_transaction(self, lpath: str, rpath: str, callback, **kwargs) -> None:
+        """Upload a local file as a file of this filesystem's transaction.
+
+        Mirrors :meth:`S3FileSystem.put_file`, but writes through ``open()``
+        of this filesystem.
+
+        Args:
+            lpath: Local file path to upload.
+            rpath: S3 destination path (s3://bucket/key).
+            callback: Progress callback for tracking upload progress.
+            **kwargs: Additional S3 parameters (e.g., ContentType, StorageClass).
+                The ``block_size`` parameter of ``open()`` is also accepted.
+
+        Raises:
+            ValueError: If the file takes more than
+                ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
+        """
+        if os.path.isdir(lpath):
+            return
+        _, key, _ = self.parse_path(rpath)
+        if not key:
+            return
+
+        size = os.path.getsize(lpath)
+        block_size = kwargs.pop("block_size", None) or self._sync_fs.default_block_size
+        self._sync_fs._check_multipart_upload_size(rpath, size, block_size)
+        callback.set_size(size)
+        if "ContentType" not in kwargs:
+            content_type, _ = mimetypes.guess_type(lpath)
+            if content_type is not None:
+                kwargs["ContentType"] = content_type
+
+        with (
+            self.open(rpath, "wb", block_size=block_size, s3_additional_kwargs=kwargs) as remote,
+            open(lpath, "rb") as local,
+        ):
+            while data := local.read(remote.blocksize):
+                remote.write(data)
+                callback.relative_update(len(data))
+        self.invalidate_cache(rpath)
 
     async def _get_file(self, rpath: str, lpath: str, callback=_DEFAULT_CALLBACK, **kwargs) -> None:
         await asyncio.to_thread(self._sync_fs.get_file, rpath, lpath, callback=callback, **kwargs)
@@ -175,59 +255,43 @@ class AioS3FileSystem(AsyncFileSystem):
     async def _makedirs(self, path: str, exist_ok: bool = False) -> None:
         await asyncio.to_thread(self._sync_fs.makedirs, path, exist_ok=exist_ok)
 
-    async def _rm(self, path: str | list[str], recursive: bool = False, **kwargs) -> None:
-        """Remove files or directories using async parallel batch deletion.
+    async def _rm(
+        self,
+        path: str | list[str],
+        recursive: bool = False,
+        batch_size: int | None = None,
+        maxdepth: int | None = None,
+        **kwargs,
+    ) -> None:
+        """Delete objects with DeleteObjects requests.
 
-        For multiple paths, chunks into batches of 1000 (S3 API limit) and uses
-        ``asyncio.gather`` with ``asyncio.to_thread`` instead of ThreadPoolExecutor.
+        See :meth:`S3FileSystem.rm`. The requests run in parallel with
+        ``asyncio.gather`` and ``asyncio.to_thread``.
+
+        Args:
+            path: S3 path (s3://bucket/key) or list of paths to delete.
+            recursive: Whether to delete all objects below the paths.
+            batch_size: Accepted for fsspec compatibility; not used.
+            maxdepth: Maximum depth to expand when ``recursive`` is True.
+            **kwargs: Additional parameters passed to the DeleteObjects API.
+                ``Quiet`` (default True) sets the quiet mode of the requests.
+
+        Raises:
+            ValueError: If a path is a bucket.
+            OSError: If S3 could not delete some of the objects.
         """
-        if isinstance(path, str):
-            path = [path]
-
-        bucket, _, _ = self.parse_path(path[0])
-
-        expand_paths: list[str] = []
-        for p in path:
-            expanded = await asyncio.to_thread(self._sync_fs.expand_path, p, recursive=recursive)
-            expand_paths.extend(expanded)
-
-        if not expand_paths:
-            return
-
-        quiet = kwargs.pop("Quiet", True)
-        delete_objects: list[dict[str, Any]] = []
-        for p in expand_paths:
-            _, key, version_id = self.parse_path(p)
-            if key:
-                object_: dict[str, Any] = {"Key": key}
-                if version_id:
-                    object_["VersionId"] = version_id
-                delete_objects.append(object_)
-
-        if not delete_objects:
-            return
-
-        chunks = [
-            delete_objects[i : i + self.DELETE_OBJECTS_MAX_KEYS]
-            for i in range(0, len(delete_objects), self.DELETE_OBJECTS_MAX_KEYS)
-        ]
-
-        async def _delete_chunk(chunk: list[dict[str, Any]]) -> None:
-            request = {
-                "Bucket": bucket,
-                "Delete": {
-                    "Objects": chunk,
-                    "Quiet": quiet,
-                },
-            }
-            await asyncio.to_thread(
-                self._sync_fs._call, self._sync_fs._client.delete_objects, **request
-            )
-
-        await asyncio.gather(*[_delete_chunk(chunk) for chunk in chunks])
-
-        for p in expand_paths:
-            self._sync_fs.invalidate_cache(p)
+        paths = await asyncio.to_thread(
+            self._sync_fs._expand_delete_paths, path, recursive=recursive, maxdepth=maxdepth
+        )
+        requests = self._sync_fs._delete_objects_requests(paths, **kwargs)
+        results = await asyncio.gather(
+            *[
+                asyncio.to_thread(self._sync_fs._delete_objects_request, request)
+                for request in requests
+            ],
+            return_exceptions=True,
+        )
+        self._sync_fs._raise_delete_objects_errors(requests, results)
 
     async def _cp_file(self, path1: str, path2: str, **kwargs) -> None:
         """Copy an S3 object, using async parallel multipart upload for large files."""
@@ -281,7 +345,12 @@ class AioS3FileSystem(AsyncFileSystem):
             block_size < S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE
             or block_size > S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE
         ):
-            raise ValueError("Block size must be greater than 5MiB and less than 5GiB.")
+            raise ValueError(
+                "Block size must be between "
+                f"5 MiB ({S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE} bytes) and "
+                f"5 GiB ({S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE} bytes), "
+                f"inclusive: {block_size}."
+            )
 
         copy_source: dict[str, Any] = {
             "Bucket": bucket1,
@@ -339,6 +408,23 @@ class AioS3FileSystem(AsyncFileSystem):
             return {f.name: f for f in files}
         return [f.name for f in files]
 
+    def _create_executor(self, max_workers: int) -> S3Executor:
+        """Create the executor for the parallel operations of a file.
+
+        An instance created with ``asynchronous=True`` has no event loop of
+        its own, so its files run the operations in a thread pool.
+
+        Args:
+            max_workers: The maximum number of operations that run at once.
+
+        Returns:
+            An ``S3AioExecutor`` on the event loop of this filesystem, or an
+            ``S3ThreadPoolExecutor`` if it has none.
+        """
+        if self._loop is None:
+            return S3ThreadPoolExecutor(max_workers=max_workers)
+        return S3AioExecutor(loop=self._loop, max_workers=max_workers)
+
     def _open(
         self,
         path: str,
@@ -362,7 +448,7 @@ class AioS3FileSystem(AsyncFileSystem):
             path,
             mode,
             max_workers=max_workers,
-            executor=S3AioExecutor(loop=self._loop),
+            executor=self._create_executor(max_workers=max_workers),
             block_size=block_size,
             cache_type=cache_type,
             autocommit=autocommit,
@@ -571,8 +657,24 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         self._sync_fs.invalidate_cache(path)
 
-    async def _touch(self, path: str, truncate: bool = True, **kwargs) -> None:
-        await asyncio.to_thread(self._sync_fs.touch, path, truncate=truncate, **kwargs)
+    async def _touch(self, path: str, truncate: bool = True, **kwargs) -> dict[str, Any]:
+        return await asyncio.to_thread(self._sync_fs.touch, path, truncate=truncate, **kwargs)
+
+    def touch(self, path: str, truncate: bool = True, **kwargs) -> dict[str, Any]:
+        """Create an empty object with PutObject.
+
+        See :meth:`S3FileSystem.touch`.
+
+        Args:
+            path: S3 path (s3://bucket/key) of the object.
+            truncate: If True, replace an existing object with an empty one;
+                if False, raise if the object exists.
+            **kwargs: Additional parameters passed to the PutObject API.
+
+        Returns:
+            The PutObject response as a dictionary.
+        """
+        return self._sync_fs.touch(path, truncate=truncate, **kwargs)
 
 
 class AioS3File(S3File):
@@ -584,4 +686,6 @@ class AioS3File(S3File):
     through the ``S3Executor`` interface — the ``S3AioExecutor``
     provided by ``AioS3FileSystem`` dispatches them through the event loop with
     ``asyncio.to_thread`` instead of a ``ThreadPoolExecutor`` per file.
+    For an ``AioS3FileSystem`` created with ``asynchronous=True``, it is an
+    ``S3ThreadPoolExecutor``.
     """

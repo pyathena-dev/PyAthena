@@ -235,6 +235,27 @@ class _ArrayTypeInspector:
             return variant
         return type_.load_dialect_impl(self.dialect)
 
+    def dialect_type(self, type_: TypeEngine[Any]) -> TypeEngine[Any]:
+        """Resolve the type this dialect uses for a SQLAlchemy type.
+
+        Takes the Athena variant from ``with_variant()`` and the implementation
+        of a TypeDecorator until neither applies.
+
+        Args:
+            type_: The declared type.
+
+        Returns:
+            The resolved type.
+        """
+        while True:
+            variant = self.variant(type_)
+            if variant is not None:
+                type_ = variant
+            elif isinstance(type_, types.TypeDecorator):
+                type_ = self.decorator_impl(type_)
+            else:
+                return type_
+
     @staticmethod
     def has_unknown_element(type_: TypeEngine[Any]) -> bool:
         if isinstance(type_, sqltypes.ARRAY):
@@ -579,7 +600,9 @@ class _ArrayUpdateCompiler:
         ):
             raise exc.CompileError("An ARRAY slice assignment requires a non-NULL array")
         rhs = compiler.process(value, **kw)
-        rhs_type = compiler._complex_dml_type(expression.value_type, require_precision=True)
+        rhs_type = compiler._dml_type_compiler.process_element(
+            expression.value_type, require_precision=True
+        )
         rhs = f"CAST({rhs} AS {rhs_type})"
         if final_slice:
             # Reject SQL expressions that evaluate to NULL without issuing a second statement.
@@ -626,7 +649,7 @@ class _ArrayUpdateCompiler:
         array_type = self._type_inspector.array_type(array_type)
         if array_type is None:
             raise exc.CompileError("Partial ARRAY updates require an ARRAY column type")
-        array_sql_type = compiler._complex_dml_type(array_type)
+        array_sql_type = compiler._dml_type_compiler.process_element(array_type)
         array = f"coalesce({array}, CAST(ARRAY[] AS {array_sql_type}))"
         bound = path[0]
         if isinstance(bound, Slice):
@@ -635,7 +658,9 @@ class _ArrayUpdateCompiler:
 
     def _prefix_and_padding(self, array, start, array_type):
         prefix = f"slice({array}, 1, least({start} - 1, cardinality({array})))"
-        element_type = self.compiler._complex_dml_type(_ArrayTypeInspector.item_type(array_type))
+        element_type = self.compiler._dml_type_compiler.process_element(
+            _ArrayTypeInspector.item_type(array_type)
+        )
         padding = (
             f"repeat(CAST(NULL AS {element_type}), "
             f"CAST(greatest({start} - 1 - cardinality({array}), 0) AS INTEGER))"

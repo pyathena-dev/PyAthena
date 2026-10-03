@@ -1,24 +1,33 @@
+import asyncio
 import functools
+import gc
 import io
 import os
+import re
+import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.request
 import uuid
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
-from itertools import chain
+from itertools import chain, pairwise
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import botocore.exceptions
 import pytest
 from fsspec import Callback
+from fsspec.dircache import DirCache
+from fsspec.implementations.dirfs import DirFileSystem
 
 import pyathena
 from pyathena.filesystem import register_s3_filesystem
 from pyathena.filesystem.s3 import S3File, S3FileSystem
+from pyathena.filesystem.s3_executor import S3AioExecutor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import S3Object, S3ObjectType, S3StorageClass
 from pyathena.util import RetryConfig
 from tests import ENV
@@ -159,6 +168,21 @@ class TestS3FileSystem:
             key=key,
         )
 
+    @staticmethod
+    def _barrier_dircache(key):
+        # Build a DirCache that holds every reader of the key until two
+        # threads have read it, so that both read before either deletes.
+        barrier = threading.Barrier(2, timeout=5)
+
+        class BarrierDirCache(DirCache):
+            def __getitem__(self, item):
+                value = super().__getitem__(item)
+                if item == key:
+                    barrier.wait()
+                return value
+
+        return BarrierDirCache()
+
     def test_get_client_compatible_with_s3fs(self):
         # Only constructs a boto3 client; no AWS access.
         fs = S3FileSystem(
@@ -263,6 +287,202 @@ class TestS3FileSystem:
         # listing find nothing, instead of the cached object answering.
         fs._call.side_effect = [FileNotFoundError("bucket/a/c.txt"), {}]
         assert not fs.exists("s3://bucket/a/c.txt")
+
+    @staticmethod
+    def _sent_delete_objects(fs):
+        return sorted(
+            (c.kwargs["Bucket"], c.kwargs["Delete"]["Objects"])
+            for c in fs._call.call_args_list
+            if c.args == (fs._client.delete_objects,)
+        )
+
+    def test_rm_paths_across_buckets(self):
+        # GH-971: a list of paths was rejected, and every request went to the
+        # bucket of one path.
+        fs = self._make_fs()
+        fs._call.return_value = {}
+
+        fs.rm(["s3://b1/a", "s3://b2/b", "s3://b1/c"], ExpectedBucketOwner="111122223333")
+        assert self._sent_delete_objects(fs) == [
+            ("b1", [{"Key": "a"}, {"Key": "c"}]),
+            ("b2", [{"Key": "b"}]),
+        ]
+        for c in fs._call.call_args_list:
+            assert c.kwargs["ExpectedBucketOwner"] == "111122223333"
+            assert c.kwargs["Delete"]["Quiet"] is True
+
+    def test_rm_version(self):
+        # GH-971: expand_path treated "?" in the version query as a wildcard.
+        fs = self._make_fs()
+        fs._call.return_value = {}
+        fs.dircache["bucket/a.csv"] = self._file_object("a.csv")
+
+        fs.rm("s3://bucket/a.csv?versionId=v1", recursive=True)
+        assert self._sent_delete_objects(fs) == [
+            ("bucket", [{"Key": "a.csv", "VersionId": "v1"}]),
+        ]
+        assert "bucket/a.csv" not in fs.dircache
+
+        fs._call.reset_mock()
+        fs.rm(["s3://bucket/a.csv?versionId=v1", "s3://bucket/b.csv"])
+        assert self._sent_delete_objects(fs) == [
+            ("bucket", [{"Key": "a.csv", "VersionId": "v1"}, {"Key": "b.csv"}]),
+        ]
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "s3://bucket",
+            "s3://bucket/",
+            "s3://bucket?versionId=v1",
+            # expand_path strips the slashes to the bucket.
+            "s3://bucket//",
+            ["s3://bucket/a", "s3://bucket"],
+        ],
+    )
+    def test_rm_bucket(self, path):
+        fs = self._make_fs()
+        fs._call.return_value = {}
+
+        with pytest.raises(ValueError, match="Cannot delete the bucket"):
+            fs.rm(path, recursive=True)
+        fs._call.assert_not_called()
+
+    def test_rm_errors(self):
+        # GH-971: S3 reports the objects it could not delete in a successful
+        # response, which rm() ignored.
+        fs = self._make_fs()
+        fs._call.return_value = {
+            "Errors": [{"Key": "locked", "Code": "AccessDenied", "Message": "Access Denied"}]
+        }
+        with pytest.raises(OSError, match=r"bucket/locked \(AccessDenied: Access Denied\)"):
+            fs.rm("s3://bucket/locked")
+
+        fs._call.return_value = {
+            "Errors": [
+                {"Key": "locked", "Code": "AccessDenied", "Message": "Access Denied"},
+                {"Key": "a", "VersionId": "v1", "Code": "InternalError", "Message": "Error"},
+            ]
+        }
+        fs.dircache["bucket/b"] = self._file_object("b")
+
+        with pytest.raises(OSError, match="Failed to delete objects: ") as exc_info:
+            fs.rm(["s3://bucket/locked", "s3://bucket/a?versionId=v1", "s3://bucket/b"])
+        assert str(exc_info.value) == (
+            "Failed to delete objects: "
+            "bucket/a?versionId=v1 (InternalError: Error), "
+            "bucket/locked (AccessDenied: Access Denied)"
+        )
+        # The deleted object is not left in the cache.
+        assert "bucket/b" not in fs.dircache
+
+    @pytest.mark.parametrize("name", ["Bucket", "Delete"])
+    def test_rm_request_target_kwargs(self, name):
+        fs = self._make_fs()
+
+        with pytest.raises(TypeError, match=f"unexpected keyword argument '{name}'"):
+            fs.rm("s3://bucket/a", **{name: "other"})
+        fs._call.assert_not_called()
+
+    def test_rm_request_error_keeps_errors(self):
+        fs = self._make_fs()
+
+        def call(method, **request):
+            if request["Bucket"] == "b1":
+                raise PermissionError("Access Denied")
+            return {"Errors": [{"Key": "b", "Code": "AccessDenied", "Message": "Access Denied"}]}
+
+        fs._call.side_effect = call
+        with pytest.raises(PermissionError, match="Access Denied") as exc_info:
+            fs.rm(["s3://b1/a", "s3://b2/b"])
+        assert exc_info.value.__notes__ == [
+            "Failed to delete objects: b2/b (AccessDenied: Access Denied)"
+        ]
+
+    def test_rm_requests_invalidate_shared_parent(self):
+        # The request threads invalidate the shared parent "bucket/dir" at
+        # once. DirCache.pop() reads before it deletes, so the second delete
+        # raised KeyError when both threads had read the entry.
+        fs = self._make_fs()
+        fs._call.return_value = {}
+        fs.DELETE_OBJECTS_MAX_KEYS = 1
+        fs.dircache = self._barrier_dircache("bucket/dir")
+        fs.dircache["bucket/dir"] = []
+
+        fs.rm(["s3://bucket/dir/a", "s3://bucket/dir/b"])
+        assert fs._call.call_count == 2
+        assert "bucket/dir" not in fs.dircache._cache
+
+    @pytest.mark.parametrize(
+        ("key", "listing", "read"),
+        [
+            ("bucket", False, lambda fs: fs._head_bucket("bucket")),
+            ("bucket/key", False, lambda fs: fs._head_object("bucket/key")),
+            ("", True, lambda fs: fs._ls_buckets()),
+            (("bucket/dir", "/"), True, lambda fs: fs._ls_dirs("bucket/dir")),
+        ],
+    )
+    def test_cache_read_with_concurrent_invalidation(self, key, listing, read):
+        # Another thread invalidates the entry right after this thread looks
+        # it up. Checking the key and then reading it raised KeyError.
+        class InvalidatingDirCache(DirCache):
+            def __getitem__(self, item):
+                value = super().__getitem__(item)
+                if item == key:
+                    self._cache.pop(item, None)
+                return value
+
+        fs = self._make_fs()
+        fs.dircache = InvalidatingDirCache()
+        cached = [self._file_object("dir/a")] if listing else self._file_object("key")
+        fs.dircache[key] = cached
+
+        assert read(fs) is cached
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("key", "call", "evict"),
+        [
+            (
+                "bucket",
+                {"side_effect": FileNotFoundError("bucket")},
+                lambda fs: fs._head_bucket("bucket", refresh=True),
+            ),
+            (
+                "bucket/key",
+                {"side_effect": FileNotFoundError("bucket/key")},
+                lambda fs: fs._head_object("bucket/key", refresh=True),
+            ),
+            (
+                ("bucket/dir", "/"),
+                {"return_value": {}},
+                lambda fs: fs._ls_dirs("bucket/dir", refresh=True),
+            ),
+        ],
+    )
+    def test_cache_eviction_with_concurrent_invalidation(self, key, call, evict):
+        # Two threads evict the same entry at once. DirCache.pop() reads
+        # before it deletes, so the second delete raised KeyError when both
+        # threads had read the entry.
+        fs = self._make_fs()
+        fs._call.configure_mock(**call)
+        fs.dircache = self._barrier_dircache(key)
+        fs.dircache[key] = []
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(evict, fs) for _ in range(2)]
+            for future in futures:
+                future.result()
+        assert key not in fs.dircache._cache
+
+    def test_rm_request_error_invalidates_cache(self):
+        fs = self._make_fs()
+        fs._call.side_effect = PermissionError("Access Denied")
+        fs.dircache["bucket/a"] = self._file_object("a")
+
+        with pytest.raises(PermissionError, match="Access Denied"):
+            fs.rm("s3://bucket/a")
+        assert "bucket/a" not in fs.dircache
 
     @pytest.mark.parametrize(
         ("prefix", "next_token"),
@@ -501,6 +721,18 @@ class TestS3FileSystem:
         with pytest.raises(ValueError, match="version"):
             fs.pipe_file("s3://bucket/key?versionId=12345abcde", b"data")
 
+    def test_pipe_file_non_contiguous_memoryview(self):
+        # A non-contiguous memoryview within the block size in items, 4 items
+        # of 8 bytes here, is uploaded with PutObject, as the buffered path
+        # cannot write it.
+        fs = self._make_fs()
+        fs._put_object = mock.MagicMock()
+        value = memoryview(b"ab" * 8).cast("H")[::2]
+
+        fs.pipe_file("s3://bucket/key", value, block_size=6)
+
+        fs._put_object.assert_called_once_with(bucket="bucket", key="key", body=b"ab" * 4)
+
     def test_pipe_file_small_drops_max_workers(self):
         fs = self._make_fs()
         fs._put_object = mock.MagicMock()
@@ -508,6 +740,82 @@ class TestS3FileSystem:
         # max_workers is an open() parameter and is not sent to PutObject.
         fs.pipe_file("s3://bucket/key", b"data", max_workers=2)
         fs._put_object.assert_called_once_with(bucket="bucket", key="key", body=b"data")
+
+    @pytest.mark.parametrize(
+        ("size", "block_size", "min_block_size"),
+        [
+            # The data fits in the maximum number of parts.
+            (12, 4, None),
+            # GH-953: more data is rejected with the minimum block size,
+            (13, 4, 5),
+            # which is at least the minimum part size.
+            (5, 1, 4),
+        ],
+    )
+    def test_check_multipart_upload_size(self, size, block_size, min_block_size):
+        fs = self._make_fs()
+        fs.MULTIPART_UPLOAD_MIN_PART_SIZE = 4
+        fs.MULTIPART_UPLOAD_MAX_PARTS = 3
+
+        if min_block_size is None:
+            fs._check_multipart_upload_size("s3://bucket/key", size, block_size)
+        else:
+            with pytest.raises(ValueError, match=f"at least {min_block_size} bytes"):
+                fs._check_multipart_upload_size("s3://bucket/key", size, block_size)
+
+    @pytest.mark.parametrize("kwargs", [{"block_size": 4}, {}])
+    def test_put_file_exceeding_max_parts(self, tmp_path, kwargs):
+        # GH-953: a file that does not fit in the maximum number of parts is
+        # rejected before anything is uploaded.
+        fs = self._make_fs()
+        fs.MULTIPART_UPLOAD_MAX_PARTS = 3
+        fs.default_block_size = 4
+        fs.open = mock.MagicMock()
+        lpath = tmp_path / "data"
+        lpath.write_bytes(b"a" * 13)
+
+        with pytest.raises(ValueError, match="block_size"):
+            fs.put_file(str(lpath), "s3://bucket/key", **kwargs)
+        fs.open.assert_not_called()
+        fs._call.assert_not_called()
+
+    def test_put_file_block_size(self, tmp_path):
+        # block_size is passed to open() instead of the S3 API.
+        fs = self._make_fs()
+        fs.open = mock.MagicMock()
+        fs.open.return_value.__enter__.return_value.blocksize = 8
+        lpath = tmp_path / "data"
+        lpath.write_bytes(b"a" * 13)
+
+        fs.put_file(str(lpath), "s3://bucket/key", block_size=8)
+
+        fs.open.assert_called_once_with(
+            "s3://bucket/key", "wb", block_size=8, s3_additional_kwargs={}
+        )
+
+    @pytest.mark.parametrize(
+        ("value", "kwargs"),
+        [
+            (b"a" * 13, {"block_size": 4}),
+            (b"a" * 13, {}),
+            # The size of a memoryview is counted in bytes, not items.
+            (memoryview(b"a" * 16).cast("I"), {}),
+        ],
+    )
+    def test_pipe_file_exceeding_max_parts(self, value, kwargs):
+        # GH-953: data that does not fit in the maximum number of parts is
+        # rejected before anything is uploaded.
+        fs = self._make_fs()
+        fs.MULTIPART_UPLOAD_MAX_PARTS = 3
+        fs.default_block_size = 4
+        fs.open = mock.MagicMock()
+        fs._put_object = mock.MagicMock()
+
+        with pytest.raises(ValueError, match="block_size"):
+            fs.pipe_file("s3://bucket/key", value, **kwargs)
+        fs.open.assert_not_called()
+        fs._put_object.assert_not_called()
+        fs._call.assert_not_called()
 
     def test_open_max_workers(self):
         fs = self._make_fs()
@@ -551,6 +859,69 @@ class TestS3FileSystem:
         with pytest.raises(ValueError, match="version specified"):
             fs.open(path, mode, **kwargs)
 
+    @pytest.mark.parametrize("mode", ["wb", "ab", "xb"])
+    @pytest.mark.parametrize(
+        ("path", "block_size", "match"),
+        [
+            # GH-926: the message states the accepted range.
+            (
+                "s3://bucket/key",
+                S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE - 1,
+                r"between 5 MiB \(5242880 bytes\) and 5 GiB \(5368709120 bytes\), inclusive",
+            ),
+            # GH-952: a part cannot be larger than the maximum part size.
+            ("s3://bucket/key", S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE + 1, "between"),
+            ("s3://bucket", S3FileSystem.DEFAULT_BLOCK_SIZE, "does not contain a key"),
+        ],
+    )
+    def test_open_invalid_for_writing(self, monkeypatch, mode, path, block_size, match):
+        # GH-976: an open() that fails validation sends no request and leaves
+        # no half-initialized file, whose garbage collection would close it.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs._call.side_effect = AssertionError("No request is expected.")
+        unraisable = []
+        monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+
+        with pytest.raises(ValueError, match=match):
+            fs.open(path, mode, block_size=block_size)
+        gc.collect()
+
+        assert unraisable == []
+
+    def test_open_append_lookup_failure(self, monkeypatch):
+        # GH-976: an append whose lookup of the existing object fails leaves
+        # no half-initialized file, whose garbage collection would close it.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+
+        def exists(path):
+            # A new exception each time: one kept by a mock would keep its
+            # traceback, and the file, alive.
+            raise PermissionError("denied")
+
+        fs.exists = exists
+        unraisable = []
+        monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+
+        with pytest.raises(PermissionError, match="denied"):
+            fs.open("s3://bucket/key", "ab")
+        gc.collect()
+
+        assert unraisable == []
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "block_size",
+        [S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE, S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE],
+    )
+    def test_open_block_size_limits_for_writing(self, block_size):
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+
+        with fs.open("s3://bucket/key", "wb", block_size=block_size) as f:
+            assert f.blocksize == block_size
+
     @pytest.mark.parametrize(
         ("path", "expected"),
         [
@@ -570,10 +941,10 @@ class TestS3FileSystem:
             fs._client.get_object, Bucket="bucket", Key="key", VersionId=expected
         )
 
-        # A range is resolved against the size of the same version.
+        # A negative offset is resolved against the size of the same version.
         fs._call.reset_mock()
         fs._call.return_value = {"Body": io.BytesIO(b"ta")}
-        assert fs.cat_file(path, start=2, end=4, version_id="v1") == b"ta"
+        assert fs.cat_file(path, start=-8, end=-6, version_id="v1") == b"ta"
         fs.info.assert_called_once_with(path, version_id=expected)
         fs._call.assert_called_once_with(
             fs._client.get_object,
@@ -582,6 +953,221 @@ class TestS3FileSystem:
             Range="bytes=2-3",
             VersionId=expected,
         )
+
+    def _make_object_fs(self, data):
+        # A filesystem holding one object at s3://bucket/key whose client
+        # answers GetObject like S3: the last bytes for a suffix range,
+        # InvalidRange when the range starts at or past the end of the
+        # object, and a failure on a range that S3 would answer with the
+        # whole object (last byte before the first).
+        # info() reports the given size, and the requested ranges are
+        # recorded.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs._call = functools.partial(S3FileSystem._call, fs)
+        fs.info = mock.MagicMock(return_value=self._file_object("key"))
+        fs.info.return_value.size = len(data)
+        ranges = []
+
+        def get_object(**request):
+            range_ = request.get("Range")
+            ranges.append(range_)
+            if range_ is None:
+                return {"Body": io.BytesIO(data)}
+            if suffix := re.fullmatch(r"bytes=-(\d+)", range_):
+                return {"Body": io.BytesIO(data[-int(suffix[1]) :])}
+            match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_)
+            assert match, range_
+            first = int(match[1])
+            last = int(match[2]) if match[2] else len(data) - 1
+            assert not match[2] or first <= last, range_
+            if first >= len(data):
+                raise botocore.exceptions.ClientError(
+                    {
+                        "Error": {"Code": "InvalidRange", "Message": "Not satisfiable"},
+                        "ResponseMetadata": {"HTTPStatusCode": 416},
+                    },
+                    "GetObject",
+                )
+            return {"Body": io.BytesIO(data[first : last + 1])}
+
+        fs._client.get_object.side_effect = get_object
+        return fs, ranges
+
+    @pytest.mark.parametrize(
+        ("start", "end"),
+        [
+            (None, 5),
+            (5, None),
+            (1, -1),
+            (-5, None),
+            (-10, None),
+            (-100, None),
+            (5, 100),
+            (-100, 5),
+            # Empty ranges.
+            (0, 0),
+            (5, 5),
+            (7, 3),
+            (10, None),
+            (12, None),
+            (12, 20),
+            (None, -20),
+            (-3, -5),
+        ],
+    )
+    def test_cat_file_range(self, start, end):
+        data = b"0123456789"
+        fs, ranges = self._make_object_fs(data)
+
+        # The range selects bytes like a slice.
+        assert fs.cat_file("s3://bucket/key", start=start, end=end) == data[start:end]
+        suffix = (start or 0) < 0 and end is None
+        negative = (start or 0) < 0 or (end or 0) < 0
+        empty = end is not None and 0 <= end <= (start or 0)
+        # Only a negative offset with an end, a negative end, or an empty
+        # range looks up the object.
+        assert fs.info.called == ((negative and not suffix) or empty)
+        if suffix:
+            assert ranges == [f"bytes={start}"]
+        if empty:
+            assert ranges == []
+
+    def test_cat_file_range_stale_size(self):
+        fs, ranges = self._make_object_fs(b"0123456789abcdefghij")
+        # A cached entry from before the object grew.
+        fs.info.return_value.size = 10
+
+        assert fs.cat_file("s3://bucket/key", start=10, end=20) == b"abcdefghij"
+        assert fs.cat_file("s3://bucket/key", start=15) == b"fghij"
+        assert fs.cat_file("s3://bucket/key", start=-5) == b"fghij"
+        assert ranges == ["bytes=10-19", "bytes=15-", "bytes=-5"]
+
+    def test_cat_file_suffix_range_key_ending_in_slash(self):
+        fs, _ = self._make_object_fs(b"abc")
+        # info() reports a key ending in "/" as a directory.
+        fs.info.return_value = S3FileSystem._directory_object("bucket", "dir")
+
+        assert fs.cat_file("s3://bucket/dir/", start=-2) == b"bc"
+        fs._client.get_object.assert_called_once_with(Bucket="bucket", Key="dir/", Range="bytes=-2")
+        fs.info.assert_not_called()
+
+    def test_cat_file_range_errors(self):
+        fs = self._make_fs()
+        fs._call = functools.partial(S3FileSystem._call, fs)
+        fs._client.get_object.side_effect = botocore.exceptions.ClientError(
+            {"Error": {"Code": "NoSuchKey", "Message": "No such key"}}, "GetObject"
+        )
+
+        # Errors other than InvalidRange are raised.
+        with pytest.raises(FileNotFoundError):
+            fs.cat_file("s3://bucket/dir", start=0, end=5)
+        fs._client.get_object.side_effect = botocore.exceptions.ClientError(
+            {
+                "Error": {"Code": "InvalidRange", "Message": "Not satisfiable"},
+                "ResponseMetadata": {"HTTPStatusCode": 416},
+            },
+            "GetObject",
+        )
+        # InvalidRange without a range is not taken as an empty read.
+        with pytest.raises(OSError, match="Not satisfiable"):
+            fs.cat_file("s3://bucket/key")
+
+    @pytest.mark.parametrize(("start", "end"), [(0, 0), (5, 3), (None, 0)])
+    def test_cat_file_empty_range_missing(self, start, end):
+        fs = self._make_fs()
+        fs.info = mock.MagicMock(side_effect=FileNotFoundError("bucket/missing"))
+
+        # An empty range of a missing object is not read as empty.
+        with pytest.raises(FileNotFoundError):
+            fs.cat_file("s3://bucket/missing", start=start, end=end)
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize(("start", "end"), [(-5, 3), (0, -1), (5, 5)])
+    def test_cat_file_range_directory(self, start, end):
+        fs = self._make_fs()
+        fs.info = mock.MagicMock(return_value=S3FileSystem._directory_object("bucket", "dir"))
+
+        # A prefix is not read as an empty object.
+        with pytest.raises(FileNotFoundError):
+            fs.cat_file("s3://bucket/dir", start=start, end=end)
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize(("start", "end"), [(None, None), (-1, None), (0, 5)])
+    def test_cat_file_bucket(self, start, end):
+        fs = self._make_fs()
+
+        with pytest.raises(FileNotFoundError):
+            fs.cat_file("s3://bucket/", start=start, end=end)
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize(("start", "end"), [(-2, -1), (0, -1), (5, 5)])
+    def test_cat_file_range_key_ending_in_slash(self, start, end):
+        fs, ranges = self._make_object_fs(b"0123456789")
+        # info() of "dir/" describes the object "dir" when both exist.
+        fs.info.return_value = self._file_object("dir")
+
+        # The size of "dir" is not used for the range of "dir/".
+        with pytest.raises(FileNotFoundError):
+            fs.cat_file("s3://bucket/dir/", start=start, end=end)
+        assert ranges == []
+
+    def test_get_file_directory(self, tmp_path):
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs.info = mock.MagicMock(return_value=S3FileSystem._directory_object("bucket", "dir"))
+
+        with pytest.raises(FileNotFoundError):
+            fs.get_file("s3://bucket/dir", str(tmp_path / "dir"))
+        assert list(tmp_path.iterdir()) == []
+
+    def test_cat_ranges_range(self):
+        fs, ranges = self._make_object_fs(b"0123456789")
+
+        assert fs.cat_ranges(["s3://bucket/key"] * 4, [5, 0, -100, 12], [5, 3, 5, 20]) == [
+            b"",
+            b"012",
+            b"01234",
+            b"",
+        ]
+        assert sorted(ranges) == ["bytes=0-2", "bytes=0-4", "bytes=12-19"]
+
+    def test_get_object_empty_range(self):
+        fs = self._make_fs()
+
+        with pytest.raises(ValueError, match="empty range"):
+            fs._get_object("bucket", "key", ranges=(5, 5))
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("size", "offset", "open_kwargs"),
+        [
+            # FirstChunkCache fetches an empty range at the end of the object.
+            (10, 10, {"cache_type": "first"}),
+            # MMapCache fetches an empty last block.
+            (32, 16, {"cache_type": "mmap", "block_size": 16}),
+            # A read past the end is split into ranges for parallel requests.
+            (40, 20, {"cache_type": "none", "block_size": 16, "max_workers": 4}),
+        ],
+    )
+    def test_read_to_end(self, size, offset, open_kwargs):
+        data = bytes(range(size))
+        fs, _ = self._make_object_fs(data)
+
+        with fs.open("s3://bucket/key", "rb", **open_kwargs) as f:
+            assert f.read(offset) == data[:offset]
+            assert f.read(size) == data[offset:]
+            assert f.read(size) == b""
+
+    @pytest.mark.parametrize("cache_type", ["bytes", "all", "first"])
+    def test_open_directory(self, cache_type):
+        fs = self._make_fs()
+        fs.info = mock.MagicMock(return_value=S3FileSystem._directory_object("bucket", "dir"))
+
+        # A prefix is not read as an empty object.
+        with pytest.raises(FileNotFoundError):
+            fs.open("s3://bucket/dir", "rb", cache_type=cache_type)
+        fs._call.assert_not_called()
 
     def test_finish_multipart_upload(self):
         fs = self._make_fs()
@@ -637,6 +1223,80 @@ class TestS3FileSystem:
                 bucket="bucket", key="key", upload_id="uploadid", futures=[future]
             )
 
+    def test_finish_multipart_upload_waits_for_running_parts(self):
+        # GH-976: a part that is still uploading when the upload is aborted
+        # may be stored after the abort, so the abort waits for it. The
+        # parts that have not started are cancelled.
+        fs = self._make_fs()
+        fs._complete_multipart_upload = mock.MagicMock()
+        events = []
+        fs._call.side_effect = lambda *args, **kwargs: events.append("abort")
+        failed: Future[SimpleNamespace] = Future()
+        failed.set_exception(RuntimeError("upload failed"))
+        started = threading.Event()
+        release = threading.Event()
+
+        def upload_part():
+            started.set()
+            # Uploading until the abort waits for it, so that an abort that
+            # does not wait comes first.
+            release.wait(5)
+            events.append("part 2 stored")
+
+        def wait_parts(futures):
+            release.set()
+            return wait(futures)
+
+        with (
+            ThreadPoolExecutor(max_workers=1) as executor,
+            mock.patch("pyathena.filesystem.s3.wait", side_effect=wait_parts) as waited,
+        ):
+            running = executor.submit(upload_part)
+            pending = executor.submit(events.append, "part 3 stored")
+            started.wait(5)
+            with pytest.raises(RuntimeError, match="upload failed"):
+                fs._finish_multipart_upload(
+                    bucket="bucket",
+                    key="key",
+                    upload_id="uploadid",
+                    futures=[failed, running, pending],
+                )
+
+        assert events == ["part 2 stored", "abort"]
+        waited.assert_called_once_with([failed, running])
+        assert pending.cancelled()
+
+    def test_finish_multipart_upload_does_not_wait_for_cancelled_parts(self):
+        # GH-976: a cancelled part is not waited for, as nothing may
+        # acknowledge its cancellation, e.g., an event loop blocked by the
+        # caller.
+        fs = self._make_fs()
+        fs._complete_multipart_upload = mock.MagicMock()
+        failed: Future[SimpleNamespace] = Future()
+        failed.set_exception(RuntimeError("upload failed"))
+        never_started: Future[SimpleNamespace] = Future()
+        errors = []
+
+        def finish():
+            try:
+                fs._finish_multipart_upload(
+                    bucket="bucket",
+                    key="key",
+                    upload_id="uploadid",
+                    futures=[failed, never_started],
+                )
+            except RuntimeError as e:
+                errors.append(e)
+
+        thread = threading.Thread(target=finish, daemon=True)
+        thread.start()
+        thread.join(5)
+
+        assert not thread.is_alive()
+        assert [str(e) for e in errors] == ["upload failed"]
+        assert never_started.cancelled()
+        fs._call.assert_called_once()
+
     @pytest.mark.parametrize(
         ("size", "block_size", "ranges"),
         [
@@ -663,6 +1323,32 @@ class TestS3FileSystem:
     )
     def test_get_copy_ranges(self, size, block_size, ranges):
         assert self._make_fs()._get_copy_ranges(size, block_size) == ranges
+
+    @pytest.mark.parametrize(
+        ("size", "num_ranges"),
+        [
+            # The block size splits the object into the maximum number of parts.
+            (10_000 * 5 * 2**20, 10_000),
+            # GH-953: a larger object is split by a larger size instead of
+            # into more parts than the maximum,
+            (10_000 * 5 * 2**20 + 1, 9_999),
+            (50 * 2**30, 10_000),
+            # including the maximum object size.
+            (5 * 2**40, 10_000),
+        ],
+    )
+    def test_get_copy_ranges_max_parts(self, size, num_ranges):
+        fs = self._make_fs()
+        ranges = fs._get_copy_ranges(size, 5 * 2**20)
+
+        assert len(ranges) == num_ranges
+        assert ranges[0][0] == 0
+        assert ranges[-1][1] == size
+        assert all(end == start for (_, end), (start, _) in pairwise(ranges))
+        assert all(
+            fs.MULTIPART_UPLOAD_MIN_PART_SIZE <= end - start <= fs.MULTIPART_UPLOAD_MAX_PART_SIZE
+            for start, end in ranges
+        )
 
     @pytest.mark.parametrize("max_workers", [1, 4])
     def test_copy_object_with_multipart_upload_part_sizes(self, max_workers):
@@ -693,6 +1379,31 @@ class TestS3FileSystem:
             (1, (0, 5 * 2**29 + 2**19)),
             (2, (5 * 2**29 + 2**19, 5 * 2**30 + 2**20)),
         ]
+
+    @pytest.mark.parametrize(
+        "block_size",
+        [
+            S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE - 1,
+            S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE + 1,
+        ],
+    )
+    def test_copy_object_with_multipart_upload_invalid_block_size(self, block_size):
+        # GH-926: the message states the accepted range.
+        fs = self._make_fs()
+
+        with pytest.raises(
+            ValueError,
+            match=r"between 5 MiB \(5242880 bytes\) and 5 GiB \(5368709120 bytes\), inclusive",
+        ):
+            fs._copy_object_with_multipart_upload(
+                bucket1="bucket",
+                key1="src",
+                size1=5 * 2**30 + 2**20,
+                bucket2="bucket",
+                key2="dst",
+                block_size=block_size,
+            )
+        fs._call.assert_not_called()
 
     def test_head_object_version_aware(self):
         fs = self._make_fs()
@@ -914,6 +1625,33 @@ class TestS3FileSystem:
             ("bucket/path/key", "v2", 4),
             ("bucket/path/key", "v1", 2),
         ]
+
+    def test_dir_filesystem(self):
+        # DirFileSystem copies every entry with copy() before renaming it.
+        fs = self._make_fs()
+        fs._call.side_effect = [
+            {
+                "CommonPrefixes": [{"Prefix": "path/dir/"}],
+                "Contents": [{"Key": "path/key", "Size": 4}],
+                "IsTruncated": False,
+            },
+            {"ContentLength": 4, "ETag": '"etag"'},
+        ]
+        dir_fs = DirFileSystem(path="bucket/path", fs=fs)
+
+        actual = dir_fs.ls("", detail=True)
+        assert [(f["name"], f["type"]) for f in actual] == [("dir", "directory"), ("key", "file")]
+        assert all(isinstance(f, S3Object) for f in actual)
+        actual = dir_fs.info("key")
+        assert isinstance(actual, S3Object)
+        assert (actual.name, actual.size) == ("key", 4)
+        # The cached entries keep their full names.
+        assert [f.name for f in fs.ls("bucket/path", detail=True)] == [
+            "bucket/path/dir",
+            "bucket/path/key",
+        ]
+        assert fs.info("bucket/path/key").name == "bucket/path/key"
+        assert fs._call.call_count == 2
 
     def test_metadata_with_version_id(self):
         fs = self._make_fs()
@@ -2146,6 +2884,7 @@ class TestS3File:
         file.s3_additional_kwargs = {}
         file.autocommit = autocommit
         file.blocksize = S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE
+        file.fs.MULTIPART_UPLOAD_MAX_PARTS = S3FileSystem.MULTIPART_UPLOAD_MAX_PARTS
         file.append_block = False
         file.multipart_upload = None
         file.multipart_upload_parts = []
@@ -2178,6 +2917,7 @@ class TestS3File:
         fs = mock.MagicMock(spec=S3FileSystem)
         fs.MULTIPART_UPLOAD_MIN_PART_SIZE = 4
         fs.MULTIPART_UPLOAD_MAX_PART_SIZE = 64
+        fs.MULTIPART_UPLOAD_MAX_PARTS = S3FileSystem.MULTIPART_UPLOAD_MAX_PARTS
         fs.exists.return_value = True
         fs.info.return_value = S3Object(
             init={"ContentLength": len(existing)},
@@ -2291,6 +3031,125 @@ class TestS3File:
         assert all(size >= fs.MULTIPART_UPLOAD_MIN_PART_SIZE for size in sizes[:-1])
         assert all(size <= fs.MULTIPART_UPLOAD_MAX_PART_SIZE for size in sizes)
 
+    @staticmethod
+    def _write_and_close(f, writes: list[bytes]) -> None:
+        with f:
+            for data in writes:
+                f.write(data)
+
+    @pytest.mark.parametrize(
+        ("existing", "mode", "writes"),
+        [
+            # The data fills the maximum number of parts.
+            (b"", "wb", [b"a" * 4] * 3),
+            (b"", "wb", [b"a" * 14]),
+            # The parts copied from the existing object in an append count
+            # toward the maximum.
+            (b"a" * 6, "ab", [b"b" * 4] * 2),
+        ],
+    )
+    @pytest.mark.parametrize("autocommit", [True, False])
+    def test_write_max_parts(self, existing, mode, writes, autocommit):
+        fs = self._make_append_fs(existing)
+        fs.MULTIPART_UPLOAD_MAX_PARTS = 3
+
+        f = S3File(fs, "s3://bucket/key.txt", mode=mode, block_size=4, autocommit=autocommit)
+        self._write_and_close(f, writes)
+        if not autocommit:
+            f.commit()
+
+        assert self._uploaded_object(fs, existing) == existing + b"".join(writes)
+        assert fs._upload_part_copy.call_count + fs._upload_part.call_count == 3
+
+    @pytest.mark.parametrize(
+        ("existing", "mode", "writes"),
+        [
+            # GH-953: the part after the maximum is not uploaded, whether it is
+            # flushed by a write()
+            (b"", "wb", [b"a" * 4] * 4),
+            # or by close(),
+            (b"", "wb", [b"a" * 12, b"b" * 3]),
+            # including after the parts copied in an append.
+            (b"a" * 6, "ab", [b"b" * 4] * 3),
+        ],
+    )
+    @pytest.mark.parametrize("autocommit", [True, False])
+    def test_write_exceeding_max_parts(self, existing, mode, writes, autocommit):
+        fs = self._make_append_fs(existing)
+        fs.MULTIPART_UPLOAD_MAX_PARTS = 3
+
+        executor = mock.MagicMock(wraps=S3ThreadPoolExecutor(max_workers=1))
+        f = S3File(
+            fs,
+            "s3://bucket/key.txt",
+            mode=mode,
+            block_size=4,
+            autocommit=autocommit,
+            executor=executor,
+        )
+        with pytest.raises(ValueError, match="block_size"):
+            self._write_and_close(f, writes)
+        # The upload is aborted, and committing a deferred write afterwards
+        # uploads nothing.
+        if not autocommit:
+            f.commit()
+
+        assert f.closed
+        # The submitted parts, some of which the abort may have cancelled.
+        assert [c.kwargs["part_number"] for c in executor.submit.call_args_list] == [1, 2, 3]
+        executor.shutdown.assert_called()
+        fs._call.assert_called_once_with(
+            "abort_multipart_upload", Bucket="bucket", Key="key.txt", UploadId="uploadid"
+        )
+        fs._finish_multipart_upload.assert_not_called()
+        fs._put_object.assert_not_called()
+
+    @pytest.mark.parametrize("autocommit", [True, False])
+    def test_write_exceeding_max_parts_abort_failure(self, autocommit):
+        # An abort failure is logged; the part limit error propagates, and
+        # neither closing the file nor committing a deferred write retries
+        # the upload or completes it.
+        fs = self._make_append_fs(b"")
+        fs.MULTIPART_UPLOAD_MAX_PARTS = 3
+        fs._call.side_effect = PermissionError("abort failed")
+
+        executor = mock.MagicMock(wraps=S3ThreadPoolExecutor(max_workers=1))
+        f = S3File(
+            fs,
+            "s3://bucket/key.txt",
+            mode="wb",
+            block_size=4,
+            autocommit=autocommit,
+            executor=executor,
+        )
+        with pytest.raises(ValueError, match="block_size"):
+            self._write_and_close(f, [b"a" * 4] * 4)
+        if not autocommit:
+            f.commit()
+
+        assert f.closed
+        assert [c.kwargs["part_number"] for c in executor.submit.call_args_list] == [1, 2, 3]
+        executor.shutdown.assert_called()
+        fs._call.assert_called_once()
+        fs._finish_multipart_upload.assert_not_called()
+        fs._put_object.assert_not_called()
+
+    def test_write_exceeding_max_parts_without_close(self):
+        # The executor of the closed file is shut down, as fsspec does not
+        # close it again when it is garbage collected.
+        fs = self._make_append_fs(b"")
+        fs.MULTIPART_UPLOAD_MAX_PARTS = 3
+        executor = mock.MagicMock(wraps=S3ThreadPoolExecutor(max_workers=1))
+        f = S3File(fs, "s3://bucket/key.txt", mode="wb", block_size=4, executor=executor)
+
+        for _ in range(3):
+            f.write(b"a" * 4)
+        with pytest.raises(ValueError, match="block_size"):
+            f.write(b"a" * 4)
+
+        assert f.closed
+        executor.shutdown.assert_called_once()
+
     def test_append_discard(self):
         # Rolling back an append aborts its multipart upload without the
         # existing object's metadata, which AbortMultipartUpload rejects,
@@ -2371,6 +3230,8 @@ class TestS3File:
 
     def test_format_ranges(self):
         assert S3File._format_ranges((0, 100)) == "bytes=0-99"
+        assert S3File._format_ranges((100, None)) == "bytes=100-"
+        assert S3File._format_ranges((-8, None)) == "bytes=-8"
 
     @pytest.mark.parametrize("autocommit", [True, False])
     def test_upload_chunk_small_file(self, autocommit):
@@ -2420,6 +3281,66 @@ class TestS3File:
         file.fs._put_object.assert_not_called()
         assert file.multipart_upload is None
         assert file.multipart_upload_parts == []
+
+    def test_discard_waits_for_running_parts(self):
+        # GH-976: a part that is still uploading when the upload is aborted
+        # may be stored after the abort, so the abort waits for it. The
+        # parts that have not started are cancelled.
+        file = self._make_write_file(b"", autocommit=False)
+        file.multipart_upload = SimpleNamespace(upload_id="uploadid")
+        events = []
+        file.fs._call.side_effect = lambda *args, **kwargs: events.append("abort")
+        started = threading.Event()
+        release = threading.Event()
+
+        def upload_part():
+            started.set()
+            # Uploading until the abort waits for it, so that an abort that
+            # does not wait comes first.
+            release.wait(5)
+            events.append("part 1 stored")
+
+        def wait_parts(futures):
+            release.set()
+            return wait(futures)
+
+        with (
+            ThreadPoolExecutor(max_workers=1) as executor,
+            mock.patch("pyathena.filesystem.s3.wait", side_effect=wait_parts) as waited,
+        ):
+            running = executor.submit(upload_part)
+            pending = executor.submit(events.append, "part 2 stored")
+            file.multipart_upload_parts = [running, pending]
+            started.wait(5)
+            file.discard()
+
+        assert events == ["part 1 stored", "abort"]
+        waited.assert_called_once_with([running])
+        assert pending.cancelled()
+
+    def test_discard_on_event_loop_thread(self):
+        # GH-976: the parts that have not started are cancelled and not
+        # waited for, so a rollback on the thread of the event loop that
+        # would run them does not block.
+        file = self._make_write_file(b"", autocommit=False)
+        file.multipart_upload = SimpleNamespace(upload_id="uploadid")
+        parts = []
+
+        async def rollback():
+            executor = S3AioExecutor(loop=asyncio.get_running_loop())
+            parts.extend(executor.submit(file.fs._upload_part) for _ in range(2))
+            file.multipart_upload_parts = list(parts)
+            file.discard()
+
+        thread = threading.Thread(target=asyncio.run, args=(rollback(),), daemon=True)
+        thread.start()
+        thread.join(5)
+
+        assert not thread.is_alive()
+        assert all(part.cancelled() for part in parts)
+        file.fs._upload_part.assert_not_called()
+        file.fs._call.assert_called_once()
+        assert file.fs._call.call_args.args[0] == "abort_multipart_upload"
 
     @pytest.mark.parametrize("autocommit", [True, False])
     def test_upload_chunk_multipart(self, autocommit):
