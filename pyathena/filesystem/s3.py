@@ -1568,10 +1568,10 @@ class S3FileSystem(AbstractFileSystem):
             f: The file to write to.
             value: The bytes to write.
         """
-        if isinstance(value, memoryview) and not value.c_contiguous:
-            # The buffer of the file cannot write a non-contiguous memoryview.
-            value = value.tobytes()
         try:
+            if isinstance(value, memoryview) and not value.c_contiguous:
+                # The buffer of the file cannot write a non-contiguous memoryview.
+                value = value.tobytes()
             f.write(value)
         except BaseException:
             f._close_without_commit()
@@ -2830,9 +2830,10 @@ class S3File(AbstractBufferedFile):
         Drops the buffered data, so that neither close() nor a deferred
         commit() uploads it, and aborts the multipart upload, if any. An
         abort failure is logged instead of raised, so it does not mask the
-        error that the caller is handling, and commit() does not complete
-        the upload afterwards. The executor is shut down here, as fsspec
-        does not close a closed file again when it is garbage collected.
+        error that the caller is handling. Even if the abort fails or is
+        interrupted, commit() does not complete the upload afterwards. The
+        executor is shut down here, as fsspec does not close a closed file
+        again when it is garbage collected.
         """
         self.buffer = None
         self.closed = True
@@ -2840,9 +2841,10 @@ class S3File(AbstractBufferedFile):
             self.discard()
         except Exception:
             _logger.exception(f"Failed to abort multipart upload to s3://{self.bucket}/{self.key}.")
+        finally:
             self.multipart_upload = None
             self.multipart_upload_parts = []
-        self._executor.shutdown()
+            self._executor.shutdown()
 
     def _initiate_upload(self) -> None:
         if not self.append_block and self.tell() < self.blocksize:
