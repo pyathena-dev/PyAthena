@@ -271,24 +271,24 @@ class AioS3FileSystem(AsyncFileSystem):
             self._sync_fs._expand_delete_paths, path, recursive=recursive, maxdepth=maxdepth
         )
         requests = self._sync_fs._delete_objects_requests(paths, **kwargs)
-        try:
-            responses = await asyncio.gather(
-                *[
-                    asyncio.to_thread(
-                        self._sync_fs._call, self._sync_fs._client.delete_objects, **request
-                    )
-                    for request in requests
-                ],
-                return_exceptions=True,
-            )
-        finally:
-            # A failed request may run beside requests that deleted objects.
+        results = asyncio.gather(
+            *[
+                asyncio.to_thread(
+                    self._sync_fs._call, self._sync_fs._client.delete_objects, **request
+                )
+                for request in requests
+            ],
+            return_exceptions=True,
+        )
+
+        def invalidate_cache(_: asyncio.Future[list[Any]]) -> None:
             for p in paths:
                 self._sync_fs.invalidate_cache(p)
-        for response in responses:
-            if isinstance(response, BaseException):
-                raise response
-        self._sync_fs._raise_delete_objects_errors(requests, cast(list[dict[str, Any]], responses))
+
+        # Invalidate after every request has finished, also after a failure
+        # or when _rm() is cancelled, since the threads cannot be stopped.
+        results.add_done_callback(invalidate_cache)
+        self._sync_fs._raise_delete_objects_errors(requests, await asyncio.shield(results))
 
     async def _cp_file(self, path1: str, path2: str, **kwargs) -> None:
         """Copy an S3 object, using async parallel multipart upload for large files."""

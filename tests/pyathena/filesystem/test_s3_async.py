@@ -290,6 +290,51 @@ class TestAioS3FileSystem:
         assert "bucket/a" not in sync_fs.dircache
 
     @pytest.mark.asyncio
+    async def test_rm_request_error_keeps_errors(self):
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+
+        def call(method, **request):
+            if request["Bucket"] == "b1":
+                raise PermissionError("Access Denied")
+            return {"Errors": [{"Key": "b", "Code": "AccessDenied", "Message": "Access Denied"}]}
+
+        fs._sync_fs._call = call
+        with pytest.raises(PermissionError, match="Access Denied") as exc_info:
+            await fs._rm(["s3://b1/a", "s3://b2/b"])
+        assert exc_info.value.__notes__ == [
+            "Failed to delete objects: b2/b (AccessDenied: Access Denied)"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_rm_cancel_invalidates_cache_after_requests(self):
+        # The request threads keep running after _rm() is cancelled, so the
+        # cache is invalidated when they finish.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        started = threading.Event()
+        release = threading.Event()
+
+        def call(method, **request):
+            started.set()
+            release.wait(10)
+            return {}
+
+        fs._sync_fs._call = call
+        fs.dircache["bucket/a"] = []
+        task = asyncio.create_task(fs._rm("s3://bucket/a"))
+        await asyncio.to_thread(started.wait, 10)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        fs.dircache["bucket/a"] = []
+
+        release.set()
+        for _ in range(100):
+            if "bucket/a" not in fs.dircache:
+                break
+            await asyncio.sleep(0.01)
+        assert "bucket/a" not in fs.dircache
+
+    @pytest.mark.asyncio
     async def test_rm_maxdepth(self):
         # GH-962: _rm() did not pass maxdepth when expanding the path.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)

@@ -318,11 +318,14 @@ class TestS3FileSystem:
             "s3://bucket",
             "s3://bucket/",
             "s3://bucket?versionId=v1",
+            # expand_path strips the slashes to the bucket.
+            "s3://bucket//",
             ["s3://bucket/a", "s3://bucket"],
         ],
     )
     def test_rm_bucket(self, path):
         fs = self._make_fs()
+        fs._call.return_value = {}
 
         with pytest.raises(ValueError, match="Cannot delete the bucket"):
             fs.rm(path, recursive=True)
@@ -355,6 +358,29 @@ class TestS3FileSystem:
         )
         # The deleted object is not left in the cache.
         assert "bucket/b" not in fs.dircache
+
+    @pytest.mark.parametrize("name", ["Bucket", "Delete"])
+    def test_rm_request_target_kwargs(self, name):
+        fs = self._make_fs()
+
+        with pytest.raises(TypeError, match=f"unexpected keyword argument '{name}'"):
+            fs.rm("s3://bucket/a", **{name: "other"})
+        fs._call.assert_not_called()
+
+    def test_rm_request_error_keeps_errors(self):
+        fs = self._make_fs()
+
+        def call(method, **request):
+            if request["Bucket"] == "b1":
+                raise PermissionError("Access Denied")
+            return {"Errors": [{"Key": "b", "Code": "AccessDenied", "Message": "Access Denied"}]}
+
+        fs._call.side_effect = call
+        with pytest.raises(PermissionError, match="Access Denied") as exc_info:
+            fs.rm(["s3://b1/a", "s3://b2/b"])
+        assert exc_info.value.__notes__ == [
+            "Failed to delete objects: b2/b (AccessDenied: Access Denied)"
+        ]
 
     def test_rm_request_error_invalidates_cache(self):
         fs = self._make_fs()

@@ -960,7 +960,8 @@ class S3FileSystem(AbstractFileSystem):
         versioned_paths, unversioned_paths = [], []
         for p in paths:
             _, key, version_id = self.parse_path(p)
-            if not key:
+            # expand_path strips the slashes of "bucket//" to the bucket.
+            if not key or not key.strip("/"):
                 raise ValueError("Cannot delete the bucket.")
             if version_id:
                 versioned_paths.append(p)
@@ -1028,7 +1029,7 @@ class S3FileSystem(AbstractFileSystem):
                 for request in requests
             ]
         # The executor has waited for every request, also after a failure.
-        self._raise_delete_objects_errors(requests, [f.result() for f in fs])
+        self._raise_delete_objects_errors(requests, [f.exception() or f.result() for f in fs])
 
     def _delete_objects_requests(self, paths: list[str], **kwargs) -> list[dict[str, Any]]:
         """Build the DeleteObjects requests that delete the objects.
@@ -1040,7 +1041,13 @@ class S3FileSystem(AbstractFileSystem):
 
         Returns:
             Requests of up to ``DELETE_OBJECTS_MAX_KEYS`` keys of one bucket each.
+
+        Raises:
+            TypeError: If kwargs has ``Bucket`` or ``Delete``.
         """
+        for name in ("Bucket", "Delete"):
+            if name in kwargs:
+                raise TypeError(f"rm() got an unexpected keyword argument '{name}'")
         quiet = kwargs.pop("Quiet", True)
         delete_objects: dict[str, list[dict[str, str]]] = {}
         for p in paths:
@@ -1065,28 +1072,41 @@ class S3FileSystem(AbstractFileSystem):
 
     @staticmethod
     def _raise_delete_objects_errors(
-        requests: list[dict[str, Any]], responses: list[dict[str, Any]]
+        requests: list[dict[str, Any]], results: list[dict[str, Any] | BaseException]
     ) -> None:
-        """Raise an error for the objects that DeleteObjects could not delete.
+        """Raise an error for the DeleteObjects requests that failed.
 
-        S3 reports these objects in the ``Errors`` of a successful response.
+        S3 reports the objects it could not delete in the ``Errors`` of a
+        successful response.
 
         Args:
             requests: The DeleteObjects requests.
-            responses: The responses, in the order of the requests.
+            results: The response or the exception of each request, in the
+                order of the requests.
 
         Raises:
-            OSError: If a response has errors.
+            BaseException: The first exception of the requests, with a note
+                that lists the objects of ``Errors``, if any.
+            OSError: If no request raised and a response has errors.
         """
+        exceptions = []
         errors = []
-        for request, response in zip(requests, responses, strict=True):
-            for error in response.get("Errors", []):
+        for request, result in zip(requests, results, strict=True):
+            if isinstance(result, BaseException):
+                exceptions.append(result)
+                continue
+            for error in result.get("Errors", []):
                 path = f"{request['Bucket']}/{error.get('Key')}"
                 if error.get("VersionId"):
                     path += f"?versionId={error['VersionId']}"
                 errors.append(f"{path} ({error.get('Code')}: {error.get('Message')})")
-        if errors:
-            raise OSError(f"Failed to delete objects: {', '.join(sorted(errors))}")
+        message = f"Failed to delete objects: {', '.join(sorted(errors))}" if errors else None
+        if exceptions:
+            if message:
+                exceptions[0].add_note(message)
+            raise exceptions[0]
+        if message:
+            raise OSError(message)
 
     def mkdir(self, path: str, create_parents: bool = True, **kwargs) -> None:
         """Create an S3 bucket.
