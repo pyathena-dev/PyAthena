@@ -742,3 +742,14 @@ class DefaultTypeConverter(Converter):
         if normalized not in self._parsed_hints:
             self._parsed_hints[normalized] = self._parser.parse(normalized)
         return self._parsed_hints[normalized]
+
+
+def _json_text_converter() -> DefaultTypeConverter:
+    """Return a ``DefaultTypeConverter`` that keeps json values as text.
+
+    Returns:
+        The converter.
+    """
+    converter = DefaultTypeConverter()
+    converter.set("json", _to_default)
+    return converter

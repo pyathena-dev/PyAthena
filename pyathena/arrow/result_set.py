@@ -12,7 +12,7 @@ from typing import (
 
 from pyathena import OperationalError
 from pyathena.arrow.util import to_column_info
-from pyathena.converter import Converter, _to_default
+from pyathena.converter import Converter, _json_text_converter, _to_default
 from pyathena.error import ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet
@@ -391,7 +391,7 @@ class AthenaArrowResultSet(AthenaResultSet):
         """
         import pyarrow as pa
 
-        rows = self._fetch_all_rows(converter or self._json_text_converter())
+        rows = self._fetch_all_rows(converter or _json_text_converter())
         if not rows:
             return pa.Table.from_pydict({})
         description = self.description if self.description else []

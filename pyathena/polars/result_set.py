@@ -20,7 +20,7 @@ from typing import (
 )
 
 from pyathena import OperationalError
-from pyathena.converter import Converter
+from pyathena.converter import Converter, _json_text_converter
 from pyathena.error import ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.polars.util import to_column_info
@@ -546,7 +546,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """
         import polars as pl
 
-        rows = self._fetch_all_rows(converter or self._json_text_converter())
+        rows = self._fetch_all_rows(converter or _json_text_converter())
         if not rows:
             return pl.DataFrame()
         description = self.description if self.description else []
