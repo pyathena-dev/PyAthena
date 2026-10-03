@@ -589,8 +589,9 @@ class S3FileSystem(AbstractFileSystem):
         exists, with a ListObjectsV2 request (``Delimiter="/"``,
         ``MaxKeys=1``) that checks whether it is a key prefix; a bucket path
         is looked up with HeadBucket. With ``version_aware``, a cached file
-        entry without a version ID is looked up again. An explicit version is
-        cached under its version-qualified path, apart from other versions.
+        entry without a version ID is looked up again. An explicit version
+        other than ``null``, which an overwrite replaces, is cached under its
+        version-qualified path, apart from other versions.
 
         Args:
             path: S3 path (e.g., "s3://bucket" or "s3://bucket/key").
