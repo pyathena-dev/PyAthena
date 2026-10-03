@@ -89,7 +89,8 @@ A multipart upload consists of at most 10,000 parts, one per block, so a write w
 the default block size can upload up to about 48.8 GiB (10,000 × 5 MiB). To write a
 larger object, use a block size of at least its size divided by 10,000, either with
 the `block_size` argument of `open` and `pipe` or with the `default_block_size`
-argument of `S3FileSystem`. A write that would need more parts raises `ValueError`
+argument of `S3FileSystem`. In an append, the parts copied from the existing object
+also count toward the limit. A write that would need more parts raises `ValueError`
 and aborts its multipart upload. Multipart copies with `cp` use parts large enough
 to stay within the limit.
 

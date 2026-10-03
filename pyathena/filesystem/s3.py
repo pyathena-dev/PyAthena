@@ -2483,8 +2483,9 @@ class S3File(AbstractBufferedFile):
                         f"Cannot upload more than {self.fs.MULTIPART_UPLOAD_MAX_PARTS} "
                         f"parts to s3://{self.bucket}/{self.key} with a block size of "
                         f"{self.blocksize} bytes. Write the file with a block_size, or "
-                        "a default_block_size of the filesystem, of at least its total "
-                        f"size divided by {self.fs.MULTIPART_UPLOAD_MAX_PARTS}."
+                        "a default_block_size of the filesystem, large enough for it to "
+                        f"fit in {self.fs.MULTIPART_UPLOAD_MAX_PARTS} parts, including "
+                        "the parts copied from the existing object in an append."
                     )
                 part_number += 1
                 self.multipart_upload_parts.append(
