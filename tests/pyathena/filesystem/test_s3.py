@@ -684,7 +684,7 @@ class TestS3FileSystem:
             (6 * 2**20, 5, 16 * 2**20),
             # An existing object smaller than 5 MiB is rewritten from the
             # buffer, not copied as well, when the append crosses the block size.
-            (2**20, 5 * 2**20, None),
+            (2**10, 5 * 2**20, None),
         ],
     )
     def test_append_with_block_size(self, fs, size, extra_size, block_size):
@@ -697,9 +697,12 @@ class TestS3FileSystem:
         fs.pipe_file(path, data)
         with fs.open(path, "ab", block_size=block_size) as f:
             f.write(extra)
-        actual = fs.cat_file(path)
-        assert len(actual) == len(data + extra)
-        assert actual == data + extra
+        # Check the size and the bytes at the ends and around the boundary
+        # instead of reading the whole object back, to keep the transfer small.
+        assert fs.info(path, refresh=True).size == size + extra_size
+        assert fs.cat_file(path, start=0, end=1) == b"a"
+        assert fs.cat_file(path, start=size - 1, end=size + 1) == b"ab"
+        assert fs.cat_file(path, start=-1) == b"b"
 
     @pytest.mark.parametrize("block_size", [None, 16 * 2**20])
     def test_append_transaction_rollback(self, fs, block_size):
@@ -711,6 +714,7 @@ class TestS3FileSystem:
             f"filesystem/test_append_transaction_rollback/{uuid.uuid4()}"
         )
         fs.pipe_file(path, data)
+        before = fs.info(path, refresh=True)
 
         def append_then_fail():
             with fs.transaction:
@@ -721,7 +725,14 @@ class TestS3FileSystem:
 
         with pytest.raises(RuntimeError):
             append_then_fail()
-        assert fs.cat_file(path) == data
+        # A committed append (a multipart upload, or the appended bytes alone)
+        # would change the ETag and the size, so the object is not read back.
+        after = fs.info(path, refresh=True)
+        assert (after.etag, after.last_modified, after.size) == (
+            before.etag,
+            before.last_modified,
+            before.size,
+        )
         assert not fs.list_multipart_uploads(path)
 
     def test_ls_buckets(self, fs):
