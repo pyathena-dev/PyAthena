@@ -368,7 +368,6 @@ class TestAioS3FileSystem:
         # open() instead of the S3 API, as outside one.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
         fs.open = mock.MagicMock()
-        fs.open.return_value.blocksize = 8
         local = tmp_path / "local"
         local.write_bytes(b"a" * 13)
 
@@ -517,7 +516,6 @@ class TestAioS3FileSystem:
         # GH-972: fsspec's mode argument selects the mode of the file.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
         fs.open = mock.MagicMock()
-        fs.open.return_value.blocksize = 4
         lpath = tmp_path / "data.csv"
         lpath.write_bytes(b"a")
 

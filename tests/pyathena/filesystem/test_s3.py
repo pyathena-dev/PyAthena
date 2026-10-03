@@ -2079,7 +2079,6 @@ class TestS3FileSystem:
         # API.
         fs = self._make_fs()
         fs.open = mock.MagicMock()
-        fs.open.return_value.blocksize = 8
         lpath = tmp_path / "data"
         lpath.write_bytes(b"a" * 13)
 
@@ -2107,7 +2106,6 @@ class TestS3FileSystem:
         fs = self._make_fs()
         fs.s3_additional_kwargs = filesystem_kwargs
         fs.open = mock.MagicMock()
-        fs.open.return_value.blocksize = 8
         lpath = tmp_path / "data.csv"
         lpath.write_bytes(b"a")
 
