@@ -15,6 +15,7 @@ import pytest
 from pandas.io.parsers import TextFileReader
 
 from pyathena.error import DatabaseError, ProgrammingError
+from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.pandas.converter import DefaultPandasTypeConverter
 from pyathena.pandas.cursor import PandasCursor
 from pyathena.pandas.result_set import AthenaPandasResultSet, PandasDataFrameIterator
@@ -229,6 +230,22 @@ class TestPandasCursor:
         assert pandas_cursor.fetchone() == (1,)
         assert pandas_cursor.rownumber == 1
         assert pandas_cursor.fetchone() is None
+
+    @pytest.mark.parametrize(
+        "pandas_cursor",
+        [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
+        indirect=True,
+    )
+    def test_result_set_file_system_not_cached(self, pandas_cursor):
+        # GH-978: the filesystems that read the results were kept in the fsspec
+        # instance cache with the connection, so the connection was never freed.
+        pandas_cursor.execute("SELECT * FROM one_row")
+        assert pandas_cursor.fetchall() == [(1,)]
+        assert not [
+            fs
+            for fs in S3FileSystem._cache.values()
+            if fs.storage_options.get("connection") is pandas_cursor.connection
+        ]
 
     @pytest.mark.parametrize(
         ("pandas_cursor", "parquet_engine", "chunksize"),

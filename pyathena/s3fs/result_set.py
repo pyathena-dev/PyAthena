@@ -131,9 +131,12 @@ class AthenaS3FSResultSet(AthenaResultSet):
 
     def _create_s3_file_system(self) -> AbstractFileSystem:
         """Create S3FileSystem using connection settings."""
+        # Not cached by fsspec so that the connection and the dircache are
+        # released with the result set.
         return self._filesystem_class(
             connection=self.connection,
             default_block_size=self._block_size,
+            skip_instance_cache=True,
         )
 
     def _init_csv_reader(self) -> None:

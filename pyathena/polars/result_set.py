@@ -289,6 +289,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
             "default_block_size": self._block_size,
             "default_cache_type": self._cache_type,
             "max_workers": self._max_workers,
+            # Not cached by fsspec so that the connection and the dircache are
+            # released with the result set.
+            "skip_instance_cache": True,
         }
 
     @property

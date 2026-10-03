@@ -17,6 +17,7 @@ import polars as pl
 import pytest
 
 from pyathena.error import DatabaseError, ProgrammingError
+from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.polars.cursor import PolarsCursor
 from pyathena.polars.result_set import AthenaPolarsResultSet
 from tests import ENV
@@ -35,6 +36,17 @@ class TestPolarsCursor:
         assert polars_cursor.fetchone() == (1,)
         assert polars_cursor.rownumber == 1
         assert polars_cursor.fetchone() is None
+
+    def test_result_set_file_system_not_cached(self, polars_cursor):
+        # GH-978: the filesystem that read the CSV results was kept in the fsspec
+        # instance cache with the connection, so the connection was never freed.
+        polars_cursor.execute("SELECT * FROM one_row")
+        assert polars_cursor.fetchall() == [(1,)]
+        assert not [
+            fs
+            for fs in S3FileSystem._cache.values()
+            if fs.storage_options.get("connection") is polars_cursor.connection
+        ]
 
     @pytest.mark.parametrize(
         "polars_cursor",

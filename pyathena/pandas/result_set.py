@@ -465,11 +465,14 @@ class AthenaPandasResultSet(AthenaResultSet):
         """
         from pyathena.filesystem.s3 import S3FileSystem
 
+        # Not cached by fsspec so that the connection and the dircache are
+        # released with the result set.
         return S3FileSystem(
             connection=self.connection,
             default_block_size=self._block_size,
             default_cache_type=self._cache_type,
             max_workers=self._max_workers,
+            skip_instance_cache=True,
         )
 
     @property
@@ -613,6 +616,7 @@ class AthenaPandasResultSet(AthenaResultSet):
                 "default_block_size": self._block_size,
                 "default_cache_type": self._cache_type,
                 "max_workers": self._max_workers,
+                "skip_instance_cache": True,
             },
             "chunksize": chunksize,
             "engine": csv_engine,
@@ -782,6 +786,7 @@ class AthenaPandasResultSet(AthenaResultSet):
                     "default_block_size": self._block_size,
                     "default_cache_type": self._cache_type,
                     "max_workers": self._max_workers,
+                    "skip_instance_cache": True,
                 },
                 **kwargs,
             )
