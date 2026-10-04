@@ -2340,8 +2340,8 @@ class TestS3FileSystem:
             fs.pipe_file(path, value, compression=compression)
 
         # The compressed value fits in one block.
-        (((path, body), kwargs),) = fs.core.put_object.call_args_list
-        assert path.key == key
+        (((s3_path, body), kwargs),) = fs.core.put_object.call_args_list
+        assert s3_path.key == key
         assert "compression" not in kwargs
         assert gzip.decompress(body) == value
 

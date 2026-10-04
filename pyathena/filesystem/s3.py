@@ -1403,7 +1403,7 @@ class S3FileSystem(AbstractFileSystem):
             raise ValueError("Cannot touch the bucket.")
 
         # The empty body is passed, so that a body keyword argument raises
-        # TypeError, as it did before.
+        # TypeError.
         object_ = self.core.put_object(s3_path, None, **kwargs)
         self.invalidate_cache(path)
         return object_.to_dict()
