@@ -43,40 +43,7 @@ def _no_trunc_date(df: DataFrame) -> DataFrame:
     return df
 
 
-def _astype_keeping_missing_strings(df: DataFrame, dtype: dict[Any, Any]) -> DataFrame:
-    """Apply a dtype mapping, keeping missing values missing in NumPy str columns.
-
-    ``astype()`` with a NumPy str dtype, which ``str`` means without
-    ``future.infer_string``, turns missing values into strings such as ``"nan"``.
-    Columns mapped to a NumPy str dtype become object columns of strings with
-    missing values kept, as pandas' C engine returns them.
-
-    Args:
-        df: The DataFrame to convert.
-        dtype: The normalized dtypes, keyed by column name.
-
-    Returns:
-        The converted DataFrame.
-    """
-    import pandas as pd
-
-    numpy_string_columns = {
-        column
-        for column, value in dtype.items()
-        if not isinstance(value, pd.api.extensions.ExtensionDtype) and value.kind == "U"
-    }
-    df = df.astype(
-        {column: value for column, value in dtype.items() if column not in numpy_string_columns}
-    )
-    for index, column in enumerate(df.columns):
-        if column in numpy_string_columns:
-            values = df.iloc[:, index]
-            strings = values.astype(str).astype(object)
-            df.isetitem(index, strings.where(values.notna(), float("nan")))
-    return df
-
-
-def _read_csv_with_pyarrow(source: IOBase, read_csv_kwargs: dict[str, Any]) -> DataFrame:
+def _read_csv_with_pyarrow(source: str | IOBase, read_csv_kwargs: dict[str, Any]) -> DataFrame:
     """Read a CSV result with pyarrow as ``pandas.read_csv(engine="pyarrow")`` does.
 
     pandas' PyArrow engine does not set ``newlines_in_values``, so pyarrow
@@ -89,9 +56,9 @@ def _read_csv_with_pyarrow(source: IOBase, read_csv_kwargs: dict[str, Any]) -> D
     ``parse_dates`` columns are parsed with ``pandas.to_datetime()``, and
     without ``future.infer_string``, strings become objects.
 
-    Unlike pandas' PyArrow engine, columns with a string dtype are read as
-    text, and a NumPy str dtype keeps missing values missing, so these columns
-    have the values of pandas' C engine.
+    Unlike pandas' PyArrow engine, columns with a string dtype are read as text,
+    except in a header-less file, and a NumPy str dtype keeps missing values
+    missing, as with pandas' C engine.
 
     Args:
         source: The result file.
@@ -117,22 +84,16 @@ def _read_csv_with_pyarrow(source: IOBase, read_csv_kwargs: dict[str, Any]) -> D
             continue
         if isinstance(column_dtype, pd.StringDtype) or column_dtype.kind == "U":
             string_columns.add(column)
-    if header is None:
-        # pyarrow names the fields of a header-less file f0, f1, ..., and pandas
-        # gives the names to the last fields, so count the fields of the first
-        # record, which has one field even if it is empty.
-        lines = (line.decode("utf-8") for line in iter(source.readline, b""))
-        first_record = next(csv.reader(lines, delimiter=read_csv_kwargs["sep"]), [])
-        source.seek(0)
-        offset = max(len(first_record), 1) - len(names)
-        column_types = {
-            f"f{offset + index}": pa.string()
-            for index, name in enumerate(names)
-            if name in string_columns
-        }
-    else:
-        # pandas ignores dtype keys that are not column names, such as positions.
-        column_types = {column: pa.string() for column in string_columns if isinstance(column, str)}
+    # Columns with a string dtype keep their text instead of the type pyarrow infers,
+    # so "007" stays "007" as with pandas' C engine. The fields of a header-less file
+    # get their names only after reading, as pandas gives the names to the last
+    # fields, so they keep the inferred types. pandas ignores dtype keys that are not
+    # column names, such as positions.
+    column_types = (
+        {}
+        if header is None
+        else {column: pa.string() for column in string_columns if isinstance(column, str)}
+    )
     table = pyarrow_csv.read_csv(
         source,
         read_options=pyarrow_csv.ReadOptions(autogenerate_column_names=header is None),
@@ -142,8 +103,6 @@ def _read_csv_with_pyarrow(source: IOBase, read_csv_kwargs: dict[str, Any]) -> D
             newlines_in_values=True,
         ),
         convert_options=pyarrow_csv.ConvertOptions(
-            # Columns with a string dtype keep their text instead of the type pyarrow
-            # infers, so "007" stays "007" as with pandas' C engine.
             column_types=column_types,
             null_values=null_values,
             strings_can_be_null="" in null_values,
@@ -175,7 +134,16 @@ def _read_csv_with_pyarrow(source: IOBase, read_csv_kwargs: dict[str, Any]) -> D
         for column, value in dtype.items()
         if column in df.columns
     }
-    df = _astype_keeping_missing_strings(df, dtype)
+    # astype() with a NumPy str dtype, which str means without future.infer_string,
+    # turns missing values into strings such as "nan", so these columns are
+    # converted after the dates instead.
+    numpy_string_columns = {
+        column
+        for column, value in dtype.items()
+        if not isinstance(value, pd.api.extensions.ExtensionDtype) and value.kind == "U"
+    }
+    dtype = {column: value for column, value in dtype.items() if column not in numpy_string_columns}
+    df = df.astype(dtype)
     if not pd.get_option("future.infer_string"):
         # Without the string dtype, pandas returns strings, and the string
         # categories of categorical columns, as objects.
@@ -203,7 +171,13 @@ def _read_csv_with_pyarrow(source: IOBase, read_csv_kwargs: dict[str, Any]) -> D
             # pandas keeps the column as strings if it cannot parse it.
             df[column] = values.to_numpy(dtype=object, na_value=float("nan"))
     # pandas applies the dtype mapping again after parsing dates.
-    df = _astype_keeping_missing_strings(df, dtype)
+    df = df.astype(dtype)
+    for index, column in enumerate(df.columns):
+        if column in numpy_string_columns:
+            # Object strings with missing values kept, as pandas' C engine returns.
+            values = df.iloc[:, index]
+            strings = values.astype(str).astype(object)
+            df.isetitem(index, strings.where(values.notna(), float("nan")))
     return df
 
 
@@ -862,11 +836,7 @@ class AthenaPandasResultSet(AthenaResultSet):
                     source = self._csv_stream = stack.enter_context(
                         self._fs.open(self.output_location, mode="rb")
                     )
-                if (
-                    csv_engine == "pyarrow"
-                    and isinstance(source, IOBase)
-                    and self._reads_csv_with_pyarrow()
-                ):
+                if csv_engine == "pyarrow" and self._reads_csv_with_pyarrow():
                     result = _read_csv_with_pyarrow(source, read_csv_kwargs)
                 else:
                     result = pd.read_csv(source, **read_csv_kwargs)

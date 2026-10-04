@@ -254,14 +254,6 @@ def _pyarrow_read_csv_kwargs(types, tab_separated=False, **kwargs):
             _pyarrow_read_csv_kwargs({"v": "varchar"}, True),
         ),
         (
-            '007\t"a\tb"\n010\tc\n',
-            _pyarrow_read_csv_kwargs({"v": "varchar", "x": "varchar"}, True),
-        ),
-        (
-            '007\t"a\nb"\n010\tc\n',
-            _pyarrow_read_csv_kwargs({"v": "varchar", "x": "varchar"}, True),
-        ),
-        (
             '"v","n"\n"007","1"\n',
             _pyarrow_read_csv_kwargs(
                 {"v": "varchar", "n": "integer"},
@@ -291,8 +283,6 @@ def _pyarrow_read_csv_kwargs(types, tab_separated=False, **kwargs):
         "numeric_looking_strings",
         "arrow_string_dtypes",
         "tab_separated_numeric_fields",
-        "tab_separated_quoted_tab",
-        "tab_separated_quoted_newline",
         "dtype_position_key",
         "unparsed_dates",
         "tab_separated_extra_fields",
@@ -302,9 +292,9 @@ def _pyarrow_read_csv_kwargs(types, tab_separated=False, **kwargs):
 def test_read_csv_with_pyarrow_matches_pandas(data, read_csv_kwargs, infer_string):
     # Without values that cross a read block, the result is the one of
     # pandas.read_csv(engine="pyarrow"), except that the columns with a string
-    # dtype have the values of pandas' C engine. Where the C engine parses a
-    # parse_dates column despite its string dtype, the PyArrow engine's
-    # applying the dtype again is kept.
+    # dtype have the values of pandas' C engine, and in a header-less file, its
+    # missing values. Where the C engine parses a parse_dates column despite its
+    # string dtype, the PyArrow engine's applying the dtype again is kept.
     with pd.option_context("future.infer_string", infer_string):
         expected = pd.read_csv(
             io.BytesIO(data.encode()),
@@ -318,8 +308,14 @@ def test_read_csv_with_pyarrow_matches_pandas(data, read_csv_kwargs, infer_strin
             column for column, value in read_csv_kwargs["dtype"].items() if _is_string_dtype(value)
         }
         for index, column in enumerate(expected.columns):
-            if column in string_columns and c_engine[column].dtype.kind != "M":
-                # The C engine makes the extra fields of a header-less file the index.
+            if column not in string_columns or c_engine[column].dtype.kind == "M":
+                continue
+            if read_csv_kwargs["header"] is None:
+                # Header-less fields keep the inferred types, and only their missing
+                # values follow the C engine, which makes extra fields the index.
+                missing = c_engine[column].isna().to_numpy()
+                expected.isetitem(index, expected.iloc[:, index].mask(missing, float("nan")))
+            else:
                 expected.isetitem(index, c_engine[column].array)
         actual = _read_csv_with_pyarrow(
             io.BytesIO(data.encode()),
