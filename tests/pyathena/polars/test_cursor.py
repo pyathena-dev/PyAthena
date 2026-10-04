@@ -834,6 +834,13 @@ class TestPolarsCursor:
         polars_cursor.execute("SELECT '001' AS x, 2 AS y", new_columns=["z"], chunksize=chunksize)
         assert polars_cursor.fetchall() == [("001", 2)]
 
+    def test_new_columns_with_schema_overrides(self, polars_cursor):
+        """schema_overrides given with new_columns are keyed by the new names, as in Polars."""
+        polars_cursor.execute(
+            "SELECT '001' AS x, 2 AS y", new_columns=["z"], schema_overrides={"z": pl.String}
+        )
+        assert polars_cursor.fetchall() == [("001", 2)]
+
     def test_duplicate_column_names_new_columns(self, polars_cursor):
         """The column types follow the columns that new_columns renames."""
         polars_cursor.execute(

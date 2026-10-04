@@ -565,8 +565,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
             has_header=has_header,
             schema_overrides=self._csv_dtypes,
         )
-        # Renamed after reading, so that Polars matches the types to the header.
-        read_kwargs.pop("new_columns", None)
+        if new_columns:
+            # Renamed after reading, so that Polars matches the types to the header.
+            read_kwargs.pop("new_columns", None)
 
         try:
             df = pl.read_csv(self.output_location, **read_kwargs)
@@ -720,7 +721,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
         Returns:
             Tuple of (separator, has_header, new_columns). ``new_columns`` are the
             names of the first columns, which the readers set after reading as Polars
-            sets the ``new_columns`` given to ``execute()``.
+            sets the ``new_columns`` given to ``execute()``. With ``schema_overrides``
+            given to ``execute()``, which replace the result set's types, Polars
+            renames the columns of a CSV file itself.
         """
         if self.output_location and self.output_location.endswith(".txt"):
             separator = "\t"
@@ -729,7 +732,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
         else:
             separator = ","
             has_header = True
-            new_columns = self._kwargs.get("new_columns")
+            new_columns = (
+                None if "schema_overrides" in self._kwargs else self._kwargs.get("new_columns")
+            )
         return separator, has_header, new_columns
 
     def _iter_csv_chunks(self) -> Iterator[pl.DataFrame]:
@@ -759,8 +764,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
             has_header=has_header,
             schema_overrides=self._csv_dtypes,
         )
-        # Renamed after reading, so that Polars matches the types to the header.
-        read_kwargs.pop("new_columns", None)
+        if new_columns:
+            # Renamed after reading, so that Polars matches the types to the header.
+            read_kwargs.pop("new_columns", None)
 
         try:
             lazy_df = pl.scan_csv(self.output_location, **read_kwargs)
