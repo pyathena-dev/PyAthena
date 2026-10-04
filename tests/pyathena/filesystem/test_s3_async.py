@@ -35,7 +35,6 @@ from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
     MULTIPART_COPY_BLOCK_SIZE,
     MULTIPART_COPY_KWARGS,
-    MULTIPART_COPY_SIZE,
     stub_multipart_copy,
 )
 
@@ -166,14 +165,14 @@ class TestAioS3FileSystem:
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
         )
         sync_fs.core.complete_multipart_upload = mock.MagicMock()
-        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={})
+        # The HeadObject of the source.
+        sync_fs._call = sync_fs._core.call = mock.MagicMock(
+            return_value={"ContentLength": 5 * 2**30 + 2**20}
+        )
 
         await fs._copy_object_with_multipart_upload(
-            bucket1="bucket",
-            key1="src",
-            size1=5 * 2**30 + 2**20,
-            bucket2="bucket",
-            key2="dst",
+            S3Path("bucket", "src"),
+            S3Path("bucket", "dst"),
             # Copy without reading the metadata, tags and annotations of the
             # source (GH-973).
             MetadataDirective="REPLACE",
@@ -204,11 +203,8 @@ class TestAioS3FileSystem:
             stub_multipart_copy(stubber, **kwargs)
             try:
                 await fs._copy_object_with_multipart_upload(
-                    bucket1="bucket",
-                    key1="src",
-                    size1=MULTIPART_COPY_SIZE,
-                    bucket2="bucket",
-                    key2="dst",
+                    S3Path("bucket", "src"),
+                    S3Path("bucket", "dst"),
                     block_size=MULTIPART_COPY_BLOCK_SIZE,
                     **MULTIPART_COPY_KWARGS,
                 )
@@ -225,25 +221,19 @@ class TestAioS3FileSystem:
         sync_fs._call = sync_fs._core.call = mock.MagicMock(
             return_value={"ContentLength": size, "VersionId": "v1"}
         )
-        sync_fs._copy_object = mock.MagicMock()
+        sync_fs.core.copy_object = mock.MagicMock()
         sync_fs.core.create_multipart_upload = mock.MagicMock()
 
         await fs._copy_object_with_multipart_upload(
-            bucket1="bucket",
-            key1="src",
-            size1=MULTIPART_COPY_SIZE,
-            bucket2="bucket",
-            key2="dst",
+            S3Path("bucket", "src"),
+            S3Path("bucket", "dst"),
             ContentType="text/csv",
             RequestPayer="requester",
         )
 
-        sync_fs._copy_object.assert_called_once_with(
-            bucket1="bucket",
-            key1="src",
-            version_id1="v1",
-            bucket2="bucket",
-            key2="dst",
+        sync_fs.core.copy_object.assert_called_once_with(
+            S3Path("bucket", "src", "v1"),
+            S3Path("bucket", "dst"),
             ContentType="text/csv",
             RequestPayer="requester",
         )
@@ -284,7 +274,7 @@ class TestAioS3FileSystem:
         sync_fs = fs._sync_fs
         with (
             mock.patch.object(
-                sync_fs, "_copy_object_annotation", wraps=sync_fs._copy_object_annotation
+                sync_fs.core, "copy_object_annotation", wraps=sync_fs.core.copy_object_annotation
             ) as copy_annotation,
             pytest.raises(PermissionError),
         ):
@@ -335,20 +325,17 @@ class TestAioS3FileSystem:
 
         sync_fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
         sync_fs.core.complete_multipart_upload = mock.MagicMock()
-        # The HeadObject of the source, for its version.
-        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={})
+        # The HeadObject of the source, with 3 parts of the default block size.
+        size = 3 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE
+        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
         sync_fs._abort_multipart_upload = mock.MagicMock(
             side_effect=lambda *args: events.append("abort")
         )
 
         with pytest.raises(OSError, match="part failed"):
             await fs._copy_object_with_multipart_upload(
-                bucket1="bucket",
-                key1="src",
-                size1=3 * S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE,
-                bucket2="bucket",
-                key2="dst",
-                block_size=S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE,
+                S3Path("bucket", "src"),
+                S3Path("bucket", "dst"),
                 MetadataDirective="REPLACE",
                 TaggingDirective="REPLACE",
                 AnnotationDirective="EXCLUDE",
@@ -394,18 +381,15 @@ class TestAioS3FileSystem:
 
         sync_fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
         sync_fs.core.complete_multipart_upload = mock.MagicMock()
-        # The HeadObject of the source, for its version.
-        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={})
+        # The HeadObject of the source, with 3 parts of the default block size.
+        size = 3 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE
+        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
         sync_fs._abort_multipart_upload = mock.MagicMock(side_effect=abort_multipart_upload)
 
         task = asyncio.ensure_future(
             fs._copy_object_with_multipart_upload(
-                bucket1="bucket",
-                key1="src",
-                size1=3 * S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE,
-                bucket2="bucket",
-                key2="dst",
-                block_size=S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE,
+                S3Path("bucket", "src"),
+                S3Path("bucket", "dst"),
                 MetadataDirective="REPLACE",
                 TaggingDirective="REPLACE",
                 AnnotationDirective="EXCLUDE",
@@ -469,20 +453,17 @@ class TestAioS3FileSystem:
         sync_fs.core.complete_multipart_upload = mock.MagicMock(
             side_effect=complete_multipart_upload
         )
-        # The HeadObject of the source, for its version.
-        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={})
+        # The HeadObject of the source, with 2 parts of the default block size.
+        size = 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE
+        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
         sync_fs._abort_multipart_upload = mock.MagicMock(
             side_effect=lambda *args: events.append("abort")
         )
 
         task = asyncio.ensure_future(
             fs._copy_object_with_multipart_upload(
-                bucket1="bucket",
-                key1="src",
-                size1=2 * S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE,
-                bucket2="bucket",
-                key2="dst",
-                block_size=S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE,
+                S3Path("bucket", "src"),
+                S3Path("bucket", "dst"),
                 MetadataDirective="REPLACE",
                 TaggingDirective="REPLACE",
                 AnnotationDirective="EXCLUDE",
@@ -506,6 +487,64 @@ class TestAioS3FileSystem:
 
         assert events == (["complete", "abort"] if completion_fails else ["complete"])
 
+    @pytest.mark.parametrize("creation_fails", [False, True])
+    @pytest.mark.asyncio
+    async def test_copy_object_with_multipart_upload_cancelled_creation(self, creation_fails):
+        # A cancellation during CreateMultipartUpload waits for it, aborts
+        # the upload that it created before any part is copied, and is
+        # re-raised. The created upload used to be left incomplete.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        events = []
+        started = threading.Event()
+        release = threading.Event()
+
+        def create_multipart_upload(*args, **kw):
+            started.set()
+            # The finally blocks of the test always release it.
+            release.wait()
+            events.append("create")
+            if creation_fails:
+                raise OSError("creation failed")
+            return SimpleNamespace(upload_id="uploadid")
+
+        sync_fs.core.create_multipart_upload = mock.MagicMock(side_effect=create_multipart_upload)
+        sync_fs.core.upload_part_copy = mock.MagicMock()
+        # The HeadObject of the source, with 2 parts of the default block size.
+        size = 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE
+        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
+        sync_fs._abort_multipart_upload = mock.MagicMock(
+            side_effect=lambda *args: events.append(("abort", args[2]))
+        )
+
+        task = asyncio.ensure_future(
+            fs._copy_object_with_multipart_upload(
+                S3Path("bucket", "src"),
+                S3Path("bucket", "dst"),
+                MetadataDirective="REPLACE",
+                TaggingDirective="REPLACE",
+                AnnotationDirective="EXCLUDE",
+            )
+        )
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            # Gives the cleanup time to return, which it must not do while
+            # the creation is held.
+            await asyncio.sleep(0.1)
+            assert not task.done()
+            assert events == []
+        except BaseException:
+            task.cancel()
+            raise
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert events == (["create"] if creation_fails else ["create", ("abort", "uploadid")])
+        sync_fs.core.upload_part_copy.assert_not_called()
+
     @pytest.mark.parametrize(
         "block_size",
         [
@@ -524,12 +563,7 @@ class TestAioS3FileSystem:
             match=r"between 5 MiB \(5242880 bytes\) and 5 GiB \(5368709120 bytes\), inclusive",
         ):
             await fs._copy_object_with_multipart_upload(
-                bucket1="bucket",
-                key1="src",
-                size1=5 * 2**30 + 2**20,
-                bucket2="bucket",
-                key2="dst",
-                block_size=block_size,
+                S3Path("bucket", "src"), S3Path("bucket", "dst"), block_size=block_size
             )
         fs._sync_fs._call.assert_not_called()
 
@@ -1009,7 +1043,7 @@ class TestAioS3FileSystem:
             )
         )
         sync_fs = fs._sync_fs
-        sync_fs._copy_object = mock.MagicMock()
+        sync_fs.core.copy_object = mock.MagicMock()
         sync_fs.core.create_multipart_upload = mock.MagicMock(
             return_value=SimpleNamespace(upload_id="uploadid")
         )
@@ -1025,8 +1059,8 @@ class TestAioS3FileSystem:
 
         sync_fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
         sync_fs.core.complete_multipart_upload = mock.MagicMock()
-        # The HeadObject of the source, for its version.
-        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={})
+        # The HeadObject of the source.
+        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
         directives = {
             "MetadataDirective": "REPLACE",
             "TaggingDirective": "REPLACE",
@@ -1046,12 +1080,9 @@ class TestAioS3FileSystem:
         )
 
         if size <= S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE:
-            sync_fs._copy_object.assert_called_once_with(
-                bucket1="bucket",
-                key1="src",
-                version_id1=None,
-                bucket2="bucket",
-                key2="dst",
+            sync_fs.core.copy_object.assert_called_once_with(
+                S3Path("bucket", "src"),
+                S3Path("bucket", "dst"),
                 RequestPayer="requester",
                 ContentType="text/csv",
                 **directives,

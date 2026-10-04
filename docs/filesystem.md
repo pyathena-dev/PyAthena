@@ -123,7 +123,10 @@ from that version, which needs `s3:GetObjectVersion` and, to copy the tags,
 `s3:GetObjectVersionTagging` on the source. A `null` version is not pinned. The annotations are listed before anything is written and copied after the
 upload completes, so the destination exists without them until the last one is
 written. If an annotation fails to copy, the error is raised and the destination is
-kept. A failed part copy aborts the multipart upload.
+kept. A failed part copy aborts the multipart upload. So does an interrupt, or the
+cancellation of an `AioS3FileSystem` copy, unless the upload has already completed. A
+CreateMultipartUpload request and the part copies in flight finish first, and so does
+the CompleteMultipartUpload request of an `AioS3FileSystem` copy.
 
 Paths are normalized as in fsspec, which drops a trailing slash, so `info`, `isfile`,
 and `open` treat `s3://YOUR_S3_BUCKET/dir/` as `s3://YOUR_S3_BUCKET/dir`: the object
@@ -280,12 +283,13 @@ directories below the bucket level) and is always a no-op.
 ## Typed S3 operations
 
 `S3FileSystem.core` is an `S3Core`, the typed operations that the filesystem sends
-its listing, lookup, delete and multipart upload requests with. It can also be built
-on a boto3 S3 client. Each operation sends one request (one per page for the
-iterators) with the retry policy, raises `FileNotFoundError` for a missing bucket or
+its listing, lookup, delete, multipart upload and copy requests with. It can also be
+built on a boto3 S3 client. Each operation sends one request (one per page for the
+iterators and `list_object_annotations()`); `plan_multipart_copy()` and
+`copy_object_annotation()`, described below, send several. The requests are sent with
+the retry policy. An operation raises `FileNotFoundError` for a missing bucket or
 multipart upload, or for a missing object or version that it reads, and caches
-nothing. Requests sent
-through `fs.core` do not invalidate the filesystem's cache: call
+nothing. Requests sent through `fs.core` do not invalidate the filesystem's cache: call
 `fs.invalidate_cache()` after a change, or make it through the filesystem.
 
 ```python
@@ -330,6 +334,19 @@ multipart upload. `part_ranges()` sends no request: it splits an object into the
 ranges of the parts that copy it, by the part limits `MULTIPART_UPLOAD_MIN_PART_SIZE` (5 MiB),
 `MULTIPART_UPLOAD_MAX_PART_SIZE` (5 GiB) and `MULTIPART_UPLOAD_MAX_PARTS` (10,000) of
 `S3Core`.
+
+`copy_object()` copies an object with one CopyObject request, which accepts objects
+up to `MULTIPART_UPLOAD_MAX_PART_SIZE`. For a larger object, `plan_multipart_copy()`
+reads the source and returns an `S3MultipartCopyPlan`: the version to copy, the byte
+ranges of the parts, the parameters of each multipart upload request, and the
+annotations to copy, so that the multipart upload writes the metadata, tags and
+annotations that CopyObject would. It sends HeadObject, then GetObjectTagging and
+ListObjectAnnotations unless the directives or the source exclude them, and writes
+nothing. If HeadObject reports a size that fits in one CopyObject request, nothing else
+is read, and the plan's `fits_single_request` says to copy with `copy_object()`
+instead. `copy_object_annotation()` copies one annotation onto the destination after
+the upload completes, with GetObjectAnnotation and PutObjectAnnotation. The
+filesystems' `cp_file()`, `copy()` and `mv()` run these plans.
 
 ## Async filesystem
 

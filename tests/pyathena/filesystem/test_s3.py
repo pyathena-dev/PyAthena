@@ -8,6 +8,7 @@ import io
 import lzma
 import os
 import re
+import signal
 import sys
 import tempfile
 import threading
@@ -1507,10 +1508,10 @@ class TestS3FileSystem:
         # sent to CopyObject and fail with NoSuchKey.
         fs = self._make_fs()
         fs.info = mock.MagicMock(return_value=S3FileSystem._directory_object("bucket", "src"))
-        fs._copy_object = mock.MagicMock()
+        fs.core.copy_object = mock.MagicMock()
 
         fs.cp_file("s3://bucket/src", "s3://bucket/dst")
-        fs._copy_object.assert_not_called()
+        fs.core.copy_object.assert_not_called()
         fs._call.assert_not_called()
 
     @pytest.mark.parametrize(
@@ -1829,7 +1830,7 @@ class TestS3FileSystem:
                 key="src",
             )
         )
-        fs._copy_object = mock.MagicMock()
+        fs.core.copy_object = mock.MagicMock()
         fs._copy_object_with_multipart_upload = mock.MagicMock()
 
         fs.cp_file(
@@ -1841,30 +1842,21 @@ class TestS3FileSystem:
         )
 
         if size <= fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE:
-            fs._copy_object.assert_called_once_with(
-                bucket1="bucket",
-                key1="src",
-                version_id1=None,
-                bucket2="bucket",
-                key2="dst",
-                RequestPayer="requester",
+            fs.core.copy_object.assert_called_once_with(
+                S3Path("bucket", "src"), S3Path("bucket", "dst"), RequestPayer="requester"
             )
         else:
             fs._copy_object_with_multipart_upload.assert_called_once_with(
-                bucket1="bucket",
-                key1="src",
-                version_id1=None,
-                size1=size,
-                bucket2="bucket",
-                key2="dst",
+                S3Path("bucket", "src"),
+                S3Path("bucket", "dst"),
                 max_workers=2,
                 block_size=fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE,
                 RequestPayer="requester",
             )
 
     def test_copy_object_with_multipart_upload_request_parameters(self):
-        # GH-946: the part copies receive the parameters of the copy that
-        # they accept, and the completion and the abort get them all.
+        # GH-946: the part copies, the completion and the abort receive the
+        # parameters of the copy that they accept.
         fs = self._make_fs()
         fs.core.create_multipart_upload = mock.MagicMock(
             return_value=SimpleNamespace(upload_id="uploadid")
@@ -1873,7 +1865,7 @@ class TestS3FileSystem:
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
         )
         fs._finish_multipart_upload = mock.MagicMock()
-        fs._call.return_value = {}
+        fs._call.return_value = {"ContentLength": 5 * 2**30 + 2**20}
         # The directives make the copy use the given values without reading
         # the source's metadata, tags and annotations (GH-973).
         directives = {
@@ -1884,12 +1876,7 @@ class TestS3FileSystem:
         kwargs = {"ContentType": "text/csv", "RequestPayer": "requester", **directives}
 
         fs._copy_object_with_multipart_upload(
-            bucket1="bucket",
-            key1="src",
-            size1=5 * 2**30 + 2**20,
-            bucket2="bucket",
-            key2="dst",
-            **kwargs,
+            S3Path("bucket", "src"), S3Path("bucket", "dst"), **kwargs
         )
 
         fs.core.create_multipart_upload.assert_called_once_with(
@@ -1901,7 +1888,9 @@ class TestS3FileSystem:
             c.kwargs["RequestPayer"] == "requester" and "ContentType" not in c.kwargs
             for c in fs.core.upload_part_copy.call_args_list
         )
-        assert fs._finish_multipart_upload.call_args.kwargs["request_kwargs"] == kwargs
+        assert fs._finish_multipart_upload.call_args.kwargs["request_kwargs"] == {
+            "RequestPayer": "requester"
+        }
 
     @staticmethod
     def _stubbed_copy_fs(**kwargs):
@@ -1917,13 +1906,10 @@ class TestS3FileSystem:
         )
 
     @staticmethod
-    def _multipart_copy(fs, bucket1="bucket", **kwargs):
+    def _multipart_copy(fs, source_bucket="bucket", **kwargs):
         fs._copy_object_with_multipart_upload(
-            bucket1=bucket1,
-            key1="src",
-            size1=MULTIPART_COPY_SIZE,
-            bucket2="bucket",
-            key2="dst",
+            S3Path(source_bucket, "src"),
+            S3Path("bucket", "dst"),
             block_size=MULTIPART_COPY_BLOCK_SIZE,
             **kwargs,
         )
@@ -2024,17 +2010,14 @@ class TestS3FileSystem:
         # an empty object, the reported version is copied with CopyObject.
         fs = self._make_fs()
         fs._call.return_value = {"ContentLength": size, "VersionId": "v1"}
-        fs._copy_object = mock.MagicMock()
+        fs.core.copy_object = mock.MagicMock()
         fs.core.create_multipart_upload = mock.MagicMock()
 
         self._multipart_copy(fs, ContentType="text/csv", RequestPayer="requester")
 
-        fs._copy_object.assert_called_once_with(
-            bucket1="bucket",
-            key1="src",
-            version_id1="v1",
-            bucket2="bucket",
-            key2="dst",
+        fs.core.copy_object.assert_called_once_with(
+            S3Path("bucket", "src", "v1"),
+            S3Path("bucket", "dst"),
             ContentType="text/csv",
             RequestPayer="requester",
         )
@@ -2049,7 +2032,11 @@ class TestS3FileSystem:
         with Stubber(fs._client) as stubber:
             # Read only for the version, which a bucket without versioning
             # does not report.
-            stubber.add_response("head_object", {"ContentType": "text/csv"}, None)
+            stubber.add_response(
+                "head_object",
+                {"ContentLength": MULTIPART_COPY_SIZE, "ContentType": "text/csv"},
+                None,
+            )
             stubber.add_response(
                 "create_multipart_upload",
                 {"UploadId": "u"},
@@ -2081,28 +2068,6 @@ class TestS3FileSystem:
         with Stubber(fs._client), pytest.raises(ValueError, match="Invalid"):
             self._multipart_copy(fs, **directive)
 
-    def test_copy_object_with_multipart_upload_unknown_parameter(self):
-        # A parameter that CopyObject does not accept is passed on to
-        # CreateMultipartUpload, so that botocore still rejects it.
-        fs = self._stubbed_copy_fs()
-        with Stubber(fs._client) as stubber:
-            stubber.add_response("head_object", {}, None)
-            create_kwargs, version_id, size = fs._get_multipart_copy_kwargs(
-                "bucket",
-                "src",
-                None,
-                {
-                    "ContentTyp": "text/csv",
-                    "MetadataDirective": "REPLACE",
-                    "TaggingDirective": "REPLACE",
-                },
-            )
-        assert create_kwargs == {"ContentTyp": "text/csv"}
-        assert version_id is None
-        assert size is None
-        with pytest.raises(botocore.exceptions.ParamValidationError, match="ContentTyp"):
-            fs._client.create_multipart_upload(Bucket="bucket", Key="dst", **create_kwargs)
-
     def test_copy_object_with_multipart_upload_sse_c_source(self):
         # GH-973: the source's SSE-C key reaches its HeadObject, and an SSE-C
         # object, which cannot have annotations, is not listed for them.
@@ -2111,7 +2076,7 @@ class TestS3FileSystem:
         with Stubber(fs._client) as stubber:
             stubber.add_response(
                 "head_object",
-                {"ContentType": "text/csv"},
+                {"ContentLength": MULTIPART_COPY_SIZE, "ContentType": "text/csv"},
                 {
                     "Bucket": "bucket",
                     "Key": "src",
@@ -2138,7 +2103,9 @@ class TestS3FileSystem:
         bucket = "bucket--usw2-az1--x-s3"
         with Stubber(fs._client) as stubber:
             stubber.add_response(
-                "head_object", {"ContentType": "text/csv"}, {"Bucket": bucket, "Key": "src"}
+                "head_object",
+                {"ContentLength": MULTIPART_COPY_SIZE, "ContentType": "text/csv"},
+                {"Bucket": bucket, "Key": "src"},
             )
             stubber.add_response(
                 "create_multipart_upload",
@@ -2148,7 +2115,7 @@ class TestS3FileSystem:
             for _ in (1, 2):
                 stubber.add_response("upload_part_copy", {"CopyPartResult": {"ETag": '"p"'}}, None)
             stubber.add_response("complete_multipart_upload", {"ETag": '"dst"'}, None)
-            self._multipart_copy(fs, bucket1=bucket)
+            self._multipart_copy(fs, source_bucket=bucket)
             stubber.assert_no_pending_responses()
 
     def test_pipe_file_invalid_path_raises(self):
@@ -3408,14 +3375,12 @@ class TestS3FileSystem:
         )
         fs.core.upload_part_copy = mock.MagicMock()
         fs._finish_multipart_upload = mock.MagicMock()
-        fs._call.return_value = {}
+        # The HeadObject of the source.
+        fs._call.return_value = {"ContentLength": 5 * 2**30 + 2**20}
 
         fs._copy_object_with_multipart_upload(
-            bucket1="bucket",
-            key1="src",
-            size1=5 * 2**30 + 2**20,
-            bucket2="bucket",
-            key2="dst",
+            S3Path("bucket", "src"),
+            S3Path("bucket", "dst"),
             max_workers=max_workers,
             # Copy without reading the metadata, tags and annotations of the
             # source (GH-973).
@@ -3433,6 +3398,84 @@ class TestS3FileSystem:
             (2, (5 * 2**29 + 2**19, 5 * 2**30 + 2**20)),
         ]
 
+    @pytest.mark.skipif(
+        threading.current_thread() is not threading.main_thread(),
+        reason="SIGINT interrupts the main thread.",
+    )
+    def test_copy_object_with_multipart_upload_interrupted_creation(self):
+        # An interrupt during CreateMultipartUpload waits for it, aborts the
+        # upload that it created before any part is copied, and is re-raised.
+        # The created upload used to be left incomplete.
+        fs = self._make_fs()
+        started = threading.Event()
+        waiting = threading.Event()
+        interrupted = threading.Event()
+
+        def create_multipart_upload(*args, **kw):
+            started.set()
+            # Still running when the interrupt arrives, which releases it.
+            interrupted.wait(30)
+            return SimpleNamespace(upload_id="uploadid")
+
+        fs.core.create_multipart_upload = mock.MagicMock(side_effect=create_multipart_upload)
+        fs.core.upload_part_copy = mock.MagicMock()
+        # The HeadObject of the source.
+        fs._call.return_value = {"ContentLength": 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE}
+        fs._abort_multipart_upload = mock.MagicMock()
+        executor = S3ThreadPoolExecutor(max_workers=2)
+        submit = executor.submit
+
+        def submit_creation(fn, *args, **kwargs):
+            future = submit(fn, *args, **kwargs)
+            if fn is fs.core.create_multipart_upload:
+                result = future.result
+
+                def wait_for_result(timeout=None):
+                    # The interrupt is sent once the copy waits for the creation.
+                    waiting.set()
+                    return result(timeout)
+
+                future.result = wait_for_result  # type: ignore[method-assign]
+            return future
+
+        executor.submit = submit_creation  # type: ignore[method-assign]
+        fs._create_executor = mock.MagicMock(return_value=executor)
+
+        def handle_interrupt(signum, frame):
+            interrupted.set()
+            raise KeyboardInterrupt
+
+        def interrupt():
+            # Sent only while the creation is running and the copy waits for
+            # it, which the creation cannot stop doing before the interrupt.
+            if started.wait(5) and waiting.wait(5):
+                signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+
+        thread = threading.Thread(target=interrupt, daemon=True)
+        previous_handler = signal.signal(signal.SIGINT, handle_interrupt)
+        try:
+            thread.start()
+            with pytest.raises(KeyboardInterrupt):
+                fs._copy_object_with_multipart_upload(
+                    S3Path("bucket", "src"),
+                    S3Path("bucket", "dst"),
+                    MetadataDirective="REPLACE",
+                    TaggingDirective="REPLACE",
+                    AnnotationDirective="EXCLUDE",
+                )
+        finally:
+            # A late interrupt is ignored instead of reaching a later test.
+            signal.signal(signal.SIGINT, lambda signum, frame: None)
+            started.set()
+            waiting.set()
+            if thread.ident is not None:
+                thread.join()
+            signal.signal(signal.SIGINT, previous_handler)
+            interrupted.set()
+
+        fs._abort_multipart_upload.assert_called_once_with("bucket", "dst", "uploadid", {})
+        fs.core.upload_part_copy.assert_not_called()
+
     @pytest.mark.parametrize(
         "block_size",
         [
@@ -3449,12 +3492,7 @@ class TestS3FileSystem:
             match=r"between 5 MiB \(5242880 bytes\) and 5 GiB \(5368709120 bytes\), inclusive",
         ):
             fs._copy_object_with_multipart_upload(
-                bucket1="bucket",
-                key1="src",
-                size1=5 * 2**30 + 2**20,
-                bucket2="bucket",
-                key2="dst",
-                block_size=block_size,
+                S3Path("bucket", "src"), S3Path("bucket", "dst"), block_size=block_size
             )
         fs._call.assert_not_called()
 

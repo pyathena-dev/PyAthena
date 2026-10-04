@@ -532,23 +532,11 @@ class AioS3FileSystem(AsyncFileSystem):
         size1 = info1.get("size", 0)
         try:
             if size1 <= self.core.MULTIPART_UPLOAD_MAX_PART_SIZE:
-                await asyncio.to_thread(
-                    self._sync_fs._copy_object,
-                    bucket1=source.bucket,
-                    key1=source.key,
-                    version_id1=source.version_id,
-                    bucket2=destination.bucket,
-                    key2=destination.key,
-                    **kwargs,
-                )
+                await asyncio.to_thread(self.core.copy_object, source, destination, **kwargs)
             else:
                 await self._copy_object_with_multipart_upload(
-                    bucket1=source.bucket,
-                    key1=source.key,
-                    version_id1=source.version_id,
-                    size1=size1,
-                    bucket2=destination.bucket,
-                    key2=destination.key,
+                    source,
+                    destination,
                     max_workers=max_workers,
                     block_size=block_size,
                     **kwargs,
@@ -560,89 +548,46 @@ class AioS3FileSystem(AsyncFileSystem):
 
     async def _copy_object_with_multipart_upload(
         self,
-        bucket1: str,
-        key1: str,
-        size1: int,
-        bucket2: str,
-        key2: str,
+        source: S3Path,
+        destination: S3Path,
         max_workers: int | None = None,
         block_size: int | None = None,
-        version_id1: str | None = None,
         **kwargs,
     ) -> None:
         """Copy an object with a multipart upload of its byte ranges.
 
         See :meth:`S3FileSystem._copy_object_with_multipart_upload`. The part
         and annotation copies run in parallel as asyncio tasks with
-        ``asyncio.to_thread``. On a cancellation after the upload is
-        created, the running part copies and the completion are waited for,
-        the upload is aborted unless it has completed, and the cancellation
-        is re-raised. A repeated cancellation returns without stopping this
-        cleanup.
+        ``asyncio.to_thread``. On a cancellation, the creation of the upload,
+        the running part copies and the completion are waited for, the
+        upload is aborted if it was created and has not completed, and the
+        cancellation is re-raised. A repeated cancellation returns without
+        stopping this cleanup.
 
         Args:
-            bucket1: Source S3 bucket name.
-            key1: Source object key.
-            size1: Size of the source object in bytes.
-            bucket2: Destination S3 bucket name.
-            key2: Destination object key.
+            source: Source S3 path, with the version ID to copy, if any.
+            destination: Destination S3 path.
             max_workers: Maximum number of parallel requests.
             block_size: Size in bytes of the copied ranges.
-            version_id1: Source version ID, if any.
             **kwargs: The CopyObject parameters of the copy; each request
                 receives those that it accepts.
 
         Raises:
-            ValueError: If ``block_size`` is out of the part size limits or a
-                directive has an invalid value.
+            ValueError: If ``block_size`` is out of the part size limits, a
+                directive has an invalid value, or HeadObject reports no
+                size.
         """
         max_workers = max_workers if max_workers else self._sync_fs.max_workers
-        block_size = block_size if block_size else self.core.MULTIPART_UPLOAD_MAX_PART_SIZE
-        if (
-            block_size < self.core.MULTIPART_UPLOAD_MIN_PART_SIZE
-            or block_size > self.core.MULTIPART_UPLOAD_MAX_PART_SIZE
-        ):
-            raise ValueError(
-                "Block size must be between "
-                f"5 MiB ({self.core.MULTIPART_UPLOAD_MIN_PART_SIZE} bytes) and "
-                f"5 GiB ({self.core.MULTIPART_UPLOAD_MAX_PART_SIZE} bytes), "
-                f"inclusive: {block_size}."
-            )
-
-        create_kwargs, version_id1, head_size = await asyncio.to_thread(
-            self._sync_fs._get_multipart_copy_kwargs, bucket1, key1, version_id1, kwargs
+        plan = await asyncio.to_thread(
+            self.core.plan_multipart_copy, source, destination, block_size, **kwargs
         )
-        if head_size is not None and head_size <= self.core.MULTIPART_UPLOAD_MAX_PART_SIZE:
+        if plan.fits_single_request:
             # See S3FileSystem._copy_object_with_multipart_upload.
-            await asyncio.to_thread(
-                self._sync_fs._copy_object,
-                bucket1=bucket1,
-                key1=key1,
-                version_id1=version_id1,
-                bucket2=bucket2,
-                key2=key2,
-                **kwargs,
-            )
+            await asyncio.to_thread(self.core.copy_object, plan.source, plan.destination, **kwargs)
             return
-        # The size of the copied version; see S3FileSystem.
-        ranges = self.core.part_ranges(size1 if head_size is None else head_size, block_size)
-        source = S3Path(bucket1, key1, version_id1)
-        destination = S3Path(bucket2, key2)
-        # Listed before anything is written; see S3FileSystem.
-        annotations = (
-            await asyncio.to_thread(
-                self._sync_fs._list_object_annotations, bucket1, key1, version_id1, kwargs
-            )
-            if self._sync_fs._copies_annotations(bucket1, kwargs)
-            else []
-        )
-        multipart_upload = await asyncio.to_thread(
-            self.core.create_multipart_upload, destination, **create_kwargs
-        )
-        upload_id = cast(str, multipart_upload.upload_id)
+        upload_id: str
 
         semaphore = asyncio.Semaphore(max_workers)
-        part_kwargs = self.core.operation_params("upload_part_copy", kwargs)
         failed = False
 
         async def _upload_part(i: int, range_: tuple[int, int]) -> S3MultipartUploadPart | None:
@@ -654,22 +599,26 @@ class AioS3FileSystem(AsyncFileSystem):
                 try:
                     return await asyncio.to_thread(
                         self.core.upload_part_copy,
-                        path=destination,
+                        path=plan.destination,
                         upload_id=upload_id,
                         part_number=i + 1,
-                        source=source,
+                        source=plan.source,
                         range_=range_,
-                        **part_kwargs,
+                        **plan.part_params,
                     )
                 except Exception:
                     # Set before the semaphore lets a waiting part start.
                     failed = True
                     raise
 
-        tasks = [asyncio.ensure_future(_upload_part(i, r)) for i, r in enumerate(ranges)]
+        tasks: list[asyncio.Future[S3MultipartUploadPart | None]] = []
         completion: asyncio.Task[S3CompleteMultipartUpload] | None = None
 
         async def _abort() -> None:
+            await asyncio.wait([creation])
+            if creation.cancelled() or creation.exception() is not None:
+                # No upload was created.
+                return
             # A part that is still copying when the upload is aborted may be
             # stored after the abort, so wait for the running parts first.
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -680,10 +629,27 @@ class AioS3FileSystem(AsyncFileSystem):
                     # there is nothing to abort.
                     return
             await asyncio.to_thread(
-                self._sync_fs._abort_multipart_upload, bucket2, key2, upload_id, kwargs
+                self._sync_fs._abort_multipart_upload,
+                plan.destination.bucket,
+                cast(str, plan.destination.key),
+                cast(str, creation.result().upload_id),
+                plan.abort_params,
             )
 
+        # A task, so that _abort() can wait for an upload that is created
+        # after a cancellation; scheduled right before the try, so that
+        # nothing can fail between the two.
+        creation = asyncio.ensure_future(
+            asyncio.to_thread(
+                self.core.create_multipart_upload, plan.destination, **plan.create_params
+            )
+        )
         try:
+            # shield keeps a cancellation from cancelling the creation, whose
+            # thread would keep running, so that _abort() can wait for it.
+            multipart_upload = await asyncio.shield(creation)
+            upload_id = cast(str, multipart_upload.upload_id)
+            tasks = [asyncio.ensure_future(_upload_part(i, r)) for i, r in enumerate(plan.ranges)]
             # Unlike gather, wait does not cancel the parts when this task is
             # cancelled; their threads would keep copying, so they are waited
             # for in _abort().
@@ -696,10 +662,10 @@ class AioS3FileSystem(AsyncFileSystem):
             completion = asyncio.ensure_future(
                 asyncio.to_thread(
                     self.core.complete_multipart_upload,
-                    destination,
+                    plan.destination,
                     upload_id,
                     cast(list[S3MultipartUploadPart], parts),
-                    **self.core.operation_params("complete_multipart_upload", kwargs),
+                    **plan.complete_params,
                 )
             )
             # shield keeps a cancellation from cancelling the completion, whose
@@ -728,22 +694,20 @@ class AioS3FileSystem(AsyncFileSystem):
                     return
                 try:
                     await asyncio.to_thread(
-                        self._sync_fs._copy_object_annotation,
+                        self.core.copy_object_annotation,
                         name,
-                        bucket1,
-                        key1,
-                        version_id1,
-                        bucket2,
-                        key2,
-                        completed,
-                        kwargs,
+                        plan.source,
+                        plan.destination,
+                        completed.version_id,
+                        completed.etag,
+                        **kwargs,
                     )
                 except Exception:
                     failed = True
                     raise
 
         results = await asyncio.gather(
-            *[_copy_annotation(name) for name in annotations], return_exceptions=True
+            *[_copy_annotation(name) for name in plan.annotations], return_exceptions=True
         )
         for result in results:
             if isinstance(result, BaseException):
