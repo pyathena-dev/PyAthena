@@ -461,7 +461,7 @@ class AioS3FileSystem(AsyncFileSystem):
             ValueError: If a source with a version ID is paired, and a
                 destination lies outside ``lpath``.
         """
-        if not isinstance(lpath, list) and _has_version_id(rpath):
+        if isinstance(lpath, (str, os.PathLike)) and _has_version_id(rpath):
             root = make_path_posix(lpath)
             rpath, lpath = await asyncio.to_thread(
                 self._sync_fs._copy_paths,
@@ -767,7 +767,7 @@ class AioS3FileSystem(AsyncFileSystem):
         if maxdepth is not None and maxdepth < 1:
             raise ValueError("maxdepth must be at least 1")
         versions, others = self._sync_fs._split_version_paths(path)
-        out = {p for p in versions if not recursive or await self._isfile(p)}
+        out = {p for p in versions if not recursive or await self._exists(p)}
         if others:
             try:
                 out.update(

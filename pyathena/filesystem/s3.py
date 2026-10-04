@@ -1123,7 +1123,8 @@ class S3FileSystem(AbstractFileSystem):
         As in fsspec, except that a path with a version ID names that version
         of an object: it is not a glob pattern, although its ``?`` is one in
         fsspec, nor is anything expanded below it. With ``recursive``, it is
-        included only if it is a file, as fsspec includes a path that exists.
+        included only if the version exists, as fsspec includes a path that
+        exists.
 
         Args:
             path: S3 path, glob pattern, or list of them.
@@ -1141,7 +1142,7 @@ class S3FileSystem(AbstractFileSystem):
         if maxdepth is not None and maxdepth < 1:
             raise ValueError("maxdepth must be at least 1")
         versions, others = self._split_version_paths(path)
-        out = {p for p in versions if not recursive or self.isfile(p)}
+        out = {p for p in versions if not recursive or self.exists(p)}
         if others:
             try:
                 out.update(
@@ -1826,7 +1827,7 @@ class S3FileSystem(AbstractFileSystem):
             ValueError: If a source with a version ID is paired, and a
                 destination lies outside ``lpath``.
         """
-        if not isinstance(lpath, list) and _has_version_id(rpath):
+        if isinstance(lpath, (str, os.PathLike)) and _has_version_id(rpath):
             root = make_path_posix(lpath)
             rpath, lpath = self._copy_paths(
                 rpath, root, recursive=recursive, maxdepth=maxdepth, isdir=LocalFileSystem().isdir

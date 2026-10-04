@@ -1716,6 +1716,23 @@ class TestS3FileSystem:
         with pytest.raises(ValueError, match="maxdepth"):
             fs.expand_path("s3://bucket/b?versionId=v1", maxdepth=0)
 
+    def test_expand_path_recursive_version_lookup_error(self):
+        # A failed lookup is raised, not taken for a missing version.
+        fs = self._make_fs()
+        self._serve_keys(fs, {"a", "b"})
+        serve = fs._call.side_effect
+
+        def call(method, **kwargs):
+            if method is fs._client.head_object and kwargs["Key"] == "b":
+                raise PermissionError("b")
+            return serve(method, **kwargs)
+
+        fs._call.side_effect = call
+        with pytest.raises(PermissionError):
+            fs.expand_path(
+                ["s3://bucket/a?versionId=v1", "s3://bucket/b?versionId=v2"], recursive=True
+            )
+
     def test_expand_path_recursive_missing_version(self):
         # With recursive, a version is included only if it is a file, as
         # fsspec includes a path that exists; a key prefix of the same name
@@ -1761,6 +1778,8 @@ class TestS3FileSystem:
             (["s3://bucket/key?versionId=v1"], "d", "d/key"),
             (Path("bucket/key?versionId=v1"), "d/", "d/key"),
             ("s3://bucket/key?versionId=v1", Path("f.txt"), "f.txt"),
+            # A sequence of destinations is paired by fsspec, as before.
+            ("s3://bucket/key?versionId=v1", ("f.txt",), "f.txt"),
         ],
     )
     def test_get_version(self, tmp_path, monkeypatch, rpath, lpath, expected):
