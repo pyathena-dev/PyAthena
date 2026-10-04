@@ -9,12 +9,10 @@ import math
 import mimetypes
 import os.path
 import time
-from collections import Counter
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future, as_completed, wait
 from copy import deepcopy
 from datetime import datetime
-from glob import has_magic
 from io import BytesIO
 from multiprocessing import cpu_count
 from re import Pattern
@@ -29,9 +27,9 @@ from fsspec import AbstractFileSystem
 from fsspec.callbacks import _DEFAULT_CALLBACK, Callback
 from fsspec.compression import compr
 from fsspec.core import get_compression
-from fsspec.implementations.local import LocalFileSystem, make_path_posix, trailing_sep
+from fsspec.implementations.local import LocalFileSystem, make_path_posix
 from fsspec.spec import AbstractBufferedFile
-from fsspec.utils import check_contained, isfilelike, other_paths, tokenize
+from fsspec.utils import check_contained, isfilelike, tokenize
 
 import pyathena
 from pyathena.connection import Connection
@@ -50,6 +48,7 @@ from pyathena.filesystem.s3_object import (
     S3StorageClass,
 )
 from pyathena.filesystem.s3_path import S3Path
+from pyathena.filesystem.s3_path_pairing import S3PathPairing
 from pyathena.util import RetryConfig, override
 
 _logger = logging.getLogger(__name__)
@@ -258,11 +257,17 @@ class S3FileSystem(AbstractFileSystem):
             retry_config=retry_config,
             request_kwargs={"RequestPayer": "requester"} if requester_pays else None,
         )
+        self._pairing = S3PathPairing(self)
 
     @property
     def core(self) -> S3Core:
         """The typed S3 operations that the filesystem sends its requests with."""
         return self._core
+
+    @property
+    def pairing(self) -> S3PathPairing:
+        """The pairing of the paths that the filesystem copies, moves and deletes."""
+        return self._pairing
 
     @property
     def _client(self) -> BaseClient:
@@ -1100,45 +1105,8 @@ class S3FileSystem(AbstractFileSystem):
             ValueError: If a path is a bucket.
             OSError: If S3 could not delete some of the objects.
         """
-        paths = self._expand_delete_paths(path, recursive=recursive, maxdepth=maxdepth)
+        paths = self.pairing.delete_paths(path, recursive=recursive, maxdepth=maxdepth)
         self._delete_objects(paths, **kwargs)
-
-    def _expand_delete_paths(
-        self, path: str | list[str], recursive: bool = False, maxdepth: int | None = None
-    ) -> list[str]:
-        """Expand the paths that ``rm`` deletes.
-
-        Args:
-            path: S3 path or list of paths.
-            recursive: Whether to include all objects below the paths.
-            maxdepth: Maximum depth to expand when ``recursive`` is True.
-
-        Returns:
-            The paths with a version ID as given, followed by the expansion
-            of the other paths by ``expand_path``.
-
-        Raises:
-            ValueError: If a path is a bucket.
-        """
-        paths = [path] if isinstance(path, str) else list(path)
-        versioned_paths, unversioned_paths = [], []
-        for p in paths:
-            s3_path = S3Path.parse(p)
-            # expand_path strips the slashes of "bucket//" to the bucket.
-            if s3_path.is_bucket:
-                raise ValueError("Cannot delete the bucket.")
-            if s3_path.version_id:
-                versioned_paths.append(p)
-            else:
-                unversioned_paths.append(p)
-
-        if unversioned_paths:
-            # Versioned paths are deleted as given, without the lookup that
-            # expand_path makes for them with recursive.
-            unversioned_paths = self.expand_path(
-                unversioned_paths, recursive=recursive, maxdepth=maxdepth
-            )
-        return versioned_paths + unversioned_paths
 
     def _create_executor(self, max_workers: int) -> S3Executor:
         """Create an executor strategy for parallel operations.
@@ -1449,129 +1417,19 @@ class S3FileSystem(AbstractFileSystem):
             return
         copied = [
             p1
-            for p1, p2 in self._move_paths(path1, path2, recursive=recursive, maxdepth=maxdepth)
+            for p1, p2 in self.pairing.move_pairs(
+                path1, path2, recursive=recursive, maxdepth=maxdepth
+            )
             if self._copy_file(p1, p2, **kwargs)
         ]
         self._delete_objects(copied)
-
-    def _move_paths(
-        self, path1, path2, recursive: bool = False, maxdepth: int | None = None
-    ) -> list[tuple[str, str]]:
-        """Pair the sources and destinations of a move as fsspec's ``copy()`` does.
-
-        Args:
-            path1: Source S3 path, glob pattern, or list of paths.
-            path2: Destination S3 path, or list of paths when ``path1`` is a
-                list.
-            recursive: Whether to include the contents of the directories.
-            maxdepth: Maximum depth of the expansion.
-
-        Returns:
-            The source and destination paths, except the sources whose
-            destination is the source itself or, for a ``null`` version, the
-            key of the source.
-
-        Raises:
-            ValueError: If two sources have the same destination, or a
-                destination is another source, including one left in place,
-                except for a directory with no object at its key, which is not
-                copied.
-        """
-        paths1, paths2 = self._copy_paths(path1, path2, recursive=recursive, maxdepth=maxdepth)
-        # The paths are copied as given, and compared by what they name.
-        named = [
-            (p1, p2, self._move_target(p1), self._move_target(p2))
-            for p1, p2 in zip(paths1, paths2, strict=False)
-        ]
-        pairs = [(p1, p2) for p1, p2, source, dest in named if source != dest]
-        moved = [(p1, source, dest) for p1, _, source, dest in named if source != dest]
-        # The sources left in place count too; a copy onto one overwrites it.
-        sources = {source for _, _, source, _ in named}
-        counts = Counter(dest for _, _, dest in moved)
-        # A source with another source below it may be a directory.
-        directories: set[str] = set()
-        for source in sources:
-            parent = source.rpartition("/")[0]
-            while parent and parent not in directories:
-                directories.add(parent)
-                parent = parent.rpartition("/")[0]
-        # A directory without an object at its key is not copied, so it
-        # writes no destination and is left out of the checks. A path with a
-        # version always names an object.
-        writers = [
-            (source, dest)
-            for p1, source, dest in moved
-            if not (
-                (counts[dest] > 1 or dest in sources)
-                and source in directories
-                and not S3Path.parse(p1).version_id
-                and self._head_object(source) is None
-            )
-        ]
-        counts = Counter(dest for _, dest in writers)
-        for _, dest in writers:
-            if counts[dest] > 1:
-                raise ValueError("Cannot move several paths to the same destination.")
-            if dest in sources:
-                raise ValueError("Cannot move a path onto another path that is moved.")
-        return pairs
-
-    def _copy_paths(
-        self,
-        path1: str | list[str],
-        path2: str | list[str],
-        recursive: bool = False,
-        maxdepth: int | None = None,
-        isdir: Callable[[str], bool] | None = None,
-    ) -> tuple[list[str], list[str]]:
-        """Pair the sources of a copy with their destinations as fsspec's ``copy()`` does.
-
-        A source with a version ID names that version of an object: it is not
-        a glob pattern, and its destination is named after its key without
-        the version.
-
-        Args:
-            path1: Source S3 path, glob pattern, or list of them.
-            path2: Destination path, or list of paths when ``path1`` is a
-                list.
-            recursive: Whether to include the contents of the directories.
-            maxdepth: Maximum depth of the expansion.
-            isdir: Whether a destination path is a directory, by default
-                ``self.isdir``; ``get()`` passes the local filesystem's.
-
-        Returns:
-            The sources and their destinations. Both are empty if ``path1``
-            is a string that matches only directories without ``recursive``.
-        """
-        if isinstance(path1, list) and isinstance(path2, list):
-            return path1, path2
-        source_is_str = isinstance(path1, str)
-        paths1 = self.expand_path(path1, recursive=recursive, maxdepth=maxdepth)
-        if source_is_str and (not recursive or maxdepth is not None):
-            # Non-recursive glob does not copy directories.
-            paths1 = [p for p in paths1 if not (trailing_sep(p) or self.isdir(p))]
-            if not paths1:
-                return [], []
-        glob = isinstance(path1, str) and has_magic(path1) and not S3Path.has_version_id(path1)
-        # The destination is looked up only when it decides the mapping.
-        exists = source_is_str and (
-            (glob and len(paths1) == 1)
-            or (
-                not glob
-                and not trailing_sep(path1)
-                and isinstance(path2, str)
-                and (trailing_sep(path2) or (isdir or self.isdir)(path2))
-            )
-        )
-        names = [S3Path.split_version_id(p)[0] for p in paths1]
-        return paths1, other_paths(names, path2, exists=exists, flatten=not source_is_str)
 
     def copy(self, path1, path2, recursive=False, maxdepth=None, on_error=None, **kwargs) -> None:
         """Copy files within S3.
 
         As fsspec's ``copy()``, except that a source with a version ID copies
         that version of the object to a destination named after its key, as
-        ``_copy_paths`` pairs them.
+        :meth:`S3PathPairing.copy_pairs` pairs them.
 
         Args:
             path1: Source S3 path, glob pattern, or list of them.
@@ -1586,9 +1444,10 @@ class S3FileSystem(AbstractFileSystem):
         """
         sources = [path1] if isinstance(path1, (str, os.PathLike)) else path1
         if isinstance(path2, str) and any(S3Path.has_version_id(p) for p in sources):
-            path1, path2 = self._copy_paths(path1, path2, recursive=recursive, maxdepth=maxdepth)
-            if not path1:
+            pairs = self.pairing.copy_pairs(path1, path2, recursive=recursive, maxdepth=maxdepth)
+            if not pairs:
                 return
+            path1, path2 = [p1 for p1, _ in pairs], [p2 for _, p2 in pairs]
         super().copy(
             path1, path2, recursive=recursive, maxdepth=maxdepth, on_error=on_error, **kwargs
         )
@@ -1600,7 +1459,7 @@ class S3FileSystem(AbstractFileSystem):
 
         As fsspec's ``get()``, except that a source with a version ID
         downloads that version of the object to a local path named after its
-        key, as ``_copy_paths`` pairs them. Those destinations are checked to
+        key, as :meth:`S3PathPairing.copy_pairs` pairs them. Those destinations are checked to
         lie under ``lpath``.
 
         Args:
@@ -1619,33 +1478,16 @@ class S3FileSystem(AbstractFileSystem):
         sources = [rpath] if isinstance(rpath, (str, os.PathLike)) else rpath
         if isinstance(lpath, (str, os.PathLike)) and any(S3Path.has_version_id(p) for p in sources):
             root = make_path_posix(lpath)
-            rpath, lpath = self._copy_paths(
+            pairs = self.pairing.copy_pairs(
                 rpath, root, recursive=recursive, maxdepth=maxdepth, isdir=LocalFileSystem().isdir
             )
+            rpath, lpath = [p1 for p1, _ in pairs], [p2 for _, p2 in pairs]
             check_contained(root, lpath)
             if not rpath:
                 return
         super().get(
             rpath, lpath, recursive=recursive, callback=callback, maxdepth=maxdepth, **kwargs
         )
-
-    def _move_target(self, path: str) -> str:
-        """Return what a path of a move names, for comparing the paths.
-
-        A write to a key replaces its ``null`` version, which the objects of a
-        bucket without versioning have, so that version names the key itself.
-
-        Args:
-            path: S3 path, possibly with a version ID.
-
-        Returns:
-            The path in ``bucket/key`` form, with the version ID unless it is
-            ``null``.
-        """
-        s3_path = S3Path.parse(path)
-        if s3_path.version_id == "null":
-            return s3_path.name
-        return str(s3_path)
 
     def cp_file(
         self, path1: str, path2: str, recursive=False, maxdepth=None, on_error=None, **kwargs

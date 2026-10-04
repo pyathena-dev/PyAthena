@@ -348,6 +348,21 @@ instead. `copy_object_annotation()` copies one annotation onto the destination a
 the upload completes, with GetObjectAnnotation and PutObjectAnnotation. The
 filesystems' `cp_file()`, `copy()` and `mv()` run these plans.
 
+`S3FileSystem.pairing` is an `S3PathPairing`, the expansion and pairing of the paths
+that `copy()`, `get()`, `mv()` and `rm()` operate on, as fsspec pairs them;
+`AioS3FileSystem.pairing` is the same object. `copy_pairs()` and `move_pairs()` return
+the `(source, destination)` pairs, and `delete_paths()` the paths that `rm()` deletes. A
+path with a version ID names that version, and its destination is named after its key.
+The pairing lists and looks up paths through the filesystem and its cache, and writes
+nothing.
+
+```python
+for source, destination in fs.pairing.copy_pairs(
+    "s3://YOUR_S3_BUCKET/src/", "s3://YOUR_S3_BUCKET/dst/", recursive=True
+):
+    print(source, "->", destination)
+```
+
 ## Async filesystem
 
 `AioS3FileSystem` provides the same functionality on top of fsspec's

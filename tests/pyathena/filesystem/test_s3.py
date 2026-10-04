@@ -41,6 +41,7 @@ from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import S3Object, S3ObjectType, S3StorageClass
 from pyathena.filesystem.s3_path import S3Path
+from pyathena.filesystem.s3_path_pairing import S3PathPairing
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
@@ -174,6 +175,7 @@ class TestS3FileSystem:
         fs._core = S3Core(client, retry_config=RetryConfig())
         # The requests of the core and of the filesystem go to one mock.
         fs._call = fs._core.call = mock.MagicMock()
+        fs._pairing = S3PathPairing(fs)
         fs.max_workers = 4
         fs.default_block_size = S3FileSystem.DEFAULT_BLOCK_SIZE
         fs.allow_bucket_creation = False

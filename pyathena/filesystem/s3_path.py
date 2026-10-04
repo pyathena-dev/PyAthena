@@ -133,6 +133,16 @@ class S3Path:
         """The path as an ``s3://`` URI, with its version ID query, if any."""
         return f"s3://{self}"
 
+    @property
+    def target(self) -> S3Path:
+        """The object that a write to the path replaces, for comparing paths.
+
+        A write to a key replaces its ``null`` version, which the objects of a
+        bucket without versioning have, so a ``null`` version names the key
+        itself. Any other path is its own target.
+        """
+        return self.with_version_id(None) if self.version_id == "null" else self
+
     def with_version_id(self, version_id: str | None) -> S3Path:
         """Return the path with another version ID.
 
