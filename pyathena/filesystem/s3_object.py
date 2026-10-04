@@ -6,9 +6,12 @@ import copy
 import logging
 from collections.abc import Iterator, Mapping, MutableMapping
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pyathena.util import override
+
+if TYPE_CHECKING:
+    from pyathena.filesystem.s3_path import S3Path
 
 _logger = logging.getLogger(__name__)
 
@@ -279,12 +282,14 @@ class S3Metadata(Mapping[str, str]):
     See https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html
     """
 
-    def __init__(self, response: dict[str, Any]) -> None:
+    def __init__(self, response: dict[str, Any], path: S3Path | None = None) -> None:
         """Initialize the metadata from a HeadObject response.
 
         Args:
             response: The HeadObject response.
+            path: The path that was looked up, if known.
         """
+        self._path = path
         self._cache_control: str | None = response.get("CacheControl")
         self._content_disposition: str | None = response.get("ContentDisposition")
         self._content_encoding: str | None = response.get("ContentEncoding")
@@ -307,6 +312,11 @@ class S3Metadata(Mapping[str, str]):
         self._bucket_key_enabled: bool | None = response.get("BucketKeyEnabled")
         self._website_redirect_location: str | None = response.get("WebsiteRedirectLocation")
         self._version_id: str | None = response.get("VersionId")
+        self._object_lock_mode: str | None = response.get("ObjectLockMode")
+        self._object_lock_retain_until_date: datetime | None = response.get(
+            "ObjectLockRetainUntilDate"
+        )
+        self._object_lock_legal_hold_status: str | None = response.get("ObjectLockLegalHoldStatus")
         self._user_metadata: dict[str, str] = response.get("Metadata", {})
 
     @override
@@ -409,6 +419,26 @@ class S3Metadata(Mapping[str, str]):
     def version_id(self) -> str | None:
         """The ``VersionId`` of the object."""
         return self._version_id
+
+    @property
+    def path(self) -> S3Path | None:
+        """The path that was looked up, or None if it is not known."""
+        return self._path
+
+    @property
+    def object_lock_mode(self) -> str | None:
+        """The ``ObjectLockMode`` of the object."""
+        return self._object_lock_mode
+
+    @property
+    def object_lock_retain_until_date(self) -> datetime | None:
+        """The ``ObjectLockRetainUntilDate`` of the object."""
+        return self._object_lock_retain_until_date
+
+    @property
+    def object_lock_legal_hold_status(self) -> str | None:
+        """The ``ObjectLockLegalHoldStatus`` of the object."""
+        return self._object_lock_legal_hold_status
 
     @property
     def user_metadata(self) -> dict[str, str]:

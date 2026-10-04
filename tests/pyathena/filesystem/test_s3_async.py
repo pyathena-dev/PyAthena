@@ -22,6 +22,7 @@ from fsspec import Callback
 
 from pyathena.filesystem.s3 import S3File, S3FileSystem
 from pyathena.filesystem.s3_async import AioS3File, AioS3FileSystem
+from pyathena.filesystem.s3_core import S3Core
 from pyathena.filesystem.s3_object import (
     S3MultipartUploadPart,
     S3Object,
@@ -164,7 +165,7 @@ class TestAioS3FileSystem:
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
         )
         sync_fs._complete_multipart_upload = mock.MagicMock()
-        sync_fs._call = mock.MagicMock(return_value={})
+        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={})
 
         await fs._copy_object_with_multipart_upload(
             bucket1="bucket",
@@ -220,7 +221,9 @@ class TestAioS3FileSystem:
         # TestS3FileSystem.test_copy_object_with_multipart_upload_small_head_object_size.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
         sync_fs = fs._sync_fs
-        sync_fs._call = mock.MagicMock(return_value={"ContentLength": size, "VersionId": "v1"})
+        sync_fs._call = sync_fs._core.call = mock.MagicMock(
+            return_value={"ContentLength": size, "VersionId": "v1"}
+        )
         sync_fs._copy_object = mock.MagicMock()
         sync_fs._create_multipart_upload = mock.MagicMock()
 
@@ -332,7 +335,7 @@ class TestAioS3FileSystem:
         sync_fs._upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
         sync_fs._complete_multipart_upload = mock.MagicMock()
         # The HeadObject of the source, for its version.
-        sync_fs._call = mock.MagicMock(return_value={})
+        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={})
         sync_fs._abort_multipart_upload = mock.MagicMock(
             side_effect=lambda *args: events.append("abort")
         )
@@ -391,7 +394,7 @@ class TestAioS3FileSystem:
         sync_fs._upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
         sync_fs._complete_multipart_upload = mock.MagicMock()
         # The HeadObject of the source, for its version.
-        sync_fs._call = mock.MagicMock(return_value={})
+        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={})
         sync_fs._abort_multipart_upload = mock.MagicMock(side_effect=abort_multipart_upload)
 
         task = asyncio.ensure_future(
@@ -464,7 +467,7 @@ class TestAioS3FileSystem:
         )
         sync_fs._complete_multipart_upload = mock.MagicMock(side_effect=complete_multipart_upload)
         # The HeadObject of the source, for its version.
-        sync_fs._call = mock.MagicMock(return_value={})
+        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={})
         sync_fs._abort_multipart_upload = mock.MagicMock(
             side_effect=lambda *args: events.append("abort")
         )
@@ -511,7 +514,7 @@ class TestAioS3FileSystem:
     async def test_copy_object_with_multipart_upload_invalid_block_size(self, block_size):
         # GH-926: the message states the accepted range.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
-        fs._sync_fs._call = mock.MagicMock()
+        fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock()
 
         with pytest.raises(
             ValueError,
@@ -564,7 +567,7 @@ class TestAioS3FileSystem:
         # the file is opened, for an existing object.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
         fs._sync_fs.exists = mock.MagicMock(return_value=True)
-        fs._sync_fs._call = mock.MagicMock()
+        fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock()
         local = tmp_path / "local"
         local.write_bytes(b"a")
         with fs.transaction:
@@ -580,11 +583,16 @@ class TestAioS3FileSystem:
         # GH-972: fsspec's mode argument used to be sent to PutObject.
         # A real client selects the request parameters of each operation.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
-        fs._sync_fs._client = boto3.client(
-            "s3", region_name="us-east-1", aws_access_key_id="dummy", aws_secret_access_key="dummy"
+        fs._sync_fs._core = S3Core(
+            boto3.client(
+                "s3",
+                region_name="us-east-1",
+                aws_access_key_id="dummy",
+                aws_secret_access_key="dummy",
+            )
         )
         fs._sync_fs.exists = mock.MagicMock(return_value=False)
-        fs._sync_fs._call = mock.MagicMock(return_value={"ETag": '"e"'})
+        fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock(return_value={"ETag": '"e"'})
         local = tmp_path / "local"
         local.write_bytes(b"a")
 
@@ -674,7 +682,7 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
         fs._sync_fs.MULTIPART_UPLOAD_MAX_PARTS = 3
         fs._sync_fs.default_block_size = 4
-        fs._sync_fs._call = mock.MagicMock()
+        fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock()
         fs.open = mock.MagicMock()
         local = tmp_path / "local"
         local.write_bytes(b"a" * 13)
@@ -710,7 +718,7 @@ class TestAioS3FileSystem:
         # GH-977: touch() used to be fsspec's open()-based default, which
         # dropped the PutObject parameters and returned None.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
-        fs._sync_fs._call = mock.MagicMock(return_value={"ETag": '"e"'})
+        fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock(return_value={"ETag": '"e"'})
 
         actual = fs.touch("s3://bucket/key", ContentType="text/plain")
         assert isinstance(actual, dict)
@@ -731,7 +739,7 @@ class TestAioS3FileSystem:
         # errors and emptied a bucket path.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
         sync_fs = fs._sync_fs
-        sync_fs._call = mock.MagicMock(return_value={})
+        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={})
 
         await fs._rm(["s3://b1/a", "s3://b2/b"], ExpectedBucketOwner="111122223333")
         assert sorted(
@@ -768,7 +776,7 @@ class TestAioS3FileSystem:
                 raise PermissionError("Access Denied")
             return {"Errors": [{"Key": "b", "Code": "AccessDenied", "Message": "Access Denied"}]}
 
-        fs._sync_fs._call = call
+        fs._sync_fs._call = fs._sync_fs._core.call = call
         with pytest.raises(PermissionError, match="Access Denied") as exc_info:
             await fs._rm(["s3://b1/a", "s3://b2/b"])
         assert exc_info.value.__notes__ == [
@@ -794,7 +802,7 @@ class TestAioS3FileSystem:
                     return
                 await asyncio.sleep(0.01)
 
-        fs._sync_fs._call = call
+        fs._sync_fs._call = fs._sync_fs._core.call = call
         task = asyncio.create_task(fs._rm(["s3://b1/a", "s3://b2/b"]))
         for event in started.values():
             await asyncio.to_thread(event.wait, 10)
@@ -823,7 +831,7 @@ class TestAioS3FileSystem:
         # GH-962: _rm() did not pass maxdepth when expanding the path.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
         sync_fs = fs._sync_fs
-        sync_fs._call = mock.MagicMock(return_value={})
+        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={})
         sync_fs.find = mock.MagicMock(return_value=["bucket/dir/a"])
         sync_fs.exists = mock.MagicMock(return_value=True)
 
@@ -867,7 +875,7 @@ class TestAioS3FileSystem:
         # sent to CopyObject and fail with NoSuchKey.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
         fs._info = mock.AsyncMock(return_value=S3FileSystem._directory_object("bucket", "src"))
-        fs._sync_fs._call = mock.MagicMock()
+        fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock()
 
         await fs._cp_file("s3://bucket/src", "s3://bucket/dst")
         fs._sync_fs._call.assert_not_called()
@@ -942,7 +950,7 @@ class TestAioS3FileSystem:
             return True
 
         fs._copy_file = copy_file
-        fs._sync_fs._call = mock.MagicMock(return_value={})
+        fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock(return_value={})
 
         await fs._mv(
             ["s3://bucket/a", "s3://bucket/d", "s3://bucket/c"],
@@ -974,7 +982,7 @@ class TestAioS3FileSystem:
             return True
 
         fs._copy_file = copy_file
-        fs._sync_fs._call = mock.MagicMock()
+        fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock()
 
         with pytest.raises(OSError, match="copy failed"):
             await fs._mv(["s3://bucket/a", "s3://bucket/b"], ["s3://bucket/x/a", "s3://bucket/x/b"])
@@ -1015,7 +1023,7 @@ class TestAioS3FileSystem:
         sync_fs._upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
         sync_fs._complete_multipart_upload = mock.MagicMock()
         # The HeadObject of the source, for its version.
-        sync_fs._call = mock.MagicMock(return_value={})
+        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={})
         directives = {
             "MetadataDirective": "REPLACE",
             "TaggingDirective": "REPLACE",

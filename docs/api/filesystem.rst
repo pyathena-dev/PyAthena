@@ -49,6 +49,30 @@ S3 Paths
 .. autoclass:: pyathena.filesystem.s3_path.S3Path
    :members:
 
+S3 Core
+-------
+
+.. autoclass:: pyathena.filesystem.s3_core.S3Core
+   :members:
+
+.. autoclass:: pyathena.filesystem.s3_core.S3ObjectSummary
+   :members:
+
+.. autoclass:: pyathena.filesystem.s3_core.S3CommonPrefix
+   :members:
+
+.. autoclass:: pyathena.filesystem.s3_core.S3Bucket
+   :members:
+
+.. autoclass:: pyathena.filesystem.s3_core.S3ListObjectsPage
+   :members:
+
+.. autoclass:: pyathena.filesystem.s3_core.S3ListObjectVersionsPage
+   :members:
+
+.. autoclass:: pyathena.filesystem.s3_core.S3ListBucketsPage
+   :members:
+
 S3 Objects
 ----------
 
@@ -59,6 +83,12 @@ S3 Objects
    :members:
 
 .. autoclass:: pyathena.filesystem.s3_object.S3StorageClass
+   :members:
+
+.. autoclass:: pyathena.filesystem.s3_object.S3Metadata
+   :members:
+
+.. autoclass:: pyathena.filesystem.s3_object.S3ObjectVersion
    :members:
 
 S3 Upload Operations
