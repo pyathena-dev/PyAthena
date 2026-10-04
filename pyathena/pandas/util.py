@@ -301,9 +301,13 @@ def to_sql(
         futures: list[concurrent.futures.Future[Any]] = []
         # The workers build their own sessions from picklable arguments, for a
         # ProcessPoolExecutor, with the credentials of the connection's session.
+        # A given botocore session already has them, and boto3 would set the
+        # credentials on it.
         session_kwargs = deepcopy(conn._session_kwargs)
         session_kwargs.update({"profile_name": conn.profile_name})
-        credentials = conn.session.get_credentials()
+        credentials = (
+            None if "botocore_session" in session_kwargs else conn.session.get_credentials()
+        )
         if credentials:
             frozen_credentials = credentials.get_frozen_credentials()
             session_kwargs.update(
