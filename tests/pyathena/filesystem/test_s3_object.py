@@ -344,6 +344,7 @@ class TestS3MultipartUpload:
                 "BucketKeyEnabled": True,
                 "RequestCharged": "requester",
                 "ChecksumAlgorithm": "CRC32",
+                "ChecksumType": "FULL_OBJECT",
                 "Initiated": datetime(2015, 1, 1, 0, 0, 0),
                 "StorageClass": "STANDARD",
                 "Owner": {"DisplayName": "test_owner", "ID": "test_owner_id"},
@@ -363,6 +364,7 @@ class TestS3MultipartUpload:
         assert actual.bucket_key_enabled is True
         assert actual.request_charged == "requester"
         assert actual.checksum_algorithm == "CRC32"
+        assert actual.checksum_type == "FULL_OBJECT"
         assert actual.initiated == datetime(2015, 1, 1, 0, 0, 0)
         assert actual.storage_class == "STANDARD"
         assert actual.owner
@@ -381,6 +383,8 @@ class TestS3MultipartUpload:
             }
         )
         assert actual.initiated is None
+        assert actual.checksum_algorithm is None
+        assert actual.checksum_type is None
         assert actual.storage_class is None
         assert actual.owner is None
         assert actual.initiator is None
@@ -452,6 +456,41 @@ class TestS3MultipartUploadPart:
         assert actual.sse_kms_key_id == "test_sse_kms_key_id"
         assert actual.bucket_key_enabled is False
         assert actual.request_charged is None
+
+    @pytest.mark.parametrize(
+        ("field", "property_name"),
+        [
+            ("ChecksumCRC32", "checksum_crc32"),
+            ("ChecksumCRC32C", "checksum_crc32c"),
+            ("ChecksumCRC64NVME", "checksum_crc64nvme"),
+            ("ChecksumSHA1", "checksum_sha1"),
+            ("ChecksumSHA256", "checksum_sha256"),
+            ("ChecksumSHA512", "checksum_sha512"),
+            ("ChecksumMD5", "checksum_md5"),
+            ("ChecksumXXHASH64", "checksum_xxhash64"),
+            ("ChecksumXXHASH3", "checksum_xxhash3"),
+            ("ChecksumXXHASH128", "checksum_xxhash128"),
+        ],
+    )
+    @pytest.mark.parametrize("copy", [False, True])
+    def test_to_api_repr_with_checksum(self, field, property_name, copy):
+        result = {"ETag": '"part"', field: "checksum"}
+        response = {"CopyPartResult": result} if copy else result
+        part = S3MultipartUploadPart(2, response)
+        assert getattr(part, property_name) == "checksum"
+        assert part.to_api_repr() == {"ETag": '"part"', "PartNumber": 2, field: "checksum"}
+
+    @pytest.mark.parametrize("copy", [False, True])
+    def test_to_api_repr_omits_missing_checksums(self, copy):
+        result = {"ETag": '"part"', "ChecksumSHA256": None}
+        part = S3MultipartUploadPart(1, {"CopyPartResult": result} if copy else result)
+        assert part.to_api_repr() == {"ETag": '"part"', "PartNumber": 1}
+        assert part.checksum_crc64nvme is None
+        assert part.checksum_sha512 is None
+        assert part.checksum_md5 is None
+        assert part.checksum_xxhash64 is None
+        assert part.checksum_xxhash3 is None
+        assert part.checksum_xxhash128 is None
 
 
 class TestS3CompleteMultipartUpload:

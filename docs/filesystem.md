@@ -348,6 +348,29 @@ instead. `copy_object_annotation()` copies one annotation onto the destination a
 the upload completes, with GetObjectAnnotation and PutObjectAnnotation. The
 filesystems' `cp_file()`, `copy()` and `mv()` run these plans.
 
+The multipart primitives take the `S3MultipartUpload` returned by creation,
+keeping its bucket, key, upload ID and checksum configuration together.
+The core retains no upload state.
+`upload_part()` passes the upload's checksum algorithm to the SDK;
+completion selects the matching part checksum and sends the upload's
+`ChecksumType` when present, including `FULL_OBJECT`.
+Without a creation algorithm, completion sends the ETag and part number without
+checksums that the SDK may add to part uploads.
+`abort_multipart_upload()` also accepts uploads returned by
+`list_multipart_uploads()`.
+
+```python
+upload = core.create_multipart_upload(
+    S3Path("YOUR_S3_BUCKET", "path/to/object"), ChecksumAlgorithm="SHA256"
+)
+try:
+    part = core.upload_part(upload, 1, b"data")
+    result = core.complete_multipart_upload(upload, [part])
+except Exception:
+    core.abort_multipart_upload(upload)
+    raise
+```
+
 ## Async filesystem
 
 `AioS3FileSystem` provides the same functionality on top of fsspec's
