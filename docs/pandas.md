@@ -556,8 +556,9 @@ Common performance options:
 
 With `engine="pyarrow"`, PandasCursor uses the PyArrow engine only when pyarrow is installed, no chunksize is set (explicitly or by `auto_optimize_chunksize`), `quoting` is the default, the result has no columns that need a converter (`boolean`, `decimal`, `varbinary`, `json`, `time with time zone`, and `timestamp with time zone` with the default converter), and the result file is at least `AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES` bytes.
 Otherwise, it falls back to the C engine.
-With the PyArrow engine, when `keep_default_na` and `na_values` are the defaults and the only pandas.read_csv() options passed to `execute()` are `dtype` as a mapping and `parse_dates` as a list, PyAthena reads the file with `pyarrow.csv`, allowing newlines in quoted values, and converts it to a DataFrame as `pandas.read_csv(engine="pyarrow")` does.
+With the PyArrow engine, when `keep_default_na` and `na_values` are the defaults and the only pandas.read_csv() options passed to `execute()` are `dtype` as a mapping and `parse_dates` as a list, PyAthena reads the file with `pyarrow.csv`, allowing newlines in quoted values, and converts it to a DataFrame as `pandas.read_csv(engine="pyarrow")` does, except that columns with a string dtype keep their text and their missing values, as with the C engine.
 Otherwise, pandas reads the file, and its PyArrow engine raises an error or returns wrong values when a quoted value containing a newline crosses one of pyarrow's read blocks.
+It also changes strings that look like numbers in a column with a string dtype, such as `"007"` to `"7.0"`, and without `future.infer_string`, turns NULL into the string `"nan"`.
 
 Apart from PandasCursor's own options such as `engine` and `chunksize`, an option passed here replaces the value PyAthena sets for the same pandas.read_csv() argument.
 For example, `dtype` replaces the whole column type mapping, and `parse_dates` replaces the list of date, time, and timestamp columns.

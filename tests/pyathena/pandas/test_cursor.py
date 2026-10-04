@@ -303,6 +303,32 @@ class TestPandasCursor:
             # pandas opens and closes the file itself.
             assert pandas_cursor.result_set._csv_stream is None
 
+    @pytest.mark.parametrize("infer_string", [True, False])
+    def test_pyarrow_engine_string_values(self, pandas_cursor, infer_string):
+        # The PyArrow engine keeps the text of strings that look like numbers, and
+        # a NULL string missing, as the C engine does.
+        query = """
+            SELECT * FROM (VALUES
+                (1, '1', 'abcdefghijklmnopqrstuvwxyz'),
+                (2, CAST(NULL AS VARCHAR), 'abcdefghijklmnopqrstuvwxyz'),
+                (3, 'nan', 'abcdefghijklmnopqrstuvwxyz'),
+                (4, '007', 'abcdefghijklmnopqrstuvwxyz'),
+                (5, '1e3', 'abcdefghijklmnopqrstuvwxyz')
+            ) AS t(id, v, padding) ORDER BY id
+            """
+        with pd.option_context("future.infer_string", infer_string):
+            with patch(
+                "pyathena.pandas.result_set._read_csv_with_pyarrow", wraps=_read_csv_with_pyarrow
+            ) as read_csv_with_pyarrow:
+                pandas_cursor.execute(query, engine="pyarrow")
+                actual = pandas_cursor.as_pandas()["v"]
+            read_csv_with_pyarrow.assert_called_once()
+            pandas_cursor.execute(query, engine="c")
+            expected = pandas_cursor.as_pandas()["v"]
+        pd.testing.assert_series_equal(actual, expected, check_exact=True)
+        assert actual.iloc[[0, 2, 3, 4]].tolist() == ["1", "nan", "007", "1e3"]
+        assert pd.isna(actual.iloc[1])
+
     def test_pyarrow_engine_multiline_values_across_blocks(self, pandas_cursor):
         # The 2.4 MB result spans several 1 MiB pyarrow read blocks, and its
         # values contain a newline and quotes.
