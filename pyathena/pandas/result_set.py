@@ -1072,12 +1072,21 @@ class AthenaPandasResultSet(AthenaResultSet):
             read_csv_kwargs: The options for ``pandas.read_csv()``, updated in place.
             csv_engine: The CSV engine that reads the file.
         """
+        import pandas as pd
+
         names = [d[0] for d in self.description or []]
-        if self._kwargs.keys() & {"dtype", "names"} or len(set(names)) == len(names):
+        if (
+            self._kwargs.keys() & {"dtype", "names"}
+            or len(set(names)) == len(names)
+            # pandas detects another delimiter, as with sep=None, from the header row.
+            or (read_csv_kwargs.get("delimiter") or read_csv_kwargs.get("sep")) != ","
+        ):
             return
         # pandas renames the names in a header row, and copies their dtypes, even with
         # names given, so the header row is skipped instead.
-        read_csv_kwargs["names"] = self._get_column_names()
+        read_csv_kwargs["names"] = self._resolve_csv_column_names(
+            names, read_csv_kwargs, pd.read_csv
+        )[0]
         read_csv_kwargs["header"] = None
         if csv_engine == "python":
             # The python engine skips lines, which a name with a newline spans.

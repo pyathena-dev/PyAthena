@@ -1783,6 +1783,32 @@ class TestPandasCursor:
         assert pandas_cursor.as_pandas().columns.tolist() == ["a\nb", "a\nb.1", "a\nb.2"]
 
     @pytest.mark.parametrize(
+        ("query", "execute_kwargs", "expected_rows", "expected_columns"),
+        [
+            (
+                'SELECT CAST(\'01:02:03\' AS TIME) AS "a\\b", 1 AS "a\\b"',
+                {"engine": "python", "escapechar": "\\"},
+                [(datetime(2017, 1, 1, 1, 2, 3).time(), 1)],
+                ["ab", "ab.1"],
+            ),
+            (
+                "SELECT 1 AS x, 2 AS x WHERE false",
+                {"engine": "python", "sep": None},
+                [],
+                ["x", "x.1"],
+            ),
+        ],
+        ids=["escapechar", "detected_delimiter"],
+    )
+    def test_duplicate_column_names_header_options(
+        self, pandas_cursor, query, execute_kwargs, expected_rows, expected_columns
+    ):
+        """Options that change how pandas reads the header still apply to the column labels."""
+        pandas_cursor.execute(query, **execute_kwargs)
+        assert pandas_cursor.fetchall() == expected_rows
+        assert pandas_cursor.as_pandas().columns.tolist() == expected_columns
+
+    @pytest.mark.parametrize(
         ("execute_kwargs", "expected_row", "expected_columns"),
         [
             ({"names": ["a", "b", "x.1"]}, (1, 2, "c"), ["a", "b", "x.1"]),
