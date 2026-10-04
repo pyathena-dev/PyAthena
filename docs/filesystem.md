@@ -339,7 +339,8 @@ ranges of the parts, the parameters of each multipart upload request, and the
 annotations to copy, so that the multipart upload writes the metadata, tags and
 annotations that CopyObject would. It sends HeadObject, then GetObjectTagging and
 ListObjectAnnotations unless the directives or the source exclude them, and writes
-nothing. `copy_object_annotation()` copies one annotation onto the destination after
+nothing. If HeadObject reports a size that fits in one CopyObject request, nothing else
+is read, and the plan's `fits_single_request` says to copy with `copy_object()` instead. `copy_object_annotation()` copies one annotation onto the destination after
 the upload completes, with GetObjectAnnotation and PutObjectAnnotation. The
 filesystems' `cp_file()` and `copy()` run these plans.
 
