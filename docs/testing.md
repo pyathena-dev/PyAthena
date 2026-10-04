@@ -134,21 +134,27 @@ A targeted run helps during development but does not replace other coverage requ
 ### Run self-contained tests offline
 
 The pandas and Polars result-set modules have self-contained tests that can run without AWS access when the session hooks are excluded.
-After `just lint`, run:
+Reuse the `.env` file from [AWS environment](#aws-environment) if it is already configured.
+For an offline-only setup, create a gitignored `.env` file in the repository root with these placeholder values:
+
+```ini
+AWS_DEFAULT_REGION=us-east-1
+AWS_ATHENA_S3_STAGING_DIR=s3://pyathena-offline-placeholder/
+AWS_ATHENA_WORKGROUP=offline
+AWS_ATHENA_SPARK_WORKGROUP=offline
+AWS_EC2_METADATA_DISABLED=true
+```
+
+After `just lint`, load `.env` and run:
 
 ```bash
-env AWS_DEFAULT_REGION=us-east-1 \
-  AWS_ATHENA_S3_STAGING_DIR=s3://pyathena-offline-placeholder/ \
-  AWS_ATHENA_WORKGROUP=offline \
-  AWS_ATHENA_SPARK_WORKGROUP=offline \
-  AWS_EC2_METADATA_DISABLED=true \
-  uv run pytest --noconftest -p no:rerunfailures -q \
+uv run --env-file .env pytest --noconftest -p no:rerunfailures -q \
   tests/pyathena/pandas/test_result_set.py \
   tests/pyathena/polars/test_result_set.py
 ```
 
-The four placeholder AWS configuration values satisfy `tests/__init__.py`, which pytest still imports with `--noconftest`.
-Disabling EC2 metadata prevents implicit credential lookup through that service.
+The four AWS configuration values are required by `tests/__init__.py`, which pytest still imports with `--noconftest`.
+The offline-only `.env` example disables EC2 metadata to prevent implicit credential lookup through that service.
 `--noconftest` excludes the AWS session hooks and fixtures; disabling the rerun plugin also avoids its local socket setup in restricted environments.
 Use this invocation only for self-contained modules; integration tests need their normal fixtures and a real AWS environment.
 
