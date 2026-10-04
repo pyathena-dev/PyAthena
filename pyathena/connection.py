@@ -497,6 +497,18 @@ class Connection(Generic[ConnectionCursor]):
         return {k: v for k, v in self._kwargs.items() if k in self._CLIENT_PASSING_ARGS}
 
     @property
+    def _s3_client_kwargs(self) -> dict[str, Any]:
+        """Get client keyword arguments for S3 client creation.
+
+        Returns:
+            The client keyword arguments without Athena's ``endpoint_url``
+            and ``api_version``.
+        """
+        return {
+            k: v for k, v in self._client_kwargs.items() if k not in ("endpoint_url", "api_version")
+        }
+
+    @property
     def session(self) -> Session:
         """Get the boto3 session used for AWS API calls.
 
@@ -528,11 +540,7 @@ class Connection(Generic[ConnectionCursor]):
                     "s3",
                     region_name=self.region_name,
                     config=self.s3_config,
-                    **{
-                        k: v
-                        for k, v in self._client_kwargs.items()
-                        if k not in ("endpoint_url", "api_version")
-                    },
+                    **self._s3_client_kwargs,
                 )
             return self._s3_client
 
