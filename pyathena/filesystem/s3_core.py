@@ -502,7 +502,7 @@ class S3Core:
     )
     # https://docs.aws.amazon.com/AmazonS3/latest/userguide/acl-overview.html#canned-acl
     # The canned ACLs that an object accepts.
-    OBJECT_ACLS: frozenset[str] = frozenset(
+    OBJECT_ACLS: ClassVar[frozenset[str]] = frozenset(
         {
             "private",
             "public-read",
@@ -514,7 +514,7 @@ class S3Core:
         }
     )
     # The canned ACLs that a bucket accepts.
-    BUCKET_ACLS: frozenset[str] = frozenset(
+    BUCKET_ACLS: ClassVar[frozenset[str]] = frozenset(
         {"private", "public-read", "public-read-write", "authenticated-read"}
     )
 
@@ -1135,7 +1135,7 @@ class S3Core:
                     source, **self.operation_params("get_object_tagging", source_params)
                 )
                 if tags:
-                    request.update({"Tagging": urlencode(list(tags.items()))})
+                    request.update({"Tagging": urlencode(tags)})
         copy_params = self.operation_params("copy_object", request)
         create_params = {
             **self.operation_params("create_multipart_upload", request),
@@ -1331,6 +1331,7 @@ class S3Core:
         Raises:
             ValueError: If the path has no key, or the ACL is not in
                 ``OBJECT_ACLS``.
+            FileNotFoundError: If the object or version does not exist.
         """
         if not path.key:
             raise ValueError(f"The path has no key: {path.uri}.")
@@ -1372,8 +1373,10 @@ class S3Core:
         ``Expires``, ``WebsiteRedirectLocation`` and ``StorageClass`` of
         ``head``, and, unless ``params`` set an encryption parameter, its
         ``ServerSideEncryption``, ``SSEKMSKeyId`` and ``BucketKeyEnabled``.
-        Fields that ``head`` does not have are not sent. HeadObject does not
-        return the KMS encryption context, so it is not retained.
+        Fields that are None in ``head`` are not sent; note that
+        :class:`~pyathena.filesystem.s3_object.S3Metadata` reports
+        ``STANDARD`` when HeadObject omits the storage class. HeadObject does
+        not return the KMS encryption context, so it is not retained.
 
         Args:
             path: The path of the object, without a version ID.

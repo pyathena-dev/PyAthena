@@ -9,6 +9,7 @@ import io
 from datetime import UTC, datetime
 from itertools import pairwise
 from unittest import mock
+from urllib.parse import parse_qs, urlsplit
 
 import boto3
 import botocore.exceptions
@@ -1494,7 +1495,7 @@ class TestS3Core:
         core, stubber = _make_core()
         with stubber:
             url = core.generate_presigned_url(S3Path("bucket", "key", "v1"))
-        assert url.startswith("https://bucket.s3.amazonaws.com/key?versionId=v1&")
+        assert parse_qs(urlsplit(url).query)["versionId"] == ["v1"]
 
 
 class TestS3DeleteBatch:

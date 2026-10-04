@@ -2292,7 +2292,7 @@ class S3FileSystem(AbstractFileSystem):
         if mode == "m":
             new_tags = {**self.core.get_object_tagging(s3_path), **tags}
         elif mode == "o":
-            new_tags = dict(tags)
+            new_tags = tags
         else:
             raise ValueError(f"Mode must be {{'o', 'm'}}, not {mode}.")
         self.core.put_object_tagging(s3_path, new_tags)
