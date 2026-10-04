@@ -682,18 +682,28 @@ class AthenaResultSet(CursorIterator):
         return True
 
     def _text_value_converters(
-        self, converters: dict[str, Callable[[str | None], Any | None]]
+        self,
+        converters: dict[str, Callable[[str | None], Any | None]],
+        column_names: list[str] | None = None,
     ) -> dict[str, Callable[[str | None], Any | None]]:
         """Select the converters of the columns that the fallbacks keep as text.
 
         Args:
             converters: The converters keyed by column name.
+            column_names: The names that ``converters`` uses for the columns, in
+                column order. Defaults to the names in the description.
 
         Returns:
             The converters of the columns whose Athena type is in ``_TEXT_VALUE_TYPES``.
         """
         description = self.description if self.description else []
-        return {d[0]: converters[d[0]] for d in description if d[1] in _TEXT_VALUE_TYPES}
+        if column_names is None:
+            column_names = [d[0] for d in description]
+        return {
+            name: converters[name]
+            for name, d in zip(column_names, description, strict=True)
+            if d[1] in _TEXT_VALUE_TYPES
+        }
 
     def _fetch_all_rows(
         self,
@@ -731,10 +741,12 @@ class AthenaResultSet(CursorIterator):
         next_token: str | None = None
 
         while True:
+            first_page = next_token is None
             response = self._get_query_results(self.DEFAULT_FETCH_SIZE, next_token)
             rows, next_token = self._parse_result_rows(response)
 
-            offset = 1 if rows and self._is_first_row_column_labels(rows) else 0
+            # Only the first page can start with the column labels.
+            offset = 1 if first_page and rows and self._is_first_row_column_labels(rows) else 0
             all_rows.extend(
                 cast(
                     list[tuple[Any | None, ...]],
@@ -746,26 +758,6 @@ class AthenaResultSet(CursorIterator):
                 break
 
         return all_rows
-
-    @staticmethod
-    def _rows_to_columnar(
-        rows: list[tuple[Any | None, ...]],
-        columns: list[str],
-    ) -> dict[str, list[Any]]:
-        """Convert row-oriented data to columnar format.
-
-        Args:
-            rows: List of row tuples from ``_fetch_all_rows()``.
-            columns: Column names in order.
-
-        Returns:
-            Dictionary mapping column names to lists of values.
-        """
-        columnar: dict[str, list[Any]] = {col: [] for col in columns}
-        for row in rows:
-            for col, val in zip(columns, row, strict=False):
-                columnar[col].append(val)
-        return columnar
 
     def _get_content_length(self) -> int:
         if not self.output_location:

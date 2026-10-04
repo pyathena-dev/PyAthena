@@ -9,9 +9,11 @@
 
 from __future__ import annotations
 
+import csv
 import logging
 from collections import abc
 from collections.abc import Callable, Iterator
+from io import BytesIO, StringIO
 from multiprocessing import cpu_count
 from typing import (
     TYPE_CHECKING,
@@ -279,7 +281,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
             self._df = self._as_polars_from_api()
             # GetQueryResults values are already converted, except json and time with
             # time zone values kept as text.
-            self._df_converters = self._text_value_converters(self.converters)
+            self._df_converters = self._text_value_converters(
+                self.converters, self._get_column_names()
+            )
         else:
             self._df = pl.DataFrame()
         if self._df is not None:
@@ -378,8 +382,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """Get Polars-compatible data types for result columns."""
         description = self.description if self.description else []
         return {
-            d[0]: dtype
-            for d in description
+            name: dtype
+            for name, d in zip(self._get_column_names(), description, strict=True)
             if (dtype := self._converter.get_dtype(d[1], d[4], d[5])) is not None
         }
 
@@ -391,16 +395,29 @@ class AthenaPolarsResultSet(AthenaResultSet):
             Dictionary mapping column names to their converter functions.
         """
         description = self.description if self.description else []
-        return {d[0]: self._converter.get(d[1]) for d in description}
+        return {
+            name: self._converter.get(d[1])
+            for name, d in zip(self._get_column_names(), description, strict=True)
+        }
 
     def _get_column_names(self) -> list[str]:
-        """Get column names from description.
+        """Get the names of the result columns in the DataFrame.
+
+        Columns with the same name are renamed as Polars renames them when it reads
+        the header of a CSV file, such as ``x`` and ``x_duplicated_0``.
 
         Returns:
             List of column names.
         """
+        import polars as pl
+
         description = self.description if self.description else []
-        return [d[0] for d in description]
+        names = [d[0] for d in description]
+        if len(set(names)) == len(names):
+            return names
+        header = StringIO()
+        csv.writer(header, quoting=csv.QUOTE_ALL).writerow(names)
+        return pl.read_csv(BytesIO(header.getvalue().encode()), n_rows=0).columns
 
     def _create_dataframe_iterator(self) -> PolarsDataFrameIterator:
         """Create a DataFrame iterator that reads the result file in chunks.
@@ -591,9 +608,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
         rows = self._fetch_all_rows(converter or _text_value_converter())
         if not rows:
             return pl.DataFrame()
-        description = self.description if self.description else []
-        columns = [d[0] for d in description]
-        return pl.DataFrame(self._rows_to_columnar(rows, columns))
+        columns = [list(column) for column in zip(*rows, strict=True)]
+        return pl.DataFrame(dict(zip(self._get_column_names(), columns, strict=True)))
 
     def as_polars(self) -> pl.DataFrame:
         """Return query results as a Polars DataFrame.
