@@ -421,7 +421,7 @@ class S3Core:
             request.update({"Delimiter": delimiter})
         if continuation_token:
             request.update({"ContinuationToken": continuation_token})
-        if max_keys:
+        if max_keys is not None:
             request.update({"MaxKeys": max_keys})
         response = self.call(self._client.list_objects_v2, **request, **params)
         return S3ListObjectsPage.from_response(bucket, response)
@@ -481,7 +481,7 @@ class S3Core:
                 recursively.
             key_marker: The key marker of the page to list.
             version_id_marker: The version ID marker of the page to list,
-                sent with ``key_marker``.
+                sent with ``key_marker`` unless it is None.
             **params: Additional request parameters, sent as given.
 
         Returns:
@@ -491,12 +491,20 @@ class S3Core:
         if delimiter:
             request.update({"Delimiter": delimiter})
         if key_marker:
-            request.update({"KeyMarker": key_marker, "VersionIdMarker": version_id_marker})
+            request.update({"KeyMarker": key_marker})
+            if version_id_marker is not None:
+                request.update({"VersionIdMarker": version_id_marker})
         response = self.call(self._client.list_object_versions, **request, **params)
         return S3ListObjectVersionsPage.from_response(bucket, response)
 
     def list_object_versions(
-        self, bucket: str, prefix: str = "", delimiter: str | None = None, **params
+        self,
+        bucket: str,
+        prefix: str = "",
+        delimiter: str | None = None,
+        key_marker: str | None = None,
+        version_id_marker: str | None = None,
+        **params,
     ) -> Iterator[S3ListObjectVersionsPage]:
         """List the pages of versions with ListObjectVersions, one request each.
 
@@ -505,13 +513,14 @@ class S3Core:
             prefix: The key prefix to list.
             delimiter: The delimiter to group keys by, or None to list
                 recursively.
+            key_marker: The key marker of the first page to list.
+            version_id_marker: The version ID marker of the first page to
+                list, sent with ``key_marker``.
             **params: Additional request parameters, sent as given.
 
         Yields:
             The pages, until one is not truncated or has no key marker.
         """
-        key_marker: str | None = None
-        version_id_marker: str | None = None
         while True:
             page = self.list_object_versions_page(
                 bucket,
@@ -545,16 +554,18 @@ class S3Core:
         response = self.call(self._client.list_buckets, **request, **params)
         return S3ListBucketsPage.from_response(response)
 
-    def list_buckets(self, **params) -> Iterator[S3ListBucketsPage]:
+    def list_buckets(
+        self, continuation_token: str | None = None, **params
+    ) -> Iterator[S3ListBucketsPage]:
         """List the pages of the buckets of the caller, one request each.
 
         Args:
+            continuation_token: The token of the first page to list.
             **params: Additional request parameters, sent as given.
 
         Yields:
             The pages, until one has no continuation token.
         """
-        continuation_token: str | None = None
         while True:
             page = self.list_buckets_page(continuation_token=continuation_token, **params)
             yield page

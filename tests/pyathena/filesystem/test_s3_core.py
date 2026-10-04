@@ -249,6 +249,52 @@ class TestS3Core:
         with stubber:
             assert len(list(core.list_object_versions("bucket", prefix="k"))) == 1
 
+    def test_list_objects_page_zero_max_keys(self):
+        core, stubber = _make_core()
+        stubber.add_response(
+            "list_objects_v2", {"KeyCount": 0}, {"Bucket": "bucket", "Prefix": "", "MaxKeys": 0}
+        )
+        with stubber:
+            assert core.list_objects_page("bucket", max_keys=0).key_count == 0
+
+    def test_list_object_versions_page_key_marker_only(self):
+        # A key marker alone is a valid request, without a VersionIdMarker.
+        core, stubber = _make_core()
+        stubber.add_response(
+            "list_object_versions", {}, {"Bucket": "bucket", "Prefix": "", "KeyMarker": "k"}
+        )
+        with stubber:
+            core.list_object_versions_page("bucket", key_marker="k")
+        stubber.assert_no_pending_responses()
+
+    def test_list_object_versions_from_markers(self):
+        # The iterator starts at the given markers and then follows the pages.
+        core, stubber = _make_core()
+        stubber.add_response(
+            "list_object_versions",
+            {"IsTruncated": True, "NextKeyMarker": "m", "NextVersionIdMarker": "w"},
+            {"Bucket": "bucket", "Prefix": "", "KeyMarker": "k", "VersionIdMarker": "v"},
+        )
+        stubber.add_response(
+            "list_object_versions",
+            {"IsTruncated": False},
+            {"Bucket": "bucket", "Prefix": "", "KeyMarker": "m", "VersionIdMarker": "w"},
+        )
+        with stubber:
+            pages = list(core.list_object_versions("bucket", key_marker="k", version_id_marker="v"))
+        stubber.assert_no_pending_responses()
+        assert len(pages) == 2
+
+    def test_list_buckets_from_token(self):
+        core, stubber = _make_core()
+        stubber.add_response(
+            "list_buckets", {"Buckets": [], "ContinuationToken": "t1"}, {"ContinuationToken": "t0"}
+        )
+        stubber.add_response("list_buckets", {"Buckets": []}, {"ContinuationToken": "t1"})
+        with stubber:
+            assert len(list(core.list_buckets(continuation_token="t0"))) == 2
+        stubber.assert_no_pending_responses()
+
     def test_list_buckets(self):
         core, stubber = _make_core()
         stubber.add_response(

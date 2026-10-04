@@ -35,7 +35,7 @@ from fsspec.utils import check_contained, isfilelike, other_paths, tokenize
 
 import pyathena
 from pyathena.connection import Connection
-from pyathena.filesystem.s3_core import S3Bucket, S3Core, S3ObjectSummary
+from pyathena.filesystem.s3_core import S3Core
 from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import (
@@ -68,103 +68,6 @@ _LOOKUP_REQUEST_PARAMETERS = frozenset(
 # The second element of the dircache key, ``(path, _LOOKUPS_CACHE_KEY)``, of
 # the lookup results of a path made with lookup request parameters.
 _LOOKUPS_CACHE_KEY = "lookups"
-
-
-def _to_s3_object(
-    entry: S3ObjectSummary | S3ObjectVersion | S3Metadata | S3Bucket,
-    version_id: str | None = None,
-) -> S3Object:
-    """Build the fsspec entry of an object, version or bucket of the core.
-
-    Args:
-        entry: A listed object, a listed version, the metadata of a looked up
-            object, which must have its path, or a bucket.
-        version_id: The version ID of the entry for metadata, which may be
-            pinned or omitted apart from the looked up path.
-
-    Returns:
-        The file entry of the object or version, named ``bucket/key`` (with
-        a ``?versionId=`` query for a version other than ``null``), or the
-        directory entry of the bucket.
-    """
-    if isinstance(entry, S3Bucket):
-        return S3Object(
-            init={
-                "ContentLength": 0,
-                "ContentType": None,
-                "StorageClass": S3StorageClass.S3_STORAGE_CLASS_BUCKET,
-                "ETag": None,
-                "LastModified": None,
-            },
-            type=S3ObjectType.S3_OBJECT_TYPE_DIRECTORY,
-            bucket=entry.name,
-            key=None,
-            version_id=None,
-        )
-    if isinstance(entry, S3Metadata):
-        if entry.path is None or not entry.path.key:
-            raise ValueError("The metadata has no object path.")
-        # Fields that the response does not have are left out, as they were
-        # when the entry was built from the response.
-        init = {
-            k: v
-            for k, v in {
-                "ETag": entry.etag,
-                "CacheControl": entry.cache_control,
-                "ContentDisposition": entry.content_disposition,
-                "ContentEncoding": entry.content_encoding,
-                "ContentLanguage": entry.content_language,
-                "ContentLength": entry.content_length,
-                "ContentType": entry.content_type,
-                "Expires": entry.expires,
-                "WebsiteRedirectLocation": entry.website_redirect_location,
-                "ServerSideEncryption": entry.server_side_encryption,
-                "SSECustomerAlgorithm": entry.sse_customer_algorithm,
-                "SSEKMSKeyId": entry.sse_kms_key_id,
-                "BucketKeyEnabled": entry.bucket_key_enabled,
-                "StorageClass": entry.storage_class,
-                "ObjectLockMode": entry.object_lock_mode,
-                "ObjectLockRetainUntilDate": entry.object_lock_retain_until_date,
-                "ObjectLockLegalHoldStatus": entry.object_lock_legal_hold_status,
-                "Metadata": entry.user_metadata,
-                "LastModified": entry.last_modified,
-            }.items()
-            if v is not None
-        }
-        return S3Object(
-            init=init,
-            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
-            bucket=entry.path.bucket,
-            key=entry.path.key,
-            version_id=version_id,
-        )
-    init = {
-        k: v
-        for k, v in {
-            "ETag": entry.etag,
-            "Size": entry.size,
-            "StorageClass": entry.storage_class,
-            "LastModified": entry.last_modified,
-        }.items()
-        if v is not None
-    }
-    if isinstance(entry, S3ObjectSummary):
-        return S3Object(
-            init=init, type=S3ObjectType.S3_OBJECT_TYPE_FILE, bucket=entry.bucket, key=entry.key
-        )
-    file = S3Object(
-        init=init,
-        type=S3ObjectType.S3_OBJECT_TYPE_FILE,
-        bucket=entry.bucket,
-        key=entry.key,
-        version_id=entry.version_id,
-        is_latest=entry.is_latest,
-    )
-    if entry.version_id != "null":
-        # A listed version is named so that it can be addressed; a write to
-        # the key replaces the "null" version, which is named by the key.
-        file.name = str(S3Path(entry.bucket, entry.key, entry.version_id))
-    return file
 
 
 class CompressedBuffer(BytesIO):
@@ -539,7 +442,7 @@ class S3FileSystem(AbstractFileSystem):
                 if buckets and any(b.name == bucket for b in buckets):
                     self._evict_cache("")
                 return None
-            file = _to_s3_object(bucket_entry)
+            file = S3Object.from_bucket(bucket_entry)
             self._cache_lookup(bucket, lookup_kwargs, file)
         return file
 
@@ -605,7 +508,7 @@ class S3FileSystem(AbstractFileSystem):
                 # Pin the version of the object so that subsequent reads see
                 # the version observed here even if the object is overwritten.
                 version_id = metadata.version_id
-            file = _to_s3_object(metadata, version_id=version_id)
+            file = S3Object.from_metadata(metadata, version_id=version_id)
             if cacheable:
                 self._cache_lookup(path, lookup_kwargs, file)
         return file
@@ -623,7 +526,9 @@ class S3FileSystem(AbstractFileSystem):
         """
         buckets = None if refresh else self.dircache.get("")
         if buckets is None:
-            buckets = [_to_s3_object(b) for page in self.core.list_buckets() for b in page.buckets]
+            buckets = [
+                S3Object.from_bucket(b) for page in self.core.list_buckets() for b in page.buckets
+            ]
             self.dircache[""] = buckets
         return buckets
 
@@ -681,7 +586,7 @@ class S3FileSystem(AbstractFileSystem):
                 )
                 for c in page.common_prefixes
             )
-            files.extend(_to_s3_object(o) for o in page.objects)
+            files.extend(S3Object.from_summary(o) for o in page.objects)
         if use_cache:
             if files:
                 self.dircache[cache_key] = files
@@ -748,12 +653,12 @@ class S3FileSystem(AbstractFileSystem):
                 self._directory_object(s3_path.bucket, c.prefix[:-1].rstrip("/"))
                 for c in page.common_prefixes
             )
-            files.extend(_to_s3_object(v) for v in page.versions)
+            files.extend(S3Object.from_version(v) for v in page.versions)
 
         if not files and s3_path.key:
             # The path may point at an object rather than a key prefix.
             files = [
-                _to_s3_object(v)
+                S3Object.from_version(v)
                 for page in self.core.list_object_versions(
                     s3_path.bucket, prefix=s3_path.key, delimiter="/"
                 )
@@ -3115,8 +3020,15 @@ class S3FileSystem(AbstractFileSystem):
 
         _logger.debug(f"List object versions: {s3_path.uri}")
         versions: list[S3ObjectVersion] = []
+        # Explicit markers start the listing, which the pages then advance.
+        key_marker = kwargs.pop("KeyMarker", None)
+        version_id_marker = kwargs.pop("VersionIdMarker", None) if key_marker else None
         for page in self.core.list_object_versions(
-            s3_path.bucket, prefix=s3_path.key or "", **kwargs
+            s3_path.bucket,
+            prefix=s3_path.key or "",
+            key_marker=key_marker,
+            version_id_marker=version_id_marker,
+            **kwargs,
         ):
             versions.extend(page.versions)
             # Delete markers are kept until the key is chosen, so that the

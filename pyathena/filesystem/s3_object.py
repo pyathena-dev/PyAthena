@@ -8,10 +8,11 @@ from collections.abc import Iterator, Mapping, MutableMapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from pyathena.filesystem.s3_path import S3Path
 from pyathena.util import override
 
 if TYPE_CHECKING:
-    from pyathena.filesystem.s3_path import S3Path
+    from pyathena.filesystem.s3_core import S3Bucket, S3ObjectSummary
 
 _logger = logging.getLogger(__name__)
 
@@ -260,6 +261,167 @@ class S3Object(MutableMapping[str, Any]):
             if field is not None:
                 fields[k] = field
         return fields
+
+    @staticmethod
+    def _listed_init(
+        key: str,
+        etag: str | None,
+        size: int | None,
+        storage_class: str | None,
+        last_modified: datetime | None,
+    ) -> dict[str, Any]:
+        """Build the ``init`` of a listed entry from its present fields.
+
+        The ``Key``, which a listed entry always has and which ``S3Object`` does
+        not keep, makes ``S3Object`` apply its defaults (size 0, ``STANDARD``
+        storage class) for the fields that the entry lacks.
+
+        Args:
+            key: The key of the entry.
+            etag: The ``ETag``, if any.
+            size: The ``Size``, if any.
+            storage_class: The ``StorageClass``, if any.
+            last_modified: The ``LastModified``, if any.
+
+        Returns:
+            The fields of the listing entry that are present.
+        """
+        fields = {
+            "Key": key,
+            "ETag": etag,
+            "Size": size,
+            "StorageClass": storage_class,
+            "LastModified": last_modified,
+        }
+        return {k: v for k, v in fields.items() if v is not None}
+
+    @classmethod
+    def from_summary(cls, summary: S3ObjectSummary) -> S3Object:
+        """Build the file entry of an object listed by ListObjectsV2.
+
+        Args:
+            summary: The listed object.
+
+        Returns:
+            The file entry, named ``bucket/key``.
+        """
+        return cls(
+            init=cls._listed_init(
+                summary.key,
+                summary.etag,
+                summary.size,
+                summary.storage_class,
+                summary.last_modified,
+            ),
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket=summary.bucket,
+            key=summary.key,
+        )
+
+    @classmethod
+    def from_version(cls, version: S3ObjectVersion) -> S3Object:
+        """Build the file entry of a version listed by ListObjectVersions.
+
+        The entry is named ``bucket/key?versionId=<id>`` so that the version
+        can be addressed, except for the ``null`` version, which a write to
+        the key replaces and which is named ``bucket/key``.
+
+        Args:
+            version: The listed version.
+
+        Returns:
+            The file entry.
+        """
+        file = cls(
+            init=cls._listed_init(
+                version.key,
+                version.etag,
+                version.size,
+                version.storage_class,
+                version.last_modified,
+            ),
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket=version.bucket,
+            key=version.key,
+            version_id=version.version_id,
+            is_latest=version.is_latest,
+        )
+        if version.version_id != "null":
+            file.name = str(S3Path(version.bucket, version.key, version.version_id))
+        return file
+
+    @classmethod
+    def from_metadata(cls, metadata: S3Metadata, version_id: str | None = None) -> S3Object:
+        """Build the file entry of an object looked up with HeadObject.
+
+        The fields that the response does not have are left out, except
+        ``Metadata``, which botocore always returns.
+
+        Args:
+            metadata: The metadata of the object, with the looked up path.
+            version_id: The version ID of the entry, which may be pinned or
+                omitted apart from the looked up path.
+
+        Returns:
+            The file entry, named ``bucket/key``.
+
+        Raises:
+            ValueError: If the metadata has no object path.
+        """
+        if metadata.path is None or not metadata.path.key:
+            raise ValueError("The metadata has no object path.")
+        fields = {
+            "ETag": metadata.etag,
+            "CacheControl": metadata.cache_control,
+            "ContentDisposition": metadata.content_disposition,
+            "ContentEncoding": metadata.content_encoding,
+            "ContentLanguage": metadata.content_language,
+            "ContentLength": metadata.content_length,
+            "ContentType": metadata.content_type,
+            "Expires": metadata.expires,
+            "WebsiteRedirectLocation": metadata.website_redirect_location,
+            "ServerSideEncryption": metadata.server_side_encryption,
+            "SSECustomerAlgorithm": metadata.sse_customer_algorithm,
+            "SSEKMSKeyId": metadata.sse_kms_key_id,
+            "BucketKeyEnabled": metadata.bucket_key_enabled,
+            "StorageClass": metadata.storage_class,
+            "ObjectLockMode": metadata.object_lock_mode,
+            "ObjectLockRetainUntilDate": metadata.object_lock_retain_until_date,
+            "ObjectLockLegalHoldStatus": metadata.object_lock_legal_hold_status,
+            "Metadata": metadata.user_metadata,
+            "LastModified": metadata.last_modified,
+        }
+        return cls(
+            init={k: v for k, v in fields.items() if v is not None},
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket=metadata.path.bucket,
+            key=metadata.path.key,
+            version_id=version_id,
+        )
+
+    @classmethod
+    def from_bucket(cls, bucket: S3Bucket) -> S3Object:
+        """Build the directory entry of a bucket.
+
+        Args:
+            bucket: The bucket.
+
+        Returns:
+            The directory entry, named after the bucket.
+        """
+        return cls(
+            init={
+                "ContentLength": 0,
+                "ContentType": None,
+                "StorageClass": S3StorageClass.S3_STORAGE_CLASS_BUCKET,
+                "ETag": None,
+                "LastModified": None,
+            },
+            type=S3ObjectType.S3_OBJECT_TYPE_DIRECTORY,
+            bucket=bucket.name,
+            key=None,
+            version_id=None,
+        )
 
 
 class S3Metadata(Mapping[str, str]):

@@ -3497,6 +3497,41 @@ class TestS3FileSystem:
             )
         fs._call.assert_not_called()
 
+    def test_ls_sparse_entries_keep_defaults(self):
+        # Listed entries without Size or StorageClass get S3Object's defaults,
+        # as they did when they were built from the response.
+        fs = self._make_fs()
+        fs.version_aware = True
+        fs._call.side_effect = [
+            {"Contents": [{"Key": "k"}]},
+            {"Versions": [{"Key": "k", "VersionId": "v1"}]},
+        ]
+
+        for files in (
+            fs.ls("s3://bucket", detail=True),
+            fs.ls("s3://bucket", detail=True, versions=True),
+        ):
+            assert (files[0]["size"], files[0]["content_length"], files[0]["storage_class"]) == (
+                0,
+                0,
+                S3StorageClass.S3_STORAGE_CLASS_STANDARD,
+            )
+
+    def test_object_version_info_from_markers(self):
+        # Explicit markers start the listing, and the next page follows the
+        # returned markers instead of sending them twice.
+        fs = self._make_fs()
+        fs._call.side_effect = [
+            {"IsTruncated": True, "NextKeyMarker": "m", "NextVersionIdMarker": "w"},
+            {"IsTruncated": False},
+        ]
+
+        fs.object_version_info("s3://bucket", KeyMarker="k", VersionIdMarker="v")
+        assert [c.kwargs for c in fs._call.call_args_list] == [
+            {"Bucket": "bucket", "Prefix": "", "KeyMarker": "k", "VersionIdMarker": "v"},
+            {"Bucket": "bucket", "Prefix": "", "KeyMarker": "m", "VersionIdMarker": "w"},
+        ]
+
     def test_ls_buckets_follows_pages(self):
         # GH-1059: ListBuckets returns pages, which _ls_buckets() used to
         # ignore beyond the first.
