@@ -5,12 +5,14 @@
 #
 # SPDX-License-Identifier: MIT
 
+import io
 from datetime import UTC, datetime
 from itertools import pairwise
 
 import boto3
 import botocore.exceptions
 import pytest
+from botocore.response import StreamingBody
 from botocore.stub import Stubber
 
 from pyathena.filesystem.s3_core import (
@@ -23,6 +25,7 @@ from pyathena.filesystem.s3_core import (
     S3ListBucketsPage,
     S3ListObjectsPage,
     S3ListObjectVersionsPage,
+    S3MultipartCopyPlan,
     S3ObjectSummary,
 )
 from pyathena.filesystem.s3_object import S3MultipartUploadPart
@@ -610,6 +613,295 @@ class TestS3Core:
             <= core.MULTIPART_UPLOAD_MAX_PART_SIZE
             for start, end in ranges
         )
+
+    def test_copy_object(self):
+        core, stubber = _make_core()
+        stubber.add_response(
+            "copy_object",
+            {},
+            {
+                "CopySource": {"Bucket": "src-bucket", "Key": "src", "VersionId": "v1"},
+                "Bucket": "bucket",
+                "Key": "dst",
+                "MetadataDirective": "REPLACE",
+            },
+        )
+        stubber.add_response(
+            "copy_object",
+            {},
+            {"CopySource": {"Bucket": "bucket", "Key": "src"}, "Bucket": "bucket", "Key": "dst"},
+        )
+        with stubber:
+            core.copy_object(
+                S3Path("src-bucket", "src", "v1"),
+                S3Path("bucket", "dst"),
+                MetadataDirective="REPLACE",
+            )
+            core.copy_object(S3Path("bucket", "src"), S3Path("bucket", "dst"))
+        stubber.assert_no_pending_responses()
+
+    @pytest.mark.parametrize(
+        ("method", "args", "match"),
+        [
+            ("copy_object", (S3Path("bucket"), S3Path("bucket", "dst")), "has no key"),
+            ("copy_object", (S3Path("bucket", "src"), S3Path("bucket")), "has no key"),
+            (
+                "copy_object",
+                (S3Path("bucket", "src"), S3Path("bucket", "dst", "v1")),
+                "Cannot write to a version",
+            ),
+            ("plan_multipart_copy", (S3Path("bucket"), S3Path("bucket", "dst")), "has no key"),
+            ("plan_multipart_copy", (S3Path("bucket", "src"), S3Path("bucket")), "has no key"),
+            (
+                "plan_multipart_copy",
+                (S3Path("bucket", "src"), S3Path("bucket", "dst", "v1")),
+                "Cannot write to a version",
+            ),
+            ("list_object_annotations", (S3Path("bucket"),), "has no key"),
+            (
+                "copy_object_annotation",
+                ("a", S3Path("bucket"), S3Path("bucket", "dst"), None, None),
+                "has no key",
+            ),
+            (
+                "copy_object_annotation",
+                ("a", S3Path("bucket", "src"), S3Path("bucket"), None, None),
+                "has no key",
+            ),
+        ],
+    )
+    def test_copy_rejects_paths(self, method, args, match):
+        core, stubber = _make_core()
+        with stubber, pytest.raises(ValueError, match=match):
+            getattr(core, method)(*args)
+
+    @staticmethod
+    def _stub_head(stubber, response, version_id=None, **params):
+        expected = {"Bucket": "bucket", "Key": "src", **params}
+        if version_id:
+            expected.update({"VersionId": version_id})
+        stubber.add_response("head_object", response, expected)
+
+    def test_plan_multipart_copy(self):
+        # The source is read as CopyObject would read it: the version that
+        # HeadObject reports is pinned, its metadata and tags replace those of
+        # the parameters, and its annotations are listed on every page. The
+        # source's expected owner reaches the reads under their own names.
+        core, stubber = _make_core()
+        size = core.MULTIPART_UPLOAD_MAX_PART_SIZE + core.MULTIPART_UPLOAD_MIN_PART_SIZE
+        source_params = {"RequestPayer": "requester", "ExpectedBucketOwner": "222222222222"}
+        self._stub_head(
+            stubber,
+            {
+                "ContentLength": size,
+                "ContentType": "text/csv",
+                "Metadata": {"owner": "etl"},
+                "VersionId": "v-src",
+            },
+            **source_params,
+        )
+        source = {"Bucket": "bucket", "Key": "src", "VersionId": "v-src", **source_params}
+        stubber.add_response("get_object_tagging", {"TagSet": [{"Key": "t", "Value": "1"}]}, source)
+        stubber.add_response(
+            "list_object_annotations",
+            {
+                "Annotations": [{"AnnotationName": "a1", "LastModified": MODIFIED, "Size": 1}],
+                "NextContinuationToken": "next",
+            },
+            source,
+        )
+        stubber.add_response(
+            "list_object_annotations",
+            {"Annotations": [{"AnnotationName": "a2", "LastModified": MODIFIED, "Size": 1}]},
+            {**source, "ContinuationToken": "next"},
+        )
+        params = {
+            "ContentType": "text/plain",
+            "Tagging": "ignored=1",
+            "StorageClass": "STANDARD_IA",
+            "RequestPayer": "requester",
+            "ExpectedBucketOwner": "111111111111",
+            "ExpectedSourceBucketOwner": "222222222222",
+            "CopySourceIfMatch": '"src"',
+        }
+        with stubber:
+            plan = core.plan_multipart_copy(
+                S3Path("bucket", "src"), S3Path("bucket", "dst"), **params
+            )
+        stubber.assert_no_pending_responses()
+
+        destination_params = {"RequestPayer": "requester", "ExpectedBucketOwner": "111111111111"}
+        assert plan == S3MultipartCopyPlan(
+            source=S3Path("bucket", "src", "v-src"),
+            destination=S3Path("bucket", "dst"),
+            size=size,
+            ranges=(
+                (0, core.MULTIPART_UPLOAD_MAX_PART_SIZE),
+                (core.MULTIPART_UPLOAD_MAX_PART_SIZE, size),
+            ),
+            create_params={
+                **destination_params,
+                "ContentType": "text/csv",
+                "Metadata": {"owner": "etl"},
+                "Tagging": "t=1",
+                "StorageClass": "STANDARD_IA",
+            },
+            part_params={
+                **destination_params,
+                "ExpectedSourceBucketOwner": "222222222222",
+                "CopySourceIfMatch": '"src"',
+            },
+            complete_params=destination_params,
+            abort_params=destination_params,
+            annotations=("a1", "a2"),
+        )
+
+    @pytest.mark.parametrize(
+        ("version_id", "head_version_id", "expected"),
+        [
+            # The version that HeadObject reports is pinned,
+            (None, "v1", "v1"),
+            # except a "null" version, which a write can replace,
+            (None, "null", None),
+            # and a version given with the path is kept.
+            ("null", "null", "null"),
+            ("v0", "v0", "v0"),
+        ],
+    )
+    @pytest.mark.parametrize("size", [0, S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE + 1])
+    def test_plan_multipart_copy_source_version(self, version_id, head_version_id, expected, size):
+        core, stubber = _make_core()
+        self._stub_head(stubber, {"ContentLength": size, "VersionId": head_version_id}, version_id)
+        with stubber:
+            plan = core.plan_multipart_copy(
+                S3Path("bucket", "src", version_id),
+                S3Path("bucket", "dst"),
+                MetadataDirective="REPLACE",
+                TaggingDirective="REPLACE",
+                AnnotationDirective="EXCLUDE",
+            )
+        stubber.assert_no_pending_responses()
+        assert plan.source == S3Path("bucket", "src", expected)
+        assert plan.fits_single_request is (size == 0)
+
+    @pytest.mark.parametrize("size", [0, S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE])
+    def test_plan_multipart_copy_fits_single_request(self, size):
+        # GH-973: a source that fits in a single CopyObject request, such as
+        # one whose cached size was stale, is not read any further.
+        core, stubber = _make_core()
+        self._stub_head(stubber, {"ContentLength": size}, RequestPayer="requester")
+        with stubber:
+            plan = core.plan_multipart_copy(
+                S3Path("bucket", "src"), S3Path("bucket", "dst"), RequestPayer="requester"
+            )
+        stubber.assert_no_pending_responses()
+        assert plan == S3MultipartCopyPlan(
+            source=S3Path("bucket", "src"),
+            destination=S3Path("bucket", "dst"),
+            size=size,
+            fits_single_request=True,
+        )
+
+    def test_plan_multipart_copy_without_size(self):
+        core, stubber = _make_core()
+        self._stub_head(stubber, {})
+        with stubber, pytest.raises(ValueError, match="no size"):
+            core.plan_multipart_copy(S3Path("bucket", "src"), S3Path("bucket", "dst"))
+
+    def test_plan_multipart_copy_unknown_parameter(self):
+        # A parameter that CopyObject does not accept is passed on to
+        # CreateMultipartUpload, so that botocore still rejects it.
+        core, stubber = _make_core()
+        self._stub_head(stubber, {"ContentLength": core.MULTIPART_UPLOAD_MAX_PART_SIZE + 1})
+        with stubber:
+            plan = core.plan_multipart_copy(
+                S3Path("bucket", "src"),
+                S3Path("bucket", "dst"),
+                ContentTyp="text/csv",
+                MetadataDirective="REPLACE",
+                TaggingDirective="REPLACE",
+                AnnotationDirective="EXCLUDE",
+            )
+        assert plan.create_params == {"ContentTyp": "text/csv"}
+        assert plan.part_params == {}
+        with pytest.raises(botocore.exceptions.ParamValidationError, match="ContentTyp"):
+            core.client.create_multipart_upload(Bucket="bucket", Key="dst", **plan.create_params)
+
+    def test_list_object_annotations(self):
+        core, stubber = _make_core()
+        stubber.add_response(
+            "list_object_annotations",
+            {
+                "Annotations": [{"AnnotationName": "a1", "LastModified": MODIFIED, "Size": 1}],
+                "NextContinuationToken": "next",
+            },
+            {"Bucket": "bucket", "Key": "key", "VersionId": "v1", "RequestPayer": "requester"},
+        )
+        stubber.add_response(
+            "list_object_annotations",
+            {},
+            {
+                "Bucket": "bucket",
+                "Key": "key",
+                "VersionId": "v1",
+                "RequestPayer": "requester",
+                "ContinuationToken": "next",
+            },
+        )
+        with stubber:
+            # The key of the path takes precedence over a parameter.
+            names = core.list_object_annotations(
+                S3Path("bucket", "key", "v1"), RequestPayer="requester", Key="other"
+            )
+        stubber.assert_no_pending_responses()
+        assert names == ["a1"]
+
+    def test_copy_object_annotation(self):
+        # The source is read with the source's parameters of the copy, and
+        # the annotation is written to the version and the ETag that the copy
+        # wrote, with the parameters that PutObjectAnnotation accepts.
+        core, stubber = _make_core()
+        stubber.add_response(
+            "get_object_annotation",
+            {"AnnotationPayload": StreamingBody(io.BytesIO(b"payload"), 7)},
+            {
+                "Bucket": "bucket",
+                "Key": "src",
+                "VersionId": "v-src",
+                "AnnotationName": "a1",
+                "RequestPayer": "requester",
+                "ExpectedBucketOwner": "222222222222",
+            },
+        )
+        stubber.add_response(
+            "put_object_annotation",
+            {},
+            {
+                "Bucket": "bucket",
+                "Key": "dst",
+                "AnnotationName": "a1",
+                "AnnotationPayload": b"payload",
+                "VersionId": "v-dst",
+                "ObjectIfMatch": '"dst"',
+                "RequestPayer": "requester",
+                "ExpectedBucketOwner": "111111111111",
+            },
+        )
+        with stubber:
+            core.copy_object_annotation(
+                "a1",
+                S3Path("bucket", "src", "v-src"),
+                S3Path("bucket", "dst"),
+                "v-dst",
+                '"dst"',
+                RequestPayer="requester",
+                ExpectedBucketOwner="111111111111",
+                ExpectedSourceBucketOwner="222222222222",
+                ContentType="text/csv",
+                # A field of the request takes precedence.
+                ObjectIfMatch='"other"',
+            )
+        stubber.assert_no_pending_responses()
 
 
 class TestS3DeleteBatch:

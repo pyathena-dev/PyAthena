@@ -280,9 +280,10 @@ directories below the bucket level) and is always a no-op.
 ## Typed S3 operations
 
 `S3FileSystem.core` is an `S3Core`, the typed operations that the filesystem sends
-its listing, lookup, delete and multipart upload requests with. It can also be built
-on a boto3 S3 client. Each operation sends one request (one per page for the
-iterators) with the retry policy, raises `FileNotFoundError` for a missing bucket or
+its listing, lookup, delete, multipart upload and copy requests with. It can also be
+built on a boto3 S3 client. Each operation sends one request (one per page for the
+iterators and `list_object_annotations()`), except the copy operations described below,
+with the retry policy, raises `FileNotFoundError` for a missing bucket or
 multipart upload, or for a missing object or version that it reads, and caches
 nothing. Requests sent
 through `fs.core` do not invalidate the filesystem's cache: call
@@ -330,6 +331,17 @@ multipart upload. `part_ranges()` sends no request: it splits an object into the
 ranges of the parts that copy it, by the part limits `MULTIPART_UPLOAD_MIN_PART_SIZE` (5 MiB),
 `MULTIPART_UPLOAD_MAX_PART_SIZE` (5 GiB) and `MULTIPART_UPLOAD_MAX_PARTS` (10,000) of
 `S3Core`.
+
+`copy_object()` copies an object with one CopyObject request, which accepts objects
+up to `MULTIPART_UPLOAD_MAX_PART_SIZE`. For a larger object, `plan_multipart_copy()`
+reads the source and returns an `S3MultipartCopyPlan`: the version to copy, the byte
+ranges of the parts, the parameters of each multipart upload request, and the
+annotations to copy, so that the multipart upload writes the metadata, tags and
+annotations that CopyObject would. It sends HeadObject, then GetObjectTagging and
+ListObjectAnnotations unless the directives or the source exclude them, and writes
+nothing. `copy_object_annotation()` copies one annotation onto the destination after
+the upload completes, with GetObjectAnnotation and PutObjectAnnotation. The
+filesystems' `cp_file()` and `copy()` run these plans.
 
 ## Async filesystem
 

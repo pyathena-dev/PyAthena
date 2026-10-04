@@ -82,6 +82,9 @@ S3 Core
 .. autoclass:: pyathena.filesystem.s3_core.S3DeleteError
    :members:
 
+.. autoclass:: pyathena.filesystem.s3_core.S3MultipartCopyPlan
+   :members:
+
 S3 Objects
 ----------
 

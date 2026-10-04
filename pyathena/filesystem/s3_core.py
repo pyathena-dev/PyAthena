@@ -12,9 +12,10 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, ClassVar, cast
+from urllib.parse import urlencode
 
 import botocore.exceptions
 from botocore.client import BaseClient
@@ -400,11 +401,57 @@ class S3DeleteResult:
         )
 
 
+@dataclass(frozen=True)
+class S3MultipartCopyPlan:
+    """The requests of a copy with a multipart upload, as CopyObject copies.
+
+    :meth:`S3Core.plan_multipart_copy` reads the source and builds the plan;
+    the caller schedules the requests: CreateMultipartUpload with
+    ``create_params``, one UploadPartCopy per range with ``part_params``,
+    then CompleteMultipartUpload with ``complete_params``, or
+    AbortMultipartUpload with ``abort_params`` after a failure, and finally
+    the copy of each annotation with :meth:`S3Core.copy_object_annotation`.
+    If ``fits_single_request`` is true, the source is copied with
+    :meth:`S3Core.copy_object` instead, and the fields after ``size`` are
+    empty.
+
+    Attributes:
+        source: The object to copy, with the version that HeadObject
+            reported unless the path has one or the version is ``null``.
+        destination: The object that the copy writes.
+        size: The size in bytes of the source, from HeadObject.
+        ranges: The ``(start, end)`` byte ranges of the source that the parts
+            copy, with an exclusive end, in part-number order.
+        create_params: The parameters of CreateMultipartUpload, with the
+            metadata and the tags that CopyObject would write.
+        part_params: The parameters of each UploadPartCopy.
+        complete_params: The parameters of CompleteMultipartUpload.
+        abort_params: The parameters of AbortMultipartUpload.
+        annotations: The names of the annotations to copy; empty if the
+            directive excludes them or the source cannot have any.
+        fits_single_request: Whether the source fits in a single CopyObject
+            request.
+    """
+
+    source: S3Path
+    destination: S3Path
+    size: int
+    ranges: tuple[tuple[int, int], ...] = ()
+    create_params: Mapping[str, Any] = field(default_factory=dict)
+    part_params: Mapping[str, Any] = field(default_factory=dict)
+    complete_params: Mapping[str, Any] = field(default_factory=dict)
+    abort_params: Mapping[str, Any] = field(default_factory=dict)
+    annotations: tuple[str, ...] = ()
+    fits_single_request: bool = False
+
+
 class S3Core:
     """Typed S3 operations, one request each, on a boto3 S3 client.
 
     Each operation sends one request, or one per page for the iterators,
-    with the retry policy, and translates S3 errors into ``OSError``
+    except those that say otherwise, such as :meth:`plan_multipart_copy`
+    and :meth:`copy_object_annotation`. The requests are sent
+    with the retry policy, and S3 errors are translated into ``OSError``
     subclasses (see :class:`~pyathena.filesystem.s3_errors.S3ClientError`):
     a missing bucket or multipart upload, or a missing object or version that
     an operation reads, raises ``FileNotFoundError``, and a denied request
@@ -425,6 +472,18 @@ class S3Core:
     MULTIPART_UPLOAD_MAX_PART_SIZE: int = 5 * 2**30  # 5GiB
     # The maximum number of parts per multipart upload is 10,000.
     MULTIPART_UPLOAD_MAX_PARTS: int = 10_000
+    # https://docs.aws.amazon.com/AmazonS3/latest/API/API_CopyObject.html
+    # The metadata that CopyObject copies from the source with the COPY
+    # metadata directive, which ignores the values given in the request.
+    _COPY_METADATA_PARAMS: ClassVar[tuple[str, ...]] = (
+        "CacheControl",
+        "ContentDisposition",
+        "ContentEncoding",
+        "ContentLanguage",
+        "ContentType",
+        "Expires",
+        "Metadata",
+    )
 
     def __init__(
         self,
@@ -788,6 +847,335 @@ class S3Core:
             if size - starts[-1] > self.MULTIPART_UPLOAD_MAX_PART_SIZE:
                 starts.append(starts[-1] + (size - starts[-1]) // 2)
         return list(zip(starts, [*starts[1:], size], strict=True))
+
+    def copy_object(self, source: S3Path, destination: S3Path, **params) -> None:
+        """Copy an object, or a version of it, with CopyObject.
+
+        Args:
+            source: The path of the object to copy, with the version ID to
+                copy, if any.
+            destination: The path of the object to write, without a version
+                ID.
+            **params: Additional request parameters, sent as given.
+
+        Raises:
+            ValueError: If the source or the destination has no key, or the
+                destination has a version ID, which a write cannot replace.
+        """
+        if not source.key:
+            raise ValueError(f"The source has no key: {source.uri}.")
+        if not destination.key:
+            raise ValueError(f"The path has no key: {destination.uri}.")
+        if destination.version_id:
+            raise ValueError(f"Cannot write to a version: {destination.uri}.")
+        copy_source: dict[str, Any] = {"Bucket": source.bucket, "Key": source.key}
+        if source.version_id:
+            copy_source.update({"VersionId": source.version_id})
+        request: dict[str, Any] = {
+            "CopySource": copy_source,
+            "Bucket": destination.bucket,
+            "Key": destination.key,
+        }
+        _logger.debug(f"Copy object from {source.uri} to {destination.uri}.")
+        self.call(self._client.copy_object, **request, **params)
+
+    def plan_multipart_copy(
+        self,
+        source: S3Path,
+        destination: S3Path,
+        block_size: int | None = None,
+        **params,
+    ) -> S3MultipartCopyPlan:
+        """Plan a copy with a multipart upload that copies as CopyObject does.
+
+        The source is read with HeadObject. Without a version in the path, a
+        version ID other than ``null`` that it reports is the version to
+        copy, so that the parts, the tags and the annotations come from the
+        same object even if the source is replaced during the copy. A
+        ``null`` version, which a write can replace, is not pinned. If the
+        reported size fits in a single CopyObject request, nothing else is
+        read and the plan says so.
+
+        No multipart request accepts the directives of CopyObject, so the
+        plan applies them as CopyObject does. With the COPY metadata
+        directive (the default), the content headers and the user-defined
+        metadata of the source are used, and the values of ``params`` are
+        ignored. With the COPY tagging directive (the default), the tags are
+        read with GetObjectTagging, and the ``Tagging`` of ``params`` is
+        ignored. REPLACE uses the values of ``params`` instead. With the COPY
+        annotation directive (the default), the annotations are listed with
+        ListObjectAnnotations, unless the source is encrypted with SSE-C or
+        is in a directory bucket, which cannot have annotations; an object in
+        a directory bucket has no tags either. The requests that read the
+        source receive ``RequestPayer``, and the source's expected bucket
+        owner and SSE-C parameters (``ExpectedSourceBucketOwner`` and
+        ``CopySourceSSECustomer*``) under their names in those requests.
+
+        Args:
+            source: The path of the object to copy, with the version ID to
+                copy, if any.
+            destination: The path of the object to write, without a version
+                ID.
+            block_size: The size in bytes of the copied ranges, between
+                ``MULTIPART_UPLOAD_MIN_PART_SIZE`` and
+                ``MULTIPART_UPLOAD_MAX_PART_SIZE`` (the default); see
+                :meth:`part_ranges`.
+            **params: The CopyObject parameters of the copy. Each request
+                receives those that it accepts; CreateMultipartUpload also
+                receives those that CopyObject does not accept either, so
+                that botocore rejects them as it would for CopyObject.
+
+        Returns:
+            The plan.
+
+        Raises:
+            ValueError: If the source or the destination has no key, the
+                destination has a version ID, ``block_size`` is out of the
+                part size limits, a directive has a value that CopyObject
+                does not accept, or HeadObject reports no size.
+        """
+        if not source.key:
+            raise ValueError(f"The source has no key: {source.uri}.")
+        if not destination.key:
+            raise ValueError(f"The path has no key: {destination.uri}.")
+        if destination.version_id:
+            raise ValueError(f"Cannot write to a version: {destination.uri}.")
+        block_size = block_size if block_size else self.MULTIPART_UPLOAD_MAX_PART_SIZE
+        if (
+            block_size < self.MULTIPART_UPLOAD_MIN_PART_SIZE
+            or block_size > self.MULTIPART_UPLOAD_MAX_PART_SIZE
+        ):
+            raise ValueError(
+                "Block size must be between "
+                f"5 MiB ({self.MULTIPART_UPLOAD_MIN_PART_SIZE} bytes) and "
+                f"5 GiB ({self.MULTIPART_UPLOAD_MAX_PART_SIZE} bytes), "
+                f"inclusive: {block_size}."
+            )
+        metadata_directive = params.get("MetadataDirective", "COPY")
+        tagging_directive = params.get("TaggingDirective", "COPY")
+        annotation_directive = params.get("AnnotationDirective", "COPY")
+        if metadata_directive not in ("COPY", "REPLACE"):
+            raise ValueError(f"Invalid MetadataDirective: {metadata_directive}.")
+        if tagging_directive not in ("COPY", "REPLACE"):
+            raise ValueError(f"Invalid TaggingDirective: {tagging_directive}.")
+        if annotation_directive not in ("COPY", "EXCLUDE"):
+            raise ValueError(f"Invalid AnnotationDirective: {annotation_directive}.")
+
+        source_params = self._copy_source_params(params)
+        _logger.debug(f"Head object to copy: {source.uri}")
+        head = self.head_object(source, **self.operation_params("head_object", source_params))
+        if head.content_length is None:
+            raise ValueError(f"HeadObject reported no size for {source.uri}.")
+        if not source.version_id and head.version_id and head.version_id != "null":
+            source = S3Path(source.bucket, source.key, head.version_id)
+        if head.content_length <= self.MULTIPART_UPLOAD_MAX_PART_SIZE:
+            # Copied with CopyObject instead, which applies the directives.
+            return S3MultipartCopyPlan(
+                source=source,
+                destination=destination,
+                size=head.content_length,
+                fits_single_request=True,
+            )
+
+        request = dict(params)
+        if metadata_directive == "COPY":
+            for name in self._COPY_METADATA_PARAMS:
+                request.pop(name, None)
+            copied = {
+                "CacheControl": head.cache_control,
+                "ContentDisposition": head.content_disposition,
+                "ContentEncoding": head.content_encoding,
+                "ContentLanguage": head.content_language,
+                "ContentType": head.content_type,
+                "Expires": head.expires,
+                "Metadata": head.user_metadata,
+            }
+            request.update({k: v for k, v in copied.items() if v is not None})
+        if tagging_directive == "COPY":
+            request.pop("Tagging", None)
+            # Directory buckets do not support GetObjectTagging, and their
+            # objects have no tags.
+            if not self._is_directory_bucket(source.bucket):
+                _logger.debug(f"Get tags to copy: {source.uri}")
+                tagging_request: dict[str, Any] = {"Bucket": source.bucket, "Key": source.key}
+                if source.version_id:
+                    tagging_request.update({"VersionId": source.version_id})
+                response = self.call(
+                    self._client.get_object_tagging,
+                    **self.operation_params("get_object_tagging", source_params),
+                    **tagging_request,
+                )
+                tags = [(t["Key"], t["Value"]) for t in response["TagSet"]]
+                if tags:
+                    request.update({"Tagging": urlencode(tags)})
+        copy_members = self._client.meta.service_model.operation_model(
+            "CopyObject"
+        ).input_shape.members
+        create_params = {
+            **self.operation_params("create_multipart_upload", request),
+            # A parameter that CopyObject does not accept either is sent as
+            # is, so that botocore rejects it as it does for CopyObject.
+            **{k: v for k, v in request.items() if k not in copy_members},
+        }
+        ranges = tuple(self.part_ranges(head.content_length, block_size))
+        # The annotations are listed before the caller writes anything, so
+        # that a missing permission fails first.
+        annotations = (
+            tuple(
+                self.list_object_annotations(
+                    source, **self.operation_params("list_object_annotations", source_params)
+                )
+            )
+            if annotation_directive == "COPY"
+            and "CopySourceSSECustomerAlgorithm" not in params
+            and not self._is_directory_bucket(source.bucket)
+            else ()
+        )
+        return S3MultipartCopyPlan(
+            source=source,
+            destination=destination,
+            size=head.content_length,
+            ranges=ranges,
+            create_params=create_params,
+            part_params=self.operation_params("upload_part_copy", params),
+            complete_params=self.operation_params("complete_multipart_upload", params),
+            abort_params=self.operation_params("abort_multipart_upload", params),
+            annotations=annotations,
+        )
+
+    def list_object_annotations(self, path: S3Path, **params) -> list[str]:
+        """List the names of the annotations of an object with ListObjectAnnotations.
+
+        Sends one request per page.
+
+        Args:
+            path: The path of the object, with the version ID to list, if
+                any.
+            **params: Additional request parameters. The fields that the
+                other arguments set take precedence over parameters of the
+                same name.
+
+        Returns:
+            The annotation names, across all pages.
+
+        Raises:
+            ValueError: If the path has no key.
+        """
+        if not path.key:
+            raise ValueError(f"The path has no key: {path.uri}.")
+        request: dict[str, Any] = {**params, "Bucket": path.bucket, "Key": path.key}
+        if path.version_id:
+            request.update({"VersionId": path.version_id})
+        names: list[str] = []
+        while True:
+            _logger.debug(f"List object annotations: {path.uri}")
+            response = self.call(self._client.list_object_annotations, **request)
+            names.extend(a["AnnotationName"] for a in response.get("Annotations", []))
+            token = response.get("NextContinuationToken")
+            if not token:
+                return names
+            request.update({"ContinuationToken": token})
+
+    def copy_object_annotation(
+        self,
+        name: str,
+        source: S3Path,
+        destination: S3Path,
+        version_id: str | None,
+        etag: str | None,
+        **params,
+    ) -> None:
+        """Copy an annotation of an object onto the object that a copy wrote.
+
+        Reads the annotation with GetObjectAnnotation and writes it with
+        PutObjectAnnotation. The annotation is written to the version that
+        the copy created, if the bucket is versioned, and only if the
+        destination still has the ETag of the copy, so that it is not
+        attached to an object written over the copy.
+
+        Args:
+            name: The annotation name.
+            source: The path of the copied object, with the version ID that
+                was copied, if any.
+            destination: The path of the object that the copy wrote, without
+                a version ID.
+            version_id: The version ID that the copy created, if any.
+            etag: The ETag of the object that the copy wrote, if any.
+            **params: The CopyObject parameters of the copy.
+                GetObjectAnnotation receives those of the source, mapped as
+                for :meth:`plan_multipart_copy`, and PutObjectAnnotation
+                those that it accepts; the fields that the other arguments
+                set take precedence.
+
+        Raises:
+            ValueError: If the source or the destination has no key.
+        """
+        if not source.key:
+            raise ValueError(f"The source has no key: {source.uri}.")
+        if not destination.key:
+            raise ValueError(f"The path has no key: {destination.uri}.")
+        get_request: dict[str, Any] = {
+            "Bucket": source.bucket,
+            "Key": source.key,
+            "AnnotationName": name,
+        }
+        if source.version_id:
+            get_request.update({"VersionId": source.version_id})
+        _logger.debug(f"Copy object annotation {name} from {source.uri} to {destination.uri}.")
+        response = self.call(
+            self._client.get_object_annotation,
+            **self.operation_params("get_object_annotation", self._copy_source_params(params)),
+            **get_request,
+        )
+        put_request: dict[str, Any] = {
+            "Bucket": destination.bucket,
+            "Key": destination.key,
+            "AnnotationName": name,
+            "AnnotationPayload": response["AnnotationPayload"].read(),
+        }
+        if version_id:
+            put_request.update({"VersionId": version_id})
+        if etag:
+            put_request.update({"ObjectIfMatch": etag})
+        self.call(
+            self._client.put_object_annotation,
+            **{**self.operation_params("put_object_annotation", params), **put_request},
+        )
+
+    @staticmethod
+    def _is_directory_bucket(bucket: str) -> bool:
+        """Return whether the bucket is a directory bucket (S3 Express One Zone).
+
+        Directory bucket names end with ``--x-s3``.
+
+        Args:
+            bucket: S3 bucket name.
+
+        Returns:
+            True if the bucket is a directory bucket.
+        """
+        return bucket.endswith("--x-s3")
+
+    @staticmethod
+    def _copy_source_params(params: Mapping[str, Any]) -> dict[str, Any]:
+        """Map the parameters of a copy to those of the requests that read its source.
+
+        Args:
+            params: The CopyObject parameters of the copy.
+
+        Returns:
+            ``RequestPayer``, and the source's expected bucket owner and SSE-C
+            parameters under the names of the requests that read the source
+            (``ExpectedBucketOwner`` and ``SSECustomer*``), where given.
+        """
+        source_params = {
+            "RequestPayer": params.get("RequestPayer"),
+            "ExpectedBucketOwner": params.get("ExpectedSourceBucketOwner"),
+            "SSECustomerAlgorithm": params.get("CopySourceSSECustomerAlgorithm"),
+            "SSECustomerKey": params.get("CopySourceSSECustomerKey"),
+            "SSECustomerKeyMD5": params.get("CopySourceSSECustomerKeyMD5"),
+        }
+        return {k: v for k, v in source_params.items() if v is not None}
 
     def list_objects_page(
         self,
