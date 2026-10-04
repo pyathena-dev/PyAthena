@@ -1036,7 +1036,7 @@ class TestAioS3FileSystem:
     @pytest.mark.asyncio
     async def test_mv_null_version_onto_key(self, status):
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
-        fs._sync_fs._call = mock.MagicMock(
+        fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock(
             return_value={} if status is None else {"Status": status}
         )
         fs._copy_file = mock.AsyncMock(return_value=True)
@@ -1063,7 +1063,7 @@ class TestAioS3FileSystem:
     @pytest.mark.asyncio
     async def test_mv_null_version_conflicts_depend_on_bucket_state(self, status):
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
-        fs._sync_fs._call = mock.MagicMock(
+        fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock(
             return_value={} if status is None else {"Status": status}
         )
         fs._copy_file = mock.AsyncMock(return_value=True)
@@ -1090,7 +1090,7 @@ class TestAioS3FileSystem:
     @pytest.mark.asyncio
     async def test_mv_null_version_directory_bucket_does_not_read_bucket_state(self):
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
-        fs._sync_fs._call = mock.MagicMock()
+        fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock()
         fs._copy_file = mock.AsyncMock(return_value=True)
         fs._delete_objects = mock.AsyncMock()
         key = "s3://example--usw2-az1--x-s3/key"
@@ -1105,7 +1105,9 @@ class TestAioS3FileSystem:
     @pytest.mark.asyncio
     async def test_mv_null_version_failure_does_not_delete(self, stage):
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
-        fs._sync_fs._call = mock.MagicMock(return_value={"Status": "Enabled"})
+        fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock(
+            return_value={"Status": "Enabled"}
+        )
         fs._copy_file = mock.AsyncMock(return_value=True)
         fs._delete_objects = mock.AsyncMock()
         if stage == "lookup":

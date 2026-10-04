@@ -425,6 +425,36 @@ class TestS3Core:
                 core.delete_bucket("bucket")
         stubber.assert_no_pending_responses()
 
+    @pytest.mark.parametrize(
+        ("response", "expected"),
+        [
+            ({"Status": "Enabled"}, "Enabled"),
+            ({"Status": "Suspended", "MFADelete": "Disabled"}, "Suspended"),
+            # A bucket whose versioning has never been enabled.
+            ({}, None),
+        ],
+    )
+    def test_get_bucket_versioning(self, response, expected):
+        core, stubber = _make_core(request_kwargs={"RequestPayer": "requester"})
+        # RequestPayer, which GetBucketVersioning does not accept, is not sent.
+        stubber.add_response(
+            "get_bucket_versioning",
+            response,
+            {"Bucket": "bucket", "ExpectedBucketOwner": "123456789012"},
+        )
+        with stubber:
+            status = core.get_bucket_versioning("bucket", ExpectedBucketOwner="123456789012")
+        stubber.assert_no_pending_responses()
+        assert status == expected
+
+    def test_get_bucket_versioning_translates_errors(self):
+        core, stubber = _make_core()
+        stubber.add_client_error(
+            "get_bucket_versioning", service_error_code="NoSuchBucket", http_status_code=404
+        )
+        with stubber, pytest.raises(FileNotFoundError):
+            core.get_bucket_versioning("bucket")
+
     def test_list_objects(self):
         core, stubber = _make_core()
         stubber.add_response(

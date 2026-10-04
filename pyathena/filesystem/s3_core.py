@@ -835,6 +835,23 @@ class S3Core:
         _logger.debug(f"Delete bucket: s3://{bucket}")
         self.call(self._client.delete_bucket, Bucket=bucket, **params)
 
+    def get_bucket_versioning(self, bucket: str, **params) -> str | None:
+        """Get the versioning state of a bucket with GetBucketVersioning.
+
+        Args:
+            bucket: The name of the bucket.
+            **params: Additional request parameters, sent as given.
+
+        Returns:
+            ``Enabled`` or ``Suspended``, or None if versioning has never
+            been enabled on the bucket.
+
+        Raises:
+            FileNotFoundError: If the bucket does not exist.
+        """
+        response = self.call(self._client.get_bucket_versioning, Bucket=bucket, **params)
+        return cast(str | None, response.get("Status"))
+
     def delete_object(self, path: S3Path, **params) -> None:
         """Delete an object, or a version of it, with DeleteObject.
 
@@ -1266,7 +1283,7 @@ class S3Core:
             request.pop("Tagging", None)
             # Directory buckets do not support GetObjectTagging, and their
             # objects have no tags.
-            if not self._is_directory_bucket(source.bucket):
+            if not source.is_directory_bucket:
                 tags = self.get_object_tagging(
                     source, **self.operation_params("get_object_tagging", source_params)
                 )
@@ -1290,7 +1307,7 @@ class S3Core:
             )
             if annotation_directive == "COPY"
             and "CopySourceSSECustomerAlgorithm" not in params
-            and not self._is_directory_bucket(source.bucket)
+            and not source.is_directory_bucket
             else ()
         )
         return S3MultipartCopyPlan(
@@ -1603,20 +1620,6 @@ class S3Core:
                 ExpiresIn=expires_in,
             ),
         )
-
-    @staticmethod
-    def _is_directory_bucket(bucket: str) -> bool:
-        """Return whether the bucket is a directory bucket (S3 Express One Zone).
-
-        Directory bucket names end with ``--x-s3``.
-
-        Args:
-            bucket: S3 bucket name.
-
-        Returns:
-            True if the bucket is a directory bucket.
-        """
-        return bucket.endswith("--x-s3")
 
     @staticmethod
     def _copy_source_params(params: Mapping[str, Any]) -> dict[str, Any]:

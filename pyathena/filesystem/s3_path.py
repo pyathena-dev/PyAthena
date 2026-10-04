@@ -124,6 +124,14 @@ class S3Path:
         return not self.key or not self.key.strip("/")
 
     @property
+    def is_directory_bucket(self) -> bool:
+        """Whether the bucket is a directory bucket (S3 Express One Zone).
+
+        The names of directory buckets end with ``--x-s3``.
+        """
+        return self.bucket.endswith("--x-s3")
+
+    @property
     def name(self) -> str:
         """The path without a scheme or version, in ``bucket/key`` form, or the bucket."""
         return f"{self.bucket}/{self.key}" if self.key else self.bucket
