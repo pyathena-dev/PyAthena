@@ -128,9 +128,8 @@ class S3PathPairing:
             raise ValueError("destination_is_dir is needed to pair the paths.")
         source_is_str = isinstance(path1, str)
         glob = isinstance(path1, str) and self._is_glob(path1)
-        # As in fsspec's copy(); destination_is_dir is None only when the
-        # destination is a list or ends with a slash, or the source is a glob
-        # pattern or ends with a slash, which decide without it.
+        # As in fsspec's copy(); destination_is_dir is None only when
+        # looks_up_destination is false, where the other terms decide.
         dest_is_dir = isinstance(path2, str) and (trailing_sep(path2) or bool(destination_is_dir))
         exists = source_is_str and (
             (glob and len(sources) == 1) or (not glob and dest_is_dir and not trailing_sep(path1))
@@ -154,8 +153,9 @@ class S3PathPairing:
         Returns:
             The sources, in ``bucket/key`` form (their
             :attr:`~pyathena.filesystem.s3_path.S3Path.target`), that have
-            another source below them and a destination that conflicts, in the
-            order of the pairs; empty if nothing needs to be looked up.
+            another source below them and a destination that conflicts, one
+            per pair in the order of the pairs; empty if nothing needs to be
+            looked up.
         """
         return self._moves(pairs)[2]
 
@@ -281,14 +281,12 @@ class S3PathPairing:
                 directories.add(parent)
                 parent = parent.rpartition("/")[0]
         counts = Counter(dest for _, _, _, source, dest in named if source != dest)
-        candidates = list(
-            dict.fromkeys(
-                source
-                for _, _, versioned, source, dest in named
-                if source != dest
-                and (counts[dest] > 1 or dest in sources)
-                and source in directories
-                and not versioned
-            )
-        )
+        candidates = [
+            source
+            for _, _, versioned, source, dest in named
+            if source != dest
+            and (counts[dest] > 1 or dest in sources)
+            and source in directories
+            and not versioned
+        ]
         return named, sources, candidates

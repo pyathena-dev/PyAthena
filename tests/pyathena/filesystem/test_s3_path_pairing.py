@@ -102,6 +102,14 @@ class TestS3PathPairing:
                 None,
                 [("bucket/b?versionId=v1", "s3://bucket/d/b")],
             ),
+            # A list of sources is copied into the destination by name.
+            (
+                ["s3://bucket/b?versionId=v1"],
+                "s3://bucket/d",
+                ["bucket/b?versionId=v1"],
+                None,
+                [("bucket/b?versionId=v1", "s3://bucket/d/b")],
+            ),
             # Lists are paired as given, up to the end of the shorter one.
             (
                 ["s3://bucket/a", "s3://bucket/b", "s3://bucket/c"],
@@ -173,6 +181,15 @@ class TestS3PathPairing:
         pairs = [("s3://bucket/d", "s3://bucket/e"), ("s3://bucket/d/x", "s3://bucket/e")]
         with pytest.raises(TypeError, match="collection"):
             _pairing(pairs).move_pairs(pairs, missing="bucket/d")
+
+    def test_conflict_candidates_one_per_pair(self):
+        # A source given twice is looked up twice, as each pair is checked.
+        pairs = [
+            ("s3://bucket/d", "s3://bucket/out"),
+            ("s3://bucket/d", "s3://bucket/out"),
+            ("s3://bucket/d/x", "s3://bucket/x"),
+        ]
+        assert _pairing(pairs).conflict_candidates(pairs) == ["bucket/d", "bucket/d"]
 
     def test_move_pairs_version_names_an_object(self):
         # A version is never taken for a directory.
