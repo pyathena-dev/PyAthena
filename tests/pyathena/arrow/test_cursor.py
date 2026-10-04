@@ -27,7 +27,11 @@ from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
-from tests.pyathena.util import CONVERTED_VALUES_QUERY, CONVERTED_VALUES_ROW
+from tests.pyathena.util import (
+    CONVERTED_VALUES_QUERY,
+    CONVERTED_VALUES_ROW,
+    RESULT_FILE_VALUES_QUERY,
+)
 
 
 class TestArrowCursor:
@@ -373,7 +377,7 @@ class TestArrowCursor:
                 pa.field("col_double", pa.float64()),
                 pa.field("col_string", pa.string()),
                 pa.field("col_varchar", pa.string()),
-                pa.field("col_timestamp", pa.timestamp("ms")),
+                pa.field("col_timestamp", pa.timestamp("us")),
                 pa.field("col_time", pa.string()),
                 pa.field("col_date", pa.timestamp("ms")),
                 pa.field("col_binary", pa.string()),
@@ -550,7 +554,7 @@ class TestArrowCursor:
             pl.Float64,
             pl.String,
             pl.String,
-            pl.Datetime("ms"),
+            pl.Datetime("us"),
             pl.String,
             pl.Datetime("ms"),
             pl.String,
@@ -1054,6 +1058,31 @@ class TestArrowCursor:
         assert arrow_cursor.as_arrow().column("col_timestamp_tz").to_pylist() == [
             "2024-02-29 23:59:58.123 +05:30"
         ]
+
+    @pytest.mark.skipif(not ENV.managed_work_group, reason="AWS_ATHENA_MANAGED_WORKGROUP not set")
+    def test_managed_results_match_result_file(self):
+        """Managed results have the types and values of the CSV result file.
+
+        The cursor's converter applies to them, including a custom one.
+        """
+        results = []
+        for kwargs in ({}, {"work_group": ENV.managed_work_group, "s3_staging_dir": ""}):
+            converter = DefaultArrowTypeConverter()
+            converter.set("varchar", lambda value: value.upper() if value else value)
+            with (
+                contextlib.closing(connect(**kwargs)) as conn,
+                conn.cursor(ArrowCursor, converter=converter) as cursor,
+            ):
+                cursor.execute(RESULT_FILE_VALUES_QUERY)
+                results.append((cursor.as_arrow(), cursor.fetchall()))
+        (table, rows), (managed_table, managed_rows) = results
+        assert managed_table.schema == table.schema
+        assert managed_table.equals(table)
+        assert managed_rows == rows
+        assert rows[0][1] == 'A,"B"\nC'
+        assert table.schema.field("col_timestamp_6").type == pa.timestamp("us")
+        # Fractions finer than microseconds are truncated.
+        assert (rows[0][5], rows[0][13]) == (datetime(2020, 1, 2, 3, 4, 5, 123456),) * 2
 
     @pytest.mark.parametrize(
         "arrow_cursor",

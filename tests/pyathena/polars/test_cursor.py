@@ -19,12 +19,18 @@ import pytest
 
 from pyathena.error import DatabaseError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
+from pyathena.polars.converter import DefaultPolarsTypeConverter
 from pyathena.polars.cursor import PolarsCursor
 from pyathena.polars.result_set import AthenaPolarsResultSet
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
-from tests.pyathena.util import CONVERTED_VALUES_QUERY, CONVERTED_VALUES_ROW, cached_file_systems
+from tests.pyathena.util import (
+    CONVERTED_VALUES_QUERY,
+    CONVERTED_VALUES_ROW,
+    RESULT_FILE_VALUES_QUERY,
+    cached_file_systems,
+)
 
 
 class TestPolarsCursor:
@@ -786,6 +792,30 @@ class TestPolarsCursor:
         assert polars_cursor.as_polars()["col_timestamp_tz"].to_list() == [
             "2024-02-29 23:59:58.123 +05:30"
         ]
+
+    @pytest.mark.skipif(not ENV.managed_work_group, reason="AWS_ATHENA_MANAGED_WORKGROUP not set")
+    def test_managed_results_match_result_file(self):
+        """Managed results have the types and values of the CSV result file.
+
+        The cursor's converter applies to them, including a custom one.
+        """
+        results = []
+        for kwargs in ({}, {"work_group": ENV.managed_work_group, "s3_staging_dir": ""}):
+            converter = DefaultPolarsTypeConverter()
+            converter.set("varchar", lambda value: value.upper() if value else value)
+            with (
+                contextlib.closing(connect(**kwargs)) as conn,
+                conn.cursor(PolarsCursor, converter=converter) as cursor,
+            ):
+                cursor.execute(RESULT_FILE_VALUES_QUERY)
+                results.append((cursor.as_polars(), cursor.fetchall()))
+        (df, rows), (managed_df, managed_rows) = results
+        assert managed_df.schema == df.schema
+        assert managed_df.equals(df)
+        assert managed_rows == rows
+        assert rows[0][1] == 'A,"B"\nC'
+        # Fractions finer than microseconds are truncated.
+        assert (rows[0][5], rows[0][13]) == (datetime(2020, 1, 2, 3, 4, 5, 123456),) * 2
 
     @pytest.mark.parametrize(
         "polars_cursor",

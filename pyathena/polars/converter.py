@@ -12,9 +12,10 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from copy import deepcopy
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pyathena.converter import (
+    _TIMESTAMP_TEXT_LENGTHS,
     Converter,
     _to_binary,
     _to_date,
@@ -25,6 +26,9 @@ from pyathena.converter import (
     _to_time_with_tz,
 )
 from pyathena.util import override
+
+if TYPE_CHECKING:
+    import polars as pl
 
 _logger = logging.getLogger(__name__)
 
@@ -37,6 +41,38 @@ _DEFAULT_POLARS_CONVERTERS: dict[str, Callable[[str | None], Any | None]] = {
     "varbinary": _to_binary,
     "json": _to_json,
 }
+
+
+def _to_datetimes(df: pl.DataFrame, dtypes: dict[str, Any]) -> pl.DataFrame:
+    """Convert timestamp text columns to Datetime dtypes, truncating finer fractions.
+
+    Athena writes up to 12 fractional digits, which Polars does not parse into a
+    Datetime whose time unit holds fewer.
+
+    Args:
+        df: The DataFrame with the timestamp text columns, with NULL as null or as
+            an empty string.
+        dtypes: The Datetime dtypes keyed by column name.
+
+    Returns:
+        The DataFrame with the columns converted.
+    """
+    import polars as pl
+
+    exprs = []
+    for name, dtype in dtypes.items():
+        if name not in df.columns:
+            # Not read, such as a column that the read options leave out.
+            continue
+        time_unit = (dtype() if isinstance(dtype, type) else dtype).time_unit
+        text = pl.col(name)
+        exprs.append(
+            pl.when(text != "")
+            .then(text.str.slice(0, _TIMESTAMP_TEXT_LENGTHS[time_unit]))
+            .str.to_datetime("%Y-%m-%d %H:%M:%S%.f", time_unit=time_unit)
+            .cast(dtype)
+        )
+    return df.with_columns(exprs) if exprs else df
 
 
 class DefaultPolarsTypeConverter(Converter):

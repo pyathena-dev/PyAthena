@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from copy import deepcopy
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pyathena.converter import (
+    _TIMESTAMP_TEXT_LENGTHS,
     Converter,
     _to_binary,
     _to_date,
@@ -19,6 +20,9 @@ from pyathena.converter import (
     _to_time_with_tz,
 )
 from pyathena.util import override
+
+if TYPE_CHECKING:
+    from pyarrow import ChunkedArray, TimestampType
 
 _logger = logging.getLogger(__name__)
 
@@ -32,6 +36,28 @@ _DEFAULT_ARROW_CONVERTERS: dict[str, Callable[[str | None], Any | None]] = {
     "varbinary": _to_binary,
     "json": _to_json,
 }
+
+
+def _to_timestamp(column: ChunkedArray, type_: TimestampType) -> ChunkedArray:
+    """Convert timestamp text to a timestamp type, truncating finer fractions.
+
+    Athena writes up to 12 fractional digits, which pyarrow does not parse into a
+    timestamp type whose unit holds fewer.
+
+    Args:
+        column: The timestamp text, with NULL as null or as an empty string.
+        type_: The timestamp type.
+
+    Returns:
+        The timestamps.
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    length = _TIMESTAMP_TEXT_LENGTHS[type_.unit]
+    if (pc.max(pc.utf8_length(column)).as_py() or 0) > length:
+        column = pc.utf8_slice_codeunits(column, 0, length)
+    return pc.if_else(pc.equal(column, ""), pa.scalar(None, pa.string()), column).cast(type_)
 
 
 class DefaultArrowTypeConverter(Converter):
@@ -86,7 +112,7 @@ class DefaultArrowTypeConverter(Converter):
                 "char": pa.string(),
                 "varchar": pa.string(),
                 "string": pa.string(),
-                "timestamp": pa.timestamp("ms"),
+                "timestamp": pa.timestamp("us"),
                 "date": pa.timestamp("ms"),
                 "time": pa.string(),
                 "time with time zone": pa.string(),

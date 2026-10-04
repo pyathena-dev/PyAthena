@@ -145,6 +145,21 @@ CONVERTED_VALUES_ROW = (
     None,
 )
 
+# Values that the cursors reading CSV result files must read the same way from the
+# GetQueryResults rows of managed query result storage.
+RESULT_FILE_VALUES_QUERY = """
+SELECT * FROM (VALUES
+  (1, 'a,"b"' || chr(10) || 'c', '', DATE '2020-01-02', TIMESTAMP '2020-01-02 03:04:05.123',
+   CAST('2020-01-02 03:04:05.123456' AS TIMESTAMP(6)), CAST('12.30' AS DECIMAL(10, 2)), X'0102',
+   ARRAY[1, 2], MAP(ARRAY['k'], ARRAY[1]), CAST(ROW(1, 'x') AS ROW(a INTEGER, b VARCHAR)),
+   json_parse('{"a": [1, 2]}'), BIGINT '9007199254740993',
+   CAST('2020-01-02 03:04:05.123456789012' AS TIMESTAMP(12))),
+  (2, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+) AS t(col_int, col_varchar, col_empty, col_date, col_timestamp, col_timestamp_6, col_decimal,
+       col_varbinary, col_array, col_map, col_row, col_json, col_bigint, col_timestamp_12)
+ORDER BY col_int
+"""
+
 
 # A Spark job whose executor tasks sleep, so that StopCalculationExecution can cancel it.
 CANCELABLE_SPARK_JOB = """

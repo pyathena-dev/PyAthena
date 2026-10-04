@@ -22,9 +22,10 @@ from typing import (
 )
 
 from pyathena import OperationalError
-from pyathena.converter import Converter, _text_value_converter
+from pyathena.converter import Converter
 from pyathena.error import ProgrammingError
 from pyathena.model import AthenaQueryExecution
+from pyathena.polars.converter import _to_datetimes
 from pyathena.polars.util import to_column_info
 from pyathena.result_set import AthenaResultSet
 from pyathena.util import RetryConfig, override
@@ -278,13 +279,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
             else:
                 self._df_iter = self._create_dataframe_iterator()
         elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
-            self._df = self._as_polars_from_api()
-            # GetQueryResults values are already converted, except json and time with
-            # time zone values kept as text.
-            column_names = self._get_frame_column_names()
-            self._df_converters = self._text_value_converters(
-                self._get_converters(column_names), column_names
-            )
+            # Without a result file, as with managed query result storage, the rows from
+            # GetQueryResults are read as a CSV result file, but not in chunks.
+            self._df = self._read_csv()
+            self._df_converters = self._get_converters(self._get_frame_column_names())
         else:
             self._df = pl.DataFrame()
         if self._df is not None:
@@ -432,6 +430,30 @@ class AthenaPolarsResultSet(AthenaResultSet):
             for name, d in zip(column_names, description, strict=True)
         }
 
+    def _get_timestamp_dtypes(self, has_header: bool) -> dict[str, Any]:
+        """Get the Datetime dtypes of the timestamp columns, which are read as text.
+
+        Args:
+            has_header: Whether the CSV data has a header. Without one, or with
+                ``schema_overrides`` or ``with_column_names`` given to ``execute()``,
+                Polars does not name the columns by the header, and they are not read
+                as text.
+
+        Returns:
+            The Datetime dtypes keyed by the header of a CSV file.
+        """
+        import polars as pl
+
+        if not has_header or self._kwargs.keys() & {"schema_overrides", "with_column_names"}:
+            return {}
+        dtypes = self._csv_dtypes
+        return {
+            name: dtype
+            for name, d in zip(self._get_column_names(), self.description or [], strict=True)
+            if d[1] == "timestamp"
+            and ((dtype := dtypes.get(name)) is pl.Datetime or isinstance(dtype, pl.Datetime))
+        }
+
     def _get_column_names(self) -> list[str]:
         """Get the names of the result columns in a DataFrame.
 
@@ -462,7 +484,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """
         names = self._get_column_names()
         new_columns = self._kwargs.get("new_columns")
-        if not new_columns or not self.output_location or self.is_unload:
+        if not new_columns or (self.output_location and self.is_unload):
             return names
         return [*new_columns[: len(names)], *names[len(new_columns) :]]
 
@@ -507,15 +529,12 @@ class AthenaPolarsResultSet(AthenaResultSet):
     def _is_csv_readable(self) -> bool:
         """Check if CSV output is available and can be read.
 
+        Without an output location, the GetQueryResults rows are read as CSV.
+
         Returns:
             True if CSV data is available to read, False otherwise.
-
-        Raises:
-            ProgrammingError: If output location is not set.
         """
-        if not self.output_location:
-            raise ProgrammingError("OutputLocation is none or empty.")
-        if not self.output_location.endswith((".csv", ".txt")):
+        if self.output_location and not self.output_location.endswith((".csv", ".txt")):
             return False
         if self.substatement_type and self.substatement_type.upper() in (
             "UPDATE",
@@ -524,8 +543,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             "VACUUM_TABLE",
         ):
             return False
-        length = self._get_content_length()
-        return length != 0
+        return not self.output_location or self._get_content_length() != 0
 
     def _prepare_parquet_location(self) -> bool:
         """Prepare unload location for Parquet reading.
@@ -541,25 +559,21 @@ class AthenaPolarsResultSet(AthenaResultSet):
         return True
 
     def _read_csv(self) -> pl.DataFrame:
-        """Read query results from CSV file in S3.
+        """Read query results from CSV file in S3, or the GetQueryResults rows as one without it.
 
         Returns:
             Polars DataFrame containing the CSV data.
 
         Raises:
-            ProgrammingError: If output location is not set.
-            OperationalError: If reading the CSV file fails.
+            OperationalError: If reading the CSV data fails.
         """
         import polars as pl
 
         if not self._is_csv_readable():
             return pl.DataFrame()
 
-        if self.output_location is None:
-            raise ProgrammingError("output_location is not available.")
-
         separator, has_header, new_columns = self._get_csv_params()
-        read_kwargs = self._read_kwargs(
+        kwargs = self._read_kwargs(
             lambda: self._csv_storage_options,
             separator=separator,
             has_header=has_header,
@@ -567,15 +581,37 @@ class AthenaPolarsResultSet(AthenaResultSet):
         )
         if "schema_overrides" not in self._kwargs:
             # Renamed after reading, so that Polars matches the types to the header.
-            read_kwargs.pop("new_columns", None)
+            kwargs.pop("new_columns", None)
+        source: str | bytes
+        if self.output_location:
+            source = location = self.output_location
+        else:
+            source = self._fetch_all_rows_as_csv()
+            if not source:
+                return pl.DataFrame()
+            location = "the GetQueryResults rows"
+            del kwargs["storage_options"]
 
         try:
-            df = pl.read_csv(self.output_location, **read_kwargs)
+            try:
+                df = pl.read_csv(source, **kwargs)
+            except pl.exceptions.ComputeError:
+                timestamp_dtypes = self._get_timestamp_dtypes(has_header)
+                if not timestamp_dtypes:
+                    raise
+                # Athena writes up to 12 fractional digits, which Polars does not parse
+                # into a Datetime whose time unit holds fewer, so the data is read again
+                # with the timestamp columns as text.
+                kwargs["schema_overrides"] = {
+                    **self._csv_dtypes,
+                    **dict.fromkeys(timestamp_dtypes, pl.String),
+                }
+                df = _to_datetimes(pl.read_csv(source, **kwargs), timestamp_dtypes)
             if new_columns:
                 df.columns = [*new_columns, *df.columns[len(new_columns) :]]
             return df
         except Exception as e:
-            _logger.exception(f"Failed to read {self.output_location}.")
+            _logger.exception(f"Failed to read {location}.")
             raise OperationalError(*e.args) from e
 
     def _read_parquet(self) -> pl.DataFrame:
@@ -640,25 +676,6 @@ class AthenaPolarsResultSet(AthenaResultSet):
         else:
             df = self._read_csv()
         return df
-
-    def _as_polars_from_api(self, converter: Converter | None = None) -> pl.DataFrame:
-        """Build a Polars DataFrame from GetQueryResults API.
-
-        Used as a fallback when ``output_location`` is not available
-        (e.g. managed query result storage).
-
-        Args:
-            converter: Type converter for result values. Defaults to
-                ``DefaultTypeConverter`` with json and time with time zone values kept as
-                text, as in the CSV result file. A Polars ``Time`` has no time zone.
-        """
-        import polars as pl
-
-        rows = self._fetch_all_rows(converter or _text_value_converter())
-        if not rows:
-            return pl.DataFrame()
-        columns = [list(column) for column in zip(*rows, strict=True)]
-        return pl.DataFrame(dict(zip(self._get_column_names(), columns, strict=True)))
 
     def as_polars(self) -> pl.DataFrame:
         """Return query results as a Polars DataFrame.

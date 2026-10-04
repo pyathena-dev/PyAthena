@@ -27,7 +27,12 @@ from pyathena.pandas.result_set import (
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
-from tests.pyathena.util import CONVERTED_VALUES_QUERY, CONVERTED_VALUES_ROW, cached_file_systems
+from tests.pyathena.util import (
+    CONVERTED_VALUES_QUERY,
+    CONVERTED_VALUES_ROW,
+    RESULT_FILE_VALUES_QUERY,
+    cached_file_systems,
+)
 
 
 def _pandas_converter_without_bigint_dtype():
@@ -1775,6 +1780,27 @@ class TestPandasCursor:
 
         pandas_cursor.execute(CONVERTED_VALUES_QUERY)
         assert pandas_cursor.fetchall() == [CONVERTED_VALUES_ROW]
+
+    @pytest.mark.skipif(not ENV.managed_work_group, reason="AWS_ATHENA_MANAGED_WORKGROUP not set")
+    def test_managed_results_match_result_file(self):
+        """Managed results have the dtypes and values of the CSV result file.
+
+        The cursor's converter applies to them, including a custom one.
+        """
+        results = []
+        for kwargs in ({}, {"work_group": ENV.managed_work_group, "s3_staging_dir": ""}):
+            converter = DefaultPandasTypeConverter()
+            converter.set("varchar", lambda value: value.upper() if value else value)
+            with (
+                contextlib.closing(connect(**kwargs)) as conn,
+                conn.cursor(PandasCursor, converter=converter) as cursor,
+            ):
+                cursor.execute(RESULT_FILE_VALUES_QUERY)
+                results.append((cursor.as_pandas(), cursor.fetchone()))
+        (df, row), (managed_df, managed_row) = results
+        pd.testing.assert_frame_equal(managed_df, df)
+        assert managed_row == row
+        assert row[1] == 'A,"B"\nC'
 
     @pytest.mark.parametrize(
         "pandas_cursor",

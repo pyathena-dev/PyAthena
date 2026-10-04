@@ -68,6 +68,11 @@ def _to_datetime(varchar_value: str | None) -> datetime | None:
     return _parse_datetime(varchar_value)
 
 
+# The length of Athena timestamp text, such as "2020-01-02 03:04:05.123456", that holds
+# the fraction a time unit can represent. Athena writes up to 12 fractional digits.
+_TIMESTAMP_TEXT_LENGTHS: dict[str, int] = {"s": 19, "ms": 23, "us": 26, "ns": 29}
+
+
 _UTC_OFFSET_PATTERN: re.Pattern[str] = re.compile(r"([+-])(\d{2}):(\d{2})")
 
 
@@ -803,33 +808,3 @@ class DefaultTypeConverter(Converter):
         if normalized not in self._parsed_hints:
             self._parsed_hints[normalized] = self._parser.parse(normalized)
         return self._parsed_hints[normalized]
-
-
-# The types whose values the Arrow and Polars GetQueryResults fallbacks keep as text,
-# as in a CSV result file, and convert when the rows are fetched.
-_TEXT_VALUE_TYPES: tuple[str, ...] = ("json", "time with time zone", "timestamp with time zone")
-
-
-def _text_value_converter() -> DefaultTypeConverter:
-    """Return a ``DefaultTypeConverter`` that keeps ``_TEXT_VALUE_TYPES`` values as text.
-
-    Values nested in typed complex values keep only the time zone types as text,
-    because Arrow and Polars time and timestamp types hold one time zone per column;
-    nested JSON values are decoded as before.
-
-    Returns:
-        The converter.
-    """
-    converter = DefaultTypeConverter()
-    for type_ in _TEXT_VALUE_TYPES:
-        converter.set(type_, _to_default)
-    converter._typed_converter = TypedValueConverter(
-        converters={
-            **_DEFAULT_CONVERTERS,
-            "time with time zone": _to_default,
-            "timestamp with time zone": _to_default,
-        },
-        default_converter=_to_default,
-        struct_parser=_to_struct,
-    )
-    return converter
