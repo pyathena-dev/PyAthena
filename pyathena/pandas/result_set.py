@@ -639,6 +639,10 @@ class AthenaPandasResultSet(AthenaResultSet):
         # Use PyArrow only when explicitly requested and all compatibility
         # checks pass; otherwise fall through to the C engine default.
         if self._engine == "pyarrow":
+            # Header-less DDL results lose numeric-looking strings and their padding
+            # when PyArrow infers types before applying the string dtypes.
+            if self.output_location and self.output_location.endswith(".txt"):
+                return "c"
             effective_chunksize = chunksize if chunksize is not None else self._chunksize
             is_compatible = (
                 effective_chunksize is None
