@@ -3022,7 +3022,7 @@ class S3FileSystem(AbstractFileSystem):
         versions: list[S3ObjectVersion] = []
         # Explicit markers start the listing, which the pages then advance.
         key_marker = kwargs.pop("KeyMarker", None)
-        version_id_marker = kwargs.pop("VersionIdMarker", None) if key_marker else None
+        version_id_marker = kwargs.pop("VersionIdMarker", None)
         for page in self.core.list_object_versions(
             s3_path.bucket,
             prefix=s3_path.key or "",

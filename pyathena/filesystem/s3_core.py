@@ -407,7 +407,7 @@ class S3Core:
         Args:
             bucket: The bucket to list.
             prefix: The key prefix to list.
-            delimiter: The delimiter to group keys by, or None to list
+            delimiter: The delimiter to group keys by; None or ``""`` lists
                 recursively.
             max_keys: The maximum number of keys of the page.
             continuation_token: The token of the page to list.
@@ -440,7 +440,7 @@ class S3Core:
         Args:
             bucket: The bucket to list.
             prefix: The key prefix to list.
-            delimiter: The delimiter to group keys by, or None to list
+            delimiter: The delimiter to group keys by; None or ``""`` lists
                 recursively.
             max_keys: The maximum number of keys per page.
             continuation_token: The token of the first page to list.
@@ -448,7 +448,13 @@ class S3Core:
 
         Yields:
             The pages, until one has no continuation token.
+
+        Raises:
+            TypeError: If ``params`` has ``ContinuationToken``, which the
+                iterator advances; pass ``continuation_token`` instead.
         """
+        if "ContinuationToken" in params:
+            raise TypeError("Pass the first page's token as continuation_token.")
         while True:
             page = self.list_objects_page(
                 bucket,
@@ -477,23 +483,23 @@ class S3Core:
         Args:
             bucket: The bucket to list.
             prefix: The key prefix to list.
-            delimiter: The delimiter to group keys by, or None to list
+            delimiter: The delimiter to group keys by; None or ``""`` lists
                 recursively.
             key_marker: The key marker of the page to list.
-            version_id_marker: The version ID marker of the page to list,
-                sent with ``key_marker`` unless it is None.
+            version_id_marker: The version ID marker of the page to list. S3
+                accepts it only with a key marker.
             **params: Additional request parameters, sent as given.
 
         Returns:
             The page.
         """
         request: dict[str, Any] = {"Bucket": bucket, "Prefix": prefix}
-        if delimiter:
+        if delimiter is not None:
             request.update({"Delimiter": delimiter})
-        if key_marker:
+        if key_marker is not None:
             request.update({"KeyMarker": key_marker})
-            if version_id_marker is not None:
-                request.update({"VersionIdMarker": version_id_marker})
+        if version_id_marker is not None:
+            request.update({"VersionIdMarker": version_id_marker})
         response = self.call(self._client.list_object_versions, **request, **params)
         return S3ListObjectVersionsPage.from_response(bucket, response)
 
@@ -511,7 +517,7 @@ class S3Core:
         Args:
             bucket: The bucket to list.
             prefix: The key prefix to list.
-            delimiter: The delimiter to group keys by, or None to list
+            delimiter: The delimiter to group keys by; None or ``""`` lists
                 recursively.
             key_marker: The key marker of the first page to list.
             version_id_marker: The version ID marker of the first page to
@@ -520,7 +526,14 @@ class S3Core:
 
         Yields:
             The pages, until one is not truncated or has no key marker.
+
+        Raises:
+            TypeError: If ``params`` has ``KeyMarker`` or ``VersionIdMarker``,
+                which the iterator advances; pass ``key_marker`` and
+                ``version_id_marker`` instead.
         """
+        if "KeyMarker" in params or "VersionIdMarker" in params:
+            raise TypeError("Pass the first page's markers as key_marker and version_id_marker.")
         while True:
             page = self.list_object_versions_page(
                 bucket,
@@ -565,7 +578,13 @@ class S3Core:
 
         Yields:
             The pages, until one has no continuation token.
+
+        Raises:
+            TypeError: If ``params`` has ``ContinuationToken``, which the
+                iterator advances; pass ``continuation_token`` instead.
         """
+        if "ContinuationToken" in params:
+            raise TypeError("Pass the first page's token as continuation_token.")
         while True:
             page = self.list_buckets_page(continuation_token=continuation_token, **params)
             yield page

@@ -139,8 +139,8 @@ class S3Object(MutableMapping[str, Any]):
         under their property names (e.g., ``ContentType`` -> ``content_type``).
         ``storage_class`` defaults to ``STANDARD`` when ``init`` has no
         ``StorageClass``, and ``size`` is taken from ``Size`` or
-        ``ContentLength``. ``name`` is set to ``bucket/key``, or to the bucket
-        when there is no key.
+        ``ContentLength``, or is 0, also for an empty ``init``. ``name`` is
+        set to ``bucket/key``, or to the bucket when there is no key.
 
         Args:
             init: An S3 API response or listing entry, such as a HeadObject
@@ -149,28 +149,27 @@ class S3Object(MutableMapping[str, Any]):
                 ``bucket``, ``key`` and ``version_id``. S3 API field names
                 are stored under their property names.
         """
-        if init:
-            filtered = {}
-            for k, v in init.items():
-                if k not in _API_FIELD_TO_S3_OBJECT_PROPERTY:
-                    continue
-                filtered[_API_FIELD_TO_S3_OBJECT_PROPERTY[k]] = v
-            if "StorageClass" not in init:
-                # https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html#API_HeadObject_ResponseSyntax
-                # Amazon S3 returns this header for all objects except for
-                # S3 Standard storage class objects.
-                filtered[_API_FIELD_TO_S3_OBJECT_PROPERTY["StorageClass"]] = (
-                    S3StorageClass.S3_STORAGE_CLASS_STANDARD
-                )
-            super().update(filtered)
-            if "Size" in init:
-                self.content_length = init["Size"]
-                self.size = init["Size"]
-            elif "ContentLength" in init:
-                self.size = init["ContentLength"]
-            else:
-                self.content_length = 0
-                self.size = 0
+        filtered = {}
+        for k, v in init.items():
+            if k not in _API_FIELD_TO_S3_OBJECT_PROPERTY:
+                continue
+            filtered[_API_FIELD_TO_S3_OBJECT_PROPERTY[k]] = v
+        if "StorageClass" not in init:
+            # https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html#API_HeadObject_ResponseSyntax
+            # Amazon S3 returns this header for all objects except for
+            # S3 Standard storage class objects.
+            filtered[_API_FIELD_TO_S3_OBJECT_PROPERTY["StorageClass"]] = (
+                S3StorageClass.S3_STORAGE_CLASS_STANDARD
+            )
+        super().update(filtered)
+        if "Size" in init:
+            self.content_length = init["Size"]
+            self.size = init["Size"]
+        elif "ContentLength" in init:
+            self.size = init["ContentLength"]
+        else:
+            self.content_length = 0
+            self.size = 0
         super().update({_API_FIELD_TO_S3_OBJECT_PROPERTY.get(k, k): v for k, v in kwargs.items()})
         if self.get("key") is None:
             self.name = self.get("bucket")
@@ -262,39 +261,6 @@ class S3Object(MutableMapping[str, Any]):
                 fields[k] = field
         return fields
 
-    @staticmethod
-    def _listed_init(
-        key: str,
-        etag: str | None,
-        size: int | None,
-        storage_class: str | None,
-        last_modified: datetime | None,
-    ) -> dict[str, Any]:
-        """Build the ``init`` of a listed entry from its present fields.
-
-        The ``Key``, which a listed entry always has and which ``S3Object`` does
-        not keep, makes ``S3Object`` apply its defaults (size 0, ``STANDARD``
-        storage class) for the fields that the entry lacks.
-
-        Args:
-            key: The key of the entry.
-            etag: The ``ETag``, if any.
-            size: The ``Size``, if any.
-            storage_class: The ``StorageClass``, if any.
-            last_modified: The ``LastModified``, if any.
-
-        Returns:
-            The fields of the listing entry that are present.
-        """
-        fields = {
-            "Key": key,
-            "ETag": etag,
-            "Size": size,
-            "StorageClass": storage_class,
-            "LastModified": last_modified,
-        }
-        return {k: v for k, v in fields.items() if v is not None}
-
     @classmethod
     def from_summary(cls, summary: S3ObjectSummary) -> S3Object:
         """Build the file entry of an object listed by ListObjectsV2.
@@ -306,13 +272,16 @@ class S3Object(MutableMapping[str, Any]):
             The file entry, named ``bucket/key``.
         """
         return cls(
-            init=cls._listed_init(
-                summary.key,
-                summary.etag,
-                summary.size,
-                summary.storage_class,
-                summary.last_modified,
-            ),
+            init={
+                k: v
+                for k, v in {
+                    "ETag": summary.etag,
+                    "Size": summary.size,
+                    "StorageClass": summary.storage_class,
+                    "LastModified": summary.last_modified,
+                }.items()
+                if v is not None
+            },
             type=S3ObjectType.S3_OBJECT_TYPE_FILE,
             bucket=summary.bucket,
             key=summary.key,
@@ -333,13 +302,16 @@ class S3Object(MutableMapping[str, Any]):
             The file entry.
         """
         file = cls(
-            init=cls._listed_init(
-                version.key,
-                version.etag,
-                version.size,
-                version.storage_class,
-                version.last_modified,
-            ),
+            init={
+                k: v
+                for k, v in {
+                    "ETag": version.etag,
+                    "Size": version.size,
+                    "StorageClass": version.storage_class,
+                    "LastModified": version.last_modified,
+                }.items()
+                if v is not None
+            },
             type=S3ObjectType.S3_OBJECT_TYPE_FILE,
             bucket=version.bucket,
             key=version.key,

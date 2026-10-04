@@ -295,6 +295,24 @@ class TestS3Core:
             assert len(list(core.list_buckets(continuation_token="t0"))) == 2
         stubber.assert_no_pending_responses()
 
+    @pytest.mark.parametrize(
+        ("method", "params"),
+        [
+            ("list_objects", {"ContinuationToken": "t0"}),
+            ("list_object_versions", {"KeyMarker": "k"}),
+            ("list_object_versions", {"VersionIdMarker": "v"}),
+            ("list_buckets", {"ContinuationToken": "t0"}),
+        ],
+    )
+    def test_iterators_reject_api_cursors(self, method, params):
+        # The iterator advances the cursor, so it is passed as an argument;
+        # in params it would be sent twice from the second page on.
+        core, stubber = _make_core()
+        args = () if method == "list_buckets" else ("bucket",)
+        with stubber, pytest.raises(TypeError, match="Pass the first page"):
+            next(getattr(core, method)(*args, **params))
+        stubber.assert_no_pending_responses()
+
     def test_list_buckets(self):
         core, stubber = _make_core()
         stubber.add_response(

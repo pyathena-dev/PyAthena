@@ -73,6 +73,16 @@ class TestS3Object:
         assert actual.version_id == "latest"
         assert actual.last_modified == datetime(2024, 5, 2, 1, 2, 3)
 
+    def test_init_empty_applies_defaults(self):
+        # The defaults of a response without Size or StorageClass apply to an
+        # empty init too, such as a listed entry built from its typed fields.
+        actual = S3Object(init={}, bucket="bucket", key="key")
+        assert (actual["size"], actual["content_length"], actual["storage_class"]) == (
+            0,
+            0,
+            S3StorageClass.S3_STORAGE_CLASS_STANDARD,
+        )
+
     def test_to_api_repr(self):
         actual = S3Object(
             init={

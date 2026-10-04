@@ -284,6 +284,8 @@ operation sends one request (one per page for the iterators) with the retry poli
 raises `FileNotFoundError` for a missing object, version or bucket, and caches nothing.
 
 ```python
+import boto3
+
 from pyathena.filesystem.s3_core import S3Core
 from pyathena.filesystem.s3_path import S3Path
 
