@@ -1514,7 +1514,8 @@ class S3FileSystem(AbstractFileSystem):
 
         As fsspec's ``copy()``, except that a source with a version ID copies
         that version of the object to a destination named after its key, as
-        :meth:`S3PathPairing.copy_pairs` pairs them.
+        :meth:`~pyathena.filesystem.s3_path_pairing.S3PathPairing.copy_pairs`
+        pairs them.
 
         Args:
             path1: Source S3 path, glob pattern, or list of them.
@@ -1544,8 +1545,8 @@ class S3FileSystem(AbstractFileSystem):
 
         As fsspec's ``get()``, except that a source with a version ID
         downloads that version of the object to a local path named after its
-        key, as :meth:`S3PathPairing.copy_pairs` pairs them. Those destinations are checked to
-        lie under ``lpath``.
+        key, as :meth:`~pyathena.filesystem.s3_path_pairing.S3PathPairing.copy_pairs`
+        pairs them. Those destinations are checked to lie under ``lpath``.
 
         Args:
             rpath: Source S3 path, glob pattern, or list of them.

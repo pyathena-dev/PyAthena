@@ -26,7 +26,7 @@ class S3PathPairing:
     pairs them, except that a path with a version ID names that version of an
     object: it is not a glob pattern, and its destination is named after its
     key without the version. A move compares the paths by what they name
-    (see :attr:`S3Path.target`).
+    (see :attr:`~pyathena.filesystem.s3_path.S3Path.target`).
 
     The rules are pure functions of the paths and of the lookups that they
     need, which the caller makes: the filesystems expand the paths and look
@@ -96,7 +96,7 @@ class S3PathPairing:
     def copy_pairs(
         path1: str | list[str],
         path2: str | list[str],
-        sources: Sequence[str] = (),
+        sources: Sequence[str] | None = None,
         destination_is_dir: bool | None = None,
     ) -> list[tuple[str, str]]:
         """Pair the sources of a copy with their destinations as fsspec's ``copy()`` does.
@@ -107,8 +107,9 @@ class S3PathPairing:
             path2: Destination path, or a list of paths: as many as the
                 sources, or, when ``path1`` is a list, its destinations.
             sources: The expansion of ``path1``, without the directories that
-                :meth:`skips_directories` leaves out. Not used when both
-                ``path1`` and ``path2`` are lists.
+                :meth:`skips_directories` leaves out; needed unless both
+                ``path1`` and ``path2`` are lists, which are paired without
+                it.
             destination_is_dir: Whether ``path2`` is a directory; needed when
                 :meth:`looks_up_destination` is true and there are sources.
 
@@ -119,10 +120,13 @@ class S3PathPairing:
             fsspec's ``copy()``. Empty if there are no sources.
 
         Raises:
-            ValueError: If ``destination_is_dir`` is needed and None.
+            ValueError: If ``sources`` or ``destination_is_dir`` is needed and
+                None.
         """
         if not S3PathPairing.expands(path1, path2):
             return list(zip(path1, path2, strict=False))
+        if sources is None:
+            raise ValueError("sources is needed to pair the paths.")
         if not sources:
             return []
         if destination_is_dir is None and S3PathPairing.looks_up_destination(path1, path2):
@@ -156,18 +160,12 @@ class S3PathPairing:
                 :meth:`copy_pairs` pairs them.
 
         Returns:
-            The sources, by their :attr:`S3Path.target`, that have another
-            source below them and a destination that conflicts, in the order
-            of the pairs; empty if nothing needs to be looked up.
+            The sources, in ``bucket/key`` form (their
+            :attr:`~pyathena.filesystem.s3_path.S3Path.target`), that have
+            another source below them and a destination that conflicts, in the
+            order of the pairs; empty if nothing needs to be looked up.
         """
-        moved, sources, directories, counts = S3PathPairing._moves(pairs)
-        return list(
-            dict.fromkeys(
-                source
-                for versioned, source, dest in moved
-                if (counts[dest] > 1 or dest in sources) and source in directories and not versioned
-            )
-        )
+        return S3PathPairing._candidates(*S3PathPairing._moves(pairs))
 
     @staticmethod
     def move_pairs(
@@ -179,7 +177,8 @@ class S3PathPairing:
             pairs: The sources and destinations of the move, as
                 :meth:`copy_pairs` pairs them.
             missing: The :meth:`conflict_candidates` without an object at their
-                key; needed when there are candidates.
+                key, in any form that names them; needed when there are
+                candidates.
 
         Returns:
             The pairs, except those whose destination is the source itself or,
@@ -191,31 +190,23 @@ class S3PathPairing:
                 except for a directory with no object at its key, which is not
                 copied. Also if ``missing`` is needed and None.
         """
-        moved, sources, directories, counts = S3PathPairing._moves(pairs)
-        if missing is None and S3PathPairing.conflict_candidates(pairs):
+        named, sources, directories, counts = S3PathPairing._moves(pairs)
+        candidates = S3PathPairing._candidates(named, sources, directories, counts)
+        if missing is None and candidates:
             raise ValueError("missing is needed to check the pairs.")
-        missing = missing or ()
-        writers = [
-            (source, dest)
-            for versioned, source, dest in moved
-            if not (
-                (counts[dest] > 1 or dest in sources)
-                and source in directories
-                and not versioned
-                and source in missing
-            )
-        ]
-        counts = Counter(dest for _, dest in writers)
-        for _, dest in writers:
-            if counts[dest] > 1:
+        # A directory without an object at its key writes no destination.
+        skipped = {str(S3Path.parse(path).target) for path in missing or ()}
+        writers = Counter(
+            dest
+            for _, _, _, source, dest in named
+            if source != dest and not (source in candidates and source in skipped)
+        )
+        for dest in writers:
+            if writers[dest] > 1:
                 raise ValueError("Cannot move several paths to the same destination.")
             if dest in sources:
                 raise ValueError("Cannot move a path onto another path that is moved.")
-        return [
-            (p1, p2)
-            for p1, p2 in pairs
-            if str(S3Path.parse(p1).target) != str(S3Path.parse(p2).target)
-        ]
+        return [(p1, p2) for p1, p2, _, source, dest in named if source != dest]
 
     @staticmethod
     def delete_paths(path: str | list[str]) -> tuple[list[str], list[str]]:
@@ -259,16 +250,16 @@ class S3PathPairing:
     @staticmethod
     def _moves(
         pairs: Sequence[tuple[str, str]],
-    ) -> tuple[list[tuple[bool, str, str]], set[str], set[str], Counter[str]]:
+    ) -> tuple[list[tuple[str, str, bool, str, str]], set[str], set[str], Counter[str]]:
         """Compare the paths of a move by what they name.
 
         Args:
             pairs: The sources and destinations of the move.
 
         Returns:
-            The moved sources (whether the source has a version, its target
-            and the target of its destination), the targets of all sources,
-            including those left in place, the parents of the sources, and
+            Each pair with whether its source has a version and the targets
+            of its source and destination; the targets of all sources,
+            including those left in place; the parents of the sources; and
             the number of moved sources per destination target.
         """
         named = []
@@ -276,14 +267,15 @@ class S3PathPairing:
             source_path = S3Path.parse(p1)
             named.append(
                 (
+                    p1,
+                    p2,
                     bool(source_path.version_id),
                     str(source_path.target),
                     str(S3Path.parse(p2).target),
                 )
             )
-        moved = [(versioned, source, dest) for versioned, source, dest in named if source != dest]
         # The sources left in place count too; a copy onto one overwrites it.
-        sources = {source for _, source, _ in named}
+        sources = {source for _, _, _, source, _ in named}
         # A source with another source below it may be a directory.
         directories: set[str] = set()
         for source in sources:
@@ -291,4 +283,35 @@ class S3PathPairing:
             while parent and parent not in directories:
                 directories.add(parent)
                 parent = parent.rpartition("/")[0]
-        return moved, sources, directories, Counter(dest for _, _, dest in moved)
+        counts = Counter(dest for _, _, _, source, dest in named if source != dest)
+        return named, sources, directories, counts
+
+    @staticmethod
+    def _candidates(
+        named: list[tuple[str, str, bool, str, str]],
+        sources: set[str],
+        directories: set[str],
+        counts: Counter[str],
+    ) -> list[str]:
+        """Select the conflict candidates of a move compared by :meth:`_moves`.
+
+        Args:
+            named: The pairs with their versions and targets.
+            sources: The targets of all sources.
+            directories: The parents of the sources.
+            counts: The number of moved sources per destination target.
+
+        Returns:
+            The moved, unversioned sources that are a parent of another
+            source and whose destination conflicts, without duplicates.
+        """
+        return list(
+            dict.fromkeys(
+                source
+                for _, _, versioned, source, dest in named
+                if source != dest
+                and (counts[dest] > 1 or dest in sources)
+                and source in directories
+                and not versioned
+            )
+        )

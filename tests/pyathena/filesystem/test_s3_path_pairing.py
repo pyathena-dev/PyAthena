@@ -113,6 +113,11 @@ class TestS3PathPairing:
         with pytest.raises(ValueError, match="destination_is_dir"):
             S3PathPairing.copy_pairs("s3://bucket/a", "s3://bucket/b", ["bucket/a"])
 
+    def test_copy_pairs_needs_sources(self):
+        # Not passing the expansion is not the same as expanding to nothing.
+        with pytest.raises(ValueError, match="sources"):
+            S3PathPairing.copy_pairs("s3://bucket/a/", "s3://bucket/b/")
+
     def test_move_pairs(self):
         # The "null" version of a key moved onto the key stays in place.
         pairs = [("s3://bucket/b?versionId=null", "s3://bucket/b"), ("bucket/d/a", "s3://bucket/z")]
@@ -153,6 +158,8 @@ class TestS3PathPairing:
         with pytest.raises(ValueError, match="same destination"):
             S3PathPairing.move_pairs(pairs, missing=set())
         assert S3PathPairing.move_pairs(pairs, missing={"bucket/d"}) == pairs
+        # The missing sources can be given in any form that names them.
+        assert S3PathPairing.move_pairs(pairs, missing={"s3://bucket/d"}) == pairs
 
     def test_move_pairs_version_names_an_object(self):
         # A version is never taken for a directory.

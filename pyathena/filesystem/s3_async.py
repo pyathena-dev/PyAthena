@@ -431,10 +431,13 @@ class AioS3FileSystem(AsyncFileSystem):
             ValueError: If the move has conflicting paths.
         """
         pairs = await self._copy_pairs(path1, path2, recursive=recursive, maxdepth=maxdepth)
-        missing = set()
-        for source in S3PathPairing.conflict_candidates(pairs):
-            if await asyncio.to_thread(self._sync_fs._head_object, source) is None:
-                missing.add(source)
+        candidates = S3PathPairing.conflict_candidates(pairs)
+        objects = await asyncio.gather(
+            *[asyncio.to_thread(self._sync_fs._head_object, source) for source in candidates]
+        )
+        missing = {
+            source for source, object_ in zip(candidates, objects, strict=True) if not object_
+        }
         return S3PathPairing.move_pairs(pairs, missing=missing)
 
     async def _copy_pairs(
@@ -463,12 +466,20 @@ class AioS3FileSystem(AsyncFileSystem):
             return S3PathPairing.copy_pairs(path1, path2)
         sources = await self._expand_path(path1, recursive=recursive, maxdepth=maxdepth)
         if S3PathPairing.skips_directories(path1, recursive, maxdepth):
-            sources = [p for p in sources if not (trailing_sep(p) or await self._isdir(p))]
+            # A path with a trailing slash is a directory without a lookup.
+            files = [p for p in sources if not trailing_sep(p)]
+            directories = await asyncio.gather(*[self._isdir(p) for p in files])
+            sources = [p for p, is_dir in zip(files, directories, strict=True) if not is_dir]
         destination_is_dir = None
         if sources and S3PathPairing.looks_up_destination(path1, path2):
             # A string, as looks_up_destination() checks.
             destination = cast(str, path2)
-            destination_is_dir = isdir(destination) if isdir else await self._isdir(destination)
+            destination_is_dir = (
+                # A local isdir, which can block, runs in a thread.
+                await asyncio.to_thread(isdir, destination)
+                if isdir
+                else await self._isdir(destination)
+            )
         return S3PathPairing.copy_pairs(path1, path2, sources, destination_is_dir)
 
     def mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs) -> None:
