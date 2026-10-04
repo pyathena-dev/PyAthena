@@ -193,11 +193,8 @@ class TestAioCursor:
         assert callback_results == [aio_cursor.query_id]
         assert await aio_cursor.fetchone() == (1,)
 
-    async def test_execute_internal_legacy_kwargs_passthrough(self):
-        """The pre-3.35 _execute() keywords are forwarded to the request (no AWS).
-
-        Mirrors the synchronous cursor test (regression test for #734).
-        """
+    async def test_execute_internal_options_passthrough(self):
+        """The private _execute() forwards its options to the request and the cache (no AWS)."""
         cursor = AioCursor.__new__(AioCursor)  # bypass __init__ to avoid AWS calls
         cursor._connection = MagicMock()
         cursor._connection.client.start_query_execution.return_value = {
@@ -217,13 +214,15 @@ class TestAioCursor:
             query_id = await cursor._execute(
                 "SELECT 1",
                 parameters=None,
-                work_group="test_work_group",
-                s3_staging_dir="s3://test-bucket/path/",
-                cache_size=10,
-                cache_expiration_time=100,
-                result_reuse_enable=True,
-                result_reuse_minutes=5,
-                paramstyle="qmark",
+                options=ExecuteOptions(
+                    work_group="test_work_group",
+                    s3_staging_dir="s3://test-bucket/path/",
+                    cache_size=10,
+                    cache_expiration_time=100,
+                    result_reuse_enable=True,
+                    result_reuse_minutes=5,
+                    paramstyle="qmark",
+                ),
             )
 
         assert query_id == "test_query_id"
@@ -266,7 +265,11 @@ class TestAioCursor:
             ) as cache_mock,
         ):
             query_id = await cursor._execute(
-                "SELECT ?", ["'1'"], paramstyle="qmark", cache_size=10, cache_expiration_time=100
+                "SELECT ?",
+                ["'1'"],
+                options=ExecuteOptions(
+                    paramstyle="qmark", cache_size=10, cache_expiration_time=100
+                ),
             )
 
         assert query_id == "test_query_id"

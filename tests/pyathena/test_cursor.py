@@ -1266,29 +1266,8 @@ class TestCursor:
         assert from_kwargs == [cursor.query_id]
         assert cursor.fetchone() == (1,)
 
-    def test_execute_internal_legacy_kwargs(self, cursor):
-        """The private _execute() accepts the pre-3.35 individual keyword arguments.
-
-        Regression test for #734: external callers such as dbt-athena <= 1.10.x
-        invoke _execute() directly with individual keywords instead of options.
-        """
-        query_id = cursor._execute(
-            "SELECT 1",
-            parameters=None,
-            work_group=ENV.default_work_group,
-            s3_staging_dir=None,
-            cache_size=0,
-            cache_expiration_time=0,
-        )
-        query_execution = cursor._poll(query_id)
-        assert query_execution.state == AthenaQueryExecution.STATE_SUCCEEDED
-
-    def test_execute_internal_legacy_kwargs_passthrough(self):
-        """The pre-3.35 _execute() keywords are forwarded to the request (no AWS).
-
-        Regression test for #734: on 3.35.0 this call raised
-        ``TypeError: _execute() got an unexpected keyword argument 'work_group'``.
-        """
+    def test_execute_internal_options_passthrough(self):
+        """The private _execute() forwards its options to the request and the cache (no AWS)."""
         cursor = Cursor.__new__(Cursor)  # bypass __init__ to avoid AWS calls
         cursor._connection = MagicMock()
         cursor._connection.client.start_query_execution.return_value = {
@@ -1306,13 +1285,15 @@ class TestCursor:
             query_id = cursor._execute(
                 "SELECT 1",
                 parameters=None,
-                work_group="test_work_group",
-                s3_staging_dir="s3://test-bucket/path/",
-                cache_size=10,
-                cache_expiration_time=100,
-                result_reuse_enable=True,
-                result_reuse_minutes=5,
-                paramstyle="qmark",
+                options=ExecuteOptions(
+                    work_group="test_work_group",
+                    s3_staging_dir="s3://test-bucket/path/",
+                    cache_size=10,
+                    cache_expiration_time=100,
+                    result_reuse_enable=True,
+                    result_reuse_minutes=5,
+                    paramstyle="qmark",
+                ),
             )
 
         assert query_id == "test_query_id"
@@ -1350,7 +1331,11 @@ class TestCursor:
             patch.object(Cursor, "_find_previous_query_id", return_value="cached") as cache_mock,
         ):
             query_id = cursor._execute(
-                "SELECT ?", ["'1'"], paramstyle="qmark", cache_size=10, cache_expiration_time=100
+                "SELECT ?",
+                ["'1'"],
+                options=ExecuteOptions(
+                    paramstyle="qmark", cache_size=10, cache_expiration_time=100
+                ),
             )
 
         assert query_id == "test_query_id"
