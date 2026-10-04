@@ -731,9 +731,9 @@ class TestAioS3FileSystem:
         local.write_bytes(b"a" * 13)
 
         with fs.transaction:
-            with pytest.raises(ValueError, match="block_size"):
+            with pytest.raises(ValueError, match="in 3 parts with a block size of 4 bytes"):
                 fs.pipe_file("s3://bucket/k1", b"a" * 13, **kwargs)
-            with pytest.raises(ValueError, match="block_size"):
+            with pytest.raises(ValueError, match="in 3 parts with a block size of 4 bytes"):
                 fs.put_file(str(local), "s3://bucket/k2", **kwargs)
         fs.open.assert_not_called()
         fs._sync_fs._call.assert_not_called()

@@ -6,6 +6,7 @@
 # SPDX-License-Identifier: MIT
 
 import io
+import re
 from datetime import UTC, datetime
 from itertools import pairwise
 from unittest import mock
@@ -25,6 +26,7 @@ from pyathena.filesystem.s3_core import (
     S3DeleteError,
     S3DeleteResult,
     S3ListBucketsPage,
+    S3ListMultipartUploadsPage,
     S3ListObjectsPage,
     S3ListObjectVersionsPage,
     S3MultipartCopyPlan,
@@ -42,9 +44,9 @@ from tests.pyathena.util import (
 MODIFIED = datetime(2026, 10, 4, tzinfo=UTC)
 
 
-def _make_core(**kwargs):
+def _make_core(region_name="us-east-1", **kwargs):
     client = boto3.client(
-        "s3", region_name="us-east-1", aws_access_key_id="dummy", aws_secret_access_key="dummy"
+        "s3", region_name=region_name, aws_access_key_id="dummy", aws_secret_access_key="dummy"
     )
     return S3Core(client, retry_config=RetryConfig(attempt=1), **kwargs), Stubber(client)
 
@@ -285,6 +287,76 @@ class TestS3Core:
         with stubber, pytest.raises(ValueError, match=match):
             core.put_object(path, b"data")
 
+    @pytest.mark.parametrize(
+        ("client_region", "kwargs", "expected"),
+        [
+            ("us-east-1", {}, {"Bucket": "bucket"}),
+            # A location constraint is sent for every region except
+            # us-east-1, which does not accept one.
+            (
+                "ap-northeast-1",
+                {},
+                {
+                    "Bucket": "bucket",
+                    "CreateBucketConfiguration": {"LocationConstraint": "ap-northeast-1"},
+                },
+            ),
+            (
+                "us-east-1",
+                {"region_name": "eu-west-1"},
+                {
+                    "Bucket": "bucket",
+                    "CreateBucketConfiguration": {"LocationConstraint": "eu-west-1"},
+                },
+            ),
+            ("ap-northeast-1", {"region_name": "us-east-1"}, {"Bucket": "bucket"}),
+            # An empty region uses the region of the client.
+            (
+                "ap-northeast-1",
+                {"region_name": ""},
+                {
+                    "Bucket": "bucket",
+                    "CreateBucketConfiguration": {"LocationConstraint": "ap-northeast-1"},
+                },
+            ),
+            ("us-east-1", {"acl": "public-read"}, {"Bucket": "bucket", "ACL": "public-read"}),
+            # An empty ACL sends no ACL.
+            ("us-east-1", {"acl": ""}, {"Bucket": "bucket"}),
+            (
+                "us-east-1",
+                {"ObjectOwnership": "BucketOwnerEnforced"},
+                {"Bucket": "bucket", "ObjectOwnership": "BucketOwnerEnforced"},
+            ),
+        ],
+    )
+    def test_create_bucket(self, client_region, kwargs, expected):
+        core, stubber = _make_core(region_name=client_region)
+        stubber.add_response("create_bucket", {}, expected)
+        with stubber:
+            core.create_bucket("bucket", **kwargs)
+        stubber.assert_no_pending_responses()
+
+    @pytest.mark.parametrize("acl", ["invalid", "bucket-owner-full-control"])
+    def test_create_bucket_rejects_acls(self, acl):
+        # An object-only canned ACL is not accepted for a bucket either.
+        core, stubber = _make_core()
+        with stubber, pytest.raises(ValueError, match="ACL not in"):
+            core.create_bucket("bucket", acl=acl)
+
+    def test_delete_bucket(self):
+        core, stubber = _make_core()
+        stubber.add_response(
+            "delete_bucket", {}, {"Bucket": "bucket", "ExpectedBucketOwner": "123456789012"}
+        )
+        stubber.add_client_error(
+            "delete_bucket", service_error_code="NoSuchBucket", http_status_code=404
+        )
+        with stubber:
+            core.delete_bucket("bucket", ExpectedBucketOwner="123456789012")
+            with pytest.raises(FileNotFoundError):
+                core.delete_bucket("bucket")
+        stubber.assert_no_pending_responses()
+
     def test_list_objects(self):
         core, stubber = _make_core()
         stubber.add_response(
@@ -441,6 +513,8 @@ class TestS3Core:
             ("list_object_versions", {"KeyMarker": "k"}),
             ("list_object_versions", {"VersionIdMarker": "v"}),
             ("list_buckets", {"ContinuationToken": "t0"}),
+            ("list_multipart_uploads", {"KeyMarker": "k"}),
+            ("list_multipart_uploads", {"UploadIdMarker": "u"}),
         ],
     )
     def test_iterators_reject_api_cursors(self, method, params):
@@ -475,6 +549,97 @@ class TestS3Core:
             ),
             S3ListBucketsPage(buckets=(S3Bucket("b"),)),
         ]
+
+    def test_list_multipart_uploads(self):
+        core, stubber = _make_core()
+        # No prefix is sent by default.
+        stubber.add_response(
+            "list_multipart_uploads",
+            {
+                "Bucket": "bucket",
+                "Uploads": [{"Key": "a", "UploadId": "u1", "Initiated": MODIFIED}],
+                "IsTruncated": True,
+                "NextKeyMarker": "a",
+                "NextUploadIdMarker": "u1",
+            },
+            {"Bucket": "bucket", "RequestPayer": "requester"},
+        )
+        stubber.add_response(
+            "list_multipart_uploads",
+            {"Uploads": [{"Key": "b", "UploadId": "u2"}], "IsTruncated": False},
+            {
+                "Bucket": "bucket",
+                "RequestPayer": "requester",
+                "KeyMarker": "a",
+                "UploadIdMarker": "u1",
+            },
+        )
+        with stubber:
+            pages = list(core.list_multipart_uploads("bucket", RequestPayer="requester"))
+        stubber.assert_no_pending_responses()
+        assert [type(p) for p in pages] == [S3ListMultipartUploadsPage] * 2
+        assert (
+            pages[0].is_truncated,
+            pages[0].next_key_marker,
+            pages[0].next_upload_id_marker,
+        ) == (
+            True,
+            "a",
+            "u1",
+        )
+        assert [(u.bucket, u.key, u.upload_id, u.initiated) for p in pages for u in p.uploads] == [
+            ("bucket", "a", "u1", MODIFIED),
+            ("bucket", "b", "u2", None),
+        ]
+
+    @pytest.mark.parametrize("prefix", ["", "dir/"])
+    def test_list_multipart_uploads_page_prefix(self, prefix):
+        # A given prefix is sent, even an empty one.
+        core, stubber = _make_core()
+        stubber.add_response("list_multipart_uploads", {}, {"Bucket": "bucket", "Prefix": prefix})
+        with stubber:
+            assert core.list_multipart_uploads_page("bucket", prefix=prefix).uploads == ()
+        stubber.assert_no_pending_responses()
+
+    @pytest.mark.parametrize(
+        "markers",
+        [
+            {},
+            {"NextKeyMarker": "a"},
+            {"NextUploadIdMarker": "u1"},
+        ],
+    )
+    def test_list_multipart_uploads_stops_without_markers(self, markers):
+        # A truncated page without both next markers is the last one.
+        core, stubber = _make_core()
+        stubber.add_response(
+            "list_multipart_uploads",
+            {"IsTruncated": True, **markers},
+            {"Bucket": "bucket", "Prefix": "k"},
+        )
+        with stubber:
+            assert len(list(core.list_multipart_uploads("bucket", prefix="k"))) == 1
+        stubber.assert_no_pending_responses()
+
+    def test_list_multipart_uploads_from_markers(self):
+        # The iterator starts at the given markers and then follows the pages.
+        core, stubber = _make_core()
+        stubber.add_response(
+            "list_multipart_uploads",
+            {"IsTruncated": True, "NextKeyMarker": "m", "NextUploadIdMarker": "w"},
+            {"Bucket": "bucket", "KeyMarker": "k", "UploadIdMarker": "u"},
+        )
+        stubber.add_response(
+            "list_multipart_uploads",
+            {"IsTruncated": False},
+            {"Bucket": "bucket", "KeyMarker": "m", "UploadIdMarker": "w"},
+        )
+        with stubber:
+            pages = list(
+                core.list_multipart_uploads("bucket", key_marker="k", upload_id_marker="u")
+            )
+        stubber.assert_no_pending_responses()
+        assert len(pages) == 2
 
     def test_delete_object(self):
         core, stubber = _make_core()
@@ -859,6 +1024,32 @@ class TestS3Core:
             <= core.MULTIPART_UPLOAD_MAX_PART_SIZE
             for start, end in ranges
         )
+
+    @pytest.mark.parametrize(
+        ("size", "block_size", "min_block_size"),
+        [
+            # The data fits in the maximum number of parts.
+            (12, 4, None),
+            # GH-953: more data is rejected with the minimum block size,
+            (13, 4, 5),
+            # which is at least the minimum part size.
+            (5, 1, 4),
+        ],
+    )
+    def test_check_multipart_upload_size(self, size, block_size, min_block_size):
+        core, _ = _make_core()
+        core.MULTIPART_UPLOAD_MIN_PART_SIZE = 4
+        core.MULTIPART_UPLOAD_MAX_PARTS = 3
+
+        if min_block_size is None:
+            core.check_multipart_upload_size(size, block_size)
+        else:
+            message = (
+                f"Cannot upload {size} bytes in 3 parts with a block size of {block_size} "
+                f"bytes. Use a block size of at least {min_block_size} bytes."
+            )
+            with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+                core.check_multipart_upload_size(size, block_size)
 
     def test_copy_object(self):
         core, stubber = _make_core()

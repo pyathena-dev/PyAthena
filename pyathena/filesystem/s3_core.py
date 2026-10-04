@@ -267,6 +267,47 @@ class S3ListBucketsPage:
 
 
 @dataclass(frozen=True)
+class S3ListMultipartUploadsPage:
+    """One page of a ListMultipartUploads listing.
+
+    Attributes:
+        bucket: The bucket that was listed.
+        uploads: The listed in-progress multipart uploads (``Uploads``),
+            with the listed bucket as their bucket.
+        is_truncated: Whether more pages follow.
+        next_key_marker: The key marker of the next page, if any.
+        next_upload_id_marker: The upload ID marker of the next page, if any.
+    """
+
+    bucket: str
+    uploads: tuple[S3MultipartUpload, ...] = ()
+    is_truncated: bool = False
+    next_key_marker: str | None = None
+    next_upload_id_marker: str | None = None
+
+    @classmethod
+    def from_response(cls, bucket: str, response: Mapping[str, Any]) -> S3ListMultipartUploadsPage:
+        """Build the page from a ListMultipartUploads response.
+
+        Args:
+            bucket: The bucket that was listed.
+            response: The ListMultipartUploads response.
+
+        Returns:
+            The page.
+        """
+        return cls(
+            bucket=bucket,
+            uploads=tuple(
+                S3MultipartUpload({**u, "Bucket": bucket}) for u in response.get("Uploads", [])
+            ),
+            is_truncated=response.get("IsTruncated", False),
+            next_key_marker=response.get("NextKeyMarker"),
+            next_upload_id_marker=response.get("NextUploadIdMarker"),
+        )
+
+
+@dataclass(frozen=True)
 class S3DeleteBatch:
     """The objects of one bucket that one DeleteObjects request deletes.
 
@@ -725,6 +766,58 @@ class S3Core:
         response = self.call(self._client.put_object, **{**params, **request})
         return S3PutObject(response)
 
+    def create_bucket(
+        self,
+        bucket: str,
+        acl: str | None = None,
+        region_name: str | None = None,
+        **params,
+    ) -> None:
+        """Create a bucket with CreateBucket.
+
+        A call creates the bucket; the ``allow_bucket_creation`` option of
+        the filesystem applies only to the filesystem's methods.
+
+        Args:
+            bucket: The name of the bucket.
+            acl: The canned ACL of the bucket, one of ``BUCKET_ACLS``. None
+                or an empty string sends no ACL.
+            region_name: The region to create the bucket in. None or an
+                empty string uses the region of the client. A location
+                constraint is sent for every region except ``us-east-1``,
+                which does not accept one.
+            **params: Additional request parameters, sent as given.
+
+        Raises:
+            ValueError: If the ACL is not a canned ACL of buckets.
+        """
+        if acl and acl not in self.BUCKET_ACLS:
+            raise ValueError(f"ACL not in {self.BUCKET_ACLS}.")
+        request: dict[str, Any] = {"Bucket": bucket}
+        if acl:
+            request.update({"ACL": acl})
+        region_name = region_name or self._client.meta.region_name
+        if region_name and region_name != "us-east-1":
+            request.update({"CreateBucketConfiguration": {"LocationConstraint": region_name}})
+        _logger.debug(f"Create bucket: s3://{bucket}")
+        self.call(self._client.create_bucket, **request, **params)
+
+    def delete_bucket(self, bucket: str, **params) -> None:
+        """Delete a bucket, which must be empty, with DeleteBucket.
+
+        A call deletes the bucket; the ``allow_bucket_deletion`` option of
+        the filesystem applies only to the filesystem's methods.
+
+        Args:
+            bucket: The name of the bucket.
+            **params: Additional request parameters, sent as given.
+
+        Raises:
+            FileNotFoundError: If the bucket does not exist.
+        """
+        _logger.debug(f"Delete bucket: s3://{bucket}")
+        self.call(self._client.delete_bucket, Bucket=bucket, **params)
+
     def delete_object(self, path: S3Path, **params) -> None:
         """Delete an object, or a version of it, with DeleteObject.
 
@@ -982,6 +1075,32 @@ class S3Core:
             if size - starts[-1] > self.MULTIPART_UPLOAD_MAX_PART_SIZE:
                 starts.append(starts[-1] + (size - starts[-1]) // 2)
         return list(zip(starts, [*starts[1:], size], strict=True))
+
+    def check_multipart_upload_size(self, size: int, block_size: int) -> None:
+        """Check that data fits in a multipart upload before it is uploaded.
+
+        Sends no request.
+
+        Args:
+            size: The size of the data in bytes.
+            block_size: The size in bytes of the parts that upload the data.
+
+        Raises:
+            ValueError: If the data takes more than
+                ``MULTIPART_UPLOAD_MAX_PARTS`` blocks. The message gives the
+                minimum block size, which is at least
+                ``MULTIPART_UPLOAD_MIN_PART_SIZE``.
+        """
+        if size > block_size * self.MULTIPART_UPLOAD_MAX_PARTS:
+            min_block_size = max(
+                math.ceil(size / self.MULTIPART_UPLOAD_MAX_PARTS),
+                self.MULTIPART_UPLOAD_MIN_PART_SIZE,
+            )
+            raise ValueError(
+                f"Cannot upload {size} bytes in {self.MULTIPART_UPLOAD_MAX_PARTS} parts "
+                f"with a block size of {block_size} bytes. "
+                f"Use a block size of at least {min_block_size} bytes."
+            )
 
     def copy_object(self, source: S3Path, destination: S3Path, **params) -> None:
         """Copy an object, or a version of it, with CopyObject.
@@ -1658,6 +1777,85 @@ class S3Core:
                 return
             key_marker = page.next_key_marker
             version_id_marker = page.next_version_id_marker or ""
+
+    def list_multipart_uploads_page(
+        self,
+        bucket: str,
+        prefix: str | None = None,
+        key_marker: str | None = None,
+        upload_id_marker: str | None = None,
+        **params,
+    ) -> S3ListMultipartUploadsPage:
+        """List one page of in-progress multipart uploads with ListMultipartUploads.
+
+        Args:
+            bucket: The bucket to list.
+            prefix: The key prefix to list, which S3 matches as a plain string
+                prefix of the keys. None sends no prefix.
+            key_marker: The key marker of the page to list.
+            upload_id_marker: The upload ID marker of the page to list. S3
+                accepts it only with a key marker.
+            **params: Additional request parameters, sent as given.
+
+        Returns:
+            The page.
+
+        Raises:
+            FileNotFoundError: If the bucket does not exist.
+        """
+        request: dict[str, Any] = {"Bucket": bucket}
+        if prefix is not None:
+            request.update({"Prefix": prefix})
+        if key_marker is not None:
+            request.update({"KeyMarker": key_marker})
+        if upload_id_marker is not None:
+            request.update({"UploadIdMarker": upload_id_marker})
+        response = self.call(self._client.list_multipart_uploads, **request, **params)
+        return S3ListMultipartUploadsPage.from_response(bucket, response)
+
+    def list_multipart_uploads(
+        self,
+        bucket: str,
+        prefix: str | None = None,
+        key_marker: str | None = None,
+        upload_id_marker: str | None = None,
+        **params,
+    ) -> Iterator[S3ListMultipartUploadsPage]:
+        """List the pages of in-progress multipart uploads, one request each.
+
+        Args:
+            bucket: The bucket to list.
+            prefix: The key prefix to list, which S3 matches as a plain string
+                prefix of the keys. None sends no prefix.
+            key_marker: The key marker of the first page to list.
+            upload_id_marker: The upload ID marker of the first page to list,
+                sent with ``key_marker``.
+            **params: Additional request parameters, sent as given.
+
+        Yields:
+            The pages, until one is not truncated or lacks either next marker.
+
+        Raises:
+            TypeError: If ``params`` has ``KeyMarker`` or ``UploadIdMarker``,
+                which the iterator advances; pass ``key_marker`` and
+                ``upload_id_marker`` instead.
+            FileNotFoundError: If the bucket does not exist.
+        """
+        if "KeyMarker" in params or "UploadIdMarker" in params:
+            raise TypeError("Pass the first page's markers as key_marker and upload_id_marker.")
+        while True:
+            page = self.list_multipart_uploads_page(
+                bucket,
+                prefix=prefix,
+                key_marker=key_marker,
+                upload_id_marker=upload_id_marker,
+                **params,
+            )
+            yield page
+            if not page.is_truncated or not page.next_key_marker or not page.next_upload_id_marker:
+                return
+            key_marker = page.next_key_marker
+            upload_id_marker = page.next_upload_id_marker
 
     def list_buckets_page(
         self, continuation_token: str | None = None, **params

@@ -76,6 +76,9 @@ S3 Core
 .. autoclass:: pyathena.filesystem.s3_core.S3ListBucketsPage
    :members:
 
+.. autoclass:: pyathena.filesystem.s3_core.S3ListMultipartUploadsPage
+   :members:
+
 .. autoclass:: pyathena.filesystem.s3_core.S3DeleteBatch
    :members:
 
