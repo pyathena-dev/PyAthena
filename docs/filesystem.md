@@ -351,8 +351,8 @@ filesystems' `cp_file()`, `copy()` and `mv()` run these plans.
 ## Path pairing
 
 `S3PathPairing` holds the rules by which `mv()` and `rm()` pair and expand their
-paths, and by which `copy()` and `get()` pair them when a source has a version ID
-(fsspec pairs the others). The pairing is fsspec's, except that a path with a version
+paths, and by which `copy()` and `get()` pair them when a source has a version ID and
+the destination is one path (fsspec pairs the others). The pairing is fsspec's, except that a path with a version
 ID names that version, and its destination is named after its key. The rules are pure
 functions: the filesystems ask `expands()`, `skips_directories()`,
 `looks_up_destination()` and `conflict_candidates()` what to look up, expand and look
