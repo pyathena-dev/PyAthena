@@ -16,12 +16,14 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+from base64 import b64encode
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from itertools import chain
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+from zlib import crc32
 
 import boto3
 import botocore.exceptions
@@ -4302,6 +4304,15 @@ class TestS3FileSystem:
                 first = fs.core.upload_part(upload, 1, data)
             last = fs.core.upload_part(upload, 2, b"end")
             fs.core.complete_multipart_upload(upload, [first, last])
+            if checksum_type == "FULL_OBJECT":
+                metadata = fs.core.call(
+                    "head_object", Bucket=upload.bucket, Key=upload.key, ChecksumMode="ENABLED"
+                )
+                assert metadata["ChecksumType"] == "FULL_OBJECT"
+                assert (
+                    metadata["ChecksumCRC32"]
+                    == b64encode(crc32(data + b"end").to_bytes(4, "big")).decode()
+                )
             fs.invalidate_cache(destination.uri)
             assert fs.cat_file(destination.uri) == data + b"end"
             assert fs.list_multipart_uploads(destination.uri) == []
@@ -5499,7 +5510,11 @@ class TestS3FileSystem:
         with pytest.raises(PermissionError):
             anon_fs.info(f"s3://{ENV.s3_staging_bucket}/{ENV.s3_filesystem_test_file_key}")
 
-    def test_list_and_clear_multipart_uploads(self, fs):
+    @pytest.mark.parametrize(
+        ("algorithm", "checksum_type"),
+        [(None, None), ("SHA256", "COMPOSITE"), ("CRC32", "FULL_OBJECT")],
+    )
+    def test_list_and_clear_multipart_uploads(self, fs, algorithm, checksum_type):
         # Scope the list/clear to a unique prefix so that parallel test
         # workers' in-flight multipart uploads in the shared bucket are
         # not aborted.
@@ -5509,7 +5524,10 @@ class TestS3FileSystem:
         )
         prefix_path = f"s3://{bucket}/{prefix}"
         key = f"{prefix}/file"
-        upload = fs.core.create_multipart_upload(S3Path(bucket, key))
+        kwargs = (
+            {"ChecksumAlgorithm": algorithm, "ChecksumType": checksum_type} if algorithm else {}
+        )
+        upload = fs.core.create_multipart_upload(S3Path(bucket, key), **kwargs)
         # A sibling key that starts with the same characters as the prefix.
         sibling = fs.core.create_multipart_upload(S3Path(bucket, f"{prefix}2/file"))
         try:
@@ -5519,6 +5537,8 @@ class TestS3FileSystem:
             assert listed.bucket == bucket
             assert listed.key == key
             assert listed.initiated
+            assert listed.checksum_algorithm == upload.checksum_algorithm
+            assert listed.checksum_type == upload.checksum_type
             assert not any(u.upload_id == sibling.upload_id for u in uploads)
 
             fs.clear_multipart_uploads(prefix_path)
@@ -5527,6 +5547,7 @@ class TestS3FileSystem:
             uploads = fs.list_multipart_uploads(f"{prefix_path}2")
             assert any(u.upload_id == sibling.upload_id for u in uploads)
         finally:
+            fs.clear_multipart_uploads(prefix_path)
             fs.clear_multipart_uploads(f"{prefix_path}2")
 
     def test_object_version_info(self, fs):
