@@ -429,6 +429,32 @@ class AthenaPandasResultSet(AthenaResultSet):
     ]
     # The pandas.read_csv() options given to execute() that _read_csv_with_pyarrow() reads.
     _PYARROW_READ_CSV_OPTIONS: ClassVar[frozenset[str]] = frozenset({"dtype", "parse_dates"})
+    # The pandas.read_csv() options given to execute() that do not change how pandas reads
+    # the header row, with which _read_csv_header_as_labels() replaces the header.
+    _LABELED_HEADER_READ_CSV_OPTIONS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "cache_dates",
+            "converters",
+            "date_format",
+            "dayfirst",
+            "decimal",
+            "dtype_backend",
+            "false_values",
+            "float_precision",
+            "index_col",
+            "keep_default_na",
+            "low_memory",
+            "na_filter",
+            "na_values",
+            "nrows",
+            "on_bad_lines",
+            "parse_dates",
+            "skipfooter",
+            "thousands",
+            "true_values",
+            "usecols",
+        }
+    )
 
     def __init__(
         self,
@@ -1075,12 +1101,11 @@ class AthenaPandasResultSet(AthenaResultSet):
         import pandas as pd
 
         names = [d[0] for d in self.description or []]
-        if (
-            self._kwargs.keys() & {"dtype", "names"}
-            or len(set(names)) == len(names)
-            # pandas detects another delimiter, as with sep=None, from the header row.
-            or (read_csv_kwargs.get("delimiter") or read_csv_kwargs.get("sep")) != ","
-        ):
+        if len(set(names)) == len(names):
+            return
+        if not self._kwargs.keys() <= self._LABELED_HEADER_READ_CSV_OPTIONS:
+            # Other options, such as dtype, names, sep, comment, or encoding, keep the
+            # header row as pandas reads it.
             return
         # pandas renames the names in a header row, and copies their dtypes, even with
         # names given, so the header row is skipped instead.
