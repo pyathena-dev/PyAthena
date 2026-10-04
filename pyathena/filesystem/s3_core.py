@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -27,6 +28,7 @@ from pyathena.filesystem.s3_object import (
     S3MultipartUpload,
     S3MultipartUploadPart,
     S3ObjectVersion,
+    S3PutObject,
 )
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.util import RetryConfig, override, retry_api_call
@@ -605,6 +607,92 @@ class S3Core:
         """
         response = self.call(self._client.head_bucket, Bucket=bucket, **params)
         return S3Bucket(name=bucket, bucket_region=response.get("BucketRegion"))
+
+    def get_object(
+        self, path: S3Path, range_: tuple[int, int | None] | None = None, **params
+    ) -> bytes:
+        """Read an object, a version of it, or a byte range of it with GetObject.
+
+        The body of the response is read whole and then closed, also when
+        the read fails. A failure to read the body is neither translated nor
+        retried: the botocore exception, such as ``ReadTimeoutError`` or
+        ``IncompleteReadError``, propagates.
+
+        Args:
+            path: The path of the object, with the version ID to read, if
+                any.
+            range_: The ``(start, end)`` byte range to read, with an exclusive
+                end, or None as the end to read to the end of the object. A
+                negative start without an end reads the last ``-start``
+                bytes, or the whole object if it is shorter. None sends no
+                range of its own, so the whole object is read unless
+                ``params`` or ``request_kwargs`` have ``Range``.
+            **params: Additional request parameters. The fields that the
+                other arguments set take precedence over parameters of the
+                same name.
+
+        Returns:
+            The bytes read.
+
+        Raises:
+            ValueError: If the path has no key, or the range is empty or has
+                both a negative start and an end, which S3 would ignore and
+                return the whole object for.
+            FileNotFoundError: If the object or version does not exist.
+            OSError: If the range starts at or past the end of the object.
+                Its ``__cause__`` is the ``ClientError`` with the
+                ``InvalidRange`` code.
+        """
+        if not path.key:
+            raise ValueError(f"The path has no key: {path.uri}.")
+        request: dict[str, Any] = {"Bucket": path.bucket, "Key": path.key}
+        if path.version_id:
+            request.update({"VersionId": path.version_id})
+        if range_ is not None:
+            start, end = range_
+            if end is None:
+                request.update({"Range": f"bytes={start}" if start < 0 else f"bytes={start}-"})
+            elif start < 0 or start >= end:
+                raise ValueError(f"Invalid range: {range_}.")
+            else:
+                request.update({"Range": f"bytes={start}-{end - 1}"})
+        request = {**params, **request}
+        _logger.debug(f"Get object: {path.uri} range={request.get('Range')}")
+        response = self.call(self._client.get_object, **request)
+        # Read through the StreamingBody, which verifies the length and the
+        # checksum of the data; entering it would return the raw stream.
+        with contextlib.closing(response["Body"]) as body:
+            return cast(bytes, body.read())
+
+    def put_object(self, path: S3Path, body: bytes | None = None, **params) -> S3PutObject:
+        """Write an object with PutObject.
+
+        Args:
+            path: The path of the object to write, without a version ID.
+            body: The data to write. None or empty bytes send no body of
+                their own, so an empty object is written unless ``params`` or
+                ``request_kwargs`` have ``Body``.
+            **params: Additional request parameters. The fields that the
+                other arguments set take precedence over parameters of the
+                same name.
+
+        Returns:
+            The result of the write.
+
+        Raises:
+            ValueError: If the path has no key, or has a version ID, which a
+                write cannot replace.
+        """
+        if not path.key:
+            raise ValueError(f"The path has no key: {path.uri}.")
+        if path.version_id:
+            raise ValueError(f"Cannot write to a version: {path.uri}.")
+        request: dict[str, Any] = {"Bucket": path.bucket, "Key": path.key}
+        if body:
+            request.update({"Body": body})
+        _logger.debug(f"Put object: {path.uri}")
+        response = self.call(self._client.put_object, **{**params, **request})
+        return S3PutObject(response)
 
     def delete_object(self, path: S3Path, **params) -> None:
         """Delete an object, or a version of it, with DeleteObject.

@@ -300,7 +300,7 @@ directories below the bucket level) and is always a no-op.
 ## Typed S3 operations
 
 `S3FileSystem.core` is an `S3Core`, the typed operations that the filesystem sends
-its listing, lookup, delete, multipart upload and copy requests with. It can also be
+its listing, lookup, read, write, delete, multipart upload and copy requests with. It can also be
 built on a boto3 S3 client. Each operation sends one request (one per page for the
 iterators and `list_object_annotations()`); `plan_multipart_copy()` and
 `copy_object_annotation()`, described below, send several. The requests are sent with
@@ -325,6 +325,18 @@ for page in core.list_objects("YOUR_S3_BUCKET", prefix="path/to/", delimiter="/"
 ```
 
 `list_object_versions()` and `list_buckets()` return pages in the same way.
+
+`get_object()` reads an object, a version of it, or a byte range and returns the bytes.
+A range has an exclusive end; `None` as the end reads to the end of the object, and a
+negative start without an end reads the last bytes. The response body is closed after
+the read; a failure to read it raises the botocore exception and is not retried.
+`put_object()` writes bytes and returns an `S3PutObject`.
+
+```python
+data = core.get_object(S3Path.parse("s3://YOUR_S3_BUCKET/path/to/object"), (0, 1024))
+result = core.put_object(S3Path("YOUR_S3_BUCKET", "path/to/copy"), data)
+print(result.etag, result.version_id)
+```
 
 `delete_objects()` deletes an `S3DeleteBatch`, the objects of one bucket that one
 DeleteObjects request accepts. `S3DeleteBatch.from_paths()` groups paths into batches
