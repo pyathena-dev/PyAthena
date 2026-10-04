@@ -662,7 +662,9 @@ class S3Core:
                 the path take precedence over parameters of the same name.
 
         Returns:
-            The multipart upload.
+            The upload retaining the path's bucket and key, including an
+            access point alias or ARN, and the response's upload ID and
+            checksum configuration.
 
         Raises:
             ValueError: If the path has no key, or has a version ID, which a
@@ -675,7 +677,9 @@ class S3Core:
         request: dict[str, Any] = {"Bucket": path.bucket, "Key": path.key}
         _logger.debug(f"Create multipart upload to {path.uri}.")
         response = self.call(self._client.create_multipart_upload, **{**params, **request})
-        return S3MultipartUpload(response)
+        # S3 returns the bucket name even when creation uses an access point.
+        # Keep the request identity for every subsequent upload operation.
+        return S3MultipartUpload({**response, "Bucket": path.bucket, "Key": path.key})
 
     @staticmethod
     def _multipart_upload_request(upload: S3MultipartUpload) -> dict[str, Any]:

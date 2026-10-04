@@ -6076,16 +6076,25 @@ class TestS3File:
             }
         assert fs._finish_multipart_upload.call_args.kwargs["request_kwargs"] == kwargs
 
-    def test_multipart_write_keyword_named_as_argument(self):
+    @pytest.mark.parametrize("parameter", ["key", "upload"])
+    def test_multipart_write_keyword_named_as_argument(self, parameter):
         # A keyword parameter of the file named like a helper argument does
         # not break the completion, which takes the parameters as a mapping.
         fs = self._make_append_fs(b"")
 
-        with S3File(fs, "s3://bucket/key.txt", mode="wb", block_size=4, key="other") as f:
+        with S3File(
+            fs, "s3://bucket/key.txt", mode="wb", block_size=4, **{parameter: "other"}
+        ) as f:
             f.write(b"x" * 8)
 
-        assert fs._finish_multipart_upload.call_args.kwargs["upload"].key == "key.txt"
-        assert fs._finish_multipart_upload.call_args.kwargs["request_kwargs"] == {"key": "other"}
+        fs.core.create_multipart_upload.assert_called_once_with(S3Path("bucket", "key.txt"))
+        assert (
+            fs._finish_multipart_upload.call_args.kwargs["upload"]
+            is fs.core.create_multipart_upload.return_value
+        )
+        assert fs._finish_multipart_upload.call_args.kwargs["request_kwargs"] == {
+            parameter: "other"
+        }
 
     def test_append_discard(self):
         # Rolling back an append aborts its multipart upload without the

@@ -461,6 +461,59 @@ class TestS3Core:
             )
         assert (part.part_number, part.etag) == (1, '"e1"')
 
+    @pytest.mark.parametrize(
+        "bucket", ["myap-abc123-s3alias", "arn:aws:s3:us-east-1:123456789012:accesspoint/myap"]
+    )
+    def test_multipart_upload_preserves_access_point_identity(self, bucket):
+        core, stubber = _make_core()
+        identity = {"Bucket": bucket, "Key": "key", "UploadId": "u"}
+        checksum = {"ChecksumAlgorithm": "SHA256", "ChecksumType": "COMPOSITE"}
+        first = {"ETag": '"first"', "ChecksumSHA256": "sha1"}
+        copied = {"ETag": '"copy"', "ChecksumSHA256": "sha2"}
+        stubber.add_response(
+            "create_multipart_upload",
+            {"Bucket": "underlying-bucket", "Key": "key", "UploadId": "u", **checksum},
+            {"Bucket": bucket, "Key": "key", **checksum},
+        )
+        stubber.add_response(
+            "upload_part",
+            first,
+            {**identity, "PartNumber": 1, "Body": b"data", "ChecksumAlgorithm": "SHA256"},
+        )
+        stubber.add_response(
+            "upload_part_copy",
+            {"CopyPartResult": copied},
+            {**identity, "PartNumber": 2, "CopySource": {"Bucket": "source", "Key": "object"}},
+        )
+        stubber.add_response(
+            "complete_multipart_upload",
+            {"ETag": '"done"'},
+            {
+                **identity,
+                "ChecksumType": "COMPOSITE",
+                "MultipartUpload": {
+                    "Parts": [{**first, "PartNumber": 1}, {**copied, "PartNumber": 2}]
+                },
+            },
+        )
+        stubber.add_client_error(
+            "abort_multipart_upload",
+            service_error_code="NoSuchUpload",
+            http_status_code=404,
+            expected_params=identity,
+        )
+        with stubber:
+            upload = core.create_multipart_upload(S3Path(bucket, "key"), **checksum)
+            assert (upload.bucket, upload.key, upload.upload_id) == (bucket, "key", "u")
+            parts = [
+                core.upload_part(upload, 1, b"data"),
+                core.upload_part_copy(upload, 2, S3Path("source", "object")),
+            ]
+            core.complete_multipart_upload(upload, parts)
+            with pytest.raises(FileNotFoundError):
+                core.abort_multipart_upload(upload)
+        stubber.assert_no_pending_responses()
+
     def test_upload_part_copy(self):
         core, stubber = _make_core()
         stubber.add_response(
