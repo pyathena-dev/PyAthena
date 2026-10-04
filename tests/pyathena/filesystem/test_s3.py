@@ -1070,6 +1070,32 @@ class TestS3FileSystem:
         with pytest.raises(ValueError, match="ACL not in"):
             fs.mkdir("s3://another-bucket", acl="invalid-acl")
 
+    def test_mkdir_creates_bucket_in_region(self):
+        fs = self._make_fs()
+        fs.allow_bucket_creation = True
+        fs.exists = mock.MagicMock(return_value=False)
+        fs._client.meta.region_name = "us-east-1"
+
+        fs.mkdir("s3://new-bucket", region_name="eu-west-1")
+        fs._call.assert_called_once_with(
+            fs._client.create_bucket,
+            Bucket="new-bucket",
+            CreateBucketConfiguration={"LocationConstraint": "eu-west-1"},
+        )
+
+    def test_mkdir_translates_invalid_parameters(self):
+        fs = self._make_fs()
+        fs.allow_bucket_creation = True
+        fs.exists = mock.MagicMock(return_value=False)
+        fs._client.meta.region_name = "us-east-1"
+        fs._call.side_effect = botocore.exceptions.ParamValidationError(report="Invalid name")
+        fs.dircache[""] = ["stale-bucket-listing"]
+
+        with pytest.raises(ValueError, match="Bucket create failed 'new-bucket'"):
+            fs.mkdir("s3://new-bucket")
+        # Nothing was created, so the cached bucket listing is kept.
+        assert "" in fs.dircache
+
     def test_mkdir_bucket_creation_disabled(self):
         # Bucket creation is disabled by default.
         fs = self._make_fs()
