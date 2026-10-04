@@ -31,11 +31,14 @@ class S3PathPairing:
     (see :attr:`~pyathena.filesystem.s3_path.S3Path.target`).
     :meth:`delete_paths` splits the paths of an ``rm()``.
 
-    The pairing is a pure value that holds no filesystem. The caller makes
-    the lookups that it asks for (:attr:`expands`, :attr:`skips_directories`,
-    :attr:`looks_up_destination` and :meth:`conflict_candidates`) with its
-    own requests and cache, and passes the results in. A lookup that a rule
-    needs and that is not passed raises ``ValueError``.
+    The pairing is a frozen dataclass of the paths as given, and holds no
+    filesystem. The caller makes the lookups that it asks for
+    (:attr:`expands`, :attr:`skips_directories`, :attr:`looks_up_destination`
+    and :meth:`conflict_candidates`) with its own requests and cache: it
+    expands the sources, leaves out the directories when
+    :attr:`skips_directories` says so, and passes the results in. A
+    ``sources``, ``destination_is_dir`` or ``missing`` that a rule needs and
+    that is not passed raises ``ValueError``.
 
     Attributes:
         path1: The source path, glob pattern, or list of them, as given to
@@ -180,7 +183,10 @@ class S3PathPairing:
                 destination is another source, including one left in place,
                 except for a directory with no object at its key, which is not
                 copied. Also if ``missing`` is needed and None.
+            TypeError: If ``missing`` is a string instead of a collection.
         """
+        if isinstance(missing, str):
+            raise TypeError("missing is a collection of paths, not a path.")
         named, sources, candidates = S3PathPairing._moves(pairs)
         if missing is None and candidates:
             raise ValueError("missing is needed to check the pairs.")

@@ -169,6 +169,11 @@ class TestS3PathPairing:
         # The missing sources can be given in any form that names them.
         assert _pairing(pairs).move_pairs(pairs, missing={"s3://bucket/d"}) == pairs
 
+    def test_move_pairs_missing_is_a_collection(self):
+        pairs = [("s3://bucket/d", "s3://bucket/e"), ("s3://bucket/d/x", "s3://bucket/e")]
+        with pytest.raises(TypeError, match="collection"):
+            _pairing(pairs).move_pairs(pairs, missing="bucket/d")
+
     def test_move_pairs_version_names_an_object(self):
         # A version is never taken for a directory.
         pairs = [

@@ -379,11 +379,13 @@ except Exception:
 those deleted as given and those expanded. The pairing is fsspec's, except that a
 path with a version ID names that version, and its destination is named after its key.
 
-A pairing is a pure value of `path1`, `path2`, `recursive` and `maxdepth`. The
-filesystems read from it what to look up (`expands`, `skips_directories`,
-`looks_up_destination` and `conflict_candidates()`), expand and look up the paths, and
-pass the results to `copy_pairs()` and `move_pairs()`. A rule that needs a lookup that
-is not passed raises `ValueError`.
+A pairing is a frozen dataclass of `path1`, `path2`, `recursive` and `maxdepth`, and
+holds no filesystem. The filesystems read from it what to look up (`expands`,
+`skips_directories`, `looks_up_destination` and `conflict_candidates()`), expand the
+sources, leave out the directories when `skips_directories` is true, look up the
+paths, and pass the results to `copy_pairs()` and `move_pairs()`. A `sources`,
+`destination_is_dir` or `missing` that a rule needs and that is not passed raises
+`ValueError`.
 
 ```python
 from pyathena.filesystem.s3_path_pairing import S3PathPairing

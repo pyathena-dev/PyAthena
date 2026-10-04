@@ -436,18 +436,11 @@ class AioS3FileSystem(AsyncFileSystem):
         pairing = S3PathPairing(path1, path2, recursive=recursive, maxdepth=maxdepth)
         pairs = await self._copy_pairs(pairing)
         candidates = await asyncio.to_thread(pairing.conflict_candidates, pairs)
-        objects = await asyncio.gather(
-            *[asyncio.to_thread(self._sync_fs._head_object, source) for source in candidates],
-            return_exceptions=True,
+        # Looked up in order in one thread, as S3FileSystem does, so that the
+        # first error stops the lookups.
+        missing = await asyncio.to_thread(
+            lambda: {s for s in candidates if self._sync_fs._head_object(s) is None}
         )
-        missing = set()
-        # Every lookup finishes; the error of the first candidate is raised,
-        # as when the lookups run in order.
-        for source, object_ in zip(candidates, objects, strict=True):
-            if isinstance(object_, BaseException):
-                raise object_
-            if object_ is None:
-                missing.add(source)
         return await asyncio.to_thread(pairing.move_pairs, pairs, missing=missing)
 
     async def _copy_pairs(
@@ -457,8 +450,9 @@ class AioS3FileSystem(AsyncFileSystem):
 
         Args:
             pairing: The paths of the copy.
-            isdir: Whether the destination is a directory, by default
-                ``self._isdir``; ``_get()`` passes the local filesystem's.
+            isdir: Whether the destination is a directory, by default the
+                wrapped ``S3FileSystem.isdir``; ``_get()`` passes the local
+                filesystem's.
 
         Returns:
             The sources and their destinations.
@@ -477,13 +471,10 @@ class AioS3FileSystem(AsyncFileSystem):
             )
         destination_is_dir = None
         if sources and pairing.looks_up_destination:
-            # A string, as looks_up_destination checks.
-            destination = cast(str, pairing.path2)
-            destination_is_dir = (
-                # A local isdir, which can block, runs in a thread.
-                await asyncio.to_thread(isdir, destination)
-                if isdir
-                else await self._isdir(destination)
+            # A string, as looks_up_destination checks; looked up in a thread
+            # as the sources are.
+            destination_is_dir = await asyncio.to_thread(
+                isdir or self._sync_fs.isdir, cast(str, pairing.path2)
             )
         # The pairing of many paths takes long enough to block the event loop.
         return await asyncio.to_thread(pairing.copy_pairs, sources, destination_is_dir)
