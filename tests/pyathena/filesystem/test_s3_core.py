@@ -5,6 +5,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+import copy
 import io
 import re
 from datetime import UTC, datetime
@@ -338,25 +339,34 @@ class TestS3Core:
 
     @pytest.mark.parametrize("client_region", ["us-east-1", "ap-northeast-1"])
     @pytest.mark.parametrize("region_name", [None, "eu-west-1"])
-    def test_create_bucket_configuration(self, client_region, region_name):
-        # A CreateBucketConfiguration of params is sent instead of the
-        # location constraint of the region, in every region.
+    @pytest.mark.parametrize(
+        "configuration",
+        [
+            {"LocationConstraint": "ap-southeast-2", "Tags": [{"Key": "team", "Value": "data"}]},
+            # No location constraint is added to a given configuration.
+            {"Tags": [{"Key": "team", "Value": "data"}]},
+        ],
+    )
+    def test_create_bucket_configuration(self, client_region, region_name, configuration):
+        # A CreateBucketConfiguration of params is sent as given instead of
+        # the location constraint of the region, in every region.
         core, stubber = _make_core(region_name=client_region)
-        configuration = {
-            "LocationConstraint": "ap-southeast-2",
-            "Tags": [{"Key": "team", "Value": "data"}],
-        }
         stubber.add_response(
             "create_bucket",
             {},
-            {"Bucket": "bucket", "ACL": "private", "CreateBucketConfiguration": configuration},
+            {
+                "Bucket": "bucket",
+                "ACL": "private",
+                "CreateBucketConfiguration": configuration,
+            },
         )
         with stubber:
             core.create_bucket(
                 "bucket",
                 acl="private",
                 region_name=region_name,
-                CreateBucketConfiguration=configuration,
+                # A copy, so that the parameter of the other cases is kept.
+                CreateBucketConfiguration=copy.deepcopy(configuration),
             )
         stubber.assert_no_pending_responses()
 
