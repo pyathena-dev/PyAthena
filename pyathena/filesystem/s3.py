@@ -1104,7 +1104,7 @@ class S3FileSystem(AbstractFileSystem):
         """Delete objects with DeleteObjects requests.
 
         Expands the paths with ``expand_path`` and deletes the matched objects
-        in parallel requests of up to ``DELETE_OBJECTS_MAX_KEYS`` keys each,
+        in parallel requests of up to ``S3DeleteBatch.MAX_KEYS`` keys each,
         one set of requests per bucket. A path with a version ID deletes that
         version without expansion.
 
@@ -1187,20 +1187,40 @@ class S3FileSystem(AbstractFileSystem):
             TypeError: If kwargs has ``Bucket`` or ``Delete``.
             OSError: If S3 could not delete some of the objects.
         """
-        for name in ("Bucket", "Delete"):
-            if name in kwargs:
-                raise TypeError(f"rm() got an unexpected keyword argument '{name}'")
-        batches = S3DeleteBatch.from_paths(
-            [p for p in map(S3Path.parse, paths) if p.key], quiet=kwargs.pop("Quiet", True)
-        )
+        batches, params = self._delete_batches(paths, **kwargs)
         if not batches:
             return
 
         max_workers = max_workers if max_workers else self.max_workers
         with self._create_executor(max_workers=max_workers) as executor:
-            fs = [executor.submit(self._delete_batch, batch, **kwargs) for batch in batches]
+            fs = [executor.submit(self._delete_batch, batch, **params) for batch in batches]
         # The executor has waited for every request, also after a failure.
         self._raise_delete_errors([f.exception() or f.result() for f in fs])
+
+    @staticmethod
+    def _delete_batches(paths: list[str], **kwargs) -> tuple[list[S3DeleteBatch], dict[str, Any]]:
+        """Group the objects that ``rm`` deletes into DeleteObjects batches.
+
+        Args:
+            paths: Paths of the objects to delete. Bucket paths are skipped.
+            **kwargs: Additional parameters of the DeleteObjects API.
+                ``Quiet`` (default True) sets the quiet mode of the batches.
+
+        Returns:
+            The batches, and the parameters of their requests without
+            ``Quiet``.
+
+        Raises:
+            TypeError: If kwargs has ``Bucket`` or ``Delete``.
+        """
+        for name in ("Bucket", "Delete"):
+            if name in kwargs:
+                raise TypeError(f"rm() got an unexpected keyword argument '{name}'")
+        quiet = kwargs.pop("Quiet", True)
+        batches = S3DeleteBatch.from_paths(
+            [p for p in map(S3Path.parse, paths) if p.key], quiet=quiet
+        )
+        return batches, kwargs
 
     def _delete_batch(self, batch: S3DeleteBatch, **kwargs) -> S3DeleteResult:
         """Delete a batch and invalidate the cache of its objects.

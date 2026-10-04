@@ -281,8 +281,8 @@ directories below the bucket level) and is always a no-op.
 `S3FileSystem.core` is an `S3Core`, the typed operations that the filesystem sends
 its listing, lookup and delete requests with. It can also be built on a boto3 S3
 client. Each operation sends one request (one per page for the iterators) with the
-retry policy, raises `FileNotFoundError` for a missing object, version or bucket, and
-caches nothing.
+retry policy, raises `FileNotFoundError` for a missing bucket, or for a missing object
+or version that it reads, and caches nothing.
 
 ```python
 import boto3
@@ -304,7 +304,9 @@ for page in core.list_objects("YOUR_S3_BUCKET", prefix="path/to/", delimiter="/"
 `delete_objects()` deletes an `S3DeleteBatch`, the objects of one bucket that one
 DeleteObjects request accepts. `S3DeleteBatch.from_paths()` groups paths into batches
 of up to 1,000 objects per bucket. The objects that S3 could not delete are in the
-`errors` of the returned `S3DeleteResult`, not raised.
+`errors` of the returned `S3DeleteResult`, not raised; as in S3, deleting a key that
+does not exist is not an error. Requests sent through `fs.core` do not invalidate the
+filesystem's cache: call `fs.invalidate_cache()` after them, or delete with `fs.rm()`.
 
 ```python
 from pyathena.filesystem.s3_core import S3DeleteBatch

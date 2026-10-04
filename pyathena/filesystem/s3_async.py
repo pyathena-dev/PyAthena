@@ -343,14 +343,9 @@ class AioS3FileSystem(AsyncFileSystem):
             TypeError: If kwargs has ``Bucket`` or ``Delete``.
             OSError: If S3 could not delete some of the objects.
         """
-        for name in ("Bucket", "Delete"):
-            if name in kwargs:
-                raise TypeError(f"rm() got an unexpected keyword argument '{name}'")
-        batches = S3DeleteBatch.from_paths(
-            [p for p in map(S3Path.parse, paths) if p.key], quiet=kwargs.pop("Quiet", True)
-        )
+        batches, params = self._sync_fs._delete_batches(paths, **kwargs)
         results = await asyncio.gather(
-            *[asyncio.to_thread(self._sync_fs._delete_batch, batch, **kwargs) for batch in batches],
+            *[asyncio.to_thread(self._sync_fs._delete_batch, batch, **params) for batch in batches],
             return_exceptions=True,
         )
         self._sync_fs._raise_delete_errors(results)
