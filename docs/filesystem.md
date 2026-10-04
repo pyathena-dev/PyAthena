@@ -326,7 +326,10 @@ for page in core.list_objects("YOUR_S3_BUCKET", prefix="path/to/", delimiter="/"
     print([o.key for o in page.objects], [p.prefix for p in page.common_prefixes])
 ```
 
-`list_object_versions()` and `list_buckets()` return pages in the same way.
+`list_object_versions()`, `list_multipart_uploads()` and `list_buckets()` return pages in
+the same way. The core sends the prefix of `list_multipart_uploads()` as given, and S3
+matches it as a plain string prefix, so it also lists the uploads to sibling keys that
+start with it, which `fs.list_multipart_uploads()` excludes.
 
 `get_object()` reads an object, a version of it, or a byte range and returns the bytes.
 A range has an exclusive end; `None` as the end reads to the end of the object, and a
@@ -395,6 +398,18 @@ url = core.generate_presigned_url(path, expires_in=600)
 upload_url = core.generate_presigned_url(path, "put_object", ContentType="text/csv")
 ```
 
+`create_bucket()` and `delete_bucket()` create and delete a bucket when called. The
+`allow_bucket_creation` and `allow_bucket_deletion` options apply only to the
+filesystem's `mkdir`/`makedirs` and `rmdir`, not to calls through the core.
+
+`create_bucket()` sends a `LocationConstraint` for the `region_name` argument, or for
+the client's region by default, except in `us-east-1`. The fields of a
+`CreateBucketConfiguration` passed as a parameter are kept, and the `LocationConstraint`
+is added to it only if it has none of `LocationConstraint`, `Location` and `Bucket`; an
+empty or `None` configuration is treated as not passed. To
+create a directory bucket, pass its `Location` and `Bucket` in
+`CreateBucketConfiguration`; no `LocationConstraint` is added.
+
 ### Multipart writer
 
 `S3MultipartWriter` provides synchronous multipart requests and part planning without fsspec.
@@ -453,7 +468,10 @@ Cancelling an async buffered write through `asyncio.to_thread` still allows its 
 multipart upload. `part_ranges()` sends no request: it splits an object into the byte
 ranges of the parts that copy it, by the part limits `MULTIPART_UPLOAD_MIN_PART_SIZE` (5 MiB),
 `MULTIPART_UPLOAD_MAX_PART_SIZE` (5 GiB) and `MULTIPART_UPLOAD_MAX_PARTS` (10,000) of
-`S3Core`.
+`S3Core`. `check_multipart_upload_size()` sends no request either: it raises
+`ValueError` with the minimum block size if data of the given size takes more than
+`MULTIPART_UPLOAD_MAX_PARTS` parts of the block size, the check that `put` and `pipe`
+make before uploading.
 
 `copy_object()` copies an object with one CopyObject request, which accepts objects
 up to `MULTIPART_UPLOAD_MAX_PART_SIZE`. For a larger object, `plan_multipart_copy()`

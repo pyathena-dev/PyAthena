@@ -1070,6 +1070,32 @@ class TestS3FileSystem:
         with pytest.raises(ValueError, match="ACL not in"):
             fs.mkdir("s3://another-bucket", acl="invalid-acl")
 
+    def test_mkdir_creates_bucket_in_region(self):
+        fs = self._make_fs()
+        fs.allow_bucket_creation = True
+        fs.exists = mock.MagicMock(return_value=False)
+        fs._client.meta.region_name = "us-east-1"
+
+        fs.mkdir("s3://new-bucket", region_name="eu-west-1")
+        fs._call.assert_called_once_with(
+            fs._client.create_bucket,
+            Bucket="new-bucket",
+            CreateBucketConfiguration={"LocationConstraint": "eu-west-1"},
+        )
+
+    def test_mkdir_translates_invalid_parameters(self):
+        fs = self._make_fs()
+        fs.allow_bucket_creation = True
+        fs.exists = mock.MagicMock(return_value=False)
+        fs._client.meta.region_name = "us-east-1"
+        fs._call.side_effect = botocore.exceptions.ParamValidationError(report="Invalid name")
+        fs.dircache[""] = ["stale-bucket-listing"]
+
+        with pytest.raises(ValueError, match="Bucket create failed 'new-bucket'"):
+            fs.mkdir("s3://new-bucket")
+        # Nothing was created, so the cached bucket listing is kept.
+        assert "" in fs.dircache
+
     def test_mkdir_bucket_creation_disabled(self):
         # Bucket creation is disabled by default.
         fs = self._make_fs()
@@ -2704,28 +2730,6 @@ class TestS3FileSystem:
             fs._client.abort_multipart_upload, Bucket="bucket", Key="key", UploadId="uploadid"
         )
 
-    @pytest.mark.parametrize(
-        ("size", "block_size", "min_block_size"),
-        [
-            # The data fits in the maximum number of parts.
-            (12, 4, None),
-            # GH-953: more data is rejected with the minimum block size,
-            (13, 4, 5),
-            # which is at least the minimum part size.
-            (5, 1, 4),
-        ],
-    )
-    def test_check_multipart_upload_size(self, size, block_size, min_block_size):
-        fs = self._make_fs()
-        fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE = 4
-        fs.core.MULTIPART_UPLOAD_MAX_PARTS = 3
-
-        if min_block_size is None:
-            fs._check_multipart_upload_size("s3://bucket/key", size, block_size)
-        else:
-            with pytest.raises(ValueError, match=f"at least {min_block_size} bytes"):
-                fs._check_multipart_upload_size("s3://bucket/key", size, block_size)
-
     @pytest.mark.parametrize("kwargs", [{"block_size": 4}, {}])
     def test_put_file_exceeding_max_parts(self, tmp_path, kwargs):
         # GH-953: a file that does not fit in the maximum number of parts is
@@ -2737,7 +2741,7 @@ class TestS3FileSystem:
         lpath = tmp_path / "data"
         lpath.write_bytes(b"a" * 13)
 
-        with pytest.raises(ValueError, match="block_size"):
+        with pytest.raises(ValueError, match="in 3 parts with a block size of 4 bytes"):
             fs.put_file(str(lpath), "s3://bucket/key", **kwargs)
         fs.open.assert_not_called()
         fs._call.assert_not_called()
@@ -2799,7 +2803,7 @@ class TestS3FileSystem:
         fs.open = mock.MagicMock()
         fs.core.put_object = mock.MagicMock()
 
-        with pytest.raises(ValueError, match="block_size"):
+        with pytest.raises(ValueError, match="in 3 parts with a block size of 4 bytes"):
             fs.pipe_file("s3://bucket/key", value, **kwargs)
         fs.open.assert_not_called()
         fs.core.put_object.assert_not_called()

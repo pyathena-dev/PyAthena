@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import logging
-import math
 import mimetypes
 import os.path
 import time
@@ -1253,22 +1252,11 @@ class S3FileSystem(AbstractFileSystem):
                     "Bucket creation is disabled. "
                     "Set allow_bucket_creation=True on the filesystem to enable it."
                 )
-            acl = kwargs.pop("acl", "")
-            if acl and acl not in self.core.BUCKET_ACLS:
-                raise ValueError(f"ACL not in {self.core.BUCKET_ACLS}.")
-            request: dict[str, Any] = {"Bucket": s3_path.bucket}
-            if acl:
-                request.update({"ACL": acl})
-            region_name = kwargs.pop("region_name", None) or self._client.meta.region_name
-            if region_name and region_name != "us-east-1":
-                # us-east-1 does not accept a location constraint.
-                request.update({"CreateBucketConfiguration": {"LocationConstraint": region_name}})
-
-            _logger.debug(f"Create bucket: s3://{s3_path.bucket}")
             try:
-                self._call(
-                    self._client.create_bucket,
-                    **request,
+                self.core.create_bucket(
+                    s3_path.bucket,
+                    acl=kwargs.pop("acl", None),
+                    region_name=kwargs.pop("region_name", None),
                 )
             except botocore.exceptions.ParamValidationError as e:
                 raise ValueError(f"Bucket create failed {s3_path.bucket!r}: {e}") from e
@@ -1339,11 +1327,7 @@ class S3FileSystem(AbstractFileSystem):
                 "Set allow_bucket_deletion=True on the filesystem to enable it."
             )
 
-        _logger.debug(f"Delete bucket: s3://{s3_path.bucket}")
-        self._call(
-            self._client.delete_bucket,
-            Bucket=s3_path.bucket,
-        )
+        self.core.delete_bucket(s3_path.bucket)
         self.invalidate_cache(s3_path.bucket)
         # invalidate_cache of the bucket keeps the cached bucket listing,
         # so evict it directly.
@@ -1743,31 +1727,6 @@ class S3FileSystem(AbstractFileSystem):
                 **kwargs,
             )
 
-    def _check_multipart_upload_size(self, path: str, size: int, block_size: int) -> None:
-        """Check that data fits in a multipart upload before uploading it.
-
-        Args:
-            path: The path that the data is written to.
-            size: The size of the data in bytes.
-            block_size: The block size of the write in bytes.
-
-        Raises:
-            ValueError: If the data takes more than
-                ``S3Core.MULTIPART_UPLOAD_MAX_PARTS`` blocks.
-        """
-        if size > block_size * self.core.MULTIPART_UPLOAD_MAX_PARTS:
-            min_block_size = max(
-                math.ceil(size / self.core.MULTIPART_UPLOAD_MAX_PARTS),
-                self.core.MULTIPART_UPLOAD_MIN_PART_SIZE,
-            )
-            raise ValueError(
-                f"Cannot upload {size} bytes to {path} in "
-                f"{self.core.MULTIPART_UPLOAD_MAX_PARTS} parts with a block size of "
-                f"{block_size} bytes. Write the file with a block_size, or a "
-                "default_block_size of the filesystem, of at least "
-                f"{min_block_size} bytes."
-            )
-
     def pipe_file(
         self, path: str, value: bytes | bytearray | memoryview, mode: str = "overwrite", **kwargs
     ) -> None:
@@ -1816,7 +1775,7 @@ class S3FileSystem(AbstractFileSystem):
         block_size = kwargs.get("block_size") or self.default_block_size
         # The size in bytes; the length of a memoryview counts its items.
         size = memoryview(value).nbytes
-        self._check_multipart_upload_size(path, size, block_size)
+        self.core.check_multipart_upload_size(size, block_size)
         if self._intrans or size > min(block_size, self.core.MULTIPART_UPLOAD_MAX_PART_SIZE):
             # Defer to the buffered open() path, which keeps the
             # deferred-commit semantics of fsspec transactions and uploads
@@ -2049,7 +2008,7 @@ class S3FileSystem(AbstractFileSystem):
         max_workers = kwargs.pop("max_workers", self.max_workers)
         # The other parameters are S3 request parameters, as in pipe_file().
         s3_additional_kwargs = {**kwargs.pop("s3_additional_kwargs", {}), **kwargs}
-        self._check_multipart_upload_size(rpath, size, block_size)
+        self.core.check_multipart_upload_size(size, block_size)
         callback.set_size(size)
         if "ContentType" not in {**self.s3_additional_kwargs, **s3_additional_kwargs}:
             content_type, _ = mimetypes.guess_type(lpath)
@@ -2358,33 +2317,13 @@ class S3FileSystem(AbstractFileSystem):
         prefix = f"{s3_path.key.rstrip('/')}/" if s3_path.key else ""
 
         _logger.debug(f"List multipart uploads: {s3_path.uri}")
-        uploads: list[S3MultipartUpload] = []
-        next_key_marker: str | None = None
-        next_upload_id_marker: str | None = None
-        while True:
-            request: dict[str, Any] = {"Bucket": s3_path.bucket}
-            if s3_path.key:
-                request.update({"Prefix": s3_path.key})
-            if next_key_marker:
-                request.update(
-                    {"KeyMarker": next_key_marker, "UploadIdMarker": next_upload_id_marker}
-                )
-            response = self._call(
-                self._client.list_multipart_uploads,
-                **request,
-            )
-            uploads.extend(
-                S3MultipartUpload({**u, "Bucket": s3_path.bucket})
-                for u in response.get("Uploads", [])
-                if u["Key"] == s3_path.key or u["Key"].startswith(prefix)
-            )
-            if not response.get("IsTruncated"):
-                break
-            next_key_marker = response.get("NextKeyMarker")
-            next_upload_id_marker = response.get("NextUploadIdMarker")
-            if not next_key_marker or not next_upload_id_marker:
-                break
-        return uploads
+        return [
+            upload
+            for page in self.core.list_multipart_uploads(s3_path.bucket, prefix=s3_path.key or None)
+            for upload in page.uploads
+            if upload.key is not None
+            and (upload.key == s3_path.key or upload.key.startswith(prefix))
+        ]
 
     def object_version_info(
         self, path: str, delete_markers: bool = False, **kwargs

@@ -215,7 +215,7 @@ class AioS3FileSystem(AsyncFileSystem):
             value = CompressedBuffer.compress(value, compression)
         block_size = kwargs.get("block_size") or self._sync_fs.default_block_size
         # The size in bytes; the length of a memoryview counts its items.
-        self._sync_fs._check_multipart_upload_size(path, memoryview(value).nbytes, block_size)
+        self.core.check_multipart_upload_size(memoryview(value).nbytes, block_size)
         self.open(path, "xb" if mode == "create" else "wb", **kwargs)._write_and_close(value)
 
     async def _put_file(
@@ -272,7 +272,7 @@ class AioS3FileSystem(AsyncFileSystem):
         max_workers = kwargs.pop("max_workers", self._sync_fs.max_workers)
         # The other parameters are S3 request parameters, as in pipe_file().
         s3_additional_kwargs = {**kwargs.pop("s3_additional_kwargs", {}), **kwargs}
-        self._sync_fs._check_multipart_upload_size(rpath, size, block_size)
+        self.core.check_multipart_upload_size(size, block_size)
         callback.set_size(size)
         if "ContentType" not in {**self._sync_fs.s3_additional_kwargs, **s3_additional_kwargs}:
             content_type, _ = mimetypes.guess_type(lpath)
