@@ -279,9 +279,10 @@ directories below the bucket level) and is always a no-op.
 ## Typed S3 operations
 
 `S3FileSystem.core` is an `S3Core`, the typed operations that the filesystem sends
-its listing and lookup requests with. It can also be built on a boto3 S3 client. Each
-operation sends one request (one per page for the iterators) with the retry policy,
-raises `FileNotFoundError` for a missing object, version or bucket, and caches nothing.
+its listing, lookup and delete requests with. It can also be built on a boto3 S3
+client. Each operation sends one request (one per page for the iterators) with the
+retry policy, raises `FileNotFoundError` for a missing object, version or bucket, and
+caches nothing.
 
 ```python
 import boto3
@@ -299,6 +300,24 @@ for page in core.list_objects("YOUR_S3_BUCKET", prefix="path/to/", delimiter="/"
 ```
 
 `list_object_versions()` and `list_buckets()` return pages in the same way.
+
+`delete_objects()` deletes an `S3DeleteBatch`, the objects of one bucket that one
+DeleteObjects request accepts. `S3DeleteBatch.from_paths()` groups paths into batches
+of up to 1,000 objects per bucket. The objects that S3 could not delete are in the
+`errors` of the returned `S3DeleteResult`, not raised.
+
+```python
+from pyathena.filesystem.s3_core import S3DeleteBatch
+
+paths = [
+    S3Path.parse("s3://YOUR_S3_BUCKET/path/to/a"),
+    S3Path.parse("s3://YOUR_S3_BUCKET/path/to/b"),
+]
+for batch in S3DeleteBatch.from_paths(paths):
+    result = core.delete_objects(batch)
+    for error in result.errors:
+        print(error)  # path (code: message)
+```
 
 ## Async filesystem
 

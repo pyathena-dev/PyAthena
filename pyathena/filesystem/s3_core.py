@@ -10,10 +10,10 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import botocore.exceptions
 from botocore.client import BaseClient
@@ -21,7 +21,7 @@ from botocore.client import BaseClient
 from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_object import S3Metadata, S3ObjectVersion
 from pyathena.filesystem.s3_path import S3Path
-from pyathena.util import RetryConfig, retry_api_call
+from pyathena.util import RetryConfig, override, retry_api_call
 
 _logger = logging.getLogger(__name__)
 
@@ -256,6 +256,143 @@ class S3ListBucketsPage:
         )
 
 
+@dataclass(frozen=True)
+class S3DeleteBatch:
+    """The objects of one bucket that one DeleteObjects request deletes.
+
+    A batch is valid by construction: it has 1 to ``MAX_KEYS`` objects, each
+    with a key in the bucket of the batch. A path with a version ID deletes
+    that version.
+
+    Attributes:
+        bucket: The bucket of the objects.
+        objects: The paths of the objects to delete.
+        quiet: Whether S3 omits the deleted objects from the response.
+    """
+
+    # https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjects.html
+    MAX_KEYS: ClassVar[int] = 1000
+
+    bucket: str
+    objects: tuple[S3Path, ...]
+    quiet: bool = True
+
+    def __post_init__(self) -> None:
+        """Validate the objects of the batch.
+
+        Raises:
+            ValueError: If the batch has no objects or more than
+                ``MAX_KEYS``, or an object has no key or another bucket.
+        """
+        if not 0 < len(self.objects) <= self.MAX_KEYS:
+            raise ValueError(f"A batch has 1 to {self.MAX_KEYS} objects, not {len(self.objects)}.")
+        for path in self.objects:
+            if not path.key or path.bucket != self.bucket:
+                raise ValueError(f"Not an object of the bucket {self.bucket}: {path.uri}.")
+
+    @classmethod
+    def from_paths(cls, paths: Iterable[S3Path], quiet: bool = True) -> list[S3DeleteBatch]:
+        """Group the paths into batches by bucket, in the order of the paths.
+
+        Args:
+            paths: The paths of the objects to delete.
+            quiet: Whether S3 omits the deleted objects from the responses.
+
+        Returns:
+            The batches of up to ``MAX_KEYS`` objects of one bucket each.
+
+        Raises:
+            ValueError: If a path has no key.
+        """
+        objects: dict[str, list[S3Path]] = {}
+        for path in paths:
+            objects.setdefault(path.bucket, []).append(path)
+        return [
+            cls(bucket=bucket, objects=tuple(paths_[i : i + cls.MAX_KEYS]), quiet=quiet)
+            for bucket, paths_ in objects.items()
+            for i in range(0, len(paths_), cls.MAX_KEYS)
+        ]
+
+
+@dataclass(frozen=True)
+class S3DeleteError:
+    """An object that DeleteObjects could not delete (an ``Errors`` entry).
+
+    ``str()`` gives ``"path (code: message)"``.
+
+    Attributes:
+        path: The path of the object, with the version ID of the request, if
+            any.
+        code: The error code.
+        message: The error message.
+    """
+
+    path: S3Path
+    code: str | None = None
+    message: str | None = None
+
+    @classmethod
+    def from_response(cls, bucket: str, entry: Mapping[str, Any]) -> S3DeleteError:
+        """Build the error from an ``Errors`` entry of DeleteObjects.
+
+        Args:
+            bucket: The bucket of the request.
+            entry: The ``Errors`` entry.
+
+        Returns:
+            The error.
+        """
+        return cls(
+            path=S3Path(bucket, entry["Key"], entry.get("VersionId")),
+            code=entry.get("Code"),
+            message=entry.get("Message"),
+        )
+
+    @override
+    def __str__(self) -> str:
+        return f"{self.path} ({self.code}: {self.message})"
+
+
+@dataclass(frozen=True)
+class S3DeleteResult:
+    """The result of a DeleteObjects request.
+
+    S3 answers a request with 200 also when it could not delete some of the
+    objects, and lists them in ``errors``.
+
+    Attributes:
+        bucket: The bucket of the request.
+        deleted: The deleted objects, with the version ID of the request, if
+            any. Empty for a quiet batch.
+        errors: The objects that S3 could not delete.
+    """
+
+    bucket: str
+    deleted: tuple[S3Path, ...] = ()
+    errors: tuple[S3DeleteError, ...] = ()
+
+    @classmethod
+    def from_response(cls, bucket: str, response: Mapping[str, Any]) -> S3DeleteResult:
+        """Build the result from a DeleteObjects response.
+
+        Args:
+            bucket: The bucket of the request.
+            response: The DeleteObjects response.
+
+        Returns:
+            The result.
+        """
+        return cls(
+            bucket=bucket,
+            deleted=tuple(
+                S3Path(bucket, d["Key"], d.get("VersionId")) for d in response.get("Deleted", [])
+            ),
+            errors=tuple(
+                S3DeleteError.from_response(bucket, e) for e in response.get("Errors", [])
+            ),
+        )
+
+
 class S3Core:
     """Typed S3 operations, one request each, on a boto3 S3 client.
 
@@ -392,6 +529,49 @@ class S3Core:
         """
         response = self.call(self._client.head_bucket, Bucket=bucket, **params)
         return S3Bucket(name=bucket, bucket_region=response.get("BucketRegion"))
+
+    def delete_object(self, path: S3Path, **params) -> None:
+        """Delete an object, or a version of it, with DeleteObject.
+
+        Args:
+            path: The path of the object, with the version ID to delete, if
+                any.
+            **params: Additional request parameters, sent as given.
+
+        Raises:
+            ValueError: If the path has no key.
+        """
+        if not path.key:
+            raise ValueError(f"The path has no key: {path.uri}.")
+        request: dict[str, Any] = {"Bucket": path.bucket, "Key": path.key}
+        if path.version_id:
+            request.update({"VersionId": path.version_id})
+        self.call(self._client.delete_object, **request, **params)
+
+    def delete_objects(self, batch: S3DeleteBatch, **params) -> S3DeleteResult:
+        """Delete the objects of a batch with one DeleteObjects request.
+
+        Args:
+            batch: The objects to delete.
+            **params: Additional request parameters, sent as given.
+
+        Returns:
+            The result, with the objects that S3 could not delete in its
+            ``errors``.
+        """
+        objects = []
+        for path in batch.objects:
+            object_ = {"Key": path.key}
+            if path.version_id:
+                object_.update({"VersionId": path.version_id})
+            objects.append(object_)
+        response = self.call(
+            self._client.delete_objects,
+            Bucket=batch.bucket,
+            Delete={"Objects": objects, "Quiet": batch.quiet},
+            **params,
+        )
+        return S3DeleteResult.from_response(batch.bucket, response)
 
     def list_objects_page(
         self,

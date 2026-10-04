@@ -29,6 +29,7 @@ from pyathena.filesystem.s3_object import (
     S3ObjectType,
     S3StorageClass,
 )
+from pyathena.filesystem.s3_path import S3Path
 from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
@@ -1752,7 +1753,7 @@ class TestAioS3FileSystem:
         fs.pipe_file(path, b"foo")
         checksum = fs.checksum(path)
         fs.ls(path)  # caching
-        fs._sync_fs._delete_object(bucket, key)
+        fs.core.delete_object(S3Path(bucket, key))
         assert checksum == fs.checksum(path)
         with pytest.raises(FileNotFoundError):
             fs.checksum(path, refresh=True)

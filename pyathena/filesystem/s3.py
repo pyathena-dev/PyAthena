@@ -35,7 +35,7 @@ from fsspec.utils import check_contained, isfilelike, other_paths, tokenize
 
 import pyathena
 from pyathena.connection import Connection
-from pyathena.filesystem.s3_core import S3Core
+from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch, S3DeleteResult
 from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import (
@@ -170,8 +170,7 @@ class S3FileSystem(AbstractFileSystem):
     # https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
     # The maximum number of parts per multipart upload is 10,000.
     MULTIPART_UPLOAD_MAX_PARTS: int = 10_000
-    # https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjects.html
-    DELETE_OBJECTS_MAX_KEYS: int = 1000
+    DELETE_OBJECTS_MAX_KEYS: int = S3DeleteBatch.MAX_KEYS
     DEFAULT_BLOCK_SIZE: int = 5 * 2**20  # 5MiB
     # https://docs.aws.amazon.com/AmazonS3/latest/userguide/acl-overview.html#canned-acl
     OBJECT_ACLS: frozenset[str] = frozenset(
@@ -1097,9 +1096,8 @@ class S3FileSystem(AbstractFileSystem):
         s3_path = S3Path.parse(path)
         if not s3_path.key:
             return
-        self._delete_object(
-            bucket=s3_path.bucket, key=s3_path.key, version_id=s3_path.version_id, **kwargs
-        )
+        _logger.debug(f"Delete object: {s3_path.uri}")
+        self.core.delete_object(s3_path)
         self.invalidate_cache(path)
 
     def rm(self, path, recursive=False, maxdepth=None, **kwargs) -> None:
@@ -1161,22 +1159,6 @@ class S3FileSystem(AbstractFileSystem):
             )
         return versioned_paths + unversioned_paths
 
-    def _delete_object(
-        self, bucket: str, key: str, version_id: str | None = None, **kwargs
-    ) -> None:
-        request = {
-            "Bucket": bucket,
-            "Key": key,
-        }
-        if version_id:
-            request.update({"VersionId": version_id})
-
-        _logger.debug(f"Delete object: {S3Path(bucket, key, version_id).uri}")
-        self._call(
-            self._client.delete_object,
-            **request,
-        )
-
     def _create_executor(self, max_workers: int) -> S3Executor:
         """Create an executor strategy for parallel operations.
 
@@ -1202,116 +1184,62 @@ class S3FileSystem(AbstractFileSystem):
                 ``Quiet`` (default True) sets the quiet mode of the requests.
 
         Raises:
-            OSError: If S3 could not delete some of the objects.
-        """
-        requests = self._delete_objects_requests(paths, **kwargs)
-        if not requests:
-            return
-
-        max_workers = max_workers if max_workers else self.max_workers
-        with self._create_executor(max_workers=max_workers) as executor:
-            fs = [executor.submit(self._delete_objects_request, request) for request in requests]
-        # The executor has waited for every request, also after a failure.
-        self._raise_delete_objects_errors(requests, [f.exception() or f.result() for f in fs])
-
-    def _delete_objects_requests(self, paths: list[str], **kwargs) -> list[dict[str, Any]]:
-        """Build the DeleteObjects requests that delete the objects.
-
-        Args:
-            paths: Paths of the objects to delete. Bucket paths are skipped.
-            **kwargs: Additional parameters of the requests. ``Quiet``
-                (default True) sets the quiet mode of the requests.
-
-        Returns:
-            Requests of up to ``DELETE_OBJECTS_MAX_KEYS`` keys of one bucket each.
-
-        Raises:
             TypeError: If kwargs has ``Bucket`` or ``Delete``.
+            OSError: If S3 could not delete some of the objects.
         """
         for name in ("Bucket", "Delete"):
             if name in kwargs:
                 raise TypeError(f"rm() got an unexpected keyword argument '{name}'")
-        quiet = kwargs.pop("Quiet", True)
-        delete_objects: dict[str, list[dict[str, str]]] = {}
-        for p in paths:
-            s3_path = S3Path.parse(p)
-            if s3_path.key:
-                object_ = {"Key": s3_path.key}
-                if s3_path.version_id:
-                    object_.update({"VersionId": s3_path.version_id})
-                delete_objects.setdefault(s3_path.bucket, []).append(object_)
-        return [
-            {
-                "Bucket": bucket,
-                "Delete": {
-                    "Objects": objects[i : i + self.DELETE_OBJECTS_MAX_KEYS],
-                    "Quiet": quiet,
-                },
-                **kwargs,
-            }
-            for bucket, objects in delete_objects.items()
-            for i in range(0, len(objects), self.DELETE_OBJECTS_MAX_KEYS)
-        ]
+        batches = S3DeleteBatch.from_paths(
+            [p for p in map(S3Path.parse, paths) if p.key], quiet=kwargs.pop("Quiet", True)
+        )
+        if not batches:
+            return
 
-    def _delete_objects_request(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Send a DeleteObjects request and invalidate the cache of its objects.
+        max_workers = max_workers if max_workers else self.max_workers
+        with self._create_executor(max_workers=max_workers) as executor:
+            fs = [executor.submit(self._delete_batch, batch, **kwargs) for batch in batches]
+        # The executor has waited for every request, also after a failure.
+        self._raise_delete_errors([f.exception() or f.result() for f in fs])
+
+    def _delete_batch(self, batch: S3DeleteBatch, **kwargs) -> S3DeleteResult:
+        """Delete a batch and invalidate the cache of its objects.
 
         The cache is invalidated when the request has finished, also when it
         fails, because S3 may have deleted some of the objects.
 
         Args:
-            request: The DeleteObjects request.
+            batch: The objects to delete.
+            **kwargs: Additional parameters passed to the DeleteObjects API.
 
         Returns:
-            The DeleteObjects response.
+            The result of the request.
         """
         try:
-            return self._call(self._client.delete_objects, **request)
+            return self.core.delete_objects(batch, **kwargs)
         finally:
-            for object_ in request["Delete"]["Objects"]:
-                self.invalidate_cache(self._delete_objects_path(request["Bucket"], object_))
+            for path in batch.objects:
+                self.invalidate_cache(str(path))
 
     @staticmethod
-    def _delete_objects_path(bucket: str, object_: dict[str, Any]) -> str:
-        """Build the path of a DeleteObjects object or error entry.
+    def _raise_delete_errors(results: list[S3DeleteResult | BaseException]) -> None:
+        """Raise an error for the batches that S3 could not delete.
 
         Args:
-            bucket: The bucket of the request.
-            object_: An entry with ``Key`` and an optional ``VersionId``.
-
-        Returns:
-            The path, with a ``?versionId=`` query if the entry has a version.
-        """
-        return str(S3Path(bucket, object_["Key"], object_.get("VersionId")))
-
-    @staticmethod
-    def _raise_delete_objects_errors(
-        requests: list[dict[str, Any]], results: list[dict[str, Any] | BaseException]
-    ) -> None:
-        """Raise an error for the DeleteObjects requests that failed.
-
-        S3 reports the objects it could not delete in the ``Errors`` of a
-        successful response.
-
-        Args:
-            requests: The DeleteObjects requests.
-            results: The response or the exception of each request, in the
-                order of the requests.
+            results: The result or the exception of each batch.
 
         Raises:
-            BaseException: The first exception of the requests, with a note
-                that lists the objects of ``Errors``, if any.
-            OSError: If no request raised and a response has errors.
+            BaseException: The first exception of the batches, with a note
+                that lists the errors of the results, if any.
+            OSError: If no batch raised and a result has errors.
         """
-        exceptions = []
-        errors = []
-        for request, result in zip(requests, results, strict=True):
+        exceptions: list[BaseException] = []
+        errors: list[str] = []
+        for result in results:
             if isinstance(result, BaseException):
                 exceptions.append(result)
-                continue
-            for error in result.get("Errors", []):
-                path = S3FileSystem._delete_objects_path(request["Bucket"], error)
-                errors.append(f"{path} ({error.get('Code')}: {error.get('Message')})")
+            else:
+                errors.extend(str(e) for e in result.errors)
         message = f"Failed to delete objects: {', '.join(sorted(errors))}" if errors else None
         if exceptions:
             if message:
