@@ -9,10 +9,10 @@ SPDX-License-Identifier: MIT
 
 # Test conventions audit
 
-This report records the source audit for [issue #1079](https://github.com/pyathena-dev/PyAthena/issues/1079).
+This report records the source audit conducted on October 4, 2026, for [issue #1079](https://github.com/pyathena-dev/PyAthena/issues/1079).
 The baseline is commit `200762088e7b0bac45054f22e32a16aa0ce95dbb`.
 Source references below identify that baseline, so later edits do not change their meaning.
-The accompanying changes clarify the conventions and address the findings listed here.
+The findings and dispositions describe that audit and its implementation in [PR #1082](https://github.com/pyathena-dev/PyAthena/pull/1082).
 
 ## Reviewed areas
 
@@ -40,7 +40,7 @@ The complete file inventory appears below.
 The compliance suite imports additional tests from the installed SQLAlchemy package.
 Those upstream implementations and generated cases are outside the project-owned source inventory.
 The audit does not establish complete runtime coverage or the correctness of every assertion.
-Unmerged worktrees, including the pandas JSON changes associated with issue #1078, are outside this baseline.
+The audit excluded changes not merged into this baseline, including the pandas JSON changes associated with issue #1078.
 
 ## Findings addressed
 
@@ -50,7 +50,7 @@ The priorities describe coverage and maintenance impact, rather than product-def
 | --- | --- | --- | --- |
 | High | [tests/pyathena/filesystem/test_s3.py:4432][sync-du] and [tests/pyathena/filesystem/test_s3_async.py:1491][async-du] | Both `test_du` bodies contain only `pass`. A broken disk-usage implementation still produces two passing tests. | Replace both placeholders with real S3 file-size, total, depth, and single-file assertions. Preserve the names, use the existing filesystem fixtures, and remove the test objects in `finally`. |
 | Medium | [tests/pyathena/pandas/test_result_set.py:265][csv-helper] and [tests/pyathena/pandas/test_result_set.py:305][csv-params] | Parameter evaluation repeatedly patches result-set properties and derives CSV options, including repeated default dtype construction. An option-building error prevents collection of unrelated tests in the module. | Store input metadata and options in the parameters. Build the options once per invocation, inside the pandas option context. Remove the unused base-initializer patch; `__new__` already bypasses `__init__`. |
-| Medium | [tests/pyathena/pandas/test_result_set.py:391][csv-oracle] | The expectation reads the CSV with two engines and conditionally replaces columns and missing values. The reader has to reconstruct the intended contract from this algorithm. | Define typed expected frames from explicit values for the 13 existing cases. Keep both `future.infer_string` settings, `check_exact=True`, column/index checks, and the difference between replacing a dtype mapping and overriding individual entries. |
+| Medium | [tests/pyathena/pandas/test_result_set.py:391][csv-oracle] | The expectation reads the CSV with two engines and conditionally replaces columns and missing values. The reader has to reconstruct the intended contract from this algorithm. | Define typed expected frames from explicit values for the 13 existing cases. Retain direct pandas PyArrow-engine comparisons for explicitly selected column positions where the contracts agree. Keep both `future.infer_string` settings, `check_exact=True`, column/index checks, and the difference between replacing a dtype mapping and overriding individual entries. |
 | Medium | [tests/pyathena/polars/test_result_set.py:259][polars-reader] | A generator is constructed in the parameter definition. Repeating the case can reuse a closed reader, making the post-close empty result a vacuous assertion. | Parameterize the reader kind and construct a fresh DataFrame or generator during each test invocation. Keep both case IDs. |
 | Low | [tests/pyathena/pandas/test_result_set.py:79][filesystem-identities] | Module-level mocks are used only as filesystem identities while `read_parquet` is patched. They introduce mutable mock state without asserting any mock behavior. | Use distinct sentinels while preserving the identity and option-precedence assertions. |
 | Low | [tests/pyathena/pandas/test_result_set.py:439][unused-dtypes] | The expected CSV parse contributes only a column-name comparison whose expected name is already literal. | Assert the explicit column name and preserved `007` value directly. |
@@ -58,7 +58,9 @@ The priorities describe coverage and maintenance impact, rather than product-def
 
 The all-types expectation shares a typed literal frame across cases.
 Its time-only field still uses pandas' datetime conversion to supply today's date, as the existing input requires.
-It does not parse a reference CSV or reproduce PyAthena's CSV conversion loop.
+The literal frame does not parse a reference CSV or reproduce PyAthena's CSV conversion loop.
+Separate library comparisons cover numeric, temporal, unmapped, and explicitly categorized columns, including duplicate and headerless column names.
+Mapped string columns retain literal assertions for PyAthena's intentional preservation of string values and missing values.
 
 ## Intentional differences retained
 
@@ -79,16 +81,17 @@ It does not parse a reference CSV or reproduce PyAthena's CSV conversion loop.
 The session hooks in [tests/pyathena/conftest.py:15][session-hooks] prepare real AWS resources even for a selected pure-logic test.
 This existing behavior is documented in the testing guide.
 The organizational changes preserve it; an offline invocation must explicitly exclude those hooks and select self-contained modules.
+The {ref}`offline test instructions <testing-offline>` include the required placeholder environment values and a validated command.
 
 ## Validation boundaries
 
 The initial audit is static source inspection.
-Runtime results belong to the implementation revision and are recorded separately in the pull request's TEST section, with commands, dependency versions, and skipped coverage.
-Compare the affected modules' collected node IDs before and after the changes, then run the self-contained pandas and Polars tests offline and both disk-usage cases against the configured AWS environment.
-Normal CI subsequently exercises the applicable PyAthena suite.
+Runtime results belong to the implementation revision and are recorded separately in [PR #1082's TEST section](https://github.com/pyathena-dev/PyAthena/pull/1082), with commands, dependency versions, and skipped coverage.
+The validation scope comprises comparison of the affected modules' collected node IDs, the self-contained pandas and Polars tests offline, and both disk-usage cases against the configured AWS environment.
+The applicable PyAthena suite runs in CI when the implementation PR is Ready.
 
 The fixes above address the identified actionable inconsistencies without a broad grouping conversion.
-Additional test-correctness findings from implementation review should be evaluated against the same observable-contract and fixture-lifetime criteria.
+Implementation review also retained the pandas compatibility comparisons, documented the offline invocation, and protected the disk-usage tests' original write errors when cleanup encounters an absent prefix.
 
 ## File inventory
 

@@ -4837,7 +4837,8 @@ class TestS3FileSystem:
             assert fs.du(directory, maxdepth=1) == 3
             assert fs.du(first) == 3
         finally:
-            fs.rm(directory, recursive=True)
+            with contextlib.suppress(FileNotFoundError):
+                fs.rm(directory, recursive=True)
 
     def test_glob(self, fs):
         dir_ = f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/filesystem/test_glob"

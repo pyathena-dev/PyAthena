@@ -1792,7 +1792,8 @@ class TestAioS3FileSystem:
             assert await fs._du(directory, maxdepth=1) == 3
             assert await fs._du(first) == 3
         finally:
-            await fs._rm(directory, recursive=True)
+            with contextlib.suppress(FileNotFoundError):
+                await fs._rm(directory, recursive=True)
 
     @pytest.mark.asyncio
     async def test_glob(self, fs):

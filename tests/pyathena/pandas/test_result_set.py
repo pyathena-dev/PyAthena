@@ -476,14 +476,22 @@ def _types_frame(infer_string, parse_time=True):
 @pytest.mark.filterwarnings("ignore:Could not infer format")
 @pytest.mark.parametrize("infer_string", [True, False])
 @pytest.mark.parametrize(
-    ("data", "types", "read_options", "expected_frame"),
+    ("data", "types", "read_options", "expected_frame", "pandas_columns"),
     [
-        pytest.param(_TYPES_CSV, _TYPES, {}, _types_frame, id="types"),
+        pytest.param(
+            _TYPES_CSV,
+            _TYPES,
+            {},
+            _types_frame,
+            [0, 1, 2, 3, 4, 5, 12, 13, 14, 15, 16, 17, 18],
+            id="types",
+        ),
         pytest.param(
             _TYPES_CSV,
             _TYPES,
             {"dtype_overrides": {"ti": "float32", "v": "category", "missing": "int64"}},
             lambda infer: _types_frame(infer).astype({"ti": "float32", "v": "category"}),
+            [0, 1, 2, 3, 4, 5, 7, 12, 13, 14, 15, 16, 17, 18],
             id="dtype",
         ),
         pytest.param(
@@ -491,6 +499,7 @@ def _types_frame(infer_string, parse_time=True):
             _TYPES,
             {"parse_dates": [12, "ts"]},
             lambda infer: _types_frame(infer, parse_time=False),
+            [0, 1, 2, 3, 4, 5, 12, 13, 14, 15, 16, 17, 18],
             id="parse_dates",
         ),
         pytest.param(
@@ -500,6 +509,7 @@ def _types_frame(infer_string, parse_time=True):
             lambda infer: _types_frame(infer).assign(
                 dt=pd.Series(["2024-02-29", None], dtype="string")
             ),
+            [0, 1, 2, 3, 4, 5, 12, 13, 14, 15, 16, 17, 18],
             id="dtype_of_date_column",
         ),
         pytest.param(
@@ -512,6 +522,7 @@ def _types_frame(infer_string, parse_time=True):
                     "d": pd.Series([pd.Timestamp("2024-01-01"), pd.NaT], dtype="datetime64[us]"),
                 }
             ),
+            [0, 1],
             id="dtype_none",
         ),
         pytest.param(
@@ -528,6 +539,7 @@ def _types_frame(infer_string, parse_time=True):
                 ],
                 axis=1,
             ),
+            [0, 1, 2],
             id="duplicate_names",
         ),
         pytest.param(
@@ -540,6 +552,7 @@ def _types_frame(infer_string, parse_time=True):
                     "n": pd.Series([1, None, 3, 4, 5], dtype="Int64"),
                 }
             ),
+            [1],
             id="numeric_looking_strings",
         ),
         pytest.param(
@@ -559,6 +572,7 @@ def _types_frame(infer_string, parse_time=True):
                     "x": pd.Series([1, 2], dtype="Int64"),
                 }
             ),
+            [2],
             id="arrow_string_dtypes",
         ),
         pytest.param(
@@ -568,6 +582,7 @@ def _types_frame(infer_string, parse_time=True):
             lambda infer: pd.DataFrame(
                 {"0": [1, 4], "1": [2, 5], "v": _string_series(["3", float("nan")], infer)}
             ),
+            [0, 1],
             id="tab_separated_numeric_fields",
         ),
         pytest.param(
@@ -575,6 +590,7 @@ def _types_frame(infer_string, parse_time=True):
             {"v": "varchar", "n": "integer"},
             {"dtype": {"v": str, 0: str}},
             lambda infer: pd.DataFrame({"v": _string_series(["007"], infer), "n": [1]}),
+            [1],
             id="dtype_position_key",
         ),
         pytest.param(
@@ -584,6 +600,7 @@ def _types_frame(infer_string, parse_time=True):
             lambda infer: pd.DataFrame(
                 {"v": _string_series(["plain", "2024-01-01", float("nan")], infer)}
             ),
+            [],
             id="unparsed_dates",
         ),
         pytest.param(
@@ -597,6 +614,7 @@ def _types_frame(infer_string, parse_time=True):
                     "col_name": _string_series(["    ", "    "], infer),
                 }
             ),
+            [0, 1, 2],
             id="tab_separated_extra_fields",
         ),
         pytest.param(
@@ -613,19 +631,30 @@ def _types_frame(infer_string, parse_time=True):
                     ),
                 }
             ),
+            [1, 2],
             id="tab_separated",
         ),
     ],
 )
 def test_read_csv_with_pyarrow_matches_pandas(
-    data, types, read_options, expected_frame, infer_string
+    data, types, read_options, expected_frame, pandas_columns, infer_string
 ):
-    """CSV values, dtypes, column names, and index match the case's pandas expectation."""
+    """CSV results match literal expectations and pandas where their contracts agree."""
     with pd.option_context("future.infer_string", infer_string):
         read_csv_kwargs = _pyarrow_read_csv_kwargs(types, **read_options)
         expected = expected_frame(infer_string)
         actual = _read_csv_with_pyarrow(io.BytesIO(data.encode()), read_csv_kwargs)
-    assert_frame_equal(actual, expected, check_exact=True)
+        assert_frame_equal(actual, expected, check_exact=True)
+        # Explicit positions retain duplicate names and headerless-column parity.
+        # Mapped string columns use PyAthena's preservation contract instead.
+        if pandas_columns:
+            reference = pd.read_csv(
+                io.BytesIO(data.encode()),
+                **{**read_csv_kwargs, "dtype": dict(read_csv_kwargs["dtype"])},
+            )
+            assert_frame_equal(
+                actual.iloc[:, pandas_columns], reference.iloc[:, pandas_columns], check_exact=True
+            )
 
 
 @pytest.mark.parametrize("infer_string", [True, False])

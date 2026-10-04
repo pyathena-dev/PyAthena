@@ -128,6 +128,32 @@ uv run --env-file .env pytest -n 1 tests/pyathena/test_cursor.py -v
 ```
 
 A targeted run helps during development but does not replace other coverage required by the affected callers or features.
+
+(testing-offline)=
+
+### Run self-contained tests offline
+
+The pandas and Polars result-set modules have self-contained tests that can run without AWS access when the session hooks are excluded.
+After `just lint`, run:
+
+```bash
+env AWS_DEFAULT_REGION=us-east-1 \
+  AWS_ATHENA_S3_STAGING_DIR=s3://pyathena-offline-placeholder/ \
+  AWS_ATHENA_WORKGROUP=offline \
+  AWS_ATHENA_SPARK_WORKGROUP=offline \
+  AWS_EC2_METADATA_DISABLED=true \
+  uv run pytest --noconftest -p no:rerunfailures -q \
+  tests/pyathena/pandas/test_result_set.py \
+  tests/pyathena/polars/test_result_set.py
+```
+
+The four placeholder AWS configuration values satisfy `tests/__init__.py`, which pytest still imports with `--noconftest`.
+Disabling EC2 metadata prevents implicit credential lookup through that service.
+`--noconftest` excludes the AWS session hooks and fixtures; disabling the rerun plugin also avoids its local socket setup in restricted environments.
+Use this invocation only for self-contained modules; integration tests need their normal fixtures and a real AWS environment.
+
+### SQLAlchemy suites
+
 The SQLAlchemy compliance suites under `tests/sqlalchemy/` run with different configurations: use `sqla` for synchronous dialects and `sqla-async` for native asyncio dialects.
 They do not run PyAthena's own dialect regression tests under `tests/pyathena/sqlalchemy/` and `tests/pyathena/aio/sqlalchemy/`.
 Run the relevant PyAthena tests too, either through `just test pyathena` or a focused selection during development:
