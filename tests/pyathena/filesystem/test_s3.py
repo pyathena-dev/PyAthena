@@ -35,7 +35,7 @@ from fsspec.implementations.memory import MemoryFileSystem
 import pyathena
 from pyathena.filesystem import register_s3_filesystem
 from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
-from pyathena.filesystem.s3_core import S3Core
+from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch
 from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import S3Object, S3ObjectType, S3StorageClass
@@ -514,6 +514,16 @@ class TestS3FileSystem:
         fs._call.side_effect = [FileNotFoundError("bucket/a/c.txt"), {}]
         assert not fs.exists("s3://bucket/a/c.txt")
 
+    @pytest.mark.parametrize("name", ["bucket", "key", "version_id"])
+    def test_rm_file_path_kwargs(self, name):
+        # The path gives these; rm_file() must not delete another version
+        # than the one asked for.
+        fs = self._make_fs()
+
+        with pytest.raises(TypeError, match=f"multiple values for keyword argument '{name}'"):
+            fs.rm_file("s3://bucket/a", **{name: "v1"})
+        fs._call.assert_not_called()
+
     @staticmethod
     def _sent_delete_objects(fs):
         return sorted(
@@ -631,11 +641,11 @@ class TestS3FileSystem:
         # raised KeyError when both threads had read the entry.
         fs = self._make_fs()
         fs._call.return_value = {}
-        fs.DELETE_OBJECTS_MAX_KEYS = 1
         fs.dircache = self._barrier_dircache("bucket/dir")
         fs.dircache["bucket/dir"] = []
 
-        fs.rm(["s3://bucket/dir/a", "s3://bucket/dir/b"])
+        with mock.patch.object(S3DeleteBatch, "MAX_KEYS", 1):
+            fs.rm(["s3://bucket/dir/a", "s3://bucket/dir/b"])
         assert fs._call.call_count == 2
         assert "bucket/dir" not in fs.dircache._cache
 
@@ -4864,7 +4874,7 @@ class TestS3FileSystem:
         fs.pipe_file(path, b"foo")
         checksum = fs.checksum(path)
         fs.ls(path)  # caching
-        fs._delete_object(bucket, key)
+        fs.core.delete_object(S3Path(bucket, key))
         assert checksum == fs.checksum(path)
         with pytest.raises(FileNotFoundError):
             fs.checksum(path, refresh=True)

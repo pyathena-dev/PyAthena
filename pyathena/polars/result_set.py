@@ -9,9 +9,11 @@
 
 from __future__ import annotations
 
+import csv
 import logging
 from collections import abc
 from collections.abc import Callable, Iterator
+from io import BytesIO, StringIO
 from multiprocessing import cpu_count
 from typing import (
     TYPE_CHECKING,
@@ -272,27 +274,30 @@ class AthenaPolarsResultSet(AthenaResultSet):
         if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
             if self._chunksize is None:
                 self._df = self._as_polars()
-                self._df_converters = self.converters
+                self._df_converters = self._get_converters(self._get_frame_column_names())
             else:
                 self._df_iter = self._create_dataframe_iterator()
         elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
             self._df = self._as_polars_from_api()
             # GetQueryResults values are already converted, except json and time with
             # time zone values kept as text.
-            self._df_converters = self._text_value_converters(self.converters)
+            column_names = self._get_frame_column_names()
+            self._df_converters = self._text_value_converters(
+                self._get_converters(column_names), column_names
+            )
         else:
             self._df = pl.DataFrame()
         if self._df is not None:
             # A clone keeps assignments to the DataFrame from as_polars()
             # out of the rows that the fetch methods return.
             self._df_iter = PolarsDataFrameIterator(
-                self._df.clone(), self._df_converters, self._get_column_names()
+                self._df.clone(), self._df_converters, self._get_frame_column_names()
             )
 
         # Cache column names for efficient access in fetchone()
         # Must be after _as_polars() and _create_dataframe_iterator(), which update
         # _metadata for unload
-        self._column_names_cache: list[str] = self._get_column_names()
+        self._column_names_cache: list[str] = self._get_frame_column_names()
         self._iterrows = self._df_iter.iterrows()
 
     def _storage_options(self, default: Callable[[], dict[str, Any]]) -> Any:
@@ -377,11 +382,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
     def dtypes(self) -> dict[str, Any]:
         """Get Polars-compatible data types for result columns."""
         description = self.description if self.description else []
-        return {
-            d[0]: dtype
-            for d in description
-            if (dtype := self._converter.get_dtype(d[1], d[4], d[5])) is not None
-        }
+        return self._get_dtypes([d[0] for d in description])
 
     @property
     def converters(self) -> dict[str, Callable[[str | None], Any | None]]:
@@ -391,16 +392,79 @@ class AthenaPolarsResultSet(AthenaResultSet):
             Dictionary mapping column names to their converter functions.
         """
         description = self.description if self.description else []
-        return {d[0]: self._converter.get(d[1]) for d in description}
+        return self._get_converters([d[0] for d in description])
+
+    @property
+    def _csv_dtypes(self) -> dict[str, Any]:
+        """The Polars data types of the result columns, keyed by the header of a CSV file."""
+        return self._get_dtypes(self._get_column_names())
+
+    def _get_dtypes(self, column_names: list[str]) -> dict[str, Any]:
+        """Get the Polars data types of the result columns.
+
+        Args:
+            column_names: The names of the result columns, in column order.
+
+        Returns:
+            The data types keyed by the given names.
+        """
+        description = self.description if self.description else []
+        return {
+            name: dtype
+            for name, d in zip(column_names, description, strict=True)
+            if (dtype := self._converter.get_dtype(d[1], d[4], d[5])) is not None
+        }
+
+    def _get_converters(
+        self, column_names: list[str]
+    ) -> dict[str, Callable[[str | None], Any | None]]:
+        """Get the conversion functions of the result columns.
+
+        Args:
+            column_names: The names of the result columns, in column order.
+
+        Returns:
+            The conversion functions keyed by the given names.
+        """
+        description = self.description if self.description else []
+        return {
+            name: self._converter.get(d[1])
+            for name, d in zip(column_names, description, strict=True)
+        }
 
     def _get_column_names(self) -> list[str]:
-        """Get column names from description.
+        """Get the names of the result columns in a DataFrame.
+
+        Columns with the same name are renamed as Polars renames them when it reads
+        the header of a CSV file, such as ``x`` and ``x_duplicated_0``.
 
         Returns:
             List of column names.
         """
+        import polars as pl
+
         description = self.description if self.description else []
-        return [d[0] for d in description]
+        names = [d[0] for d in description]
+        if len(set(names)) == len(names):
+            return names
+        header = StringIO()
+        csv.writer(header, quoting=csv.QUOTE_ALL).writerow(names)
+        return pl.read_csv(BytesIO(header.getvalue().encode()), n_rows=0).columns
+
+    def _get_frame_column_names(self) -> list[str]:
+        """Get the names of the result columns in the DataFrames that the result set reads.
+
+        The ``new_columns`` given to ``execute()`` rename the columns of a CSV result
+        file by position.
+
+        Returns:
+            List of column names.
+        """
+        names = self._get_column_names()
+        new_columns = self._kwargs.get("new_columns")
+        if not new_columns or not self.output_location or self.is_unload:
+            return names
+        return [*new_columns[: len(names)], *names[len(new_columns) :]]
 
     def _create_dataframe_iterator(self) -> PolarsDataFrameIterator:
         """Create a DataFrame iterator that reads the result file in chunks.
@@ -420,7 +484,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
         else:
             self._metadata = ()
             reader = iter(())
-        return PolarsDataFrameIterator(reader, self.converters, self._get_column_names())
+        column_names = self._get_frame_column_names()
+        return PolarsDataFrameIterator(reader, self._get_converters(column_names), column_names)
 
     @override
     def fetchone(
@@ -494,19 +559,20 @@ class AthenaPolarsResultSet(AthenaResultSet):
             raise ProgrammingError("output_location is not available.")
 
         separator, has_header, new_columns = self._get_csv_params()
+        read_kwargs = self._read_kwargs(
+            lambda: self._csv_storage_options,
+            separator=separator,
+            has_header=has_header,
+            schema_overrides=self._csv_dtypes,
+        )
+        if "schema_overrides" not in self._kwargs:
+            # Renamed after reading, so that Polars matches the types to the header.
+            read_kwargs.pop("new_columns", None)
 
         try:
-            df = pl.read_csv(
-                self.output_location,
-                **self._read_kwargs(
-                    lambda: self._csv_storage_options,
-                    separator=separator,
-                    has_header=has_header,
-                    schema_overrides=self.dtypes,
-                ),
-            )
+            df = pl.read_csv(self.output_location, **read_kwargs)
             if new_columns:
-                df.columns = new_columns
+                df.columns = [*new_columns, *df.columns[len(new_columns) :]]
             return df
         except Exception as e:
             _logger.exception(f"Failed to read {self.output_location}.")
@@ -591,9 +657,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
         rows = self._fetch_all_rows(converter or _text_value_converter())
         if not rows:
             return pl.DataFrame()
-        description = self.description if self.description else []
-        columns = [d[0] for d in description]
-        return pl.DataFrame(self._rows_to_columnar(rows, columns))
+        columns = [list(column) for column in zip(*rows, strict=True)]
+        return pl.DataFrame(dict(zip(self._get_column_names(), columns, strict=True)))
 
     def as_polars(self) -> pl.DataFrame:
         """Return query results as a Polars DataFrame.
@@ -654,16 +719,22 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """Get CSV parsing parameters based on file type.
 
         Returns:
-            Tuple of (separator, has_header, new_columns).
+            Tuple of (separator, has_header, new_columns). ``new_columns`` are the
+            names of the first columns, which the readers set after reading as Polars
+            sets the ``new_columns`` given to ``execute()``. With ``schema_overrides``
+            given to ``execute()``, which replace the result set's types, Polars
+            renames the columns of a CSV file itself.
         """
         if self.output_location and self.output_location.endswith(".txt"):
             separator = "\t"
             has_header = False
-            new_columns: list[str] | None = self._get_column_names()
+            new_columns: list[str] | None = self._get_frame_column_names()
         else:
             separator = ","
             has_header = True
-            new_columns = None
+            new_columns = (
+                None if "schema_overrides" in self._kwargs else self._kwargs.get("new_columns")
+            )
         return separator, has_header, new_columns
 
     def _iter_csv_chunks(self) -> Iterator[pl.DataFrame]:
@@ -685,22 +756,23 @@ class AthenaPolarsResultSet(AthenaResultSet):
             raise ProgrammingError("output_location is not available.")
 
         separator, has_header, new_columns = self._get_csv_params()
+        # scan_csv uses Rust's native object_store (like scan_parquet),
+        # not fsspec, so we use the same storage options as Parquet
+        read_kwargs = self._read_kwargs(
+            lambda: self._parquet_storage_options,
+            separator=separator,
+            has_header=has_header,
+            schema_overrides=self._csv_dtypes,
+        )
+        if "schema_overrides" not in self._kwargs:
+            # Renamed after reading, so that Polars matches the types to the header.
+            read_kwargs.pop("new_columns", None)
 
         try:
-            # scan_csv uses Rust's native object_store (like scan_parquet),
-            # not fsspec, so we use the same storage options as Parquet
-            lazy_df = pl.scan_csv(
-                self.output_location,
-                **self._read_kwargs(
-                    lambda: self._parquet_storage_options,
-                    separator=separator,
-                    has_header=has_header,
-                    schema_overrides=self.dtypes,
-                ),
-            )
+            lazy_df = pl.scan_csv(self.output_location, **read_kwargs)
             for batch in lazy_df.collect_batches(chunk_size=self._chunksize):
                 if new_columns:
-                    batch.columns = new_columns
+                    batch.columns = [*new_columns, *batch.columns[len(new_columns) :]]
                 yield batch
         except Exception as e:
             _logger.exception(f"Failed to read {self.output_location}.")
@@ -763,7 +835,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
             ...     process(df)  # Single DataFrame with all data
         """
         if self._df is not None:
-            return PolarsDataFrameIterator(self._df, self._df_converters, self._get_column_names())
+            return PolarsDataFrameIterator(
+                self._df, self._df_converters, self._get_frame_column_names()
+            )
         return self._df_iter
 
     @override

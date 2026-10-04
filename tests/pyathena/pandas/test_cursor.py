@@ -269,6 +269,30 @@ class TestPandasCursor:
             assert pandas_cursor.result_set._csv_stream.closed
 
     @pytest.mark.parametrize(
+        "pandas_cursor",
+        [{"endpoint_url": f"https://athena.{ENV.region_name}.amazonaws.com"}],
+        indirect=True,
+    )
+    def test_athena_endpoint_url(self, pandas_cursor):
+        # GH-576: the S3 requests were sent to Athena's endpoint_url.
+        pandas_cursor.execute("SELECT * FROM one_row")
+        assert pandas_cursor.fetchall() == [(1,)]
+
+    def test_result_sets_share_s3_client(self, pandas_cursor):
+        # GH-1011: each result set and its filesystem built their own S3 client,
+        # so every query opened new connections to S3.
+        conn = pandas_cursor.connection
+        session_client = conn.session.client
+        file_systems = []
+        with patch.object(conn.session, "client", side_effect=session_client) as client:
+            for _ in range(2):
+                pandas_cursor.execute("SELECT * FROM one_row")
+                assert pandas_cursor.fetchall() == [(1,)]
+                file_systems.append(pandas_cursor.result_set._fs)
+        assert [c.args for c in client.call_args_list] == [("s3",)]
+        assert all(fs._client is conn.s3_client for fs in file_systems)
+
+    @pytest.mark.parametrize(
         ("query", "expected", "binary"),
         [
             ("SELECT * FROM one_row", [(1,)], False),
@@ -1015,6 +1039,8 @@ class TestPandasCursor:
             result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)
             result_set._chunksize = None  # Default values
             result_set._quoting = 1
+            result_set._metadata = None
+            result_set._kwargs = {}
 
             # Test C engine specification
             result_set._engine = "c"
@@ -1036,6 +1062,34 @@ class TestPandasCursor:
             ):
                 engine = result_set._get_csv_engine()
                 assert engine == "pyarrow"
+
+            # Test PyArrow with column names that repeat, which it does not rename
+            with (
+                patch.object(result_set, "_get_available_engine", return_value="pyarrow"),
+                patch.object(
+                    type(result_set), "converters", new_callable=PropertyMock, return_value={}
+                ),
+                patch.object(
+                    type(result_set),
+                    "description",
+                    new_callable=PropertyMock,
+                    return_value=[("x", "integer"), ("x", "integer")],
+                ),
+            ):
+                engine = result_set._get_csv_engine()
+                assert engine == "c"
+
+            # Test PyArrow with read options that rename the columns
+            result_set._kwargs = {"names": ["b", "a"]}
+            with (
+                patch.object(result_set, "_get_available_engine", return_value="pyarrow"),
+                patch.object(
+                    type(result_set), "converters", new_callable=PropertyMock, return_value={}
+                ),
+            ):
+                engine = result_set._get_csv_engine()
+                assert engine == "c"
+            result_set._kwargs = {}
 
             # Test PyArrow with incompatible chunksize (via parameter)
             with (
@@ -1721,6 +1775,104 @@ class TestPandasCursor:
 
         pandas_cursor.execute(CONVERTED_VALUES_QUERY)
         assert pandas_cursor.fetchall() == [CONVERTED_VALUES_ROW]
+
+    @pytest.mark.parametrize(
+        "pandas_cursor",
+        [
+            pytest.param({}, id="default"),
+            pytest.param(
+                {"work_group": ENV.managed_work_group, "s3_staging_dir": ""},
+                id="managed",
+                marks=pytest.mark.skipif(
+                    not ENV.managed_work_group,
+                    reason="AWS_ATHENA_MANAGED_WORKGROUP not set",
+                ),
+            ),
+        ],
+        indirect=["pandas_cursor"],
+    )
+    def test_duplicate_column_names(self, pandas_cursor):
+        pandas_cursor.execute(
+            "SELECT 1 AS x, 'a' AS x, CAST('01:02:03' AS TIME) AS x, 'b' AS y, "
+            "json_parse('[1]') AS j, json_parse('[2]') AS j, CAST('12:34:56' AS TIME) AS t, 2 AS t"
+        )
+        assert pandas_cursor.fetchall() == [
+            (
+                1,
+                "a",
+                datetime(2017, 1, 1, 1, 2, 3).time(),
+                "b",
+                [1],
+                [2],
+                datetime(2017, 1, 1, 12, 34, 56).time(),
+                2,
+            )
+        ]
+        assert pandas_cursor.as_pandas().columns.tolist() == [
+            "x",
+            "x.1",
+            "x.2",
+            "y",
+            "j",
+            "j.1",
+            "t",
+            "t.1",
+        ]
+
+    @pytest.mark.parametrize("engine", ["c", "python"])
+    def test_duplicate_column_names_with_newline(self, pandas_cursor, engine):
+        """Columns with the same name keep their own types, with a newline in the name."""
+        pandas_cursor.execute(
+            'SELECT 1 AS "a\nb", CAST(\'01:02:03\' AS TIME) AS "a\nb", '
+            "INTERVAL '2' DAY AS \"a\nb\"",
+            engine=engine,
+        )
+        assert pandas_cursor.fetchall() == [
+            (1, datetime(2017, 1, 1, 1, 2, 3).time(), "2 00:00:00.000")
+        ]
+        assert pandas_cursor.as_pandas().columns.tolist() == ["a\nb", "a\nb.1", "a\nb.2"]
+
+    @pytest.mark.parametrize(
+        ("query", "execute_kwargs", "expected_rows", "expected_columns"),
+        [
+            (
+                'SELECT CAST(\'01:02:03\' AS TIME) AS "a\\b", 1 AS "a\\b"',
+                {"engine": "python", "escapechar": "\\"},
+                [(datetime(2017, 1, 1, 1, 2, 3).time(), 1)],
+                ["ab", "ab.1"],
+            ),
+            (
+                "SELECT 1 AS x, 2 AS x WHERE false",
+                {"engine": "python", "sep": None},
+                [],
+                ["x", "x.1"],
+            ),
+        ],
+        ids=["escapechar", "detected_delimiter"],
+    )
+    def test_duplicate_column_names_header_options(
+        self, pandas_cursor, query, execute_kwargs, expected_rows, expected_columns
+    ):
+        """Options that change how pandas reads the header still apply to the column labels."""
+        pandas_cursor.execute(query, **execute_kwargs)
+        assert pandas_cursor.fetchall() == expected_rows
+        assert pandas_cursor.as_pandas().columns.tolist() == expected_columns
+
+    @pytest.mark.parametrize(
+        ("execute_kwargs", "expected_row", "expected_columns"),
+        [
+            ({"names": ["a", "b", "x.1"]}, (1, 2, "c"), ["a", "b", "x.1"]),
+            ({"usecols": [1, 2]}, (2, "c"), ["x.1", "y"]),
+            ({"usecols": ["x.1", "y"]}, (2, "c"), ["x.1", "y"]),
+        ],
+    )
+    def test_duplicate_column_names_read_options(
+        self, pandas_cursor, execute_kwargs, expected_row, expected_columns
+    ):
+        """The column types follow the columns that the read options rename or select."""
+        pandas_cursor.execute("SELECT 1 AS x, 2 AS x, 'c' AS y", **execute_kwargs)
+        assert pandas_cursor.fetchall() == [expected_row]
+        assert pandas_cursor.as_pandas().columns.tolist() == expected_columns
 
     @pytest.mark.parametrize(
         "execute_kwargs",

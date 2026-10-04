@@ -111,6 +111,14 @@ def _block_start(cursor, response=None):
 
 
 class TestCursor:
+    def test_builds_no_s3_client(self, cursor):
+        # GH-1011: the result set built an S3 client it never used.
+        session = cursor.connection.session
+        with patch.object(session, "client", side_effect=session.client) as client:
+            cursor.execute("SELECT * FROM one_row")
+            assert cursor.fetchall() == [(1,)]
+        client.assert_not_called()
+
     def test_fetchone(self, cursor):
         cursor.execute("SELECT * FROM one_row")
         assert cursor.rowcount == -1

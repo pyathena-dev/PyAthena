@@ -463,6 +463,21 @@ def test_to_sql_with_index(cursor):
     ]
 
 
+@pytest.mark.parametrize(
+    "cursor",
+    [{"endpoint_url": f"https://athena.{ENV.region_name}.amazonaws.com"}],
+    indirect=True,
+)
+def test_to_sql_athena_endpoint_url(cursor):
+    # GH-576: the uploads were sent to Athena's endpoint_url.
+    df = pd.DataFrame({"col_int": np.int32([1])})
+    table_name = f"""to_sql_{str(uuid.uuid4()).replace("-", "")}"""
+    location = f"{ENV.s3_staging_dir}{ENV.schema}/{table_name}/"
+    to_sql(df, table_name, cursor._connection, location, schema=ENV.schema, if_exists="fail")
+    cursor.execute(f"SELECT * FROM {table_name}")
+    assert cursor.fetchall() == [(1,)]
+
+
 def test_to_sql_with_partitions(cursor):
     df = pd.DataFrame(
         {

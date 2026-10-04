@@ -12,7 +12,7 @@ from typing import (
 
 from pyathena import OperationalError
 from pyathena.arrow.util import to_column_info
-from pyathena.converter import Converter, _text_value_converter, _to_default
+from pyathena.converter import _TEXT_VALUE_TYPES, Converter, _text_value_converter, _to_default
 from pyathena.error import ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet
@@ -254,23 +254,23 @@ class AthenaArrowResultSet(AthenaResultSet):
         except StopIteration:
             return
         else:
-            dict_rows = rows.to_pydict()
-            converters = (
-                self.converters
-                if self._convert_rows
-                else self._text_value_converters(self.converters)
-            )
-            if converters:
-                column_names = dict_rows.keys()
+            # Read the columns and their converters by position; to_pydict() and the
+            # converters property keep one column per name.
+            columns = [column.to_pylist() for column in rows.columns]
+            description = self.description if self.description else []
+            converters = [
+                self._converter.get(d[1])
+                if self._convert_rows or d[1] in _TEXT_VALUE_TYPES
+                else _to_default
+                for d in description
+            ]
+            if any(convert is not _to_default for convert in converters):
                 processed_rows = [
-                    tuple(
-                        converters.get(k, _to_default)(v)
-                        for k, v in zip(column_names, row, strict=False)
-                    )
-                    for row in zip(*dict_rows.values(), strict=False)
+                    tuple(convert(v) for convert, v in zip(converters, row, strict=False))
+                    for row in zip(*columns, strict=False)
                 ]
             else:
-                processed_rows = list(zip(*dict_rows.values(), strict=False))
+                processed_rows = list(zip(*columns, strict=False))
             self._rows.extend(processed_rows)
 
     @override
@@ -302,10 +302,24 @@ class AthenaArrowResultSet(AthenaResultSet):
         ):
             return pa.Table.from_pydict({})
         length = self._get_content_length()
-        binary_columns = {d[0] for d in self.description or [] if d[1] == "varbinary"}
+        description = self.description if self.description else []
+        names = [d[0] for d in description]
+        # pyarrow types every column with a name by its column_types entry, so columns
+        # with the same name are read under their positions and get their names back
+        # after reading.
+        has_duplicate_names = len(set(names)) != len(names)
+        if has_duplicate_names:
+            column_names = [str(i) for i in range(len(names))]
+            column_types = {
+                str(i): dtype
+                for i, d in enumerate(description)
+                if (dtype := self._converter.get_dtype(d[1], d[4], d[5])) is not None
+            }
+        else:
+            column_names = names
+            column_types = self.column_types
+        binary_columns = {i for i, d in enumerate(description) if d[1] == "varbinary"}
         if length and self.output_location.endswith(".txt"):
-            description = self.description if self.description else []
-            column_names = [d[0] for d in description]
             read_opts = csv.ReadOptions(
                 skip_rows=0,
                 column_names=column_names,
@@ -320,6 +334,11 @@ class AthenaArrowResultSet(AthenaResultSet):
             )
         elif length and self.output_location.endswith(".csv"):
             read_opts = csv.ReadOptions(skip_rows=0, block_size=self._block_size, use_threads=True)
+            if has_duplicate_names:
+                read_opts.column_names = column_names
+                # Skips the header as a parsed row; skip_rows would split a quoted name
+                # that contains a newline.
+                read_opts.skip_rows_after_names = 1
             parse_opts = csv.ParseOptions(
                 delimiter=",",
                 quote_char='"',
@@ -344,12 +363,14 @@ class AthenaArrowResultSet(AthenaResultSet):
                     strings_can_be_null=bool(binary_columns),
                     quoted_strings_can_be_null=False,
                     timestamp_parsers=self.timestamp_parsers,
-                    column_types=self.column_types,
+                    column_types=column_types,
                 ),
             )
+            if has_duplicate_names:
+                table = table.rename_columns(names)
             if binary_columns:
                 for index, field in enumerate(table.schema):
-                    if field.name not in binary_columns and (
+                    if index not in binary_columns and (
                         pa.types.is_string(field.type) or pa.types.is_binary(field.type)
                     ):
                         # Preserve the existing CSV behavior for non-binary Athena columns.
@@ -403,8 +424,8 @@ class AthenaArrowResultSet(AthenaResultSet):
         if not rows:
             return pa.Table.from_pydict({})
         description = self.description if self.description else []
-        columns = [d[0] for d in description]
-        return pa.table(self._rows_to_columnar(rows, columns))
+        columns = [list(column) for column in zip(*rows, strict=True)]
+        return pa.table(columns, names=[d[0] for d in description])
 
     def as_arrow(self) -> Table:
         """Return the query results as an Apache Arrow Table.
@@ -447,4 +468,4 @@ class AthenaArrowResultSet(AthenaResultSet):
 
         super().close()
         self._table = pa.Table.from_pydict({})
-        self._batches = []
+        self._batches = iter([])

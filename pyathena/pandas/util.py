@@ -259,7 +259,7 @@ def to_sql(
 
     bucket_name, key_prefix = parse_output_location(location)
     bucket = conn.session.resource(
-        "s3", region_name=conn.region_name, **conn._client_kwargs
+        "s3", region_name=conn.region_name, **conn._s3_client_kwargs
     ).Bucket(bucket_name)
     cursor = conn.cursor()
 
@@ -298,7 +298,7 @@ def to_sql(
         futures: list[concurrent.futures.Future[Any]] = []
         session_kwargs = deepcopy(conn._session_kwargs)
         session_kwargs.update({"profile_name": conn.profile_name})
-        client_kwargs = deepcopy(conn._client_kwargs)
+        client_kwargs = deepcopy(conn._s3_client_kwargs)
         client_kwargs.update({"region_name": conn.region_name})
         partition_prefixes = []
         if partitions:

@@ -105,14 +105,9 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         self._calculation_id: str | None = None
         self._calculation_execution: AthenaCalculationExecution | None = None
 
-        # Created before the session so that a local failure cannot leave
-        # a newly started session behind.
-        self._client = self.connection.session.client(
-            "s3",
-            region_name=self.connection.region_name,
-            config=self.connection.config,
-            **self.connection._client_kwargs,
-        )
+        # Taken before the session so that a failure to build the client
+        # cannot leave a newly started session behind.
+        self._client = self.connection.s3_client
 
         if session_id:
             if self._exists_session(session_id):

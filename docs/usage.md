@@ -750,6 +750,34 @@ The connection builds one Glue client on first use from its session, region, and
 Pass `glue_metadata_fallback=False` to `connect()` to turn the fallback off.
 The Glue request does not carry the connection's workgroup; turn the fallback off where access depends on the workgroup, such as a workgroup enabled for IAM Identity Center.
 
+## S3 client
+
+A connection builds one S3 client on first use and shares it with the result sets of its cursors, the `S3FileSystem` instances created with `connection=`, and the Spark cursors.
+The result sets of `Cursor`, `DictCursor`, and their asynchronous versions do not use it, so these cursors build no S3 client.
+`ArrowCursor`, and `PolarsCursor` for Parquet (`unload=True`) and chunked results, read the query results through their libraries' own S3 clients and use the shared client for their other S3 requests.
+
+The S3 client is built from the connection's session, region, and client arguments, with the botocore `config` merged with `s3_config`.
+It does not use the connection's `endpoint_url` and `api_version`, which are Athena's, and neither do the S3 requests of `pyathena.pandas.util.to_sql()`.
+To send S3 requests to another endpoint, use botocore's [service-specific endpoint settings](https://docs.aws.amazon.com/sdkref/latest/guide/feature-ss-endpoints.html), such as the `AWS_ENDPOINT_URL_S3` environment variable.
+Options set in `s3_config` take precedence over those in `config` for the S3 client only:
+
+```python
+from botocore.config import Config
+from pyathena import connect
+
+conn = connect(
+    s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+    region_name="us-west-2",
+    s3_config=Config(max_pool_connections=50),
+)
+```
+
+The client keeps up to `max_pool_connections` connections per host for reuse, 10 by default.
+Concurrent requests beyond that open more connections, which urllib3 closes after use, logging a "Connection pool is full" warning.
+
+`Connection.close()` closes the network connections of the connection's Athena client, and of its Glue and S3 clients if they were built.
+A client used after that opens new connections.
+
 ## Environment variables
 
 Support [Boto3 environment variables](https://boto3.amazonaws.com/v1/documentation/api/latest/guide/configuration.html#using-environment-variables).

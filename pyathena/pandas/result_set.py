@@ -469,6 +469,32 @@ class AthenaPandasResultSet(AthenaResultSet):
     ]
     # The pandas.read_csv() options given to execute() that _read_csv_with_pyarrow() reads.
     _PYARROW_READ_CSV_OPTIONS: ClassVar[frozenset[str]] = frozenset({"dtype", "parse_dates"})
+    # The pandas.read_csv() options given to execute() that do not change how pandas reads
+    # the header row, with which _read_csv_header_as_labels() replaces the header.
+    _LABELED_HEADER_READ_CSV_OPTIONS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "cache_dates",
+            "converters",
+            "date_format",
+            "dayfirst",
+            "decimal",
+            "dtype_backend",
+            "false_values",
+            "float_precision",
+            "index_col",
+            "keep_default_na",
+            "low_memory",
+            "na_filter",
+            "na_values",
+            "nrows",
+            "on_bad_lines",
+            "parse_dates",
+            "skipfooter",
+            "thousands",
+            "true_values",
+            "usecols",
+        }
+    )
 
     def __init__(
         self,
@@ -551,9 +577,10 @@ class AthenaPandasResultSet(AthenaResultSet):
         # The converters that pandas.read_csv() applies, keyed by column name.
         self._csv_converters: dict[Any, Callable[[str | None], Any]] = {}
 
-        # Cache time column names for efficient _trunc_date processing
+        # Cache time column names for efficient _trunc_date processing. _read_csv()
+        # replaces them with the labels of the columns that it reads.
         description = self.description if self.description else []
-        self._time_columns: list[str] = [d[0] for d in description if d[1] == "time"]
+        self._time_columns: list[Any] = [d[0] for d in description if d[1] == "time"]
 
         import pandas as pd
 
@@ -615,6 +642,12 @@ class AthenaPandasResultSet(AthenaResultSet):
                 effective_chunksize is None
                 and self._quoting == 1
                 and not self.converters
+                # The pyarrow engine does not rename columns with the same name, and
+                # the column labels cannot be resolved for it (see
+                # _get_csv_column_labels()).
+                and not self._needs_csv_column_name_resolution(
+                    [d[0] for d in self.description or []]
+                )
                 and (file_size_bytes is None or file_size_bytes >= self.PYARROW_MIN_FILE_SIZE_BYTES)
             )
             if is_compatible:
@@ -728,6 +761,23 @@ class AthenaPandasResultSet(AthenaResultSet):
         description = self.description if self.description else []
         return [d[0] for d in description if d[1] in self._PARSE_DATES]
 
+    def _get_column_names(self) -> list[Any]:
+        """Get the names of the result columns in the DataFrame.
+
+        Columns with the same name are renamed as pandas renames them when it reads
+        the header of a CSV file, such as ``x`` and ``x.1``.
+
+        Returns:
+            List of column names.
+        """
+        import pandas as pd
+
+        description = self.description if self.description else []
+        names = [d[0] for d in description]
+        if len(set(names)) == len(names):
+            return names
+        return self._resolve_csv_column_names(names, {}, pd.read_csv)[0]
+
     def _finish_csv_frame(self, df: DataFrame) -> DataFrame:
         """Finish a DataFrame read from the CSV result file.
 
@@ -781,8 +831,8 @@ class AthenaPandasResultSet(AthenaResultSet):
             return None
         else:
             self._rownumber = row[0] + 1
-            description = self.description if self.description else []
-            return tuple([row[1][d[0]] for d in description])
+            # By position, so that columns with the same name keep their own values.
+            return tuple(row[1].values())
 
     def _read_csv(self) -> TextFileReader | DataFrame:
         import pandas as pd
@@ -816,11 +866,17 @@ class AthenaPandasResultSet(AthenaResultSet):
 
         csv_engine = self._get_csv_engine(length, effective_chunksize)
         read_csv_kwargs = self._get_csv_read_options(csv_engine, effective_chunksize)
+        labels = self._get_csv_column_labels(csv_engine, read_csv_kwargs)
+        if labels is not None:
+            self._key_csv_columns_by_labels(read_csv_kwargs, labels)
 
         try:
             with ExitStack() as stack:
                 source: str | IOBase = self.output_location
-                binary_columns = self._configure_binary_csv_read(read_csv_kwargs, pd.read_csv)
+                binary_columns = self._configure_binary_csv_read(read_csv_kwargs, labels)
+                if labels is not None:
+                    # After _configure_binary_csv_read(), which checks for the header row.
+                    self._read_csv_header_as_labels(read_csv_kwargs, csv_engine)
                 self._csv_converters = read_csv_kwargs.get("converters") or {}
                 if binary_columns:
                     # Given storage_options, even None, open the file through fsspec
@@ -883,7 +939,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         if self.output_location and self.output_location.endswith(".txt"):
             sep = "\t"
             header = None
-            names = [d[0] for d in self.description or []]
+            names = self._get_column_names()
         else:
             sep = ","
             header = 0
@@ -958,18 +1014,31 @@ class AthenaPandasResultSet(AthenaResultSet):
             )
         return column_names, selected_names
 
-    def _can_preserve_binary_csv_nulls(self, read_csv_kwargs: dict[str, Any]) -> bool:
-        """Whether CSV settings support distinguishing binary NULL from empty values."""
+    def _is_standard_csv_parsing(self, read_csv_kwargs: dict[str, Any]) -> bool:
+        """Whether the options read a CSV result file as Athena writes it.
+
+        Args:
+            read_csv_kwargs: The options for ``pandas.read_csv()``.
+
+        Returns:
+            True if pandas reads the header and quoted fields of the file as written.
+        """
         return not (
-            "varbinary" not in self._converter.mappings
-            or "converters" in self._kwargs
-            or not self.output_location
+            not self.output_location
             or not self.output_location.endswith(".csv")
             or read_csv_kwargs.get("header") != 0
             or read_csv_kwargs.get("skiprows") is not None
             or read_csv_kwargs.get("dialect") is not None
             or read_csv_kwargs.get("quoting") == csv.QUOTE_NONE
             or read_csv_kwargs.get("quotechar", '"') != '"'
+        )
+
+    def _can_preserve_binary_csv_nulls(self, read_csv_kwargs: dict[str, Any]) -> bool:
+        """Whether CSV settings support distinguishing binary NULL from empty values."""
+        return (
+            "varbinary" in self._converter.mappings
+            and "converters" not in self._kwargs
+            and self._is_standard_csv_parsing(read_csv_kwargs)
         )
 
     def _needs_csv_column_name_resolution(self, column_names: list[Any]) -> bool:
@@ -991,38 +1060,133 @@ class AthenaPandasResultSet(AthenaResultSet):
             )
         )
 
+    def _get_csv_column_labels(
+        self, csv_engine: str, read_csv_kwargs: dict[str, Any]
+    ) -> list[Any] | None:
+        """Get the labels that pandas gives the result columns when it reads the CSV file.
+
+        Args:
+            csv_engine: The CSV engine that reads the file.
+            read_csv_kwargs: The options for ``pandas.read_csv()``.
+
+        Returns:
+            The label of each result column in the description order, with None for a
+            column that ``usecols`` leaves out. None if the options do not read the file
+            as Athena writes it, or if the labels do not match the result columns one
+            to one, such as with fewer ``names``.
+        """
+        import pandas as pd
+
+        # The pyarrow engine runs only when no labels need resolving (see
+        # _get_csv_engine()), and does not support reading only the header.
+        if csv_engine == "pyarrow" or not self._is_standard_csv_parsing(read_csv_kwargs):
+            return None
+        column_names = [d[0] for d in self.description or []]
+        if not self._needs_csv_column_name_resolution(column_names):
+            return column_names
+        labels, selected_labels = self._resolve_csv_column_names(
+            column_names, read_csv_kwargs, pd.read_csv
+        )
+        if len(labels) != len(column_names):
+            return None
+        return [label if label in selected_labels else None for label in labels]
+
+    def _key_csv_columns_by_labels(
+        self, read_csv_kwargs: dict[str, Any], labels: list[Any]
+    ) -> None:
+        """Key the column options of ``pandas.read_csv()`` by the labels of the columns.
+
+        Columns with the same name keep their own converters and date parsing, and
+        options that rename or select columns get the types of the columns they
+        read. The ``dtype``, ``converters``, and ``parse_dates`` given to
+        ``execute()`` are kept as they are.
+
+        Args:
+            read_csv_kwargs: The options for ``pandas.read_csv()``, updated in place.
+            labels: The labels from ``_get_csv_column_labels()``.
+        """
+        description = self.description or []
+        columns = [
+            (label, d) for label, d in zip(labels, description, strict=True) if label is not None
+        ]
+        if "dtype" not in self._kwargs:
+            read_csv_kwargs["dtype"] = {
+                label: dtype
+                for label, d in columns
+                if (dtype := self._converter.get_dtype(d[1], d[4], d[5])) is not None
+            }
+        if "converters" not in self._kwargs:
+            read_csv_kwargs["converters"] = {
+                label: self._get_csv_converter(d[1])
+                for label, d in columns
+                if d[1] in self._converter.mappings
+            }
+        if "parse_dates" not in self._kwargs:
+            read_csv_kwargs["parse_dates"] = [
+                label for label, d in columns if d[1] in self._PARSE_DATES
+            ]
+        self._time_columns = [label for label, d in columns if d[1] == "time"]
+
+    def _read_csv_header_as_labels(self, read_csv_kwargs: dict[str, Any], csv_engine: str) -> None:
+        """Read the header of the CSV result file as the labels of columns with the same name.
+
+        pandas gives a column that it renames, such as ``x.1``, the dtype of the first
+        column with the name when it has none of its own. When PyAthena builds the
+        dtypes, the columns are read under their labels, so that each keeps its own type.
+
+        Args:
+            read_csv_kwargs: The options for ``pandas.read_csv()``, updated in place.
+            csv_engine: The CSV engine that reads the file.
+        """
+        import pandas as pd
+
+        names = [d[0] for d in self.description or []]
+        if len(set(names)) == len(names):
+            return
+        if not self._kwargs.keys() <= self._LABELED_HEADER_READ_CSV_OPTIONS:
+            # Other options, such as dtype, names, sep, comment, or encoding, keep the
+            # header row as pandas reads it.
+            return
+        # pandas renames the names in a header row, and copies their dtypes, even with
+        # names given, so the header row is skipped instead.
+        read_csv_kwargs["names"] = self._resolve_csv_column_names(
+            names, read_csv_kwargs, pd.read_csv
+        )[0]
+        read_csv_kwargs["header"] = None
+        if csv_engine == "python":
+            # The python engine skips lines, which a name with a newline spans.
+            header = StringIO(newline="")
+            csv.writer(header, quoting=csv.QUOTE_ALL, lineterminator="").writerow(names)
+            read_csv_kwargs["skiprows"] = len(StringIO(header.getvalue(), newline="").readlines())
+        else:
+            # The C engine skips parsed rows.
+            read_csv_kwargs["skiprows"] = 1
+
     def _configure_binary_csv_read(
-        self, read_csv_kwargs: dict[str, Any], read_csv: Callable[..., DataFrame]
+        self, read_csv_kwargs: dict[str, Any], labels: list[Any] | None
     ) -> set[int]:
-        """Wrap binary converters and return column positions needing NULL preservation."""
-        if not self._can_preserve_binary_csv_nulls(read_csv_kwargs):
+        """Wrap binary converters and return column positions needing NULL preservation.
+
+        Args:
+            read_csv_kwargs: The options for ``pandas.read_csv()``, whose converters
+                are keyed by the column labels.
+            labels: The labels from ``_get_csv_column_labels()``.
+
+        Returns:
+            The positions of the binary columns whose NULL fields the stream preserves.
+        """
+        if labels is None or not self._can_preserve_binary_csv_nulls(read_csv_kwargs):
             return set()
 
         description = self.description or []
-        binary_columns = {i for i, d in enumerate(description) if d[1] == "varbinary"}
-        if not binary_columns:
-            return set()
-
-        column_names = [d[0] for d in description]
-        converters = read_csv_kwargs["converters"]
-        if self._needs_csv_column_name_resolution(column_names):
-            column_names, selected_names = self._resolve_csv_column_names(
-                column_names, read_csv_kwargs, read_csv
-            )
-            if len(column_names) != len(description):
-                return set()
-            converters = {
-                name: self._get_csv_converter(d[1])
-                for name, d in zip(column_names, description, strict=True)
-                if d[1] in self._converter.mappings and name in selected_names
-            }
-            binary_columns = {i for i in binary_columns if column_names[i] in selected_names}
-
+        binary_columns = {
+            i for i, d in enumerate(description) if d[1] == "varbinary" and labels[i] is not None
+        }
         if binary_columns:
+            converters = read_csv_kwargs["converters"]
             for index in binary_columns:
-                name = column_names[index]
-                converters[name] = partial(_convert_binary_csv, converters[name])
-            read_csv_kwargs["converters"] = converters
+                label = labels[index]
+                converters[label] = partial(_convert_binary_csv, converters[label])
         return binary_columns
 
     def _open_binary_csv_stream(
@@ -1119,24 +1283,20 @@ class AthenaPandasResultSet(AthenaResultSet):
         if not rows:
             return pd.DataFrame()
         description = self.description if self.description else []
-        columns = [d[0] for d in description]
-        columnar = self._rows_to_columnar(rows, columns)
+        # Positional, so that columns with the same name keep their own values.
+        columns = [list(column) for column in zip(*rows, strict=True)]
         # Integer columns get the dtype that the CSV result file reads them with,
         # and json columns with NULL stay objects as there, so that NULL does not
         # make their values floats.
-        dtypes: dict[str, Any] = {}
-        for d in description:
+        data: dict[Any, Any] = {}
+        for name, values, d in zip(self._get_column_names(), columns, description, strict=True):
+            dtype = None
             if d[1] in self._INTEGER_TYPES:
-                if (dtype := self._converter.get_dtype(d[1], d[4], d[5])) is not None:
-                    dtypes[d[0]] = dtype
-            elif d[1] == "json" and None in columnar[d[0]]:
-                dtypes[d[0]] = object
-        return pd.DataFrame(
-            {
-                name: values if name not in dtypes else pd.array(values, dtype=dtypes[name])
-                for name, values in columnar.items()
-            }
-        )
+                dtype = self._converter.get_dtype(d[1], d[4], d[5])
+            elif d[1] == "json" and None in values:
+                dtype = object
+            data[name] = values if dtype is None else pd.array(values, dtype=dtype)
+        return pd.DataFrame(data)
 
     def as_pandas(self) -> PandasDataFrameIterator | DataFrame:
         """Return the query results as a DataFrame or an iterator of DataFrame chunks.
