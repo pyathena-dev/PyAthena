@@ -345,7 +345,9 @@ class AioS3FileSystem(AsyncFileSystem):
         Raises:
             ValueError: If a path is a bucket.
         """
-        versioned_paths, unversioned_paths = S3PathPairing.delete_paths(path)
+        versioned_paths, unversioned_paths = await asyncio.to_thread(
+            S3PathPairing.delete_paths, path
+        )
         if not unversioned_paths:
             # _expand_path raises FileNotFoundError for no paths.
             return versioned_paths
@@ -434,11 +436,17 @@ class AioS3FileSystem(AsyncFileSystem):
         pairs = await self._copy_pairs(path1, path2, recursive=recursive, maxdepth=maxdepth)
         candidates = await asyncio.to_thread(S3PathPairing.conflict_candidates, pairs)
         objects = await asyncio.gather(
-            *[asyncio.to_thread(self._sync_fs._head_object, source) for source in candidates]
+            *[asyncio.to_thread(self._sync_fs._head_object, source) for source in candidates],
+            return_exceptions=True,
         )
-        missing = {
-            source for source, object_ in zip(candidates, objects, strict=True) if not object_
-        }
+        missing = set()
+        # Every lookup finishes; the error of the first candidate is raised,
+        # as when the lookups run in order.
+        for source, object_ in zip(candidates, objects, strict=True):
+            if isinstance(object_, BaseException):
+                raise object_
+            if object_ is None:
+                missing.add(source)
         return await asyncio.to_thread(S3PathPairing.move_pairs, pairs, missing=missing)
 
     async def _copy_pairs(
@@ -464,7 +472,7 @@ class AioS3FileSystem(AsyncFileSystem):
             The sources and their destinations.
         """
         if not S3PathPairing.expands(path1, path2):
-            return S3PathPairing.copy_pairs(path1, path2)
+            return await asyncio.to_thread(S3PathPairing.copy_pairs, path1, path2)
         sources = await self._expand_path(path1, recursive=recursive, maxdepth=maxdepth)
         if S3PathPairing.skips_directories(path1, recursive, maxdepth):
             # A path with a trailing slash is a directory without a lookup.

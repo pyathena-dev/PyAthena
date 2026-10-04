@@ -1143,6 +1143,27 @@ class TestAioS3FileSystem:
         assert len(pairs) == 4
         fs._sync_fs._head_object.assert_called_once_with("bucket/d")
 
+    @pytest.mark.asyncio
+    async def test_move_pairs_raises_the_first_lookup_error(self):
+        # The conflict lookups run concurrently, but the error of the first
+        # candidate is raised, as when they run in order.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+
+        def head_object(path):
+            if path == "bucket/d1":
+                time.sleep(0.1)
+                raise PermissionError(path)
+            raise TimeoutError(path)
+
+        fs._sync_fs._head_object = mock.MagicMock(side_effect=head_object)
+
+        with pytest.raises(PermissionError, match="bucket/d1"):
+            await fs._move_pairs(
+                ["s3://bucket/d1", "s3://bucket/d1/x", "s3://bucket/d2", "s3://bucket/d2/x"],
+                ["s3://bucket/o", "s3://bucket/o", "s3://bucket/p", "s3://bucket/p"],
+            )
+        assert fs._sync_fs._head_object.call_count == 2
+
     def test_internal_file_system_not_cached(self):
         # GH-978: the internal S3FileSystem was kept in the fsspec instance
         # cache, so skip_instance_cache=True instances shared it.

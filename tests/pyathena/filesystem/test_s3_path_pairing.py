@@ -173,6 +173,20 @@ class TestS3PathPairing:
         with pytest.raises(ValueError, match="same destination"):
             S3PathPairing.move_pairs(pairs)
 
+    def test_move_pairs_version_of_missing_directory_key(self):
+        # The "null" version of a key without a current object still names an
+        # object, so it writes its destination although the key is missing.
+        pairs = [
+            ("src/d", "dst/out"),
+            ("src/d?versionId=null", "dst/out"),
+            ("src/a", "dst/out"),
+            ("src/d/x", "dst/x"),
+        ]
+
+        assert S3PathPairing.conflict_candidates(pairs) == ["src/d"]
+        with pytest.raises(ValueError, match="same destination"):
+            S3PathPairing.move_pairs(pairs, missing={"src/d"})
+
     def test_delete_paths(self):
         assert S3PathPairing.delete_paths(
             ["s3://bucket/d", "s3://bucket/b?versionId=v1", "s3://bucket/c"]

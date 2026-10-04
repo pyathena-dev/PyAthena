@@ -201,8 +201,12 @@ class S3PathPairing:
         skipped = set(candidates).intersection(
             str(S3Path.parse(path).target) for path in missing or ()
         )
+        # A path with a version always names an object, so it writes its
+        # destination even when the key has no current object.
         writers = Counter(
-            dest for _, _, _, source, dest in named if source != dest and source not in skipped
+            dest
+            for _, _, versioned, source, dest in named
+            if source != dest and (versioned or source not in skipped)
         )
         for dest in writers:
             if writers[dest] > 1:
