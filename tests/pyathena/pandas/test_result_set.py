@@ -181,7 +181,6 @@ def _pyarrow_read_csv_kwargs(types, tab_separated=False, **kwargs):
     ("data", "read_csv_kwargs"),
     [
         (_TYPES_CSV, _pyarrow_read_csv_kwargs(_TYPES)),
-        (_TYPES_CSV, _pyarrow_read_csv_kwargs(_TYPES, na_values=("", "NA"))),
         (
             _TYPES_CSV,
             _pyarrow_read_csv_kwargs(
@@ -196,11 +195,28 @@ def _pyarrow_read_csv_kwargs(types, tab_separated=False, **kwargs):
         ),
         (_TYPES_CSV, _pyarrow_read_csv_kwargs(_TYPES, parse_dates=[12, "ts"])),
         (
+            _TYPES_CSV,
+            _pyarrow_read_csv_kwargs(
+                _TYPES, dtype={**_pyarrow_read_csv_kwargs(_TYPES)["dtype"], "dt": "string"}
+            ),
+        ),
+        (
+            '"x","x","d"\n"1","2","2024-01-01"\n,,\n',
+            _pyarrow_read_csv_kwargs({"x": "integer", "d": "date"}),
+        ),
+        (
             "x\t1\t2024-01-01\n\t\t\ny y\t3\t2024-01-02\n",
             _pyarrow_read_csv_kwargs({"a": "varchar", "b": "bigint", "c": "date"}, True),
         ),
     ],
-    ids=["types", "na_values", "dtype", "parse_dates", "tab_separated"],
+    ids=[
+        "types",
+        "dtype",
+        "parse_dates",
+        "dtype_of_date_column",
+        "duplicate_names",
+        "tab_separated",
+    ],
 )
 def test_read_csv_with_pyarrow_matches_pandas(data, read_csv_kwargs, infer_string):
     # Without values that cross a read block, the result is the one of

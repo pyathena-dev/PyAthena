@@ -297,10 +297,7 @@ class TestPandasCursor:
             # pandas opens and closes the file itself.
             assert pandas_cursor.result_set._csv_stream is None
 
-    @pytest.mark.parametrize(
-        "read_options", [{}, {"storage_options": None}], ids=["filesystem", "storage_options"]
-    )
-    def test_pyarrow_engine_multiline_values_across_blocks(self, pandas_cursor, read_options):
+    def test_pyarrow_engine_multiline_values_across_blocks(self, pandas_cursor):
         # The 2.4 MB result spans several 1 MiB pyarrow read blocks, and its
         # values contain a newline and quotes.
         with patch(
@@ -313,7 +310,6 @@ class TestPandasCursor:
                 FROM UNNEST(sequence(1, 2000)) AS t(i)
                 """,
                 engine="pyarrow",
-                **read_options,
             )
             df = pandas_cursor.as_pandas()
         read_csv_with_pyarrow.assert_called_once()
@@ -987,8 +983,6 @@ class TestPandasCursor:
             result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)
             result_set._chunksize = None  # Default values
             result_set._quoting = 1
-            result_set._keep_default_na = False
-            result_set._kwargs = {}
 
             # Test C engine specification
             result_set._engine = "c"
@@ -1065,37 +1059,37 @@ class TestPandasCursor:
                 assert engine == "c"
 
     @pytest.mark.parametrize(
-        ("keep_default_na", "kwargs", "expected"),
+        ("keep_default_na", "na_values", "kwargs", "expected"),
         [
-            (
-                False,
-                {"dtype": {"a": "str"}, "parse_dates": ["b"], "storage_options": None},
-                "pyarrow",
-            ),
-            (True, {}, "c"),
-            (False, {"usecols": ["a"]}, "c"),
-            (False, {"dtype_backend": "pyarrow"}, "c"),
-            (False, {"dtype": "str"}, "c"),
+            (False, ("",), {}, True),
+            (False, ("",), {"dtype": {"a": "str"}, "parse_dates": ["b"]}, True),
+            (True, ("",), {}, False),
+            (False, ("", "NA"), {}, False),
+            (False, np.array([""]), {}, False),
+            (False, ("",), {"storage_options": None}, False),
+            (False, ("",), {"on_bad_lines": "skip"}, False),
+            (False, ("",), {"dtype": "str"}, False),
         ],
-        ids=["supported_options", "keep_default_na", "usecols", "dtype_backend", "single_dtype"],
+        ids=[
+            "default",
+            "dtype_parse_dates",
+            "keep_default_na",
+            "na_values",
+            "na_values_array",
+            "storage_options",
+            "on_bad_lines",
+            "single_dtype",
+        ],
     )
-    def test_get_csv_engine_pyarrow_read_options(self, keep_default_na, kwargs, expected):
-        # The PyArrow engine reads only the pandas.read_csv() options that
-        # _read_csv_with_pyarrow() handles; other options use the C engine.
+    def test_reads_csv_with_pyarrow(self, keep_default_na, na_values, kwargs, expected):
+        # PyAthena reads the CSV result for the PyArrow engine only with the options
+        # that _read_csv_with_pyarrow() reproduces; pandas reads it otherwise.
         with patch("pyathena.pandas.result_set.AthenaResultSet.__init__"):
             result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)
-            result_set._engine = "pyarrow"
-            result_set._chunksize = None
-            result_set._quoting = 1
             result_set._keep_default_na = keep_default_na
+            result_set._na_values = na_values
             result_set._kwargs = kwargs
-            with (
-                patch.object(result_set, "_get_available_engine", return_value="pyarrow"),
-                patch.object(
-                    type(result_set), "converters", new_callable=PropertyMock, return_value={}
-                ),
-            ):
-                assert result_set._get_csv_engine() == expected
+            assert result_set._reads_csv_with_pyarrow() is expected
 
     @pytest.mark.parametrize(
         ("pandas_cursor", "parquet_engine", "chunksize"),
