@@ -300,6 +300,141 @@ def _pyarrow_read_csv_kwargs(types, tab_separated=False, **kwargs):
         return result_set._get_csv_read_options("pyarrow", None)
 
 
+def _read_csv_result(data, types, engine="c", chunksize=None, **kwargs):
+    """Read an in-memory CSV through the result set and the real pandas parser."""
+    result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)
+    result_set._converter = DefaultPandasTypeConverter()
+    result_set._keep_default_na = False
+    result_set._na_values = ("",)
+    result_set._quoting = 1
+    result_set._engine = engine
+    result_set._chunksize = chunksize
+    result_set._auto_optimize_chunksize = False
+    result_set._kwargs = kwargs
+    result_set._time_columns = []
+    result_set._csv_stream = None
+    result_set._fs = MagicMock()
+    result_set._fs.open.return_value = io.BytesIO(data.encode())
+    description = [(name, type_, None, None, 0, 0, "UNKNOWN") for name, type_ in types.items()]
+    with (
+        patch.object(
+            AthenaPandasResultSet,
+            "description",
+            new_callable=PropertyMock,
+            return_value=description,
+        ),
+        patch.object(
+            AthenaPandasResultSet,
+            "output_location",
+            new_callable=PropertyMock,
+            return_value="s3://bucket/result.csv",
+        ),
+        patch.object(
+            AthenaPandasResultSet,
+            "substatement_type",
+            new_callable=PropertyMock,
+            return_value=None,
+        ),
+        patch.object(AthenaPandasResultSet, "_get_content_length", return_value=len(data)),
+        patch("pandas.read_csv", wraps=pd.read_csv) as read_csv,
+        patch(
+            "pyathena.pandas.result_set._read_csv_with_pyarrow",
+            wraps=_read_csv_with_pyarrow,
+        ) as read_pyarrow,
+    ):
+        result = result_set._read_csv()
+    options = read_pyarrow.call_args.args[1] if read_pyarrow.called else read_csv.call_args.kwargs
+    if isinstance(result, pd.DataFrame):
+        return result_set._finish_csv_frame(result), options
+    return PandasDataFrameIterator(
+        result, result_set._finish_csv_frame, result_set._csv_stream
+    ), options
+
+
+@pytest.mark.filterwarnings("error::pandas.errors.DtypeWarning")
+@pytest.mark.parametrize(
+    ("json_value", "expected"), [("9007199254740993", 9007199254740993), ("true", True)]
+)
+@pytest.mark.parametrize(
+    ("engine", "kwargs", "access"),
+    [
+        pytest.param("c", {}, "whole", id="c"),
+        pytest.param("auto", {}, "whole", id="auto"),
+        pytest.param("pyarrow", {}, "whole", id="pyarrow-fallback"),
+        pytest.param("c", {"chunksize": 400005}, "iteration", id="iteration"),
+        pytest.param("c", {"chunksize": 400010}, "get_chunk", id="get-chunk"),
+        pytest.param("c", {"index_col": "j"}, "whole", id="index"),
+        pytest.param("c", {"usecols": ["j"]}, "whole", id="usecols"),
+    ],
+)
+def test_read_csv_json_null_without_dtype_warning(json_value, expected, engine, kwargs, access):
+    """JSON NULLs in a later parser block keep exact values without a warning."""
+    data = "n,j\n" + f"1,{json_value}\n" * 400000 + "2,\n" * 10
+    result, options = _read_csv_result(data, {"n": "integer", "j": "json"}, engine=engine, **kwargs)
+    if access != "whole":
+        with result:
+            first = result.get_chunk(400005) if access == "get_chunk" else next(result)
+            assert len(first) == 400005
+            df = pd.concat([first, *result])
+    else:
+        df = result
+    values = df.index if kwargs.get("index_col") == "j" else df["j"]
+    assert options["engine"] == "c"
+    assert options["low_memory"] is False
+    assert len(df) == 400010
+    assert values.dtype == object
+    assert type(values[0]) is type(expected)
+    assert (values[:400000] == expected).all()
+    assert values[-10:].tolist() == [None] * 10
+
+
+def test_read_csv_json_explicit_low_memory_true():
+    """An explicit low_memory=True keeps pandas' internal block parsing and warning."""
+    data = "n,j\n" + "1,9007199254740993\n" * 400000 + "2,\n" * 10
+    with pytest.warns(pd.errors.DtypeWarning, match="have mixed types"):
+        df, options = _read_csv_result(data, {"n": "integer", "j": "json"}, low_memory=True)
+    assert options["low_memory"] is True
+    assert df["j"].iloc[0] == 9007199254740993
+    assert df["j"].iloc[-10:].tolist() == [None] * 10
+
+
+@pytest.mark.filterwarnings("error::pandas.errors.DtypeWarning")
+@pytest.mark.parametrize("low_memory", [None, True, False])
+def test_read_csv_json_without_null(low_memory):
+    """JSON without NULL keeps its inferred dtype with default or explicit low_memory."""
+    kwargs = {} if low_memory is None else {"low_memory": low_memory}
+    df, options = _read_csv_result("n,j\n1,2\n3,4\n", {"n": "integer", "j": "json"}, **kwargs)
+    assert options["low_memory"] is (False if low_memory is None else low_memory)
+    assert df["j"].dtype == "int64"
+    assert df["j"].tolist() == [2, 4]
+
+
+@pytest.mark.parametrize(
+    ("types", "engine", "kwargs"),
+    [
+        pytest.param({"n": "integer", "j": "integer"}, "c", {}, id="no-json"),
+        pytest.param({"n": "integer", "j": "json"}, "c", {"usecols": ["n"]}, id="json-excluded"),
+        pytest.param(
+            {"n": "integer", "j": "json"}, "c", {"converters": {}}, id="custom-converters"
+        ),
+        pytest.param(
+            {"n": "integer", "j": "json"},
+            "c",
+            {"converters": {"j": int}},
+            id="custom-json-converter",
+        ),
+        pytest.param({"n": "integer", "j": "json"}, "python", {}, id="python"),
+        pytest.param({"n": "integer", "j": "integer"}, "pyarrow", {}, id="pyarrow"),
+    ],
+)
+def test_read_csv_without_json_c_converter_keeps_low_memory_default(types, engine, kwargs):
+    """Other columns, converters, and engines do not get a low_memory option."""
+    df, options = _read_csv_result("n,j\n" + "1,2\n" * 30, types, engine=engine, **kwargs)
+    assert options["engine"] == engine
+    assert "low_memory" not in options
+    assert len(df) == 30
+
+
 @pytest.mark.filterwarnings("ignore:Could not infer format")
 @pytest.mark.parametrize("infer_string", [True, False])
 @pytest.mark.parametrize(

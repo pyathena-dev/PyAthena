@@ -17,12 +17,14 @@ import urllib.parse
 import urllib.request
 import uuid
 import weakref
+from base64 import b64encode
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from itertools import chain
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+from zlib import crc32
 
 import boto3
 import botocore.exceptions
@@ -40,7 +42,7 @@ from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
 from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch
 from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3ThreadPoolExecutor
-from pyathena.filesystem.s3_object import S3Object, S3ObjectType, S3StorageClass
+from pyathena.filesystem.s3_object import S3MultipartUpload, S3Object, S3ObjectType, S3StorageClass
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.util import RetryConfig
 from tests import ENV
@@ -1187,7 +1189,9 @@ class TestS3FileSystem:
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
         fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=S3MultipartUpload(
+                {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
+            )
         )
         fs.core.upload_part = mock.MagicMock(
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
@@ -1282,7 +1286,9 @@ class TestS3FileSystem:
                     name,
                 )
                 raise S3ClientError(error).os_error from error
-            return {"UploadId": "uploadid", "ETag": '"e"'}
+            if name == "create_multipart_upload":
+                return {"Bucket": request["Bucket"], "Key": request["Key"], "UploadId": "uploadid"}
+            return {"ETag": '"e"'}
 
         fs._call.side_effect = call
         return requests
@@ -1435,7 +1441,12 @@ class TestS3FileSystem:
             requests.append((name, request))
             if name == "upload_part" and fail:
                 raise OSError("upload failed")
-            return {"UploadId": "uploadid", "ETag": '"e"'}
+            return {
+                "Bucket": request["Bucket"],
+                "Key": request["Key"],
+                "UploadId": "uploadid",
+                "ETag": '"e"',
+            }
 
         fs._call.side_effect = call
         block_size = fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE
@@ -1466,6 +1477,7 @@ class TestS3FileSystem:
         # GH-946: the completion and the abort receive the parameters of the
         # upload that they accept.
         fs = self._make_fs()
+        upload = S3MultipartUpload({"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"})
         fs.core.complete_multipart_upload = mock.MagicMock()
         kwargs = {
             "ContentType": "text/csv",
@@ -1475,23 +1487,18 @@ class TestS3FileSystem:
         part: Future[SimpleNamespace] = Future()
         part.set_result(SimpleNamespace(etag='"e1"', part_number=1))
 
-        fs._finish_multipart_upload(
-            bucket="bucket", key="key", upload_id="uploadid", futures=[part], request_kwargs=kwargs
-        )
+        fs._finish_multipart_upload(upload=upload, futures=[part], request_kwargs=kwargs)
         failed: Future[SimpleNamespace] = Future()
         failed.set_exception(RuntimeError("upload failed"))
         with pytest.raises(RuntimeError, match="upload failed"):
             fs._finish_multipart_upload(
-                bucket="bucket",
-                key="key",
-                upload_id="uploadid",
+                upload=upload,
                 futures=[failed],
                 request_kwargs=kwargs,
             )
 
         fs.core.complete_multipart_upload.assert_called_once_with(
-            S3Path("bucket", "key"),
-            "uploadid",
+            upload,
             [part.result()],
             RequestPayer="requester",
             SSECustomerAlgorithm="AES256",
@@ -1909,7 +1916,9 @@ class TestS3FileSystem:
         # parameters of the copy that they accept.
         fs = self._make_fs()
         fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=S3MultipartUpload(
+                {"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"}
+            )
         )
         fs.core.upload_part_copy = mock.MagicMock(
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
@@ -2029,7 +2038,9 @@ class TestS3FileSystem:
             "VersionId": "null",
         }
         fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=S3MultipartUpload(
+                {"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"}
+            )
         )
         fs.core.upload_part_copy = mock.MagicMock()
         fs._finish_multipart_upload = mock.MagicMock()
@@ -2089,7 +2100,7 @@ class TestS3FileSystem:
             )
             stubber.add_response(
                 "create_multipart_upload",
-                {"UploadId": "u"},
+                {"Bucket": "bucket", "Key": "dst", "UploadId": "u"},
                 {"Bucket": "bucket", "Key": "dst", "ContentType": "text/plain", "Tagging": "a=1"},
             )
             for _ in (1, 2):
@@ -2136,7 +2147,7 @@ class TestS3FileSystem:
             )
             stubber.add_response(
                 "create_multipart_upload",
-                {"UploadId": "u"},
+                {"Bucket": "bucket", "Key": "dst", "UploadId": "u"},
                 {"Bucket": "bucket", "Key": "dst", "ContentType": "text/csv", "Metadata": {}},
             )
             for _ in (1, 2):
@@ -2159,7 +2170,7 @@ class TestS3FileSystem:
             )
             stubber.add_response(
                 "create_multipart_upload",
-                {"UploadId": "u"},
+                {"Bucket": "bucket", "Key": "dst", "UploadId": "u"},
                 {"Bucket": "bucket", "Key": "dst", "ContentType": "text/csv", "Metadata": {}},
             )
             for _ in (1, 2):
@@ -2197,7 +2208,9 @@ class TestS3FileSystem:
         fs._transaction = None
         fs._put_object = mock.MagicMock()
         fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=S3MultipartUpload(
+                {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
+            )
         )
         fs.core.upload_part = mock.MagicMock(
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
@@ -2220,7 +2233,9 @@ class TestS3FileSystem:
         fs.default_cache_type = "bytes"
         fs._put_object = mock.MagicMock()
         fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=S3MultipartUpload(
+                {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
+            )
         )
         fs.core.upload_part = mock.MagicMock(
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
@@ -2249,7 +2264,9 @@ class TestS3FileSystem:
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
         fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=S3MultipartUpload(
+                {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
+            )
         )
         fs.core.upload_part = mock.MagicMock(
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
@@ -2323,7 +2340,9 @@ class TestS3FileSystem:
         fs.default_cache_type = "bytes"
         fs._transaction = None
         fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=S3MultipartUpload(
+                {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
+            )
         )
         fs.core.upload_part = mock.MagicMock(
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
@@ -2397,7 +2416,9 @@ class TestS3FileSystem:
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
         fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=S3MultipartUpload(
+                {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
+            )
         )
         fs._finish_multipart_upload = mock.MagicMock()
         executor = mock.MagicMock()
@@ -2452,7 +2473,9 @@ class TestS3FileSystem:
         fs.default_cache_type = "bytes"
         fs._transaction = None
         fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=S3MultipartUpload(
+                {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
+            )
         )
         fs.core.upload_part = mock.MagicMock(
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
@@ -3266,6 +3289,7 @@ class TestS3FileSystem:
 
     def test_finish_multipart_upload(self):
         fs = self._make_fs()
+        upload = S3MultipartUpload({"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"})
         fs.core.complete_multipart_upload = mock.MagicMock()
         futures = []
         for part_number in (1, 2):
@@ -3273,11 +3297,10 @@ class TestS3FileSystem:
             future.set_result(SimpleNamespace(etag=f'"e{part_number}"', part_number=part_number))
             futures.append(future)
 
-        fs._finish_multipart_upload(
-            bucket="bucket", key="key", upload_id="uploadid", futures=futures
-        )
+        fs._finish_multipart_upload(upload=upload, futures=futures)
         fs.core.complete_multipart_upload.assert_called_once_with(
-            S3Path("bucket", "key"), "uploadid", [f.result() for f in futures]
+            upload,
+            [f.result() for f in futures],
         )
         fs._call.assert_not_called()
 
@@ -3286,14 +3309,13 @@ class TestS3FileSystem:
     @pytest.mark.parametrize("error", [RuntimeError, KeyboardInterrupt])
     def test_finish_multipart_upload_aborts_on_failure(self, error):
         fs = self._make_fs()
+        upload = S3MultipartUpload({"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"})
         fs.core.complete_multipart_upload = mock.MagicMock()
         future: Future[SimpleNamespace] = Future()
         future.set_exception(error("upload failed"))
 
         with pytest.raises(error, match="upload failed"):
-            fs._finish_multipart_upload(
-                bucket="bucket", key="key", upload_id="uploadid", futures=[future]
-            )
+            fs._finish_multipart_upload(upload=upload, futures=[future])
         fs.core.complete_multipart_upload.assert_not_called()
         fs._call.assert_called_once_with(
             fs._client.abort_multipart_upload,
@@ -3306,6 +3328,7 @@ class TestS3FileSystem:
         # A caller that aborts the upload itself, as S3File.commit() does,
         # gets the original error with the parts and the upload left alone.
         fs = self._make_fs()
+        upload = S3MultipartUpload({"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"})
         fs.core.complete_multipart_upload = mock.MagicMock()
         failed: Future[SimpleNamespace] = Future()
         failed.set_exception(RuntimeError("upload failed"))
@@ -3313,9 +3336,7 @@ class TestS3FileSystem:
 
         with pytest.raises(RuntimeError, match="upload failed"):
             fs._finish_multipart_upload(
-                bucket="bucket",
-                key="key",
-                upload_id="uploadid",
+                upload=upload,
                 futures=[failed, pending],
                 abort=False,
             )
@@ -3324,6 +3345,7 @@ class TestS3FileSystem:
 
     def test_finish_multipart_upload_abort_failure_does_not_mask_the_original_error(self, caplog):
         fs = self._make_fs()
+        upload = S3MultipartUpload({"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"})
         fs.core.complete_multipart_upload = mock.MagicMock()
         # The abort is sent through the core, whose call is the same mock.
         fs._call.side_effect = RuntimeError("abort failed")
@@ -3332,9 +3354,7 @@ class TestS3FileSystem:
 
         # The abort failure is logged, and the original error propagates.
         with pytest.raises(RuntimeError, match="upload failed"):
-            fs._finish_multipart_upload(
-                bucket="bucket", key="key", upload_id="uploadid", futures=[future]
-            )
+            fs._finish_multipart_upload(upload=upload, futures=[future])
         fs._call.assert_called_once_with(
             fs._client.abort_multipart_upload, Bucket="bucket", Key="key", UploadId="uploadid"
         )
@@ -3345,6 +3365,7 @@ class TestS3FileSystem:
         # may be stored after the abort, so the abort waits for it. The
         # parts that have not started are cancelled.
         fs = self._make_fs()
+        upload = S3MultipartUpload({"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"})
         fs.core.complete_multipart_upload = mock.MagicMock()
         events = []
         fs._call.side_effect = lambda *args, **kwargs: events.append("abort")
@@ -3373,9 +3394,7 @@ class TestS3FileSystem:
             started.wait(5)
             with pytest.raises(RuntimeError, match="upload failed"):
                 fs._finish_multipart_upload(
-                    bucket="bucket",
-                    key="key",
-                    upload_id="uploadid",
+                    upload=upload,
                     futures=[failed, running, pending],
                 )
 
@@ -3388,6 +3407,7 @@ class TestS3FileSystem:
         # acknowledge its cancellation, e.g., an event loop blocked by the
         # caller.
         fs = self._make_fs()
+        upload = S3MultipartUpload({"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"})
         fs.core.complete_multipart_upload = mock.MagicMock()
         failed: Future[SimpleNamespace] = Future()
         failed.set_exception(RuntimeError("upload failed"))
@@ -3397,9 +3417,7 @@ class TestS3FileSystem:
         def finish():
             try:
                 fs._finish_multipart_upload(
-                    bucket="bucket",
-                    key="key",
-                    upload_id="uploadid",
+                    upload=upload,
                     futures=[failed, never_started],
                 )
             except RuntimeError as e:
@@ -3421,7 +3439,9 @@ class TestS3FileSystem:
         # as one part larger than 5 GiB.
         fs = self._make_fs()
         fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=S3MultipartUpload(
+                {"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"}
+            )
         )
         fs.core.upload_part_copy = mock.MagicMock()
         fs._finish_multipart_upload = mock.MagicMock()
@@ -3465,7 +3485,7 @@ class TestS3FileSystem:
             started.set()
             # Still running when the interrupt arrives, which releases it.
             interrupted.wait(30)
-            return SimpleNamespace(upload_id="uploadid")
+            return S3MultipartUpload({"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"})
 
         fs.core.create_multipart_upload = mock.MagicMock(side_effect=create_multipart_upload)
         fs.core.upload_part_copy = mock.MagicMock()
@@ -3523,7 +3543,14 @@ class TestS3FileSystem:
             signal.signal(signal.SIGINT, previous_handler)
             interrupted.set()
 
-        fs._abort_multipart_upload.assert_called_once_with("bucket", "dst", "uploadid", {})
+        fs._abort_multipart_upload.assert_called_once()
+        upload, params = fs._abort_multipart_upload.call_args.args
+        assert (upload.bucket, upload.key, upload.upload_id, params) == (
+            "bucket",
+            "dst",
+            "uploadid",
+            {},
+        )
         fs.core.upload_part_copy.assert_not_called()
 
     @pytest.mark.parametrize(
@@ -4003,11 +4030,374 @@ class TestS3FileSystem:
         fs.clear_multipart_uploads(path)
         assert sorted(aborted) == expected
 
+    @pytest.mark.parametrize(
+        ("code", "exception"),
+        [
+            (None, None),
+            ("NoSuchUpload", None),
+            ("NoSuchBucket", FileNotFoundError),
+            ("AccessDenied", PermissionError),
+            ("InternalError", OSError),
+        ],
+    )
+    def test_clear_multipart_uploads_race(self, code, exception):
+        fs = S3FileSystem(
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            max_workers=1,
+            retry_config=RetryConfig(attempt=1),
+            skip_instance_cache=True,
+        )
+        with Stubber(fs.core.client) as stubber:
+            stubber.add_response(
+                "list_multipart_uploads",
+                {
+                    "Uploads": [
+                        {"Key": "prefix/gone", "UploadId": "gone"},
+                        {
+                            "Key": "prefix/pending",
+                            "UploadId": "pending",
+                            "ChecksumAlgorithm": "CRC32",
+                            "ChecksumType": "FULL_OBJECT",
+                        },
+                    ],
+                    "IsTruncated": False,
+                },
+                {"Bucket": "bucket", "Prefix": "prefix/"},
+            )
+            request = {"Bucket": "bucket", "Key": "prefix/gone", "UploadId": "gone"}
+            if code:
+                stubber.add_client_error(
+                    "abort_multipart_upload",
+                    service_error_code=code,
+                    http_status_code=404 if code.startswith("NoSuch") else 500,
+                    expected_params=request,
+                )
+            else:
+                stubber.add_response("abort_multipart_upload", {}, request)
+            stubber.add_response(
+                "abort_multipart_upload",
+                {},
+                {"Bucket": "bucket", "Key": "prefix/pending", "UploadId": "pending"},
+            )
+            expected = pytest.raises(exception) if exception else contextlib.nullcontext()
+            with expected:
+                fs.clear_multipart_uploads("s3://bucket/prefix/")
+            stubber.assert_no_pending_responses()
+
+    def test_clear_multipart_uploads_empty(self):
+        fs = S3FileSystem(
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            max_workers=1,
+            skip_instance_cache=True,
+        )
+        with Stubber(fs.core.client) as stubber:
+            stubber.add_response(
+                "list_multipart_uploads",
+                {"Uploads": [], "IsTruncated": False},
+                {"Bucket": "bucket", "Prefix": "prefix/"},
+            )
+            fs.clear_multipart_uploads("s3://bucket/prefix/")
+            stubber.assert_no_pending_responses()
+
+    def test_clear_multipart_uploads_checks_all_results(self, monkeypatch):
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        fs.list_multipart_uploads = mock.MagicMock(
+            return_value=[
+                S3MultipartUpload({"Bucket": "bucket", "Key": f"prefix/{n}", "UploadId": str(n)})
+                for n in range(3)
+            ]
+        )
+        error = PermissionError("denied")
+        futures = [mock.Mock(), mock.Mock(), mock.Mock()]
+        futures[0].result.side_effect = error
+        futures[2].result.side_effect = FileNotFoundError("unclassified missing resource")
+        executor = mock.MagicMock()
+        executor.__enter__.return_value.submit.side_effect = futures
+        monkeypatch.setattr(fs, "_create_executor", mock.Mock(return_value=executor))
+        monkeypatch.setattr("pyathena.filesystem.s3.as_completed", lambda pending: iter(pending))
+        with pytest.raises(PermissionError) as raised:
+            fs.clear_multipart_uploads("s3://bucket/prefix/")
+        assert raised.value is error
+        for future in futures:
+            future.result.assert_called_once_with()
+
+    def test_clear_multipart_uploads_preserves_unclassified_file_not_found(self):
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        fs.list_multipart_uploads = mock.MagicMock(
+            return_value=[
+                S3MultipartUpload({"Bucket": "bucket", "Key": "prefix/key", "UploadId": "u"})
+            ]
+        )
+        error = FileNotFoundError("unclassified missing resource")
+        fs.core.abort_multipart_upload = mock.MagicMock(side_effect=error)
+        with pytest.raises(FileNotFoundError) as raised:
+            fs.clear_multipart_uploads("s3://bucket/prefix/")
+        assert raised.value is error
+
+    @pytest.mark.parametrize(
+        ("algorithm", "checksum_type"),
+        [(None, None), ("SHA256", None), ("CRC32", None), ("CRC32", "FULL_OBJECT")],
+    )
+    def test_multipart_copy_uses_creation_algorithm(self, algorithm, checksum_type):
+        fs = S3FileSystem(
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            max_workers=1,
+            skip_instance_cache=True,
+        )
+        block_size = 5 * 2**30
+        size = 2 * block_size
+        checksum_kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
+        if checksum_type:
+            checksum_kwargs["ChecksumType"] = checksum_type
+        expected_parts = []
+        with Stubber(fs.core.client) as stubber:
+            stubber.add_response(
+                "head_object", {"ContentLength": size}, {"Bucket": "bucket", "Key": "src"}
+            )
+            stubber.add_response(
+                "create_multipart_upload",
+                {"Bucket": "bucket", "Key": "dst", "UploadId": "u", **checksum_kwargs},
+                {"Bucket": "bucket", "Key": "dst", **checksum_kwargs},
+            )
+            for number, range_ in (
+                (1, f"bytes=0-{block_size - 1}"),
+                (2, f"bytes={block_size}-{size - 1}"),
+            ):
+                result = {"ETag": f'"p{number}"', f"Checksum{algorithm or 'CRC32'}": "checksum"}
+                stubber.add_response(
+                    "upload_part_copy",
+                    {"CopyPartResult": result},
+                    {
+                        "Bucket": "bucket",
+                        "Key": "dst",
+                        "UploadId": "u",
+                        "PartNumber": number,
+                        "CopySource": {"Bucket": "bucket", "Key": "src"},
+                        "CopySourceRange": range_,
+                    },
+                )
+                expected_parts.append(
+                    {
+                        "ETag": result["ETag"],
+                        "PartNumber": number,
+                        **({f"Checksum{algorithm}": "checksum"} if algorithm else {}),
+                    }
+                )
+            stubber.add_response(
+                "complete_multipart_upload",
+                {"ETag": '"done"'},
+                {
+                    "Bucket": "bucket",
+                    "Key": "dst",
+                    "UploadId": "u",
+                    "MultipartUpload": {"Parts": expected_parts},
+                    **({"ChecksumType": checksum_type} if checksum_type else {}),
+                },
+            )
+            kwargs = {
+                "source": S3Path("bucket", "src"),
+                "destination": S3Path("bucket", "dst"),
+                "block_size": block_size,
+                "MetadataDirective": "REPLACE",
+                "TaggingDirective": "REPLACE",
+                "AnnotationDirective": "EXCLUDE",
+                **checksum_kwargs,
+            }
+            fs._copy_object_with_multipart_upload(**kwargs)
+            stubber.assert_no_pending_responses()
+
     @pytest.fixture(scope="class")
     def fs(self, request):
         if not hasattr(request, "param"):
             request.param = {}
         return S3FileSystem(connect(), **request.param)
+
+    @pytest.mark.parametrize(
+        ("algorithm", "checksum_type"),
+        [(None, None), ("SHA256", None), ("CRC32", None), ("CRC32", "FULL_OBJECT")],
+    )
+    def test_open_multipart_with_checksum(self, fs, algorithm, checksum_type):
+        block_size = 5 * 2**20
+        data = b"x" * (block_size + 1)
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_open_multipart_with_checksum/{uuid.uuid4()}"
+        )
+        kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
+        if checksum_type:
+            kwargs["ChecksumType"] = checksum_type
+        try:
+            with fs.open(path, "wb", block_size=block_size, s3_additional_kwargs=kwargs) as file:
+                file.write(data)
+            assert fs.cat_file(path) == data
+            assert fs.list_multipart_uploads(path) == []
+        finally:
+            fs.clear_multipart_uploads(path)
+            if fs.exists(path):
+                fs.rm(path)
+
+    @pytest.mark.parametrize(
+        ("algorithm", "checksum_type"),
+        [(None, None), ("SHA256", None), ("CRC32", None), ("CRC32", "FULL_OBJECT")],
+    )
+    def test_put_file_multipart_with_checksum(self, fs, tmp_path, algorithm, checksum_type):
+        block_size = 5 * 2**20
+        data = b"x" * (block_size + 1)
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_put_file_multipart_with_checksum/{uuid.uuid4()}"
+        )
+        kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
+        if checksum_type:
+            kwargs["ChecksumType"] = checksum_type
+        try:
+            lpath = tmp_path / "data"
+            lpath.write_bytes(data)
+            fs.put_file(str(lpath), path, block_size=block_size, s3_additional_kwargs=kwargs)
+            assert fs.cat_file(path) == data
+            assert fs.list_multipart_uploads(path) == []
+        finally:
+            fs.clear_multipart_uploads(path)
+            if fs.exists(path):
+                fs.rm(path)
+
+    @pytest.mark.parametrize(
+        ("algorithm", "checksum_type"),
+        [(None, None), ("SHA256", None), ("CRC32", None), ("CRC32", "FULL_OBJECT")],
+    )
+    def test_pipe_file_multipart_with_checksum(self, fs, algorithm, checksum_type):
+        block_size = 5 * 2**20
+        data = b"x" * (block_size + 1)
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_pipe_file_multipart_with_checksum/{uuid.uuid4()}"
+        )
+        kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
+        if checksum_type:
+            kwargs["ChecksumType"] = checksum_type
+        try:
+            fs.pipe_file(path, data, block_size=block_size, s3_additional_kwargs=kwargs)
+            assert fs.cat_file(path) == data
+            assert fs.list_multipart_uploads(path) == []
+        finally:
+            fs.clear_multipart_uploads(path)
+            if fs.exists(path):
+                fs.rm(path)
+
+    @pytest.mark.parametrize(
+        ("algorithm", "checksum_type"),
+        [(None, None), ("SHA256", None), ("CRC32", None), ("CRC32", "FULL_OBJECT")],
+    )
+    def test_append_multipart_with_checksum(self, fs, algorithm, checksum_type):
+        block_size = 5 * 2**20
+        data = b"x" * (block_size + 1)
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_append_multipart_with_checksum/{uuid.uuid4()}"
+        )
+        kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
+        if checksum_type:
+            kwargs["ChecksumType"] = checksum_type
+        try:
+            original = b"y" * block_size
+            fs.pipe_file(path, original)
+            with fs.open(path, "ab", block_size=block_size, s3_additional_kwargs=kwargs) as file:
+                file.write(data)
+            assert fs.cat_file(path) == original + data
+            assert fs.list_multipart_uploads(path) == []
+        finally:
+            fs.clear_multipart_uploads(path)
+            if fs.exists(path):
+                fs.rm(path)
+
+    @pytest.mark.parametrize(
+        ("algorithm", "checksum_type"),
+        [(None, None), ("SHA256", "COMPOSITE"), ("CRC32", "FULL_OBJECT")],
+    )
+    @pytest.mark.parametrize("copy", [False, True])
+    def test_core_multipart_upload_with_checksum(self, fs, algorithm, checksum_type, copy):
+        prefix = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_core_multipart_with_checksum/{uuid.uuid4()}/"
+        )
+        destination = S3Path.parse(f"{prefix}destination")
+        source = S3Path.parse(f"{prefix}source")
+        data = b"x" * S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
+        kwargs = (
+            {"ChecksumAlgorithm": algorithm, "ChecksumType": checksum_type} if algorithm else {}
+        )
+        try:
+            if copy:
+                fs.pipe_file(source.uri, data)
+            upload = fs.core.create_multipart_upload(destination, **kwargs)
+            if algorithm:
+                assert upload.checksum_algorithm == algorithm
+                assert upload.checksum_type == checksum_type
+            listed = fs.list_multipart_uploads(destination.uri)
+            assert len(listed) == 1
+            assert listed[0].upload_id == upload.upload_id
+            assert listed[0].checksum_algorithm == upload.checksum_algorithm
+            assert listed[0].checksum_type == upload.checksum_type
+            if copy:
+                first = fs.core.upload_part_copy(upload, 1, source)
+            else:
+                first = fs.core.upload_part(upload, 1, data)
+            last = fs.core.upload_part(upload, 2, b"end")
+            fs.core.complete_multipart_upload(upload, [first, last])
+            if checksum_type == "FULL_OBJECT":
+                metadata = fs.core.call(
+                    "head_object", Bucket=upload.bucket, Key=upload.key, ChecksumMode="ENABLED"
+                )
+                assert metadata["ChecksumType"] == "FULL_OBJECT"
+                assert (
+                    metadata["ChecksumCRC32"]
+                    == b64encode(crc32(data + b"end").to_bytes(4, "big")).decode()
+                )
+            fs.invalidate_cache(destination.uri)
+            assert fs.cat_file(destination.uri) == data + b"end"
+            assert fs.list_multipart_uploads(destination.uri) == []
+        finally:
+            fs.clear_multipart_uploads(prefix)
+            for path in (source, destination):
+                if fs.exists(path.uri):
+                    fs.rm(path.uri)
+
+    def test_clear_multipart_uploads_after_listed_upload_is_aborted(self, fs):
+        prefix = (
+            f"{ENV.s3_staging_key}{ENV.schema}/filesystem/test_clear_multipart_race/{uuid.uuid4()}/"
+        )
+        path = f"s3://{ENV.s3_staging_bucket}/{prefix}"
+        gone_path = S3Path(ENV.s3_staging_bucket, f"{prefix}gone")
+        gone = fs.core.create_multipart_upload(gone_path)
+        try:
+            fs.core.create_multipart_upload(S3Path(ENV.s3_staging_bucket, f"{prefix}pending"))
+            list_uploads = fs.list_multipart_uploads
+
+            def list_then_abort(path):
+                uploads = list_uploads(path)
+                assert len(uploads) == 2
+                assert any(upload.upload_id == gone.upload_id for upload in uploads)
+                fs.core.abort_multipart_upload(gone)
+                return uploads
+
+            with mock.patch.object(
+                fs, "list_multipart_uploads", side_effect=list_then_abort
+            ) as list_mock:
+                fs.clear_multipart_uploads(path)
+                list_mock.assert_called_once_with(path)
+            assert fs.list_multipart_uploads(path) == []
+        finally:
+            fs.clear_multipart_uploads(path)
 
     @pytest.mark.parametrize(
         ("fs", "start", "end", "target_data"),
@@ -5170,7 +5560,11 @@ class TestS3FileSystem:
         with pytest.raises(PermissionError):
             anon_fs.info(f"s3://{ENV.s3_staging_bucket}/{ENV.s3_filesystem_test_file_key}")
 
-    def test_list_and_clear_multipart_uploads(self, fs):
+    @pytest.mark.parametrize(
+        ("algorithm", "checksum_type"),
+        [(None, None), ("SHA256", "COMPOSITE"), ("CRC32", "FULL_OBJECT")],
+    )
+    def test_list_and_clear_multipart_uploads(self, fs, algorithm, checksum_type):
         # Scope the list/clear to a unique prefix so that parallel test
         # workers' in-flight multipart uploads in the shared bucket are
         # not aborted.
@@ -5180,7 +5574,10 @@ class TestS3FileSystem:
         )
         prefix_path = f"s3://{bucket}/{prefix}"
         key = f"{prefix}/file"
-        upload = fs.core.create_multipart_upload(S3Path(bucket, key))
+        kwargs = (
+            {"ChecksumAlgorithm": algorithm, "ChecksumType": checksum_type} if algorithm else {}
+        )
+        upload = fs.core.create_multipart_upload(S3Path(bucket, key), **kwargs)
         # A sibling key that starts with the same characters as the prefix.
         sibling = fs.core.create_multipart_upload(S3Path(bucket, f"{prefix}2/file"))
         try:
@@ -5190,6 +5587,8 @@ class TestS3FileSystem:
             assert listed.bucket == bucket
             assert listed.key == key
             assert listed.initiated
+            assert listed.checksum_algorithm == upload.checksum_algorithm
+            assert listed.checksum_type == upload.checksum_type
             assert not any(u.upload_id == sibling.upload_id for u in uploads)
 
             fs.clear_multipart_uploads(prefix_path)
@@ -5198,6 +5597,7 @@ class TestS3FileSystem:
             uploads = fs.list_multipart_uploads(f"{prefix_path}2")
             assert any(u.upload_id == sibling.upload_id for u in uploads)
         finally:
+            fs.clear_multipart_uploads(prefix_path)
             fs.clear_multipart_uploads(f"{prefix_path}2")
 
     def test_object_version_info(self, fs):
@@ -5401,7 +5801,9 @@ class TestS3File:
         file.blocksize = 4
         file.fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE = 4
         file.fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE = 8
-        file.multipart_upload = SimpleNamespace(upload_id="uploadid")
+        file.multipart_upload = S3MultipartUpload(
+            {"Bucket": "bucket", "Key": "key.txt", "UploadId": "uploadid"}
+        )
         file._executor = ThreadPoolExecutor(max_workers=1)
         file.fs.core.upload_part.side_effect = lambda **kw: SimpleNamespace(
             etag=f'"e{kw["part_number"]}"', part_number=kw["part_number"]
@@ -5424,7 +5826,9 @@ class TestS3File:
             key="key.txt",
         )
         fs.cat_file.return_value = existing
-        fs.core.create_multipart_upload.return_value = SimpleNamespace(upload_id="uploadid")
+        fs.core.create_multipart_upload.return_value = S3MultipartUpload(
+            {"Bucket": "bucket", "Key": "key.txt", "UploadId": "uploadid"}
+        )
 
         def part(**kw):
             return SimpleNamespace(etag=f'"e{kw["part_number"]}"', part_number=kw["part_number"])
@@ -5722,16 +6126,25 @@ class TestS3File:
             }
         assert fs._finish_multipart_upload.call_args.kwargs["request_kwargs"] == kwargs
 
-    def test_multipart_write_keyword_named_as_argument(self):
+    @pytest.mark.parametrize("parameter", ["key", "upload"])
+    def test_multipart_write_keyword_named_as_argument(self, parameter):
         # A keyword parameter of the file named like a helper argument does
         # not break the completion, which takes the parameters as a mapping.
         fs = self._make_append_fs(b"")
 
-        with S3File(fs, "s3://bucket/key.txt", mode="wb", block_size=4, key="other") as f:
+        with S3File(
+            fs, "s3://bucket/key.txt", mode="wb", block_size=4, **{parameter: "other"}
+        ) as f:
             f.write(b"x" * 8)
 
-        assert fs._finish_multipart_upload.call_args.kwargs["key"] == "key.txt"
-        assert fs._finish_multipart_upload.call_args.kwargs["request_kwargs"] == {"key": "other"}
+        fs.core.create_multipart_upload.assert_called_once_with(S3Path("bucket", "key.txt"))
+        assert (
+            fs._finish_multipart_upload.call_args.kwargs["upload"]
+            is fs.core.create_multipart_upload.return_value
+        )
+        assert fs._finish_multipart_upload.call_args.kwargs["request_kwargs"] == {
+            parameter: "other"
+        }
 
     def test_append_discard(self):
         # Rolling back an append aborts its multipart upload without the
@@ -5870,7 +6283,9 @@ class TestS3File:
         # may be stored after the abort, so the abort waits for it. The
         # parts that have not started are cancelled.
         file = self._make_write_file(b"", autocommit=False)
-        file.multipart_upload = SimpleNamespace(upload_id="uploadid")
+        file.multipart_upload = S3MultipartUpload(
+            {"Bucket": "bucket", "Key": "key.txt", "UploadId": "uploadid"}
+        )
         events = []
         file.fs._call.side_effect = lambda *args, **kwargs: events.append("abort")
         started = threading.Event()
@@ -5965,7 +6380,9 @@ class TestS3File:
         # waited for, so a rollback on the thread of the event loop that
         # would run them does not block.
         file = self._make_write_file(b"", autocommit=False)
-        file.multipart_upload = SimpleNamespace(upload_id="uploadid")
+        file.multipart_upload = S3MultipartUpload(
+            {"Bucket": "bucket", "Key": "key.txt", "UploadId": "uploadid"}
+        )
         parts = []
 
         async def rollback():

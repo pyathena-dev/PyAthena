@@ -690,7 +690,7 @@ class AioS3FileSystem(AsyncFileSystem):
             # See S3FileSystem._copy_object_with_multipart_upload.
             await asyncio.to_thread(self.core.copy_object, plan.source, plan.destination, **kwargs)
             return
-        upload_id: str
+        multipart_upload: S3MultipartUpload
 
         semaphore = asyncio.Semaphore(max_workers)
         failed = False
@@ -704,8 +704,7 @@ class AioS3FileSystem(AsyncFileSystem):
                 try:
                     return await asyncio.to_thread(
                         self.core.upload_part_copy,
-                        path=plan.destination,
-                        upload_id=upload_id,
+                        upload=multipart_upload,
                         part_number=i + 1,
                         source=plan.source,
                         range_=range_,
@@ -735,9 +734,7 @@ class AioS3FileSystem(AsyncFileSystem):
                     return
             await asyncio.to_thread(
                 self._sync_fs._abort_multipart_upload,
-                plan.destination.bucket,
-                cast(str, plan.destination.key),
-                cast(str, creation.result().upload_id),
+                creation.result(),
                 plan.abort_params,
             )
 
@@ -753,7 +750,6 @@ class AioS3FileSystem(AsyncFileSystem):
             # shield keeps a cancellation from cancelling the creation, whose
             # thread would keep running, so that _abort() can wait for it.
             multipart_upload = await asyncio.shield(creation)
-            upload_id = cast(str, multipart_upload.upload_id)
             tasks = [asyncio.ensure_future(_upload_part(i, r)) for i, r in enumerate(plan.ranges)]
             # Unlike gather, wait does not cancel the parts when this task is
             # cancelled; their threads would keep copying, so they are waited
@@ -767,8 +763,7 @@ class AioS3FileSystem(AsyncFileSystem):
             completion = asyncio.ensure_future(
                 asyncio.to_thread(
                     self.core.complete_multipart_upload,
-                    plan.destination,
-                    upload_id,
+                    multipart_upload,
                     cast(list[S3MultipartUploadPart], parts),
                     **plan.complete_params,
                 )

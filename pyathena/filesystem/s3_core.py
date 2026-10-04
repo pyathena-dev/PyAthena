@@ -662,7 +662,9 @@ class S3Core:
                 the path take precedence over parameters of the same name.
 
         Returns:
-            The multipart upload.
+            The upload retaining the path's bucket and key, including an
+            access point alias or ARN, and the response's upload ID and
+            checksum configuration.
 
         Raises:
             ValueError: If the path has no key, or has a version ID, which a
@@ -675,16 +677,29 @@ class S3Core:
         request: dict[str, Any] = {"Bucket": path.bucket, "Key": path.key}
         _logger.debug(f"Create multipart upload to {path.uri}.")
         response = self.call(self._client.create_multipart_upload, **{**params, **request})
-        return S3MultipartUpload(response)
+        # S3 returns the bucket name even when creation uses an access point.
+        # Keep the request identity for every subsequent upload operation.
+        return S3MultipartUpload({**response, "Bucket": path.bucket, "Key": path.key})
+
+    @staticmethod
+    def _multipart_upload_request(upload: S3MultipartUpload) -> dict[str, Any]:
+        """Return the upload identity, rejecting incomplete upload objects."""
+        if not upload.bucket:
+            raise ValueError("The multipart upload has no bucket.")
+        if not upload.key:
+            raise ValueError("The multipart upload has no key.")
+        if not upload.upload_id:
+            raise ValueError("The multipart upload has no upload ID.")
+        return {"Bucket": upload.bucket, "Key": upload.key, "UploadId": upload.upload_id}
 
     def upload_part(
-        self, path: S3Path, upload_id: str, part_number: int, body: bytes, **params
+        self, upload: S3MultipartUpload, part_number: int, body: bytes, **params
     ) -> S3MultipartUploadPart:
         """Upload a part of a multipart upload with UploadPart.
 
         Args:
-            path: The path of the object that the upload writes.
-            upload_id: The ID of the multipart upload.
+            upload: The multipart upload returned by creation. Its checksum
+                algorithm is passed to the SDK to calculate the part checksum.
             part_number: The number of the part, from 1.
             body: The data of the part.
             **params: Additional request parameters. The fields that the
@@ -695,25 +710,22 @@ class S3Core:
             The uploaded part.
 
         Raises:
-            ValueError: If the path has no key.
+            ValueError: If the upload has no bucket, key, or upload ID.
         """
-        if not path.key:
-            raise ValueError(f"The path has no key: {path.uri}.")
         request: dict[str, Any] = {
-            "Bucket": path.bucket,
-            "Key": path.key,
-            "UploadId": upload_id,
+            **self._multipart_upload_request(upload),
             "PartNumber": part_number,
             "Body": body,
         }
-        _logger.debug(f"Upload part of {upload_id} to {path.uri} as part {part_number}.")
+        if upload.checksum_algorithm is not None:
+            request["ChecksumAlgorithm"] = upload.checksum_algorithm
+        _logger.debug(f"Upload part of {upload.upload_id} as part {part_number}.")
         response = self.call(self._client.upload_part, **{**params, **request})
         return S3MultipartUploadPart(part_number, response)
 
     def upload_part_copy(
         self,
-        path: S3Path,
-        upload_id: str,
+        upload: S3MultipartUpload,
         part_number: int,
         source: S3Path,
         range_: tuple[int, int] | None = None,
@@ -722,8 +734,7 @@ class S3Core:
         """Copy a part of a multipart upload from an object with UploadPartCopy.
 
         Args:
-            path: The path of the object that the upload writes.
-            upload_id: The ID of the multipart upload.
+            upload: The multipart upload returned by creation.
             part_number: The number of the part, from 1.
             source: The path of the object to copy, with the version ID to
                 copy, if any.
@@ -739,36 +750,42 @@ class S3Core:
             The copied part.
 
         Raises:
-            ValueError: If the path or the source has no key.
+            ValueError: If the upload has no bucket, key, or upload ID, or the
+                source has no key.
         """
-        if not path.key:
-            raise ValueError(f"The path has no key: {path.uri}.")
+        request = self._multipart_upload_request(upload)
         if not source.key:
             raise ValueError(f"The source has no key: {source.uri}.")
         copy_source: dict[str, Any] = {"Bucket": source.bucket, "Key": source.key}
         if source.version_id:
             copy_source.update({"VersionId": source.version_id})
-        request: dict[str, Any] = {
-            "Bucket": path.bucket,
-            "Key": path.key,
-            "CopySource": copy_source,
-            "UploadId": upload_id,
-            "PartNumber": part_number,
-        }
+        request.update(
+            {
+                "CopySource": copy_source,
+                "PartNumber": part_number,
+            }
+        )
         if range_:
             request.update({"CopySourceRange": f"bytes={range_[0]}-{range_[1] - 1}"})
-        _logger.debug(f"Upload part copy from {source.uri} to {path.uri} as part {part_number}.")
+        _logger.debug(
+            f"Copy part from {source.uri} to upload {upload.upload_id} as part {part_number}."
+        )
         response = self.call(self._client.upload_part_copy, **{**params, **request})
         return S3MultipartUploadPart(part_number, response)
 
     def complete_multipart_upload(
-        self, path: S3Path, upload_id: str, parts: Sequence[S3MultipartUploadPart], **params
+        self,
+        upload: S3MultipartUpload,
+        parts: Sequence[S3MultipartUploadPart],
+        **params,
     ) -> S3CompleteMultipartUpload:
         """Complete a multipart upload with CompleteMultipartUpload.
 
         Args:
-            path: The path of the object that the upload writes.
-            upload_id: The ID of the multipart upload.
+            upload: The multipart upload returned by creation. Its checksum
+                algorithm selects the matching part checksum, and its checksum
+                type is sent when present. Without an algorithm, only the ETag
+                and part number are sent, even if the SDK added a part checksum.
             parts: The uploaded parts, in part-number order.
             **params: Additional request parameters. The fields that the
                 other arguments set take precedence over parameters of the
@@ -778,40 +795,39 @@ class S3Core:
             The completed upload.
 
         Raises:
-            ValueError: If the path has no key.
+            ValueError: If the upload has no bucket, key, or upload ID.
         """
-        if not path.key:
-            raise ValueError(f"The path has no key: {path.uri}.")
-        request: dict[str, Any] = {
-            "Bucket": path.bucket,
-            "Key": path.key,
-            "UploadId": upload_id,
-            "MultipartUpload": {
-                "Parts": [{"ETag": p.etag, "PartNumber": p.part_number} for p in parts]
-            },
+        request = self._multipart_upload_request(upload)
+        part_fields = {"ETag", "PartNumber"}
+        if upload.checksum_algorithm is not None:
+            part_fields.add(f"Checksum{upload.checksum_algorithm}")
+        if upload.checksum_type is not None:
+            request["ChecksumType"] = upload.checksum_type
+        request["MultipartUpload"] = {
+            "Parts": [
+                {key: value for key, value in part.to_api_repr().items() if key in part_fields}
+                for part in parts
+            ]
         }
-        _logger.debug(f"Complete multipart upload {upload_id} to {path.uri}.")
+        _logger.debug(f"Complete multipart upload {upload.upload_id}.")
         response = self.call(self._client.complete_multipart_upload, **{**params, **request})
         return S3CompleteMultipartUpload(response)
 
-    def abort_multipart_upload(self, path: S3Path, upload_id: str, **params) -> None:
+    def abort_multipart_upload(self, upload: S3MultipartUpload, **params) -> None:
         """Abort a multipart upload with AbortMultipartUpload.
 
         Args:
-            path: The path of the object that the upload writes.
-            upload_id: The ID of the multipart upload.
+            upload: The multipart upload returned by creation or listing.
             **params: Additional request parameters. The fields that the
                 other arguments set take precedence over parameters of the
                 same name.
 
         Raises:
-            ValueError: If the path has no key.
+            ValueError: If the upload has no bucket, key, or upload ID.
             FileNotFoundError: If the upload does not exist, for example
                 because it was completed or aborted.
         """
-        if not path.key:
-            raise ValueError(f"The path has no key: {path.uri}.")
-        request: dict[str, Any] = {"Bucket": path.bucket, "Key": path.key, "UploadId": upload_id}
+        request = self._multipart_upload_request(upload)
         self.call(self._client.abort_multipart_upload, **{**params, **request})
 
     def part_ranges(self, size: int, block_size: int) -> list[tuple[int, int]]:
