@@ -193,55 +193,6 @@ class TestAioCursor:
         assert callback_results == [aio_cursor.query_id]
         assert await aio_cursor.fetchone() == (1,)
 
-    async def test_execute_internal_legacy_kwargs_passthrough(self):
-        """The pre-3.35 _execute() keywords are forwarded to the request (no AWS).
-
-        Mirrors the synchronous cursor test (regression test for #734).
-        """
-        cursor = AioCursor.__new__(AioCursor)  # bypass __init__ to avoid AWS calls
-        cursor._connection = MagicMock()
-        cursor._connection.client.start_query_execution.return_value = {
-            "QueryExecutionId": "test_query_id"
-        }
-        cursor._retry_config = RetryConfig()
-        cursor._kill_on_interrupt = True
-
-        with (
-            patch.object(
-                AioCursor, "_build_start_query_execution_request", return_value={}
-            ) as request_mock,
-            patch.object(
-                AioCursor, "_find_previous_query_id", new_callable=AsyncMock, return_value=None
-            ) as cache_mock,
-        ):
-            query_id = await cursor._execute(
-                "SELECT 1",
-                parameters=None,
-                work_group="test_work_group",
-                s3_staging_dir="s3://test-bucket/path/",
-                cache_size=10,
-                cache_expiration_time=100,
-                result_reuse_enable=True,
-                result_reuse_minutes=5,
-                paramstyle="qmark",
-            )
-
-        assert query_id == "test_query_id"
-        request_mock.assert_called_once_with(
-            query="SELECT 1",
-            work_group="test_work_group",
-            s3_staging_dir="s3://test-bucket/path/",
-            result_reuse_enable=True,
-            result_reuse_minutes=5,
-            execution_parameters=None,
-        )
-        cache_mock.assert_awaited_once_with(
-            "SELECT 1",
-            "test_work_group",
-            cache_size=10,
-            cache_expiration_time=100,
-        )
-
     async def test_execute_qmark_parameters_skip_cache(self):
         """A qmark query with parameters never searches the cache (no AWS, #941).
 
@@ -266,7 +217,11 @@ class TestAioCursor:
             ) as cache_mock,
         ):
             query_id = await cursor._execute(
-                "SELECT ?", ["'1'"], paramstyle="qmark", cache_size=10, cache_expiration_time=100
+                "SELECT ?",
+                ["'1'"],
+                options=ExecuteOptions(
+                    paramstyle="qmark", cache_size=10, cache_expiration_time=100
+                ),
             )
 
         assert query_id == "test_query_id"

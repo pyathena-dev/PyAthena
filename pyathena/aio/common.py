@@ -36,31 +36,17 @@ class AioBaseCursor(BaseCursor):
         self,
         operation: str,
         parameters: dict[str, Any] | list[str] | None = None,
-        work_group: str | None = None,
-        s3_staging_dir: str | None = None,
-        cache_size: int | None = None,
-        cache_expiration_time: int | None = None,
-        result_reuse_enable: bool | None = None,
-        result_reuse_minutes: int | None = None,
-        paramstyle: str | None = None,
+        *,
         options: ExecuteOptions | None = None,
     ) -> str:
         """Start a query execution, or find a previous one to reuse.
 
-        The individual keyword arguments override the ``options`` field of the
-        same name unless None. A query with execution parameters (``qmark``)
-        always starts a new execution.
+        A query with execution parameters (``qmark``) always starts a new
+        execution.
 
         Args:
             operation: SQL query string.
             parameters: Query parameters.
-            work_group: Athena work group.
-            s3_staging_dir: S3 location for query results.
-            cache_size: Number of recent executions to search for a reusable result.
-            cache_expiration_time: Maximum age of a reusable result in seconds.
-            result_reuse_enable: Whether to enable Athena result reuse.
-            result_reuse_minutes: Maximum age of an Athena-reused result in minutes.
-            paramstyle: Parameter style ('qmark' or 'pyformat').
             options: The execution options.
 
         Returns:
@@ -72,19 +58,7 @@ class AioBaseCursor(BaseCursor):
             ProgrammingError: If the formatter rejects the query or its parameters.
             DatabaseError: If the ``StartQueryExecution`` request fails.
         """
-        # The individual keyword arguments are retained for backward compatibility
-        # with external callers that predate ExecuteOptions, mirroring
-        # BaseCursor._execute().
-        options = ExecuteOptions.resolve(
-            options,
-            work_group=work_group,
-            s3_staging_dir=s3_staging_dir,
-            cache_size=cache_size,
-            cache_expiration_time=cache_expiration_time,
-            result_reuse_enable=result_reuse_enable,
-            result_reuse_minutes=result_reuse_minutes,
-            paramstyle=paramstyle,
-        )
+        options = ExecuteOptions.resolve(options)
         query, request = self._build_execute_request(operation, parameters, options)
         query_id = None
         # Athena does not return the ExecutionParameters of earlier executions,
