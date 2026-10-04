@@ -8,7 +8,6 @@ import logging
 import math
 import mimetypes
 import os.path
-import re
 import time
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
@@ -30,9 +29,9 @@ from fsspec import AbstractFileSystem
 from fsspec.callbacks import _DEFAULT_CALLBACK, Callback
 from fsspec.compression import compr
 from fsspec.core import get_compression
-from fsspec.implementations.local import trailing_sep
+from fsspec.implementations.local import LocalFileSystem, make_path_posix, trailing_sep
 from fsspec.spec import AbstractBufferedFile
-from fsspec.utils import isfilelike, other_paths, tokenize
+from fsspec.utils import check_contained, isfilelike, other_paths, tokenize
 
 import pyathena
 from pyathena.connection import Connection
@@ -49,6 +48,7 @@ from pyathena.filesystem.s3_object import (
     S3PutObject,
     S3StorageClass,
 )
+from pyathena.filesystem.s3_path import S3Path
 from pyathena.util import RetryConfig, override, retry_api_call
 
 _logger = logging.getLogger(__name__)
@@ -212,10 +212,7 @@ class S3FileSystem(AbstractFileSystem):
         "Expires",
         "Metadata",
     )
-    PATTERN_PATH: Pattern[str] = re.compile(
-        r"(^s3://|^s3a://|^)(?P<bucket>[a-zA-Z0-9.\-_]+)(/(?P<key>[^?]+)|/)?"
-        r"($|\?version(Id|ID|id|_id)=(?P<version_id>.+)$)"
-    )
+    PATTERN_PATH: Pattern[str] = S3Path.PATTERN
 
     protocol = ("s3", "s3a")
     _extra_tokenize_attributes = ("default_block_size",)
@@ -350,9 +347,7 @@ class S3FileSystem(AbstractFileSystem):
     def parse_path(path: str) -> tuple[str, str | None, str | None]:
         """Parse an S3 path into its bucket, key and version ID.
 
-        The path may have an ``s3://`` or ``s3a://`` scheme and a version ID
-        query (``?versionId=``, ``?versionID=``, ``?versionid=`` or
-        ``?version_id=``).
+        See :meth:`S3Path.parse`, which returns them as an :class:`S3Path`.
 
         Args:
             path: The S3 path (e.g., "s3://bucket/key?versionId=...").
@@ -364,10 +359,8 @@ class S3FileSystem(AbstractFileSystem):
         Raises:
             ValueError: If the path is not a valid S3 path.
         """
-        match = S3FileSystem.PATTERN_PATH.search(path)
-        if match:
-            return match.group("bucket"), match.group("key"), match.group("version_id")
-        raise ValueError(f"Invalid S3 path format {path}.")
+        s3_path = S3Path.parse(path)
+        return s3_path.bucket, s3_path.key, s3_path.version_id
 
     @staticmethod
     def _directory_object(bucket: str, key: str | None, version_id: str | None = None) -> S3Object:
@@ -388,8 +381,19 @@ class S3FileSystem(AbstractFileSystem):
 
     @staticmethod
     def _versioned_file_object(bucket: str, version: dict[str, Any]) -> S3Object:
-        """Build an S3Object from a ListObjectVersions Versions entry."""
-        return S3Object(
+        """Build an S3Object from a ListObjectVersions Versions entry.
+
+        Its name addresses the version with a ``?versionId=`` query, except
+        for the ``null`` version, which a write to the key replaces.
+
+        Args:
+            bucket: The bucket of the version.
+            version: The ``Versions`` entry of the ListObjectVersions response.
+
+        Returns:
+            The file object of the version.
+        """
+        file = S3Object(
             init=version,
             type=S3ObjectType.S3_OBJECT_TYPE_FILE,
             bucket=bucket,
@@ -397,6 +401,9 @@ class S3FileSystem(AbstractFileSystem):
             version_id=version.get("VersionId"),
             is_latest=version.get("IsLatest", False),
         )
+        if file.version_id != "null":
+            file.name = str(S3Path(bucket, version["Key"], file.version_id))
+        return file
 
     def _head_bucket(
         self,
@@ -481,14 +488,14 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             The object, or None if it does not exist.
         """
-        bucket, key, path_version_id = self.parse_path(path)
-        version_id = path_version_id if path_version_id else version_id
+        s3_path = S3Path.parse(path)
+        version_id = s3_path.version_id if s3_path.version_id else version_id
         if version_id:
             # Cache an explicit version under its version-qualified path so
             # that it neither reuses nor replaces the entry of another version,
             # with a single spelling of the query so that a missing version
             # evicts the entry whatever spelling looked it up.
-            path = f"{path.partition('?')[0]}?versionId={version_id}"
+            path = str(s3_path.with_version_id(version_id))
         # Writes invalidate only the path without the version, and an
         # overwrite replaces the "null" version of a bucket without
         # versioning, so that version is looked up every time.
@@ -498,8 +505,8 @@ class S3FileSystem(AbstractFileSystem):
         if file is None:
             try:
                 request = {
-                    "Bucket": bucket,
-                    "Key": key,
+                    "Bucket": s3_path.bucket,
+                    "Key": s3_path.key,
                 }
                 if version_id:
                     request.update({"VersionId": version_id})
@@ -525,8 +532,8 @@ class S3FileSystem(AbstractFileSystem):
             file = S3Object(
                 init=response,
                 type=S3ObjectType.S3_OBJECT_TYPE_FILE,
-                bucket=bucket,
-                key=key,
+                bucket=s3_path.bucket,
+                key=s3_path.key,
                 version_id=version_id,
             )
             if cacheable:
@@ -598,10 +605,10 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             The listed directories and files.
         """
-        bucket, key, version_id = self.parse_path(path)
+        s3_path = S3Path.parse(path)
         use_cache = not prefix and not next_token
-        if key:
-            prefix = f"{key}/{prefix if prefix else ''}"
+        if s3_path.key:
+            prefix = f"{s3_path.key}/{prefix if prefix else ''}"
 
         cache_key = (path, delimiter)
         cached = self.dircache.get(cache_key) if use_cache and not refresh else None
@@ -611,7 +618,7 @@ class S3FileSystem(AbstractFileSystem):
         files: list[S3Object] = []
         while True:
             request: dict[Any, Any] = {
-                "Bucket": bucket,
+                "Bucket": s3_path.bucket,
                 "Prefix": prefix,
                 "Delimiter": delimiter,
             }
@@ -624,14 +631,16 @@ class S3FileSystem(AbstractFileSystem):
                 **request,
             )
             files.extend(
-                self._directory_object(bucket, c["Prefix"][:-1].rstrip("/"), version_id)
+                self._directory_object(
+                    s3_path.bucket, c["Prefix"][:-1].rstrip("/"), s3_path.version_id
+                )
                 for c in response.get("CommonPrefixes", [])
             )
             files.extend(
                 S3Object(
                     init=c,
                     type=S3ObjectType.S3_OBJECT_TYPE_FILE,
-                    bucket=bucket,
+                    bucket=s3_path.bucket,
                     key=c["Key"],
                 )
                 for c in response.get("Contents", [])
@@ -659,8 +668,10 @@ class S3FileSystem(AbstractFileSystem):
             detail: If True, return S3Object instances; if False, return paths as strings.
             refresh: If True, bypass cache and fetch fresh results from S3.
             **kwargs: Additional arguments including:
-                versions: If True, list all versions of the objects. Requires
-                    the filesystem to be constructed with ``version_aware=True``.
+                versions: If True, list all versions of the objects, named
+                    ``bucket/key?versionId=<id>`` except for the ``null``
+                    version. Requires the filesystem to be constructed with
+                    ``version_aware=True``.
 
         Returns:
             List of S3Object instances (if detail=True) or paths as strings (if detail=False).
@@ -694,26 +705,30 @@ class S3FileSystem(AbstractFileSystem):
         The listing is always fetched from S3 and is not cached, because the
         dircache stores the current view of a path.
         """
-        bucket, key, _ = self.parse_path(path)
-        prefix = f"{key}/" if key else ""
+        s3_path = S3Path.parse(path)
+        prefix = f"{s3_path.key}/" if s3_path.key else ""
 
         files: list[S3Object] = []
-        for response in self._list_object_versions_pages(bucket, prefix=prefix, delimiter="/"):
+        for response in self._list_object_versions_pages(
+            s3_path.bucket, prefix=prefix, delimiter="/"
+        ):
             files.extend(
-                self._directory_object(bucket, c["Prefix"][:-1].rstrip("/"))
+                self._directory_object(s3_path.bucket, c["Prefix"][:-1].rstrip("/"))
                 for c in response.get("CommonPrefixes", [])
             )
             files.extend(
-                self._versioned_file_object(bucket, v) for v in response.get("Versions", [])
+                self._versioned_file_object(s3_path.bucket, v) for v in response.get("Versions", [])
             )
 
-        if not files and key:
+        if not files and s3_path.key:
             # The path may point at an object rather than a key prefix.
             files = [
-                self._versioned_file_object(bucket, v)
-                for response in self._list_object_versions_pages(bucket, prefix=key, delimiter="/")
+                self._versioned_file_object(s3_path.bucket, v)
+                for response in self._list_object_versions_pages(
+                    s3_path.bucket, prefix=s3_path.key, delimiter="/"
+                )
                 for v in response.get("Versions", [])
-                if v["Key"] == key
+                if v["Key"] == s3_path.key
             ]
         return files
 
@@ -764,10 +779,11 @@ class S3FileSystem(AbstractFileSystem):
         missing, or find a key prefix, the cached listing of the parent is
         removed. With ``version_aware``, a cached file
         entry without a version ID is looked up again. With an explicit
-        version, the cached entries of the path are skipped, and the
+        version, the cached entries of the path are skipped, the
         HeadObject result is cached under the version-qualified path apart
         from other versions, except for the ``null`` version, which an
-        overwrite replaces. With request parameters on which the
+        overwrite replaces, and a missing version is not looked up as a key
+        prefix, since a version names an object. With request parameters on which the
         authorization of the requests depends (``ExpectedBucketOwner``,
         ``RequestPayer``, and the ``SSECustomer*`` parameters of an object
         encrypted with a customer-provided key), each request receives those
@@ -808,8 +824,8 @@ class S3FileSystem(AbstractFileSystem):
                 key=None,
                 version_id=None,
             )
-        bucket, key, path_version_id = self.parse_path(path)
-        version_id = path_version_id if path_version_id else kwargs.pop("version_id", None)
+        s3_path = S3Path.parse(path)
+        version_id = s3_path.version_id if s3_path.version_id else kwargs.pop("version_id", None)
         lookup_kwargs = self._get_lookup_kwargs(kwargs)
         # Cached entries describe the current version of a path as looked up
         # without lookup parameters, so an explicit version or lookup
@@ -844,14 +860,16 @@ class S3FileSystem(AbstractFileSystem):
                         return cache
                 else:
                     return self._directory_object(
-                        bucket, key.rstrip("/") if key else None, version_id
+                        s3_path.bucket, s3_path.key.rstrip("/") if s3_path.key else None, version_id
                     )
-        if key:
+        if s3_path.key:
             object_info = self._head_object(
                 path, refresh=refresh, version_id=version_id, lookup_kwargs=lookup_kwargs
             )
             if object_info:
                 return object_info
+            if version_id:
+                raise FileNotFoundError(path)
         else:
             bucket_info = self._head_bucket(path, refresh=refresh, lookup_kwargs=lookup_kwargs)
             if bucket_info:
@@ -862,8 +880,8 @@ class S3FileSystem(AbstractFileSystem):
             self._client.list_objects_v2,
             **{
                 **self._get_operation_kwargs("list_objects_v2", lookup_kwargs),
-                "Bucket": bucket,
-                "Prefix": f"{key.rstrip('/')}/" if key else "",
+                "Bucket": s3_path.bucket,
+                "Prefix": f"{s3_path.key.rstrip('/')}/" if s3_path.key else "",
                 "Delimiter": "/",
                 "MaxKeys": 1,
             },
@@ -876,7 +894,9 @@ class S3FileSystem(AbstractFileSystem):
             # Nothing caches the key prefix, and the cached listing of the
             # parent may predate it.
             self._evict_cache((self._parent(path), "/"))
-            return self._directory_object(bucket, key.rstrip("/") if key else None, version_id)
+            return self._directory_object(
+                s3_path.bucket, s3_path.key.rstrip("/") if s3_path.key else None, version_id
+            )
         raise FileNotFoundError(path)
 
     def _extract_parent_directories(
@@ -948,7 +968,7 @@ class S3FileSystem(AbstractFileSystem):
         path = self._strip_protocol(path)
         if path in ["", "/"]:
             raise ValueError("Cannot traverse all files in S3.")
-        bucket, key, _ = self.parse_path(path)
+        s3_path = S3Path.parse(path)
         prefix = kwargs.pop("prefix", "")
         refresh = kwargs.pop("refresh", False)
 
@@ -964,17 +984,17 @@ class S3FileSystem(AbstractFileSystem):
             # directories are derived from the listed keys, below the last
             # slash of the prefix, as with maxdepth.
             if withdirs:
-                base_key = "/".join(k for k in (key, prefix.rpartition("/")[0]) if k)
+                base_key = "/".join(k for k in (s3_path.key, prefix.rpartition("/")[0]) if k)
                 # Build a new list; files may be the cached listing.
-                files = files + self._extract_parent_directories(files, bucket, base_key)
+                files = files + self._extract_parent_directories(files, s3_path.bucket, base_key)
 
         if files:
             # Something is listed below the path, so the path is a directory,
             # which fsspec includes with the directories. A bucket is not
             # included, since cp_file() cannot copy it in a recursive copy.
-            if withdirs and key:
-                files = [self._directory_object(bucket, key), *files]
-        elif key:
+            if withdirs and s3_path.key:
+                files = [self._directory_object(s3_path.bucket, s3_path.key), *files]
+        elif s3_path.key:
             # As in fsspec, the path itself is returned if it is an object,
             # or with withdirs if it is a directory.
             try:
@@ -1058,6 +1078,61 @@ class S3FileSystem(AbstractFileSystem):
             return {f.name: f for f in files}
         return [f.name for f in files]
 
+    def expand_path(self, path, recursive=False, maxdepth=None, **kwargs) -> list[str]:
+        """Expand glob patterns and directories into the paths they match.
+
+        As in fsspec, except that a path with a version ID names that version
+        of an object: it is not a glob pattern, although its ``?`` is one in
+        fsspec, nor is anything expanded below it. With ``recursive``, it is
+        included only if the version exists, as fsspec includes a path that
+        exists.
+
+        Args:
+            path: S3 path, glob pattern, or list of them.
+            recursive: Whether to include the paths below the directories.
+            maxdepth: Maximum depth of the expansion, at least 1.
+            **kwargs: Additional arguments passed to ``glob`` and ``find``.
+
+        Returns:
+            The sorted matching paths.
+
+        Raises:
+            ValueError: If ``maxdepth`` is less than 1.
+            FileNotFoundError: If nothing matches.
+        """
+        if maxdepth is not None and maxdepth < 1:
+            raise ValueError("maxdepth must be at least 1")
+        versions, others = self._split_version_paths(path)
+        out = {p for p in versions if not recursive or self.exists(p)}
+        if others:
+            try:
+                out.update(
+                    super().expand_path(others, recursive=recursive, maxdepth=maxdepth, **kwargs)
+                )
+            except FileNotFoundError:
+                if not out:
+                    raise
+        if not out:
+            raise FileNotFoundError(path)
+        return sorted(out)
+
+    def _split_version_paths(self, path) -> tuple[list[str], list[str]]:
+        """Split paths into those with a version ID and the others.
+
+        Args:
+            path: S3 path, glob pattern, or list of them.
+
+        Returns:
+            Tuple of the paths with a version ID and the other paths, without
+            the protocol.
+        """
+        paths = [
+            self._strip_protocol(p)
+            for p in ([path] if isinstance(path, (str, os.PathLike)) else path)
+        ]
+        versions = [p for p in paths if S3Path.split_version_id(p)[1]]
+        return versions, [p for p in paths if p not in versions]
+
     def exists(self, path: str, **kwargs) -> bool:
         """Check if an S3 path exists.
 
@@ -1088,11 +1163,11 @@ class S3FileSystem(AbstractFileSystem):
         if path in ["", "/"]:
             # The root always exists.
             return True
-        bucket, key, _ = self.parse_path(path)
+        s3_path = S3Path.parse(path)
         lookup_kwargs = self._get_lookup_kwargs(kwargs)
         # The cached listings are made without lookup parameters.
         use_listings = not refresh and not lookup_kwargs
-        if key:
+        if s3_path.key:
             try:
                 if use_listings and self._ls_from_cache(path):
                     return True
@@ -1100,10 +1175,10 @@ class S3FileSystem(AbstractFileSystem):
                 return bool(info)
             except FileNotFoundError:
                 return False
-        if use_listings and self._ls_from_cache(bucket):
+        if use_listings and self._ls_from_cache(s3_path.bucket):
             return True
         try:
-            file = self._head_bucket(bucket, refresh=refresh, lookup_kwargs=lookup_kwargs)
+            file = self._head_bucket(s3_path.bucket, refresh=refresh, lookup_kwargs=lookup_kwargs)
         except PermissionError:
             # HeadBucket answers 403 for a bucket that exists but that the
             # caller may not access.
@@ -1121,10 +1196,12 @@ class S3FileSystem(AbstractFileSystem):
             **kwargs: Accepted for fsspec compatibility; not used in the
                 request.
         """
-        bucket, key, version_id = self.parse_path(path)
-        if not key:
+        s3_path = S3Path.parse(path)
+        if not s3_path.key:
             return
-        self._delete_object(bucket=bucket, key=key, version_id=version_id, **kwargs)
+        self._delete_object(
+            bucket=s3_path.bucket, key=s3_path.key, version_id=s3_path.version_id, **kwargs
+        )
         self.invalidate_cache(path)
 
     def rm(self, path, recursive=False, maxdepth=None, **kwargs) -> None:
@@ -1169,17 +1246,18 @@ class S3FileSystem(AbstractFileSystem):
         paths = [path] if isinstance(path, str) else list(path)
         versioned_paths, unversioned_paths = [], []
         for p in paths:
-            _, key, version_id = self.parse_path(p)
+            s3_path = S3Path.parse(p)
             # expand_path strips the slashes of "bucket//" to the bucket.
-            if not key or not key.strip("/"):
+            if s3_path.is_bucket:
                 raise ValueError("Cannot delete the bucket.")
-            if version_id:
+            if s3_path.version_id:
                 versioned_paths.append(p)
             else:
                 unversioned_paths.append(p)
 
         if unversioned_paths:
-            # expand_path treats "?" as a wildcard, so versioned paths skip it.
+            # Versioned paths are deleted as given, without the lookup that
+            # expand_path makes for them with recursive.
             unversioned_paths = self.expand_path(
                 unversioned_paths, recursive=recursive, maxdepth=maxdepth
             )
@@ -1195,7 +1273,7 @@ class S3FileSystem(AbstractFileSystem):
         if version_id:
             request.update({"VersionId": version_id})
 
-        _logger.debug(f"Delete object: s3://{bucket}/{key}?versionId={version_id}")
+        _logger.debug(f"Delete object: {S3Path(bucket, key, version_id).uri}")
         self._call(
             self._client.delete_object,
             **request,
@@ -1258,12 +1336,12 @@ class S3FileSystem(AbstractFileSystem):
         quiet = kwargs.pop("Quiet", True)
         delete_objects: dict[str, list[dict[str, str]]] = {}
         for p in paths:
-            bucket, key, version_id = self.parse_path(p)
-            if key:
-                object_ = {"Key": key}
-                if version_id:
-                    object_.update({"VersionId": version_id})
-                delete_objects.setdefault(bucket, []).append(object_)
+            s3_path = S3Path.parse(p)
+            if s3_path.key:
+                object_ = {"Key": s3_path.key}
+                if s3_path.version_id:
+                    object_.update({"VersionId": s3_path.version_id})
+                delete_objects.setdefault(s3_path.bucket, []).append(object_)
         return [
             {
                 "Bucket": bucket,
@@ -1306,10 +1384,7 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             The path, with a ``?versionId=`` query if the entry has a version.
         """
-        path = f"{bucket}/{object_['Key']}"
-        if object_.get("VersionId"):
-            path += f"?versionId={object_['VersionId']}"
-        return path
+        return str(S3Path(bucket, object_["Key"], object_.get("VersionId")))
 
     @staticmethod
     def _raise_delete_objects_errors(
@@ -1380,13 +1455,13 @@ class S3FileSystem(AbstractFileSystem):
         path = self._strip_protocol(path).rstrip("/")
         if not path:
             raise ValueError("Cannot create the root directory.")
-        bucket, key, _ = self.parse_path(path)
-        if self.exists(bucket):
-            if not key:
+        s3_path = S3Path.parse(path)
+        if self.exists(s3_path.bucket):
+            if not s3_path.key:
                 # Requested to create a bucket, but the bucket already exists.
-                raise FileExistsError(bucket)
+                raise FileExistsError(s3_path.bucket)
             # Do nothing as the bucket already exists.
-        elif not key or create_parents:
+        elif not s3_path.key or create_parents:
             if not self.allow_bucket_creation:
                 raise PermissionError(
                     "Bucket creation is disabled. "
@@ -1395,7 +1470,7 @@ class S3FileSystem(AbstractFileSystem):
             acl = kwargs.pop("acl", "")
             if acl and acl not in self.BUCKET_ACLS:
                 raise ValueError(f"ACL not in {self.BUCKET_ACLS}.")
-            request: dict[str, Any] = {"Bucket": bucket}
+            request: dict[str, Any] = {"Bucket": s3_path.bucket}
             if acl:
                 request.update({"ACL": acl})
             region_name = kwargs.pop("region_name", None) or self._client.meta.region_name
@@ -1403,22 +1478,22 @@ class S3FileSystem(AbstractFileSystem):
                 # us-east-1 does not accept a location constraint.
                 request.update({"CreateBucketConfiguration": {"LocationConstraint": region_name}})
 
-            _logger.debug(f"Create bucket: s3://{bucket}")
+            _logger.debug(f"Create bucket: s3://{s3_path.bucket}")
             try:
                 self._call(
                     self._client.create_bucket,
                     **request,
                 )
             except botocore.exceptions.ParamValidationError as e:
-                raise ValueError(f"Bucket create failed {bucket!r}: {e}") from e
+                raise ValueError(f"Bucket create failed {s3_path.bucket!r}: {e}") from e
             # invalidate_cache of the bucket keeps the cached bucket
             # listing, so evict it directly.
             self._evict_cache("")
-            self.invalidate_cache(bucket)
+            self.invalidate_cache(s3_path.bucket)
         else:
             # exists() has already confirmed the bucket does not exist,
             # and it is not requested to be created.
-            raise FileNotFoundError(bucket)
+            raise FileNotFoundError(s3_path.bucket)
 
     def makedirs(self, path: str, exist_ok: bool = False) -> None:
         """Recursively create a directory, creating the bucket if necessary.
@@ -1466,8 +1541,8 @@ class S3FileSystem(AbstractFileSystem):
             OSError: If the bucket is not empty.
         """
         path = self._strip_protocol(path).rstrip("/")
-        bucket, key, _ = self.parse_path(path)
-        if key:
+        s3_path = S3Path.parse(path)
+        if s3_path.key:
             if self.exists(path):
                 # The user may have meant rm(path, recursive=True).
                 raise FileExistsError(path)
@@ -1478,12 +1553,12 @@ class S3FileSystem(AbstractFileSystem):
                 "Set allow_bucket_deletion=True on the filesystem to enable it."
             )
 
-        _logger.debug(f"Delete bucket: s3://{bucket}")
+        _logger.debug(f"Delete bucket: s3://{s3_path.bucket}")
         self._call(
             self._client.delete_bucket,
-            Bucket=bucket,
+            Bucket=s3_path.bucket,
         )
-        self.invalidate_cache(bucket)
+        self.invalidate_cache(s3_path.bucket)
         # invalidate_cache of the bucket keeps the cached bucket listing,
         # so evict it directly.
         self._evict_cache("")
@@ -1505,15 +1580,15 @@ class S3FileSystem(AbstractFileSystem):
             ValueError: If the path has a version ID, is a bucket, or exists
                 while ``truncate`` is False.
         """
-        bucket, key, version_id = self.parse_path(path)
-        if version_id:
+        s3_path = S3Path.parse(path)
+        if s3_path.version_id:
             raise ValueError("Cannot touch the file with the version specified.")
         if not truncate and self.exists(path):
             raise ValueError("Cannot touch the existing file without specifying truncate.")
-        if not key:
+        if not s3_path.key:
             raise ValueError("Cannot touch the bucket.")
 
-        object_ = self._put_object(bucket=bucket, key=key, body=None, **kwargs)
+        object_ = self._put_object(bucket=s3_path.bucket, key=s3_path.key, body=None, **kwargs)
         self.invalidate_cache(path)
         return object_.to_dict()
 
@@ -1575,27 +1650,7 @@ class S3FileSystem(AbstractFileSystem):
                 except for a directory with no object at its key, which is not
                 copied.
         """
-        if isinstance(path1, list) and isinstance(path2, list):
-            paths1, paths2 = path1, path2
-        else:
-            source_is_str = isinstance(path1, str)
-            paths1 = self.expand_path(path1, recursive=recursive, maxdepth=maxdepth)
-            if source_is_str and (not recursive or maxdepth is not None):
-                # Non-recursive glob does not copy directories.
-                paths1 = [p for p in paths1 if not (trailing_sep(p) or self.isdir(p))]
-                if not paths1:
-                    return []
-            # The destination is looked up only when it decides the mapping.
-            exists = source_is_str and (
-                (has_magic(path1) and len(paths1) == 1)
-                or (
-                    not has_magic(path1)
-                    and not trailing_sep(path1)
-                    and isinstance(path2, str)
-                    and (trailing_sep(path2) or self.isdir(path2))
-                )
-            )
-            paths2 = other_paths(paths1, path2, exists=exists, flatten=not source_is_str)
+        paths1, paths2 = self._copy_paths(path1, path2, recursive=recursive, maxdepth=maxdepth)
         # The paths are copied as given, and compared by what they name.
         named = [
             (p1, p2, self._move_target(p1), self._move_target(p2))
@@ -1622,7 +1677,7 @@ class S3FileSystem(AbstractFileSystem):
             if not (
                 (counts[dest] > 1 or dest in sources)
                 and source in directories
-                and not self.parse_path(p1)[2]
+                and not S3Path.parse(p1).version_id
                 and self._head_object(source) is None
             )
         ]
@@ -1633,6 +1688,119 @@ class S3FileSystem(AbstractFileSystem):
             if dest in sources:
                 raise ValueError("Cannot move a path onto another path that is moved.")
         return pairs
+
+    def _copy_paths(
+        self,
+        path1: str | list[str],
+        path2: str | list[str],
+        recursive: bool = False,
+        maxdepth: int | None = None,
+        isdir: Callable[[str], bool] | None = None,
+    ) -> tuple[list[str], list[str]]:
+        """Pair the sources of a copy with their destinations as fsspec's ``copy()`` does.
+
+        A source with a version ID names that version of an object: it is not
+        a glob pattern, and its destination is named after its key without
+        the version.
+
+        Args:
+            path1: Source S3 path, glob pattern, or list of them.
+            path2: Destination path, or list of paths when ``path1`` is a
+                list.
+            recursive: Whether to include the contents of the directories.
+            maxdepth: Maximum depth of the expansion.
+            isdir: Whether a destination path is a directory, by default
+                ``self.isdir``; ``get()`` passes the local filesystem's.
+
+        Returns:
+            The sources and their destinations. Both are empty if ``path1``
+            is a string that matches only directories without ``recursive``.
+        """
+        if isinstance(path1, list) and isinstance(path2, list):
+            return path1, path2
+        source_is_str = isinstance(path1, str)
+        paths1 = self.expand_path(path1, recursive=recursive, maxdepth=maxdepth)
+        if source_is_str and (not recursive or maxdepth is not None):
+            # Non-recursive glob does not copy directories.
+            paths1 = [p for p in paths1 if not (trailing_sep(p) or self.isdir(p))]
+            if not paths1:
+                return [], []
+        glob = isinstance(path1, str) and has_magic(path1) and not S3Path.has_version_id(path1)
+        # The destination is looked up only when it decides the mapping.
+        exists = source_is_str and (
+            (glob and len(paths1) == 1)
+            or (
+                not glob
+                and not trailing_sep(path1)
+                and isinstance(path2, str)
+                and (trailing_sep(path2) or (isdir or self.isdir)(path2))
+            )
+        )
+        names = [S3Path.split_version_id(p)[0] for p in paths1]
+        return paths1, other_paths(names, path2, exists=exists, flatten=not source_is_str)
+
+    def copy(self, path1, path2, recursive=False, maxdepth=None, on_error=None, **kwargs) -> None:
+        """Copy files within S3.
+
+        As fsspec's ``copy()``, except that a source with a version ID copies
+        that version of the object to a destination named after its key, as
+        ``_copy_paths`` pairs them.
+
+        Args:
+            path1: Source S3 path, glob pattern, or list of them.
+            path2: Destination S3 path, or list of paths when ``path1`` is a
+                list.
+            recursive: Whether to copy the directories with their contents.
+            maxdepth: Maximum depth of a recursive copy.
+            on_error: ``"raise"`` or ``"ignore"`` for a missing source; by
+                default ``"ignore"`` with ``recursive`` and ``"raise"``
+                otherwise.
+            **kwargs: Additional S3 copy parameters passed to ``cp_file()``.
+        """
+        sources = [path1] if isinstance(path1, (str, os.PathLike)) else path1
+        if isinstance(path2, str) and any(S3Path.has_version_id(p) for p in sources):
+            path1, path2 = self._copy_paths(path1, path2, recursive=recursive, maxdepth=maxdepth)
+            if not path1:
+                return
+        super().copy(
+            path1, path2, recursive=recursive, maxdepth=maxdepth, on_error=on_error, **kwargs
+        )
+
+    def get(
+        self, rpath, lpath, recursive=False, callback=_DEFAULT_CALLBACK, maxdepth=None, **kwargs
+    ) -> None:
+        """Copy files from S3 to the local filesystem.
+
+        As fsspec's ``get()``, except that a source with a version ID
+        downloads that version of the object to a local path named after its
+        key, as ``_copy_paths`` pairs them. Those destinations are checked to
+        lie under ``lpath``.
+
+        Args:
+            rpath: Source S3 path, glob pattern, or list of them.
+            lpath: Local destination path, or list of paths when ``rpath`` is
+                a list.
+            recursive: Whether to copy the directories with their contents.
+            callback: Progress callback.
+            maxdepth: Maximum depth of a recursive copy.
+            **kwargs: Additional parameters passed to ``get_file()``.
+
+        Raises:
+            ValueError: If a source with a version ID is paired, and a
+                destination lies outside ``lpath``.
+        """
+        sources = [rpath] if isinstance(rpath, (str, os.PathLike)) else rpath
+        if isinstance(lpath, (str, os.PathLike)) and any(S3Path.has_version_id(p) for p in sources):
+            root = make_path_posix(lpath)
+            rpath, lpath = self._copy_paths(
+                rpath, root, recursive=recursive, maxdepth=maxdepth, isdir=LocalFileSystem().isdir
+            )
+            check_contained(root, lpath)
+            if not rpath:
+                return
+        super().get(
+            rpath, lpath, recursive=recursive, callback=callback, maxdepth=maxdepth, **kwargs
+        )
 
     def _move_target(self, path: str) -> str:
         """Return what a path of a move names, for comparing the paths.
@@ -1647,11 +1815,10 @@ class S3FileSystem(AbstractFileSystem):
             The path in ``bucket/key`` form, with the version ID unless it is
             ``null``.
         """
-        bucket, key, version_id = self.parse_path(path)
-        target = f"{bucket}/{key}" if key else bucket
-        if version_id and version_id != "null":
-            return f"{target}?versionId={version_id}"
-        return target
+        s3_path = S3Path.parse(path)
+        if s3_path.version_id == "null":
+            return s3_path.name
+        return str(s3_path)
 
     def cp_file(
         self, path1: str, path2: str, recursive=False, maxdepth=None, on_error=None, **kwargs
@@ -1702,21 +1869,14 @@ class S3FileSystem(AbstractFileSystem):
         Raises:
             ValueError: If trying to copy to a versioned file or copy buckets.
         """
-        # fsspec < 2026.6.0: AbstractFileSystem.mv() passed the typo'd
-        # "onerror" keyword (instead of "on_error", which copy() consumes),
-        # so it leaked through copy(**kwargs) into cp_file and must not
-        # reach the S3 API. Remove this once the fsspec requirement is
-        # >= 2026.6.0, where mv() passes on_error correctly.
-        # https://github.com/fsspec/filesystem_spec/commit/346a589fef9308550ffa3d0d510f2db67281bb05
-        kwargs.pop("onerror", None)
         # Parameters of the multipart copy, not of the S3 requests.
         block_size = kwargs.pop("block_size", None)
         max_workers = kwargs.pop("max_workers", None)
-        bucket1, key1, version_id1 = self.parse_path(path1)
-        bucket2, key2, version_id2 = self.parse_path(path2)
-        if version_id2:
+        source = S3Path.parse(path1)
+        destination = S3Path.parse(path2)
+        if destination.version_id:
             raise ValueError("Cannot copy to a versioned file.")
-        if not key1 or not key2:
+        if not source.key or not destination.key:
             raise ValueError("Cannot copy buckets.")
 
         info1 = self.info(path1)
@@ -1728,21 +1888,21 @@ class S3FileSystem(AbstractFileSystem):
         try:
             if size1 <= self.MULTIPART_UPLOAD_MAX_PART_SIZE:
                 self._copy_object(
-                    bucket1=bucket1,
-                    key1=key1,
-                    version_id1=version_id1,
-                    bucket2=bucket2,
-                    key2=key2,
+                    bucket1=source.bucket,
+                    key1=source.key,
+                    version_id1=source.version_id,
+                    bucket2=destination.bucket,
+                    key2=destination.key,
                     **kwargs,
                 )
             else:
                 self._copy_object_with_multipart_upload(
-                    bucket1=bucket1,
-                    key1=key1,
-                    version_id1=version_id1,
+                    bucket1=source.bucket,
+                    key1=source.key,
+                    version_id1=source.version_id,
                     size1=size1,
-                    bucket2=bucket2,
-                    key2=key2,
+                    bucket2=destination.bucket,
+                    key2=destination.key,
                     max_workers=max_workers,
                     block_size=block_size,
                     **kwargs,
@@ -1775,8 +1935,8 @@ class S3FileSystem(AbstractFileSystem):
         }
 
         _logger.debug(
-            f"Copy object from s3://{bucket1}/{key1}?versionId={version_id1} "
-            f"to s3://{bucket2}/{key2}."
+            f"Copy object from {S3Path(bucket1, key1, version_id1).uri} "
+            f"to {S3Path(bucket2, key2).uri}."
         )
         self._call(self._client.copy_object, **request, **kwargs)
 
@@ -1983,7 +2143,7 @@ class S3FileSystem(AbstractFileSystem):
         source = {"Bucket": bucket, "Key": key}
         if version_id:
             source.update({"VersionId": version_id})
-        _logger.debug(f"Head object to copy: s3://{bucket}/{key}?versionId={version_id}")
+        _logger.debug(f"Head object to copy: {S3Path(bucket, key, version_id).uri}")
         head = S3Metadata(
             self._call(
                 self._client.head_object,
@@ -2018,7 +2178,7 @@ class S3FileSystem(AbstractFileSystem):
             # Directory buckets do not support GetObjectTagging, and their
             # objects have no tags.
             if not self._is_directory_bucket(bucket):
-                _logger.debug(f"Get tags to copy: s3://{bucket}/{key}?versionId={version_id}")
+                _logger.debug(f"Get tags to copy: {S3Path(bucket, key, version_id).uri}")
                 response = self._call(
                     self._client.get_object_tagging,
                     **self._get_operation_kwargs("get_object_tagging", source_kwargs),
@@ -2084,7 +2244,7 @@ class S3FileSystem(AbstractFileSystem):
             request.update({"VersionId": version_id})
         names: list[str] = []
         while True:
-            _logger.debug(f"List object annotations: s3://{bucket}/{key}?versionId={version_id}")
+            _logger.debug(f"List object annotations: {S3Path(bucket, key, version_id).uri}")
             response = self._call(self._client.list_object_annotations, **request)
             names.extend(a["AnnotationName"] for a in response.get("Annotations", []))
             token = response.get("NextContinuationToken")
@@ -2124,7 +2284,7 @@ class S3FileSystem(AbstractFileSystem):
         if version_id1:
             source.update({"VersionId": version_id1})
         _logger.debug(
-            f"Copy object annotation {name} from s3://{bucket1}/{key1}?versionId={version_id1} "
+            f"Copy object annotation {name} from {S3Path(bucket1, key1, version_id1).uri} "
             f"to s3://{bucket2}/{key2}."
         )
         response = self._call(
@@ -2265,10 +2425,10 @@ class S3FileSystem(AbstractFileSystem):
             # large data as a parallel multipart upload.
             self.open(path, "xb" if mode == "create" else "wb", **kwargs)._write_and_close(value)
             return
-        bucket, key, version_id = self.parse_path(path)
-        if version_id:
+        s3_path = S3Path.parse(path)
+        if s3_path.version_id:
             raise ValueError("Cannot write to the file with the version specified.")
-        if not key:
+        if not s3_path.key:
             raise ValueError("Cannot write to a bucket.")
         kwargs.pop("block_size", None)
         kwargs.pop("max_workers", None)
@@ -2288,7 +2448,7 @@ class S3FileSystem(AbstractFileSystem):
             # buffered path does.
             value = bytes(value)
 
-        self._put_object(bucket=bucket, key=key, body=value, **request_kwargs)
+        self._put_object(bucket=s3_path.bucket, key=s3_path.key, body=value, **request_kwargs)
         self.invalidate_cache(path)
 
     def _finish_multipart_upload(
@@ -2298,14 +2458,15 @@ class S3FileSystem(AbstractFileSystem):
         upload_id: str,
         futures: list[Future[S3MultipartUploadPart]],
         request_kwargs: Mapping[str, Any] | None = None,
+        abort: bool = True,
     ) -> S3CompleteMultipartUpload:
         """Collect the uploaded parts and complete the multipart upload.
 
         When any part or the completion fails, or the wait for them is
         interrupted, the parts that have not started are cancelled, the
         running ones are waited for, and the multipart upload is aborted so
-        that no incomplete upload or part is left behind. The original error
-        is then re-raised.
+        that no incomplete upload or part is left behind, unless ``abort`` is
+        false. The original error is then re-raised.
 
         Args:
             bucket: S3 bucket name.
@@ -2315,6 +2476,8 @@ class S3FileSystem(AbstractFileSystem):
             request_kwargs: Parameters of the upload, such as
                 ``RequestPayer`` or the SSE-C parameters; the completion and
                 the abort receive those that they accept.
+            abort: Whether to abort the multipart upload on failure. A caller
+                that keeps the upload to abort it itself passes false.
 
         Returns:
             S3CompleteMultipartUpload of the completed upload.
@@ -2332,6 +2495,8 @@ class S3FileSystem(AbstractFileSystem):
                 **self._get_operation_kwargs("complete_multipart_upload", request_kwargs),
             )
         except BaseException:
+            if not abort:
+                raise
             # A part that is still uploading when the upload is aborted may
             # be stored after the abort, so wait for the parts that could not
             # be cancelled first.
@@ -2400,12 +2565,12 @@ class S3FileSystem(AbstractFileSystem):
             FileNotFoundError: If the path has no key or the key does not
                 exist.
         """
-        bucket, key, path_version_id = self.parse_path(path)
-        if not key:
+        s3_path = S3Path.parse(path)
+        if not s3_path.key:
             raise FileNotFoundError(path)
         version_id = kwargs.pop("version_id", None)
-        if path_version_id:
-            version_id = path_version_id
+        if s3_path.version_id:
+            version_id = s3_path.version_id
         ranges: tuple[int, int | None] | None = None
         if start is not None and start < 0 and end is None:
             # S3 returns the last bytes, or the whole object when it is
@@ -2419,7 +2584,10 @@ class S3FileSystem(AbstractFileSystem):
                 # empty range sends no GetObject request that would report a
                 # missing object.
                 info = self.info(path, version_id=version_id, **self._get_lookup_kwargs(kwargs))
-                if info.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY or info.key != key:
+                if (
+                    info.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
+                    or info.key != s3_path.key
+                ):
                     # There is no object to read, as GetObject reports for
                     # the other ranges, or info() describes the key without
                     # the trailing slash of this one.
@@ -2433,8 +2601,8 @@ class S3FileSystem(AbstractFileSystem):
                 ranges = (start, end)
         try:
             return self._get_object(
-                bucket=bucket,
-                key=key,
+                bucket=s3_path.bucket,
+                key=s3_path.key,
                 ranges=ranges,
                 version_id=version_id,
                 **kwargs,
@@ -2493,8 +2661,7 @@ class S3FileSystem(AbstractFileSystem):
             # No support for directory uploads.
             return
 
-        bucket, key, _ = self.parse_path(rpath)
-        if not key:
+        if not S3Path.parse(rpath).key:
             # No support for bucket copy.
             return
 
@@ -2541,7 +2708,7 @@ class S3FileSystem(AbstractFileSystem):
             outfile: A file-like object to write to instead of ``lpath``.
             **kwargs: Additional S3 parameters passed to open().
         """
-        _, _, path_version_id = self.parse_path(self._strip_protocol(rpath))
+        path_version_id = S3Path.parse(self._strip_protocol(rpath)).version_id
         if outfile is None and isfilelike(lpath):
             outfile = lpath
         elif (
@@ -2623,11 +2790,11 @@ class S3FileSystem(AbstractFileSystem):
             ...     client_method="put_object"
             ... )
         """
-        bucket, key, version_id = self.parse_path(path)
+        s3_path = S3Path.parse(path)
         client_method = kwargs.pop("client_method", "get_object")
-        params = {"Bucket": bucket, "Key": key}
-        if version_id:
-            params.update({"VersionId": version_id})
+        params = {"Bucket": s3_path.bucket, "Key": s3_path.key}
+        if s3_path.version_id:
+            params.update({"VersionId": s3_path.version_id})
         if kwargs:
             params.update(kwargs)
         request = {
@@ -2636,7 +2803,7 @@ class S3FileSystem(AbstractFileSystem):
             "ExpiresIn": expiration,
         }
 
-        _logger.debug(f"Generate signed url: s3://{bucket}/{key}?versionId={version_id}")
+        _logger.debug(f"Generate signed url: {s3_path.uri}")
         return self._call(
             self._client.generate_presigned_url,
             **request,
@@ -2655,14 +2822,14 @@ class S3FileSystem(AbstractFileSystem):
             system-defined metadata (content type, encryption settings,
             etc.) as typed properties.
         """
-        bucket, key, version_id = self.parse_path(path)
-        if not key:
+        s3_path = S3Path.parse(path)
+        if not s3_path.key:
             raise ValueError("Cannot get metadata of a bucket.")
-        request: dict[str, Any] = {"Bucket": bucket, "Key": key}
-        if version_id:
-            request.update({"VersionId": version_id})
+        request: dict[str, Any] = {"Bucket": s3_path.bucket, "Key": s3_path.key}
+        if s3_path.version_id:
+            request.update({"VersionId": s3_path.version_id})
 
-        _logger.debug(f"Head object metadata: s3://{bucket}/{key}?versionId={version_id}")
+        _logger.debug(f"Head object metadata: {s3_path.uri}")
         response = self._call(
             self._client.head_object,
             **request,
@@ -2718,10 +2885,10 @@ class S3FileSystem(AbstractFileSystem):
         Raises:
             ValueError: If the path is a bucket or has a version ID.
         """
-        bucket, key, version_id = self.parse_path(path)
-        if not key:
+        s3_path = S3Path.parse(path)
+        if not s3_path.key:
             raise ValueError("Cannot set metadata of a bucket.")
-        if version_id:
+        if s3_path.version_id:
             raise ValueError("Cannot set metadata of a version.")
         head = self.metadata(path)
         metadata = dict(head)
@@ -2754,12 +2921,12 @@ class S3FileSystem(AbstractFileSystem):
                 }
             )
 
-        _logger.debug(f"Set object metadata: s3://{bucket}/{key}")
+        _logger.debug(f"Set object metadata: {s3_path.uri}")
         self._call(
             self._client.copy_object,
-            CopySource={"Bucket": bucket, "Key": key},
-            Bucket=bucket,
-            Key=key,
+            CopySource={"Bucket": s3_path.bucket, "Key": s3_path.key},
+            Bucket=s3_path.bucket,
+            Key=s3_path.key,
             Metadata=metadata,
             MetadataDirective="REPLACE",
             **{
@@ -2778,14 +2945,14 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             Dictionary mapping tag keys to tag values.
         """
-        bucket, key, version_id = self.parse_path(path)
-        if not key:
+        s3_path = S3Path.parse(path)
+        if not s3_path.key:
             raise ValueError("Cannot get tags of a bucket.")
-        request: dict[str, Any] = {"Bucket": bucket, "Key": key}
-        if version_id:
-            request.update({"VersionId": version_id})
+        request: dict[str, Any] = {"Bucket": s3_path.bucket, "Key": s3_path.key}
+        if s3_path.version_id:
+            request.update({"VersionId": s3_path.version_id})
 
-        _logger.debug(f"Get object tagging: s3://{bucket}/{key}?versionId={version_id}")
+        _logger.debug(f"Get object tagging: {s3_path.uri}")
         response = self._call(
             self._client.get_object_tagging,
             **request,
@@ -2808,8 +2975,8 @@ class S3FileSystem(AbstractFileSystem):
                 'm' will merge in new tags with existing tags, which incurs
                 two remote calls.
         """
-        bucket, key, version_id = self.parse_path(path)
-        if not key:
+        s3_path = S3Path.parse(path)
+        if not s3_path.key:
             raise ValueError("Cannot put tags of a bucket.")
         if mode == "m":
             existing_tags = self.get_tags(path)
@@ -2820,14 +2987,14 @@ class S3FileSystem(AbstractFileSystem):
         else:
             raise ValueError(f"Mode must be {{'o', 'm'}}, not {mode}.")
         request: dict[str, Any] = {
-            "Bucket": bucket,
-            "Key": key,
+            "Bucket": s3_path.bucket,
+            "Key": s3_path.key,
             "Tagging": {"TagSet": new_tags},
         }
-        if version_id:
-            request.update({"VersionId": version_id})
+        if s3_path.version_id:
+            request.update({"VersionId": s3_path.version_id})
 
-        _logger.debug(f"Put object tagging: s3://{bucket}/{key}?versionId={version_id}")
+        _logger.debug(f"Put object tagging: {s3_path.uri}")
         self._call(
             self._client.put_object_tagging,
             **request,
@@ -2846,12 +3013,12 @@ class S3FileSystem(AbstractFileSystem):
             **kwargs: Additional parameters passed to the PutObjectAcl or
                 PutBucketAcl API.
         """
-        bucket, key, version_id = self.parse_path(path)
+        s3_path = S3Path.parse(path)
         # Validate before any ACL is applied so that a recursive call cannot
         # partially apply object ACLs and then fail on the bucket ACL.
-        if not key and acl not in self.BUCKET_ACLS:
+        if not s3_path.key and acl not in self.BUCKET_ACLS:
             raise ValueError(f"ACL not in {self.BUCKET_ACLS}.")
-        if key and acl not in self.OBJECT_ACLS:
+        if s3_path.key and acl not in self.OBJECT_ACLS:
             raise ValueError(f"ACL not in {self.OBJECT_ACLS}.")
         if recursive:
             with self._create_executor(max_workers=self.max_workers) as executor:
@@ -2861,26 +3028,26 @@ class S3FileSystem(AbstractFileSystem):
                 ]
                 for future in as_completed(futures):
                     future.result()
-            if key:
+            if s3_path.key:
                 # A key prefix is not an object itself; only the objects
                 # below it have ACLs.
                 return
-        if key:
-            request: dict[str, Any] = {"Bucket": bucket, "Key": key, "ACL": acl}
-            if version_id:
-                request.update({"VersionId": version_id})
+        if s3_path.key:
+            request: dict[str, Any] = {"Bucket": s3_path.bucket, "Key": s3_path.key, "ACL": acl}
+            if s3_path.version_id:
+                request.update({"VersionId": s3_path.version_id})
 
-            _logger.debug(f"Put object acl: s3://{bucket}/{key}?versionId={version_id}")
+            _logger.debug(f"Put object acl: {s3_path.uri}")
             self._call(
                 self._client.put_object_acl,
                 **request,
                 **kwargs,
             )
         else:
-            _logger.debug(f"Put bucket acl: s3://{bucket}")
+            _logger.debug(f"Put bucket acl: {s3_path.uri}")
             self._call(
                 self._client.put_bucket_acl,
-                Bucket=bucket,
+                Bucket=s3_path.bucket,
                 ACL=acl,
                 **kwargs,
             )
@@ -2903,19 +3070,19 @@ class S3FileSystem(AbstractFileSystem):
             List of S3MultipartUpload instances describing the in-progress
             multipart uploads.
         """
-        bucket, key, _ = self.parse_path(path)
+        s3_path = S3Path.parse(path)
         # S3 matches Prefix as a plain string, so the uploads are filtered to
         # the key itself and the keys under it.
-        prefix = f"{key.rstrip('/')}/" if key else ""
+        prefix = f"{s3_path.key.rstrip('/')}/" if s3_path.key else ""
 
-        _logger.debug(f"List multipart uploads: s3://{bucket}/{key}")
+        _logger.debug(f"List multipart uploads: {s3_path.uri}")
         uploads: list[S3MultipartUpload] = []
         next_key_marker: str | None = None
         next_upload_id_marker: str | None = None
         while True:
-            request: dict[str, Any] = {"Bucket": bucket}
-            if key:
-                request.update({"Prefix": key})
+            request: dict[str, Any] = {"Bucket": s3_path.bucket}
+            if s3_path.key:
+                request.update({"Prefix": s3_path.key})
             if next_key_marker:
                 request.update(
                     {"KeyMarker": next_key_marker, "UploadIdMarker": next_upload_id_marker}
@@ -2925,9 +3092,9 @@ class S3FileSystem(AbstractFileSystem):
                 **request,
             )
             uploads.extend(
-                S3MultipartUpload({**u, "Bucket": bucket})
+                S3MultipartUpload({**u, "Bucket": s3_path.bucket})
                 for u in response.get("Uploads", [])
-                if u["Key"] == key or u["Key"].startswith(prefix)
+                if u["Key"] == s3_path.key or u["Key"].startswith(prefix)
             )
             if not response.get("IsTruncated"):
                 break
@@ -2960,30 +3127,32 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             List of S3ObjectVersion instances describing the versions.
         """
-        bucket, key, _ = self.parse_path(path)
+        s3_path = S3Path.parse(path)
         # S3 matches Prefix as a plain string, so the versions are filtered to
         # the key itself or the keys under it.
-        prefix = f"{key.rstrip('/')}/" if key else ""
+        prefix = f"{s3_path.key.rstrip('/')}/" if s3_path.key else ""
 
-        _logger.debug(f"List object versions: s3://{bucket}/{key}")
+        _logger.debug(f"List object versions: {s3_path.uri}")
         versions: list[S3ObjectVersion] = []
-        for response in self._list_object_versions_pages(bucket, prefix=key or "", **kwargs):
+        for response in self._list_object_versions_pages(
+            s3_path.bucket, prefix=s3_path.key or "", **kwargs
+        ):
             versions.extend(
-                S3ObjectVersion(bucket=bucket, is_delete_marker=False, response=v)
+                S3ObjectVersion(bucket=s3_path.bucket, is_delete_marker=False, response=v)
                 for v in response.get("Versions", [])
             )
             # Delete markers are kept until the key is chosen, so that the
             # choice is the same with and without them.
             versions.extend(
-                S3ObjectVersion(bucket=bucket, is_delete_marker=True, response=m)
+                S3ObjectVersion(bucket=s3_path.bucket, is_delete_marker=True, response=m)
                 for m in response.get("DeleteMarkers", [])
             )
         # botocore decodes the keys only when it sets EncodingType itself, so
         # the keys of an explicit EncodingType="url" are decoded for matching.
         url_encoded = kwargs.get("EncodingType") == "url"
         keys = [unquote_plus(v.key) if url_encoded else v.key for v in versions]
-        if key and not key.endswith("/") and key in keys:
-            selected = [v for v, k in zip(versions, keys, strict=True) if k == key]
+        if s3_path.key and not s3_path.key.endswith("/") and s3_path.key in keys:
+            selected = [v for v, k in zip(versions, keys, strict=True) if k == s3_path.key]
         else:
             selected = [v for v, k in zip(versions, keys, strict=True) if k.startswith(prefix)]
         return [v for v in selected if delete_markers or not v.is_delete_marker]
@@ -3060,12 +3229,9 @@ class S3FileSystem(AbstractFileSystem):
             if not path:
                 self._evict_cache("")
             while path:
-                # parse_path does not accept "?" in keys, so it starts the
-                # versionId query.
-                base, _, query = path.partition("?")
+                base, version_id = S3Path.split_version_id(path)
                 cache_paths = [path]
-                if query:
-                    version_id = query.partition("=")[2]
+                if version_id:
                     cache_paths.extend(
                         f"{base}?{name}={version_id}"
                         for name in ("versionId", "versionID", "versionid", "version_id")
@@ -3083,7 +3249,7 @@ class S3FileSystem(AbstractFileSystem):
                         self._evict_cache(cache_key)
                 # A version-qualified path continues with the path without
                 # the version.
-                path = self._strip_protocol(base) if query else self._parent(path)
+                path = self._strip_protocol(base) if version_id else self._parent(path)
 
     def _evict_cache(self, key: str | tuple[str, str]) -> None:
         """Remove a dircache entry if it exists.
@@ -3224,10 +3390,10 @@ class S3FileSystem(AbstractFileSystem):
         cache = self.dircache.get(path.rstrip("/"))
         if cache is not None:
             return cast("list[S3Object] | S3Object", cache)
-        _, key, version_id = self.parse_path(path)
-        if version_id:
+        s3_path = S3Path.parse(path)
+        if s3_path.version_id:
             return None
-        if key:
+        if s3_path.key:
             parent_cache = self.dircache.get((self._parent(path), "/"))
         else:
             parent_cache = self.dircache.get("")
@@ -3243,7 +3409,7 @@ class S3FileSystem(AbstractFileSystem):
             ]
             if files:
                 return files
-            if key:
+            if s3_path.key:
                 raise FileNotFoundError(path)
             # The bucket listing holds only the buckets that the caller owns,
             # so a bucket missing from it is looked up with HeadBucket.
@@ -3325,7 +3491,7 @@ class S3FileSystem(AbstractFileSystem):
         if version_id:
             request.update({"VersionId": version_id})
 
-        _logger.debug(f"Get object: s3://{bucket}/{key}?versionId={version_id}&range={range_}")
+        _logger.debug(f"Get object: {S3Path(bucket, key, version_id).uri} range={range_}")
         response = self._call(
             self._client.get_object,
             # The fields of the request take precedence over inherited
@@ -3559,11 +3725,12 @@ class S3File(AbstractBufferedFile):
         # The arguments are validated, and the objects looked up, before the
         # base class initializer: a file that fails here is never opened, so
         # its garbage collection does not close (flush and commit) it.
-        bucket, key, path_version_id = S3FileSystem.parse_path(path)
-        self.bucket = bucket
-        if not key:
+        s3_path = S3Path.parse(path)
+        path_version_id = s3_path.version_id
+        self.bucket = s3_path.bucket
+        if not s3_path.key:
             raise ValueError("The path does not contain a key.")
-        self.key = key
+        self.key = s3_path.key
         if version_id and path_version_id:
             if version_id != path_version_id:
                 raise ValueError(
@@ -3610,6 +3777,10 @@ class S3File(AbstractBufferedFile):
                 # consistent even if the object is overwritten. info() heads
                 # the object when the cached entry carries no version.
                 self.version_id = info.get("version_id")
+                if self.version_id:
+                    # Carried in the path as an explicit version is, so that
+                    # the methods of the file use it too.
+                    path = f"{path}?versionId={self.version_id}"
             if etag := info.get("etag"):
                 self.s3_additional_kwargs.update({"IfMatch": etag})
             self._details = info
@@ -3686,20 +3857,23 @@ class S3File(AbstractBufferedFile):
         Drops the buffered data, so that neither close() nor a deferred
         commit() uploads it, and aborts the multipart upload, if any. An
         abort failure is logged instead of raised, so it does not mask the
-        error that the caller is handling. Even if the abort fails or is
-        interrupted, commit() does not complete the upload afterwards. The
-        executor is shut down here, as fsspec does not close a closed file
-        again when it is garbage collected.
+        error that the caller is handling. If the abort fails or is
+        interrupted, the upload is kept so that :meth:`discard` can abort it,
+        and commit() does not complete it. The executor is shut down here, as
+        fsspec does not close a closed file again when it is garbage
+        collected.
         """
         self.buffer = None
         self.closed = True
         try:
             self.discard()
         except Exception:
-            _logger.exception(f"Failed to abort multipart upload to s3://{self.bucket}/{self.key}.")
+            # discard() keeps the upload when the abort fails.
+            upload_id = cast(S3MultipartUpload, self.multipart_upload).upload_id
+            _logger.exception(
+                f"Failed to abort multipart upload {upload_id} to s3://{self.bucket}/{self.key}."
+            )
         finally:
-            self.multipart_upload = None
-            self.multipart_upload_parts = []
             self._executor.shutdown()
 
     def _write_and_close(self, value: bytes | bytearray | memoryview) -> None:
@@ -3869,8 +4043,10 @@ class S3File(AbstractBufferedFile):
         Creates an empty object if nothing was written, uploads the buffered
         data with PutObject if no multipart upload part was submitted, and
         otherwise completes the multipart upload, which is aborted if the
-        completion fails or is interrupted. Invalidates the cache of the path
-        afterwards.
+        completion fails or is interrupted. If the abort also fails, the
+        upload is kept so that :meth:`discard` can abort it. Invalidates the
+        cache of the path afterwards. Does nothing for a file whose failed
+        write dropped the written data.
 
         Raises:
             FileExistsError: If an object was created at the path after the
@@ -3878,40 +4054,50 @@ class S3File(AbstractBufferedFile):
             RuntimeError: If parts were submitted but no multipart upload is
                 initialized.
         """
+        if self.buffer is None:
+            # _close_without_commit() dropped the written data. A multipart
+            # upload that it failed to abort is kept for discard(), not
+            # completed.
+            return
         if self.tell() == 0:
-            if self.buffer is not None:
-                self.discard()
-                self.fs.touch(self.path, **self._get_request_kwargs("put_object"))
+            self.discard()
+            self.fs.touch(self.path, **self._get_request_kwargs("put_object"))
         elif not self.multipart_upload_parts:
-            if self.buffer is not None:
-                # Upload files smaller than block size.
-                self.buffer.seek(0)
-                data = self.buffer.read()
-                self.fs._put_object(
-                    bucket=self.bucket,
-                    key=self.key,
-                    body=data,
-                    **self._get_request_kwargs("put_object"),
-                )
+            # Upload files smaller than block size.
+            self.buffer.seek(0)
+            data = self.buffer.read()
+            self.fs._put_object(
+                bucket=self.bucket,
+                key=self.key,
+                body=data,
+                **self._get_request_kwargs("put_object"),
+            )
         else:
             if not self.multipart_upload:
                 raise RuntimeError("Multipart upload is not initialized.")
 
+            upload_id = cast(str, self.multipart_upload.upload_id)
             try:
                 self.fs._finish_multipart_upload(
                     bucket=self.bucket,
                     key=self.key,
-                    upload_id=cast(str, self.multipart_upload.upload_id),
+                    upload_id=upload_id,
                     futures=self.multipart_upload_parts,
                     request_kwargs=self.s3_additional_kwargs,
+                    abort=False,
                 )
-            except Exception:
-                # The multipart upload has been aborted by the helper;
-                # prevent discard() from aborting it again. An interrupt may
-                # have stopped the helper before the abort, so the upload is
-                # kept for discard() then.
-                self.multipart_upload = None
-                self.multipart_upload_parts = []
+            except BaseException:
+                # discard() keeps the upload if the abort fails or is
+                # interrupted, so that a later discard(), such as a
+                # transaction rollback, retries the abort. An abort failure
+                # is logged so that it does not mask the original error.
+                try:
+                    self.discard()
+                except Exception:
+                    _logger.exception(
+                        f"Failed to abort multipart upload {upload_id} "
+                        f"to s3://{self.bucket}/{self.key}."
+                    )
                 raise
 
         self.fs.invalidate_cache(self.path)

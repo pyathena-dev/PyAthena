@@ -30,6 +30,12 @@ from tests.pyathena.conftest import connect
 from tests.pyathena.util import CONVERTED_VALUES_QUERY, CONVERTED_VALUES_ROW, cached_file_systems
 
 
+def _pandas_converter_without_bigint_dtype():
+    converter = DefaultPandasTypeConverter()
+    del converter.types["bigint"]
+    return converter
+
+
 class TestPandasCursor:
     @pytest.mark.parametrize(
         ("engine", "chunksize"), [("auto", None), ("c", 2), ("python", 2), ("pyarrow", None)]
@@ -1730,3 +1736,106 @@ class TestPandasCursor:
         kwargs = result_set_class.call_args.kwargs
         expected = {**cursor_kwargs, **execute_kwargs}
         assert {key: kwargs[key] for key in expected} == expected
+
+    @pytest.mark.parametrize(
+        "pandas_cursor",
+        [
+            pytest.param({"converter": _pandas_converter_without_bigint_dtype()}, id="default"),
+            pytest.param(
+                {
+                    "work_group": ENV.managed_work_group,
+                    "s3_staging_dir": "",
+                    "converter": _pandas_converter_without_bigint_dtype(),
+                },
+                id="managed",
+                marks=pytest.mark.skipif(
+                    not ENV.managed_work_group,
+                    reason="AWS_ATHENA_MANAGED_WORKGROUP not set",
+                ),
+            ),
+        ],
+        indirect=["pandas_cursor"],
+    )
+    def test_integer_without_dtype(self, pandas_cursor):
+        pandas_cursor.execute(
+            "SELECT * FROM (VALUES BIGINT '1', NULL) AS t(col_bigint) ORDER BY col_bigint"
+        )
+        df = pandas_cursor.as_pandas()
+        assert df["col_bigint"].dtype == np.float64
+        assert df["col_bigint"].iloc[0] == 1.0
+        assert math.isnan(df["col_bigint"].iloc[1])
+
+    @pytest.mark.parametrize(
+        ("pandas_cursor", "kwargs"),
+        [
+            pytest.param({}, {}, id="default"),
+            pytest.param({}, {"chunksize": 1}, id="chunked"),
+            pytest.param({}, {"index_col": "col_json"}, id="index"),
+            pytest.param({}, {"index_col": ["col_int", "col_json"]}, id="multi_index"),
+            pytest.param(
+                {},
+                {
+                    "usecols": [
+                        "col_int",
+                        "col_bigint",
+                        "col_json",
+                        "col_binary",
+                        "col_json_not_null",
+                        "col_time",
+                    ]
+                },
+                id="usecols",
+            ),
+            pytest.param(
+                {"work_group": ENV.managed_work_group, "s3_staging_dir": ""},
+                {},
+                id="managed",
+                marks=pytest.mark.skipif(
+                    not ENV.managed_work_group,
+                    reason="AWS_ATHENA_MANAGED_WORKGROUP not set",
+                ),
+            ),
+        ],
+        indirect=["pandas_cursor"],
+    )
+    def test_integer_and_json_with_null(self, pandas_cursor, kwargs):
+        pandas_cursor.execute(
+            """
+            SELECT * FROM (VALUES
+              (1, BIGINT '9007199254740993', json_parse('9007199254740993'), X'01',
+               json_parse('9007199254740995'), CAST('01:02:03' AS TIME)),
+              (2, NULL, NULL, NULL, json_parse('9007199254740997'), CAST('04:05:06' AS TIME))
+            ) AS t(col_int, col_bigint, col_json, col_binary, col_json_not_null, col_time)
+            ORDER BY col_int
+            """,
+            **kwargs,
+        )
+        df = pandas_cursor.as_pandas()
+        if "chunksize" in kwargs:
+            df = pd.concat([df.get_chunk(1), *df])
+
+        def column(name):
+            if name in df.index.names:
+                return df.index.get_level_values(name)
+            return df[name]
+
+        assert column("col_int").dtype == pd.Int64Dtype()
+        assert column("col_bigint").dtype == pd.Int64Dtype()
+        assert column("col_json").dtype == np.object_
+        # A json column without NULL keeps the dtype that pandas infers.
+        assert column("col_json_not_null").dtype == np.int64
+        assert column("col_bigint").tolist() == [9007199254740993, pd.NA]
+        if isinstance(df.index, pd.MultiIndex):
+            # A MultiIndex level holds None as NaN.
+            json_values = column("col_json").tolist()
+            assert json_values[0] == 9007199254740993
+            assert isinstance(json_values[0], int)
+            assert pd.isna(json_values[1])
+        else:
+            assert column("col_json").tolist() == [9007199254740993, None]
+        assert column("col_json_not_null").tolist() == [9007199254740995, 9007199254740997]
+        assert column("col_binary").tolist() == [b"\x01", None]
+        assert column("col_time").tolist() == [
+            datetime(2017, 1, 1, 1, 2, 3).time(),
+            datetime(2017, 1, 1, 4, 5, 6).time(),
+        ]

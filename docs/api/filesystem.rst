@@ -43,6 +43,12 @@ S3 Executor
 .. autoclass:: pyathena.filesystem.s3_executor.S3AioExecutor
    :members:
 
+S3 Paths
+--------
+
+.. autoclass:: pyathena.filesystem.s3_path.S3Path
+   :members:
+
 S3 Objects
 ----------
 

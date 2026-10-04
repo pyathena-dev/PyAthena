@@ -19,16 +19,20 @@ from typing import TYPE_CHECKING, Any, cast
 from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.callbacks import _DEFAULT_CALLBACK
 from fsspec.core import get_compression
+from fsspec.implementations.local import LocalFileSystem, make_path_posix
+from fsspec.utils import check_contained
 
 from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3Executor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import (
+    S3CompleteMultipartUpload,
     S3Metadata,
     S3MultipartUpload,
     S3Object,
     S3ObjectType,
     S3ObjectVersion,
 )
+from pyathena.filesystem.s3_path import S3Path
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -36,6 +40,8 @@ if TYPE_CHECKING:
     from pyathena.connection import Connection
 
 _logger = logging.getLogger(__name__)
+# The running cleanups of cancelled multipart copies.
+_cleanup_tasks: set[asyncio.Future[None]] = set()
 
 
 class AioS3FileSystem(AsyncFileSystem):
@@ -253,8 +259,7 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         if os.path.isdir(lpath):
             return
-        _, key, _ = self.parse_path(rpath)
-        if not key:
+        if not S3Path.parse(rpath).key:
             return
 
         size = os.path.getsize(lpath)
@@ -392,6 +397,87 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         sync(self.loop, self._mv, path1, path2, recursive=recursive, maxdepth=maxdepth, **kwargs)
 
+    async def _copy(
+        self,
+        path1,
+        path2,
+        recursive=False,
+        on_error=None,
+        maxdepth=None,
+        batch_size=None,
+        **kwargs,
+    ) -> None:
+        """Copy files within S3.
+
+        See :meth:`S3FileSystem.copy`. The copies run as in fsspec's
+        ``_copy()``.
+
+        Args:
+            path1: Source S3 path, glob pattern, or list of them.
+            path2: Destination S3 path, or list of paths when ``path1`` is a
+                list.
+            recursive: Whether to copy the directories with their contents.
+            on_error: ``"raise"`` or ``"ignore"`` for a missing source.
+            maxdepth: Maximum depth of a recursive copy.
+            batch_size: Number of copies to run at the same time.
+            **kwargs: Additional S3 copy parameters passed to ``_cp_file()``.
+        """
+        sources = [path1] if isinstance(path1, (str, os.PathLike)) else path1
+        if isinstance(path2, str) and any(S3Path.has_version_id(p) for p in sources):
+            path1, path2 = await asyncio.to_thread(
+                self._sync_fs._copy_paths, path1, path2, recursive=recursive, maxdepth=maxdepth
+            )
+            if not path1:
+                return
+        await super()._copy(
+            path1,
+            path2,
+            recursive=recursive,
+            on_error=on_error,
+            maxdepth=maxdepth,
+            batch_size=batch_size,
+            **kwargs,
+        )
+
+    async def _get(
+        self, rpath, lpath, recursive=False, callback=_DEFAULT_CALLBACK, maxdepth=None, **kwargs
+    ) -> None:
+        """Copy files from S3 to the local filesystem.
+
+        See :meth:`S3FileSystem.get`. The downloads run as in fsspec's
+        ``_get()``.
+
+        Args:
+            rpath: Source S3 path, glob pattern, or list of them.
+            lpath: Local destination path, or list of paths when ``rpath`` is
+                a list.
+            recursive: Whether to copy the directories with their contents.
+            callback: Progress callback.
+            maxdepth: Maximum depth of a recursive copy.
+            **kwargs: Additional parameters passed to ``_get_file()``.
+
+        Raises:
+            ValueError: If a source with a version ID is paired, and a
+                destination lies outside ``lpath``.
+        """
+        sources = [rpath] if isinstance(rpath, (str, os.PathLike)) else rpath
+        if isinstance(lpath, (str, os.PathLike)) and any(S3Path.has_version_id(p) for p in sources):
+            root = make_path_posix(lpath)
+            rpath, lpath = await asyncio.to_thread(
+                self._sync_fs._copy_paths,
+                rpath,
+                root,
+                recursive=recursive,
+                maxdepth=maxdepth,
+                isdir=LocalFileSystem().isdir,
+            )
+            check_contained(root, lpath)
+            if not rpath:
+                return
+        await super()._get(
+            rpath, lpath, recursive=recursive, callback=callback, maxdepth=maxdepth, **kwargs
+        )
+
     async def _cp_file(self, path1: str, path2: str, **kwargs) -> None:
         """Copy an S3 object, using async parallel multipart upload for large files.
 
@@ -423,17 +509,14 @@ class AioS3FileSystem(AsyncFileSystem):
         Raises:
             ValueError: If trying to copy to a versioned file or copy buckets.
         """
-        # fsspec < 2026.6.0 leaks the typo'd "onerror" keyword from mv();
-        # see S3FileSystem.cp_file.
-        kwargs.pop("onerror", None)
         # Parameters of the multipart copy, not of the S3 requests.
         block_size = kwargs.pop("block_size", None)
         max_workers = kwargs.pop("max_workers", None)
-        bucket1, key1, version_id1 = self.parse_path(path1)
-        bucket2, key2, version_id2 = self.parse_path(path2)
-        if version_id2:
+        source = S3Path.parse(path1)
+        destination = S3Path.parse(path2)
+        if destination.version_id:
             raise ValueError("Cannot copy to a versioned file.")
-        if not key1 or not key2:
+        if not source.key or not destination.key:
             raise ValueError("Cannot copy buckets.")
 
         info1 = await self._info(path1)
@@ -446,21 +529,21 @@ class AioS3FileSystem(AsyncFileSystem):
             if size1 <= S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE:
                 await asyncio.to_thread(
                     self._sync_fs._copy_object,
-                    bucket1=bucket1,
-                    key1=key1,
-                    version_id1=version_id1,
-                    bucket2=bucket2,
-                    key2=key2,
+                    bucket1=source.bucket,
+                    key1=source.key,
+                    version_id1=source.version_id,
+                    bucket2=destination.bucket,
+                    key2=destination.key,
                     **kwargs,
                 )
             else:
                 await self._copy_object_with_multipart_upload(
-                    bucket1=bucket1,
-                    key1=key1,
-                    version_id1=version_id1,
+                    bucket1=source.bucket,
+                    key1=source.key,
+                    version_id1=source.version_id,
                     size1=size1,
-                    bucket2=bucket2,
-                    key2=key2,
+                    bucket2=destination.bucket,
+                    key2=destination.key,
                     max_workers=max_workers,
                     block_size=block_size,
                     **kwargs,
@@ -485,8 +568,12 @@ class AioS3FileSystem(AsyncFileSystem):
         """Copy an object with a multipart upload of its byte ranges.
 
         See :meth:`S3FileSystem._copy_object_with_multipart_upload`. The part
-        and annotation copies run in parallel with ``asyncio.gather`` and
-        ``asyncio.to_thread``.
+        and annotation copies run in parallel as asyncio tasks with
+        ``asyncio.to_thread``. On a cancellation after the upload is
+        created, the running part copies and the completion are waited for,
+        the upload is aborted unless it has completed, and the cancellation
+        is re-raised. A repeated cancellation returns without stopping this
+        cleanup.
 
         Args:
             bucket1: Source S3 bucket name.
@@ -589,25 +676,55 @@ class AioS3FileSystem(AsyncFileSystem):
             }
 
         tasks = [asyncio.ensure_future(_upload_part(i, r)) for i, r in enumerate(ranges)]
-        try:
-            # gather keeps the part-number order of the tasks.
-            parts = await asyncio.gather(*tasks)
-            completed = await asyncio.to_thread(
-                self._sync_fs._complete_multipart_upload,
-                bucket=bucket2,
-                key=key2,
-                upload_id=upload_id,
-                parts=cast(list[dict[str, Any]], parts),
-                **self._sync_fs._get_operation_kwargs("complete_multipart_upload", kwargs),
-            )
-        except Exception:
-            failed = True
+        completion: asyncio.Task[S3CompleteMultipartUpload] | None = None
+
+        async def _abort() -> None:
             # A part that is still copying when the upload is aborted may be
             # stored after the abort, so wait for the running parts first.
             await asyncio.gather(*tasks, return_exceptions=True)
+            if completion is not None:
+                await asyncio.wait([completion])
+                if not completion.cancelled() and completion.exception() is None:
+                    # The upload completed despite the cancellation, so
+                    # there is nothing to abort.
+                    return
             await asyncio.to_thread(
                 self._sync_fs._abort_multipart_upload, bucket2, key2, upload_id, kwargs
             )
+
+        try:
+            # Unlike gather, wait does not cancel the parts when this task is
+            # cancelled; their threads would keep copying, so they are waited
+            # for in _abort().
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            for task in done:
+                if (error := task.exception()) is not None:
+                    raise error
+            # The tasks are in part-number order.
+            parts = [task.result() for task in tasks]
+            completion = asyncio.ensure_future(
+                asyncio.to_thread(
+                    self._sync_fs._complete_multipart_upload,
+                    bucket=bucket2,
+                    key=key2,
+                    upload_id=upload_id,
+                    parts=cast(list[dict[str, Any]], parts),
+                    **self._sync_fs._get_operation_kwargs("complete_multipart_upload", kwargs),
+                )
+            )
+            # shield keeps a cancellation from cancelling the completion, whose
+            # thread would keep running, so that _abort() can wait for it.
+            completed = await asyncio.shield(completion)
+        except BaseException:
+            # Also on cancellation, as S3FileSystem._finish_multipart_upload
+            # does on an interrupt.
+            failed = True
+            cleanup = asyncio.ensure_future(_abort())
+            # A repeated cancellation of this task returns without stopping
+            # the cleanup; the event loop keeps only weak references to tasks.
+            _cleanup_tasks.add(cleanup)
+            cleanup.add_done_callback(_cleanup_tasks.discard)
+            await asyncio.shield(cleanup)
             raise
 
         failed = False
@@ -656,6 +773,45 @@ class AioS3FileSystem(AsyncFileSystem):
         if detail:
             return {f.name: f for f in files}
         return [f.name for f in files]
+
+    async def _expand_path(self, path, recursive=False, maxdepth=None, **kwargs) -> list[str]:
+        """Expand glob patterns and directories into the paths they match.
+
+        See :meth:`S3FileSystem.expand_path`. The other paths are expanded by
+        fsspec's ``_expand_path()``, whose glob lists only the keys under the
+        literal part of the pattern.
+
+        Args:
+            path: S3 path, glob pattern, or list of them.
+            recursive: Whether to include the paths below the directories.
+            maxdepth: Maximum depth of the expansion, at least 1.
+            **kwargs: Additional arguments passed to fsspec's
+                ``_expand_path()``, such as ``assume_literal``.
+
+        Returns:
+            The sorted matching paths.
+
+        Raises:
+            ValueError: If ``maxdepth`` is less than 1.
+            FileNotFoundError: If nothing matches.
+        """
+        if maxdepth is not None and maxdepth < 1:
+            raise ValueError("maxdepth must be at least 1")
+        versions, others = self._sync_fs._split_version_paths(path)
+        out = {p for p in versions if not recursive or await self._exists(p)}
+        if others:
+            try:
+                out.update(
+                    await super()._expand_path(
+                        others, recursive=recursive, maxdepth=maxdepth, **kwargs
+                    )
+                )
+            except FileNotFoundError:
+                if not out:
+                    raise
+        if not out:
+            raise FileNotFoundError(path)
+        return sorted(out)
 
     def _create_executor(self, max_workers: int) -> S3Executor:
         """Create the executor for the parallel operations of a file.
