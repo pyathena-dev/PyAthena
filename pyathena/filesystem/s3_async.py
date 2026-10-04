@@ -35,6 +35,7 @@ from pyathena.filesystem.s3_object import (
     S3ObjectVersion,
 )
 from pyathena.filesystem.s3_path import S3Path
+from pyathena.filesystem.s3_path_pairing import S3PathPairing
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -324,7 +325,7 @@ class AioS3FileSystem(AsyncFileSystem):
             OSError: If S3 could not delete some of the objects.
         """
         paths = await asyncio.to_thread(
-            self._sync_fs._expand_delete_paths, path, recursive=recursive, maxdepth=maxdepth
+            self._sync_fs._delete_paths, path, recursive=recursive, maxdepth=maxdepth
         )
         await self._delete_objects(paths, **kwargs)
 
@@ -372,7 +373,7 @@ class AioS3FileSystem(AsyncFileSystem):
         if path1 == path2:
             return
         pairs = await asyncio.to_thread(
-            self._sync_fs._move_paths, path1, path2, recursive=recursive, maxdepth=maxdepth
+            self._sync_fs._move_pairs, path1, path2, recursive=recursive, maxdepth=maxdepth
         )
         # Every copy finishes before a failure is raised, as in fsspec's
         # _copy(), and nothing is deleted after a failure.
@@ -429,11 +430,13 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         sources = [path1] if isinstance(path1, (str, os.PathLike)) else path1
         if isinstance(path2, str) and any(S3Path.has_version_id(p) for p in sources):
-            path1, path2 = await asyncio.to_thread(
-                self._sync_fs._copy_paths, path1, path2, recursive=recursive, maxdepth=maxdepth
+            pairs = await asyncio.to_thread(
+                self._sync_fs._copy_pairs,
+                S3PathPairing(path1, path2, recursive=recursive, maxdepth=maxdepth),
             )
-            if not path1:
+            if not pairs:
                 return
+            path1, path2 = [p1 for p1, _ in pairs], [p2 for _, p2 in pairs]
         await super()._copy(
             path1,
             path2,
@@ -468,14 +471,12 @@ class AioS3FileSystem(AsyncFileSystem):
         sources = [rpath] if isinstance(rpath, (str, os.PathLike)) else rpath
         if isinstance(lpath, (str, os.PathLike)) and any(S3Path.has_version_id(p) for p in sources):
             root = make_path_posix(lpath)
-            rpath, lpath = await asyncio.to_thread(
-                self._sync_fs._copy_paths,
-                rpath,
-                root,
-                recursive=recursive,
-                maxdepth=maxdepth,
+            pairs = await asyncio.to_thread(
+                self._sync_fs._copy_pairs,
+                S3PathPairing(rpath, root, recursive=recursive, maxdepth=maxdepth),
                 isdir=LocalFileSystem().isdir,
             )
+            rpath, lpath = [p1 for p1, _ in pairs], [p2 for _, p2 in pairs]
             check_contained(root, lpath)
             if not rpath:
                 return

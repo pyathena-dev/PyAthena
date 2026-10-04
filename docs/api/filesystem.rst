@@ -49,6 +49,9 @@ S3 Paths
 .. autoclass:: pyathena.filesystem.s3_path.S3Path
    :members:
 
+.. autoclass:: pyathena.filesystem.s3_path_pairing.S3PathPairing
+   :members:
+
 S3 Core
 -------
 

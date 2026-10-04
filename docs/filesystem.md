@@ -424,6 +424,31 @@ except Exception:
     raise
 ```
 
+## Path pairing
+
+`S3PathPairing` pairs the paths of one `copy()`, `get()` or `mv()`: `mv()` always, and
+`copy()` and `get()` when a source has a version ID and the destination is one path
+(fsspec pairs the others). Its `delete_paths()` splits the paths of an `rm()` into
+those deleted as given and those expanded. The pairing is fsspec's, except that a
+path with a version ID names that version, and its destination is named after its key.
+
+A pairing is a frozen dataclass of `path1`, `path2`, `recursive` and `maxdepth`, and
+holds no filesystem. The filesystems read from it what to look up (`expands`,
+`skips_directories`, `looks_up_destination` and `conflict_candidates()`), expand the
+sources, leave out the directories when `skips_directories` is true, look up the
+paths, and pass the results to `copy_pairs()` and `move_pairs()`. A `sources`,
+`destination_is_dir` or `missing` that a rule needs and that is not passed raises
+`ValueError`.
+
+```python
+from pyathena.filesystem.s3_path_pairing import S3PathPairing
+
+pairing = S3PathPairing("s3://YOUR_S3_BUCKET/src/", "s3://YOUR_S3_BUCKET/dst/", recursive=True)
+sources = fs.expand_path(pairing.path1, recursive=pairing.recursive)
+for source, destination in pairing.copy_pairs(sources):
+    print(source, "->", destination)
+```
+
 ## Async filesystem
 
 `AioS3FileSystem` provides the same functionality on top of fsspec's
