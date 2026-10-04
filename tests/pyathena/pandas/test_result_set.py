@@ -80,6 +80,90 @@ _FS = MagicMock(name="pyathena_fs")
 _USER_FS = MagicMock(name="user_fs")
 
 
+@pytest.mark.parametrize("engine", ["auto", "c", "python", "pyarrow"])
+@pytest.mark.parametrize(
+    ("output_location", "file_size_bytes", "pyarrow_engine"),
+    [
+        ("s3://bucket/result.txt", None, "c"),
+        ("s3://bucket/result.txt", 99, "c"),
+        ("s3://bucket/result.txt", 100, "c"),
+        ("s3://bucket/result.txt", 101, "c"),
+        ("s3://bucket/result.csv", None, "pyarrow"),
+        ("s3://bucket/result.csv", 99, "c"),
+        ("s3://bucket/result.csv", 100, "pyarrow"),
+        ("s3://bucket/result.csv", 101, "pyarrow"),
+        (None, None, "pyarrow"),
+    ],
+)
+def test_get_csv_engine_result_format(engine, output_location, file_size_bytes, pyarrow_engine):
+    result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)
+    result_set._query_execution = MagicMock(output_location=output_location)
+    result_set._metadata = None
+    result_set._converter = DefaultPandasTypeConverter()
+    result_set._engine = engine
+    result_set._chunksize = None
+    result_set._quoting = csv.QUOTE_ALL
+    result_set._kwargs = {}
+
+    expected = {"auto": "c", "c": "c", "python": "python", "pyarrow": pyarrow_engine}[engine]
+    assert result_set._get_csv_engine(file_size_bytes) == expected
+
+
+@pytest.mark.parametrize("infer_string", [True, False])
+@pytest.mark.parametrize("read_csv_kwargs", [{}, {"keep_default_na": True}])
+@pytest.mark.parametrize("statement", ["show_tables", "show_columns", "describe"])
+def test_read_csv_ddl_preserves_numeric_looking_names(statement, read_csv_kwargs, infer_string):
+    values = ["001", "007", "1e3"] * 10
+    if statement == "show_tables":
+        names = ["tab_name"]
+        rows = [(value,) for value in values]
+    elif statement == "show_columns":
+        names = ["field"]
+        rows = [(f"{value:<20}",) for value in values]
+    else:
+        names = ["col_name", "data_type", "comment"]
+        rows = [(f"{value:<20}", f"{'int':<20}", "") for value in values]
+    data = "".join("\t".join(row) + "\n" for row in rows).encode()
+    assert len(data) >= AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES
+
+    result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)
+    result_set._query_execution = MagicMock(
+        output_location="s3://bucket/result.txt", substatement_type=None
+    )
+    result_set._converter = DefaultPandasTypeConverter()
+    result_set._engine = "pyarrow"
+    result_set._chunksize = None
+    result_set._auto_optimize_chunksize = False
+    result_set._quoting = csv.QUOTE_ALL
+    result_set._keep_default_na = False
+    result_set._na_values = ("",)
+    result_set._kwargs = read_csv_kwargs
+    result_set._fs = MagicMock()
+    result_set._fs.open.return_value = stream = io.BytesIO(data)
+    description = [(name, "string", None, None, 0, 0, "UNKNOWN") for name in names]
+
+    with (
+        pd.option_context("future.infer_string", infer_string),
+        patch.object(
+            AthenaPandasResultSet,
+            "description",
+            new_callable=PropertyMock,
+            return_value=description,
+        ),
+        patch.object(result_set, "_get_content_length", return_value=len(data)),
+        patch("pandas.read_csv", wraps=pd.read_csv) as read_csv,
+    ):
+        expected = pd.read_csv(io.BytesIO(data), **result_set._get_csv_read_options("c", None))
+        read_csv.reset_mock()
+        actual = result_set._read_csv()
+
+    assert_frame_equal(actual, expected, check_exact=True)
+    assert actual.iloc[:, 0].tolist() == [row[0] for row in rows]
+    read_csv.assert_called_once()
+    assert read_csv.call_args.kwargs["engine"] == "c"
+    assert stream.closed
+
+
 class TestAthenaPandasResultSet:
     @pytest.mark.parametrize(
         ("execute_kwargs", "path", "filesystem_kwargs"),

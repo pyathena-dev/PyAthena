@@ -1040,6 +1040,7 @@ class TestPandasCursor:
             result_set._chunksize = None  # Default values
             result_set._quoting = 1
             result_set._metadata = None
+            result_set._query_execution = None
             result_set._kwargs = {}
 
             # Test C engine specification
