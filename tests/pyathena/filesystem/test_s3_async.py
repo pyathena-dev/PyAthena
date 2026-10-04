@@ -1036,6 +1036,82 @@ class TestAioS3FileSystem:
         assert finished == ["s3://bucket/b"]
         fs._sync_fs._call.assert_not_called()
 
+    @pytest.mark.parametrize("status", [None, "Suspended", "Enabled"])
+    @pytest.mark.asyncio
+    async def test_mv_null_version_onto_key(self, status):
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs._sync_fs._call = mock.MagicMock(
+            return_value={} if status is None else {"Status": status}
+        )
+        fs._copy_file = mock.AsyncMock(return_value=True)
+        fs._delete_objects = mock.AsyncMock()
+        sources = ["s3://bucket/a?versionId=null", "s3a://bucket/b?version_id=null"]
+        destinations = ["s3://bucket/a", "s3://bucket/b"]
+
+        await fs._mv(sources, destinations, MetadataDirective="COPY")
+
+        fs._sync_fs._call.assert_called_once_with(
+            fs._sync_fs._client.get_bucket_versioning, Bucket="bucket"
+        )
+        if status == "Enabled":
+            assert fs._copy_file.await_args_list == [
+                mock.call(source, dest, MetadataDirective="COPY")
+                for source, dest in zip(sources, destinations, strict=True)
+            ]
+            fs._delete_objects.assert_awaited_once_with(sources)
+        else:
+            fs._copy_file.assert_not_awaited()
+            fs._delete_objects.assert_awaited_once_with([])
+
+    @pytest.mark.parametrize("status", [None, "Suspended", "Enabled"])
+    @pytest.mark.asyncio
+    async def test_mv_null_version_conflicts_depend_on_bucket_state(self, status):
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs._sync_fs._call = mock.MagicMock(
+            return_value={} if status is None else {"Status": status}
+        )
+        fs._copy_file = mock.AsyncMock(return_value=True)
+        fs._delete_objects = mock.AsyncMock()
+        sources = ["s3://bucket/a", "s3://bucket/b?versionId=null"]
+        destinations = ["s3a://bucket/b", "s3://bucket/out"]
+
+        with (
+            contextlib.nullcontext()
+            if status == "Enabled"
+            else pytest.raises(ValueError, match="another path that is moved")
+        ):
+            await fs._mv(sources, destinations)
+
+        if status == "Enabled":
+            assert fs._copy_file.await_args_list == [
+                mock.call(source, dest) for source, dest in zip(sources, destinations, strict=True)
+            ]
+            fs._delete_objects.assert_awaited_once_with(sources)
+        else:
+            fs._copy_file.assert_not_awaited()
+            fs._delete_objects.assert_not_awaited()
+
+    @pytest.mark.parametrize("stage", ["lookup", "copy"])
+    @pytest.mark.asyncio
+    async def test_mv_null_version_failure_does_not_delete(self, stage):
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs._sync_fs._call = mock.MagicMock(return_value={"Status": "Enabled"})
+        fs._copy_file = mock.AsyncMock(return_value=True)
+        fs._delete_objects = mock.AsyncMock()
+        if stage == "lookup":
+            fs._sync_fs._call.side_effect = PermissionError("Access Denied")
+        else:
+            fs._copy_file.side_effect = PermissionError("Access Denied")
+
+        with pytest.raises(PermissionError, match="Access Denied"):
+            await fs._mv(
+                ["s3://bucket/other", "s3://bucket/key?versionId=null"],
+                ["s3://bucket/out", "s3://bucket/key"],
+            )
+        fs._delete_objects.assert_not_awaited()
+        if stage == "lookup":
+            fs._copy_file.assert_not_awaited()
+
     @pytest.mark.parametrize("size", [10, 5 * 2**30 + 1])
     @pytest.mark.asyncio
     async def test_cp_file_multipart_parameters(self, size):

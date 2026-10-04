@@ -158,6 +158,29 @@ The offline-only `.env` example disables EC2 metadata to prevent implicit creden
 `--noconftest` excludes the AWS session hooks and fixtures; disabling the rerun plugin also avoids its local socket setup in restricted environments.
 Use this invocation only for self-contained modules; integration tests need their normal fixtures and a real AWS environment.
 
+### S3 null-version moves
+
+The null-version move regression tests create three dedicated temporary buckets:
+unversioned, versioning-enabled, and versioning-suspended. They run only when
+explicitly enabled, because provisioning requires additional permissions and a
+15-minute wait after first enabling versioning. Run them serially:
+
+```bash
+AWS_ATHENA_S3_VERSIONING_TESTS=1 uv run --env-file .env pytest -n 1 \
+  tests/pyathena/filesystem/test_s3_versioning.py -v
+```
+
+The test identity needs `s3:CreateBucket`, `s3:GetBucketVersioning`,
+`s3:PutBucketVersioning`, `s3:PutObject`, `s3:GetObject`, `s3:GetObjectVersion`,
+`s3:ListBucketVersions`, `s3:DeleteObjectVersion`, and `s3:DeleteBucket` on the
+temporary `pyathena-mv-null-*` buckets and their objects, in addition to the normal
+test session permissions. The fixture deletes all versions and delete markers,
+then removes its buckets, including when a test fails. An interrupted process may
+leave buckets behind; remove only the buckets created by that run.
+
+Ordinary CI does not enable these tests. Its state-specific mock regression tests
+and existing AWS suite still run; report the opt-in results separately.
+
 ### SQLAlchemy suites
 
 The SQLAlchemy compliance suites under `tests/sqlalchemy/` run with different configurations: use `sqla` for synchronous dialects and `sqla-async` for native asyncio dialects.
