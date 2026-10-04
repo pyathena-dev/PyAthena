@@ -3291,6 +3291,29 @@ class TestS3FileSystem:
             assert f.read(size) == data[offset:]
             assert f.read(size) == b""
 
+    def test_read_parallel_ranges_in_order(self):
+        # The ranges of a parallel read are joined in their order, also when
+        # the first range finishes last.
+        data = bytes(range(64))
+        fs, ranges = self._make_object_fs(data)
+        get_object = fs._client.get_object.side_effect
+        others_done = threading.Semaphore(0)
+
+        def answer_first_range_last(**request):
+            if request["Range"].startswith("bytes=0-"):
+                for _ in range(3):
+                    assert others_done.acquire(timeout=5)
+                return get_object(**request)
+            try:
+                return get_object(**request)
+            finally:
+                others_done.release()
+
+        fs._client.get_object.side_effect = answer_first_range_last
+        with fs.open("s3://bucket/key", "rb", cache_type="none", block_size=16, max_workers=4) as f:
+            assert f.read() == data
+        assert sorted(ranges) == ["bytes=0-15", "bytes=16-31", "bytes=32-47", "bytes=48-63"]
+
     @pytest.mark.parametrize("cache_type", ["bytes", "all", "first"])
     def test_open_directory(self, cache_type):
         fs = self._make_fs()
