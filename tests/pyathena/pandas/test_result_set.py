@@ -229,6 +229,13 @@ def _pyarrow_read_csv_kwargs(types, tab_separated=False, **kwargs):
             _pyarrow_read_csv_kwargs({"v": "varchar", "n": "integer"}),
         ),
         (
+            '"v","n"\n"007","1"\n',
+            _pyarrow_read_csv_kwargs(
+                {"v": "varchar", "n": "integer"},
+                dtype={**_pyarrow_read_csv_kwargs({"v": "varchar"})["dtype"], 0: str},
+            ),
+        ),
+        (
             '"v"\n"plain"\n"2024-01-01"\n\n',
             _pyarrow_read_csv_kwargs({"v": "varchar"}, parse_dates=["v"]),
         ),
@@ -249,6 +256,7 @@ def _pyarrow_read_csv_kwargs(types, tab_separated=False, **kwargs):
         "dtype_none",
         "duplicate_names",
         "numeric_looking_strings",
+        "dtype_position_key",
         "unparsed_dates",
         "tab_separated_extra_fields",
         "tab_separated",

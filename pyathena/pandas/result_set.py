@@ -87,7 +87,8 @@ def _read_csv_with_pyarrow(source: str | IOBase, read_csv_kwargs: dict[str, Any]
             f"f{index}": pa.string() for index, name in enumerate(names) if name in string_columns
         }
     else:
-        column_types = {column: pa.string() for column in string_columns}
+        # pandas ignores dtype keys that are not column names, such as positions.
+        column_types = {column: pa.string() for column in string_columns if isinstance(column, str)}
     table = pyarrow_csv.read_csv(
         source,
         read_options=pyarrow_csv.ReadOptions(autogenerate_column_names=header is None),
