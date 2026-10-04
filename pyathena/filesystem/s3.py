@@ -3584,8 +3584,9 @@ class S3File(AbstractBufferedFile):
             # a multipart upload, whatever the block size.
             return
 
+        path = S3Path(self.bucket, self.key)
         self.multipart_upload = self.fs.core.create_multipart_upload(
-            S3Path(self.bucket, self.key), **self._get_request_kwargs("create_multipart_upload")
+            path, **self._get_request_kwargs("create_multipart_upload")
         )
         if self.append_block:
             if self.tell() > self.fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE:
@@ -3603,10 +3604,11 @@ class S3File(AbstractBufferedFile):
                     self.multipart_upload_parts.append(
                         self._executor.submit(
                             self.fs.core.upload_part_copy,
-                            path=S3Path(self.bucket, self.key),
+                            path=path,
                             upload_id=cast(str, self.multipart_upload.upload_id),
                             part_number=i + 1,
-                            source=S3Path(self.bucket, self.key),
+                            # The existing object is copied into the upload.
+                            source=path,
                             range_=range_,
                             **self._get_request_kwargs("upload_part_copy"),
                         )
@@ -3615,10 +3617,10 @@ class S3File(AbstractBufferedFile):
                 self.multipart_upload_parts.append(
                     self._executor.submit(
                         self.fs.core.upload_part_copy,
-                        path=S3Path(self.bucket, self.key),
+                        path=path,
                         upload_id=cast(str, self.multipart_upload.upload_id),
                         part_number=1,
-                        source=S3Path(self.bucket, self.key),
+                        source=path,
                         **self._get_request_kwargs("upload_part_copy"),
                     )
                 )

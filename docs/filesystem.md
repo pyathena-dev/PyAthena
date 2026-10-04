@@ -325,8 +325,8 @@ for batch in S3DeleteBatch.from_paths(paths):
 
 `create_multipart_upload()`, `upload_part()`, `upload_part_copy()`,
 `complete_multipart_upload()` and `abort_multipart_upload()` send the requests of a
-multipart upload. `part_ranges()` splits an object into the byte ranges of the parts
-that copy it, by the part limits `MULTIPART_UPLOAD_MIN_PART_SIZE` (5 MiB),
+multipart upload. `part_ranges()` sends no request: it splits an object into the byte
+ranges of the parts that copy it, by the part limits `MULTIPART_UPLOAD_MIN_PART_SIZE` (5 MiB),
 `MULTIPART_UPLOAD_MAX_PART_SIZE` (5 GiB) and `MULTIPART_UPLOAD_MAX_PARTS` (10,000) of
 `S3Core`.
 

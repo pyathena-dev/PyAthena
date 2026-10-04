@@ -597,7 +597,7 @@ class S3Core:
         """Start a multipart upload to an object with CreateMultipartUpload.
 
         Args:
-            path: The path of the object to write.
+            path: The path of the object to write, without a version ID.
             **params: Additional request parameters. The bucket and key of
                 the path take precedence over parameters of the same name.
 
@@ -605,10 +605,13 @@ class S3Core:
             The multipart upload.
 
         Raises:
-            ValueError: If the path has no key.
+            ValueError: If the path has no key, or has a version ID, which a
+                write cannot replace.
         """
         if not path.key:
             raise ValueError(f"The path has no key: {path.uri}.")
+        if path.version_id:
+            raise ValueError(f"Cannot write to a version: {path.uri}.")
         request: dict[str, Any] = {"Bucket": path.bucket, "Key": path.key}
         _logger.debug(f"Create multipart upload to {path.uri}.")
         response = self.call(self._client.create_multipart_upload, **{**params, **request})
@@ -741,6 +744,8 @@ class S3Core:
 
         Raises:
             ValueError: If the path has no key.
+            FileNotFoundError: If the upload does not exist, for example
+                because it was completed or aborted.
         """
         if not path.key:
             raise ValueError(f"The path has no key: {path.uri}.")

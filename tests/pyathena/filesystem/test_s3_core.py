@@ -549,6 +549,12 @@ class TestS3Core:
         with pytest.raises(ValueError, match="has no key"):
             getattr(core, method)(*args)
 
+    def test_create_multipart_upload_rejects_versions(self):
+        # A write replaces the object at the key, not the named version.
+        core, _ = _make_core()
+        with pytest.raises(ValueError, match="Cannot write to a version"):
+            core.create_multipart_upload(S3Path("bucket", "key", "v1"))
+
     @pytest.mark.parametrize(
         ("size", "block_size", "ranges"),
         [
