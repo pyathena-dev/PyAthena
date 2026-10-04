@@ -1784,18 +1784,14 @@ class S3FileSystem(AbstractFileSystem):
                     wait([creation])
                     if creation.exception() is None:
                         self._abort_multipart_upload(
-                            plan.destination.bucket,
-                            cast(str, plan.destination.key),
-                            cast(str, creation.result().upload_id),
+                            creation.result(),
                             plan.abort_params,
                         )
                 raise
-            upload_id = cast(str, multipart_upload.upload_id)
             futures = [
                 executor.submit(
                     self.core.upload_part_copy,
-                    path=plan.destination,
-                    upload_id=upload_id,
+                    upload=multipart_upload,
                     part_number=i + 1,
                     source=plan.source,
                     range_=range_,
@@ -1804,14 +1800,11 @@ class S3FileSystem(AbstractFileSystem):
                 for i, range_ in enumerate(plan.ranges)
             ]
             completed = self._finish_multipart_upload(
-                bucket=plan.destination.bucket,
-                key=cast(str, plan.destination.key),
-                upload_id=upload_id,
+                upload=multipart_upload,
                 futures=futures,
                 # Filtered again for the completion and the abort, which
                 # leaves the plan's parameters of each unchanged.
                 request_kwargs={**plan.complete_params, **plan.abort_params},
-                checksum_algorithm=multipart_upload.checksum_algorithm,
             )
         for name in plan.annotations:
             self.core.copy_object_annotation(
@@ -1931,13 +1924,10 @@ class S3FileSystem(AbstractFileSystem):
 
     def _finish_multipart_upload(
         self,
-        bucket: str,
-        key: str,
-        upload_id: str,
+        upload: S3MultipartUpload,
         futures: list[Future[S3MultipartUploadPart]],
         request_kwargs: Mapping[str, Any] | None = None,
         abort: bool = True,
-        checksum_algorithm: str | None = None,
     ) -> S3CompleteMultipartUpload:
         """Collect the uploaded parts and complete the multipart upload.
 
@@ -1948,16 +1938,13 @@ class S3FileSystem(AbstractFileSystem):
         false. The original error is then re-raised.
 
         Args:
-            bucket: S3 bucket name.
-            key: Object key being uploaded.
-            upload_id: Unique identifier for the multipart upload.
+            upload: The multipart upload returned by creation.
             futures: Futures of the part uploads, in part-number order.
             request_kwargs: Parameters of the upload, such as
                 ``RequestPayer`` or the SSE-C parameters; the completion and
                 the abort receive those that they accept.
             abort: Whether to abort the multipart upload on failure. A caller
                 that keeps the upload to abort it itself passes false.
-            checksum_algorithm: The algorithm returned when the upload was created.
 
         Returns:
             S3CompleteMultipartUpload of the completed upload.
@@ -1967,10 +1954,8 @@ class S3FileSystem(AbstractFileSystem):
             # The futures are in part-number order.
             parts = [future.result() for future in futures]
             return self.core.complete_multipart_upload(
-                S3Path(bucket, key),
-                upload_id,
+                upload,
                 parts,
-                checksum_algorithm=checksum_algorithm,
                 **self.core.operation_params("complete_multipart_upload", request_kwargs),
             )
         except BaseException:
@@ -1980,11 +1965,11 @@ class S3FileSystem(AbstractFileSystem):
             # be stored after the abort, so wait for the parts that could not
             # be cancelled first.
             wait([future for future in futures if not future.cancel()])
-            self._abort_multipart_upload(bucket, key, upload_id, request_kwargs)
+            self._abort_multipart_upload(upload, request_kwargs)
             raise
 
     def _abort_multipart_upload(
-        self, bucket: str, key: str, upload_id: str, request_kwargs: Mapping[str, Any]
+        self, upload: S3MultipartUpload, request_kwargs: Mapping[str, Any]
     ) -> None:
         """Abort a failed multipart upload, logging an error of the abort.
 
@@ -1992,21 +1977,19 @@ class S3FileSystem(AbstractFileSystem):
         caller can re-raise the error that made the upload fail.
 
         Args:
-            bucket: S3 bucket name.
-            key: Object key being uploaded.
-            upload_id: Unique identifier for the multipart upload.
+            upload: The multipart upload returned by creation.
             request_kwargs: Parameters of the upload; the abort receives
                 those that it accepts.
         """
         try:
             self.core.abort_multipart_upload(
-                S3Path(bucket, key),
-                upload_id,
+                upload,
                 **self.core.operation_params("abort_multipart_upload", request_kwargs),
             )
         except Exception:
             _logger.exception(
-                f"Failed to abort multipart upload {upload_id} to s3://{bucket}/{key}."
+                f"Failed to abort multipart upload {upload.upload_id} "
+                f"to s3://{upload.bucket}/{upload.key}."
             )
 
     def cat_file(
@@ -2644,8 +2627,7 @@ class S3FileSystem(AbstractFileSystem):
             futures = [
                 executor.submit(
                     self.core.abort_multipart_upload,
-                    S3Path(cast(str, upload.bucket), cast(str, upload.key)),
-                    cast(str, upload.upload_id),
+                    upload,
                 )
                 for upload in uploads
             ]
@@ -3308,8 +3290,7 @@ class S3File(AbstractBufferedFile):
                     self.multipart_upload_parts.append(
                         self._executor.submit(
                             self.fs.core.upload_part_copy,
-                            path=path,
-                            upload_id=cast(str, self.multipart_upload.upload_id),
+                            upload=self.multipart_upload,
                             part_number=i + 1,
                             # The existing object is copied into the upload.
                             source=path,
@@ -3321,8 +3302,7 @@ class S3File(AbstractBufferedFile):
                 self.multipart_upload_parts.append(
                     self._executor.submit(
                         self.fs.core.upload_part_copy,
-                        path=path,
-                        upload_id=cast(str, self.multipart_upload.upload_id),
+                        upload=self.multipart_upload,
                         part_number=1,
                         source=path,
                         **self._get_request_kwargs("upload_part_copy"),
@@ -3386,8 +3366,7 @@ class S3File(AbstractBufferedFile):
                 self.multipart_upload_parts.append(
                     self._executor.submit(
                         self.fs.core.upload_part,
-                        path=S3Path(self.bucket, self.key),
-                        upload_id=cast(str, self.multipart_upload.upload_id),
+                        upload=self.multipart_upload,
                         part_number=part_number,
                         body=upload,
                         **self._get_request_kwargs("upload_part"),
@@ -3442,13 +3421,10 @@ class S3File(AbstractBufferedFile):
             upload_id = cast(str, self.multipart_upload.upload_id)
             try:
                 self.fs._finish_multipart_upload(
-                    bucket=self.bucket,
-                    key=self.key,
-                    upload_id=upload_id,
+                    upload=self.multipart_upload,
                     futures=self.multipart_upload_parts,
                     request_kwargs=self.s3_additional_kwargs,
                     abort=False,
-                    checksum_algorithm=self.multipart_upload.checksum_algorithm,
                 )
             except BaseException:
                 # discard() keeps the upload if the abort fails or is
@@ -3478,8 +3454,7 @@ class S3File(AbstractBufferedFile):
             # be cancelled first.
             wait([f for f in self.multipart_upload_parts if not f.cancel()])
             self.fs.core.abort_multipart_upload(
-                S3Path(self.bucket, self.key),
-                cast(str, self.multipart_upload.upload_id),
+                self.multipart_upload,
                 **self._get_request_kwargs("abort_multipart_upload"),
             )
 

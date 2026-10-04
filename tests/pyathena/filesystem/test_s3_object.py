@@ -344,6 +344,7 @@ class TestS3MultipartUpload:
                 "BucketKeyEnabled": True,
                 "RequestCharged": "requester",
                 "ChecksumAlgorithm": "CRC32",
+                "ChecksumType": "FULL_OBJECT",
                 "Initiated": datetime(2015, 1, 1, 0, 0, 0),
                 "StorageClass": "STANDARD",
                 "Owner": {"DisplayName": "test_owner", "ID": "test_owner_id"},
@@ -363,6 +364,7 @@ class TestS3MultipartUpload:
         assert actual.bucket_key_enabled is True
         assert actual.request_charged == "requester"
         assert actual.checksum_algorithm == "CRC32"
+        assert actual.checksum_type == "FULL_OBJECT"
         assert actual.initiated == datetime(2015, 1, 1, 0, 0, 0)
         assert actual.storage_class == "STANDARD"
         assert actual.owner
@@ -381,6 +383,8 @@ class TestS3MultipartUpload:
             }
         )
         assert actual.initiated is None
+        assert actual.checksum_algorithm is None
+        assert actual.checksum_type is None
         assert actual.storage_class is None
         assert actual.owner is None
         assert actual.initiator is None

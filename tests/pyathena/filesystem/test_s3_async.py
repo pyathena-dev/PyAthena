@@ -24,6 +24,7 @@ from pyathena.filesystem.s3 import S3File, S3FileSystem
 from pyathena.filesystem.s3_async import AioS3File, AioS3FileSystem
 from pyathena.filesystem.s3_core import S3Core
 from pyathena.filesystem.s3_object import (
+    S3MultipartUpload,
     S3MultipartUploadPart,
     S3Object,
     S3ObjectType,
@@ -160,7 +161,9 @@ class TestAioS3FileSystem:
         )
         sync_fs = fs._sync_fs
         sync_fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
+            return_value=S3MultipartUpload(
+                {"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"}
+            )
         )
         sync_fs.core.upload_part_copy = mock.MagicMock(
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
@@ -308,7 +311,9 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(connection=mock.MagicMock(), max_workers=2, skip_instance_cache=True)
         sync_fs = fs._sync_fs
         sync_fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
+            return_value=S3MultipartUpload(
+                {"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"}
+            )
         )
         events = []
         failed = threading.Event()
@@ -357,7 +362,9 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(connection=mock.MagicMock(), max_workers=2, skip_instance_cache=True)
         sync_fs = fs._sync_fs
         sync_fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
+            return_value=S3MultipartUpload(
+                {"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"}
+            )
         )
         events = []
         lock = threading.Lock()
@@ -433,7 +440,9 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
         sync_fs = fs._sync_fs
         sync_fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
+            return_value=S3MultipartUpload(
+                {"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"}
+            )
         )
         events = []
         started = threading.Event()
@@ -507,7 +516,7 @@ class TestAioS3FileSystem:
             events.append("create")
             if creation_fails:
                 raise OSError("creation failed")
-            return SimpleNamespace(upload_id="uploadid")
+            return S3MultipartUpload({"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"})
 
         sync_fs.core.create_multipart_upload = mock.MagicMock(side_effect=create_multipart_upload)
         sync_fs.core.upload_part_copy = mock.MagicMock()
@@ -515,7 +524,7 @@ class TestAioS3FileSystem:
         size = 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE
         sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
         sync_fs._abort_multipart_upload = mock.MagicMock(
-            side_effect=lambda *args: events.append(("abort", args[2]))
+            side_effect=lambda upload, params: events.append(("abort", upload.upload_id))
         )
 
         task = asyncio.ensure_future(
@@ -1046,7 +1055,9 @@ class TestAioS3FileSystem:
         sync_fs = fs._sync_fs
         sync_fs.core.copy_object = mock.MagicMock()
         sync_fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
+            return_value=S3MultipartUpload(
+                {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
+            )
         )
         running = []
         concurrency = []
@@ -1145,7 +1156,12 @@ class TestAioS3FileSystem:
                 {
                     "Uploads": [
                         {"Key": "prefix/gone", "UploadId": "gone"},
-                        {"Key": "prefix/pending", "UploadId": "pending"},
+                        {
+                            "Key": "prefix/pending",
+                            "UploadId": "pending",
+                            "ChecksumAlgorithm": "CRC32",
+                            "ChecksumType": "FULL_OBJECT",
+                        },
                     ],
                     "IsTruncated": False,
                 },
@@ -1188,9 +1204,12 @@ class TestAioS3FileSystem:
             fs.clear_multipart_uploads("s3://bucket/prefix/")
             stubber.assert_no_pending_responses()
 
-    @pytest.mark.parametrize("algorithm", [None, "SHA256", "CRC32"])
+    @pytest.mark.parametrize(
+        ("algorithm", "checksum_type"),
+        [(None, None), ("SHA256", None), ("CRC32", None), ("CRC32", "FULL_OBJECT")],
+    )
     @pytest.mark.asyncio
-    async def test_multipart_copy_uses_creation_algorithm(self, algorithm):
+    async def test_multipart_copy_uses_creation_algorithm(self, algorithm, checksum_type):
         fs = AioS3FileSystem(
             key="dummy",
             secret="dummy",
@@ -1201,6 +1220,8 @@ class TestAioS3FileSystem:
         block_size = 5 * 2**30
         size = 2 * block_size
         checksum_kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
+        if checksum_type:
+            checksum_kwargs["ChecksumType"] = checksum_type
         expected_parts = []
         with Stubber(fs.core.client) as stubber:
             stubber.add_response(
@@ -1243,14 +1264,12 @@ class TestAioS3FileSystem:
                     "Key": "dst",
                     "UploadId": "u",
                     "MultipartUpload": {"Parts": expected_parts},
+                    **({"ChecksumType": checksum_type} if checksum_type else {}),
                 },
             )
             kwargs = {
-                "bucket1": "bucket",
-                "key1": "src",
-                "size1": size,
-                "bucket2": "bucket",
-                "key2": "dst",
+                "source": S3Path("bucket", "src"),
+                "destination": S3Path("bucket", "dst"),
                 "block_size": block_size,
                 "MetadataDirective": "REPLACE",
                 "TaggingDirective": "REPLACE",
@@ -1266,8 +1285,11 @@ class TestAioS3FileSystem:
             request.param = {}
         return AioS3FileSystem(connection=connect(), **request.param)
 
-    @pytest.mark.parametrize("algorithm", [None, "SHA256", "CRC32"])
-    def test_open_multipart_with_checksum(self, fs, algorithm):
+    @pytest.mark.parametrize(
+        ("algorithm", "checksum_type"),
+        [(None, None), ("SHA256", None), ("CRC32", None), ("CRC32", "FULL_OBJECT")],
+    )
+    def test_open_multipart_with_checksum(self, fs, algorithm, checksum_type):
         block_size = 5 * 2**20
         data = b"x" * (block_size + 1)
         path = (
@@ -1275,6 +1297,8 @@ class TestAioS3FileSystem:
             f"filesystem/test_async_open_multipart_with_checksum/{uuid.uuid4()}"
         )
         kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
+        if checksum_type:
+            kwargs["ChecksumType"] = checksum_type
         try:
             with fs.open(path, "wb", block_size=block_size, s3_additional_kwargs=kwargs) as file:
                 file.write(data)
@@ -1285,8 +1309,11 @@ class TestAioS3FileSystem:
             if fs.exists(path):
                 fs.rm(path)
 
-    @pytest.mark.parametrize("algorithm", [None, "SHA256", "CRC32"])
-    def test_put_file_multipart_with_checksum(self, fs, tmp_path, algorithm):
+    @pytest.mark.parametrize(
+        ("algorithm", "checksum_type"),
+        [(None, None), ("SHA256", None), ("CRC32", None), ("CRC32", "FULL_OBJECT")],
+    )
+    def test_put_file_multipart_with_checksum(self, fs, tmp_path, algorithm, checksum_type):
         block_size = 5 * 2**20
         data = b"x" * (block_size + 1)
         path = (
@@ -1294,6 +1321,8 @@ class TestAioS3FileSystem:
             f"filesystem/test_async_put_file_multipart_with_checksum/{uuid.uuid4()}"
         )
         kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
+        if checksum_type:
+            kwargs["ChecksumType"] = checksum_type
         try:
             lpath = tmp_path / "data"
             lpath.write_bytes(data)
@@ -1305,8 +1334,11 @@ class TestAioS3FileSystem:
             if fs.exists(path):
                 fs.rm(path)
 
-    @pytest.mark.parametrize("algorithm", [None, "SHA256", "CRC32"])
-    def test_pipe_file_multipart_with_checksum(self, fs, algorithm):
+    @pytest.mark.parametrize(
+        ("algorithm", "checksum_type"),
+        [(None, None), ("SHA256", None), ("CRC32", None), ("CRC32", "FULL_OBJECT")],
+    )
+    def test_pipe_file_multipart_with_checksum(self, fs, algorithm, checksum_type):
         block_size = 5 * 2**20
         data = b"x" * (block_size + 1)
         path = (
@@ -1314,6 +1346,8 @@ class TestAioS3FileSystem:
             f"filesystem/test_async_pipe_file_multipart_with_checksum/{uuid.uuid4()}"
         )
         kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
+        if checksum_type:
+            kwargs["ChecksumType"] = checksum_type
         try:
             fs.pipe_file(path, data, block_size=block_size, s3_additional_kwargs=kwargs)
             assert fs.cat_file(path) == data
@@ -1323,8 +1357,11 @@ class TestAioS3FileSystem:
             if fs.exists(path):
                 fs.rm(path)
 
-    @pytest.mark.parametrize("algorithm", [None, "SHA256", "CRC32"])
-    def test_append_multipart_with_checksum(self, fs, algorithm):
+    @pytest.mark.parametrize(
+        ("algorithm", "checksum_type"),
+        [(None, None), ("SHA256", None), ("CRC32", None), ("CRC32", "FULL_OBJECT")],
+    )
+    def test_append_multipart_with_checksum(self, fs, algorithm, checksum_type):
         block_size = 5 * 2**20
         data = b"x" * (block_size + 1)
         path = (
@@ -1332,6 +1369,8 @@ class TestAioS3FileSystem:
             f"filesystem/test_async_append_multipart_with_checksum/{uuid.uuid4()}"
         )
         kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
+        if checksum_type:
+            kwargs["ChecksumType"] = checksum_type
         try:
             original = b"y" * block_size
             fs.pipe_file(path, original)
@@ -1361,7 +1400,7 @@ class TestAioS3FileSystem:
                 uploads = list_uploads(path)
                 assert len(uploads) == 2
                 assert any(upload.upload_id == gone.upload_id for upload in uploads)
-                sync_fs.core.abort_multipart_upload(gone_path, gone.upload_id)
+                sync_fs.core.abort_multipart_upload(gone)
                 return uploads
 
             with mock.patch.object(
@@ -2192,7 +2231,9 @@ class TestAioS3File:
 
         sync_fs = fs._sync_fs
         sync_fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
+            return_value=S3MultipartUpload(
+                {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
+            )
         )
         sync_fs.core.upload_part = track(
             lambda **kw: S3MultipartUploadPart(kw["part_number"], {"ETag": '"e"'})

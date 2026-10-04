@@ -868,6 +868,7 @@ class S3MultipartUpload:
         self._bucket_key_enabled = response.get("BucketKeyEnabled")
         self._request_charged = response.get("RequestCharged")
         self._checksum_algorithm = response.get("ChecksumAlgorithm")
+        self._checksum_type = response.get("ChecksumType")
         # The following fields are returned by the ListMultipartUploads API.
         self._initiated: datetime | None = response.get("Initiated")
         self._storage_class: str | None = response.get("StorageClass")
@@ -940,6 +941,11 @@ class S3MultipartUpload:
     def checksum_algorithm(self) -> str | None:
         """The ``ChecksumAlgorithm`` of the upload."""
         return self._checksum_algorithm
+
+    @property
+    def checksum_type(self) -> str | None:
+        """The ``ChecksumType`` of the upload: COMPOSITE or FULL_OBJECT."""
+        return self._checksum_type
 
     @property
     def initiated(self) -> datetime | None:
