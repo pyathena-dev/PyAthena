@@ -16,6 +16,7 @@ import pytest
 import sqlalchemy
 from botocore.exceptions import ClientError
 from sqlalchemy import create_engine, engine_from_config, func, literal_column, select, text, types
+from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import NoSuchTableError
 from sqlalchemy.sql import expression, type_coerce
 from sqlalchemy.sql.ddl import CreateTable
@@ -139,6 +140,17 @@ class TestAthenaDialect:
         }
         assert entry_points
         assert {name: load() for name, load in loader.impls.items()} == entry_points
+
+    @pytest.mark.parametrize("dialect_class", [AthenaRestDialect, AthenaAioDialect])
+    @pytest.mark.parametrize(("value", "expected"), [("false", False), ("true", True)])
+    def test_conn_str_use_ssl(self, dialect_class, value, expected):
+        # The URL value is a string, and botocore treats "false" as true.
+        url = make_url(
+            "awsathena+rest://athena.us-west-2.amazonaws.com:443/default"
+            f"?s3_staging_dir=s3://bucket/path/&use_ssl={value}"
+        )
+        _, opts = dialect_class().create_connect_args(url)
+        assert opts["use_ssl"] is expected
 
     @pytest.mark.parametrize("dialect_class", [AthenaDialect, AthenaAioDialect])
     def test_type_compiler(self, dialect_class):

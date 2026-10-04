@@ -306,6 +306,8 @@ class AthenaDialect(DefaultDialect):
             with contextlib.suppress(ValueError):
                 verify = bool(strtobool(verify))
             opts.update({"verify": verify})
+        if "use_ssl" in opts:
+            opts.update({"use_ssl": bool(strtobool(opts["use_ssl"]))})
         if "duration_seconds" in opts:
             opts.update({"duration_seconds": int(opts["duration_seconds"])})
         if "poll_interval" in opts:
