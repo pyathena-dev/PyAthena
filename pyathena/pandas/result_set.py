@@ -96,8 +96,9 @@ def _read_csv_with_pyarrow(source: str | IOBase, read_csv_kwargs: dict[str, Any]
     # Integers become nullable dtypes first so that a dtype entry converts them
     # without going through float64.
     df = table.cast(schema).to_pandas(types_mapper=integer_dtypes.get)
-    if names is not None:
-        df.columns = names
+    if header is None:
+        # pandas names the columns beyond the given names by their positions.
+        df.columns = [str(index) for index in range(len(df.columns) - len(names))] + names
     dtype = dict(read_csv_kwargs["dtype"])
     for column in df.columns:
         # Integer columns without a dtype entry get NumPy integer types.

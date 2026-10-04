@@ -7,7 +7,7 @@
 
 import csv
 import io
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pandas as pd
 import pytest
@@ -154,25 +154,41 @@ _TYPES = {
 
 
 def _pyarrow_read_csv_kwargs(types, tab_separated=False, **kwargs):
-    """Build the pandas.read_csv() options that PandasCursor passes to the PyArrow engine."""
-    converter = DefaultPandasTypeConverter()
-    return {
-        "sep": "\t" if tab_separated else ",",
-        "header": None if tab_separated else 0,
-        "names": list(types) if tab_separated else None,
-        "dtype": {
-            name: dtype
-            for name, type_ in types.items()
-            if (dtype := converter.get_dtype(type_, 0, 0)) is not None
-        },
-        "parse_dates": [
-            name for name, type_ in types.items() if type_ in ("date", "time", "timestamp")
-        ],
-        "skip_blank_lines": False,
-        "keep_default_na": False,
-        "na_values": ("",),
-        **kwargs,
-    }
+    """Build the pandas.read_csv() options with AthenaPandasResultSet._get_csv_read_options().
+
+    Args:
+        types: The Athena types of the result columns, keyed by column name.
+        tab_separated: Whether the result is a tab-separated ``.txt`` file.
+        **kwargs: The pandas.read_csv() options given to ``execute()``.
+
+    Returns:
+        The options for the PyArrow engine.
+    """
+    with patch("pyathena.pandas.result_set.AthenaResultSet.__init__", return_value=None):
+        result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)
+    result_set._converter = DefaultPandasTypeConverter()
+    result_set._keep_default_na = False
+    result_set._na_values = ("",)
+    result_set._quoting = 1
+    result_set._kwargs = kwargs
+    description = [(name, type_, None, None, 0, 0, "UNKNOWN") for name, type_ in types.items()]
+    location = f"s3://bucket/result.{'txt' if tab_separated else 'csv'}"
+    with (
+        patch.object(
+            AthenaPandasResultSet,
+            "description",
+            new_callable=PropertyMock,
+            return_value=description,
+        ),
+        patch.object(
+            AthenaPandasResultSet,
+            "output_location",
+            new_callable=PropertyMock,
+            return_value=location,
+        ),
+    ):
+        assert result_set._reads_csv_with_pyarrow()
+        return result_set._get_csv_read_options("pyarrow", None)
 
 
 @pytest.mark.filterwarnings("ignore:Could not infer format")
@@ -209,6 +225,14 @@ def _pyarrow_read_csv_kwargs(types, tab_separated=False, **kwargs):
             _pyarrow_read_csv_kwargs({"x": "integer", "d": "date"}),
         ),
         (
+            '"v"\n"plain"\n"2024-01-01"\n\n',
+            _pyarrow_read_csv_kwargs({"v": "varchar"}, parse_dates=["v"]),
+        ),
+        (
+            "id    \tint    \t    \nname  \tstring \t    \n",
+            _pyarrow_read_csv_kwargs({"col_name": "varchar"}, True),
+        ),
+        (
             "x\t1\t2024-01-01\n\t\t\ny y\t3\t2024-01-02\n",
             _pyarrow_read_csv_kwargs({"a": "varchar", "b": "bigint", "c": "date"}, True),
         ),
@@ -220,6 +244,8 @@ def _pyarrow_read_csv_kwargs(types, tab_separated=False, **kwargs):
         "dtype_of_date_column",
         "dtype_none",
         "duplicate_names",
+        "unparsed_dates",
+        "tab_separated_extra_fields",
         "tab_separated",
     ],
 )
@@ -229,7 +255,6 @@ def test_read_csv_with_pyarrow_matches_pandas(data, read_csv_kwargs, infer_strin
     with pd.option_context("future.infer_string", infer_string):
         expected = pd.read_csv(
             io.BytesIO(data.encode()),
-            engine="pyarrow",
             **{**read_csv_kwargs, "dtype": dict(read_csv_kwargs["dtype"])},
         )
         actual = _read_csv_with_pyarrow(
