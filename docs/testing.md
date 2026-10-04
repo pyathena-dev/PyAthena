@@ -167,8 +167,16 @@ explicitly enabled, because provisioning requires additional permissions and a
 
 ```bash
 AWS_ATHENA_S3_VERSIONING_TESTS=1 uv run --env-file .env pytest -n 1 \
-  tests/pyathena/filesystem/test_s3_versioning.py -v
+  tests/pyathena/filesystem/test_s3.py \
+  tests/pyathena/filesystem/test_s3_async.py -k move_null_version_onto_key -v
 ```
+
+These nine cases belong to `TestS3FileSystem` and `TestAioS3FileSystem` and use
+their existing filesystem fixtures. The shared session-scoped bucket fixture in
+`tests/pyathena/filesystem/conftest.py` provisions the three buckets once per
+worker, so a serial run shares one setup and wait across both test modules.
+The synchronous API, asynchronous API, and asynchronous filesystem's synchronous
+wrapper each have a separate test method.
 
 The test identity needs `s3:CreateBucket`, `s3:GetBucketVersioning`,
 `s3:PutBucketVersioning`, `s3:PutObject`, `s3:GetObject`, `s3:GetObjectVersion`,

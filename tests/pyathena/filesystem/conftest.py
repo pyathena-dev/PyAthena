@@ -5,7 +5,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Opt-in real S3 tests of null-version moves using temporary buckets."""
+"""Shared S3 filesystem integration-test fixtures."""
 
 import os
 import time
@@ -14,20 +14,16 @@ import uuid
 import boto3
 import pytest
 
-from pyathena.filesystem.s3 import S3FileSystem
-from pyathena.filesystem.s3_async import AioS3FileSystem
 from tests import ENV
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("AWS_ATHENA_S3_VERSIONING_TESTS") != "1",
-    reason="Set AWS_ATHENA_S3_VERSIONING_TESTS=1 to create temporary versioning test buckets.",
-)
-
-BACKENDS = ["sync", "async", "async-wrapper"]
+VERSIONING_TEST_KEYS = ("sync", "async", "async-wrapper")
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def versioning_buckets():
+    """Share temporary buckets across the sync and async opt-in move tests."""
+    if os.getenv("AWS_ATHENA_S3_VERSIONING_TESTS") != "1":
+        pytest.skip("Set AWS_ATHENA_S3_VERSIONING_TESTS=1 to create versioning test buckets.")
     client = boto3.client("s3", region_name=ENV.region_name)
     buckets = {}
     try:
@@ -40,7 +36,7 @@ def versioning_buckets():
             )
             client.create_bucket(Bucket=bucket, **params)
             buckets[status] = bucket
-            for key in BACKENDS:
+            for key in VERSIONING_TEST_KEYS:
                 client.put_object(Bucket=bucket, Key=key, Body=b"original")
             if status:
                 client.put_bucket_versioning(
@@ -54,7 +50,7 @@ def versioning_buckets():
             time.sleep(min(30, remaining))
         for status in ("Enabled", "Suspended"):
             bucket = buckets[status]
-            for key in BACKENDS:
+            for key in VERSIONING_TEST_KEYS:
                 response = client.put_object(Bucket=bucket, Key=key, Body=b"current")
                 assert response["VersionId"] != "null"
             if status == "Suspended":
@@ -84,48 +80,3 @@ def versioning_buckets():
                 errors.append(error)
         if errors:
             raise ExceptionGroup("Failed to remove versioning test buckets", errors)
-
-
-@pytest.fixture(params=BACKENDS)
-def fs(request):
-    backend = request.param
-    cls = S3FileSystem if backend == "sync" else AioS3FileSystem
-    return backend, cls(region_name=ENV.region_name, skip_instance_cache=True)
-
-
-class TestS3NullVersionMove:
-    @pytest.mark.parametrize("status", [None, "Enabled", "Suspended"])
-    @pytest.mark.asyncio
-    async def test_mv_null_version_onto_key(self, fs, versioning_buckets, status):
-        backend, filesystem = fs
-        client, buckets = versioning_buckets
-        bucket = buckets[status]
-        path = f"s3://{bucket}/{backend}"
-        before = [
-            v
-            for v in client.list_object_versions(Bucket=bucket, Prefix=backend)["Versions"]
-            if v["Key"] == backend
-        ]
-        assert any(v["VersionId"] == "null" for v in before)
-        if status:
-            assert not next(v for v in before if v["VersionId"] == "null")["IsLatest"]
-
-        if backend == "async":
-            await filesystem._mv(f"{path}?versionId=null", path)
-        else:
-            filesystem.mv(f"{path}?versionId=null", path)
-
-        with client.get_object(Bucket=bucket, Key=backend)["Body"] as body:
-            assert body.read() == (b"original" if status != "Suspended" else b"current")
-        after = [
-            v
-            for v in client.list_object_versions(Bucket=bucket, Prefix=backend)["Versions"]
-            if v["Key"] == backend
-        ]
-        if status == "Enabled":
-            assert not any(v["VersionId"] == "null" for v in after)
-            assert len(after) == len(before)
-            latest = next(v for v in after if v["IsLatest"])
-            assert latest["VersionId"] not in {v["VersionId"] for v in before}
-        else:
-            assert after == before

@@ -2112,6 +2112,93 @@ class TestAioS3FileSystem:
             assert await fs._cat_file(rpath_copy) == tmp.read()
             assert await fs._cat_file(rpath_copy) == await fs._cat_file(rpath)
 
+    @pytest.mark.skipif(
+        os.getenv("AWS_ATHENA_S3_VERSIONING_TESTS") != "1",
+        reason="Set AWS_ATHENA_S3_VERSIONING_TESTS=1 to create versioning test buckets.",
+    )
+    @pytest.mark.parametrize(
+        "status",
+        [
+            pytest.param(None, id="async-None"),
+            pytest.param("Enabled", id="async-Enabled"),
+            pytest.param("Suspended", id="async-Suspended"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_move_null_version_onto_key(self, fs, versioning_buckets, status):
+        client, buckets = versioning_buckets
+        bucket = buckets[status]
+        key = "async"
+        path = f"s3://{bucket}/{key}"
+        before = [
+            v
+            for v in client.list_object_versions(Bucket=bucket, Prefix=key)["Versions"]
+            if v["Key"] == key
+        ]
+        assert any(v["VersionId"] == "null" for v in before)
+        if status:
+            assert not next(v for v in before if v["VersionId"] == "null")["IsLatest"]
+
+        await fs._mv(f"{path}?versionId=null", path)
+
+        with client.get_object(Bucket=bucket, Key=key)["Body"] as body:
+            assert body.read() == (b"original" if status != "Suspended" else b"current")
+        after = [
+            v
+            for v in client.list_object_versions(Bucket=bucket, Prefix=key)["Versions"]
+            if v["Key"] == key
+        ]
+        if status == "Enabled":
+            assert not any(v["VersionId"] == "null" for v in after)
+            assert len(after) == len(before)
+            latest = next(v for v in after if v["IsLatest"])
+            assert latest["VersionId"] not in {v["VersionId"] for v in before}
+        else:
+            assert after == before
+
+    @pytest.mark.skipif(
+        os.getenv("AWS_ATHENA_S3_VERSIONING_TESTS") != "1",
+        reason="Set AWS_ATHENA_S3_VERSIONING_TESTS=1 to create versioning test buckets.",
+    )
+    @pytest.mark.parametrize(
+        "status",
+        [
+            pytest.param(None, id="async-wrapper-None"),
+            pytest.param("Enabled", id="async-wrapper-Enabled"),
+            pytest.param("Suspended", id="async-wrapper-Suspended"),
+        ],
+    )
+    def test_move_null_version_onto_key_sync_wrapper(self, fs, versioning_buckets, status):
+        client, buckets = versioning_buckets
+        bucket = buckets[status]
+        key = "async-wrapper"
+        path = f"s3://{bucket}/{key}"
+        before = [
+            v
+            for v in client.list_object_versions(Bucket=bucket, Prefix=key)["Versions"]
+            if v["Key"] == key
+        ]
+        assert any(v["VersionId"] == "null" for v in before)
+        if status:
+            assert not next(v for v in before if v["VersionId"] == "null")["IsLatest"]
+
+        fs.mv(f"{path}?versionId=null", path)
+
+        with client.get_object(Bucket=bucket, Key=key)["Body"] as body:
+            assert body.read() == (b"original" if status != "Suspended" else b"current")
+        after = [
+            v
+            for v in client.list_object_versions(Bucket=bucket, Prefix=key)["Versions"]
+            if v["Key"] == key
+        ]
+        if status == "Enabled":
+            assert not any(v["VersionId"] == "null" for v in after)
+            assert len(after) == len(before)
+            latest = next(v for v in after if v["IsLatest"])
+            assert latest["VersionId"] not in {v["VersionId"] for v in before}
+        else:
+            assert after == before
+
     @pytest.mark.asyncio
     async def test_move(self, fs):
         path1 = (
