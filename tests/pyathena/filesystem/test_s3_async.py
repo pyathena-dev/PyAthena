@@ -741,6 +741,31 @@ class TestAioS3FileSystem:
         )
 
     @pytest.mark.asyncio
+    async def test_get_version_path_destination(self, tmp_path):
+        # A Path destination is paired too: the version is downloaded to the
+        # file, not into a directory of that name.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs._sync_fs.isdir = mock.MagicMock(return_value=False)
+        fs._get_file = mock.AsyncMock()
+
+        await fs._get("s3://bucket/b?versionId=v1", tmp_path / "out.bin")
+        assert fs._get_file.await_args.args[:2] == (
+            "bucket/b?versionId=v1",
+            (tmp_path / "out.bin").as_posix(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_expand_path_glob_lists_stem_prefix(self):
+        # Unversioned globs keep fsspec's async expansion, which lists only
+        # the keys that start with the stem before the first wildcard.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs._sync_fs._find = mock.MagicMock(return_value=[])
+
+        with pytest.raises(FileNotFoundError):
+            await fs._expand_path("s3://bucket/reports/2026-*.csv")
+        assert fs._sync_fs._find.call_args.kwargs["prefix"] == "2026-"
+
+    @pytest.mark.asyncio
     async def test_get_version(self, tmp_path):
         # GH-979: a version is downloaded to a local path named after its key.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)

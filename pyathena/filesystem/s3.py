@@ -69,7 +69,7 @@ _LOOKUP_REQUEST_PARAMETERS = frozenset(
 _LOOKUPS_CACHE_KEY = "lookups"
 
 
-def _has_version_id(path: str | list[str]) -> bool:
+def _has_version_id(path: str | os.PathLike[str] | list[str]) -> bool:
     """Return whether a path, or a path of a list, ends with a version ID query.
 
     fsspec's ``copy()`` and ``get()`` take ``?`` for a glob character and
@@ -82,8 +82,30 @@ def _has_version_id(path: str | list[str]) -> bool:
     Returns:
         Whether a path has a version ID query.
     """
-    paths = [path] if isinstance(path, str) else path
-    return any(S3Path.split_version_id(str(p))[1] for p in paths)
+    paths = [path] if isinstance(path, (str, os.PathLike)) else path
+    return any(S3Path.split_version_id(os.fspath(p))[1] for p in paths)
+
+
+def _check_contained(root: str, paths: list[str]) -> None:
+    """Raise if a local destination lies outside the destination root.
+
+    The destinations are named after the source keys, whose ``..`` segments
+    would otherwise place a download above the root, as fsspec's ``get()``
+    checks for the destinations that it names.
+
+    Args:
+        root: The local destination root.
+        paths: The local destinations named below it.
+
+    Raises:
+        ValueError: If a destination lies outside the root.
+    """
+    root_key = os.path.normcase(os.path.abspath(root))
+    prefix = root_key.rstrip(os.sep) + os.sep
+    for path in paths:
+        key = os.path.normcase(os.path.abspath(path))
+        if key != root_key and not key.startswith(prefix):
+            raise ValueError(f"The destination {path!r} is outside {root!r}.")
 
 
 class CompressedBuffer(BytesIO):
@@ -1098,7 +1120,7 @@ class S3FileSystem(AbstractFileSystem):
         As in fsspec, except that a path with a version ID names that version
         of an object: it is not a glob pattern, although its ``?`` is one in
         fsspec, nor is anything expanded below it. With ``recursive``, it is
-        included only if the version exists.
+        included only if it is a file, as fsspec includes a path that exists.
 
         Args:
             path: S3 path, glob pattern, or list of them.
@@ -1115,13 +1137,8 @@ class S3FileSystem(AbstractFileSystem):
         """
         if maxdepth is not None and maxdepth < 1:
             raise ValueError("maxdepth must be at least 1")
-        paths = [
-            self._strip_protocol(p)
-            for p in ([path] if isinstance(path, (str, os.PathLike)) else path)
-        ]
-        versions = [p for p in paths if S3Path.split_version_id(p)[1]]
-        others = [p for p in paths if not S3Path.split_version_id(p)[1]]
-        out = {p for p in versions if not recursive or self.exists(p)}
+        versions, others = self._split_version_paths(path)
+        out = {p for p in versions if not recursive or self.isfile(p)}
         if others:
             try:
                 out.update(
@@ -1133,6 +1150,23 @@ class S3FileSystem(AbstractFileSystem):
         if not out:
             raise FileNotFoundError(path)
         return sorted(out)
+
+    def _split_version_paths(self, path) -> tuple[list[str], list[str]]:
+        """Split paths into those with a version ID and the others.
+
+        Args:
+            path: S3 path, glob pattern, or list of them.
+
+        Returns:
+            Tuple of the paths with a version ID and the other paths, without
+            the protocol.
+        """
+        paths = [
+            self._strip_protocol(p)
+            for p in ([path] if isinstance(path, (str, os.PathLike)) else path)
+        ]
+        versions = [p for p in paths if S3Path.split_version_id(p)[1]]
+        return versions, [p for p in paths if p not in versions]
 
     def exists(self, path: str, **kwargs) -> bool:
         """Check if an S3 path exists.
@@ -1773,7 +1807,8 @@ class S3FileSystem(AbstractFileSystem):
 
         As fsspec's ``get()``, except that a source with a version ID
         downloads that version of the object to a local path named after its
-        key, as ``_copy_paths`` pairs them.
+        key, as ``_copy_paths`` pairs them. Those destinations are checked to
+        lie under ``lpath``.
 
         Args:
             rpath: Source S3 path, glob pattern, or list of them.
@@ -1783,15 +1818,17 @@ class S3FileSystem(AbstractFileSystem):
             callback: Progress callback.
             maxdepth: Maximum depth of a recursive copy.
             **kwargs: Additional parameters passed to ``get_file()``.
+
+        Raises:
+            ValueError: If a source with a version ID is paired, and a
+                destination lies outside ``lpath``.
         """
-        if isinstance(lpath, str) and _has_version_id(rpath):
+        if not isinstance(lpath, list) and _has_version_id(rpath):
+            root = make_path_posix(lpath)
             rpath, lpath = self._copy_paths(
-                rpath,
-                make_path_posix(lpath),
-                recursive=recursive,
-                maxdepth=maxdepth,
-                isdir=LocalFileSystem().isdir,
+                rpath, root, recursive=recursive, maxdepth=maxdepth, isdir=LocalFileSystem().isdir
             )
+            _check_contained(root, lpath)
             if not rpath:
                 return
         super().get(

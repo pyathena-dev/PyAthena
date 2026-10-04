@@ -49,11 +49,14 @@ class S3Path:
 
     # Version IDs do not contain "?", so only the last query can be one.
     VERSION_QUERY: ClassVar[Pattern[str]] = re.compile(
-        r"\?version(Id|ID|id|_id)=(?P<version_id>[^?]+)$"
+        r"\?version(Id|ID|id|_id)=(?P<version_id>[^?]+)\Z"
     )
+    # Keys may contain any character, including newlines. A bare "/" is tried
+    # before a key so that "bucket/?versionId=..." names the bucket.
     PATTERN: ClassVar[Pattern[str]] = re.compile(
-        r"(^s3://|^s3a://|^)(?P<bucket>[a-zA-Z0-9.\-_]+)(/(?P<key>.+?)|/)?"
-        rf"($|{VERSION_QUERY.pattern})"
+        r"(^s3://|^s3a://|^)(?P<bucket>[a-zA-Z0-9.\-_]+)(/|/(?P<key>.+?))?"
+        rf"(\Z|{VERSION_QUERY.pattern})",
+        re.DOTALL,
     )
 
     bucket: str

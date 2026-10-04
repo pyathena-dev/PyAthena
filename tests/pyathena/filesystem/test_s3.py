@@ -34,7 +34,7 @@ from fsspec.implementations.memory import MemoryFileSystem
 
 import pyathena
 from pyathena.filesystem import register_s3_filesystem
-from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
+from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem, _has_version_id
 from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import S3Object, S3ObjectType, S3StorageClass
@@ -1700,13 +1700,17 @@ class TestS3FileSystem:
             fs.expand_path("s3://bucket/b?versionId=v1", maxdepth=0)
 
     def test_expand_path_recursive_missing_version(self):
-        # With recursive, a version is included only if it exists, as fsspec
-        # does for the other paths.
+        # With recursive, a version is included only if it is a file, as
+        # fsspec includes a path that exists; a key prefix of the same name
+        # is not a version.
         fs = self._make_fs()
-        self._serve_keys(fs, set())
+        self._serve_keys(fs, {"b", "dir/child"})
 
+        assert fs.expand_path(
+            ["s3://bucket/b?versionId=v1", "s3://bucket/dir?versionId=v2"], recursive=True
+        ) == ["bucket/b?versionId=v1"]
         with pytest.raises(FileNotFoundError):
-            fs.expand_path("s3://bucket/b?versionId=v1", recursive=True)
+            fs.expand_path("s3://bucket/dir?versionId=v2", recursive=True)
 
     @pytest.mark.parametrize(
         ("path1", "path2", "expected"),
@@ -1738,9 +1742,12 @@ class TestS3FileSystem:
             ("s3://bucket/key?versionId=v1", "f.txt", "f.txt"),
             ("s3://bucket/key?versionId=v1", "d/", "d/key"),
             (["s3://bucket/key?versionId=v1"], "d", "d/key"),
+            (Path("bucket/key?versionId=v1"), "d/", "d/key"),
+            ("s3://bucket/key?versionId=v1", Path("f.txt"), "f.txt"),
         ],
     )
     def test_get_version(self, tmp_path, monkeypatch, rpath, lpath, expected):
+        # Path sources and destinations are accepted as fsspec accepts them.
         # GH-979: a version is downloaded to a local path named after its
         # key, which used to be the version-qualified name of the source.
         monkeypatch.chdir(tmp_path)
@@ -1752,6 +1759,37 @@ class TestS3FileSystem:
             {"d", expected}
         )
         assert (tmp_path / expected).read_bytes() == b"data"
+
+    @pytest.mark.parametrize(
+        "rpath",
+        [
+            "s3://bucket/a/..?versionId=v1",
+            # The sources without a version are named by the same pairing.
+            ["s3://bucket/x/..", "s3://bucket/key?versionId=v1"],
+        ],
+    )
+    def test_get_version_outside_destination(self, tmp_path, rpath):
+        # A destination named after a key must stay under lpath, which
+        # fsspec checks for the destinations that it names.
+        (tmp_path / "d").mkdir()
+        fs, _ = self._make_object_fs(b"data")
+
+        with pytest.raises(ValueError, match="outside"):
+            fs.get(rpath, f"{tmp_path}/d/")
+        assert sorted(p.name for p in tmp_path.rglob("*")) == ["d"]
+
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            ("bucket/key", False),
+            ("bucket/key?versionId=v1", True),
+            (Path("bucket/key"), False),
+            (Path("bucket/key?versionId=v1"), True),
+            (["bucket/a", Path("bucket/b?versionId=v1")], True),
+        ],
+    )
+    def test_has_version_id(self, path, expected):
+        assert _has_version_id(path) is expected
 
     def test_mv_nothing_within_maxdepth(self):
         # Only directories within maxdepth: nothing is moved, as with copy().

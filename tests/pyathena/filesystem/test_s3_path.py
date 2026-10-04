@@ -34,6 +34,12 @@ class TestS3Path:
             ("bucket/obj?versionId=", S3Path("bucket", "obj?versionId=")),
             ("bucket/obj?versionId=a?versionId=b", S3Path("bucket", "obj?versionId=a", "b")),
             ("bucket/?", S3Path("bucket", "?")),
+            # A version right after the bucket names a version of the bucket path.
+            ("bucket/?versionId=v1", S3Path("bucket", None, "v1")),
+            # Keys may contain newlines, also at the end.
+            ("bucket/a\nb", S3Path("bucket", "a\nb")),
+            ("bucket/a\n", S3Path("bucket", "a\n")),
+            ("bucket/a\n?versionId=v1", S3Path("bucket", "a\n", "v1")),
         ],
     )
     def test_parse(self, path, expected):
