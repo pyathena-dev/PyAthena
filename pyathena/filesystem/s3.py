@@ -1121,8 +1121,7 @@ class S3FileSystem(AbstractFileSystem):
         """
         versioned_paths, unversioned_paths = S3PathPairing.delete_paths(path)
         if not unversioned_paths:
-            # Versioned paths are deleted as given, without the lookup that
-            # expand_path makes for them with recursive.
+            # expand_path raises FileNotFoundError for no paths.
             return versioned_paths
         return versioned_paths + self.expand_path(
             unversioned_paths, recursive=recursive, maxdepth=maxdepth

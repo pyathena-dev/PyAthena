@@ -1849,9 +1849,7 @@ class TestS3FileSystem:
         # The filesystem holds no reference cycle, so a filesystem that is
         # not cached, such as the internal one of a cursor (GH-978), is freed
         # as soon as it is unused.
-        fs = S3FileSystem(
-            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
-        )
+        fs = self._stubbed_fs()
         ref = weakref.ref(fs)
         gc.disable()
         try:

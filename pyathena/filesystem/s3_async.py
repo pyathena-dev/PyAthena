@@ -347,6 +347,7 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         versioned_paths, unversioned_paths = S3PathPairing.delete_paths(path)
         if not unversioned_paths:
+            # _expand_path raises FileNotFoundError for no paths.
             return versioned_paths
         return versioned_paths + await self._expand_path(
             unversioned_paths, recursive=recursive, maxdepth=maxdepth
@@ -431,14 +432,14 @@ class AioS3FileSystem(AsyncFileSystem):
             ValueError: If the move has conflicting paths.
         """
         pairs = await self._copy_pairs(path1, path2, recursive=recursive, maxdepth=maxdepth)
-        candidates = S3PathPairing.conflict_candidates(pairs)
+        candidates = await asyncio.to_thread(S3PathPairing.conflict_candidates, pairs)
         objects = await asyncio.gather(
             *[asyncio.to_thread(self._sync_fs._head_object, source) for source in candidates]
         )
         missing = {
             source for source, object_ in zip(candidates, objects, strict=True) if not object_
         }
-        return S3PathPairing.move_pairs(pairs, missing=missing)
+        return await asyncio.to_thread(S3PathPairing.move_pairs, pairs, missing=missing)
 
     async def _copy_pairs(
         self,
@@ -467,9 +468,11 @@ class AioS3FileSystem(AsyncFileSystem):
         sources = await self._expand_path(path1, recursive=recursive, maxdepth=maxdepth)
         if S3PathPairing.skips_directories(path1, recursive, maxdepth):
             # A path with a trailing slash is a directory without a lookup.
+            # The paths are looked up in one thread, mostly from the cache.
             files = [p for p in sources if not trailing_sep(p)]
-            directories = await asyncio.gather(*[self._isdir(p) for p in files])
-            sources = [p for p, is_dir in zip(files, directories, strict=True) if not is_dir]
+            sources = await asyncio.to_thread(
+                lambda: [p for p in files if not self._sync_fs.isdir(p)]
+            )
         destination_is_dir = None
         if sources and S3PathPairing.looks_up_destination(path1, path2):
             # A string, as looks_up_destination() checks.
@@ -480,7 +483,10 @@ class AioS3FileSystem(AsyncFileSystem):
                 if isdir
                 else await self._isdir(destination)
             )
-        return S3PathPairing.copy_pairs(path1, path2, sources, destination_is_dir)
+        # The pairing of many paths takes long enough to block the event loop.
+        return await asyncio.to_thread(
+            S3PathPairing.copy_pairs, path1, path2, sources, destination_is_dir
+        )
 
     def mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs) -> None:
         """Move files from one S3 location to another.

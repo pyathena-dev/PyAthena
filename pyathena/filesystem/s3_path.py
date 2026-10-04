@@ -135,9 +135,9 @@ class S3Path:
 
     @property
     def target(self) -> S3Path:
-        """The object that a write to the path replaces, for comparing paths.
+        """What the path names when paths are compared: a ``null`` version names its key.
 
-        A ``null`` version names the key itself: in a bucket without
+        A ``null`` version is taken to name the key itself: in a bucket without
         versioning, or with versioning suspended, a write to the key replaces
         its ``null`` version. With versioning enabled, a write adds a new
         version instead, but the ``null`` version is still taken to name the

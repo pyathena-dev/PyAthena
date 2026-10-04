@@ -1118,13 +1118,16 @@ class TestAioS3FileSystem:
         # See TestS3FileSystem.test_copy_pairs_destination_lookup; the aio
         # filesystem expands and looks up the paths with its own coroutines.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
-        # Only the destination is a directory.
+        # Only the destination is a directory. The sources are looked up in
+        # one thread with the sync isdir, the destination with _isdir.
+        fs._sync_fs.isdir = mock.MagicMock(return_value=False)
         fs._isdir = mock.AsyncMock(side_effect=lambda p: p.rstrip("/").endswith("/d"))
 
         pairs = await fs._copy_pairs("s3://bucket/b?versionId=v1", path2)
 
         assert pairs == [("bucket/b?versionId=v1", expected)]
-        assert [c.args[0] for c in fs._isdir.call_args_list] == lookups
+        assert [c.args[0] for c in fs._sync_fs.isdir.call_args_list] == lookups[:1]
+        assert [c.args[0] for c in fs._isdir.call_args_list] == lookups[1:]
 
     @pytest.mark.asyncio
     async def test_move_pairs_looks_up_only_conflict_candidates(self):
