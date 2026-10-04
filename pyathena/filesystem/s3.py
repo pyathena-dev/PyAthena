@@ -2210,49 +2210,6 @@ class S3FileSystem(AbstractFileSystem):
                 f"{min_block_size} bytes."
             )
 
-    @staticmethod
-    def _write_and_close(f: S3File, value: bytes | bytearray | memoryview) -> None:
-        """Write the whole value to a file opened for writing and close it.
-
-        Unlike a ``with`` block, a failed write closes the file without
-        committing it, so the existing object is left unchanged.
-
-        Args:
-            f: The file to write to.
-            value: The bytes to write.
-        """
-        try:
-            if isinstance(value, memoryview) and not value.c_contiguous:
-                # The buffer of the file cannot write a non-contiguous memoryview.
-                value = value.tobytes()
-            f.write(value)
-        except BaseException:
-            f._close_without_commit()
-            raise
-        f.close()
-
-    @staticmethod
-    def _write_file_and_close(f: S3File, local: BinaryIO, callback: Callback) -> None:
-        """Write the rest of a local file to a file opened for writing and close it.
-
-        Unlike a ``with`` block, a failed read, write, or progress update
-        closes the file without committing it, so the existing object is
-        left unchanged.
-
-        Args:
-            f: The file to write to.
-            local: The local file to read from.
-            callback: Progress callback, updated with the size of each block.
-        """
-        try:
-            while data := local.read(f.blocksize):
-                f.write(data)
-                callback.relative_update(len(data))
-        except BaseException:
-            f._close_without_commit()
-            raise
-        f.close()
-
     def pipe_file(
         self, path: str, value: bytes | bytearray | memoryview, mode: str = "overwrite", **kwargs
     ) -> None:
@@ -2306,9 +2263,7 @@ class S3FileSystem(AbstractFileSystem):
             # Defer to the buffered open() path, which keeps the
             # deferred-commit semantics of fsspec transactions and uploads
             # large data as a parallel multipart upload.
-            self._write_and_close(
-                self.open(path, "xb" if mode == "create" else "wb", **kwargs), value
-            )
+            self.open(path, "xb" if mode == "create" else "wb", **kwargs)._write_and_close(value)
             return
         bucket, key, version_id = self.parse_path(path)
         if version_id:
@@ -2558,17 +2513,13 @@ class S3FileSystem(AbstractFileSystem):
         # The local file is opened first, so that an unreadable one fails
         # before the remote file is opened.
         with open(lpath, "rb") as local:
-            self._write_file_and_close(
-                self.open(
-                    rpath,
-                    "xb" if mode == "create" else "wb",
-                    block_size=block_size,
-                    max_workers=max_workers,
-                    s3_additional_kwargs=s3_additional_kwargs,
-                ),
-                local,
-                callback,
-            )
+            self.open(
+                rpath,
+                "xb" if mode == "create" else "wb",
+                block_size=block_size,
+                max_workers=max_workers,
+                s3_additional_kwargs=s3_additional_kwargs,
+            )._write_file_and_close(local, callback)
 
         self.invalidate_cache(rpath)
 
@@ -3750,6 +3701,45 @@ class S3File(AbstractBufferedFile):
             self.multipart_upload = None
             self.multipart_upload_parts = []
             self._executor.shutdown()
+
+    def _write_and_close(self, value: bytes | bytearray | memoryview) -> None:
+        """Write the whole value and close the file.
+
+        Unlike a ``with`` block, a failed write closes the file without
+        committing it, so the existing object is left unchanged.
+
+        Args:
+            value: The bytes to write.
+        """
+        try:
+            if isinstance(value, memoryview) and not value.c_contiguous:
+                # The buffer of the file cannot write a non-contiguous memoryview.
+                value = value.tobytes()
+            self.write(value)
+        except BaseException:
+            self._close_without_commit()
+            raise
+        self.close()
+
+    def _write_file_and_close(self, local: BinaryIO, callback: Callback) -> None:
+        """Write the rest of a local file and close the file.
+
+        Unlike a ``with`` block, a failed read, write, or progress update
+        closes the file without committing it, so the existing object is
+        left unchanged.
+
+        Args:
+            local: The local file to read from.
+            callback: Progress callback, updated with the size of each block.
+        """
+        try:
+            while data := local.read(self.blocksize):
+                self.write(data)
+                callback.relative_update(len(data))
+        except BaseException:
+            self._close_without_commit()
+            raise
+        self.close()
 
     def _initiate_upload(self) -> None:
         if not self.append_block and self.tell() < self.blocksize:
