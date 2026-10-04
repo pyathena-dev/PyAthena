@@ -268,6 +268,20 @@ class TestPandasCursor:
         if not pandas_cursor.result_set.is_unload:
             assert pandas_cursor.result_set._csv_stream.closed
 
+    def test_result_sets_share_s3_client(self, pandas_cursor):
+        # GH-1011: each result set and its filesystem built their own S3 client,
+        # so every query opened new connections to S3.
+        conn = pandas_cursor.connection
+        session_client = conn.session.client
+        file_systems = []
+        with patch.object(conn.session, "client", side_effect=session_client) as client:
+            for _ in range(2):
+                pandas_cursor.execute("SELECT * FROM one_row")
+                assert pandas_cursor.fetchall() == [(1,)]
+                file_systems.append(pandas_cursor.result_set._fs)
+        assert [c.args for c in client.call_args_list] == [("s3",)]
+        assert all(fs._client is conn.s3_client for fs in file_systems)
+
     @pytest.mark.parametrize(
         ("query", "expected", "binary"),
         [

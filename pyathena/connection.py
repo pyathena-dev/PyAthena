@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from collections.abc import Callable
 from typing import (
@@ -127,6 +128,7 @@ class Connection(Generic[ConnectionCursor]):
         kill_on_interrupt: bool = ...,
         session: Session | None = ...,
         config: Config | None = ...,
+        s3_config: Config | None = ...,
         result_reuse_enable: bool = ...,
         result_reuse_minutes: int = ...,
         on_start_query_execution: Callable[[str], None] | None = ...,
@@ -160,6 +162,7 @@ class Connection(Generic[ConnectionCursor]):
         kill_on_interrupt: bool = ...,
         session: Session | None = ...,
         config: Config | None = ...,
+        s3_config: Config | None = ...,
         result_reuse_enable: bool = ...,
         result_reuse_minutes: int = ...,
         on_start_query_execution: Callable[[str], None] | None = ...,
@@ -192,6 +195,7 @@ class Connection(Generic[ConnectionCursor]):
         kill_on_interrupt: bool = True,
         session: Session | None = None,
         config: Config | None = None,
+        s3_config: Config | None = None,
         result_reuse_enable: bool = False,
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
         on_start_query_execution: Callable[[str], None] | None = None,
@@ -231,6 +235,8 @@ class Connection(Generic[ConnectionCursor]):
             kill_on_interrupt: Cancel running queries on interrupt. Defaults to True.
             session: Pre-configured boto3 Session. Creates new session if None.
             config: Boto3 Config object for client configuration.
+            s3_config: Botocore Config options for the S3 client only, such as
+                ``max_pool_connections``. They are merged over ``config``.
             result_reuse_enable: Enable Athena query result reuse. Defaults to False.
             result_reuse_minutes: Minutes to reuse cached results.
             on_start_query_execution: Callback invoked with each query ID before the cursor
@@ -331,16 +337,16 @@ class Connection(Generic[ConnectionCursor]):
                 **self._session_kwargs,
             )
 
-        if not self.config.user_agent_extra or (
-            pyathena.user_agent_extra not in self.config.user_agent_extra
-        ):
-            self.config.user_agent_extra = (
-                f"{pyathena.user_agent_extra}"
-                f"{' ' + self.config.user_agent_extra if self.config.user_agent_extra else ''}"
-            )
+        self._add_user_agent(self.config)
+        self.s3_config: Config = self.config.merge(s3_config) if s3_config else self.config
+        self._add_user_agent(self.s3_config)
         self._client = self._session.client(
             "athena", region_name=self.region_name, config=self.config, **self._client_kwargs
         )
+        # Built on first use, once per connection even when several threads
+        # need it at the same time.
+        self._s3_client_lock = threading.Lock()
+        self._s3_client: BaseClient | None = None
         self._converter = converter
         self._formatter = formatter if formatter else DefaultParameterFormatter()
         self._retry_config = retry_config if retry_config else RetryConfig()
@@ -355,6 +361,19 @@ class Connection(Generic[ConnectionCursor]):
         self._glue = GlueMetadataClient(
             self._session, self.region_name, self.config, self._client_kwargs
         )
+
+    @staticmethod
+    def _add_user_agent(config: Config) -> None:
+        """Add PyAthena's user agent to a botocore config unless it has it.
+
+        Args:
+            config: The config to update in place.
+        """
+        if not config.user_agent_extra or pyathena.user_agent_extra not in config.user_agent_extra:
+            config.user_agent_extra = (
+                f"{pyathena.user_agent_extra}"
+                f"{' ' + config.user_agent_extra if config.user_agent_extra else ''}"
+            )
 
     def _assume_role(
         self,
@@ -496,6 +515,23 @@ class Connection(Generic[ConnectionCursor]):
         return self._client
 
     @property
+    def s3_client(self) -> BaseClient:
+        """The S3 client shared by the connection's result sets, filesystems and Spark cursors.
+
+        It is built on first use from the connection's session, region,
+        ``s3_config`` and client arguments.
+        """
+        with self._s3_client_lock:
+            if self._s3_client is None:
+                self._s3_client = self._session.client(
+                    "s3",
+                    region_name=self.region_name,
+                    config=self.s3_config,
+                    **self._client_kwargs,
+                )
+            return self._s3_client
+
+    @property
     def retry_config(self) -> RetryConfig:
         """Get the retry configuration for AWS API calls.
 
@@ -587,14 +623,19 @@ class Connection(Generic[ConnectionCursor]):
     def close(self) -> None:
         """Close the connection.
 
-        Closes the database connection. This method is provided for DB API 2.0
-        compatibility. Since Athena connections are stateless, this method
-        currently does not perform any actual cleanup operations.
+        Closes the network connections of the Athena client and of the Glue and
+        S3 clients if they were built. A client used after this opens new
+        network connections.
 
         Note:
             This method is called automatically when using the connection
             as a context manager (with statement).
         """
+        self._client.close()
+        self._glue.close()
+        with self._s3_client_lock:
+            if self._s3_client is not None:
+                self._s3_client.close()
 
     def commit(self) -> None:
         """Commit any pending transaction.

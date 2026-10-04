@@ -93,6 +93,12 @@ class GlueMetadataClient:
                 )
             return self._client
 
+    def close(self) -> None:
+        """Close the network connections of the Glue client if it was built."""
+        with self._lock:
+            if self._client is not None:
+                self._client.close()
+
     @staticmethod
     def _catalog_request_kwargs(catalog_name: str | None) -> dict[str, str] | None:
         # AwsDataCatalog is the caller's default Glue catalog. An S3 Tables

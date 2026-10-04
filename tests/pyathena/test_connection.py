@@ -5,10 +5,15 @@
 #
 # SPDX-License-Identifier: MIT
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
+from unittest.mock import patch
 
 import pytest
+from botocore.config import Config
 
+import pyathena
 from pyathena.arrow.async_cursor import AsyncArrowCursor
 from pyathena.arrow.cursor import ArrowCursor
 from pyathena.async_cursor import AsyncCursor, AsyncDictCursor
@@ -16,6 +21,7 @@ from pyathena.connection import Connection
 from pyathena.converter import DefaultTypeConverter
 from pyathena.cursor import Cursor, DictCursor
 from pyathena.error import ProgrammingError
+from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.pandas.async_cursor import AsyncPandasCursor
 from pyathena.pandas.cursor import PandasCursor
 from pyathena.polars.async_cursor import AsyncPolarsCursor
@@ -115,3 +121,74 @@ class TestConnection:
     def test_cursor_arraysize_not_positive(self, cursor_class):
         with pytest.raises(ProgrammingError):
             _connection().cursor(cursor_class, arraysize=0)
+
+    def test_s3_client_built_once_across_threads(self):
+        conn = _connection()
+        created = []
+        session_client = conn.session.client
+
+        def contended_client(*args, **kwargs):
+            created.append((args, conn._s3_client_lock.locked()))
+            return session_client(*args, **kwargs)
+
+        conn._session.client = contended_client
+        barrier = threading.Barrier(8)
+
+        def get_client(_):
+            barrier.wait()
+            return conn.s3_client
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            clients = list(executor.map(get_client, range(8)))
+
+        assert created == [(("s3",), True)]
+        assert all(client is clients[0] for client in clients)
+        assert clients[0].meta.service_model.service_name == "s3"
+
+    def test_s3_filesystem_uses_connection_s3_client(self):
+        conn = _connection()
+
+        fs = S3FileSystem(connection=conn, skip_instance_cache=True)
+
+        assert fs._client is conn.s3_client
+
+    def test_s3_config_defaults_to_config(self):
+        conn = _connection(config=Config(max_pool_connections=20))
+
+        assert conn.s3_config is conn.config
+        assert conn.s3_client.meta.config.max_pool_connections == 20
+
+    def test_s3_config_merged_over_config(self):
+        conn = _connection(
+            config=Config(connect_timeout=3, max_pool_connections=20),
+            s3_config=Config(max_pool_connections=50, user_agent_extra="s3-agent"),
+        )
+
+        s3_config = conn.s3_client.meta.config
+        assert s3_config.max_pool_connections == 50
+        assert s3_config.connect_timeout == 3
+        assert pyathena.user_agent_extra in s3_config.user_agent_extra
+        assert "s3-agent" in s3_config.user_agent_extra
+        assert conn.client.meta.config.max_pool_connections == 20
+        assert "s3-agent" not in conn.client.meta.config.user_agent_extra
+
+    def test_close_closes_built_clients(self):
+        conn = _connection()
+        with patch.object(conn.client, "close") as athena_close:
+            conn.close()
+
+        athena_close.assert_called_once_with()
+        # Clients that were not used are not built to be closed.
+        assert conn._glue._client is None
+        assert conn._s3_client is None
+
+        with (
+            patch.object(conn.client, "close") as athena_close,
+            patch.object(conn._glue.client, "close") as glue_close,
+            patch.object(conn.s3_client, "close") as s3_close,
+        ):
+            conn.close()
+
+        athena_close.assert_called_once_with()
+        glue_close.assert_called_once_with()
+        s3_close.assert_called_once_with()

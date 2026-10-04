@@ -104,12 +104,6 @@ class AthenaResultSet(CursorIterator):
                     self._hints_by_index[k] = v
                 else:
                     self._hints_by_name[k.lower()] = v
-        self._client = connection.session.client(
-            "s3",
-            region_name=connection.region_name,
-            config=connection.config,
-            **connection._client_kwargs,
-        )
 
         self._metadata: tuple[dict[str, Any], ...] | None = None
         self._column_types: tuple[str, ...] | None = None
@@ -773,7 +767,7 @@ class AthenaResultSet(CursorIterator):
         bucket, key = parse_output_location(self.output_location)
         try:
             response = retry_api_call(
-                self._client.head_object,
+                self.connection.s3_client.head_object,
                 config=self._retry_config,
                 logger=_logger,
                 Bucket=bucket,
@@ -791,7 +785,7 @@ class AthenaResultSet(CursorIterator):
         bucket, key = parse_output_location(self.data_manifest_location)
         try:
             response = retry_api_call(
-                self._client.get_object,
+                self.connection.s3_client.get_object,
                 config=self._retry_config,
                 logger=_logger,
                 Bucket=bucket,

@@ -9,7 +9,7 @@ import asyncio
 import logging
 import threading
 import uuid
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
@@ -480,7 +480,9 @@ class TestSparkBaseCursor:
     @pytest.mark.parametrize("cursor_class", SPARK_CURSOR_CLASSES)
     def test_init_does_not_start_session_when_s3_client_fails(self, cursor_class):
         connection = _connection()
-        connection.session.client.side_effect = ValueError("Invalid S3 client configuration.")
+        type(connection).s3_client = PropertyMock(
+            side_effect=ValueError("Invalid S3 client configuration.")
+        )
         with pytest.raises(ValueError, match=r"^Invalid S3 client configuration\.$"):
             _init_cursor(cursor_class, connection)
 

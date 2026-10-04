@@ -234,9 +234,10 @@ class S3FileSystem(AbstractFileSystem):
         """Create a filesystem for Amazon S3.
 
         Args:
-            connection: A PyAthena connection whose session, region, config and
-                retry policy the S3 client uses. Without one, the client is built
-                from s3fs-compatible arguments in ``kwargs``.
+            connection: A PyAthena connection whose S3 client
+                (``Connection.s3_client``) and retry policy the filesystem uses.
+                Without one, the client is built from s3fs-compatible arguments
+                in ``kwargs``.
             default_block_size: The block size for reads and writes; defaults to
                 ``DEFAULT_BLOCK_SIZE``.
             default_cache_type: The fsspec cache type for reads; defaults to
@@ -259,12 +260,7 @@ class S3FileSystem(AbstractFileSystem):
         """
         super().__init__(*args, **kwargs)
         if connection:
-            client = connection.session.client(
-                "s3",
-                region_name=connection.region_name,
-                config=connection.config,
-                **connection._client_kwargs,
-            )
+            client = connection.s3_client
             retry_config = connection.retry_config
         else:
             client = self._get_client_compatible_with_s3fs(**kwargs)
