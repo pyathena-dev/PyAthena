@@ -44,6 +44,7 @@ from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import S3MultipartUpload, S3Object, S3ObjectType, S3StorageClass
 from pyathena.filesystem.s3_path import S3Path
+from pyathena.filesystem.s3_path_pairing import S3PathPairing
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
@@ -1832,7 +1833,7 @@ class TestS3FileSystem:
         # Only the destination is a directory.
         fs.isdir = mock.MagicMock(side_effect=lambda p: p.rstrip("/").endswith("/d"))
 
-        pairs = fs._copy_pairs("s3://bucket/b?versionId=v1", path2)
+        pairs = fs._copy_pairs(S3PathPairing("s3://bucket/b?versionId=v1", path2))
 
         assert pairs == [("bucket/b?versionId=v1", expected)]
         assert [c.args[0] for c in fs.isdir.call_args_list] == lookups

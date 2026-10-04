@@ -10,6 +10,11 @@ import pytest
 from pyathena.filesystem.s3_path_pairing import S3PathPairing
 
 
+def _pairing(pairs):
+    # The pairing of a move of the paths as lists.
+    return S3PathPairing([p1 for p1, _ in pairs], [p2 for _, p2 in pairs])
+
+
 class TestS3PathPairing:
     @pytest.mark.parametrize(
         ("path1", "path2", "expected"),
@@ -22,7 +27,7 @@ class TestS3PathPairing:
         ],
     )
     def test_expands(self, path1, path2, expected):
-        assert S3PathPairing.expands(path1, path2) is expected
+        assert S3PathPairing(path1, path2).expands is expected
 
     @pytest.mark.parametrize(
         ("path1", "recursive", "maxdepth", "expected"),
@@ -34,7 +39,10 @@ class TestS3PathPairing:
         ],
     )
     def test_skips_directories(self, path1, recursive, maxdepth, expected):
-        assert S3PathPairing.skips_directories(path1, recursive, maxdepth) is expected
+        assert (
+            S3PathPairing(path1, "s3://bucket/out", recursive, maxdepth).skips_directories
+            is expected
+        )
 
     @pytest.mark.parametrize(
         ("path1", "path2", "expected"),
@@ -52,7 +60,7 @@ class TestS3PathPairing:
         ],
     )
     def test_looks_up_destination(self, path1, path2, expected):
-        assert S3PathPairing.looks_up_destination(path1, path2) is expected
+        assert S3PathPairing(path1, path2).looks_up_destination is expected
 
     @pytest.mark.parametrize(
         ("path1", "path2", "sources", "destination_is_dir", "expected"),
@@ -107,23 +115,23 @@ class TestS3PathPairing:
         ],
     )
     def test_copy_pairs(self, path1, path2, sources, destination_is_dir, expected):
-        assert S3PathPairing.copy_pairs(path1, path2, sources, destination_is_dir) == expected
+        assert S3PathPairing(path1, path2).copy_pairs(sources, destination_is_dir) == expected
 
     def test_copy_pairs_needs_destination_lookup(self):
         with pytest.raises(ValueError, match="destination_is_dir"):
-            S3PathPairing.copy_pairs("s3://bucket/a", "s3://bucket/b", ["bucket/a"])
+            S3PathPairing("s3://bucket/a", "s3://bucket/b").copy_pairs(["bucket/a"])
 
     def test_copy_pairs_needs_sources(self):
         # Not passing the expansion is not the same as expanding to nothing.
         with pytest.raises(ValueError, match="sources"):
-            S3PathPairing.copy_pairs("s3://bucket/a/", "s3://bucket/b/")
+            S3PathPairing("s3://bucket/a/", "s3://bucket/b/").copy_pairs()
 
     def test_move_pairs(self):
         # The "null" version of a key moved onto the key stays in place.
         pairs = [("s3://bucket/b?versionId=null", "s3://bucket/b"), ("bucket/d/a", "s3://bucket/z")]
 
-        assert S3PathPairing.conflict_candidates(pairs) == []
-        assert S3PathPairing.move_pairs(pairs) == [("bucket/d/a", "s3://bucket/z")]
+        assert _pairing(pairs).conflict_candidates(pairs) == []
+        assert _pairing(pairs).move_pairs(pairs) == [("bucket/d/a", "s3://bucket/z")]
 
     @pytest.mark.parametrize(
         ("pairs", "match"),
@@ -140,7 +148,7 @@ class TestS3PathPairing:
     )
     def test_move_pairs_conflicts(self, pairs, match):
         with pytest.raises(ValueError, match=match):
-            S3PathPairing.move_pairs(pairs)
+            _pairing(pairs).move_pairs(pairs)
 
     def test_move_pairs_directory_without_object(self):
         # A source with another source below it may be a directory; one
@@ -152,14 +160,14 @@ class TestS3PathPairing:
             ("s3://bucket/e/y", "s3://bucket/out"),
         ]
 
-        assert S3PathPairing.conflict_candidates(pairs) == ["bucket/d"]
+        assert _pairing(pairs).conflict_candidates(pairs) == ["bucket/d"]
         with pytest.raises(ValueError, match="missing"):
-            S3PathPairing.move_pairs(pairs)
+            _pairing(pairs).move_pairs(pairs)
         with pytest.raises(ValueError, match="same destination"):
-            S3PathPairing.move_pairs(pairs, missing=set())
-        assert S3PathPairing.move_pairs(pairs, missing={"bucket/d"}) == pairs
+            _pairing(pairs).move_pairs(pairs, missing=set())
+        assert _pairing(pairs).move_pairs(pairs, missing={"bucket/d"}) == pairs
         # The missing sources can be given in any form that names them.
-        assert S3PathPairing.move_pairs(pairs, missing={"s3://bucket/d"}) == pairs
+        assert _pairing(pairs).move_pairs(pairs, missing={"s3://bucket/d"}) == pairs
 
     def test_move_pairs_version_names_an_object(self):
         # A version is never taken for a directory.
@@ -169,9 +177,9 @@ class TestS3PathPairing:
             ("s3://bucket/a", "s3://bucket/out"),
         ]
 
-        assert S3PathPairing.conflict_candidates(pairs) == []
+        assert _pairing(pairs).conflict_candidates(pairs) == []
         with pytest.raises(ValueError, match="same destination"):
-            S3PathPairing.move_pairs(pairs)
+            _pairing(pairs).move_pairs(pairs)
 
     def test_move_pairs_version_of_missing_directory_key(self):
         # The "null" version of a key without a current object still names an
@@ -183,9 +191,9 @@ class TestS3PathPairing:
             ("src/d/x", "dst/x"),
         ]
 
-        assert S3PathPairing.conflict_candidates(pairs) == ["src/d"]
+        assert _pairing(pairs).conflict_candidates(pairs) == ["src/d"]
         with pytest.raises(ValueError, match="same destination"):
-            S3PathPairing.move_pairs(pairs, missing={"src/d"})
+            _pairing(pairs).move_pairs(pairs, missing={"src/d"})
 
     def test_delete_paths(self):
         assert S3PathPairing.delete_paths(

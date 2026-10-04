@@ -31,6 +31,7 @@ from pyathena.filesystem.s3_object import (
     S3StorageClass,
 )
 from pyathena.filesystem.s3_path import S3Path
+from pyathena.filesystem.s3_path_pairing import S3PathPairing
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
@@ -1135,7 +1136,7 @@ class TestAioS3FileSystem:
         fs._sync_fs.isdir = mock.MagicMock(return_value=False)
         fs._isdir = mock.AsyncMock(side_effect=lambda p: p.rstrip("/").endswith("/d"))
 
-        pairs = await fs._copy_pairs("s3://bucket/b?versionId=v1", path2)
+        pairs = await fs._copy_pairs(S3PathPairing("s3://bucket/b?versionId=v1", path2))
 
         assert pairs == [("bucket/b?versionId=v1", expected)]
         assert [c.args[0] for c in fs._sync_fs.isdir.call_args_list] == lookups[:1]

@@ -1463,50 +1463,44 @@ class S3FileSystem(AbstractFileSystem):
         Raises:
             ValueError: If the move has conflicting paths.
         """
-        pairs = self._copy_pairs(path1, path2, recursive=recursive, maxdepth=maxdepth)
+        pairing = S3PathPairing(path1, path2, recursive=recursive, maxdepth=maxdepth)
+        pairs = self._copy_pairs(pairing)
         missing = {
             source
-            for source in S3PathPairing.conflict_candidates(pairs)
+            for source in pairing.conflict_candidates(pairs)
             if self._head_object(source) is None
         }
-        return S3PathPairing.move_pairs(pairs, missing=missing)
+        return pairing.move_pairs(pairs, missing=missing)
 
     def _copy_pairs(
-        self,
-        path1: str | list[str],
-        path2: str | list[str],
-        recursive: bool = False,
-        maxdepth: int | None = None,
-        isdir: Callable[[str], bool] | None = None,
+        self, pairing: S3PathPairing, isdir: Callable[[str], bool] | None = None
     ) -> list[tuple[str, str]]:
         """Expand and pair the paths of a copy (see :meth:`S3PathPairing.copy_pairs`).
 
         The destination is looked up only when it decides the pairing.
 
         Args:
-            path1: Source S3 path, glob pattern, or list of them.
-            path2: Destination path, or list of paths when ``path1`` is a
-                list.
-            recursive: Whether to include the contents of the directories.
-            maxdepth: Maximum depth of the expansion.
+            pairing: The paths of the copy.
             isdir: Whether the destination is a directory, by default
                 ``self.isdir``; ``get()`` passes the local filesystem's.
 
         Returns:
             The sources and their destinations.
         """
-        if not S3PathPairing.expands(path1, path2):
-            return S3PathPairing.copy_pairs(path1, path2)
-        sources = self.expand_path(path1, recursive=recursive, maxdepth=maxdepth)
-        if S3PathPairing.skips_directories(path1, recursive, maxdepth):
+        if not pairing.expands:
+            return pairing.copy_pairs()
+        sources = self.expand_path(
+            pairing.path1, recursive=pairing.recursive, maxdepth=pairing.maxdepth
+        )
+        if pairing.skips_directories:
             sources = [p for p in sources if not (trailing_sep(p) or self.isdir(p))]
         destination_is_dir = (
-            # A string, as looks_up_destination() checks.
-            (isdir or self.isdir)(cast(str, path2))
-            if sources and S3PathPairing.looks_up_destination(path1, path2)
+            # A string, as looks_up_destination checks.
+            (isdir or self.isdir)(cast(str, pairing.path2))
+            if sources and pairing.looks_up_destination
             else None
         )
-        return S3PathPairing.copy_pairs(path1, path2, sources, destination_is_dir)
+        return pairing.copy_pairs(sources, destination_is_dir)
 
     def copy(self, path1, path2, recursive=False, maxdepth=None, on_error=None, **kwargs) -> None:
         """Copy files within S3.
@@ -1529,7 +1523,9 @@ class S3FileSystem(AbstractFileSystem):
         """
         sources = [path1] if isinstance(path1, (str, os.PathLike)) else path1
         if isinstance(path2, str) and any(S3Path.has_version_id(p) for p in sources):
-            pairs = self._copy_pairs(path1, path2, recursive=recursive, maxdepth=maxdepth)
+            pairs = self._copy_pairs(
+                S3PathPairing(path1, path2, recursive=recursive, maxdepth=maxdepth)
+            )
             if not pairs:
                 return
             path1, path2 = [p1 for p1, _ in pairs], [p2 for _, p2 in pairs]
@@ -1564,7 +1560,8 @@ class S3FileSystem(AbstractFileSystem):
         if isinstance(lpath, (str, os.PathLike)) and any(S3Path.has_version_id(p) for p in sources):
             root = make_path_posix(lpath)
             pairs = self._copy_pairs(
-                rpath, root, recursive=recursive, maxdepth=maxdepth, isdir=LocalFileSystem().isdir
+                S3PathPairing(rpath, root, recursive=recursive, maxdepth=maxdepth),
+                isdir=LocalFileSystem().isdir,
             )
             rpath, lpath = [p1 for p1, _ in pairs], [p2 for _, p2 in pairs]
             check_contained(root, lpath)

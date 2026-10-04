@@ -373,23 +373,24 @@ except Exception:
 
 ## Path pairing
 
-`S3PathPairing` holds the rules by which `mv()` pairs its paths and `rm()` expands
-them, and by which `copy()` and `get()` pair them when a source has a version ID and
-the destination is one path (fsspec pairs the others). The pairing is fsspec's,
-except that a path with a version ID names that version, and its destination is named
-after its key. The rules are pure functions: the filesystems ask `expands()`,
-`skips_directories()`, `looks_up_destination()` and `conflict_candidates()` what to
-look up, expand and look up the paths, and pass the results to `copy_pairs()`,
-`move_pairs()` and `delete_paths()`. A rule that needs a lookup that is not passed
-raises `ValueError`.
+`S3PathPairing` pairs the paths of one `copy()`, `get()` or `mv()`: `mv()` always, and
+`copy()` and `get()` when a source has a version ID and the destination is one path
+(fsspec pairs the others). Its `delete_paths()` splits the paths of an `rm()` into
+those deleted as given and those expanded. The pairing is fsspec's, except that a
+path with a version ID names that version, and its destination is named after its key.
+
+A pairing is a pure value of `path1`, `path2`, `recursive` and `maxdepth`. The
+filesystems read from it what to look up (`expands`, `skips_directories`,
+`looks_up_destination` and `conflict_candidates()`), expand and look up the paths, and
+pass the results to `copy_pairs()` and `move_pairs()`. A rule that needs a lookup that
+is not passed raises `ValueError`.
 
 ```python
 from pyathena.filesystem.s3_path_pairing import S3PathPairing
 
-sources = fs.expand_path("s3://YOUR_S3_BUCKET/src/", recursive=True)
-for source, destination in S3PathPairing.copy_pairs(
-    "s3://YOUR_S3_BUCKET/src/", "s3://YOUR_S3_BUCKET/dst/", sources
-):
+pairing = S3PathPairing("s3://YOUR_S3_BUCKET/src/", "s3://YOUR_S3_BUCKET/dst/", recursive=True)
+sources = fs.expand_path(pairing.path1, recursive=pairing.recursive)
+for source, destination in pairing.copy_pairs(sources):
     print(source, "->", destination)
 ```
 
