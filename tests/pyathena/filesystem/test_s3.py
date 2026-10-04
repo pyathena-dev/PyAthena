@@ -5818,6 +5818,87 @@ class TestS3File:
             fs._call.side_effect = None
             file._close_without_commit()
 
+    @pytest.mark.parametrize("autocommit", [False, True])
+    @pytest.mark.parametrize("abort_fails", [False, True])
+    def test_repeated_creation_interrupt(self, autocommit, abort_fails):
+        fs = self._make_append_fs(b"")
+        started = threading.Event()
+        release = threading.Event()
+        upload = fs.core.create_multipart_upload.return_value
+
+        def create(*args, **kwargs):
+            started.set()
+            assert release.wait(5)
+            return upload
+
+        fs.core.create_multipart_upload.side_effect = create
+        if abort_fails:
+            fs._call.side_effect = PermissionError("abort failed")
+        executor = S3ThreadPoolExecutor(max_workers=1)
+        submit = executor.submit
+
+        def submit_creation(fn, *args, **kwargs):
+            future = submit(fn, *args, **kwargs)
+
+            def interrupt_result(timeout=None):
+                assert started.wait(5)
+                raise KeyboardInterrupt("first interrupt")
+
+            future.result = interrupt_result  # type: ignore[method-assign]
+            return future
+
+        executor.submit = submit_creation  # type: ignore[method-assign]
+        file = S3File(
+            fs,
+            "s3://bucket/key.txt",
+            mode="wb",
+            block_size=4,
+            autocommit=autocommit,
+            executor=executor,
+        )
+        closed_at_recovery = []
+
+        def interrupt_recovery(futures):
+            if not release.is_set():
+                closed_at_recovery.append(file.closed and file.buffer is None)
+                release.set()
+                raise KeyboardInterrupt("second interrupt")
+            return wait(futures)
+
+        try:
+            with (
+                mock.patch("pyathena.filesystem.s3.wait", side_effect=interrupt_recovery),
+                pytest.raises(KeyboardInterrupt, match="first interrupt"),
+            ):
+                file.write(b"x" * 8)
+
+            assert closed_at_recovery == [True]
+            assert file.closed
+            assert file.buffer is None
+            fs._call.assert_called_once_with(
+                S3_CLIENT.abort_multipart_upload,
+                Bucket="bucket",
+                Key="key.txt",
+                UploadId="uploadid",
+            )
+            assert (file.multipart_upload is upload) is abort_fails
+            file.close()
+            file.commit()
+            fs.core.upload_part.assert_not_called()
+            fs.core.complete_multipart_upload.assert_not_called()
+            fs._put_object.assert_not_called()
+            fs.touch.assert_not_called()
+            if abort_fails:
+                fs._call.side_effect = None
+                file.discard()
+                assert fs._call.call_count == 2
+                assert file.multipart_upload is None
+        finally:
+            release.set()
+            executor.shutdown()
+            fs._call.side_effect = None
+            file._close_without_commit()
+
     def test_creation_cancelled_before_start(self):
         fs = self._make_append_fs(b"")
         creation = Future()

@@ -3200,7 +3200,7 @@ class S3File(AbstractBufferedFile):
             # The executor is shut down even if the final flush fails.
             self._executor.shutdown()
 
-    def _close_without_commit(self) -> None:
+    def _close_without_commit(self, *, creation: Future[S3MultipartUpload] | None = None) -> None:
         """Close the file without uploading the written data.
 
         Drops the buffered data, so that neither close() nor a deferred
@@ -3211,19 +3211,33 @@ class S3File(AbstractBufferedFile):
         and commit() does not complete it. The executor is shut down here, as
         fsspec does not close a closed file again when it is garbage
         collected.
+
+        Args:
+            creation: A pending multipart creation to cancel or wait for before
+                aborting. Further KeyboardInterrupts during this wait are delayed
+                until the request finishes, so its upload ID can be recovered.
         """
         if self.buffer is None and getattr(self, "closed", False):
             return
         self.buffer = None
         self.closed = True
         try:
-            self.discard()
-        except Exception:
-            # discard() keeps the upload when the abort fails.
-            upload_id = cast(S3MultipartUpload, self.multipart_upload).upload_id
-            _logger.exception(
-                f"Failed to abort multipart upload {upload_id} to s3://{self.bucket}/{self.key}."
-            )
+            if creation is not None and not creation.cancel():
+                while not creation.done():
+                    try:
+                        wait([creation])
+                    except KeyboardInterrupt:
+                        # Leave the file closed and recover the response before
+                        # re-raising the interrupt that initiated cleanup.
+                        continue
+            try:
+                self.discard()
+            except Exception:
+                # discard() keeps the upload when the abort fails.
+                upload_id = cast(S3MultipartUpload, self.multipart_upload).upload_id
+                _logger.exception(
+                    f"Failed to abort multipart upload {upload_id} to s3://{self.bucket}/{self.key}."
+                )
         finally:
             self._executor.shutdown()
 
@@ -3319,11 +3333,11 @@ class S3File(AbstractBufferedFile):
         except BaseException:
             # A submitted creation may still return an ID after the wait is
             # interrupted. The writer records it before resolving the future.
-            if creation is None:
-                self._executor.shutdown()
-            elif not creation.cancel():
-                wait([creation])
-            self._close_without_commit()
+            try:
+                if creation is None:
+                    self._executor.shutdown()
+            finally:
+                self._close_without_commit(creation=creation)
             raise
 
     def _upload_chunk(self, final: bool = False) -> bool:
