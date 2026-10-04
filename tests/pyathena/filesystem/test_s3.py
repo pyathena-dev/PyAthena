@@ -2165,7 +2165,7 @@ class TestS3FileSystem:
         fs.core.upload_part = mock.MagicMock(
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
         )
-        fs._finish_multipart_upload = mock.MagicMock()
+        fs.core.complete_multipart_upload = mock.MagicMock()
 
         with fs.transaction if intrans else contextlib.nullcontext():
             fs.pipe_file("s3://bucket/dir/key/", b"a" * size)
@@ -2190,14 +2190,14 @@ class TestS3FileSystem:
         fs.core.upload_part = mock.MagicMock(
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
         )
-        fs._finish_multipart_upload = mock.MagicMock()
+        fs.core.complete_multipart_upload = mock.MagicMock()
         data = b"a" * (S3FileSystem.DEFAULT_BLOCK_SIZE + 4)
 
         fs.pipe_file("s3://bucket/key", memoryview(data).cast("I"))
 
         fs._put_object.assert_not_called()
         assert b"".join(c.kwargs["body"] for c in fs.core.upload_part.call_args_list) == data
-        fs._finish_multipart_upload.assert_called_once()
+        fs.core.complete_multipart_upload.assert_called_once()
 
     def test_pipe_file_small_drops_max_workers(self):
         fs = self._make_fs()
@@ -2221,13 +2221,13 @@ class TestS3FileSystem:
         fs.core.upload_part = mock.MagicMock(
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
         )
-        fs._finish_multipart_upload = mock.MagicMock()
+        fs.core.complete_multipart_upload = mock.MagicMock()
         size = S3FileSystem.DEFAULT_BLOCK_SIZE + 1
 
         fs.pipe_file("s3://bucket/key", memoryview(b"ab" * size)[::2])
 
         assert b"".join(c.kwargs["body"] for c in fs.core.upload_part.call_args_list) == b"a" * size
-        fs._finish_multipart_upload.assert_called_once()
+        fs.core.complete_multipart_upload.assert_called_once()
         fs._call.assert_not_called()
 
     @pytest.mark.parametrize("intrans", [False, True])
@@ -2297,7 +2297,7 @@ class TestS3FileSystem:
         fs.core.upload_part = mock.MagicMock(
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
         )
-        fs._finish_multipart_upload = mock.MagicMock()
+        fs.core.complete_multipart_upload = mock.MagicMock()
         # Random bytes stay larger than the block size when compressed.
         value = os.urandom(S3FileSystem.DEFAULT_BLOCK_SIZE + 1)
 
@@ -2306,7 +2306,7 @@ class TestS3FileSystem:
 
         body = b"".join(c.kwargs["body"] for c in fs.core.upload_part.call_args_list)
         assert gzip.decompress(body) == value
-        fs._finish_multipart_upload.assert_called_once()
+        fs.core.complete_multipart_upload.assert_called_once()
 
     def test_pipe_file_compression_non_contiguous_memoryview(self):
         fs = self._make_fs()
@@ -2370,15 +2370,23 @@ class TestS3FileSystem:
                 {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
             )
         )
-        fs._finish_multipart_upload = mock.MagicMock()
+        fs.core.complete_multipart_upload = mock.MagicMock()
         executor = mock.MagicMock()
-        executor.submit.side_effect = [Future(), RuntimeError("submit failed")]
+
+        def submit(fn, *args, **kwargs):
+            if not fs.core.create_multipart_upload.called:
+                creation = Future()
+                creation.set_result(fn(*args, **kwargs))
+                return creation
+            raise RuntimeError("submit failed")
+
+        executor.submit.side_effect = submit
         fs._create_executor = mock.MagicMock(return_value=executor)
 
         with pytest.raises(RuntimeError, match="submit failed"):
             fs.pipe_file("s3://bucket/key", b"a" * (3 * S3FileSystem.DEFAULT_BLOCK_SIZE))
 
-        fs._finish_multipart_upload.assert_not_called()
+        fs.core.complete_multipart_upload.assert_not_called()
         fs._call.assert_called_once_with(
             fs._client.abort_multipart_upload, Bucket="bucket", Key="key", UploadId="uploadid"
         )
@@ -2430,7 +2438,7 @@ class TestS3FileSystem:
         fs.core.upload_part = mock.MagicMock(
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
         )
-        fs._finish_multipart_upload = mock.MagicMock()
+        fs.core.complete_multipart_upload = mock.MagicMock()
         callback = Callback()
         callback.relative_update = mock.MagicMock(side_effect=RuntimeError("callback failed"))
         lpath = tmp_path / "data"
@@ -2442,7 +2450,7 @@ class TestS3FileSystem:
         ):
             fs.put_file(str(lpath), "s3://bucket/key", callback=callback)
 
-        fs._finish_multipart_upload.assert_not_called()
+        fs.core.complete_multipart_upload.assert_not_called()
         fs._call.assert_called_once_with(
             fs._client.abort_multipart_upload, Bucket="bucket", Key="key", UploadId="uploadid"
         )
