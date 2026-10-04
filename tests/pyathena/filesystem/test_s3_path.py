@@ -26,12 +26,26 @@ class TestS3Path:
             ("bucket/obj?versionid=v1", S3Path("bucket", "obj", "v1")),
             ("bucket/obj?version_id=v1", S3Path("bucket", "obj", "v1")),
             ("bucket?versionId=v1", S3Path("bucket", None, "v1")),
+            # Only a trailing version ID query is a version; any other "?" is
+            # part of the key.
+            ("bucket/dir/what?.txt", S3Path("bucket", "dir/what?.txt")),
+            ("bucket/obj?x=1", S3Path("bucket", "obj?x=1")),
+            ("bucket/a?b?versionId=v1", S3Path("bucket", "a?b", "v1")),
+            ("bucket/obj?versionId=", S3Path("bucket", "obj?versionId=")),
+            ("bucket/obj?versionId=a?versionId=b", S3Path("bucket", "obj?versionId=a", "b")),
+            ("bucket/?", S3Path("bucket", "?")),
+            # A version right after the bucket names a version of the bucket path.
+            ("bucket/?versionId=v1", S3Path("bucket", None, "v1")),
+            # Keys may contain newlines, also at the end.
+            ("bucket/a\nb", S3Path("bucket", "a\nb")),
+            ("bucket/a\n", S3Path("bucket", "a\n")),
+            ("bucket/a\n?versionId=v1", S3Path("bucket", "a\n", "v1")),
         ],
     )
     def test_parse(self, path, expected):
         assert S3Path.parse(path) == expected
 
-    @pytest.mark.parametrize("path", ["", "s3://", "http://bucket", "bucket/obj?x=1"])
+    @pytest.mark.parametrize("path", ["", "s3://", "http://bucket", "bucket?x=1"])
     def test_parse_invalid(self, path):
         with pytest.raises(ValueError, match="Invalid S3 path format"):
             S3Path.parse(path)
@@ -69,6 +83,22 @@ class TestS3Path:
 
     def test_str_spells_the_version_query_as_version_id(self):
         assert str(S3Path.parse("s3a://bucket/key?version_id=v1")) == "bucket/key?versionId=v1"
+
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            ("bucket/key", ("bucket/key", None)),
+            ("s3://bucket/key?versionId=v1", ("s3://bucket/key", "v1")),
+            ("bucket/dir/?version_id=v1", ("bucket/dir/", "v1")),
+            ("bucket/what?.txt", ("bucket/what?.txt", None)),
+            ("bucket/a?b?versionID=v1", ("bucket/a?b", "v1")),
+            # Not an S3 path, which parse() would reject.
+            ("", ("", None)),
+            ("name?versionid=v1", ("name", "v1")),
+        ],
+    )
+    def test_split_version_id(self, path, expected):
+        assert S3Path.split_version_id(path) == expected
 
     def test_with_version_id(self):
         path = S3Path("bucket", "key", "v1")

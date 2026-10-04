@@ -29,7 +29,7 @@ from fsspec import AbstractFileSystem
 from fsspec.callbacks import _DEFAULT_CALLBACK, Callback
 from fsspec.compression import compr
 from fsspec.core import get_compression
-from fsspec.implementations.local import trailing_sep
+from fsspec.implementations.local import LocalFileSystem, make_path_posix, trailing_sep
 from fsspec.spec import AbstractBufferedFile
 from fsspec.utils import isfilelike, other_paths, tokenize
 
@@ -67,6 +67,45 @@ _LOOKUP_REQUEST_PARAMETERS = frozenset(
 # The second element of the dircache key, ``(path, _LOOKUPS_CACHE_KEY)``, of
 # the lookup results of a path made with lookup request parameters.
 _LOOKUPS_CACHE_KEY = "lookups"
+
+
+def _has_version_id(path: str | os.PathLike[str] | list[str]) -> bool:
+    """Return whether a path, or a path of a list, ends with a version ID query.
+
+    fsspec's ``copy()`` and ``get()`` take ``?`` for a glob character and
+    name the destinations after the sources, so sources with a version ID are
+    paired with their destinations by ``S3FileSystem._copy_paths``.
+
+    Args:
+        path: A path or a list of paths.
+
+    Returns:
+        Whether a path has a version ID query.
+    """
+    paths = [path] if isinstance(path, (str, os.PathLike)) else path
+    return any(S3Path.split_version_id(os.fspath(p))[1] for p in paths)
+
+
+def _check_contained(root: str, paths: list[str]) -> None:
+    """Raise if a local destination lies outside the destination root.
+
+    The destinations are named after the source keys, whose ``..`` segments
+    would otherwise place a download above the root, as fsspec's ``get()``
+    checks for the destinations that it names.
+
+    Args:
+        root: The local destination root.
+        paths: The local destinations named below it.
+
+    Raises:
+        ValueError: If a destination lies outside the root.
+    """
+    root_key = os.path.normcase(os.path.abspath(root))
+    prefix = root_key.rstrip(os.sep) + os.sep
+    for path in paths:
+        key = os.path.normcase(os.path.abspath(path))
+        if key != root_key and not key.startswith(prefix):
+            raise ValueError(f"The destination {path!r} is outside {root!r}.")
 
 
 class CompressedBuffer(BytesIO):
@@ -381,8 +420,19 @@ class S3FileSystem(AbstractFileSystem):
 
     @staticmethod
     def _versioned_file_object(bucket: str, version: dict[str, Any]) -> S3Object:
-        """Build an S3Object from a ListObjectVersions Versions entry."""
-        return S3Object(
+        """Build an S3Object from a ListObjectVersions Versions entry.
+
+        Its name addresses the version with a ``?versionId=`` query, except
+        for the ``null`` version, which a write to the key replaces.
+
+        Args:
+            bucket: The bucket of the version.
+            version: The ``Versions`` entry of the ListObjectVersions response.
+
+        Returns:
+            The file object of the version.
+        """
+        file = S3Object(
             init=version,
             type=S3ObjectType.S3_OBJECT_TYPE_FILE,
             bucket=bucket,
@@ -390,6 +440,9 @@ class S3FileSystem(AbstractFileSystem):
             version_id=version.get("VersionId"),
             is_latest=version.get("IsLatest", False),
         )
+        if file.version_id != "null":
+            file.name = str(S3Path(bucket, version["Key"], file.version_id))
+        return file
 
     def _head_bucket(
         self,
@@ -654,8 +707,10 @@ class S3FileSystem(AbstractFileSystem):
             detail: If True, return S3Object instances; if False, return paths as strings.
             refresh: If True, bypass cache and fetch fresh results from S3.
             **kwargs: Additional arguments including:
-                versions: If True, list all versions of the objects. Requires
-                    the filesystem to be constructed with ``version_aware=True``.
+                versions: If True, list all versions of the objects, named
+                    ``bucket/key?versionId=<id>`` except for the ``null``
+                    version. Requires the filesystem to be constructed with
+                    ``version_aware=True``.
 
         Returns:
             List of S3Object instances (if detail=True) or paths as strings (if detail=False).
@@ -763,10 +818,11 @@ class S3FileSystem(AbstractFileSystem):
         missing, or find a key prefix, the cached listing of the parent is
         removed. With ``version_aware``, a cached file
         entry without a version ID is looked up again. With an explicit
-        version, the cached entries of the path are skipped, and the
+        version, the cached entries of the path are skipped, the
         HeadObject result is cached under the version-qualified path apart
         from other versions, except for the ``null`` version, which an
-        overwrite replaces. With request parameters on which the
+        overwrite replaces, and a missing version is not looked up as a key
+        prefix, since a version names an object. With request parameters on which the
         authorization of the requests depends (``ExpectedBucketOwner``,
         ``RequestPayer``, and the ``SSECustomer*`` parameters of an object
         encrypted with a customer-provided key), each request receives those
@@ -851,6 +907,8 @@ class S3FileSystem(AbstractFileSystem):
             )
             if object_info:
                 return object_info
+            if version_id:
+                raise FileNotFoundError(path)
         else:
             bucket_info = self._head_bucket(path, refresh=refresh, lookup_kwargs=lookup_kwargs)
             if bucket_info:
@@ -1059,6 +1117,61 @@ class S3FileSystem(AbstractFileSystem):
             return {f.name: f for f in files}
         return [f.name for f in files]
 
+    def expand_path(self, path, recursive=False, maxdepth=None, **kwargs) -> list[str]:
+        """Expand glob patterns and directories into the paths they match.
+
+        As in fsspec, except that a path with a version ID names that version
+        of an object: it is not a glob pattern, although its ``?`` is one in
+        fsspec, nor is anything expanded below it. With ``recursive``, it is
+        included only if the version exists, as fsspec includes a path that
+        exists.
+
+        Args:
+            path: S3 path, glob pattern, or list of them.
+            recursive: Whether to include the paths below the directories.
+            maxdepth: Maximum depth of the expansion, at least 1.
+            **kwargs: Additional arguments passed to ``glob`` and ``find``.
+
+        Returns:
+            The sorted matching paths.
+
+        Raises:
+            ValueError: If ``maxdepth`` is less than 1.
+            FileNotFoundError: If nothing matches.
+        """
+        if maxdepth is not None and maxdepth < 1:
+            raise ValueError("maxdepth must be at least 1")
+        versions, others = self._split_version_paths(path)
+        out = {p for p in versions if not recursive or self.exists(p)}
+        if others:
+            try:
+                out.update(
+                    super().expand_path(others, recursive=recursive, maxdepth=maxdepth, **kwargs)
+                )
+            except FileNotFoundError:
+                if not out:
+                    raise
+        if not out:
+            raise FileNotFoundError(path)
+        return sorted(out)
+
+    def _split_version_paths(self, path) -> tuple[list[str], list[str]]:
+        """Split paths into those with a version ID and the others.
+
+        Args:
+            path: S3 path, glob pattern, or list of them.
+
+        Returns:
+            Tuple of the paths with a version ID and the other paths, without
+            the protocol.
+        """
+        paths = [
+            self._strip_protocol(p)
+            for p in ([path] if isinstance(path, (str, os.PathLike)) else path)
+        ]
+        versions = [p for p in paths if S3Path.split_version_id(p)[1]]
+        return versions, [p for p in paths if p not in versions]
+
     def exists(self, path: str, **kwargs) -> bool:
         """Check if an S3 path exists.
 
@@ -1182,7 +1295,8 @@ class S3FileSystem(AbstractFileSystem):
                 unversioned_paths.append(p)
 
         if unversioned_paths:
-            # expand_path treats "?" as a wildcard, so versioned paths skip it.
+            # Versioned paths are deleted as given, without the lookup that
+            # expand_path makes for them with recursive.
             unversioned_paths = self.expand_path(
                 unversioned_paths, recursive=recursive, maxdepth=maxdepth
             )
@@ -1575,27 +1689,7 @@ class S3FileSystem(AbstractFileSystem):
                 except for a directory with no object at its key, which is not
                 copied.
         """
-        if isinstance(path1, list) and isinstance(path2, list):
-            paths1, paths2 = path1, path2
-        else:
-            source_is_str = isinstance(path1, str)
-            paths1 = self.expand_path(path1, recursive=recursive, maxdepth=maxdepth)
-            if source_is_str and (not recursive or maxdepth is not None):
-                # Non-recursive glob does not copy directories.
-                paths1 = [p for p in paths1 if not (trailing_sep(p) or self.isdir(p))]
-                if not paths1:
-                    return []
-            # The destination is looked up only when it decides the mapping.
-            exists = source_is_str and (
-                (has_magic(path1) and len(paths1) == 1)
-                or (
-                    not has_magic(path1)
-                    and not trailing_sep(path1)
-                    and isinstance(path2, str)
-                    and (trailing_sep(path2) or self.isdir(path2))
-                )
-            )
-            paths2 = other_paths(paths1, path2, exists=exists, flatten=not source_is_str)
+        paths1, paths2 = self._copy_paths(path1, path2, recursive=recursive, maxdepth=maxdepth)
         # The paths are copied as given, and compared by what they name.
         named = [
             (p1, p2, self._move_target(p1), self._move_target(p2))
@@ -1633,6 +1727,117 @@ class S3FileSystem(AbstractFileSystem):
             if dest in sources:
                 raise ValueError("Cannot move a path onto another path that is moved.")
         return pairs
+
+    def _copy_paths(
+        self,
+        path1: str | list[str],
+        path2: str | list[str],
+        recursive: bool = False,
+        maxdepth: int | None = None,
+        isdir: Callable[[str], bool] | None = None,
+    ) -> tuple[list[str], list[str]]:
+        """Pair the sources of a copy with their destinations as fsspec's ``copy()`` does.
+
+        A source with a version ID names that version of an object: it is not
+        a glob pattern, and its destination is named after its key without
+        the version.
+
+        Args:
+            path1: Source S3 path, glob pattern, or list of them.
+            path2: Destination path, or list of paths when ``path1`` is a
+                list.
+            recursive: Whether to include the contents of the directories.
+            maxdepth: Maximum depth of the expansion.
+            isdir: Whether a destination path is a directory, by default
+                ``self.isdir``; ``get()`` passes the local filesystem's.
+
+        Returns:
+            The sources and their destinations. Both are empty if ``path1``
+            is a string that matches only directories without ``recursive``.
+        """
+        if isinstance(path1, list) and isinstance(path2, list):
+            return path1, path2
+        source_is_str = isinstance(path1, str)
+        paths1 = self.expand_path(path1, recursive=recursive, maxdepth=maxdepth)
+        if source_is_str and (not recursive or maxdepth is not None):
+            # Non-recursive glob does not copy directories.
+            paths1 = [p for p in paths1 if not (trailing_sep(p) or self.isdir(p))]
+            if not paths1:
+                return [], []
+        glob = isinstance(path1, str) and has_magic(path1) and not _has_version_id(path1)
+        # The destination is looked up only when it decides the mapping.
+        exists = source_is_str and (
+            (glob and len(paths1) == 1)
+            or (
+                not glob
+                and not trailing_sep(path1)
+                and isinstance(path2, str)
+                and (trailing_sep(path2) or (isdir or self.isdir)(path2))
+            )
+        )
+        names = [S3Path.split_version_id(p)[0] for p in paths1]
+        return paths1, other_paths(names, path2, exists=exists, flatten=not source_is_str)
+
+    def copy(self, path1, path2, recursive=False, maxdepth=None, on_error=None, **kwargs) -> None:
+        """Copy files within S3.
+
+        As fsspec's ``copy()``, except that a source with a version ID copies
+        that version of the object to a destination named after its key, as
+        ``_copy_paths`` pairs them.
+
+        Args:
+            path1: Source S3 path, glob pattern, or list of them.
+            path2: Destination S3 path, or list of paths when ``path1`` is a
+                list.
+            recursive: Whether to copy the directories with their contents.
+            maxdepth: Maximum depth of a recursive copy.
+            on_error: ``"raise"`` or ``"ignore"`` for a missing source; by
+                default ``"ignore"`` with ``recursive`` and ``"raise"``
+                otherwise.
+            **kwargs: Additional S3 copy parameters passed to ``cp_file()``.
+        """
+        if isinstance(path2, str) and _has_version_id(path1):
+            path1, path2 = self._copy_paths(path1, path2, recursive=recursive, maxdepth=maxdepth)
+            if not path1:
+                return
+        super().copy(
+            path1, path2, recursive=recursive, maxdepth=maxdepth, on_error=on_error, **kwargs
+        )
+
+    def get(
+        self, rpath, lpath, recursive=False, callback=_DEFAULT_CALLBACK, maxdepth=None, **kwargs
+    ) -> None:
+        """Copy files from S3 to the local filesystem.
+
+        As fsspec's ``get()``, except that a source with a version ID
+        downloads that version of the object to a local path named after its
+        key, as ``_copy_paths`` pairs them. Those destinations are checked to
+        lie under ``lpath``.
+
+        Args:
+            rpath: Source S3 path, glob pattern, or list of them.
+            lpath: Local destination path, or list of paths when ``rpath`` is
+                a list.
+            recursive: Whether to copy the directories with their contents.
+            callback: Progress callback.
+            maxdepth: Maximum depth of a recursive copy.
+            **kwargs: Additional parameters passed to ``get_file()``.
+
+        Raises:
+            ValueError: If a source with a version ID is paired, and a
+                destination lies outside ``lpath``.
+        """
+        if isinstance(lpath, (str, os.PathLike)) and _has_version_id(rpath):
+            root = make_path_posix(lpath)
+            rpath, lpath = self._copy_paths(
+                rpath, root, recursive=recursive, maxdepth=maxdepth, isdir=LocalFileSystem().isdir
+            )
+            _check_contained(root, lpath)
+            if not rpath:
+                return
+        super().get(
+            rpath, lpath, recursive=recursive, callback=callback, maxdepth=maxdepth, **kwargs
+        )
 
     def _move_target(self, path: str) -> str:
         """Return what a path of a move names, for comparing the paths.
@@ -3068,12 +3273,9 @@ class S3FileSystem(AbstractFileSystem):
             if not path:
                 self._evict_cache("")
             while path:
-                # parse_path does not accept "?" in keys, so it starts the
-                # versionId query.
-                base, _, query = path.partition("?")
+                base, version_id = S3Path.split_version_id(path)
                 cache_paths = [path]
-                if query:
-                    version_id = query.partition("=")[2]
+                if version_id:
                     cache_paths.extend(
                         f"{base}?{name}={version_id}"
                         for name in ("versionId", "versionID", "versionid", "version_id")
@@ -3091,7 +3293,7 @@ class S3FileSystem(AbstractFileSystem):
                         self._evict_cache(cache_key)
                 # A version-qualified path continues with the path without
                 # the version.
-                path = self._strip_protocol(base) if query else self._parent(path)
+                path = self._strip_protocol(base) if version_id else self._parent(path)
 
     def _evict_cache(self, key: str | tuple[str, str]) -> None:
         """Remove a dircache entry if it exists.
@@ -3619,6 +3821,10 @@ class S3File(AbstractBufferedFile):
                 # consistent even if the object is overwritten. info() heads
                 # the object when the cached entry carries no version.
                 self.version_id = info.get("version_id")
+                if self.version_id:
+                    # Carried in the path as an explicit version is, so that
+                    # the methods of the file use it too.
+                    path = f"{path}?versionId={self.version_id}"
             if etag := info.get("etag"):
                 self.s3_additional_kwargs.update({"IfMatch": etag})
             self._details = info
