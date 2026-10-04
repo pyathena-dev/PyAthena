@@ -387,8 +387,8 @@ core.replace_object_metadata(path, head, {**head, "attr1": "value1"})
 `generate_presigned_url()` signs a URL locally, for `get_object` unless another client
 method is given, and sends no request. Its parameters take precedence over the
 `Bucket`, `Key` and `VersionId` of the path. The `request_kwargs` of the core, such as
-`RequestPayer`, are not included in the signed parameters; pass them to the call to
-sign them.
+`RequestPayer`, are not included in the signed parameters; pass them as parameters
+of `generate_presigned_url()` to sign them.
 
 ```python
 url = core.generate_presigned_url(path, expires_in=600)
