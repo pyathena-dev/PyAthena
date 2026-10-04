@@ -227,8 +227,13 @@ fs.clear_multipart_uploads("s3://YOUR_S3_BUCKET/path/to/")
 
 With `version_aware=True`, reads pin the object version observed at open time, so a
 file handle keeps returning consistent data even if the object is overwritten while
-reading. Explicit versions can always be read with the `?versionId=` suffix or the
-`version_id` argument.
+reading. The file path carries the pinned version as a `?versionId=` suffix, which
+`metadata()`, `getxattr()` and `url()` of the file also use. Explicit versions can
+always be read with the `?versionId=` suffix or the `version_id` argument. Only a
+`?versionId=` (or `?versionID=`, `?versionid=`, `?version_id=`) query at the end of a
+path is a version; any other `?` is part of the key. A path with a version is not a
+glob pattern: `copy()`, `mv()` and `get()` copy that version to a destination named
+after its key.
 
 ```python
 fs = S3FileSystem(
@@ -239,8 +244,9 @@ fs = S3FileSystem(
 with fs.open("s3://YOUR_S3_BUCKET/path/to/object", "rb") as f:
     data = f.read()  # Pinned to the version observed at open time.
 
-# List all versions of the objects under a prefix.
-fs.ls("s3://YOUR_S3_BUCKET/path/to/", versions=True, detail=True)
+# List all versions of the objects under a prefix. Each version is named
+# "bucket/key?versionId=<id>", except the "null" version, which is named by its key.
+fs.ls("s3://YOUR_S3_BUCKET/path/to/", versions=True)
 
 # Typed version information, including delete markers if requested.
 versions = fs.object_version_info("s3://YOUR_S3_BUCKET/path/to/object")

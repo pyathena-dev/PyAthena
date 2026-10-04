@@ -24,8 +24,9 @@ class S3Path:
     Paths are parsed from strings such as ``s3://bucket/key``,
     ``s3a://bucket/key`` or ``bucket/key``, optionally followed by a version
     ID query (``?versionId=``, ``?versionID=``, ``?versionid=`` or
-    ``?version_id=``). The root path, which names no bucket, is not an
-    ``S3Path``.
+    ``?version_id=``). Only a query at the end of the path is a version ID;
+    any other ``?`` is part of the key. The root path, which names no bucket,
+    is not an ``S3Path``.
 
     Attributes:
         bucket: The name of the bucket.
@@ -46,9 +47,13 @@ class S3Path:
         's3://bucket/dir/key?versionId=v1'
     """
 
+    # Version IDs do not contain "?", so only the last query can be one.
+    VERSION_QUERY: ClassVar[Pattern[str]] = re.compile(
+        r"\?version(Id|ID|id|_id)=(?P<version_id>[^?]+)$"
+    )
     PATTERN: ClassVar[Pattern[str]] = re.compile(
-        r"(^s3://|^s3a://|^)(?P<bucket>[a-zA-Z0-9.\-_]+)(/(?P<key>[^?]+)|/)?"
-        r"($|\?version(Id|ID|id|_id)=(?P<version_id>.+)$)"
+        r"(^s3://|^s3a://|^)(?P<bucket>[a-zA-Z0-9.\-_]+)(/(?P<key>.+?)|/)?"
+        rf"($|{VERSION_QUERY.pattern})"
     )
 
     bucket: str
@@ -73,6 +78,26 @@ class S3Path:
         if not match:
             raise ValueError(f"Invalid S3 path format {path}.")
         return cls(match.group("bucket"), match.group("key"), match.group("version_id"))
+
+    @classmethod
+    def split_version_id(cls, path: str) -> tuple[str, str | None]:
+        """Split the version ID query from the end of a path string.
+
+        Unlike :meth:`parse`, any string is accepted, such as the names that
+        fsspec builds.
+
+        Args:
+            path: The path string.
+
+        Returns:
+            Tuple of the string without the version ID query and the version
+            ID, or of the string itself and None if it ends with no version
+            ID query.
+        """
+        match = cls.VERSION_QUERY.search(path)
+        if not match:
+            return path, None
+        return path[: match.start()], match.group("version_id")
 
     @property
     def is_bucket(self) -> bool:

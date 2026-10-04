@@ -137,16 +137,15 @@ class TestAioS3FileSystem:
             AioS3FileSystem.parse_path("s3://bucket?foo=bar")
 
         with pytest.raises(ValueError, match="Invalid S3 path format"):
-            AioS3FileSystem.parse_path("s3://bucket/path/to/obj?foo=bar")
-
-        with pytest.raises(ValueError, match="Invalid S3 path format"):
             AioS3FileSystem.parse_path("s3a://bucket?")
 
         with pytest.raises(ValueError, match="Invalid S3 path format"):
             AioS3FileSystem.parse_path("s3a://bucket?foo=bar")
 
-        with pytest.raises(ValueError, match="Invalid S3 path format"):
-            AioS3FileSystem.parse_path("s3a://bucket/path/to/obj?foo=bar")
+        # GH-979: a "?" in a key that does not start a trailing version ID
+        # query is part of the key.
+        for path in ("s3://bucket/path/to/obj?foo=bar", "s3a://bucket/path/to/obj?foo=bar"):
+            assert AioS3FileSystem.parse_path(path) == ("bucket", "path/to/obj?foo=bar", None)
 
     @pytest.mark.parametrize("max_workers", [1, 4])
     @pytest.mark.asyncio
@@ -727,6 +726,32 @@ class TestAioS3FileSystem:
 
         await fs._cp_file("s3://bucket/src", "s3://bucket/dst")
         fs._sync_fs._call.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_copy_version(self):
+        # GH-979: a version is copied to a destination named after its key,
+        # not globbed with "?" as a wildcard.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs._sync_fs.isdir = mock.MagicMock(return_value=False)
+        fs._cp_file = mock.AsyncMock()
+
+        await fs._copy("s3://bucket/b?versionId=v1", "s3://bucket/d/", RequestPayer="requester")
+        fs._cp_file.assert_awaited_once_with(
+            "bucket/b?versionId=v1", "s3://bucket/d/b", RequestPayer="requester"
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_version(self, tmp_path):
+        # GH-979: a version is downloaded to a local path named after its key.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs._sync_fs.isdir = mock.MagicMock(return_value=False)
+        fs._get_file = mock.AsyncMock()
+
+        await fs._get("s3://bucket/b?versionId=v1", f"{tmp_path}/")
+        assert fs._get_file.await_args.args[:2] == (
+            "bucket/b?versionId=v1",
+            f"{tmp_path.as_posix()}/b",
+        )
 
     @pytest.mark.asyncio
     async def test_mv(self):

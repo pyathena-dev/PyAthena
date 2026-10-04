@@ -19,8 +19,9 @@ from typing import TYPE_CHECKING, Any, cast
 from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.callbacks import _DEFAULT_CALLBACK
 from fsspec.core import get_compression
+from fsspec.implementations.local import LocalFileSystem, make_path_posix
 
-from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
+from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem, _has_version_id
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3Executor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import (
     S3Metadata,
@@ -392,6 +393,79 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         sync(self.loop, self._mv, path1, path2, recursive=recursive, maxdepth=maxdepth, **kwargs)
 
+    async def _copy(
+        self,
+        path1,
+        path2,
+        recursive=False,
+        on_error=None,
+        maxdepth=None,
+        batch_size=None,
+        **kwargs,
+    ) -> None:
+        """Copy files within S3.
+
+        See :meth:`S3FileSystem.copy`. The copies run as in fsspec's
+        ``_copy()``.
+
+        Args:
+            path1: Source S3 path, glob pattern, or list of them.
+            path2: Destination S3 path, or list of paths when ``path1`` is a
+                list.
+            recursive: Whether to copy the directories with their contents.
+            on_error: ``"raise"`` or ``"ignore"`` for a missing source.
+            maxdepth: Maximum depth of a recursive copy.
+            batch_size: Number of copies to run at the same time.
+            **kwargs: Additional S3 copy parameters passed to ``_cp_file()``.
+        """
+        if isinstance(path2, str) and _has_version_id(path1):
+            path1, path2 = await asyncio.to_thread(
+                self._sync_fs._copy_paths, path1, path2, recursive=recursive, maxdepth=maxdepth
+            )
+            if not path1:
+                return
+        await super()._copy(
+            path1,
+            path2,
+            recursive=recursive,
+            on_error=on_error,
+            maxdepth=maxdepth,
+            batch_size=batch_size,
+            **kwargs,
+        )
+
+    async def _get(
+        self, rpath, lpath, recursive=False, callback=_DEFAULT_CALLBACK, maxdepth=None, **kwargs
+    ) -> None:
+        """Copy files from S3 to the local filesystem.
+
+        See :meth:`S3FileSystem.get`. The downloads run as in fsspec's
+        ``_get()``.
+
+        Args:
+            rpath: Source S3 path, glob pattern, or list of them.
+            lpath: Local destination path, or list of paths when ``rpath`` is
+                a list.
+            recursive: Whether to copy the directories with their contents.
+            callback: Progress callback.
+            maxdepth: Maximum depth of a recursive copy.
+            **kwargs: Additional parameters passed to ``_get_file()``.
+        """
+        if isinstance(lpath, str) and _has_version_id(rpath):
+            rpath, lpath = await asyncio.to_thread(
+                self._sync_fs._copy_paths,
+                rpath,
+                make_path_posix(lpath),
+                recursive=recursive,
+                maxdepth=maxdepth,
+                isdir=LocalFileSystem().isdir,
+            )
+            if not rpath:
+                return
+        await super()._get(
+            rpath, lpath, recursive=recursive, callback=callback, maxdepth=maxdepth, **kwargs
+        )
+
     async def _cp_file(self, path1: str, path2: str, **kwargs) -> None:
         """Copy an S3 object, using async parallel multipart upload for large files.
 
@@ -656,6 +730,24 @@ class AioS3FileSystem(AsyncFileSystem):
         if detail:
             return {f.name: f for f in files}
         return [f.name for f in files]
+
+    async def _expand_path(self, path, recursive=False, maxdepth=None, **kwargs) -> list[str]:
+        """Expand glob patterns and directories into the paths they match.
+
+        See :meth:`S3FileSystem.expand_path`.
+
+        Args:
+            path: S3 path, glob pattern, or list of them.
+            recursive: Whether to include the paths below the directories.
+            maxdepth: Maximum depth of the expansion, at least 1.
+            **kwargs: Additional arguments passed to ``glob`` and ``find``.
+
+        Returns:
+            The sorted matching paths.
+        """
+        return await asyncio.to_thread(
+            self._sync_fs.expand_path, path, recursive=recursive, maxdepth=maxdepth, **kwargs
+        )
 
     def _create_executor(self, max_workers: int) -> S3Executor:
         """Create the executor for the parallel operations of a file.
