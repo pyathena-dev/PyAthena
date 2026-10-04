@@ -786,9 +786,14 @@ class S3Core:
                 empty string uses the region of the client. A location
                 constraint is sent for every region except ``us-east-1``,
                 which does not accept one.
-            **params: Additional request parameters, sent as given. A
-                ``CreateBucketConfiguration`` given here is sent instead of
-                the location constraint of ``region_name``, in every region.
+            **params: Additional request parameters, sent as given, except
+                ``CreateBucketConfiguration``. Its fields are kept, and the
+                ``LocationConstraint`` of ``region_name`` is added unless
+                the region is ``us-east-1`` or the configuration has a
+                ``LocationConstraint``, ``Location`` or ``Bucket``. A
+                directory bucket is created with ``Location`` and
+                ``Bucket``, so no ``LocationConstraint`` is added to its
+                configuration. The given configuration is not modified.
 
         Raises:
             ValueError: If the ACL is not a canned ACL of buckets.
@@ -798,9 +803,18 @@ class S3Core:
         request: dict[str, Any] = {"Bucket": bucket}
         if acl:
             request.update({"ACL": acl})
+        configuration = dict(params.pop("CreateBucketConfiguration", None) or {})
         region_name = region_name or self._client.meta.region_name
-        if "CreateBucketConfiguration" not in params and region_name and region_name != "us-east-1":
-            request.update({"CreateBucketConfiguration": {"LocationConstraint": region_name}})
+        if (
+            region_name
+            and region_name != "us-east-1"
+            # LocationConstraint is not supported for directory buckets,
+            # which are configured with Location and Bucket instead.
+            and not configuration.keys() & {"LocationConstraint", "Location", "Bucket"}
+        ):
+            configuration.update({"LocationConstraint": region_name})
+        if configuration:
+            request.update({"CreateBucketConfiguration": configuration})
         _logger.debug(f"Create bucket: s3://{bucket}")
         self.call(self._client.create_bucket, **request, **params)
 

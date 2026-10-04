@@ -43,6 +43,9 @@ from tests.pyathena.util import (
 )
 
 MODIFIED = datetime(2026, 10, 4, tzinfo=UTC)
+TAGS = [{"Key": "team", "Value": "data"}]
+DIRECTORY_LOCATION = {"Type": "AvailabilityZone", "Name": "apne1-az4"}
+DIRECTORY_BUCKET = {"Type": "Directory", "DataRedundancy": "SingleAvailabilityZone"}
 
 
 def _make_core(region_name="us-east-1", **kwargs):
@@ -337,38 +340,69 @@ class TestS3Core:
             core.create_bucket("bucket", **kwargs)
         stubber.assert_no_pending_responses()
 
-    @pytest.mark.parametrize("client_region", ["us-east-1", "ap-northeast-1"])
-    @pytest.mark.parametrize("region_name", [None, "eu-west-1"])
     @pytest.mark.parametrize(
-        "configuration",
+        ("client_region", "region_name", "configuration", "expected"),
         [
-            {"LocationConstraint": "ap-southeast-2", "Tags": [{"Key": "team", "Value": "data"}]},
-            # No location constraint is added to a given configuration.
-            {"Tags": [{"Key": "team", "Value": "data"}]},
+            # The fields of a given configuration are kept, and no location
+            # constraint is added in us-east-1,
+            ("us-east-1", None, {"Tags": TAGS}, {"Tags": TAGS}),
+            ("us-east-1", None, {}, None),
+            # but in another region, the constraint of the region is added,
+            (
+                "ap-northeast-1",
+                None,
+                {"Tags": TAGS},
+                {"Tags": TAGS, "LocationConstraint": "ap-northeast-1"},
+            ),
+            (
+                "us-east-1",
+                "eu-west-1",
+                {"Tags": TAGS},
+                {"Tags": TAGS, "LocationConstraint": "eu-west-1"},
+            ),
+            ("ap-northeast-1", None, {}, {"LocationConstraint": "ap-northeast-1"}),
+            # unless the configuration has its own location constraint,
+            (
+                "ap-northeast-1",
+                "eu-west-1",
+                {"LocationConstraint": "ap-southeast-2", "Tags": TAGS},
+                {"LocationConstraint": "ap-southeast-2", "Tags": TAGS},
+            ),
+            # or the location or bucket of a directory bucket.
+            (
+                "ap-northeast-1",
+                None,
+                {"Location": DIRECTORY_LOCATION, "Bucket": DIRECTORY_BUCKET},
+                {"Location": DIRECTORY_LOCATION, "Bucket": DIRECTORY_BUCKET},
+            ),
+            (
+                "us-east-1",
+                "eu-west-1",
+                {"Location": DIRECTORY_LOCATION},
+                {"Location": DIRECTORY_LOCATION},
+            ),
+            (
+                "ap-northeast-1",
+                "eu-west-1",
+                {"Bucket": DIRECTORY_BUCKET},
+                {"Bucket": DIRECTORY_BUCKET},
+            ),
         ],
     )
-    def test_create_bucket_configuration(self, client_region, region_name, configuration):
-        # A CreateBucketConfiguration of params is sent as given instead of
-        # the location constraint of the region, in every region.
+    def test_create_bucket_configuration(self, client_region, region_name, configuration, expected):
         core, stubber = _make_core(region_name=client_region)
-        stubber.add_response(
-            "create_bucket",
-            {},
-            {
-                "Bucket": "bucket",
-                "ACL": "private",
-                "CreateBucketConfiguration": configuration,
-            },
-        )
+        request = {"Bucket": "bucket", "ACL": "private"}
+        if expected is not None:
+            request.update({"CreateBucketConfiguration": expected})
+        stubber.add_response("create_bucket", {}, request)
+        given = copy.deepcopy(configuration)
         with stubber:
             core.create_bucket(
-                "bucket",
-                acl="private",
-                region_name=region_name,
-                # A copy, so that the parameter of the other cases is kept.
-                CreateBucketConfiguration=copy.deepcopy(configuration),
+                "bucket", acl="private", region_name=region_name, CreateBucketConfiguration=given
             )
         stubber.assert_no_pending_responses()
+        # The given configuration is not modified.
+        assert given == configuration
 
     @pytest.mark.parametrize("acl", ["invalid", "bucket-owner-full-control"])
     def test_create_bucket_rejects_acls(self, acl):

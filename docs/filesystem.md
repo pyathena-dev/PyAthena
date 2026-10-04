@@ -402,6 +402,13 @@ upload_url = core.generate_presigned_url(path, "put_object", ContentType="text/c
 `allow_bucket_creation` and `allow_bucket_deletion` options apply only to the
 filesystem's `mkdir`/`makedirs` and `rmdir`, not to calls through the core.
 
+`create_bucket()` sends a `LocationConstraint` for the `region_name` argument, or for
+the client's region by default, except in `us-east-1`. The fields of a
+`CreateBucketConfiguration` passed as a parameter are kept, and the `LocationConstraint`
+is added to it only if it has none of `LocationConstraint`, `Location` and `Bucket`. To
+create a directory bucket, pass its `Location` and `Bucket` in
+`CreateBucketConfiguration`; no `LocationConstraint` is added.
+
 ### Multipart writer
 
 `S3MultipartWriter` provides synchronous multipart requests and part planning without fsspec.
