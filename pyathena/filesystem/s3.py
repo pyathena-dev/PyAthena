@@ -50,6 +50,7 @@ from pyathena.filesystem.s3_object import (
     S3StorageClass,
 )
 from pyathena.filesystem.s3_path import S3Path
+from pyathena.filesystem.s3_writer import S3MultipartWriter
 from pyathena.util import RetryConfig, override
 
 _logger = logging.getLogger(__name__)
@@ -3167,7 +3168,7 @@ class S3File(AbstractBufferedFile):
         )
 
         self.append_block = False
-        self.multipart_upload: S3MultipartUpload | None = None
+        self._multipart_writer: S3MultipartWriter | None = None
         self.multipart_upload_parts: list[Future[S3MultipartUploadPart]] = []
         if append_info is not None:
             if append_data is not None:
@@ -3211,6 +3212,8 @@ class S3File(AbstractBufferedFile):
         fsspec does not close a closed file again when it is garbage
         collected.
         """
+        if self.buffer is None and getattr(self, "closed", False):
+            return
         self.buffer = None
         self.closed = True
         try:
@@ -3263,51 +3266,65 @@ class S3File(AbstractBufferedFile):
             raise
         self.close()
 
+    def _get_multipart_writer(self) -> S3MultipartWriter:
+        if self._multipart_writer is None:
+            self._multipart_writer = S3MultipartWriter(
+                self.fs.core, S3Path(self.bucket, self.key), block_size=self.blocksize
+            )
+        return self._multipart_writer
+
+    @property
+    def multipart_upload(self) -> S3MultipartUpload | None:
+        """The upload identity retained by the core writer, if initialized."""
+        return self._multipart_writer.upload if self._multipart_writer is not None else None
+
+    @multipart_upload.setter
+    def multipart_upload(self, upload: S3MultipartUpload | None) -> None:
+        if upload is not None:
+            self._get_multipart_writer().upload = upload
+        elif self._multipart_writer is not None:
+            self._multipart_writer.upload = None
+
     def _initiate_upload(self) -> None:
         if not self.append_block and self.tell() < self.blocksize:
-            # Files smaller than block size in size cannot be multipart uploaded.
-            # An append to an object copied with UploadPartCopy always uses
-            # a multipart upload, whatever the block size.
             return
 
-        path = S3Path(self.bucket, self.key)
-        self.multipart_upload = self.fs.core.create_multipart_upload(
-            path, **self._get_request_kwargs("create_multipart_upload")
-        )
-        if self.append_block:
-            if self.tell() > self.fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE:
-                info = self.fs.info(
-                    self.path,
-                    version_id=self.version_id,
-                    **self.fs._get_lookup_kwargs(self.s3_additional_kwargs),
-                )
-                ranges = self.fs.core.part_ranges(
-                    # Set copy source file byte size
-                    info.get("size", 0),
-                    self.fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE,
-                )
-                for i, range_ in enumerate(ranges):
+        writer = self._get_multipart_writer()
+        creation: Future[S3MultipartUpload] | None = None
+        try:
+            creation = self._executor.submit(
+                writer.initiate, **self._get_request_kwargs("create_multipart_upload")
+            )
+            creation.result()
+            if self.append_block:
+                whole_source = self.tell() <= self.fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE
+                size = self.tell()
+                if not whole_source:
+                    info = self.fs.info(
+                        self.path,
+                        version_id=self.version_id,
+                        **self.fs._get_lookup_kwargs(self.s3_additional_kwargs),
+                    )
+                    size = info.get("size", 0)
+                for part_number, range_ in writer.iter_copy_parts(size):
                     self.multipart_upload_parts.append(
                         self._executor.submit(
-                            self.fs.core.upload_part_copy,
-                            upload=self.multipart_upload,
-                            part_number=i + 1,
-                            # The existing object is copied into the upload.
-                            source=path,
-                            range_=range_,
+                            writer.upload_part_copy,
+                            part_number=part_number,
+                            source=S3Path(self.bucket, self.key),
+                            range_=None if whole_source else range_,
                             **self._get_request_kwargs("upload_part_copy"),
                         )
                     )
-            else:
-                self.multipart_upload_parts.append(
-                    self._executor.submit(
-                        self.fs.core.upload_part_copy,
-                        upload=self.multipart_upload,
-                        part_number=1,
-                        source=path,
-                        **self._get_request_kwargs("upload_part_copy"),
-                    )
-                )
+        except BaseException:
+            # A submitted creation may still return an ID after the wait is
+            # interrupted. The writer records it before resolving the future.
+            if creation is None:
+                self._executor.shutdown()
+            elif not creation.cancel():
+                wait([creation])
+            self._close_without_commit()
+            raise
 
     def _upload_chunk(self, final: bool = False) -> bool:
         # The return value controls whether fsspec's flush() resets self.buffer
@@ -3329,51 +3346,23 @@ class S3File(AbstractBufferedFile):
         # fsspec's flush() never calls this on a closed file, whose buffer
         # may have been dropped.
         buffer = cast(BytesIO, self.buffer)
-        part_number = len(self.multipart_upload_parts)
+        writer = self._get_multipart_writer()
         buffer.seek(0)
-        data = buffer.read(self.blocksize)
-        while data:
-            # Only the last part of a multipart upload may be smaller than the
-            # minimum part size, and more data may follow a mid-stream chunk.
-            # A single write() can leave several blocks in the buffer, so look
-            # ahead one block and merge a short last block into this one.
-            next_data = buffer.read(self.blocksize)
-            next_data_size = len(next_data)
-            if 0 < next_data_size < self.fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE:
-                upload_data = data + next_data
-                upload_data_size = len(upload_data)
-                if upload_data_size < self.fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE:
-                    uploads = [upload_data]
-                else:
-                    split_size = upload_data_size // 2
-                    uploads = [upload_data[:split_size], upload_data[split_size:]]
-                next_data = b""
-            else:
-                uploads = [data]
-
-            for upload in uploads:
-                if part_number >= self.fs.core.MULTIPART_UPLOAD_MAX_PARTS:
-                    self._close_without_commit()
-                    raise ValueError(
-                        f"Cannot upload more than {self.fs.core.MULTIPART_UPLOAD_MAX_PARTS} "
-                        f"parts to s3://{self.bucket}/{self.key} with a block size of "
-                        f"{self.blocksize} bytes. Write the file with a block_size, or "
-                        "a default_block_size of the filesystem, large enough for it to "
-                        f"fit in {self.fs.core.MULTIPART_UPLOAD_MAX_PARTS} parts, including "
-                        "the parts copied from the existing object in an append."
-                    )
-                part_number += 1
+        try:
+            for part_number, data in writer.iter_parts(
+                buffer, first_part_number=len(self.multipart_upload_parts) + 1
+            ):
                 self.multipart_upload_parts.append(
                     self._executor.submit(
-                        self.fs.core.upload_part,
-                        upload=self.multipart_upload,
+                        writer.upload_part,
                         part_number=part_number,
-                        body=upload,
+                        body=data,
                         **self._get_request_kwargs("upload_part"),
                     )
                 )
-
-            data = next_data
+        except BaseException:
+            self._close_without_commit()
+            raise
 
         if self.autocommit and final:
             self.commit()
@@ -3420,11 +3409,9 @@ class S3File(AbstractBufferedFile):
 
             upload_id = cast(str, self.multipart_upload.upload_id)
             try:
-                self.fs._finish_multipart_upload(
-                    upload=self.multipart_upload,
-                    futures=self.multipart_upload_parts,
-                    request_kwargs=self.s3_additional_kwargs,
-                    abort=False,
+                parts = [future.result() for future in self.multipart_upload_parts]
+                self._get_multipart_writer().complete(
+                    parts, **self._get_request_kwargs("complete_multipart_upload")
                 )
             except BaseException:
                 # discard() keeps the upload if the abort fails or is
@@ -3453,10 +3440,7 @@ class S3File(AbstractBufferedFile):
             # be stored after the abort, so wait for the parts that could not
             # be cancelled first.
             wait([f for f in self.multipart_upload_parts if not f.cancel()])
-            self.fs.core.abort_multipart_upload(
-                self.multipart_upload,
-                **self._get_request_kwargs("abort_multipart_upload"),
-            )
+            self._get_multipart_writer().abort(**self._get_request_kwargs("abort_multipart_upload"))
 
         self.multipart_upload = None
         self.multipart_upload_parts = []

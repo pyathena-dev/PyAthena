@@ -117,3 +117,9 @@ S3 Upload Operations
 
 .. autoclass:: pyathena.filesystem.s3_object.S3CompleteMultipartUpload
    :members:
+
+Multipart Writer
+----------------
+
+.. autoclass:: pyathena.filesystem.s3_writer.S3MultipartWriter
+   :members:

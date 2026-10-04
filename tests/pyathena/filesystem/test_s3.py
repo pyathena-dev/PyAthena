@@ -5701,6 +5701,199 @@ class TestS3FileSystem:
 
 
 class TestS3File:
+    @pytest.mark.parametrize("operation", ["write", "append", "exclusive", "pipe", "put"])
+    @pytest.mark.parametrize("abort_fails", [False, True])
+    @pytest.mark.skipif(
+        threading.current_thread() is not threading.main_thread(),
+        reason="SIGINT interrupts the main thread.",
+    )
+    def test_interrupted_creation(self, tmp_path, operation, abort_fails):
+        # GH-1077: creation finishes after SIGINT interrupts the writer's wait.
+        # Its ID is recovered and aborted before the interrupt is re-raised.
+        fs = self._make_append_fs(b"a" * 6 if operation == "append" else b"")
+        fs.exists.return_value = False
+        fs._intrans = False
+        fs.default_block_size = 4
+        fs.max_workers = 1
+        fs.s3_additional_kwargs = {}
+        fs._strip_protocol.side_effect = S3FileSystem._strip_protocol
+        started = threading.Event()
+        waiting = threading.Event()
+        interrupted = threading.Event()
+        upload = fs.core.create_multipart_upload.return_value
+
+        def create(*args, **kwargs):
+            started.set()
+            if threading.current_thread() is threading.main_thread():
+                # The old implementation sent creation on the main thread.
+                waiting.set()
+            assert interrupted.wait(5)
+            return upload
+
+        fs.core.create_multipart_upload.side_effect = create
+        if abort_fails:
+            fs._call.side_effect = PermissionError("abort failed")
+        executor = S3ThreadPoolExecutor(max_workers=1)
+        submit = executor.submit
+
+        def submit_creation(fn, *args, **kwargs):
+            future = submit(fn, *args, **kwargs)
+            result = future.result
+
+            def wait_for_result(timeout=None):
+                waiting.set()
+                return result(timeout)
+
+            future.result = wait_for_result  # type: ignore[method-assign]
+            return future
+
+        executor.submit = submit_creation  # type: ignore[method-assign]
+        mode = {"append": "ab", "exclusive": "xb"}.get(operation, "wb")
+        file = S3File(
+            fs,
+            "s3://bucket/key.txt",
+            mode=mode,
+            block_size=4,
+            autocommit=False,
+            executor=executor,
+        )
+        fs.open.return_value = file
+        if operation == "pipe":
+            perform = functools.partial(
+                S3FileSystem.pipe_file, fs, file.path, b"x" * 8, block_size=4
+            )
+        elif operation == "put":
+            local = tmp_path / "input"
+            local.write_bytes(b"x" * 8)
+            perform = functools.partial(
+                S3FileSystem.put_file, fs, str(local), file.path, block_size=4
+            )
+        else:
+            perform = functools.partial(file.write, b"x" * 8)
+
+        def handle_interrupt(signum, frame):
+            interrupted.set()
+            raise KeyboardInterrupt
+
+        def interrupt():
+            if started.wait(5) and waiting.wait(5):
+                signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+
+        thread = threading.Thread(target=interrupt, daemon=True)
+        previous_handler = signal.signal(signal.SIGINT, handle_interrupt)
+        try:
+            thread.start()
+            with pytest.raises(KeyboardInterrupt):
+                perform()
+            fs._call.assert_called_once_with(
+                S3_CLIENT.abort_multipart_upload,
+                Bucket="bucket",
+                Key="key.txt",
+                UploadId="uploadid",
+            )
+            assert file.closed
+            assert file.buffer is None
+            assert (file.multipart_upload is upload) is abort_fails
+            file.close()
+            file.commit()
+            fs.core.upload_part.assert_not_called()
+            fs.core.upload_part_copy.assert_not_called()
+            fs.core.complete_multipart_upload.assert_not_called()
+            fs._put_object.assert_not_called()
+            fs.touch.assert_not_called()
+            if abort_fails:
+                fs._call.side_effect = None
+                file.discard()
+                assert fs._call.call_count == 2
+                assert file.multipart_upload is None
+        finally:
+            signal.signal(signal.SIGINT, lambda signum, frame: None)
+            started.set()
+            waiting.set()
+            interrupted.set()
+            if thread.ident is not None:
+                thread.join(5)
+            signal.signal(signal.SIGINT, previous_handler)
+            fs._call.side_effect = None
+            file._close_without_commit()
+
+    def test_creation_cancelled_before_start(self):
+        fs = self._make_append_fs(b"")
+        creation = Future()
+        creation.result = mock.MagicMock(side_effect=KeyboardInterrupt)  # type: ignore[method-assign]
+        executor = mock.MagicMock()
+        executor.submit.return_value = creation
+        file = S3File(fs, "s3://bucket/key.txt", mode="wb", block_size=4, executor=executor)
+
+        with pytest.raises(KeyboardInterrupt):
+            file.write(b"x" * 8)
+
+        assert creation.cancelled()
+        assert file.closed
+        assert file.buffer is None
+        assert file.multipart_upload is None
+        executor.shutdown.assert_called_once()
+        fs.core.create_multipart_upload.assert_not_called()
+        fs._call.assert_not_called()
+        file.commit()
+        fs._put_object.assert_not_called()
+
+    def test_creation_failure(self):
+        fs = self._make_append_fs(b"")
+        fs.core.create_multipart_upload.side_effect = PermissionError("create failed")
+        file = S3File(fs, "s3://bucket/key.txt", mode="wb", block_size=4)
+
+        with pytest.raises(PermissionError, match="create failed"):
+            file.write(b"x" * 8)
+
+        assert file.closed
+        assert file.buffer is None
+        assert file.multipart_upload is None
+        fs._call.assert_not_called()
+        file.commit()
+        fs._put_object.assert_not_called()
+
+    async def test_cancelled_async_write_finishes(self):
+        # Cancelling to_thread does not interrupt the buffered writer's thread.
+        fs = self._make_append_fs(b"")
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        upload = fs.core.create_multipart_upload.return_value
+
+        def create(*args, **kwargs):
+            started.set()
+            assert release.wait(5)
+            return upload
+
+        fs.core.create_multipart_upload.side_effect = create
+        file = S3File(
+            fs,
+            "s3://bucket/key.txt",
+            mode="wb",
+            block_size=4,
+            executor=S3AioExecutor(asyncio.get_running_loop(), max_workers=1),
+        )
+
+        def write():
+            try:
+                file._write_and_close(b"x" * 8)
+            finally:
+                finished.set()
+
+        task = asyncio.create_task(asyncio.to_thread(write))
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release.set()
+            assert await asyncio.to_thread(finished.wait, 5)
+        fs.core.complete_multipart_upload.assert_called_once()
+        fs._call.assert_not_called()
+        assert file.closed
+
     @staticmethod
     def _make_mock_fs():
         # A mocked filesystem that selects the request parameters of each
@@ -5735,6 +5928,7 @@ class TestS3File:
         file.blocksize = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
         file.fs.core.MULTIPART_UPLOAD_MAX_PARTS = S3Core.MULTIPART_UPLOAD_MAX_PARTS
         file.append_block = False
+        file._multipart_writer = None
         file.multipart_upload = None
         file.multipart_upload_parts = []
         file.buffer = io.BytesIO(data)
@@ -5794,10 +5988,10 @@ class TestS3File:
         if fs._put_object.called:
             fs.core.create_multipart_upload.assert_not_called()
             return fs._put_object.call_args.kwargs["body"]
-        fs._finish_multipart_upload.assert_called_once()
+        fs.core.complete_multipart_upload.assert_called_once()
         parts = []
         for c in fs.core.upload_part_copy.call_args_list:
-            start, end = c.kwargs.get("range_", (0, len(existing)))
+            start, end = c.kwargs.get("range_") or (0, len(existing))
             parts.append((c.kwargs["part_number"], existing[start:end]))
         parts += [
             (c.kwargs["part_number"], c.kwargs["body"]) for c in fs.core.upload_part.call_args_list
@@ -5948,12 +6142,16 @@ class TestS3File:
 
         assert f.closed
         # The submitted parts, some of which the abort may have cancelled.
-        assert [c.kwargs["part_number"] for c in executor.submit.call_args_list] == [1, 2, 3]
+        assert [
+            c.kwargs["part_number"]
+            for c in executor.submit.call_args_list
+            if "part_number" in c.kwargs
+        ] == [1, 2, 3]
         executor.shutdown.assert_called()
         fs._call.assert_called_once_with(
             S3_CLIENT.abort_multipart_upload, Bucket="bucket", Key="key.txt", UploadId="uploadid"
         )
-        fs._finish_multipart_upload.assert_not_called()
+        fs.core.complete_multipart_upload.assert_not_called()
         fs._put_object.assert_not_called()
 
     @pytest.mark.parametrize("autocommit", [True, False])
@@ -5981,10 +6179,14 @@ class TestS3File:
             f.commit()
 
         assert f.closed
-        assert [c.kwargs["part_number"] for c in executor.submit.call_args_list] == [1, 2, 3]
+        assert [
+            c.kwargs["part_number"]
+            for c in executor.submit.call_args_list
+            if "part_number" in c.kwargs
+        ] == [1, 2, 3]
         executor.shutdown.assert_called()
         fs._call.assert_called_once()
-        fs._finish_multipart_upload.assert_not_called()
+        fs.core.complete_multipart_upload.assert_not_called()
         fs._put_object.assert_not_called()
         assert "Failed to abort multipart upload uploadid to s3://bucket/key.txt." in caplog.text
 
@@ -6020,7 +6222,7 @@ class TestS3File:
         assert f.closed
         executor.shutdown.assert_called()
         fs._call.assert_called_once()
-        fs._finish_multipart_upload.assert_not_called()
+        fs.core.complete_multipart_upload.assert_not_called()
         fs._put_object.assert_not_called()
 
         assert f.multipart_upload is not None
@@ -6049,8 +6251,7 @@ class TestS3File:
 
     def test_multipart_write_request_parameters(self):
         # GH-946: the parts receive the parameters of the file that they
-        # accept, such as RequestPayer and SSE-C, and the completion receives
-        # them all.
+        # accept, such as RequestPayer and SSE-C, as does the completion.
         fs = self._make_append_fs(b"")
         kwargs = {
             "ContentType": "text/csv",
@@ -6074,12 +6275,16 @@ class TestS3File:
                 "SSECustomerAlgorithm": "AES256",
                 "SSECustomerKey": "key",
             }
-        assert fs._finish_multipart_upload.call_args.kwargs["request_kwargs"] == kwargs
+        assert fs.core.complete_multipart_upload.call_args.kwargs == fs.core.operation_params(
+            "complete_multipart_upload", kwargs
+        )
 
-    @pytest.mark.parametrize("parameter", ["key", "upload"])
+    @pytest.mark.parametrize(
+        "parameter", ["key", "upload", "parts", "body", "part_number", "source", "range_", "fn"]
+    )
     def test_multipart_write_keyword_named_as_argument(self, parameter):
-        # A keyword parameter of the file named like a helper argument does
-        # not break the completion, which takes the parameters as a mapping.
+        # A keyword parameter of the file named like a helper argument
+        # is ignored when filtering parameters before calling writer methods.
         fs = self._make_append_fs(b"")
 
         with S3File(
@@ -6089,12 +6294,10 @@ class TestS3File:
 
         fs.core.create_multipart_upload.assert_called_once_with(S3Path("bucket", "key.txt"))
         assert (
-            fs._finish_multipart_upload.call_args.kwargs["upload"]
+            fs.core.complete_multipart_upload.call_args.args[0]
             is fs.core.create_multipart_upload.return_value
         )
-        assert fs._finish_multipart_upload.call_args.kwargs["request_kwargs"] == {
-            parameter: "other"
-        }
+        assert fs.core.complete_multipart_upload.call_args.kwargs == {}
 
     def test_append_discard(self):
         # Rolling back an append aborts its multipart upload without the
@@ -6122,7 +6325,7 @@ class TestS3File:
             RequestPayer="requester",
             ExpectedBucketOwner="123",
         )
-        fs._finish_multipart_upload.assert_not_called()
+        fs.core.complete_multipart_upload.assert_not_called()
         fs._put_object.assert_not_called()
 
     @pytest.mark.parametrize(
@@ -6275,9 +6478,6 @@ class TestS3File:
         # is kept so that discard() retries the abort.
         file = self._make_multipart_write_file(b"x" * 16, autocommit=False)
         file._upload_chunk(final=True)
-        file.fs._finish_multipart_upload.side_effect = functools.partial(
-            S3FileSystem._finish_multipart_upload, file.fs
-        )
         file.fs.core.complete_multipart_upload.side_effect = error("complete failed")
         if abort_fails:
             file.fs._call.side_effect = [PermissionError("abort failed"), None]
@@ -6309,9 +6509,6 @@ class TestS3File:
         # retries the abort.
         file = self._make_multipart_write_file(b"x" * 16, autocommit=False)
         file._upload_chunk(final=True)
-        file.fs._finish_multipart_upload.side_effect = functools.partial(
-            S3FileSystem._finish_multipart_upload, file.fs
-        )
         file.fs.core.complete_multipart_upload.side_effect = RuntimeError("complete failed")
         file.fs._call.side_effect = [KeyboardInterrupt, None]
 
@@ -6369,9 +6566,9 @@ class TestS3File:
         assert file._upload_chunk(final=True) is False  # final -> buffer kept
         if not autocommit:
             # Deferred: the multipart upload is completed by commit().
-            file.fs._finish_multipart_upload.assert_not_called()
+            file.fs.core.complete_multipart_upload.assert_not_called()
             file.commit()
-        file.fs._finish_multipart_upload.assert_called_once()
+        file.fs.core.complete_multipart_upload.assert_called_once()
         file.fs._put_object.assert_not_called()
 
 
