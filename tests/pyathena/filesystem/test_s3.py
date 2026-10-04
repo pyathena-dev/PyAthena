@@ -1648,7 +1648,7 @@ class TestS3FileSystem:
         fs = self._make_fs()
         self._serve_keys(fs, {"b"})
 
-        # The "null" version is the object at the key, so it stays in place.
+        # In this unversioned bucket, the "null" version names the key and stays in place.
         fs.mv(["s3://bucket/b?versionId=null"], ["s3://bucket/b"])
         fs._call.assert_called_once_with(fs._client.get_bucket_versioning, Bucket="bucket")
 

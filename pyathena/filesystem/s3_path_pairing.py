@@ -166,6 +166,9 @@ class S3PathPairing:
             another source below them and a destination that conflicts, one
             per pair in the order of the pairs; empty if nothing needs to be
             looked up.
+
+        Raises:
+            TypeError: If ``versioning_enabled_buckets`` is a string.
         """
         return self._moves(pairs, versioning_enabled_buckets)[2]
 
@@ -199,6 +202,7 @@ class S3PathPairing:
                 except for a directory with no object at its key, which is not
                 copied. Also if ``missing`` is needed and None.
             TypeError: If ``missing`` is a string instead of a collection.
+                Also if ``versioning_enabled_buckets`` is a string.
         """
         if isinstance(missing, str):
             raise TypeError("missing is a collection of paths, not a path.")
@@ -264,7 +268,16 @@ class S3PathPairing:
 
     @staticmethod
     def _target(path: S3Path, versioning_enabled_buckets: Collection[str]) -> str:
-        """Return a move target using the caller's bucket versioning state."""
+        """Return a move target using the caller's bucket versioning state.
+
+        Args:
+            path: The path of the source or destination.
+            versioning_enabled_buckets: Buckets whose versioning is enabled.
+
+        Returns:
+            The normalized path, retaining a ``null`` version only when its
+            bucket has versioning enabled.
+        """
         return str(path if path.bucket in versioning_enabled_buckets else path.target)
 
     @staticmethod
@@ -283,7 +296,14 @@ class S3PathPairing:
             of its source and destination; the targets of all sources,
             including those left in place; and the conflict candidates (see
             :meth:`conflict_candidates`).
+
+        Raises:
+            TypeError: If ``versioning_enabled_buckets`` is a string.
         """
+        if isinstance(versioning_enabled_buckets, str):
+            raise TypeError(
+                "versioning_enabled_buckets is a collection of bucket names, not a bucket name."
+            )
         named = []
         for p1, p2 in pairs:
             source_path = S3Path.parse(p1)

@@ -172,6 +172,12 @@ class TestS3PathPairing:
             pairing.move_pairs(pairs)
         assert pairing.move_pairs(pairs, versioning_enabled_buckets={"bucket"}) == pairs
 
+    @pytest.mark.parametrize("method", ["conflict_candidates", "move_pairs"])
+    def test_move_bucket_names_are_a_collection(self, method):
+        pairs = [("logs/key?versionId=null", "logs/key")]
+        with pytest.raises(TypeError, match="collection of bucket names"):
+            getattr(_pairing(pairs), method)(pairs, versioning_enabled_buckets="logs-archive")
+
     @pytest.mark.parametrize(
         ("pairs", "match"),
         [

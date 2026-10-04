@@ -1439,6 +1439,7 @@ class S3FileSystem(AbstractFileSystem):
                 destination is another source, including one left in place,
                 which is checked before anything is copied. A directory with
                 no object at its key, which is not copied, does not conflict.
+            OSError: If bucket versioning cannot be read.
         """
         if path1 == path2:
             return
@@ -1470,6 +1471,7 @@ class S3FileSystem(AbstractFileSystem):
 
         Raises:
             ValueError: If the move has conflicting paths.
+            OSError: If bucket versioning cannot be read.
         """
         pairing = S3PathPairing(path1, path2, recursive=recursive, maxdepth=maxdepth)
         pairs = self._copy_pairs(pairing)

@@ -404,6 +404,13 @@ paths, and pass the results to `copy_pairs()` and `move_pairs()`. A `sources`,
 `destination_is_dir` or `missing` that a rule needs and that is not passed raises
 `ValueError`.
 
+For moves that compare a null version with its unversioned key, the caller also
+looks up bucket versioning and passes the names of the versioning-enabled buckets
+as `versioning_enabled_buckets` to both `conflict_candidates()` and `move_pairs()`.
+Pass a collection of bucket names, such as a set, rather than a single string.
+The default empty collection treats null versions as their keys, as in unversioned
+or suspended buckets. The model makes no AWS requests.
+
 ```python
 from pyathena.filesystem.s3_path_pairing import S3PathPairing
 
