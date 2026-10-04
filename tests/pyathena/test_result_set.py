@@ -23,6 +23,10 @@ def _page(values, next_token=None):
     return response
 
 
+def _row(*values):
+    return {"Data": [{} if v is None else {"VarCharValue": v} for v in values]}
+
+
 class TestAthenaResultSet:
     def test_fetch_all_rows_skips_column_labels_only_on_first_page(self):
         """A later page can start with a data row equal to the column labels.
@@ -43,6 +47,26 @@ class TestAthenaResultSet:
         pages = [_page(["a", "1"], "token"), _page(["a", "2"])]
         with patch.object(result_set, "_get_query_results", side_effect=pages):
             assert result_set._fetch_all_rows() == [("1",), ("a",), ("2",)]
+
+    def test_fetch_all_rows_as_csv(self):
+        """The GetQueryResults rows are written as Athena writes a CSV result file.
+
+        Only the first page starts with the column labels, so a later row equal to
+        them is data. No AWS calls; GetQueryResults is mocked.
+        """
+        result_set = AthenaResultSet.__new__(AthenaResultSet)  # bypass __init__
+        result_set._query_execution = None
+        result_set._metadata = tuple(
+            {"Name": name, "Type": "varchar", "Precision": 0, "Scale": 0, "Nullable": "UNKNOWN"}
+            for name in ("v", 'w"')
+        )
+        pages = [
+            {"ResultSet": {"Rows": [_row("v", 'w"'), _row('a,"b"\nc', None)]}, "NextToken": "t"},
+            {"ResultSet": {"Rows": [_row("v", 'w"'), _row("", "1")]}},
+        ]
+        with patch.object(AthenaResultSet, "_get_query_results", side_effect=pages):
+            data = result_set._fetch_all_rows_as_csv()
+        assert data == b'"v","w"""\n"a,""b""\nc",\n"v","w"""\n"","1"\n'
 
 
 class TestWithResultSet:

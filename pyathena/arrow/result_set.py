@@ -12,19 +12,44 @@ from typing import (
 
 from pyathena import OperationalError
 from pyathena.arrow.util import to_column_info
-from pyathena.converter import _TEXT_VALUE_TYPES, Converter, _text_value_converter, _to_default
-from pyathena.error import ProgrammingError
+from pyathena.converter import Converter, _to_default
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet
 from pyathena.util import RetryConfig, override, parse_output_location
 
 if TYPE_CHECKING:
     import polars as pl
-    from pyarrow import Table
+    from pyarrow import ChunkedArray, Table, TimestampType
 
     from pyathena.connection import Connection
 
 _logger = logging.getLogger(__name__)
+
+# The length of timestamp text, such as "2020-01-02 03:04:05.123456", that holds the
+# fraction a timestamp unit can represent.
+_TIMESTAMP_TEXT_LENGTHS: dict[str, int] = {"s": 19, "ms": 23, "us": 26, "ns": 29}
+
+
+def _to_timestamp(column: ChunkedArray, type_: TimestampType) -> ChunkedArray:
+    """Convert timestamp text to a timestamp type, truncating finer fractions.
+
+    Athena writes up to 12 fractional digits, which pyarrow does not parse into a
+    timestamp type whose unit holds fewer.
+
+    Args:
+        column: The timestamp text, with NULL as null or as an empty string.
+        type_: The timestamp type.
+
+    Returns:
+        The timestamps.
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    length = _TIMESTAMP_TEXT_LENGTHS[type_.unit]
+    if (pc.max(pc.utf8_length(column)).as_py() or 0) > length:
+        column = pc.utf8_slice_codeunits(column, 0, length)
+    return pc.if_else(pc.equal(column, ""), pa.scalar(None, pa.string()), column).cast(type_)
 
 
 class AthenaArrowResultSet(AthenaResultSet):
@@ -141,15 +166,13 @@ class AthenaArrowResultSet(AthenaResultSet):
         if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
             self._table = self._as_arrow()
         elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
-            self._table = self._as_arrow_from_api()
+            # Without a result file, as with managed query result storage, the rows from
+            # GetQueryResults are read as a CSV result file.
+            self._table = self._read_csv()
         else:
             import pyarrow as pa
 
             self._table = pa.Table.from_pydict({})
-        # The fetch methods convert the values read from a result file. GetQueryResults
-        # values are already converted, except json and time with time zone values,
-        # which stay text.
-        self._convert_rows = bool(self.output_location)
         self._batches = iter(self._table.to_batches(arraysize))
 
     def _create_s3_file_system(self):
@@ -258,12 +281,7 @@ class AthenaArrowResultSet(AthenaResultSet):
             # converters property keep one column per name.
             columns = [column.to_pylist() for column in rows.columns]
             description = self.description if self.description else []
-            converters = [
-                self._converter.get(d[1])
-                if self._convert_rows or d[1] in _TEXT_VALUE_TYPES
-                else _to_default
-                for d in description
-            ]
+            converters = [self._converter.get(d[1]) for d in description]
             if any(convert is not _to_default for convert in converters):
                 processed_rows = [
                     tuple(convert(v) for convert, v in zip(converters, row, strict=False))
@@ -287,12 +305,18 @@ class AthenaArrowResultSet(AthenaResultSet):
         return self._rows.popleft()
 
     def _read_csv(self) -> Table:
+        """Read the CSV result file, or the GetQueryResults rows as one without it.
+
+        Returns:
+            The Arrow Table of the results.
+
+        Raises:
+            OperationalError: If reading the results fails.
+        """
         import pyarrow as pa
         from pyarrow import csv
 
-        if not self.output_location:
-            raise ProgrammingError("OutputLocation is none or empty.")
-        if not self.output_location.endswith((".csv", ".txt")):
+        if self.output_location and not self.output_location.endswith((".csv", ".txt")):
             return pa.Table.from_pydict({})
         if self.substatement_type and self.substatement_type.upper() in (
             "UPDATE",
@@ -301,7 +325,14 @@ class AthenaArrowResultSet(AthenaResultSet):
             "VACUUM_TABLE",
         ):
             return pa.Table.from_pydict({})
-        length = self._get_content_length()
+        if self.output_location:
+            data = None
+            length = self._get_content_length()
+            location = "/".join(parse_output_location(self.output_location))
+        else:
+            data = self._fetch_all_rows_as_csv()
+            length = len(data)
+            location = "the GetQueryResults rows"
         description = self.description if self.description else []
         names = [d[0] for d in description]
         # pyarrow types every column with a name by its column_types entry, so columns
@@ -318,8 +349,16 @@ class AthenaArrowResultSet(AthenaResultSet):
         else:
             column_names = names
             column_types = self.column_types
+        # Timestamp columns are read as text: pyarrow does not parse fractions finer
+        # than the unit, and on some platforms its strptime fallbacks accept such a
+        # value without its fraction.
+        timestamp_types = {
+            i: dtype
+            for i, (name, d) in enumerate(zip(column_names, description, strict=True))
+            if d[1] == "timestamp" and isinstance(dtype := column_types.get(name), pa.TimestampType)
+        }
         binary_columns = {i for i, d in enumerate(description) if d[1] == "varbinary"}
-        if length and self.output_location.endswith(".txt"):
+        if length and self.output_location and self.output_location.endswith(".txt"):
             read_opts = csv.ReadOptions(
                 skip_rows=0,
                 column_names=column_names,
@@ -332,7 +371,7 @@ class AthenaArrowResultSet(AthenaResultSet):
                 double_quote=False,
                 escape_char=False,
             )
-        elif length and self.output_location.endswith(".csv"):
+        elif length:
             read_opts = csv.ReadOptions(skip_rows=0, block_size=self._block_size, use_threads=True)
             if has_duplicate_names:
                 read_opts.column_names = column_names
@@ -353,19 +392,27 @@ class AthenaArrowResultSet(AthenaResultSet):
         else:
             return pa.Table.from_pydict({})
 
-        bucket, key = parse_output_location(self.output_location)
         try:
             table = csv.read_csv(
-                self._fs.open_input_stream(f"{bucket}/{key}"),
+                self._fs.open_input_stream(location) if data is None else pa.BufferReader(data),
                 read_options=read_opts,
                 parse_options=parse_opts,
                 convert_options=csv.ConvertOptions(
                     strings_can_be_null=bool(binary_columns),
                     quoted_strings_can_be_null=False,
                     timestamp_parsers=self.timestamp_parsers,
-                    column_types=column_types,
+                    column_types={
+                        **column_types,
+                        **{column_names[i]: pa.string() for i in timestamp_types},
+                    },
                 ),
             )
+            for index, type_ in timestamp_types.items():
+                table = table.set_column(
+                    index,
+                    pa.field(table.schema.field(index).name, type_),
+                    _to_timestamp(table.column(index), type_),
+                )
             if has_duplicate_names:
                 table = table.rename_columns(names)
             if binary_columns:
@@ -377,7 +424,7 @@ class AthenaArrowResultSet(AthenaResultSet):
                         table = table.set_column(index, field, table.column(index).fill_null(""))
             return table
         except Exception as e:
-            _logger.exception(f"Failed to read {bucket}/{key}.")
+            _logger.exception(f"Failed to read {location}.")
             raise OperationalError(*e.args) from e
 
     def _read_parquet(self) -> Table:
@@ -405,27 +452,6 @@ class AthenaArrowResultSet(AthenaResultSet):
         else:
             table = self._read_csv()
         return table
-
-    def _as_arrow_from_api(self, converter: Converter | None = None) -> Table:
-        """Build an Arrow Table from GetQueryResults API.
-
-        Used as a fallback when ``output_location`` is not available
-        (e.g. managed query result storage).
-
-        Args:
-            converter: Type converter for result values. Defaults to
-                ``DefaultTypeConverter`` with json and time with time zone values kept as
-                text, as in the CSV result file. Arrow has no type for JSON values or for
-                times with a time zone.
-        """
-        import pyarrow as pa
-
-        rows = self._fetch_all_rows(converter or _text_value_converter())
-        if not rows:
-            return pa.Table.from_pydict({})
-        description = self.description if self.description else []
-        columns = [list(column) for column in zip(*rows, strict=True)]
-        return pa.table(columns, names=[d[0] for d in description])
 
     def as_arrow(self) -> Table:
         """Return the query results as an Apache Arrow Table.

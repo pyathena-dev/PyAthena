@@ -8,7 +8,7 @@ from collections import abc
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack
 from functools import partial
-from io import BufferedReader, IOBase, StringIO, TextIOWrapper
+from io import BufferedReader, BytesIO, IOBase, StringIO, TextIOWrapper
 from multiprocessing import cpu_count
 from typing import (
     TYPE_CHECKING,
@@ -421,7 +421,6 @@ class AthenaPandasResultSet(AthenaResultSet):
     AUTO_CHUNK_SIZE_LARGE: int = 100_000
     AUTO_CHUNK_SIZE_MEDIUM: int = 50_000
 
-    _INTEGER_TYPES: ClassVar[tuple[str, ...]] = ("tinyint", "smallint", "integer", "bigint")
     _PARSE_DATES: ClassVar[list[str]] = [
         "date",
         "time",
@@ -546,16 +545,19 @@ class AthenaPandasResultSet(AthenaResultSet):
 
         # The whole result when it was not read in chunks.
         self._df: DataFrame | None = None
-        if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
-            result = self._as_pandas()
-            trunc_date = _no_trunc_date if self.is_unload else self._finish_csv_frame
+        if self.state == AthenaQueryExecution.STATE_SUCCEEDED:
+            if self.output_location:
+                result = self._as_pandas()
+                trunc_date = _no_trunc_date if self.is_unload else self._finish_csv_frame
+            else:
+                # Without a result file, as with managed query result storage, the rows
+                # from GetQueryResults are read as a CSV result file, but not in chunks.
+                result = self._read_csv()
+                trunc_date = self._finish_csv_frame
             if isinstance(result, pd.DataFrame):
                 self._df = trunc_date(result)
             else:
                 self._df_iter = PandasDataFrameIterator(result, trunc_date, self._csv_stream)
-        elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
-            # GetQueryResults values are already converted and need no time truncation.
-            self._df = self._as_pandas_from_api()
         else:
             self._df = pd.DataFrame()
         if self._df is not None:
@@ -795,11 +797,19 @@ class AthenaPandasResultSet(AthenaResultSet):
             return tuple(row[1].values())
 
     def _read_csv(self) -> TextFileReader | DataFrame:
+        """Read the CSV result file, or the GetQueryResults rows as one without it.
+
+        The GetQueryResults rows are read as a whole, not in chunks.
+
+        Returns:
+            The DataFrame of the results, or a reader of their chunks.
+
+        Raises:
+            OperationalError: If reading the results fails.
+        """
         import pandas as pd
 
-        if not self.output_location:
-            raise ProgrammingError("OutputLocation is none or empty.")
-        if not self.output_location.endswith((".csv", ".txt")):
+        if self.output_location and not self.output_location.endswith((".csv", ".txt")):
             return pd.DataFrame()
         if self.substatement_type and self.substatement_type.upper() in (
             "UPDATE",
@@ -808,15 +818,22 @@ class AthenaPandasResultSet(AthenaResultSet):
             "VACUUM_TABLE",
         ):
             return pd.DataFrame()
-        length = self._get_content_length()
+        if self.output_location:
+            data = None
+            length = self._get_content_length()
+            location = self.output_location
+        else:
+            data = self._fetch_all_rows_as_csv()
+            length = len(data)
+            location = "the GetQueryResults rows"
         if length == 0:
             return pd.DataFrame()
 
         # Chunksize determination with user preference priority
-        effective_chunksize = self._chunksize
+        effective_chunksize = self._chunksize if data is None else None
 
         # Only auto-optimize if user hasn't specified chunksize AND auto_optimize is enabled
-        if effective_chunksize is None and self._auto_optimize_chunksize:
+        if effective_chunksize is None and self._auto_optimize_chunksize and data is None:
             effective_chunksize = self._auto_determine_chunksize(length)
             if effective_chunksize:
                 _logger.debug(
@@ -832,13 +849,22 @@ class AthenaPandasResultSet(AthenaResultSet):
 
         try:
             with ExitStack() as stack:
-                source: str | IOBase = self.output_location
+                source: str | IOBase = location
                 binary_columns = self._configure_binary_csv_read(read_csv_kwargs, labels)
                 if labels is not None:
                     # After _configure_binary_csv_read(), which checks for the header row.
                     self._read_csv_header_as_labels(read_csv_kwargs, csv_engine)
                 self._csv_converters = read_csv_kwargs.get("converters") or {}
-                if binary_columns:
+                if data is not None:
+                    # The rows are in memory, with nothing to open with storage options.
+                    read_csv_kwargs.pop("storage_options", None)
+                    if binary_columns:
+                        source = self._csv_stream = stack.enter_context(
+                            self._open_binary_csv_stream(binary_columns, None, data)
+                        )
+                    else:
+                        source = BytesIO(data)
+                elif binary_columns:
                     # Given storage_options, even None, open the file through fsspec
                     # as pandas does.
                     storage_options = None
@@ -861,7 +887,7 @@ class AthenaPandasResultSet(AthenaResultSet):
                     stack.pop_all()
 
             # Log performance information for large files
-            if length > self.LARGE_FILE_THRESHOLD_BYTES:
+            if data is None and length > self.LARGE_FILE_THRESHOLD_BYTES:
                 mode = "chunked" if effective_chunksize else "full"
                 chunksize = f" with chunksize={effective_chunksize}" if effective_chunksize else ""
                 _logger.info(
@@ -872,7 +898,7 @@ class AthenaPandasResultSet(AthenaResultSet):
             return result
 
         except Exception as e:
-            _logger.exception(f"Failed to read {self.output_location}.")
+            _logger.exception(f"Failed to read {location}.")
             raise OperationalError(*e.args) from e
 
     def _reads_csv_with_pyarrow(self) -> bool:
@@ -984,8 +1010,7 @@ class AthenaPandasResultSet(AthenaResultSet):
             True if pandas reads the header and quoted fields of the file as written.
         """
         return not (
-            not self.output_location
-            or not self.output_location.endswith(".csv")
+            (self.output_location and not self.output_location.endswith(".csv"))
             or read_csv_kwargs.get("header") != 0
             or read_csv_kwargs.get("skiprows") is not None
             or read_csv_kwargs.get("dialect") is not None
@@ -1150,12 +1175,28 @@ class AthenaPandasResultSet(AthenaResultSet):
         return binary_columns
 
     def _open_binary_csv_stream(
-        self, binary_columns: set[int], storage_options: dict[str, Any] | None
+        self,
+        binary_columns: set[int],
+        storage_options: dict[str, Any] | None,
+        data: bytes | None = None,
     ) -> TextIOWrapper:
-        """Open a stream that preserves binary NULL fields and original CSV newlines."""
+        """Open a stream that preserves binary NULL fields and original CSV newlines.
+
+        Args:
+            binary_columns: Zero-based indexes of the binary columns.
+            storage_options: The options to open the result file with through fsspec,
+                or None to open it with PyAthena's filesystem.
+            data: The CSV text to read in place of the result file.
+
+        Returns:
+            The text stream for ``pandas.read_csv()``.
+        """
         text_options: dict[str, Any] = {"mode": "rt", "encoding": "utf-8", "newline": ""}
         with ExitStack() as stack:
-            if storage_options is None:
+            source: IOBase
+            if data is not None:
+                source = StringIO(data.decode("utf-8"), newline="")
+            elif storage_options is None:
                 source = stack.enter_context(self._fs.open(self.output_location, **text_options))
             else:
                 source = stack.enter_context(
@@ -1226,37 +1267,6 @@ class AthenaPandasResultSet(AthenaResultSet):
         else:
             df = self._read_csv()
         return df
-
-    def _as_pandas_from_api(self, converter: Converter | None = None) -> DataFrame:
-        """Build a DataFrame from GetQueryResults API.
-
-        Used as a fallback when ``output_location`` is not available
-        (e.g. managed query result storage).
-
-        Args:
-            converter: Type converter for result values. Defaults to
-                ``DefaultTypeConverter`` if not specified.
-        """
-        import pandas as pd
-
-        rows = self._fetch_all_rows(converter)
-        if not rows:
-            return pd.DataFrame()
-        description = self.description if self.description else []
-        # Positional, so that columns with the same name keep their own values.
-        columns = [list(column) for column in zip(*rows, strict=True)]
-        # Integer columns get the dtype that the CSV result file reads them with,
-        # and json columns with NULL stay objects as there, so that NULL does not
-        # make their values floats.
-        data: dict[Any, Any] = {}
-        for name, values, d in zip(self._get_column_names(), columns, description, strict=True):
-            dtype = None
-            if d[1] in self._INTEGER_TYPES:
-                dtype = self._converter.get_dtype(d[1], d[4], d[5])
-            elif d[1] == "json" and None in values:
-                dtype = object
-            data[name] = values if dtype is None else pd.array(values, dtype=dtype)
-        return pd.DataFrame(data)
 
     def as_pandas(self) -> PandasDataFrameIterator | DataFrame:
         """Return the query results as a DataFrame or an iterator of DataFrame chunks.

@@ -5,13 +5,19 @@
 #
 # SPDX-License-Identifier: MIT
 
+from datetime import datetime
 from unittest.mock import PropertyMock, patch
 
 import polars as pl
 import pytest
 
 from pyathena.error import OperationalError
-from pyathena.polars.result_set import AthenaPolarsResultSet, PolarsDataFrameIterator
+from pyathena.polars.converter import DefaultPolarsTypeConverter
+from pyathena.polars.result_set import (
+    AthenaPolarsResultSet,
+    PolarsDataFrameIterator,
+    _to_datetimes,
+)
 
 _ROWS_BEFORE_FAILURE = 300_000
 
@@ -25,7 +31,46 @@ def _chunked_result_set() -> AthenaPolarsResultSet:
     result_set = AthenaPolarsResultSet.__new__(AthenaPolarsResultSet)  # bypass __init__
     result_set._chunksize = 10_000
     result_set._kwargs = {}
+    result_set._metadata = None
     return result_set
+
+
+@pytest.mark.parametrize(
+    ("dtype", "microseconds"),
+    [
+        (pl.Datetime, [0, 123000, 123456, 123456, 123456]),
+        (pl.Datetime("ms"), [0, 123000, 123000, 123000, 123000]),
+        (pl.Datetime("us"), [0, 123000, 123456, 123456, 123456]),
+    ],
+)
+def test_to_datetimes(dtype, microseconds):
+    """Timestamp text with up to 12 fractional digits is truncated to the time unit.
+
+    NULL can be null or an empty string, depending on the read options. A column that
+    the DataFrame does not have, such as one not selected, is skipped.
+    """
+    df = pl.DataFrame(
+        {
+            "t": [
+                "2020-01-02 03:04:05",
+                "2020-01-02 03:04:05.123",
+                "2020-01-02 03:04:05.123456",
+                "2020-01-02 03:04:05.123456789",
+                "2020-01-02 03:04:05.123456789012",
+                "0001-01-01 00:00:00.000",
+                "",
+                None,
+            ]
+        }
+    )
+    result = _to_datetimes(df, {"t": dtype, "missing": dtype})
+    assert result.schema["t"] == dtype
+    assert result["t"].to_list() == [
+        *(datetime(2020, 1, 2, 3, 4, 5, us) for us in microseconds),
+        datetime(1, 1, 1),
+        None,
+        None,
+    ]
 
 
 class TestAthenaPolarsResultSet:
@@ -205,6 +250,51 @@ class TestAthenaPolarsResultSet:
             if not isinstance(result, (pl.DataFrame, tuple)):
                 list(result)
         assert read.call_args.kwargs["storage_options"] == {"anon": True}
+
+    @pytest.mark.parametrize(
+        ("kwargs", "expected"),
+        [
+            ({}, {"t": [datetime(2020, 1, 2, 3, 4, 5, 123456), None]}),
+            ({"columns": ["v"]}, {}),
+            ({"new_columns": ["t2", "v2"]}, {"t2": [datetime(2020, 1, 2, 3, 4, 5, 123456), None]}),
+            ({"with_column_names": lambda names: [n.upper() for n in names]}, OperationalError),
+        ],
+    )
+    def test_read_csv_truncates_timestamps(self, kwargs, expected):
+        """Timestamps that fail to parse are read again as text and truncated.
+
+        With ``with_column_names`` given to execute(), Polars renames the columns as it
+        reads them, so they are not, and the read fails as before. No AWS calls; the
+        GetQueryResults rows are mocked.
+        """
+        result_set = AthenaPolarsResultSet.__new__(AthenaPolarsResultSet)  # bypass __init__
+        result_set._query_execution = None
+        result_set._converter = DefaultPolarsTypeConverter()
+        result_set._kwargs = kwargs
+        result_set._metadata = tuple(
+            {"Name": n, "Type": t, "Precision": 3, "Scale": 0, "Nullable": "UNKNOWN"}
+            for n, t in (("t", "timestamp"), ("v", "varchar"))
+        )
+        data = b'"t","v"\n"2020-01-02 03:04:05.123456789012","x"\n,"y"\n'
+        with (
+            patch.object(AthenaPolarsResultSet, "_fetch_all_rows_as_csv", return_value=data),
+            patch.object(
+                AthenaPolarsResultSet,
+                "_csv_storage_options",
+                new_callable=PropertyMock,
+                return_value={},
+            ),
+        ):
+            if expected is OperationalError:
+                with pytest.raises(OperationalError):
+                    result_set._read_csv()
+                return
+            df = result_set._read_csv()
+        for name, values in expected.items():
+            assert df.schema[name] == pl.Datetime("us")
+            assert df[name].to_list() == values
+        if not expected:
+            assert df.columns == ["v"]
 
 
 class TestPolarsDataFrameIterator:

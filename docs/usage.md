@@ -42,6 +42,8 @@ cursor = connect(work_group="YOUR_MANAGED_WORK_GROUP",
 With managed query result storage, query results are retrieved via the `GetQueryResults` API
 (1000 rows per request) instead of reading S3 files directly. This may be slower for large
 result sets. For large datasets, consider using customer-managed storage or the `UNLOAD` statement.
+The pandas, Arrow, and Polars cursors read these rows as they read a CSV result file, with the
+same types and converters, but not in chunks.
 ```
 
 ## Cursor iteration
@@ -709,8 +711,7 @@ column. You can mix both styles in the same dictionary.
   JSON-formatted output, which is parsed reliably.
 - **Arrow, Pandas, and Polars cursors** — These cursors accept `result_set_type_hints`
   but their converters do not currently use the hints because they rely on their own
-  type systems. The parameter is passed through for forward compatibility and for
-  result sets that fall back to the default conversion path.
+  type systems. The parameter is passed through for forward compatibility.
 
 ### Breaking change in 3.30.0
 

@@ -12,13 +12,13 @@ from typing import (
 )
 
 from pyathena.common import BaseCursor, CursorIterator
-from pyathena.converter import _TEXT_VALUE_TYPES, Converter, DefaultTypeConverter
+from pyathena.converter import Converter, DefaultTypeConverter
 from pyathena.error import DataError, OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig, override, parse_output_location, retry_api_call
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Iterator
 
     from pyathena.connection import Connection
 
@@ -675,29 +675,34 @@ class AthenaResultSet(CursorIterator):
                 return False
         return True
 
-    def _text_value_converters(
-        self,
-        converters: dict[str, Callable[[str | None], Any | None]],
-        column_names: list[str] | None = None,
-    ) -> dict[str, Callable[[str | None], Any | None]]:
-        """Select the converters of the columns that the fallbacks keep as text.
+    def _iter_all_row_pages(self) -> Iterator[tuple[list[dict[str, Any]], int]]:
+        """Fetch all rows via GetQueryResults API from the beginning.
 
-        Args:
-            converters: The converters keyed by column name.
-            column_names: The names that ``converters`` uses for the columns, in
-                column order. Defaults to the names in the description.
+        Paginates through all results using MaxResults=1000. This is for subclass result
+        sets that need to fall back to the API when S3 output is not available (e.g.,
+        managed query result storage).
 
-        Returns:
-            The converters of the columns whose Athena type is in ``_TEXT_VALUE_TYPES``.
+        Yields:
+            The rows of each page and the offset of their first data row, which is 1 when
+            the first page starts with the column labels.
         """
-        description = self.description if self.description else []
-        if column_names is None:
-            column_names = [d[0] for d in description]
-        return {
-            name: converters[name]
-            for name, d in zip(column_names, description, strict=True)
-            if d[1] in _TEXT_VALUE_TYPES
-        }
+        _logger.warning(
+            "output_location is not available (e.g. managed query result storage). "
+            "Falling back to GetQueryResults API. "
+            "This may be slow for large result sets."
+        )
+
+        next_token: str | None = None
+        first_page = True
+        while True:
+            response = self._get_query_results(self.DEFAULT_FETCH_SIZE, next_token)
+            rows, next_token = self._parse_result_rows(response)
+            # Only the first page starts with the column labels.
+            offset = 1 if first_page and rows and self._is_first_row_column_labels(rows) else 0
+            first_page = False
+            yield rows, offset
+            if not next_token:
+                break
 
     def _fetch_all_rows(
         self,
@@ -705,53 +710,63 @@ class AthenaResultSet(CursorIterator):
     ) -> list[tuple[Any | None, ...]]:
         """Fetch all rows via GetQueryResults API with type conversion.
 
-        Paginates through all results from the beginning using MaxResults=1000.
-        Defaults to ``DefaultTypeConverter`` for string-to-Python type conversion,
-        because subclass converters (e.g. Pandas/Arrow) are designed for S3 file
-        reading and may not handle API result strings.
-
-        This method is intended for use by subclass result sets that need to
-        fall back to the API when S3 output is not available (e.g., managed
-        query result storage).
-
         Args:
             converter: Type converter for result values. Defaults to
                 ``DefaultTypeConverter`` if not specified.
 
         Returns:
             List of converted row tuples.
+
+        Raises:
+            ProgrammingError: If the metadata is not available.
         """
-        if self._metadata is None:
+        metadata = self._metadata
+        if metadata is None:
             raise ProgrammingError("Metadata is not available.")
-
-        _logger.warning(
-            "output_location is not available (e.g. managed query result storage). "
-            "Falling back to GetQueryResults API. "
-            "This may be slow for large result sets."
-        )
-
         converter = converter or DefaultTypeConverter()
         all_rows: list[tuple[Any | None, ...]] = []
-        next_token: str | None = None
-
-        while True:
-            first_page = next_token is None
-            response = self._get_query_results(self.DEFAULT_FETCH_SIZE, next_token)
-            rows, next_token = self._parse_result_rows(response)
-
-            # Only the first page can start with the column labels.
-            offset = 1 if first_page and rows and self._is_first_row_column_labels(rows) else 0
+        for rows, offset in self._iter_all_row_pages():
             all_rows.extend(
                 cast(
                     list[tuple[Any | None, ...]],
-                    self._get_rows(offset, self._metadata, rows, converter),
+                    self._get_rows(offset, metadata, rows, converter),
                 )
             )
-
-            if not next_token:
-                break
-
         return all_rows
+
+    def _fetch_all_rows_as_csv(self) -> bytes:
+        """Fetch all rows via GetQueryResults API as the text of a CSV result file.
+
+        GetQueryResults returns the same text for each value as the CSV result file
+        has, and this writes it in the same format: a header of the column labels,
+        each value quoted with its quotes doubled, NULL as an empty field, and a line
+        feed after each row. The cursors that read CSV result files can then read it
+        as one.
+
+        Returns:
+            The CSV text encoded in UTF-8, or empty bytes when the result has no columns.
+
+        Raises:
+            ProgrammingError: If the metadata is not available.
+        """
+        if self._metadata is None:
+            raise ProgrammingError("Metadata is not available.")
+        description = self.description if self.description else []
+        if not description:
+            return b""
+        lines = [",".join('"' + d[0].replace('"', '""') + '"' for d in description)]
+        for rows, offset in self._iter_all_row_pages():
+            lines.extend(
+                ",".join(
+                    ""
+                    if (value := data.get("VarCharValue")) is None
+                    else '"' + value.replace('"', '""') + '"'
+                    for data in row.get("Data", [])
+                )
+                for row in rows[offset:]
+            )
+        lines.append("")
+        return "\n".join(lines).encode("utf-8")
 
     def _get_content_length(self) -> int:
         if not self.output_location:
