@@ -23,6 +23,7 @@ from fsspec.implementations.local import LocalFileSystem, make_path_posix
 from fsspec.utils import check_contained
 
 from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
+from pyathena.filesystem.s3_core import S3Core
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3Executor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
@@ -137,6 +138,11 @@ class AioS3FileSystem(AsyncFileSystem):
         )
         # Share dircache for cache coherence between async and sync instances
         self.dircache = self._sync_fs.dircache
+
+    @property
+    def core(self) -> S3Core:
+        """The typed S3 operations of the wrapped ``S3FileSystem``."""
+        return self._sync_fs.core
 
     @staticmethod
     def parse_path(path: str) -> tuple[str, str | None, str | None]:
@@ -646,7 +652,7 @@ class AioS3FileSystem(AsyncFileSystem):
         upload_id = cast(str, multipart_upload.upload_id)
 
         semaphore = asyncio.Semaphore(max_workers)
-        part_kwargs = self._sync_fs._get_operation_kwargs("upload_part_copy", kwargs)
+        part_kwargs = self._sync_fs.core.operation_params("upload_part_copy", kwargs)
         failed = False
 
         async def _upload_part(i: int, range_: tuple[int, int]) -> dict[str, Any] | None:
@@ -709,7 +715,7 @@ class AioS3FileSystem(AsyncFileSystem):
                     key=key2,
                     upload_id=upload_id,
                     parts=cast(list[dict[str, Any]], parts),
-                    **self._sync_fs._get_operation_kwargs("complete_multipart_upload", kwargs),
+                    **self._sync_fs.core.operation_params("complete_multipart_upload", kwargs),
                 )
             )
             # shield keeps a cancellation from cancelling the completion, whose

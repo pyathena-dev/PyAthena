@@ -6,9 +6,13 @@ import copy
 import logging
 from collections.abc import Iterator, Mapping, MutableMapping
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from pyathena.filesystem.s3_path import S3Path
 from pyathena.util import override
+
+if TYPE_CHECKING:
+    from pyathena.filesystem.s3_core import S3Bucket, S3ObjectSummary
 
 _logger = logging.getLogger(__name__)
 
@@ -135,8 +139,8 @@ class S3Object(MutableMapping[str, Any]):
         under their property names (e.g., ``ContentType`` -> ``content_type``).
         ``storage_class`` defaults to ``STANDARD`` when ``init`` has no
         ``StorageClass``, and ``size`` is taken from ``Size`` or
-        ``ContentLength``. ``name`` is set to ``bucket/key``, or to the bucket
-        when there is no key.
+        ``ContentLength``, or is 0, also for an empty ``init``. ``name`` is
+        set to ``bucket/key``, or to the bucket when there is no key.
 
         Args:
             init: An S3 API response or listing entry, such as a HeadObject
@@ -145,28 +149,27 @@ class S3Object(MutableMapping[str, Any]):
                 ``bucket``, ``key`` and ``version_id``. S3 API field names
                 are stored under their property names.
         """
-        if init:
-            filtered = {}
-            for k, v in init.items():
-                if k not in _API_FIELD_TO_S3_OBJECT_PROPERTY:
-                    continue
-                filtered[_API_FIELD_TO_S3_OBJECT_PROPERTY[k]] = v
-            if "StorageClass" not in init:
-                # https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html#API_HeadObject_ResponseSyntax
-                # Amazon S3 returns this header for all objects except for
-                # S3 Standard storage class objects.
-                filtered[_API_FIELD_TO_S3_OBJECT_PROPERTY["StorageClass"]] = (
-                    S3StorageClass.S3_STORAGE_CLASS_STANDARD
-                )
-            super().update(filtered)
-            if "Size" in init:
-                self.content_length = init["Size"]
-                self.size = init["Size"]
-            elif "ContentLength" in init:
-                self.size = init["ContentLength"]
-            else:
-                self.content_length = 0
-                self.size = 0
+        filtered = {}
+        for k, v in init.items():
+            if k not in _API_FIELD_TO_S3_OBJECT_PROPERTY:
+                continue
+            filtered[_API_FIELD_TO_S3_OBJECT_PROPERTY[k]] = v
+        if "StorageClass" not in init:
+            # https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html#API_HeadObject_ResponseSyntax
+            # Amazon S3 returns this header for all objects except for
+            # S3 Standard storage class objects.
+            filtered[_API_FIELD_TO_S3_OBJECT_PROPERTY["StorageClass"]] = (
+                S3StorageClass.S3_STORAGE_CLASS_STANDARD
+            )
+        super().update(filtered)
+        if "Size" in init:
+            self.content_length = init["Size"]
+            self.size = init["Size"]
+        elif "ContentLength" in init:
+            self.size = init["ContentLength"]
+        else:
+            self.content_length = 0
+            self.size = 0
         super().update({_API_FIELD_TO_S3_OBJECT_PROPERTY.get(k, k): v for k, v in kwargs.items()})
         if self.get("key") is None:
             self.name = self.get("bucket")
@@ -258,6 +261,140 @@ class S3Object(MutableMapping[str, Any]):
                 fields[k] = field
         return fields
 
+    @classmethod
+    def from_summary(cls, summary: S3ObjectSummary) -> S3Object:
+        """Build the file entry of an object listed by ListObjectsV2.
+
+        Args:
+            summary: The listed object.
+
+        Returns:
+            The file entry, named ``bucket/key``.
+        """
+        return cls(
+            init={
+                k: v
+                for k, v in {
+                    "ETag": summary.etag,
+                    "Size": summary.size,
+                    "StorageClass": summary.storage_class,
+                    "LastModified": summary.last_modified,
+                }.items()
+                if v is not None
+            },
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket=summary.bucket,
+            key=summary.key,
+        )
+
+    @classmethod
+    def from_version(cls, version: S3ObjectVersion) -> S3Object:
+        """Build the file entry of a version listed by ListObjectVersions.
+
+        The entry is named ``bucket/key?versionId=<id>`` so that the version
+        can be addressed, except for the ``null`` version, which a write to
+        the key replaces and which is named ``bucket/key``.
+
+        Args:
+            version: The listed version.
+
+        Returns:
+            The file entry.
+        """
+        file = cls(
+            init={
+                k: v
+                for k, v in {
+                    "ETag": version.etag,
+                    "Size": version.size,
+                    "StorageClass": version.storage_class,
+                    "LastModified": version.last_modified,
+                }.items()
+                if v is not None
+            },
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket=version.bucket,
+            key=version.key,
+            version_id=version.version_id,
+            is_latest=version.is_latest,
+        )
+        if version.version_id != "null":
+            file.name = str(S3Path(version.bucket, version.key, version.version_id))
+        return file
+
+    @classmethod
+    def from_metadata(cls, metadata: S3Metadata, version_id: str | None = None) -> S3Object:
+        """Build the file entry of an object looked up with HeadObject.
+
+        The fields that the response does not have are left out, except
+        ``Metadata``, which botocore always returns.
+
+        Args:
+            metadata: The metadata of the object, with the looked up path.
+            version_id: The version ID of the entry, which may be pinned or
+                omitted apart from the looked up path.
+
+        Returns:
+            The file entry, named ``bucket/key``.
+
+        Raises:
+            ValueError: If the metadata has no object path.
+        """
+        if metadata.path is None or not metadata.path.key:
+            raise ValueError("The metadata has no object path.")
+        fields = {
+            "ETag": metadata.etag,
+            "CacheControl": metadata.cache_control,
+            "ContentDisposition": metadata.content_disposition,
+            "ContentEncoding": metadata.content_encoding,
+            "ContentLanguage": metadata.content_language,
+            "ContentLength": metadata.content_length,
+            "ContentType": metadata.content_type,
+            "Expires": metadata.expires,
+            "WebsiteRedirectLocation": metadata.website_redirect_location,
+            "ServerSideEncryption": metadata.server_side_encryption,
+            "SSECustomerAlgorithm": metadata.sse_customer_algorithm,
+            "SSEKMSKeyId": metadata.sse_kms_key_id,
+            "BucketKeyEnabled": metadata.bucket_key_enabled,
+            "StorageClass": metadata.storage_class,
+            "ObjectLockMode": metadata.object_lock_mode,
+            "ObjectLockRetainUntilDate": metadata.object_lock_retain_until_date,
+            "ObjectLockLegalHoldStatus": metadata.object_lock_legal_hold_status,
+            "Metadata": metadata.user_metadata,
+            "LastModified": metadata.last_modified,
+        }
+        return cls(
+            init={k: v for k, v in fields.items() if v is not None},
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket=metadata.path.bucket,
+            key=metadata.path.key,
+            version_id=version_id,
+        )
+
+    @classmethod
+    def from_bucket(cls, bucket: S3Bucket) -> S3Object:
+        """Build the directory entry of a bucket.
+
+        Args:
+            bucket: The bucket.
+
+        Returns:
+            The directory entry, named after the bucket.
+        """
+        return cls(
+            init={
+                "ContentLength": 0,
+                "ContentType": None,
+                "StorageClass": S3StorageClass.S3_STORAGE_CLASS_BUCKET,
+                "ETag": None,
+                "LastModified": None,
+            },
+            type=S3ObjectType.S3_OBJECT_TYPE_DIRECTORY,
+            bucket=bucket.name,
+            key=None,
+            version_id=None,
+        )
+
 
 class S3Metadata(Mapping[str, str]):
     """Represents the metadata of an S3 object as returned by HeadObject.
@@ -279,12 +416,14 @@ class S3Metadata(Mapping[str, str]):
     See https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html
     """
 
-    def __init__(self, response: dict[str, Any]) -> None:
+    def __init__(self, response: dict[str, Any], path: S3Path | None = None) -> None:
         """Initialize the metadata from a HeadObject response.
 
         Args:
             response: The HeadObject response.
+            path: The path that was looked up, if known.
         """
+        self._path = path
         self._cache_control: str | None = response.get("CacheControl")
         self._content_disposition: str | None = response.get("ContentDisposition")
         self._content_encoding: str | None = response.get("ContentEncoding")
@@ -307,6 +446,11 @@ class S3Metadata(Mapping[str, str]):
         self._bucket_key_enabled: bool | None = response.get("BucketKeyEnabled")
         self._website_redirect_location: str | None = response.get("WebsiteRedirectLocation")
         self._version_id: str | None = response.get("VersionId")
+        self._object_lock_mode: str | None = response.get("ObjectLockMode")
+        self._object_lock_retain_until_date: datetime | None = response.get(
+            "ObjectLockRetainUntilDate"
+        )
+        self._object_lock_legal_hold_status: str | None = response.get("ObjectLockLegalHoldStatus")
         self._user_metadata: dict[str, str] = response.get("Metadata", {})
 
     @override
@@ -409,6 +553,26 @@ class S3Metadata(Mapping[str, str]):
     def version_id(self) -> str | None:
         """The ``VersionId`` of the object."""
         return self._version_id
+
+    @property
+    def path(self) -> S3Path | None:
+        """The path that was looked up, or None if it is not known."""
+        return self._path
+
+    @property
+    def object_lock_mode(self) -> str | None:
+        """The ``ObjectLockMode`` of the object."""
+        return self._object_lock_mode
+
+    @property
+    def object_lock_retain_until_date(self) -> datetime | None:
+        """The ``ObjectLockRetainUntilDate`` of the object."""
+        return self._object_lock_retain_until_date
+
+    @property
+    def object_lock_legal_hold_status(self) -> str | None:
+        """The ``ObjectLockLegalHoldStatus`` of the object."""
+        return self._object_lock_legal_hold_status
 
     @property
     def user_metadata(self) -> dict[str, str]:

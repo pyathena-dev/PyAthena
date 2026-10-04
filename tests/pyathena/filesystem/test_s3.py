@@ -35,6 +35,7 @@ from fsspec.implementations.memory import MemoryFileSystem
 import pyathena
 from pyathena.filesystem import register_s3_filesystem
 from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
+from pyathena.filesystem.s3_core import S3Core
 from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import S3Object, S3ObjectType, S3StorageClass
@@ -166,12 +167,12 @@ class TestS3FileSystem:
         # __init__ which would require a boto3 client.
         fs = S3FileSystem.__new__(S3FileSystem)
         fs.dircache = DirCache()
-        fs._client = mock.MagicMock()
-        fs._client.meta.method_to_api_mapping = S3_CLIENT.meta.method_to_api_mapping
-        fs._client.meta.service_model = S3_CLIENT.meta.service_model
-        fs._call = mock.MagicMock()
-        fs._retry_config = RetryConfig()
-        fs.request_kwargs = {}
+        client = mock.MagicMock()
+        client.meta.method_to_api_mapping = S3_CLIENT.meta.method_to_api_mapping
+        client.meta.service_model = S3_CLIENT.meta.service_model
+        fs._core = S3Core(client, retry_config=RetryConfig())
+        # The requests of the core and of the filesystem go to one mock.
+        fs._call = fs._core.call = mock.MagicMock()
         fs.max_workers = 4
         fs.default_block_size = S3FileSystem.DEFAULT_BLOCK_SIZE
         fs.allow_bucket_creation = False
@@ -1095,27 +1096,6 @@ class TestS3FileSystem:
             ServerSideEncryption="AES256",
             ContentType="text/plain",
         )
-
-    @pytest.mark.parametrize(
-        ("method", "kwargs", "expected"),
-        [
-            (
-                "get_object",
-                {"ServerSideEncryption": "AES256", "RequestPayer": "requester", "IfMatch": '"e"'},
-                {"RequestPayer": "requester", "IfMatch": '"e"'},
-            ),
-            ("head_bucket", {"RequestPayer": "requester"}, {}),
-            (
-                "upload_part",
-                {"ContentType": "text/csv", "SSECustomerAlgorithm": "AES256"},
-                {"SSECustomerAlgorithm": "AES256"},
-            ),
-            # Not an S3 API operation.
-            ("generate_presigned_url", {"RequestPayer": "requester"}, {}),
-        ],
-    )
-    def test_get_operation_kwargs(self, method, kwargs, expected):
-        assert self._make_fs()._get_operation_kwargs(method, kwargs) == expected
 
     def test_requester_pays(self):
         # GH-969: RequestPayer is sent only with the operations that accept
@@ -2965,6 +2945,8 @@ class TestS3FileSystem:
         # recorded.
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
+        # The real request function, on the client mock.
+        fs._core.call = functools.partial(S3Core.call, fs._core)
         fs._call = functools.partial(S3FileSystem._call, fs)
         fs.info = mock.MagicMock(return_value=self._file_object("key"))
         fs.info.return_value.size = len(data)
@@ -3055,6 +3037,8 @@ class TestS3FileSystem:
 
     def test_cat_file_range_errors(self):
         fs = self._make_fs()
+        # The real request function, on the client mock.
+        fs._core.call = functools.partial(S3Core.call, fs._core)
         fs._call = functools.partial(S3FileSystem._call, fs)
         fs._client.get_object.side_effect = botocore.exceptions.ClientError(
             {"Error": {"Code": "NoSuchKey", "Message": "No such key"}}, "GetObject"
@@ -3512,6 +3496,89 @@ class TestS3FileSystem:
                 block_size=block_size,
             )
         fs._call.assert_not_called()
+
+    def test_ls_sparse_entries_keep_defaults(self):
+        # Listed entries without Size or StorageClass get S3Object's defaults,
+        # as they did when they were built from the response.
+        fs = self._make_fs()
+        fs.version_aware = True
+        fs._call.side_effect = [
+            {"Contents": [{"Key": "k"}]},
+            {"Versions": [{"Key": "k", "VersionId": "v1"}]},
+        ]
+
+        for files in (
+            fs.ls("s3://bucket", detail=True),
+            fs.ls("s3://bucket", detail=True, versions=True),
+        ):
+            assert (files[0]["size"], files[0]["content_length"], files[0]["storage_class"]) == (
+                0,
+                0,
+                S3StorageClass.S3_STORAGE_CLASS_STANDARD,
+            )
+
+    def test_object_version_info_from_markers(self):
+        # Explicit markers start the listing, and the next page follows the
+        # returned markers instead of sending them twice.
+        fs = self._make_fs()
+        fs._call.side_effect = [
+            {"IsTruncated": True, "NextKeyMarker": "m", "NextVersionIdMarker": "w"},
+            {"IsTruncated": False},
+        ]
+
+        fs.object_version_info("s3://bucket", KeyMarker="k", VersionIdMarker="v")
+        assert [c.kwargs for c in fs._call.call_args_list] == [
+            {"Bucket": "bucket", "Prefix": "", "KeyMarker": "k", "VersionIdMarker": "v"},
+            {"Bucket": "bucket", "Prefix": "", "KeyMarker": "m", "VersionIdMarker": "w"},
+        ]
+
+    def test_ls_buckets_follows_pages(self):
+        # GH-1059: ListBuckets returns pages, which _ls_buckets() used to
+        # ignore beyond the first.
+        fs = self._make_fs()
+        fs._call.side_effect = [
+            {"Buckets": [{"Name": "a"}], "ContinuationToken": "t1"},
+            {"Buckets": [{"Name": "b"}]},
+        ]
+
+        assert fs.ls("s3://") == ["a", "b"]
+        assert fs._call.call_args_list == [
+            mock.call(fs._client.list_buckets),
+            mock.call(fs._client.list_buckets, ContinuationToken="t1"),
+        ]
+
+    def test_info_keeps_head_object_fields(self):
+        # The entry built from the typed HeadObject result has the fields
+        # that it had when it was built from the response.
+        fs = self._make_fs()
+        retain_until = datetime(2027, 1, 1, tzinfo=UTC)
+        fs._call.return_value = {
+            "ContentLength": 4,
+            "ETag": '"e"',
+            "ObjectLockMode": "GOVERNANCE",
+            "ObjectLockRetainUntilDate": retain_until,
+            "ObjectLockLegalHoldStatus": "ON",
+            "BucketKeyEnabled": False,
+            "Metadata": {"a": "1"},
+        }
+
+        info = fs.info("s3://bucket/key")
+        assert dict(info) == {
+            "content_length": 4,
+            "size": 4,
+            "etag": '"e"',
+            "object_lock_mode": "GOVERNANCE",
+            "object_lock_retain_until_date": retain_until,
+            "object_lock_legal_hold_status": "ON",
+            "bucket_key_enabled": False,
+            "metadata": {"a": "1"},
+            "storage_class": S3StorageClass.S3_STORAGE_CLASS_STANDARD,
+            "type": S3ObjectType.S3_OBJECT_TYPE_FILE,
+            "bucket": "bucket",
+            "key": "key",
+            "version_id": None,
+            "name": "bucket/key",
+        }
 
     def test_head_object_version_aware(self):
         fs = self._make_fs()
@@ -5241,9 +5308,7 @@ class TestS3File:
         # operation as the real one does.
         fs = mock.MagicMock(spec=S3FileSystem)
         fs._client = S3_CLIENT
-        fs._get_operation_kwargs.side_effect = functools.partial(
-            S3FileSystem._get_operation_kwargs, fs
-        )
+        fs.core = S3Core(S3_CLIENT)
         fs._get_lookup_kwargs.side_effect = S3FileSystem._get_lookup_kwargs
         return fs
 

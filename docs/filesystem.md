@@ -276,6 +276,30 @@ fs.rmdir("s3://YOUR_NEW_BUCKET")  # The bucket must be empty.
 Creating a key prefix under an existing bucket requires no operation (S3 has no real
 directories below the bucket level) and is always a no-op.
 
+## Typed S3 operations
+
+`S3FileSystem.core` is an `S3Core`, the typed operations that the filesystem sends
+its listing and lookup requests with. It can also be built on a boto3 S3 client. Each
+operation sends one request (one per page for the iterators) with the retry policy,
+raises `FileNotFoundError` for a missing object, version or bucket, and caches nothing.
+
+```python
+import boto3
+
+from pyathena.filesystem.s3_core import S3Core
+from pyathena.filesystem.s3_path import S3Path
+
+core = fs.core  # or S3Core(boto3.client("s3"))
+
+metadata = core.head_object(S3Path.parse("s3://YOUR_S3_BUCKET/path/to/object"))
+print(metadata.content_length, metadata.version_id)
+
+for page in core.list_objects("YOUR_S3_BUCKET", prefix="path/to/", delimiter="/"):
+    print([o.key for o in page.objects], [p.prefix for p in page.common_prefixes])
+```
+
+`list_object_versions()` and `list_buckets()` return pages in the same way.
+
 ## Async filesystem
 
 `AioS3FileSystem` provides the same functionality on top of fsspec's
