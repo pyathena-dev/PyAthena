@@ -3691,20 +3691,23 @@ class S3File(AbstractBufferedFile):
         Drops the buffered data, so that neither close() nor a deferred
         commit() uploads it, and aborts the multipart upload, if any. An
         abort failure is logged instead of raised, so it does not mask the
-        error that the caller is handling. Even if the abort fails or is
-        interrupted, commit() does not complete the upload afterwards. The
-        executor is shut down here, as fsspec does not close a closed file
-        again when it is garbage collected.
+        error that the caller is handling. If the abort fails or is
+        interrupted, the upload is kept so that :meth:`discard` can abort it,
+        and commit() does not complete it. The executor is shut down here, as
+        fsspec does not close a closed file again when it is garbage
+        collected.
         """
         self.buffer = None
         self.closed = True
         try:
             self.discard()
         except Exception:
-            _logger.exception(f"Failed to abort multipart upload to s3://{self.bucket}/{self.key}.")
+            # discard() keeps the upload when the abort fails.
+            upload_id = cast(S3MultipartUpload, self.multipart_upload).upload_id
+            _logger.exception(
+                f"Failed to abort multipart upload {upload_id} to s3://{self.bucket}/{self.key}."
+            )
         finally:
-            self.multipart_upload = None
-            self.multipart_upload_parts = []
             self._executor.shutdown()
 
     def _write_and_close(self, value: bytes | bytearray | memoryview) -> None:
@@ -3876,7 +3879,8 @@ class S3File(AbstractBufferedFile):
         otherwise completes the multipart upload, which is aborted if the
         completion fails or is interrupted. If the abort also fails, the
         upload is kept so that :meth:`discard` can abort it. Invalidates the
-        cache of the path afterwards.
+        cache of the path afterwards. Does nothing for a file whose failed
+        write dropped the written data.
 
         Raises:
             FileExistsError: If an object was created at the path after the
@@ -3884,21 +3888,24 @@ class S3File(AbstractBufferedFile):
             RuntimeError: If parts were submitted but no multipart upload is
                 initialized.
         """
+        if self.buffer is None:
+            # _close_without_commit() dropped the written data. A multipart
+            # upload that it failed to abort is kept for discard(), not
+            # completed.
+            return
         if self.tell() == 0:
-            if self.buffer is not None:
-                self.discard()
-                self.fs.touch(self.path, **self._get_request_kwargs("put_object"))
+            self.discard()
+            self.fs.touch(self.path, **self._get_request_kwargs("put_object"))
         elif not self.multipart_upload_parts:
-            if self.buffer is not None:
-                # Upload files smaller than block size.
-                self.buffer.seek(0)
-                data = self.buffer.read()
-                self.fs._put_object(
-                    bucket=self.bucket,
-                    key=self.key,
-                    body=data,
-                    **self._get_request_kwargs("put_object"),
-                )
+            # Upload files smaller than block size.
+            self.buffer.seek(0)
+            data = self.buffer.read()
+            self.fs._put_object(
+                bucket=self.bucket,
+                key=self.key,
+                body=data,
+                **self._get_request_kwargs("put_object"),
+            )
         else:
             if not self.multipart_upload:
                 raise RuntimeError("Multipart upload is not initialized.")

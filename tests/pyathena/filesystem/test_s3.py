@@ -5267,10 +5267,11 @@ class TestS3File:
         fs._put_object.assert_not_called()
 
     @pytest.mark.parametrize("autocommit", [True, False])
-    def test_write_exceeding_max_parts_abort_failure(self, autocommit):
+    def test_write_exceeding_max_parts_abort_failure(self, caplog, autocommit):
         # An abort failure is logged; the part limit error propagates, and
         # neither closing the file nor committing a deferred write retries
-        # the upload or completes it.
+        # the upload or completes it. GH-945: the upload is kept, so that
+        # discard() retries the abort.
         fs = self._make_append_fs(b"")
         fs.MULTIPART_UPLOAD_MAX_PARTS = 3
         fs._call.side_effect = PermissionError("abort failed")
@@ -5295,10 +5296,20 @@ class TestS3File:
         fs._call.assert_called_once()
         fs._finish_multipart_upload.assert_not_called()
         fs._put_object.assert_not_called()
+        assert "Failed to abort multipart upload uploadid to s3://bucket/key.txt." in caplog.text
+
+        assert f.multipart_upload is not None
+        fs._call.side_effect = None
+        f.discard()
+        assert fs._call.call_count == 2
+        assert fs._call.call_args_list[1] == fs._call.call_args_list[0]
+        assert f.multipart_upload is None
+        assert f.multipart_upload_parts == []
 
     def test_write_exceeding_max_parts_abort_interrupted(self):
         # GH-997: an interrupted abort propagates, and a deferred commit
         # still does not complete the upload; the executor is shut down.
+        # GH-945: the upload is kept, so that discard() retries the abort.
         fs = self._make_append_fs(b"")
         fs.MULTIPART_UPLOAD_MAX_PARTS = 3
         fs._call.side_effect = KeyboardInterrupt
@@ -5321,6 +5332,14 @@ class TestS3File:
         fs._call.assert_called_once()
         fs._finish_multipart_upload.assert_not_called()
         fs._put_object.assert_not_called()
+
+        assert f.multipart_upload is not None
+        fs._call.side_effect = None
+        f.discard()
+        assert fs._call.call_count == 2
+        assert fs._call.call_args_list[1] == fs._call.call_args_list[0]
+        assert f.multipart_upload is None
+        assert f.multipart_upload_parts == []
 
     def test_write_exceeding_max_parts_without_close(self):
         # The executor of the closed file is shut down, as fsspec does not
