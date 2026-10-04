@@ -5704,8 +5704,9 @@ class TestS3File:
     @pytest.mark.parametrize("operation", ["write", "append", "exclusive", "pipe", "put"])
     @pytest.mark.parametrize("abort_fails", [False, True])
     @pytest.mark.skipif(
-        threading.current_thread() is not threading.main_thread(),
-        reason="SIGINT interrupts the main thread.",
+        threading.current_thread() is not threading.main_thread()
+        or not hasattr(signal, "pthread_kill"),
+        reason="Requires SIGINT delivery to the main thread.",
     )
     def test_interrupted_creation(self, tmp_path, operation, abort_fails):
         # GH-1077: creation finishes after SIGINT interrupts the writer's wait.
