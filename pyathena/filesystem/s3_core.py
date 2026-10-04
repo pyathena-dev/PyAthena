@@ -406,8 +406,9 @@ class S3Core:
     Each operation sends one request, or one per page for the iterators,
     with the retry policy, and translates S3 errors into ``OSError``
     subclasses (see :class:`~pyathena.filesystem.s3_errors.S3ClientError`):
-    a missing bucket, or a missing object or version that an operation reads,
-    raises ``FileNotFoundError``, and a denied request ``PermissionError``.
+    a missing bucket or multipart upload, or a missing object or version that
+    an operation reads, raises ``FileNotFoundError``, and a denied request
+    ``PermissionError``.
     As in S3, deleting a missing key is not an error. Nothing is cached.
 
     Example:
@@ -668,7 +669,8 @@ class S3Core:
             source: The path of the object to copy, with the version ID to
                 copy, if any.
             range_: The ``(start, end)`` byte range of the source to copy,
-                with an exclusive end; None copies the whole source.
+                with an exclusive end. None sends no range, so the whole
+                source is copied unless ``params`` has ``CopySourceRange``.
             **params: Additional request parameters. The fields that the
                 other arguments set take precedence over parameters of the
                 same name.

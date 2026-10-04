@@ -3305,10 +3305,11 @@ class TestS3FileSystem:
         assert not pending.cancelled()
         fs._call.assert_not_called()
 
-    def test_finish_multipart_upload_abort_failure_does_not_mask_the_original_error(self):
+    def test_finish_multipart_upload_abort_failure_does_not_mask_the_original_error(self, caplog):
         fs = self._make_fs()
         fs.core.complete_multipart_upload = mock.MagicMock()
-        fs._call = mock.MagicMock(side_effect=RuntimeError("abort failed"))
+        # The abort is sent through the core, whose call is the same mock.
+        fs._call.side_effect = RuntimeError("abort failed")
         future: Future[SimpleNamespace] = Future()
         future.set_exception(RuntimeError("upload failed"))
 
@@ -3317,6 +3318,10 @@ class TestS3FileSystem:
             fs._finish_multipart_upload(
                 bucket="bucket", key="key", upload_id="uploadid", futures=[future]
             )
+        fs._call.assert_called_once_with(
+            fs._client.abort_multipart_upload, Bucket="bucket", Key="key", UploadId="uploadid"
+        )
+        assert "Failed to abort multipart upload uploadid to s3://bucket/key." in caplog.text
 
     def test_finish_multipart_upload_waits_for_running_parts(self):
         # GH-976: a part that is still uploading when the upload is aborted
