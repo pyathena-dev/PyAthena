@@ -7,11 +7,13 @@
 
 import time
 from concurrent.futures import wait
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 from botocore.config import Config
 from botocore.exceptions import ClientError
+from dateutil.tz import gettz
 from jinja2 import Environment, FileSystemLoader
 from sqlalchemy import types
 
@@ -105,6 +107,38 @@ def unreachable_glue(connection):
         ),
         {},
     )
+
+
+# TIME values of several precisions, with and without a time zone, TIMESTAMP WITH TIME
+# ZONE values with UTC offsets and a zone name, a NULL JSON value, and the row that
+# every cursor should fetch for them.
+CONVERTED_VALUES_QUERY = """
+SELECT
+  1 AS col
+  ,CAST('12:34:56' AS TIME(0)) AS col_time_0
+  ,CAST('12:34:56.123456789' AS TIME(9)) AS col_time_9
+  ,CAST('12:34:56.789 +09:00' AS TIME WITH TIME ZONE) AS col_time_tz
+  ,CAST('12:34:56 -05:30' AS TIME(0) WITH TIME ZONE) AS col_time_tz_0
+  ,CAST(NULL AS TIME WITH TIME ZONE) AS col_time_tz_null
+  ,CAST(NULL AS JSON) AS col_json_null
+  ,TIMESTAMP '2024-02-29 23:59:58.123 +05:30' AS col_timestamp_tz
+  ,TIMESTAMP '2024-02-29 23:59:58.123 -08:00' AS col_timestamp_tz_negative
+  ,TIMESTAMP '2024-02-29 23:59:58.123 America/New_York' AS col_timestamp_tz_name
+  ,CAST(NULL AS TIMESTAMP WITH TIME ZONE) AS col_timestamp_tz_null
+"""
+CONVERTED_VALUES_ROW = (
+    1,
+    datetime(2000, 1, 1, 12, 34, 56).time(),
+    datetime(2000, 1, 1, 12, 34, 56, 123456).time(),
+    datetime(2000, 1, 1, 12, 34, 56, 789000, tzinfo=timezone(timedelta(hours=9))).timetz(),
+    datetime(2000, 1, 1, 12, 34, 56, tzinfo=timezone(-timedelta(hours=5, minutes=30))).timetz(),
+    None,
+    None,
+    datetime(2024, 2, 29, 23, 59, 58, 123000, tzinfo=timezone(timedelta(hours=5, minutes=30))),
+    datetime(2024, 2, 29, 23, 59, 58, 123000, tzinfo=timezone(-timedelta(hours=8))),
+    datetime(2024, 2, 29, 23, 59, 58, 123000, tzinfo=gettz("America/New_York")),
+    None,
+)
 
 
 # A Spark job whose executor tasks sleep, so that StopCalculationExecution can cancel it.

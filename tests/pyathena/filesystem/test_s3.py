@@ -1,8 +1,11 @@
 import asyncio
+import bz2
 import contextlib
 import functools
 import gc
+import gzip
 import io
+import lzma
 import os
 import re
 import sys
@@ -24,13 +27,14 @@ import botocore.exceptions
 import pytest
 from botocore.stub import Stubber
 from fsspec import Callback
+from fsspec.compression import compr
 from fsspec.dircache import DirCache
 from fsspec.implementations.dirfs import DirFileSystem
 from fsspec.implementations.memory import MemoryFileSystem
 
 import pyathena
 from pyathena.filesystem import register_s3_filesystem
-from pyathena.filesystem.s3 import S3File, S3FileSystem
+from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
 from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import S3Object, S3ObjectType, S3StorageClass
@@ -1736,15 +1740,61 @@ class TestS3FileSystem:
             fs.pipe_file("s3://bucket/key?versionId=12345abcde", b"data")
 
     def test_pipe_file_non_contiguous_memoryview(self):
-        # A non-contiguous memoryview within the block size in items, 4 items
-        # of 8 bytes here, is uploaded with PutObject.
+        # A non-contiguous memoryview within the block size, 4 items of 2
+        # bytes here, is uploaded with PutObject.
         fs = self._make_fs()
         fs._put_object = mock.MagicMock()
         value = memoryview(b"ab" * 8).cast("H")[::2]
 
-        fs.pipe_file("s3://bucket/key", value, block_size=6)
+        fs.pipe_file("s3://bucket/key", value, block_size=8)
 
         fs._put_object.assert_called_once_with(bucket="bucket", key="key", body=b"ab" * 4)
+
+    @pytest.mark.parametrize("intrans", [False, True])
+    @pytest.mark.parametrize("size", [1, S3FileSystem.DEFAULT_BLOCK_SIZE + 1])
+    def test_pipe_file_trailing_slash(self, intrans, size):
+        # GH-1037: a path with a trailing slash is written without it, as
+        # open() writes it, whatever the size of the value. The single
+        # request used to write the key with the trailing slash.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs._transaction = None
+        fs._put_object = mock.MagicMock()
+        fs._create_multipart_upload = mock.MagicMock(
+            return_value=SimpleNamespace(upload_id="uploadid")
+        )
+        fs._upload_part = mock.MagicMock(
+            side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
+        )
+        fs._finish_multipart_upload = mock.MagicMock()
+
+        with fs.transaction if intrans else contextlib.nullcontext():
+            fs.pipe_file("s3://bucket/dir/key/", b"a" * size)
+
+        calls = fs._put_object.call_args_list + fs._create_multipart_upload.call_args_list
+        assert [c.kwargs["key"] for c in calls] == ["dir/key"]
+
+    def test_pipe_file_memoryview_routed_by_bytes(self):
+        # A memoryview larger than the block size in bytes, but not in items,
+        # is uploaded as a multipart upload. Its item count used to route it
+        # to PutObject, which accepts at most 5 GiB.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs._put_object = mock.MagicMock()
+        fs._create_multipart_upload = mock.MagicMock(
+            return_value=SimpleNamespace(upload_id="uploadid")
+        )
+        fs._upload_part = mock.MagicMock(
+            side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
+        )
+        fs._finish_multipart_upload = mock.MagicMock()
+        data = b"a" * (S3FileSystem.DEFAULT_BLOCK_SIZE + 4)
+
+        fs.pipe_file("s3://bucket/key", memoryview(data).cast("I"))
+
+        fs._put_object.assert_not_called()
+        assert b"".join(c.kwargs["body"] for c in fs._upload_part.call_args_list) == data
+        fs._finish_multipart_upload.assert_called_once()
 
     def test_pipe_file_small_drops_max_workers(self):
         fs = self._make_fs()
@@ -1792,6 +1842,113 @@ class TestS3FileSystem:
             pytest.raises(RuntimeError, match="write failed"),
         ):
             fs.pipe_file("s3://bucket/key", b"a" * (S3FileSystem.DEFAULT_BLOCK_SIZE + 1))
+
+        fs._put_object.assert_not_called()
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("path", "compression", "key"),
+        [
+            ("s3://bucket/key", "gzip", "key"),
+            ("s3://bucket/key.gz", "infer", "key.gz"),
+            # Inferred from, and written to, the path without the trailing
+            # slash, as open() does.
+            ("s3://bucket/key.gz/", "infer", "key.gz"),
+        ],
+    )
+    @pytest.mark.parametrize("intrans", [False, True])
+    @pytest.mark.parametrize("size", [1, S3FileSystem.DEFAULT_BLOCK_SIZE + 1])
+    def test_pipe_file_compression(self, path, compression, key, intrans, size):
+        # GH-1037: the value is compressed before it is uploaded, on every
+        # path. The single-request path used to send compression to
+        # PutObject, which botocore rejects.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs._transaction = None
+        fs._put_object = mock.MagicMock()
+        value = b"a" * size
+
+        with fs.transaction if intrans else contextlib.nullcontext():
+            fs.pipe_file(path, value, compression=compression)
+
+        # The compressed value fits in one block.
+        ((_, kwargs),) = fs._put_object.call_args_list
+        assert kwargs["key"] == key
+        assert "compression" not in kwargs
+        assert gzip.decompress(kwargs["body"]) == value
+
+    @pytest.mark.parametrize("intrans", [False, True])
+    def test_pipe_file_compression_multipart(self, intrans):
+        # Compressed data larger than the block size is uploaded as a
+        # multipart upload.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs._transaction = None
+        fs._create_multipart_upload = mock.MagicMock(
+            return_value=SimpleNamespace(upload_id="uploadid")
+        )
+        fs._upload_part = mock.MagicMock(
+            side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
+        )
+        fs._finish_multipart_upload = mock.MagicMock()
+        # Random bytes stay larger than the block size when compressed.
+        value = os.urandom(S3FileSystem.DEFAULT_BLOCK_SIZE + 1)
+
+        with fs.transaction if intrans else contextlib.nullcontext():
+            fs.pipe_file("s3://bucket/key", value, compression="gzip")
+
+        body = b"".join(c.kwargs["body"] for c in fs._upload_part.call_args_list)
+        assert gzip.decompress(body) == value
+        fs._finish_multipart_upload.assert_called_once()
+
+    def test_pipe_file_compression_non_contiguous_memoryview(self):
+        fs = self._make_fs()
+        fs._put_object = mock.MagicMock()
+
+        fs.pipe_file("s3://bucket/key", memoryview(b"ab" * 4)[::2], compression="gzip")
+
+        assert gzip.decompress(fs._put_object.call_args.kwargs["body"]) == b"aaaa"
+
+    def test_pipe_file_compression_inferred_none(self):
+        # "infer" uploads the value as it is for a path without the
+        # extension of a codec, as open() does.
+        fs = self._make_fs()
+        fs._put_object = mock.MagicMock()
+
+        fs.pipe_file("s3://bucket/key.txt", b"a", compression="infer")
+
+        ((_, kwargs),) = fs._put_object.call_args_list
+        assert "compression" not in kwargs
+        assert kwargs["body"] == b"a"
+
+    def test_pipe_file_unsupported_compression(self):
+        fs = self._make_fs()
+
+        with pytest.raises(ValueError, match="not supported"):
+            fs.pipe_file("s3://bucket/key", b"a", compression="unknown")
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize("intrans", [False, True])
+    def test_pipe_file_compression_failed_write(self, intrans):
+        # GH-1037: a failed write of a compressed value leaves the existing
+        # object unchanged. open() used to return a compression wrapper,
+        # without _close_without_commit(), and the object was replaced with
+        # an empty compressed one.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs._transaction = None
+        fs._put_object = mock.MagicMock()
+        # Random bytes stay larger than the block size when compressed, so
+        # that the buffered path also writes them outside a transaction.
+        value = b"a" if intrans else os.urandom(S3FileSystem.DEFAULT_BLOCK_SIZE + 1)
+
+        with (
+            mock.patch.object(S3File, "write", side_effect=RuntimeError("write failed")),
+            fs.transaction if intrans else contextlib.nullcontext(),
+            pytest.raises(RuntimeError, match="write failed"),
+        ):
+            fs.pipe_file("s3://bucket/key", value, compression="gzip")
+        gc.collect()
 
         fs._put_object.assert_not_called()
         fs._call.assert_not_called()
@@ -5161,3 +5318,35 @@ class TestS3File:
             file.commit()
         file.fs._finish_multipart_upload.assert_called_once()
         file.fs._put_object.assert_not_called()
+
+
+class TestCompressedBuffer:
+    @pytest.mark.parametrize(
+        ("compression", "decompress"),
+        [("gzip", gzip.decompress), ("bz2", bz2.decompress), ("xz", lzma.decompress)],
+    )
+    def test_compress(self, compression, decompress):
+        assert decompress(CompressedBuffer.compress(b"a" * 100, compression)) == b"a" * 100
+
+    def test_compress_non_contiguous_memoryview(self):
+        value = memoryview(b"ab" * 4)[::2]
+
+        assert gzip.decompress(CompressedBuffer.compress(value, "gzip")) == b"aaaa"
+
+    @pytest.mark.parametrize("compression", ["unknown", "infer"])
+    def test_compress_unsupported(self, compression):
+        # "infer" is resolved from a path by the caller, as open() does.
+        with pytest.raises(ValueError, match="not supported"):
+            CompressedBuffer.compress(b"a", compression)
+
+    def test_compress_codec_closing_its_file(self):
+        # GH-1037: some codecs, such as the zstandard stream writer, close the
+        # file that they write to when they are closed.
+        def closing_gzip(f, mode):
+            g = gzip.GzipFile(fileobj=f, mode=mode)
+            close = g.close
+            g.close = lambda: (close(), f.close())
+            return g
+
+        with mock.patch.dict(compr, {"closing": closing_gzip}):
+            assert gzip.decompress(CompressedBuffer.compress(b"a", "closing")) == b"a"

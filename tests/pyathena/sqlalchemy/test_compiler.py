@@ -964,6 +964,67 @@ class TestAthenaDDLCompiler:
         with pytest.raises(exc.CompileError, match="managed storage"):
             CreateTable(table).compile(dialect=self._s3tables_dialect())
 
+    @pytest.mark.parametrize(
+        ("tblproperties", "is_iceberg"),
+        [
+            ({"table_type": "ICEBERG"}, True),
+            ({"TABLE_TYPE": "iceberg", "format": "parquet"}, True),
+            ({"table_type": "HIVE"}, False),
+            ({"table_type": "HIVE", "note": "iceberg migration"}, False),
+            ({"comment_iceberg": "x", "table_type_note": "y"}, False),
+            ({"note": "table_type iceberg"}, False),
+            ("'table_type'='ICEBERG'", True),
+            ("\t'format' = 'parquet',\n\t'table_type' = 'iceberg'", True),
+            ("'table_type'=\"ICEBERG\"", True),
+            ('"table_type"="ICEBERG"', True),
+            ("'table_type'='HIVE','note'='iceberg migration'", False),
+            ("'note'='\\'table_type\\'=\\'iceberg\\''", False),
+            ("'table_type'='HIVE','note'=\"'table_type'='ICEBERG'\"", False),
+            ("'note'=\"it's\",'table_type'='ICEBERG'", True),
+        ],
+    )
+    def test_create_table_iceberg_requires_table_type_iceberg(self, tblproperties, is_iceberg):
+        table = Table(
+            "tbl",
+            MetaData(schema="pyathena"),
+            Column("id", Integer),
+            awsathena_location="s3://bucket/path/to/",
+            awsathena_tblproperties=tblproperties,
+        )
+        ddl = str(CreateTable(table).compile(dialect=AthenaDialect()))
+        assert ddl.strip().startswith("CREATE TABLE" if is_iceberg else "CREATE EXTERNAL TABLE")
+
+    @pytest.mark.parametrize(
+        ("tblproperties", "is_iceberg"),
+        [
+            ("'table_type'='ICEBERG'", True),
+            ("'table_type'=\"ICEBERG\"", True),
+            ("'table_type'='HIVE','note'='iceberg migration'", False),
+        ],
+    )
+    def test_create_table_iceberg_from_connection_tblproperties(self, tblproperties, is_iceberg):
+        table = Table("tbl", MetaData(schema="pyathena"), Column("id", Integer))
+        dialect = AthenaDialect()
+        dialect._connect_options = {
+            "schema_name": "pyathena",
+            "location": "s3://bucket/path/to/",
+            "tblproperties": tblproperties,
+        }
+        ddl = str(CreateTable(table).compile(dialect=dialect))
+        assert ddl.strip().startswith("CREATE TABLE" if is_iceberg else "CREATE EXTERNAL TABLE")
+
+    def test_create_table_s3tables_table_type_not_iceberg_raises(self):
+        # Mentioning "iceberg" outside the table_type value does not make an
+        # Iceberg table, so S3 Tables still reject it.
+        table = Table(
+            "tbl",
+            MetaData(schema="pyathena"),
+            Column("id", Integer),
+            awsathena_tblproperties={"table_type": "HIVE", "note": "iceberg migration"},
+        )
+        with pytest.raises(exc.CompileError, match="S3 Tables support only Iceberg tables"):
+            CreateTable(table).compile(dialect=self._s3tables_dialect())
+
     def test_create_table_s3tables_omits_connection_level_formats(self):
         # Connection-level file_format/row_format must not leak STORED AS or
         # ROW FORMAT clauses into managed Iceberg DDL.

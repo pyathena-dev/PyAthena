@@ -19,6 +19,7 @@ import polars as pl
 import pyarrow as pa
 import pytest
 
+from pyathena.arrow.converter import DefaultArrowTypeConverter
 from pyathena.arrow.cursor import ArrowCursor
 from pyathena.arrow.result_set import AthenaArrowResultSet
 from pyathena.error import DatabaseError, ProgrammingError
@@ -26,6 +27,7 @@ from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
+from tests.pyathena.util import CONVERTED_VALUES_QUERY, CONVERTED_VALUES_ROW
 
 
 class TestArrowCursor:
@@ -984,6 +986,19 @@ class TestArrowCursor:
         assert values[3] == "N/A"
         assert values[4] == "NULL"
 
+    def test_fetch_converts_each_value_once(self):
+        """The fetch methods call the converter once per value, after a set() too."""
+        calls = []
+        converter = DefaultArrowTypeConverter()
+        with (
+            contextlib.closing(connect()) as conn,
+            conn.cursor(ArrowCursor, converter=converter) as cursor,
+        ):
+            cursor.execute("SELECT * FROM (VALUES 'a', 'b') AS t(v) ORDER BY v")
+            converter.set("varchar", lambda value: calls.append(value) or value)
+            assert cursor.fetchall() == [("a",), ("b",)]
+        assert calls == ["a", "b"]
+
     @pytest.mark.parametrize(
         "arrow_cursor",
         [
@@ -1009,17 +1024,35 @@ class TestArrowCursor:
               ,json_parse('{"a": 1}') AS col_json
               ,CAST('{"a": 1}' AS JSON) AS col_json_string
               ,CAST(NULL AS JSON) AS col_json_null
+              ,CAST(NULL AS TIME) AS col_time_null
             UNION ALL
             SELECT
-              2, CAST('12:34:56' AS TIME), X'0102', json_parse('[1, "x"]'), json_parse('"s"'), NULL
+              2, CAST('12:34:56' AS TIME), X'0102', json_parse('[1, "x"]'), json_parse('"s"'), NULL,
+              NULL
             ORDER BY col
             """
         )
         assert arrow_cursor.fetchall() == [
-            (1, datetime(2017, 1, 1, 12, 34, 56).time(), b"\x01\x02", {"a": 1}, '{"a": 1}', None),
-            (2, datetime(2017, 1, 1, 12, 34, 56).time(), b"\x01\x02", [1, "x"], "s", None),
+            (
+                1,
+                datetime(2017, 1, 1, 12, 34, 56).time(),
+                b"\x01\x02",
+                {"a": 1},
+                '{"a": 1}',
+                None,
+                None,
+            ),
+            (2, datetime(2017, 1, 1, 12, 34, 56).time(), b"\x01\x02", [1, "x"], "s", None, None),
         ]
         assert arrow_cursor.as_arrow().schema.field("col_json").type == pa.string()
+
+        arrow_cursor.execute(CONVERTED_VALUES_QUERY)
+        assert arrow_cursor.fetchall() == [CONVERTED_VALUES_ROW]
+        # An Arrow time type has no time zone, so the table keeps the text.
+        assert arrow_cursor.as_arrow().column("col_time_tz").to_pylist() == ["12:34:56.789+09:00"]
+        assert arrow_cursor.as_arrow().column("col_timestamp_tz").to_pylist() == [
+            "2024-02-29 23:59:58.123 +05:30"
+        ]
 
     @pytest.mark.parametrize(
         "execute_kwargs", [{}, {"connect_timeout": 3.0, "request_timeout": 4.0}]

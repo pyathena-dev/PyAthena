@@ -9,7 +9,7 @@ import re
 from abc import ABCMeta, abstractmethod
 from collections.abc import Callable
 from copy import deepcopy
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any, ClassVar
 
@@ -67,25 +67,92 @@ def _to_datetime(varchar_value: str | None) -> datetime | None:
     return _parse_datetime(varchar_value)
 
 
+_UTC_OFFSET_PATTERN: re.Pattern[str] = re.compile(r"([+-])(\d{2}):(\d{2})")
+
+
+def _parse_utc_offset(value: str) -> timezone | None:
+    """Parse a ``+HH:MM`` or ``-HH:MM`` UTC offset.
+
+    Args:
+        value: The text to parse.
+
+    Returns:
+        The fixed-offset time zone, or None if the text is not an offset.
+    """
+    match = _UTC_OFFSET_PATTERN.fullmatch(value)
+    if not match:
+        return None
+    sign, hours, minutes = match.groups()
+    offset = timedelta(hours=int(hours), minutes=int(minutes))
+    return timezone(-offset if sign == "-" else offset)
+
+
 def _to_datetime_with_tz(varchar_value: str | None) -> datetime | None:
     """Convert an Athena TIMESTAMP WITH TIME ZONE value to an aware datetime.
 
     Args:
-        varchar_value: The value as text with a trailing zone name, or None.
+        varchar_value: The value as text with a trailing zone name or ``+HH:MM`` /
+            ``-HH:MM`` UTC offset, or None. An empty string, which pandas and the
+            Arrow CSV reader return for NULL, is None.
 
     Returns:
         The aware datetime, or None.
     """
-    if varchar_value is None:
+    if not varchar_value:
         return None
     datetime_, _, tz = varchar_value.rpartition(" ")
-    return _parse_datetime(datetime_).replace(tzinfo=gettz(tz))
+    return _parse_datetime(datetime_).replace(tzinfo=_parse_utc_offset(tz) or gettz(tz))
+
+
+def _parse_time(value: str) -> time:
+    """Parse an Athena TIME value of any precision.
+
+    Args:
+        value: The value as ``HH:MM:SS`` followed by an optional fraction of up to
+            12 digits.
+
+    Returns:
+        The time. Digits beyond microseconds are truncated.
+    """
+    seconds, _, fraction = value.partition(".")
+    parsed = datetime.strptime(seconds, "%H:%M:%S").time()
+    if fraction:
+        parsed = parsed.replace(microsecond=int(fraction[:6].ljust(6, "0")))
+    return parsed
 
 
 def _to_time(varchar_value: str | None) -> time | None:
-    if varchar_value is None:
+    """Convert an Athena TIME value to a time.
+
+    Args:
+        varchar_value: The value as text, or None. An empty string, which the Arrow
+            CSV reader returns for NULL, is None.
+
+    Returns:
+        The time, or None.
+    """
+    if not varchar_value:
         return None
-    return datetime.strptime(varchar_value, "%H:%M:%S.%f").time()
+    return _parse_time(varchar_value)
+
+
+def _to_time_with_tz(varchar_value: str | None) -> time | None:
+    """Convert an Athena TIME WITH TIME ZONE value to an aware time.
+
+    Args:
+        varchar_value: The value as text with a trailing ``+HH:MM`` or ``-HH:MM``
+            offset, or None. An empty string, which pandas and the Arrow CSV reader
+            return for NULL, is None.
+
+    Returns:
+        The time with a fixed-offset ``tzinfo``, or None.
+    """
+    if not varchar_value:
+        return None
+    index = max(varchar_value.rfind("+"), varchar_value.rfind("-"))
+    return _parse_time(varchar_value[:index]).replace(
+        tzinfo=_parse_utc_offset(varchar_value[index:])
+    )
 
 
 def _to_float(varchar_value: str | None) -> float | None:
@@ -119,17 +186,12 @@ def _to_binary(varchar_value: str | None) -> bytes | None:
 
 
 def _to_json(varchar_value: str | None) -> Any | None:
-    if varchar_value is None:
-        return None
-    return json.loads(varchar_value)
-
-
-def _csv_to_json(varchar_value: str | None) -> Any | None:
-    """Convert an Athena JSON value read from a CSV result file.
+    """Convert an Athena JSON value to a Python value.
 
     Args:
-        varchar_value: The value as JSON text, or None. An empty string, which
-            CSV results use for SQL NULL, is also treated as NULL.
+        varchar_value: The JSON text, or None. An empty string, which pandas and the
+            Arrow CSV reader return for NULL, is None; Athena never returns empty JSON
+            text.
 
     Returns:
         The decoded value, or None for SQL NULL.
@@ -494,6 +556,7 @@ _DEFAULT_CONVERTERS: dict[str, Callable[[str | None], Any | None]] = {
     "timestamp with time zone": _to_datetime_with_tz,
     "date": _to_date,
     "time": _to_time,
+    "time with time zone": _to_time_with_tz,
     "varbinary": _to_binary,
     "array": _to_array,
     "map": _to_map,
@@ -744,12 +807,31 @@ class DefaultTypeConverter(Converter):
         return self._parsed_hints[normalized]
 
 
-def _json_text_converter() -> DefaultTypeConverter:
-    """Return a ``DefaultTypeConverter`` that keeps json values as text.
+# The types whose values the Arrow and Polars GetQueryResults fallbacks keep as text,
+# as in a CSV result file, and convert when the rows are fetched.
+_TEXT_VALUE_TYPES: tuple[str, ...] = ("json", "time with time zone", "timestamp with time zone")
+
+
+def _text_value_converter() -> DefaultTypeConverter:
+    """Return a ``DefaultTypeConverter`` that keeps ``_TEXT_VALUE_TYPES`` values as text.
+
+    Values nested in typed complex values keep only the time zone types as text,
+    because Arrow and Polars time and timestamp types hold one time zone per column;
+    nested JSON values are decoded as before.
 
     Returns:
         The converter.
     """
     converter = DefaultTypeConverter()
-    converter.set("json", _to_default)
+    for type_ in _TEXT_VALUE_TYPES:
+        converter.set(type_, _to_default)
+    converter._typed_converter = TypedValueConverter(
+        converters={
+            **_DEFAULT_CONVERTERS,
+            "time with time zone": _to_default,
+            "timestamp with time zone": _to_default,
+        },
+        default_converter=_to_default,
+        struct_parser=_to_struct,
+    )
     return converter

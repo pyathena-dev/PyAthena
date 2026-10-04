@@ -23,6 +23,18 @@ class TestTypeSignatureParser:
         assert node.children == []
         assert node.field_names is None
 
+    @pytest.mark.parametrize(
+        ("type_str", "expected"),
+        [
+            ("time(3) with time zone", "time with time zone"),
+            ("TIMESTAMP(6)  WITH TIME ZONE", "timestamp with time zone"),
+            ("decimal(10, 2)", "decimal"),
+            ("varchar(255)", "varchar"),
+        ],
+    )
+    def test_parameterized_type_keeps_suffix(self, type_str, expected):
+        assert TypeSignatureParser().parse(type_str).type_name == expected
+
     def test_simple_type_case_insensitive(self):
         parser = TypeSignatureParser()
         node = parser.parse("VARCHAR")

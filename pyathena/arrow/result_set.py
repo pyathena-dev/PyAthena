@@ -12,7 +12,7 @@ from typing import (
 
 from pyathena import OperationalError
 from pyathena.arrow.util import to_column_info
-from pyathena.converter import Converter, _json_text_converter, _to_default
+from pyathena.converter import Converter, _text_value_converter, _to_default
 from pyathena.error import ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet
@@ -147,7 +147,8 @@ class AthenaArrowResultSet(AthenaResultSet):
 
             self._table = pa.Table.from_pydict({})
         # The fetch methods convert the values read from a result file. GetQueryResults
-        # values are already converted, except json values, which stay text.
+        # values are already converted, except json and time with time zone values,
+        # which stay text.
         self._convert_rows = bool(self.output_location)
         self._batches = iter(self._table.to_batches(arraysize))
 
@@ -255,7 +256,9 @@ class AthenaArrowResultSet(AthenaResultSet):
         else:
             dict_rows = rows.to_pydict()
             converters = (
-                self.converters if self._convert_rows else self._json_converters(self.converters)
+                self.converters
+                if self._convert_rows
+                else self._text_value_converters(self.converters)
             )
             if converters:
                 column_names = dict_rows.keys()
@@ -390,12 +393,13 @@ class AthenaArrowResultSet(AthenaResultSet):
 
         Args:
             converter: Type converter for result values. Defaults to
-                ``DefaultTypeConverter`` with json values kept as text, as in
-                the CSV result file.
+                ``DefaultTypeConverter`` with json and time with time zone values kept as
+                text, as in the CSV result file. Arrow has no type for JSON values or for
+                times with a time zone.
         """
         import pyarrow as pa
 
-        rows = self._fetch_all_rows(converter or _json_text_converter())
+        rows = self._fetch_all_rows(converter or _text_value_converter())
         if not rows:
             return pa.Table.from_pydict({})
         description = self.description if self.description else []

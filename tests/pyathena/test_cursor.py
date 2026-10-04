@@ -41,6 +41,8 @@ from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.tables import TABLES, VIEWS
 from tests.pyathena.util import (
+    CONVERTED_VALUES_QUERY,
+    CONVERTED_VALUES_ROW,
     EVENT_TIMEOUT,
     interrupt_start_waits,
     succeeded_query_execution,
@@ -1688,8 +1690,8 @@ class TestCursor:
         indirect=["cursor"],
     )
     def test_fetch_all_rows(self, cursor):
-        cursor.execute("SELECT 1 AS col")
-        assert cursor.fetchall() == [(1,)]
+        cursor.execute(CONVERTED_VALUES_QUERY)
+        assert cursor.fetchall() == [CONVERTED_VALUES_ROW]
 
     @staticmethod
     def _metadata_view(metadata):
