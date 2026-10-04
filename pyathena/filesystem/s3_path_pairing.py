@@ -28,7 +28,9 @@ class S3PathPairing:
     pairs them, except that a path with a version ID names that version of an
     object: it is not a glob pattern, and its destination is named after its
     key without the version. A move compares the paths by what they name
-    (see :attr:`~pyathena.filesystem.s3_path.S3Path.target`).
+    (see :attr:`~pyathena.filesystem.s3_path.S3Path.target`), keeping ``null``
+    versions distinct from their keys in the caller's versioning-enabled
+    buckets.
     :meth:`delete_paths` splits the paths of an ``rm()``.
 
     The pairing is a frozen dataclass of the paths as given, and holds no

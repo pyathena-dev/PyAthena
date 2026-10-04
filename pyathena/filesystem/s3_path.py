@@ -135,13 +135,13 @@ class S3Path:
 
     @property
     def target(self) -> S3Path:
-        """What the path names when paths are compared: a ``null`` version names its key.
+        """The default move target, assuming bucket versioning is not enabled.
 
         A ``null`` version is taken to name the key itself: in a bucket without
         versioning, or with versioning suspended, a write to the key replaces
         its ``null`` version. With versioning enabled, a write adds a new
-        version instead, but the ``null`` version is still taken to name the
-        key. Any other path is its own target.
+        version instead, so callers with that state must keep the ``null``
+        version distinct from its key. Any other path is its own target.
         """
         return self.with_version_id(None) if self.version_id == "null" else self
 
