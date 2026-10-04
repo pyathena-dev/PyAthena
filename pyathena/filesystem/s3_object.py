@@ -993,20 +993,21 @@ class S3MultipartUploadPart:
         self._part_number = part_number
         self._copy_source_version_id: str | None = response.get("CopySourceVersionId")
         copy_part_result = response.get("CopyPartResult")
-        if copy_part_result:
-            self._last_modified: datetime | None = copy_part_result.get("LastModified")
-            self._etag: str | None = copy_part_result.get("ETag")
-            self._checksum_crc32: str | None = copy_part_result.get("ChecksumCRC32")
-            self._checksum_crc32c: str | None = copy_part_result.get("ChecksumCRC32C")
-            self._checksum_sha1: str | None = copy_part_result.get("ChecksumSHA1")
-            self._checksum_sha256: str | None = copy_part_result.get("ChecksumSHA256")
-        else:
-            self._last_modified = None
-            self._etag = response.get("ETag")
-            self._checksum_crc32 = response.get("ChecksumCRC32")
-            self._checksum_crc32c = response.get("ChecksumCRC32C")
-            self._checksum_sha1 = response.get("ChecksumSHA1")
-            self._checksum_sha256 = response.get("ChecksumSHA256")
+        self._last_modified: datetime | None = (
+            copy_part_result.get("LastModified") if copy_part_result else None
+        )
+        part_result = copy_part_result or response
+        self._etag: str | None = part_result.get("ETag")
+        self._checksum_crc32: str | None = part_result.get("ChecksumCRC32")
+        self._checksum_crc32c: str | None = part_result.get("ChecksumCRC32C")
+        self._checksum_crc64nvme: str | None = part_result.get("ChecksumCRC64NVME")
+        self._checksum_sha1: str | None = part_result.get("ChecksumSHA1")
+        self._checksum_sha256: str | None = part_result.get("ChecksumSHA256")
+        self._checksum_sha512: str | None = part_result.get("ChecksumSHA512")
+        self._checksum_md5: str | None = part_result.get("ChecksumMD5")
+        self._checksum_xxhash64: str | None = part_result.get("ChecksumXXHASH64")
+        self._checksum_xxhash3: str | None = part_result.get("ChecksumXXHASH3")
+        self._checksum_xxhash128: str | None = part_result.get("ChecksumXXHASH128")
         self._server_side_encryption: str | None = response.get("ServerSideEncryption")
         self._sse_customer_algorithm: str | None = response.get("SSECustomerAlgorithm")
         self._sse_customer_key_md5: str | None = response.get("SSECustomerKeyMD5")
@@ -1055,6 +1056,36 @@ class S3MultipartUploadPart:
         return self._checksum_sha256
 
     @property
+    def checksum_crc64nvme(self) -> str | None:
+        """The ``ChecksumCRC64NVME`` of the part."""
+        return self._checksum_crc64nvme
+
+    @property
+    def checksum_sha512(self) -> str | None:
+        """The ``ChecksumSHA512`` of the part."""
+        return self._checksum_sha512
+
+    @property
+    def checksum_md5(self) -> str | None:
+        """The ``ChecksumMD5`` of the part."""
+        return self._checksum_md5
+
+    @property
+    def checksum_xxhash64(self) -> str | None:
+        """The ``ChecksumXXHASH64`` of the part."""
+        return self._checksum_xxhash64
+
+    @property
+    def checksum_xxhash3(self) -> str | None:
+        """The ``ChecksumXXHASH3`` of the part."""
+        return self._checksum_xxhash3
+
+    @property
+    def checksum_xxhash128(self) -> str | None:
+        """The ``ChecksumXXHASH128`` of the part."""
+        return self._checksum_xxhash128
+
+    @property
     def server_side_encryption(self) -> str | None:
         """The ``ServerSideEncryption`` algorithm of the part."""
         return self._server_side_encryption
@@ -1089,16 +1120,23 @@ class S3MultipartUploadPart:
 
         Returns:
             Dictionary with the ``ETag``, checksum and ``PartNumber`` fields of
-            the part.
+            the part, omitting fields whose value is None.
         """
-        return {
+        fields = {
             "ETag": self.etag,
             "ChecksumCRC32": self.checksum_crc32,
             "ChecksumCRC32C": self.checksum_crc32c,
+            "ChecksumCRC64NVME": self.checksum_crc64nvme,
             "ChecksumSHA1": self.checksum_sha1,
             "ChecksumSHA256": self.checksum_sha256,
+            "ChecksumSHA512": self.checksum_sha512,
+            "ChecksumMD5": self.checksum_md5,
+            "ChecksumXXHASH64": self.checksum_xxhash64,
+            "ChecksumXXHASH3": self.checksum_xxhash3,
+            "ChecksumXXHASH128": self.checksum_xxhash128,
             "PartNumber": self.part_number,
         }
+        return {key: value for key, value in fields.items() if value is not None}
 
 
 class S3CompleteMultipartUpload:

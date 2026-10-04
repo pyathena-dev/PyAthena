@@ -2623,6 +2623,9 @@ class S3FileSystem(AbstractFileSystem):
     def clear_multipart_uploads(self, path: str) -> None:
         """Abort any incomplete multipart uploads in the bucket.
 
+        Uploads completed or aborted after listing are already cleared.
+        All abort results are checked before another abort error is raised.
+
         Args:
             path: S3 bucket or key path (e.g., "bucket", "s3://bucket" or
                 "s3://bucket/prefix"). If the path contains a key, only the
@@ -2632,6 +2635,7 @@ class S3FileSystem(AbstractFileSystem):
         uploads = self.list_multipart_uploads(path)
         if not uploads:
             return
+        error: Exception | None = None
         with self._create_executor(max_workers=self.max_workers) as executor:
             futures = [
                 executor.submit(
@@ -2642,7 +2646,20 @@ class S3FileSystem(AbstractFileSystem):
                 for upload in uploads
             ]
             for future in as_completed(futures):
-                future.result()
+                try:
+                    future.result()
+                except Exception as e:
+                    cause = e.__cause__
+                    if (
+                        isinstance(e, FileNotFoundError)
+                        and isinstance(cause, botocore.exceptions.ClientError)
+                        and S3ClientError(cause).code == "NoSuchUpload"
+                    ):
+                        continue
+                    if error is None:
+                        error = e
+        if error is not None:
+            raise error
 
     def created(self, path: str) -> datetime:
         """Return the creation time of the path.

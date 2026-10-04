@@ -786,9 +786,7 @@ class S3Core:
             "Bucket": path.bucket,
             "Key": path.key,
             "UploadId": upload_id,
-            "MultipartUpload": {
-                "Parts": [{"ETag": p.etag, "PartNumber": p.part_number} for p in parts]
-            },
+            "MultipartUpload": {"Parts": [part.to_api_repr() for part in parts]},
         }
         _logger.debug(f"Complete multipart upload {upload_id} to {path.uri}.")
         response = self.call(self._client.complete_multipart_upload, **{**params, **request})
