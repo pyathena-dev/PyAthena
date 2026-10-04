@@ -899,6 +899,100 @@ class TestS3Core:
             )
         stubber.assert_no_pending_responses()
 
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "ChecksumCRC32",
+            "ChecksumCRC32C",
+            "ChecksumCRC64NVME",
+            "ChecksumSHA1",
+            "ChecksumSHA256",
+            "ChecksumSHA512",
+            "ChecksumMD5",
+            "ChecksumXXHASH64",
+            "ChecksumXXHASH3",
+            "ChecksumXXHASH128",
+        ],
+    )
+    @pytest.mark.parametrize("copy", [False, True])
+    def test_complete_multipart_upload_preserves_part_checksums(self, field, copy):
+        core, stubber = _make_core()
+        expected_parts = []
+        for number in (1, 2):
+            result = {"ETag": f'"e{number}"', field: f"checksum{number}"}
+            request = {"Bucket": "bucket", "Key": "key", "UploadId": "u", "PartNumber": number}
+            if copy:
+                request["CopySource"] = {"Bucket": "bucket", "Key": "source"}
+                stubber.add_response("upload_part_copy", {"CopyPartResult": result}, request)
+            else:
+                request["Body"] = b"data"
+                stubber.add_response("upload_part", result, request)
+            expected_parts.append({**result, "PartNumber": number})
+        stubber.add_response(
+            "complete_multipart_upload",
+            {"ETag": '"done"'},
+            {
+                "Bucket": "bucket",
+                "Key": "key",
+                "UploadId": "u",
+                "MultipartUpload": {"Parts": expected_parts},
+                "RequestPayer": "requester",
+            },
+        )
+        with stubber:
+            if copy:
+                parts = [
+                    core.upload_part_copy(
+                        S3Path("bucket", "key"), "u", n, S3Path("bucket", "source")
+                    )
+                    for n in (1, 2)
+                ]
+            else:
+                parts = [core.upload_part(S3Path("bucket", "key"), "u", n, b"data") for n in (1, 2)]
+            completed = core.complete_multipart_upload(
+                S3Path("bucket", "key"),
+                "u",
+                parts,
+                checksum_algorithm=field.removeprefix("Checksum"),
+                RequestPayer="requester",
+                MultipartUpload={"Parts": []},
+            )
+        stubber.assert_no_pending_responses()
+        assert completed.etag == '"done"'
+
+    @pytest.mark.parametrize("algorithm", [None, "SHA256"])
+    def test_complete_multipart_upload_uses_creation_algorithm(self, algorithm):
+        core, stubber = _make_core()
+        part = S3MultipartUploadPart(
+            1,
+            {
+                "ETag": '"part"',
+                "ChecksumCRC32": "sdk-crc",
+                "ChecksumSHA256": "upload-sha",
+            },
+        )
+        expected = {"ETag": '"part"', "PartNumber": 1}
+        if algorithm:
+            expected["ChecksumSHA256"] = "upload-sha"
+        stubber.add_response(
+            "complete_multipart_upload",
+            {"ETag": '"done"'},
+            {
+                "Bucket": "bucket",
+                "Key": "key",
+                "UploadId": "u",
+                "MultipartUpload": {"Parts": [expected]},
+            },
+        )
+        with stubber:
+            if algorithm is None:
+                core.complete_multipart_upload(S3Path("bucket", "key"), "u", [part])
+            else:
+                core.complete_multipart_upload(
+                    S3Path("bucket", "key"), "u", [part], checksum_algorithm=algorithm
+                )
+        stubber.assert_no_pending_responses()
+
 
 class TestS3DeleteBatch:
     def test_from_paths(self):
@@ -969,97 +1063,3 @@ class TestS3ObjectSummary:
     def test_frozen(self):
         with pytest.raises(AttributeError):
             S3ObjectSummary("bucket", "k").key = "other"  # type: ignore[misc]
-
-
-@pytest.mark.parametrize(
-    "field",
-    [
-        "ChecksumCRC32",
-        "ChecksumCRC32C",
-        "ChecksumCRC64NVME",
-        "ChecksumSHA1",
-        "ChecksumSHA256",
-        "ChecksumSHA512",
-        "ChecksumMD5",
-        "ChecksumXXHASH64",
-        "ChecksumXXHASH3",
-        "ChecksumXXHASH128",
-    ],
-)
-@pytest.mark.parametrize("copy", [False, True])
-def test_complete_multipart_upload_preserves_part_checksums(field, copy):
-    core, stubber = _make_core()
-    expected_parts = []
-    for number in (1, 2):
-        result = {"ETag": f'"e{number}"', field: f"checksum{number}"}
-        request = {"Bucket": "bucket", "Key": "key", "UploadId": "u", "PartNumber": number}
-        if copy:
-            request["CopySource"] = {"Bucket": "bucket", "Key": "source"}
-            stubber.add_response("upload_part_copy", {"CopyPartResult": result}, request)
-        else:
-            request["Body"] = b"data"
-            stubber.add_response("upload_part", result, request)
-        expected_parts.append({**result, "PartNumber": number})
-    stubber.add_response(
-        "complete_multipart_upload",
-        {"ETag": '"done"'},
-        {
-            "Bucket": "bucket",
-            "Key": "key",
-            "UploadId": "u",
-            "MultipartUpload": {"Parts": expected_parts},
-            "RequestPayer": "requester",
-        },
-    )
-    with stubber:
-        if copy:
-            parts = [
-                core.upload_part_copy(S3Path("bucket", "key"), "u", n, S3Path("bucket", "source"))
-                for n in (1, 2)
-            ]
-        else:
-            parts = [core.upload_part(S3Path("bucket", "key"), "u", n, b"data") for n in (1, 2)]
-        completed = core.complete_multipart_upload(
-            S3Path("bucket", "key"),
-            "u",
-            parts,
-            checksum_algorithm=field.removeprefix("Checksum"),
-            RequestPayer="requester",
-            MultipartUpload={"Parts": []},
-        )
-    stubber.assert_no_pending_responses()
-    assert completed.etag == '"done"'
-
-
-@pytest.mark.parametrize("algorithm", [None, "SHA256"])
-def test_complete_multipart_upload_uses_creation_algorithm(algorithm):
-    core, stubber = _make_core()
-    part = S3MultipartUploadPart(
-        1,
-        {
-            "ETag": '"part"',
-            "ChecksumCRC32": "sdk-crc",
-            "ChecksumSHA256": "upload-sha",
-        },
-    )
-    expected = {"ETag": '"part"', "PartNumber": 1}
-    if algorithm:
-        expected["ChecksumSHA256"] = "upload-sha"
-    stubber.add_response(
-        "complete_multipart_upload",
-        {"ETag": '"done"'},
-        {
-            "Bucket": "bucket",
-            "Key": "key",
-            "UploadId": "u",
-            "MultipartUpload": {"Parts": [expected]},
-        },
-    )
-    with stubber:
-        if algorithm is None:
-            core.complete_multipart_upload(S3Path("bucket", "key"), "u", [part])
-        else:
-            core.complete_multipart_upload(
-                S3Path("bucket", "key"), "u", [part], checksum_algorithm=algorithm
-            )
-    stubber.assert_no_pending_responses()

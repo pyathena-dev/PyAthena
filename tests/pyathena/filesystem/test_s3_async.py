@@ -1120,11 +1120,254 @@ class TestAioS3FileSystem:
         for fs in (fs1, fs2, fs3):
             assert fs._sync_fs not in S3FileSystem._cache.values()
 
+    @pytest.mark.parametrize(
+        ("code", "exception"),
+        [
+            (None, None),
+            ("NoSuchUpload", None),
+            ("NoSuchBucket", FileNotFoundError),
+            ("AccessDenied", PermissionError),
+            ("InternalError", OSError),
+        ],
+    )
+    def test_clear_multipart_uploads_race(self, code, exception):
+        fs = AioS3FileSystem(
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            max_workers=1,
+            retry_config=RetryConfig(attempt=1),
+            skip_instance_cache=True,
+        )
+        with Stubber(fs.core.client) as stubber:
+            stubber.add_response(
+                "list_multipart_uploads",
+                {
+                    "Uploads": [
+                        {"Key": "prefix/gone", "UploadId": "gone"},
+                        {"Key": "prefix/pending", "UploadId": "pending"},
+                    ],
+                    "IsTruncated": False,
+                },
+                {"Bucket": "bucket", "Prefix": "prefix/"},
+            )
+            request = {"Bucket": "bucket", "Key": "prefix/gone", "UploadId": "gone"}
+            if code:
+                stubber.add_client_error(
+                    "abort_multipart_upload",
+                    service_error_code=code,
+                    http_status_code=404 if code.startswith("NoSuch") else 500,
+                    expected_params=request,
+                )
+            else:
+                stubber.add_response("abort_multipart_upload", {}, request)
+            stubber.add_response(
+                "abort_multipart_upload",
+                {},
+                {"Bucket": "bucket", "Key": "prefix/pending", "UploadId": "pending"},
+            )
+            expected = pytest.raises(exception) if exception else contextlib.nullcontext()
+            with expected:
+                fs.clear_multipart_uploads("s3://bucket/prefix/")
+            stubber.assert_no_pending_responses()
+
+    def test_clear_multipart_uploads_empty(self):
+        fs = AioS3FileSystem(
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            max_workers=1,
+            skip_instance_cache=True,
+        )
+        with Stubber(fs.core.client) as stubber:
+            stubber.add_response(
+                "list_multipart_uploads",
+                {"Uploads": [], "IsTruncated": False},
+                {"Bucket": "bucket", "Prefix": "prefix/"},
+            )
+            fs.clear_multipart_uploads("s3://bucket/prefix/")
+            stubber.assert_no_pending_responses()
+
+    @pytest.mark.parametrize("algorithm", [None, "SHA256", "CRC32"])
+    @pytest.mark.asyncio
+    async def test_multipart_copy_uses_creation_algorithm(self, algorithm):
+        fs = AioS3FileSystem(
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            max_workers=1,
+            skip_instance_cache=True,
+        )
+        block_size = 5 * 2**30
+        size = 2 * block_size
+        checksum_kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
+        expected_parts = []
+        with Stubber(fs.core.client) as stubber:
+            stubber.add_response(
+                "head_object", {"ContentLength": size}, {"Bucket": "bucket", "Key": "src"}
+            )
+            stubber.add_response(
+                "create_multipart_upload",
+                {"Bucket": "bucket", "Key": "dst", "UploadId": "u", **checksum_kwargs},
+                {"Bucket": "bucket", "Key": "dst", **checksum_kwargs},
+            )
+            for number, range_ in (
+                (1, f"bytes=0-{block_size - 1}"),
+                (2, f"bytes={block_size}-{size - 1}"),
+            ):
+                result = {"ETag": f'"p{number}"', f"Checksum{algorithm or 'CRC32'}": "checksum"}
+                stubber.add_response(
+                    "upload_part_copy",
+                    {"CopyPartResult": result},
+                    {
+                        "Bucket": "bucket",
+                        "Key": "dst",
+                        "UploadId": "u",
+                        "PartNumber": number,
+                        "CopySource": {"Bucket": "bucket", "Key": "src"},
+                        "CopySourceRange": range_,
+                    },
+                )
+                expected_parts.append(
+                    {
+                        "ETag": result["ETag"],
+                        "PartNumber": number,
+                        **({f"Checksum{algorithm}": "checksum"} if algorithm else {}),
+                    }
+                )
+            stubber.add_response(
+                "complete_multipart_upload",
+                {"ETag": '"done"'},
+                {
+                    "Bucket": "bucket",
+                    "Key": "dst",
+                    "UploadId": "u",
+                    "MultipartUpload": {"Parts": expected_parts},
+                },
+            )
+            kwargs = {
+                "bucket1": "bucket",
+                "key1": "src",
+                "size1": size,
+                "bucket2": "bucket",
+                "key2": "dst",
+                "block_size": block_size,
+                "MetadataDirective": "REPLACE",
+                "TaggingDirective": "REPLACE",
+                "AnnotationDirective": "EXCLUDE",
+                **checksum_kwargs,
+            }
+            await fs._copy_object_with_multipart_upload(**kwargs)
+            stubber.assert_no_pending_responses()
+
     @pytest.fixture(scope="class")
     def fs(self, request):
         if not hasattr(request, "param"):
             request.param = {}
         return AioS3FileSystem(connection=connect(), **request.param)
+
+    @pytest.mark.parametrize("algorithm", [None, "SHA256", "CRC32"])
+    def test_open_multipart_with_checksum(self, fs, algorithm):
+        block_size = 5 * 2**20
+        data = b"x" * (block_size + 1)
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_open_multipart_with_checksum/{uuid.uuid4()}"
+        )
+        kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
+        try:
+            with fs.open(path, "wb", block_size=block_size, s3_additional_kwargs=kwargs) as file:
+                file.write(data)
+            assert fs.cat_file(path) == data
+            assert fs.list_multipart_uploads(path) == []
+        finally:
+            fs.clear_multipart_uploads(path)
+            if fs.exists(path):
+                fs.rm(path)
+
+    @pytest.mark.parametrize("algorithm", [None, "SHA256", "CRC32"])
+    def test_put_file_multipart_with_checksum(self, fs, tmp_path, algorithm):
+        block_size = 5 * 2**20
+        data = b"x" * (block_size + 1)
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_put_file_multipart_with_checksum/{uuid.uuid4()}"
+        )
+        kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
+        try:
+            lpath = tmp_path / "data"
+            lpath.write_bytes(data)
+            fs.put_file(str(lpath), path, block_size=block_size, s3_additional_kwargs=kwargs)
+            assert fs.cat_file(path) == data
+            assert fs.list_multipart_uploads(path) == []
+        finally:
+            fs.clear_multipart_uploads(path)
+            if fs.exists(path):
+                fs.rm(path)
+
+    @pytest.mark.parametrize("algorithm", [None, "SHA256", "CRC32"])
+    def test_pipe_file_multipart_with_checksum(self, fs, algorithm):
+        block_size = 5 * 2**20
+        data = b"x" * (block_size + 1)
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_pipe_file_multipart_with_checksum/{uuid.uuid4()}"
+        )
+        kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
+        try:
+            fs.pipe_file(path, data, block_size=block_size, s3_additional_kwargs=kwargs)
+            assert fs.cat_file(path) == data
+            assert fs.list_multipart_uploads(path) == []
+        finally:
+            fs.clear_multipart_uploads(path)
+            if fs.exists(path):
+                fs.rm(path)
+
+    @pytest.mark.parametrize("algorithm", [None, "SHA256", "CRC32"])
+    def test_append_multipart_with_checksum(self, fs, algorithm):
+        block_size = 5 * 2**20
+        data = b"x" * (block_size + 1)
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_append_multipart_with_checksum/{uuid.uuid4()}"
+        )
+        kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
+        try:
+            original = b"y" * block_size
+            fs.pipe_file(path, original)
+            with fs.open(path, "ab", block_size=block_size, s3_additional_kwargs=kwargs) as file:
+                file.write(data)
+            assert fs.cat_file(path) == original + data
+            assert fs.list_multipart_uploads(path) == []
+        finally:
+            fs.clear_multipart_uploads(path)
+            if fs.exists(path):
+                fs.rm(path)
+
+    def test_clear_multipart_uploads_after_listed_upload_is_aborted(self, fs):
+        sync_fs = fs._sync_fs
+        prefix = (
+            f"{ENV.s3_staging_key}{ENV.schema}/filesystem/test_clear_multipart_race/{uuid.uuid4()}/"
+        )
+        path = f"s3://{ENV.s3_staging_bucket}/{prefix}"
+        gone_path = S3Path(ENV.s3_staging_bucket, f"{prefix}gone")
+        gone = sync_fs.core.create_multipart_upload(gone_path)
+        try:
+            sync_fs.core.create_multipart_upload(S3Path(ENV.s3_staging_bucket, f"{prefix}pending"))
+            list_uploads = sync_fs.list_multipart_uploads
+
+            def list_then_abort(path):
+                uploads = list_uploads(path)
+                assert len(uploads) == 2
+                assert any(upload.upload_id == gone.upload_id for upload in uploads)
+                sync_fs.core.abort_multipart_upload(gone_path, gone.upload_id)
+                return uploads
+
+            with mock.patch.object(sync_fs, "list_multipart_uploads", side_effect=list_then_abort):
+                fs.clear_multipart_uploads(path)
+            assert fs.list_multipart_uploads(path) == []
+        finally:
+            fs.clear_multipart_uploads(path)
 
     @pytest.mark.parametrize(
         ("fs", "start", "end", "target_data"),
@@ -2070,261 +2313,3 @@ class TestAioS3File:
 
     def test_format_ranges(self):
         assert S3File._format_ranges((0, 100)) == "bytes=0-99"
-
-
-@pytest.mark.parametrize("fs_class", [S3FileSystem, AioS3FileSystem])
-@pytest.mark.parametrize(
-    ("code", "exception"),
-    [
-        (None, None),
-        ("NoSuchUpload", None),
-        ("NoSuchBucket", FileNotFoundError),
-        ("AccessDenied", PermissionError),
-        ("InternalError", OSError),
-    ],
-)
-def test_clear_multipart_uploads_race(fs_class, code, exception):
-    fs = fs_class(
-        key="dummy",
-        secret="dummy",
-        region_name="us-east-1",
-        max_workers=1,
-        retry_config=RetryConfig(attempt=1),
-        skip_instance_cache=True,
-    )
-    sync_fs = fs._sync_fs if isinstance(fs, AioS3FileSystem) else fs
-    with Stubber(sync_fs.core.client) as stubber:
-        stubber.add_response(
-            "list_multipart_uploads",
-            {
-                "Uploads": [
-                    {"Key": "prefix/gone", "UploadId": "gone"},
-                    {"Key": "prefix/pending", "UploadId": "pending"},
-                ],
-                "IsTruncated": False,
-            },
-            {"Bucket": "bucket", "Prefix": "prefix/"},
-        )
-        request = {"Bucket": "bucket", "Key": "prefix/gone", "UploadId": "gone"}
-        if code:
-            stubber.add_client_error(
-                "abort_multipart_upload",
-                service_error_code=code,
-                http_status_code=404 if code.startswith("NoSuch") else 500,
-                expected_params=request,
-            )
-        else:
-            stubber.add_response("abort_multipart_upload", {}, request)
-        stubber.add_response(
-            "abort_multipart_upload",
-            {},
-            {"Bucket": "bucket", "Key": "prefix/pending", "UploadId": "pending"},
-        )
-        expected = pytest.raises(exception) if exception else contextlib.nullcontext()
-        with expected:
-            fs.clear_multipart_uploads("s3://bucket/prefix/")
-        stubber.assert_no_pending_responses()
-
-
-@pytest.mark.parametrize("fs_class", [S3FileSystem, AioS3FileSystem])
-def test_clear_multipart_uploads_empty(fs_class):
-    fs = fs_class(
-        key="dummy",
-        secret="dummy",
-        region_name="us-east-1",
-        max_workers=1,
-        skip_instance_cache=True,
-    )
-    sync_fs = fs._sync_fs if isinstance(fs, AioS3FileSystem) else fs
-    with Stubber(sync_fs.core.client) as stubber:
-        stubber.add_response(
-            "list_multipart_uploads",
-            {"Uploads": [], "IsTruncated": False},
-            {"Bucket": "bucket", "Prefix": "prefix/"},
-        )
-        fs.clear_multipart_uploads("s3://bucket/prefix/")
-        stubber.assert_no_pending_responses()
-
-
-def test_clear_multipart_uploads_checks_all_results(monkeypatch):
-    fs = S3FileSystem(
-        key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
-    )
-    fs.list_multipart_uploads = mock.MagicMock(
-        return_value=[
-            SimpleNamespace(bucket="bucket", key=f"prefix/{n}", upload_id=str(n)) for n in range(3)
-        ]
-    )
-    error = PermissionError("denied")
-    futures = [mock.Mock(), mock.Mock(), mock.Mock()]
-    futures[0].result.side_effect = error
-    futures[2].result.side_effect = FileNotFoundError("unclassified missing resource")
-    executor = mock.MagicMock()
-    executor.__enter__.return_value.submit.side_effect = futures
-    monkeypatch.setattr(fs, "_create_executor", mock.Mock(return_value=executor))
-    monkeypatch.setattr("pyathena.filesystem.s3.as_completed", lambda pending: iter(pending))
-    with pytest.raises(PermissionError) as raised:
-        fs.clear_multipart_uploads("s3://bucket/prefix/")
-    assert raised.value is error
-    for future in futures:
-        future.result.assert_called_once_with()
-
-
-def test_clear_multipart_uploads_preserves_unclassified_file_not_found():
-    fs = S3FileSystem(
-        key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
-    )
-    fs.list_multipart_uploads = mock.MagicMock(
-        return_value=[SimpleNamespace(bucket="bucket", key="prefix/key", upload_id="u")]
-    )
-    error = FileNotFoundError("unclassified missing resource")
-    fs.core.abort_multipart_upload = mock.MagicMock(side_effect=error)
-    with pytest.raises(FileNotFoundError) as raised:
-        fs.clear_multipart_uploads("s3://bucket/prefix/")
-    assert raised.value is error
-
-
-@pytest.mark.parametrize("fs_class", [S3FileSystem, AioS3FileSystem])
-@pytest.mark.parametrize("algorithm", [None, "SHA256", "CRC32"])
-@pytest.mark.asyncio
-async def test_multipart_copy_uses_creation_algorithm(fs_class, algorithm):
-    fs = fs_class(
-        key="dummy",
-        secret="dummy",
-        region_name="us-east-1",
-        max_workers=1,
-        skip_instance_cache=True,
-    )
-    block_size = 5 * 2**30
-    size = 2 * block_size
-    checksum_kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
-    expected_parts = []
-    with Stubber(fs.core.client) as stubber:
-        stubber.add_response(
-            "head_object", {"ContentLength": size}, {"Bucket": "bucket", "Key": "src"}
-        )
-        stubber.add_response(
-            "create_multipart_upload",
-            {"Bucket": "bucket", "Key": "dst", "UploadId": "u", **checksum_kwargs},
-            {"Bucket": "bucket", "Key": "dst", **checksum_kwargs},
-        )
-        for number, range_ in (
-            (1, f"bytes=0-{block_size - 1}"),
-            (2, f"bytes={block_size}-{size - 1}"),
-        ):
-            result = {"ETag": f'"p{number}"', f"Checksum{algorithm or 'CRC32'}": "checksum"}
-            stubber.add_response(
-                "upload_part_copy",
-                {"CopyPartResult": result},
-                {
-                    "Bucket": "bucket",
-                    "Key": "dst",
-                    "UploadId": "u",
-                    "PartNumber": number,
-                    "CopySource": {"Bucket": "bucket", "Key": "src"},
-                    "CopySourceRange": range_,
-                },
-            )
-            expected_parts.append(
-                {
-                    "ETag": result["ETag"],
-                    "PartNumber": number,
-                    **({f"Checksum{algorithm}": "checksum"} if algorithm else {}),
-                }
-            )
-        stubber.add_response(
-            "complete_multipart_upload",
-            {"ETag": '"done"'},
-            {
-                "Bucket": "bucket",
-                "Key": "dst",
-                "UploadId": "u",
-                "MultipartUpload": {"Parts": expected_parts},
-            },
-        )
-        kwargs = {
-            "bucket1": "bucket",
-            "key1": "src",
-            "size1": size,
-            "bucket2": "bucket",
-            "key2": "dst",
-            "block_size": block_size,
-            "MetadataDirective": "REPLACE",
-            "TaggingDirective": "REPLACE",
-            "AnnotationDirective": "EXCLUDE",
-            **checksum_kwargs,
-        }
-        if isinstance(fs, AioS3FileSystem):
-            await fs._copy_object_with_multipart_upload(**kwargs)
-        else:
-            fs._copy_object_with_multipart_upload(**kwargs)
-        stubber.assert_no_pending_responses()
-
-
-@pytest.mark.parametrize("fs", [S3FileSystem, AioS3FileSystem], indirect=True)
-class TestMultipartUploadRegression:
-    @pytest.fixture
-    def fs(self, request):
-        return request.param(connect(), max_workers=1, skip_instance_cache=True)
-
-    @pytest.mark.parametrize("algorithm", [None, "SHA256", "CRC32"])
-    @pytest.mark.parametrize("method", ["open", "put_file", "pipe_file", "append"])
-    def test_multipart_write_with_checksum(self, fs, tmp_path, algorithm, method):
-        block_size = 5 * 2**20
-        data = b"x" * (block_size + 1)
-        path = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_multipart_checksum/{uuid.uuid4()}"
-        )
-        kwargs = {
-            "block_size": block_size,
-            "s3_additional_kwargs": {"ChecksumAlgorithm": algorithm} if algorithm else {},
-        }
-        expected = data
-        try:
-            if method == "append":
-                original = b"y" * block_size
-                fs.pipe_file(path, original)
-                with fs.open(path, "ab", **kwargs) as file:
-                    file.write(data)
-                expected = original + data
-            elif method == "open":
-                with fs.open(path, "wb", **kwargs) as file:
-                    file.write(data)
-            elif method == "put_file":
-                local = tmp_path / "data"
-                local.write_bytes(data)
-                fs.put_file(str(local), path, **kwargs)
-            else:
-                fs.pipe_file(path, data, **kwargs)
-            assert fs.cat_file(path) == expected
-            assert fs.list_multipart_uploads(path) == []
-        finally:
-            fs.clear_multipart_uploads(path)
-            if fs.exists(path):
-                fs.rm(path)
-
-    def test_clear_multipart_uploads_after_listed_upload_is_aborted(self, fs):
-        sync_fs = fs._sync_fs if isinstance(fs, AioS3FileSystem) else fs
-        prefix = (
-            f"{ENV.s3_staging_key}{ENV.schema}/filesystem/test_clear_multipart_race/{uuid.uuid4()}/"
-        )
-        path = f"s3://{ENV.s3_staging_bucket}/{prefix}"
-        gone_path = S3Path(ENV.s3_staging_bucket, f"{prefix}gone")
-        gone = sync_fs.core.create_multipart_upload(gone_path)
-        try:
-            sync_fs.core.create_multipart_upload(S3Path(ENV.s3_staging_bucket, f"{prefix}pending"))
-            list_uploads = sync_fs.list_multipart_uploads
-
-            def list_then_abort(path):
-                uploads = list_uploads(path)
-                assert len(uploads) == 2
-                assert any(upload.upload_id == gone.upload_id for upload in uploads)
-                sync_fs.core.abort_multipart_upload(gone_path, gone.upload_id)
-                return uploads
-
-            with mock.patch.object(sync_fs, "list_multipart_uploads", side_effect=list_then_abort):
-                fs.clear_multipart_uploads(path)
-            assert fs.list_multipart_uploads(path) == []
-        finally:
-            fs.clear_multipart_uploads(path)
