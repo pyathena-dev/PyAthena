@@ -485,8 +485,10 @@ class AioS3FileSystem(AsyncFileSystem):
         """Copy an object with a multipart upload of its byte ranges.
 
         See :meth:`S3FileSystem._copy_object_with_multipart_upload`. The part
-        and annotation copies run in parallel with ``asyncio.gather`` and
-        ``asyncio.to_thread``.
+        and annotation copies run in parallel as asyncio tasks with
+        ``asyncio.to_thread``. A cancellation while the parts are copied or
+        the upload is completed waits for the running part copies, aborts
+        the upload, and is re-raised.
 
         Args:
             bucket1: Source S3 bucket name.
