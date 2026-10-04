@@ -16,7 +16,8 @@ PyAthena's own S3FileSystem (fsspec compatible), and other reads use Polars' nat
 so s3fs is also not required.
 
 Options passed to `execute()`, other than PolarsCursor's own options such as `chunksize`, are passed to the Polars read function.
-With `use_pyarrow=True` and `schema_overrides=None`, `pl.read_csv()` reads the CSV result with pyarrow, which raises an error or returns wrong values when a quoted value containing a newline crosses one of pyarrow's read blocks.
+`pl.read_csv()` reads the CSV result with pyarrow when `use_pyarrow=True` is given with `schema_overrides=None`, which replaces PyAthena's column types, and Polars' other conditions for it hold.
+That read raises an error or returns wrong values when a quoted value containing a newline crosses one of pyarrow's read blocks.
 The default Polars CSV reader reads such values.
 
 You can use the PolarsCursor by specifying the `cursor_class`
