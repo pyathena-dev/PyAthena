@@ -29,6 +29,7 @@ from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
     S3Metadata,
     S3MultipartUpload,
+    S3MultipartUploadPart,
     S3Object,
     S3ObjectType,
     S3ObjectVersion,
@@ -205,7 +206,7 @@ class AioS3FileSystem(AsyncFileSystem):
             FileExistsError: If the mode is "create" and the path already
                 exists.
             ValueError: If the compression is not supported, or if the data
-                takes more than ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
+                takes more than ``S3Core.MULTIPART_UPLOAD_MAX_PARTS`` blocks.
         """
         # See S3FileSystem.pipe_file.
         compression = get_compression(self._strip_protocol(path), kwargs.pop("compression", None))
@@ -258,7 +259,7 @@ class AioS3FileSystem(AsyncFileSystem):
             FileExistsError: If the mode is "create" and the path already
                 exists.
             ValueError: If the file takes more than
-                ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
+                ``S3Core.MULTIPART_UPLOAD_MAX_PARTS`` blocks.
         """
         if os.path.isdir(lpath):
             return
@@ -530,7 +531,7 @@ class AioS3FileSystem(AsyncFileSystem):
             return False
         size1 = info1.get("size", 0)
         try:
-            if size1 <= S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE:
+            if size1 <= self.core.MULTIPART_UPLOAD_MAX_PART_SIZE:
                 await asyncio.to_thread(
                     self._sync_fs._copy_object,
                     bucket1=source.bucket,
@@ -596,22 +597,22 @@ class AioS3FileSystem(AsyncFileSystem):
                 directive has an invalid value.
         """
         max_workers = max_workers if max_workers else self._sync_fs.max_workers
-        block_size = block_size if block_size else S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE
+        block_size = block_size if block_size else self.core.MULTIPART_UPLOAD_MAX_PART_SIZE
         if (
-            block_size < S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE
-            or block_size > S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE
+            block_size < self.core.MULTIPART_UPLOAD_MIN_PART_SIZE
+            or block_size > self.core.MULTIPART_UPLOAD_MAX_PART_SIZE
         ):
             raise ValueError(
                 "Block size must be between "
-                f"5 MiB ({S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE} bytes) and "
-                f"5 GiB ({S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE} bytes), "
+                f"5 MiB ({self.core.MULTIPART_UPLOAD_MIN_PART_SIZE} bytes) and "
+                f"5 GiB ({self.core.MULTIPART_UPLOAD_MAX_PART_SIZE} bytes), "
                 f"inclusive: {block_size}."
             )
 
         create_kwargs, version_id1, head_size = await asyncio.to_thread(
             self._sync_fs._get_multipart_copy_kwargs, bucket1, key1, version_id1, kwargs
         )
-        if head_size is not None and head_size <= S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE:
+        if head_size is not None and head_size <= self.core.MULTIPART_UPLOAD_MAX_PART_SIZE:
             # See S3FileSystem._copy_object_with_multipart_upload.
             await asyncio.to_thread(
                 self._sync_fs._copy_object,
@@ -624,15 +625,9 @@ class AioS3FileSystem(AsyncFileSystem):
             )
             return
         # The size of the copied version; see S3FileSystem.
-        ranges = self._sync_fs._get_copy_ranges(
-            size1 if head_size is None else head_size, block_size
-        )
-        copy_source: dict[str, Any] = {
-            "Bucket": bucket1,
-            "Key": key1,
-        }
-        if version_id1:
-            copy_source["VersionId"] = version_id1
+        ranges = self.core.part_ranges(size1 if head_size is None else head_size, block_size)
+        source = S3Path(bucket1, key1, version_id1)
+        destination = S3Path(bucket2, key2)
         # Listed before anything is written; see S3FileSystem.
         annotations = (
             await asyncio.to_thread(
@@ -642,42 +637,34 @@ class AioS3FileSystem(AsyncFileSystem):
             else []
         )
         multipart_upload = await asyncio.to_thread(
-            self._sync_fs._create_multipart_upload,
-            bucket=bucket2,
-            key=key2,
-            **create_kwargs,
+            self.core.create_multipart_upload, destination, **create_kwargs
         )
         upload_id = cast(str, multipart_upload.upload_id)
 
         semaphore = asyncio.Semaphore(max_workers)
-        part_kwargs = self._sync_fs.core.operation_params("upload_part_copy", kwargs)
+        part_kwargs = self.core.operation_params("upload_part_copy", kwargs)
         failed = False
 
-        async def _upload_part(i: int, range_: tuple[int, int]) -> dict[str, Any] | None:
+        async def _upload_part(i: int, range_: tuple[int, int]) -> S3MultipartUploadPart | None:
             nonlocal failed
             async with semaphore:
                 if failed:
                     # The upload is being aborted; do not start more parts.
                     return None
                 try:
-                    result = await asyncio.to_thread(
-                        self._sync_fs._upload_part_copy,
-                        bucket=bucket2,
-                        key=key2,
-                        copy_source=copy_source,
+                    return await asyncio.to_thread(
+                        self.core.upload_part_copy,
+                        path=destination,
                         upload_id=upload_id,
                         part_number=i + 1,
-                        copy_source_ranges=range_,
+                        source=source,
+                        range_=range_,
                         **part_kwargs,
                     )
                 except Exception:
                     # Set before the semaphore lets a waiting part start.
                     failed = True
                     raise
-            return {
-                "ETag": result.etag,
-                "PartNumber": result.part_number,
-            }
 
         tasks = [asyncio.ensure_future(_upload_part(i, r)) for i, r in enumerate(ranges)]
         completion: asyncio.Task[S3CompleteMultipartUpload] | None = None
@@ -708,12 +695,11 @@ class AioS3FileSystem(AsyncFileSystem):
             parts = [task.result() for task in tasks]
             completion = asyncio.ensure_future(
                 asyncio.to_thread(
-                    self._sync_fs._complete_multipart_upload,
-                    bucket=bucket2,
-                    key=key2,
-                    upload_id=upload_id,
-                    parts=cast(list[dict[str, Any]], parts),
-                    **self._sync_fs.core.operation_params("complete_multipart_upload", kwargs),
+                    self.core.complete_multipart_upload,
+                    destination,
+                    upload_id,
+                    cast(list[S3MultipartUploadPart], parts),
+                    **self.core.operation_params("complete_multipart_upload", kwargs),
                 )
             )
             # shield keeps a cancellation from cancelling the completion, whose

@@ -10,7 +10,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable, Iterator, Mapping
+import math
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, ClassVar, cast
@@ -19,7 +20,13 @@ import botocore.exceptions
 from botocore.client import BaseClient
 
 from pyathena.filesystem.s3_errors import S3ClientError
-from pyathena.filesystem.s3_object import S3Metadata, S3ObjectVersion
+from pyathena.filesystem.s3_object import (
+    S3CompleteMultipartUpload,
+    S3Metadata,
+    S3MultipartUpload,
+    S3MultipartUploadPart,
+    S3ObjectVersion,
+)
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.util import RetryConfig, override, retry_api_call
 
@@ -399,8 +406,9 @@ class S3Core:
     Each operation sends one request, or one per page for the iterators,
     with the retry policy, and translates S3 errors into ``OSError``
     subclasses (see :class:`~pyathena.filesystem.s3_errors.S3ClientError`):
-    a missing bucket, or a missing object or version that an operation reads,
-    raises ``FileNotFoundError``, and a denied request ``PermissionError``.
+    a missing bucket or multipart upload, or a missing object or version that
+    an operation reads, raises ``FileNotFoundError``, and a denied request
+    ``PermissionError``.
     As in S3, deleting a missing key is not an error. Nothing is cached.
 
     Example:
@@ -409,6 +417,14 @@ class S3Core:
         >>> for page in core.list_objects("bucket", prefix="dir/", delimiter="/"):
         ...     print([o.key for o in page.objects])
     """
+
+    # https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
+    # The minimum size of a part in a multipart upload is 5MiB.
+    MULTIPART_UPLOAD_MIN_PART_SIZE: int = 5 * 2**20  # 5MiB
+    # The maximum size of a part in a multipart upload is 5GiB.
+    MULTIPART_UPLOAD_MAX_PART_SIZE: int = 5 * 2**30  # 5GiB
+    # The maximum number of parts per multipart upload is 10,000.
+    MULTIPART_UPLOAD_MAX_PARTS: int = 10_000
 
     def __init__(
         self,
@@ -577,6 +593,201 @@ class S3Core:
             **params,
         )
         return S3DeleteResult.from_response(batch.bucket, response)
+
+    def create_multipart_upload(self, path: S3Path, **params) -> S3MultipartUpload:
+        """Start a multipart upload to an object with CreateMultipartUpload.
+
+        Args:
+            path: The path of the object to write, without a version ID.
+            **params: Additional request parameters. The bucket and key of
+                the path take precedence over parameters of the same name.
+
+        Returns:
+            The multipart upload.
+
+        Raises:
+            ValueError: If the path has no key, or has a version ID, which a
+                write cannot replace.
+        """
+        if not path.key:
+            raise ValueError(f"The path has no key: {path.uri}.")
+        if path.version_id:
+            raise ValueError(f"Cannot write to a version: {path.uri}.")
+        request: dict[str, Any] = {"Bucket": path.bucket, "Key": path.key}
+        _logger.debug(f"Create multipart upload to {path.uri}.")
+        response = self.call(self._client.create_multipart_upload, **{**params, **request})
+        return S3MultipartUpload(response)
+
+    def upload_part(
+        self, path: S3Path, upload_id: str, part_number: int, body: bytes, **params
+    ) -> S3MultipartUploadPart:
+        """Upload a part of a multipart upload with UploadPart.
+
+        Args:
+            path: The path of the object that the upload writes.
+            upload_id: The ID of the multipart upload.
+            part_number: The number of the part, from 1.
+            body: The data of the part.
+            **params: Additional request parameters. The fields that the
+                other arguments set take precedence over parameters of the
+                same name.
+
+        Returns:
+            The uploaded part.
+
+        Raises:
+            ValueError: If the path has no key.
+        """
+        if not path.key:
+            raise ValueError(f"The path has no key: {path.uri}.")
+        request: dict[str, Any] = {
+            "Bucket": path.bucket,
+            "Key": path.key,
+            "UploadId": upload_id,
+            "PartNumber": part_number,
+            "Body": body,
+        }
+        _logger.debug(f"Upload part of {upload_id} to {path.uri} as part {part_number}.")
+        response = self.call(self._client.upload_part, **{**params, **request})
+        return S3MultipartUploadPart(part_number, response)
+
+    def upload_part_copy(
+        self,
+        path: S3Path,
+        upload_id: str,
+        part_number: int,
+        source: S3Path,
+        range_: tuple[int, int] | None = None,
+        **params,
+    ) -> S3MultipartUploadPart:
+        """Copy a part of a multipart upload from an object with UploadPartCopy.
+
+        Args:
+            path: The path of the object that the upload writes.
+            upload_id: The ID of the multipart upload.
+            part_number: The number of the part, from 1.
+            source: The path of the object to copy, with the version ID to
+                copy, if any.
+            range_: The ``(start, end)`` byte range of the source to copy,
+                with an exclusive end. None sends no range of its own, so the
+                whole source is copied unless ``params`` or ``request_kwargs``
+                have ``CopySourceRange``.
+            **params: Additional request parameters. The fields that the
+                other arguments set take precedence over parameters of the
+                same name.
+
+        Returns:
+            The copied part.
+
+        Raises:
+            ValueError: If the path or the source has no key.
+        """
+        if not path.key:
+            raise ValueError(f"The path has no key: {path.uri}.")
+        if not source.key:
+            raise ValueError(f"The source has no key: {source.uri}.")
+        copy_source: dict[str, Any] = {"Bucket": source.bucket, "Key": source.key}
+        if source.version_id:
+            copy_source.update({"VersionId": source.version_id})
+        request: dict[str, Any] = {
+            "Bucket": path.bucket,
+            "Key": path.key,
+            "CopySource": copy_source,
+            "UploadId": upload_id,
+            "PartNumber": part_number,
+        }
+        if range_:
+            request.update({"CopySourceRange": f"bytes={range_[0]}-{range_[1] - 1}"})
+        _logger.debug(f"Upload part copy from {source.uri} to {path.uri} as part {part_number}.")
+        response = self.call(self._client.upload_part_copy, **{**params, **request})
+        return S3MultipartUploadPart(part_number, response)
+
+    def complete_multipart_upload(
+        self, path: S3Path, upload_id: str, parts: Sequence[S3MultipartUploadPart], **params
+    ) -> S3CompleteMultipartUpload:
+        """Complete a multipart upload with CompleteMultipartUpload.
+
+        Args:
+            path: The path of the object that the upload writes.
+            upload_id: The ID of the multipart upload.
+            parts: The uploaded parts, in part-number order.
+            **params: Additional request parameters. The fields that the
+                other arguments set take precedence over parameters of the
+                same name.
+
+        Returns:
+            The completed upload.
+
+        Raises:
+            ValueError: If the path has no key.
+        """
+        if not path.key:
+            raise ValueError(f"The path has no key: {path.uri}.")
+        request: dict[str, Any] = {
+            "Bucket": path.bucket,
+            "Key": path.key,
+            "UploadId": upload_id,
+            "MultipartUpload": {
+                "Parts": [{"ETag": p.etag, "PartNumber": p.part_number} for p in parts]
+            },
+        }
+        _logger.debug(f"Complete multipart upload {upload_id} to {path.uri}.")
+        response = self.call(self._client.complete_multipart_upload, **{**params, **request})
+        return S3CompleteMultipartUpload(response)
+
+    def abort_multipart_upload(self, path: S3Path, upload_id: str, **params) -> None:
+        """Abort a multipart upload with AbortMultipartUpload.
+
+        Args:
+            path: The path of the object that the upload writes.
+            upload_id: The ID of the multipart upload.
+            **params: Additional request parameters. The fields that the
+                other arguments set take precedence over parameters of the
+                same name.
+
+        Raises:
+            ValueError: If the path has no key.
+            FileNotFoundError: If the upload does not exist, for example
+                because it was completed or aborted.
+        """
+        if not path.key:
+            raise ValueError(f"The path has no key: {path.uri}.")
+        request: dict[str, Any] = {"Bucket": path.bucket, "Key": path.key, "UploadId": upload_id}
+        self.call(self._client.abort_multipart_upload, **{**params, **request})
+
+    def part_ranges(self, size: int, block_size: int) -> list[tuple[int, int]]:
+        """Split an object into the source ranges of the parts that copy it.
+
+        The object is split into ranges of ``block_size`` bytes, or of a
+        larger size that splits it into at most
+        ``MULTIPART_UPLOAD_MAX_PARTS`` ranges. A last range shorter than
+        ``MULTIPART_UPLOAD_MIN_PART_SIZE`` is merged into the previous one,
+        which is split in half if the result exceeds
+        ``MULTIPART_UPLOAD_MAX_PART_SIZE``. Every range is then within the
+        S3 part size limits, including the last one unless the whole object
+        is smaller than the minimum part size, so that more parts can follow
+        the copied ones, as in an append.
+
+        Args:
+            size: The size of the source object in bytes.
+            block_size: The size in bytes to split the object by, between
+                ``MULTIPART_UPLOAD_MIN_PART_SIZE`` and
+                ``MULTIPART_UPLOAD_MAX_PART_SIZE``. It is raised to
+                ``size`` divided by ``MULTIPART_UPLOAD_MAX_PARTS``, rounded
+                up, if smaller. The range that a short last range is merged
+                into can be longer, up to ``MULTIPART_UPLOAD_MAX_PART_SIZE``.
+
+        Returns:
+            The ``(start, end)`` byte ranges, with an exclusive end, that
+            cover the whole object in order.
+        """
+        block_size = max(block_size, math.ceil(size / self.MULTIPART_UPLOAD_MAX_PARTS))
+        starts = list(range(0, size, block_size))
+        if len(starts) > 1 and size - starts[-1] < self.MULTIPART_UPLOAD_MIN_PART_SIZE:
+            starts.pop()
+            if size - starts[-1] > self.MULTIPART_UPLOAD_MAX_PART_SIZE:
+                starts.append(starts[-1] + (size - starts[-1]) // 2)
+        return list(zip(starts, [*starts[1:], size], strict=True))
 
     def list_objects_page(
         self,
