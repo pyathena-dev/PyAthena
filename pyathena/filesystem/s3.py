@@ -1415,9 +1415,17 @@ class S3FileSystem(AbstractFileSystem):
         ``AbstractFileSystem.mv()`` instead removes ``path1`` by expanding it
         again, which also deletes copies placed where ``path1`` matches them
         and files that ``maxdepth`` kept from being copied. A file whose
-        destination is the file itself, or the ``null`` version of a file
-        moved to the file, is left in place, and directories, which S3 does
-        not store as objects, are not copied.
+        destination is the file itself is left in place, and directories,
+        which S3 does not store as objects, are not copied. A ``null`` version
+        moved onto its key is copied and deleted only when bucket versioning
+        is enabled. Without versioning, or with versioning suspended, that
+        move is left in place because the copy would replace the version
+        that the deletion removes.
+
+        Comparing a ``null`` version with its unversioned key calls
+        GetBucketVersioning once per bucket during the move's planning and
+        requires ``s3:GetBucketVersioning``. The result is not cached across
+        moves. Directory buckets do not support versioning and need no lookup.
 
         Args:
             path1: Source S3 path, glob pattern, or list of paths.
@@ -1432,6 +1440,7 @@ class S3FileSystem(AbstractFileSystem):
                 destination is another source, including one left in place,
                 which is checked before anything is copied. A directory with
                 no object at its key, which is not copied, does not conflict.
+            OSError: If bucket versioning cannot be read.
         """
         if path1 == path2:
             return
@@ -1463,15 +1472,35 @@ class S3FileSystem(AbstractFileSystem):
 
         Raises:
             ValueError: If the move has conflicting paths.
+            OSError: If bucket versioning cannot be read.
         """
         pairing = S3PathPairing(path1, path2, recursive=recursive, maxdepth=maxdepth)
         pairs = self._copy_pairs(pairing)
+        paths = {p: S3Path.parse(p) for pair in pairs for p in pair}
+        unversioned = {p.name for p in paths.values() if not p.version_id}
+        buckets = {
+            p.bucket
+            for p in paths.values()
+            if p.version_id == "null"
+            and p.name in unversioned
+            and not self.core._is_directory_bucket(p.bucket)
+        }
+        versioned_buckets = {
+            bucket
+            for bucket in buckets
+            if self._call(self._client.get_bucket_versioning, Bucket=bucket).get("Status")
+            == "Enabled"
+        }
         missing = {
             source
-            for source in pairing.conflict_candidates(pairs)
+            for source in pairing.conflict_candidates(
+                pairs, versioning_enabled_buckets=versioned_buckets
+            )
             if self._head_object(source) is None
         }
-        return pairing.move_pairs(pairs, missing=missing)
+        return pairing.move_pairs(
+            pairs, missing=missing, versioning_enabled_buckets=versioned_buckets
+        )
 
     def _copy_pairs(
         self, pairing: S3PathPairing, isdir: Callable[[str], bool] | None = None

@@ -795,6 +795,8 @@ class TestS3FileSystem:
         keys = set(keys)
 
         def call(method, **kwargs):
+            if method is fs._client.get_bucket_versioning:
+                return {}
             if method is fs._client.head_object:
                 if kwargs["Key"] not in keys:
                     raise FileNotFoundError(kwargs["Key"])
@@ -1542,11 +1544,15 @@ class TestS3FileSystem:
     def test_mv_conflicting_destinations(self, path1, path2):
         fs = self._make_fs()
         fs.info = mock.MagicMock()
+        fs._call.return_value = {}
 
         with pytest.raises(ValueError, match="Cannot move"):
             fs.mv(path1, path2, recursive=True)
         fs.info.assert_not_called()
-        fs._call.assert_not_called()
+        if any(S3Path.parse(p).version_id == "null" for p in path1):
+            fs._call.assert_called_once_with(fs._client.get_bucket_versioning, Bucket="bucket")
+        else:
+            fs._call.assert_not_called()
 
     def test_mv_conflicting_destinations_of_listed_sources(self):
         # A list of sources is mapped without looking up the destination.
@@ -1642,9 +1648,9 @@ class TestS3FileSystem:
         fs = self._make_fs()
         self._serve_keys(fs, {"b"})
 
-        # The "null" version is the object at the key, so it stays in place.
+        # In this unversioned bucket, the "null" version names the key and stays in place.
         fs.mv(["s3://bucket/b?versionId=null"], ["s3://bucket/b"])
-        fs._call.assert_not_called()
+        fs._call.assert_called_once_with(fs._client.get_bucket_versioning, Bucket="bucket")
 
         # Another version is copied onto the key, and then deleted.
         fs.mv(["s3://bucket/b?versionId=v1"], ["s3://bucket/b"])
@@ -1656,6 +1662,186 @@ class TestS3FileSystem:
             if c.args[0] is fs._client.delete_objects
         ]
         assert deletes == [[{"Key": "b", "VersionId": "v1"}]]
+
+    @pytest.mark.parametrize("status", [None, "Suspended", "Enabled"])
+    def test_mv_null_version_onto_key(self, status):
+        fs = self._make_fs()
+        fs._call.return_value = {} if status is None else {"Status": status}
+        fs._copy_file = mock.MagicMock(return_value=True)
+        fs._delete_objects = mock.MagicMock()
+        sources = ["s3://bucket/a?versionId=null", "s3a://bucket/b?version_id=null"]
+        destinations = ["s3://bucket/a", "s3://bucket/b"]
+
+        fs.mv(sources, destinations, MetadataDirective="COPY")
+
+        fs._call.assert_called_once_with(fs._client.get_bucket_versioning, Bucket="bucket")
+        if status == "Enabled":
+            assert fs._copy_file.call_args_list == [
+                mock.call(source, dest, MetadataDirective="COPY")
+                for source, dest in zip(sources, destinations, strict=True)
+            ]
+            fs._delete_objects.assert_called_once_with(sources)
+        else:
+            fs._copy_file.assert_not_called()
+            fs._delete_objects.assert_called_once_with([])
+
+    def test_mv_null_version_request_versions(self):
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        with Stubber(fs._client) as stubber:
+            stubber.add_response(
+                "get_bucket_versioning", {"Status": "Enabled"}, {"Bucket": "bucket"}
+            )
+            stubber.add_response(
+                "head_object",
+                {"ContentLength": 3, "VersionId": "null"},
+                {"Bucket": "bucket", "Key": "key", "VersionId": "null"},
+            )
+            stubber.add_response(
+                "copy_object",
+                {"CopyObjectResult": {"ETag": '"copied"'}, "VersionId": "new"},
+                {
+                    "Bucket": "bucket",
+                    "Key": "key",
+                    "CopySource": {"Bucket": "bucket", "Key": "key", "VersionId": "null"},
+                },
+            )
+            stubber.add_response(
+                "delete_objects",
+                {},
+                {
+                    "Bucket": "bucket",
+                    "Delete": {"Objects": [{"Key": "key", "VersionId": "null"}], "Quiet": True},
+                },
+            )
+
+            fs.mv(["s3://bucket/key?versionId=null"], ["s3://bucket/key"])
+            stubber.assert_no_pending_responses()
+
+    @pytest.mark.parametrize("status", [None, "Suspended", "Enabled"])
+    def test_mv_null_version_conflicts_depend_on_bucket_state(self, status):
+        fs = self._make_fs()
+        fs._call.return_value = {} if status is None else {"Status": status}
+        fs._copy_file = mock.MagicMock(return_value=True)
+        fs._delete_objects = mock.MagicMock()
+        sources = ["s3://bucket/a", "s3://bucket/b?versionId=null"]
+        destinations = ["s3a://bucket/b", "s3://bucket/out"]
+
+        with (
+            contextlib.nullcontext()
+            if status == "Enabled"
+            else pytest.raises(ValueError, match="another path that is moved")
+        ):
+            fs.mv(sources, destinations)
+
+        fs._call.assert_called_once_with(fs._client.get_bucket_versioning, Bucket="bucket")
+        if status == "Enabled":
+            assert fs._copy_file.call_args_list == [
+                mock.call(source, dest) for source, dest in zip(sources, destinations, strict=True)
+            ]
+            fs._delete_objects.assert_called_once_with(sources)
+        else:
+            fs._copy_file.assert_not_called()
+            fs._delete_objects.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("source", "dest"),
+        [
+            ("s3://bucket/a", "s3://bucket/b"),
+            ("s3://bucket/a?versionId=v1", "s3://bucket/a"),
+            ("s3://bucket/a?versionId=null", "s3://bucket/b"),
+            ("s3://bucket/a?versionId=null", "s3a://bucket/a?version_id=null"),
+        ],
+    )
+    def test_mv_without_null_key_comparison_does_not_read_bucket_state(self, source, dest):
+        fs = self._make_fs()
+        fs._copy_file = mock.MagicMock(return_value=True)
+        fs._delete_objects = mock.MagicMock()
+
+        fs.mv([source], [dest])
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize("same_key", [False, True])
+    def test_mv_null_version_directory_bucket_does_not_read_bucket_state(self, same_key):
+        fs = self._make_fs()
+        fs._copy_file = mock.MagicMock(return_value=True)
+        fs._delete_objects = mock.MagicMock()
+        key = "s3://example--usw2-az1--x-s3/key"
+        sources = [f"{key}?versionId=null"] if same_key else [f"{key}?versionId=null", key]
+        destinations = [key] if same_key else [f"{key}-copy1", f"{key}-copy2"]
+
+        fs.mv(sources, destinations)
+
+        fs._call.assert_not_called()
+        if same_key:
+            fs._copy_file.assert_not_called()
+            fs._delete_objects.assert_called_once_with([])
+        else:
+            assert fs._copy_file.call_args_list == [
+                mock.call(source, dest) for source, dest in zip(sources, destinations, strict=True)
+            ]
+            fs._delete_objects.assert_called_once_with(sources)
+
+    def test_mv_null_version_reads_each_bucket(self):
+        fs = self._make_fs()
+        fs._call.side_effect = lambda method, **request: (
+            {"Status": "Enabled"} if request["Bucket"] == "enabled" else {"Status": "Suspended"}
+        )
+        fs._copy_file = mock.MagicMock(return_value=True)
+        fs._delete_objects = mock.MagicMock()
+
+        fs.mv(
+            ["s3://enabled/key?versionId=null", "s3://suspended/key?versionId=null"],
+            ["s3://enabled/key", "s3://suspended/key"],
+        )
+        assert fs._call.call_count == 2
+        fs._call.assert_has_calls(
+            [
+                mock.call(fs._client.get_bucket_versioning, Bucket="enabled"),
+                mock.call(fs._client.get_bucket_versioning, Bucket="suspended"),
+            ],
+            any_order=True,
+        )
+        fs._copy_file.assert_called_once_with("s3://enabled/key?versionId=null", "s3://enabled/key")
+        fs._delete_objects.assert_called_once_with(["s3://enabled/key?versionId=null"])
+
+    def test_mv_null_version_does_not_cache_bucket_state(self):
+        fs = self._make_fs()
+        fs._call.side_effect = [{}, {"Status": "Enabled"}, {"Status": "Suspended"}]
+        fs._copy_file = mock.MagicMock(return_value=True)
+        fs._delete_objects = mock.MagicMock()
+        source = "s3://bucket/key?versionId=null"
+
+        for _ in range(3):
+            fs.mv([source], ["s3://bucket/key"])
+        assert fs._call.call_count == 3
+        fs._copy_file.assert_called_once_with(source, "s3://bucket/key")
+        assert fs._delete_objects.call_args_list == [
+            mock.call([]),
+            mock.call([source]),
+            mock.call([]),
+        ]
+
+    @pytest.mark.parametrize("stage", ["lookup", "copy"])
+    def test_mv_null_version_failure_does_not_delete(self, stage):
+        fs = self._make_fs()
+        fs._call.return_value = {"Status": "Enabled"}
+        fs._copy_file = mock.MagicMock(return_value=True)
+        fs._delete_objects = mock.MagicMock()
+        if stage == "lookup":
+            fs._call.side_effect = PermissionError("Access Denied")
+        else:
+            fs._copy_file.side_effect = PermissionError("Access Denied")
+
+        with pytest.raises(PermissionError, match="Access Denied"):
+            fs.mv(
+                ["s3://bucket/other", "s3://bucket/key?versionId=null"],
+                ["s3://bucket/out", "s3://bucket/key"],
+            )
+        fs._delete_objects.assert_not_called()
+        if stage == "lookup":
+            fs._copy_file.assert_not_called()
 
     def test_question_mark_keys(self):
         # GH-979: keys containing "?" are keys, not version ID queries.
@@ -5216,6 +5402,49 @@ class TestS3FileSystem:
             tmp.seek(0)
             assert fs.cat(rpath_copy) == tmp.read()
             assert fs.cat(rpath_copy) == fs.cat(rpath)
+
+    @pytest.mark.skipif(
+        os.getenv("AWS_ATHENA_S3_VERSIONING_TESTS") != "1",
+        reason="Set AWS_ATHENA_S3_VERSIONING_TESTS=1 to create versioning test buckets.",
+    )
+    @pytest.mark.parametrize(
+        "status",
+        [
+            pytest.param(None, id="sync-None"),
+            pytest.param("Enabled", id="sync-Enabled"),
+            pytest.param("Suspended", id="sync-Suspended"),
+        ],
+    )
+    def test_move_null_version_onto_key(self, fs, versioning_buckets, status):
+        client, buckets = versioning_buckets
+        bucket = buckets[status]
+        key = "sync"
+        path = f"s3://{bucket}/{key}"
+        before = [
+            v
+            for v in client.list_object_versions(Bucket=bucket, Prefix=key)["Versions"]
+            if v["Key"] == key
+        ]
+        assert any(v["VersionId"] == "null" for v in before)
+        if status:
+            assert not next(v for v in before if v["VersionId"] == "null")["IsLatest"]
+
+        fs.mv(f"{path}?versionId=null", path)
+
+        with client.get_object(Bucket=bucket, Key=key)["Body"] as body:
+            assert body.read() == (b"original" if status != "Suspended" else b"current")
+        after = [
+            v
+            for v in client.list_object_versions(Bucket=bucket, Prefix=key)["Versions"]
+            if v["Key"] == key
+        ]
+        if status == "Enabled":
+            assert not any(v["VersionId"] == "null" for v in after)
+            assert len(after) == len(before)
+            latest = next(v for v in after if v["IsLatest"])
+            assert latest["VersionId"] not in {v["VersionId"] for v in before}
+        else:
+            assert after == before
 
     def test_move(self, fs):
         path1 = (

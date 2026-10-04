@@ -261,6 +261,23 @@ for version in versions:
 Version-aware operations require the `s3:GetObjectVersion` and
 `s3:ListBucketVersions` permissions.
 
+Moving a `?versionId=null` source onto its own key copies that version and
+deletes the source version when bucket versioning is enabled. If versioning has
+never been enabled or is suspended, the move leaves the source in place: copying
+onto the key would replace the null version that the subsequent deletion removes.
+The same distinction applies to move conflict checks.
+
+A move compares a null version with its unversioned key using `GetBucketVersioning`,
+which requires `s3:GetBucketVersioning`. Each relevant bucket is looked up once
+during planning; other moves do not make this request. The result is not cached
+between moves. A failed lookup stops the move before any copy or deletion.
+Directory buckets do not support versioning, so their null versions are treated
+as the key itself without a versioning lookup.
+
+The opt-in S3 versioning integration tests create dedicated temporary buckets and
+check unversioned, enabled, and suspended states. See [Testing](testing.md) for the
+command and required test permissions.
+
 ## Bucket lifecycle
 
 Bucket creation and deletion are infrastructure-level changes and are disabled by
@@ -439,6 +456,13 @@ sources, leave out the directories when `skips_directories` is true, look up the
 paths, and pass the results to `copy_pairs()` and `move_pairs()`. A `sources`,
 `destination_is_dir` or `missing` that a rule needs and that is not passed raises
 `ValueError`.
+
+For moves that compare a null version with its unversioned key, the caller also
+looks up bucket versioning and passes the names of the versioning-enabled buckets
+as `versioning_enabled_buckets` to both `conflict_candidates()` and `move_pairs()`.
+Pass a collection of bucket names, such as a set, rather than a single string.
+The default empty collection treats null versions as their keys, as in unversioned
+or suspended buckets. The model makes no AWS requests.
 
 ```python
 from pyathena.filesystem.s3_path_pairing import S3PathPairing

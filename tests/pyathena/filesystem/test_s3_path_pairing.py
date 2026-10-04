@@ -142,6 +142,43 @@ class TestS3PathPairing:
         assert _pairing(pairs).move_pairs(pairs) == [("bucket/d/a", "s3://bucket/z")]
 
     @pytest.mark.parametrize(
+        ("enabled_buckets", "expected"),
+        [
+            ((), []),
+            (("enabled",), [("enabled/key?versionId=null", "enabled/key")]),
+            (("other",), [("other/key?versionId=null", "other/key")]),
+        ],
+    )
+    def test_move_pairs_null_version_bucket_state(self, enabled_buckets, expected):
+        pairs = [
+            ("enabled/key?versionId=null", "enabled/key"),
+            ("other/key?versionId=null", "other/key"),
+            ("enabled/unchanged?versionId=null", "s3://enabled/unchanged?versionID=null"),
+        ]
+        pairing = _pairing(pairs)
+
+        assert pairing.conflict_candidates(pairs, versioning_enabled_buckets=enabled_buckets) == []
+        assert pairing.move_pairs(pairs, versioning_enabled_buckets=enabled_buckets) == expected
+        assert pairing.move_pairs(pairs) == []
+
+    def test_move_pairs_distinguishes_null_version_source(self):
+        pairs = [
+            ("bucket/key?versionId=null", "bucket/out"),
+            ("bucket/other", "bucket/key"),
+        ]
+        pairing = _pairing(pairs)
+
+        with pytest.raises(ValueError, match="another path"):
+            pairing.move_pairs(pairs)
+        assert pairing.move_pairs(pairs, versioning_enabled_buckets={"bucket"}) == pairs
+
+    @pytest.mark.parametrize("method", ["conflict_candidates", "move_pairs"])
+    def test_move_bucket_names_are_a_collection(self, method):
+        pairs = [("logs/key?versionId=null", "logs/key")]
+        with pytest.raises(TypeError, match="collection of bucket names"):
+            getattr(_pairing(pairs), method)(pairs, versioning_enabled_buckets="logs-archive")
+
+    @pytest.mark.parametrize(
         ("pairs", "match"),
         [
             (

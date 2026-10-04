@@ -369,6 +369,7 @@ class AioS3FileSystem(AsyncFileSystem):
                 destination is another source, including one left in place,
                 which is checked before anything is copied. A directory with
                 no object at its key, which is not copied, does not conflict.
+            OSError: If bucket versioning cannot be read.
         """
         if path1 == path2:
             return
@@ -400,6 +401,10 @@ class AioS3FileSystem(AsyncFileSystem):
             recursive: Whether to move the directories with their contents.
             maxdepth: Maximum depth of a recursive move.
             **kwargs: Additional S3 copy parameters.
+
+        Raises:
+            ValueError: If the move has conflicting paths.
+            OSError: If bucket versioning cannot be read.
         """
         sync(self.loop, self._mv, path1, path2, recursive=recursive, maxdepth=maxdepth, **kwargs)
 

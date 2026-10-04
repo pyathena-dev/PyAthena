@@ -1036,6 +1036,96 @@ class TestAioS3FileSystem:
         assert finished == ["s3://bucket/b"]
         fs._sync_fs._call.assert_not_called()
 
+    @pytest.mark.parametrize("status", [None, "Suspended", "Enabled"])
+    @pytest.mark.asyncio
+    async def test_mv_null_version_onto_key(self, status):
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs._sync_fs._call = mock.MagicMock(
+            return_value={} if status is None else {"Status": status}
+        )
+        fs._copy_file = mock.AsyncMock(return_value=True)
+        fs._delete_objects = mock.AsyncMock()
+        sources = ["s3://bucket/a?versionId=null", "s3a://bucket/b?version_id=null"]
+        destinations = ["s3://bucket/a", "s3://bucket/b"]
+
+        await fs._mv(sources, destinations, MetadataDirective="COPY")
+
+        fs._sync_fs._call.assert_called_once_with(
+            fs._sync_fs._client.get_bucket_versioning, Bucket="bucket"
+        )
+        if status == "Enabled":
+            assert fs._copy_file.await_args_list == [
+                mock.call(source, dest, MetadataDirective="COPY")
+                for source, dest in zip(sources, destinations, strict=True)
+            ]
+            fs._delete_objects.assert_awaited_once_with(sources)
+        else:
+            fs._copy_file.assert_not_awaited()
+            fs._delete_objects.assert_awaited_once_with([])
+
+    @pytest.mark.parametrize("status", [None, "Suspended", "Enabled"])
+    @pytest.mark.asyncio
+    async def test_mv_null_version_conflicts_depend_on_bucket_state(self, status):
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs._sync_fs._call = mock.MagicMock(
+            return_value={} if status is None else {"Status": status}
+        )
+        fs._copy_file = mock.AsyncMock(return_value=True)
+        fs._delete_objects = mock.AsyncMock()
+        sources = ["s3://bucket/a", "s3://bucket/b?versionId=null"]
+        destinations = ["s3a://bucket/b", "s3://bucket/out"]
+
+        with (
+            contextlib.nullcontext()
+            if status == "Enabled"
+            else pytest.raises(ValueError, match="another path that is moved")
+        ):
+            await fs._mv(sources, destinations)
+
+        if status == "Enabled":
+            assert fs._copy_file.await_args_list == [
+                mock.call(source, dest) for source, dest in zip(sources, destinations, strict=True)
+            ]
+            fs._delete_objects.assert_awaited_once_with(sources)
+        else:
+            fs._copy_file.assert_not_awaited()
+            fs._delete_objects.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_mv_null_version_directory_bucket_does_not_read_bucket_state(self):
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs._sync_fs._call = mock.MagicMock()
+        fs._copy_file = mock.AsyncMock(return_value=True)
+        fs._delete_objects = mock.AsyncMock()
+        key = "s3://example--usw2-az1--x-s3/key"
+
+        await fs._mv([f"{key}?versionId=null"], [key])
+
+        fs._sync_fs._call.assert_not_called()
+        fs._copy_file.assert_not_awaited()
+        fs._delete_objects.assert_awaited_once_with([])
+
+    @pytest.mark.parametrize("stage", ["lookup", "copy"])
+    @pytest.mark.asyncio
+    async def test_mv_null_version_failure_does_not_delete(self, stage):
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs._sync_fs._call = mock.MagicMock(return_value={"Status": "Enabled"})
+        fs._copy_file = mock.AsyncMock(return_value=True)
+        fs._delete_objects = mock.AsyncMock()
+        if stage == "lookup":
+            fs._sync_fs._call.side_effect = PermissionError("Access Denied")
+        else:
+            fs._copy_file.side_effect = PermissionError("Access Denied")
+
+        with pytest.raises(PermissionError, match="Access Denied"):
+            await fs._mv(
+                ["s3://bucket/other", "s3://bucket/key?versionId=null"],
+                ["s3://bucket/out", "s3://bucket/key"],
+            )
+        fs._delete_objects.assert_not_awaited()
+        if stage == "lookup":
+            fs._copy_file.assert_not_awaited()
+
     @pytest.mark.parametrize("size", [10, 5 * 2**30 + 1])
     @pytest.mark.asyncio
     async def test_cp_file_multipart_parameters(self, size):
@@ -2021,6 +2111,93 @@ class TestAioS3FileSystem:
             tmp.seek(0)
             assert await fs._cat_file(rpath_copy) == tmp.read()
             assert await fs._cat_file(rpath_copy) == await fs._cat_file(rpath)
+
+    @pytest.mark.skipif(
+        os.getenv("AWS_ATHENA_S3_VERSIONING_TESTS") != "1",
+        reason="Set AWS_ATHENA_S3_VERSIONING_TESTS=1 to create versioning test buckets.",
+    )
+    @pytest.mark.parametrize(
+        "status",
+        [
+            pytest.param(None, id="async-None"),
+            pytest.param("Enabled", id="async-Enabled"),
+            pytest.param("Suspended", id="async-Suspended"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_move_null_version_onto_key(self, fs, versioning_buckets, status):
+        client, buckets = versioning_buckets
+        bucket = buckets[status]
+        key = "async"
+        path = f"s3://{bucket}/{key}"
+        before = [
+            v
+            for v in client.list_object_versions(Bucket=bucket, Prefix=key)["Versions"]
+            if v["Key"] == key
+        ]
+        assert any(v["VersionId"] == "null" for v in before)
+        if status:
+            assert not next(v for v in before if v["VersionId"] == "null")["IsLatest"]
+
+        await fs._mv(f"{path}?versionId=null", path)
+
+        with client.get_object(Bucket=bucket, Key=key)["Body"] as body:
+            assert body.read() == (b"original" if status != "Suspended" else b"current")
+        after = [
+            v
+            for v in client.list_object_versions(Bucket=bucket, Prefix=key)["Versions"]
+            if v["Key"] == key
+        ]
+        if status == "Enabled":
+            assert not any(v["VersionId"] == "null" for v in after)
+            assert len(after) == len(before)
+            latest = next(v for v in after if v["IsLatest"])
+            assert latest["VersionId"] not in {v["VersionId"] for v in before}
+        else:
+            assert after == before
+
+    @pytest.mark.skipif(
+        os.getenv("AWS_ATHENA_S3_VERSIONING_TESTS") != "1",
+        reason="Set AWS_ATHENA_S3_VERSIONING_TESTS=1 to create versioning test buckets.",
+    )
+    @pytest.mark.parametrize(
+        "status",
+        [
+            pytest.param(None, id="async-wrapper-None"),
+            pytest.param("Enabled", id="async-wrapper-Enabled"),
+            pytest.param("Suspended", id="async-wrapper-Suspended"),
+        ],
+    )
+    def test_move_null_version_onto_key_sync_wrapper(self, fs, versioning_buckets, status):
+        client, buckets = versioning_buckets
+        bucket = buckets[status]
+        key = "async-wrapper"
+        path = f"s3://{bucket}/{key}"
+        before = [
+            v
+            for v in client.list_object_versions(Bucket=bucket, Prefix=key)["Versions"]
+            if v["Key"] == key
+        ]
+        assert any(v["VersionId"] == "null" for v in before)
+        if status:
+            assert not next(v for v in before if v["VersionId"] == "null")["IsLatest"]
+
+        fs.mv(f"{path}?versionId=null", path)
+
+        with client.get_object(Bucket=bucket, Key=key)["Body"] as body:
+            assert body.read() == (b"original" if status != "Suspended" else b"current")
+        after = [
+            v
+            for v in client.list_object_versions(Bucket=bucket, Prefix=key)["Versions"]
+            if v["Key"] == key
+        ]
+        if status == "Enabled":
+            assert not any(v["VersionId"] == "null" for v in after)
+            assert len(after) == len(before)
+            latest = next(v for v in after if v["IsLatest"])
+            assert latest["VersionId"] not in {v["VersionId"] for v in before}
+        else:
+            assert after == before
 
     @pytest.mark.asyncio
     async def test_move(self, fs):
