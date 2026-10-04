@@ -451,12 +451,13 @@ class S3Core:
     """Typed S3 operations on a boto3 S3 client.
 
     Each operation sends one request, or one per page for the iterators,
-    except those that say otherwise, such as :meth:`plan_multipart_copy`
-    and :meth:`copy_object_annotation`. The requests are sent
-    with the retry policy, and S3 errors are translated into ``OSError``
-    subclasses (see :class:`~pyathena.filesystem.s3_errors.S3ClientError`):
-    a missing bucket or multipart upload, or a missing object or version that
-    an operation reads, raises ``FileNotFoundError``, and a denied request
+    except those that say otherwise, such as :meth:`plan_multipart_copy`,
+    :meth:`copy_object_annotation` and :meth:`generate_presigned_url`. The
+    requests are sent with the retry policy, and S3 errors are translated
+    into ``OSError`` subclasses (see
+    :class:`~pyathena.filesystem.s3_errors.S3ClientError`): a missing bucket
+    or multipart upload, or a missing object or version that an operation
+    reads, raises ``FileNotFoundError``, and a denied request
     ``PermissionError``.
     As in S3, deleting a missing key is not an error. Nothing is cached.
 
@@ -485,6 +486,36 @@ class S3Core:
         "ContentType",
         "Expires",
         "Metadata",
+    )
+    # https://docs.aws.amazon.com/AmazonS3/latest/API/API_CopyObject.html
+    # The CopyObject parameters that set the encryption of the copy.
+    _SSE_COPY_PARAMS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "ServerSideEncryption",
+            "SSEKMSKeyId",
+            "SSEKMSEncryptionContext",
+            "BucketKeyEnabled",
+            "SSECustomerAlgorithm",
+            "SSECustomerKey",
+            "SSECustomerKeyMD5",
+        }
+    )
+    # https://docs.aws.amazon.com/AmazonS3/latest/userguide/acl-overview.html#canned-acl
+    # The canned ACLs that an object accepts.
+    OBJECT_ACLS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "private",
+            "public-read",
+            "public-read-write",
+            "authenticated-read",
+            "aws-exec-read",
+            "bucket-owner-read",
+            "bucket-owner-full-control",
+        }
+    )
+    # The canned ACLs that a bucket accepts.
+    BUCKET_ACLS: ClassVar[frozenset[str]] = frozenset(
+        {"private", "public-read", "public-read-write", "authenticated-read"}
     )
 
     def __init__(
@@ -1100,16 +1131,9 @@ class S3Core:
             # Directory buckets do not support GetObjectTagging, and their
             # objects have no tags.
             if not self._is_directory_bucket(source.bucket):
-                _logger.debug(f"Get tags to copy: {source.uri}")
-                tagging_request: dict[str, Any] = {"Bucket": source.bucket, "Key": source.key}
-                if source.version_id:
-                    tagging_request.update({"VersionId": source.version_id})
-                response = self.call(
-                    self._client.get_object_tagging,
-                    **self.operation_params("get_object_tagging", source_params),
-                    **tagging_request,
+                tags = self.get_object_tagging(
+                    source, **self.operation_params("get_object_tagging", source_params)
                 )
-                tags = [(t["Key"], t["Value"]) for t in response["TagSet"]]
                 if tags:
                     request.update({"Tagging": urlencode(tags)})
         copy_params = self.operation_params("copy_object", request)
@@ -1242,6 +1266,206 @@ class S3Core:
         self.call(
             self._client.put_object_annotation,
             **{**self.operation_params("put_object_annotation", params), **put_request},
+        )
+
+    def get_object_tagging(self, path: S3Path, **params) -> dict[str, str]:
+        """Get the tags of an object, or of a version of it, with GetObjectTagging.
+
+        Args:
+            path: The path of the object, with the version ID to read, if
+                any, including ``null``.
+            **params: Additional request parameters, sent as given.
+
+        Returns:
+            The tags, mapping each key to its value, in the order of the
+            response.
+
+        Raises:
+            ValueError: If the path has no key.
+            FileNotFoundError: If the object or version does not exist.
+        """
+        if not path.key:
+            raise ValueError(f"The path has no key: {path.uri}.")
+        request: dict[str, Any] = {"Bucket": path.bucket, "Key": path.key}
+        if path.version_id:
+            request.update({"VersionId": path.version_id})
+        _logger.debug(f"Get object tagging: {path.uri}")
+        response = self.call(self._client.get_object_tagging, **request, **params)
+        return {t["Key"]: t["Value"] for t in response["TagSet"]}
+
+    def put_object_tagging(self, path: S3Path, tags: Mapping[str, str], **params) -> None:
+        """Replace the tags of an object, or of a version of it, with PutObjectTagging.
+
+        Args:
+            path: The path of the object, with the version ID to tag, if any,
+                including ``null``.
+            tags: The tags, mapping each key to its value. They replace all
+                the existing tags.
+            **params: Additional request parameters, sent as given.
+
+        Raises:
+            ValueError: If the path has no key.
+            FileNotFoundError: If the object or version does not exist.
+        """
+        if not path.key:
+            raise ValueError(f"The path has no key: {path.uri}.")
+        request: dict[str, Any] = {
+            "Bucket": path.bucket,
+            "Key": path.key,
+            "Tagging": {"TagSet": [{"Key": k, "Value": v} for k, v in tags.items()]},
+        }
+        if path.version_id:
+            request.update({"VersionId": path.version_id})
+        _logger.debug(f"Put object tagging: {path.uri}")
+        self.call(self._client.put_object_tagging, **request, **params)
+
+    def put_object_acl(self, path: S3Path, acl: str, **params) -> None:
+        """Apply a canned ACL to an object, or to a version of it, with PutObjectAcl.
+
+        Args:
+            path: The path of the object, with the version ID to apply the
+                ACL to, if any, including ``null``.
+            acl: The canned ACL, one of ``OBJECT_ACLS``.
+            **params: Additional request parameters, sent as given.
+
+        Raises:
+            ValueError: If the path has no key, or the ACL is not in
+                ``OBJECT_ACLS``.
+            FileNotFoundError: If the object or version does not exist.
+        """
+        if not path.key:
+            raise ValueError(f"The path has no key: {path.uri}.")
+        if acl not in self.OBJECT_ACLS:
+            raise ValueError(f"ACL not in {self.OBJECT_ACLS}.")
+        request: dict[str, Any] = {"Bucket": path.bucket, "Key": path.key, "ACL": acl}
+        if path.version_id:
+            request.update({"VersionId": path.version_id})
+        _logger.debug(f"Put object acl: {path.uri}")
+        self.call(self._client.put_object_acl, **request, **params)
+
+    def put_bucket_acl(self, bucket: str, acl: str, **params) -> None:
+        """Apply a canned ACL to a bucket with PutBucketAcl.
+
+        Args:
+            bucket: The name of the bucket.
+            acl: The canned ACL, one of ``BUCKET_ACLS``.
+            **params: Additional request parameters, sent as given.
+
+        Raises:
+            ValueError: If the ACL is not in ``BUCKET_ACLS``.
+            FileNotFoundError: If the bucket does not exist.
+        """
+        if acl not in self.BUCKET_ACLS:
+            raise ValueError(f"ACL not in {self.BUCKET_ACLS}.")
+        _logger.debug(f"Put bucket acl: s3://{bucket}")
+        self.call(self._client.put_bucket_acl, Bucket=bucket, ACL=acl, **params)
+
+    def replace_object_metadata(
+        self, path: S3Path, head: S3Metadata, metadata: Mapping[str, str], **params
+    ) -> None:
+        """Replace the user-defined metadata of an object by copying it onto itself.
+
+        S3 does not update the metadata of an object in place, so the object
+        is copied onto itself with CopyObject and the REPLACE metadata
+        directive, which writes a new object, or a new version in a
+        versioned bucket. With that directive, S3 does not copy what the
+        request omits, so the request also sends the content headers,
+        ``Expires``, ``WebsiteRedirectLocation`` and ``StorageClass`` of
+        ``head``, and, unless ``params`` set an encryption parameter, its
+        ``ServerSideEncryption``, ``SSEKMSKeyId`` and ``BucketKeyEnabled``.
+        Fields that are None in ``head`` are not sent; note that
+        :class:`~pyathena.filesystem.s3_object.S3Metadata` reports
+        ``STANDARD`` when HeadObject omits the storage class. HeadObject does
+        not return the KMS encryption context, so it is not retained.
+
+        Args:
+            path: The path of the object, without a version ID.
+            head: The HeadObject result of ``path`` (see :meth:`head_object`),
+                whose fields are retained.
+            metadata: The user-defined metadata of the copy, which replaces
+                all the existing user-defined metadata.
+            **params: Additional CopyObject parameters. They take precedence
+                over the retained fields; one that the copy itself sets,
+                such as ``Metadata``, ``MetadataDirective`` or ``Key``,
+                raises ``TypeError``.
+
+        Raises:
+            ValueError: If the path has no key or has a version ID, which a
+                write cannot replace.
+        """
+        if not path.key:
+            raise ValueError(f"The path has no key: {path.uri}.")
+        if path.version_id:
+            raise ValueError(f"Cannot write to a version: {path.uri}.")
+        _logger.debug(f"Replace object metadata: {path.uri}")
+        retained: dict[str, Any] = {
+            "CacheControl": head.cache_control,
+            "ContentDisposition": head.content_disposition,
+            "ContentEncoding": head.content_encoding,
+            "ContentLanguage": head.content_language,
+            "ContentType": head.content_type,
+            "Expires": head.expires,
+            "WebsiteRedirectLocation": head.website_redirect_location,
+            "StorageClass": head.storage_class,
+        }
+        if not self._SSE_COPY_PARAMS.intersection(params):
+            retained.update(
+                {
+                    "ServerSideEncryption": head.server_side_encryption,
+                    "SSEKMSKeyId": head.sse_kms_key_id,
+                    "BucketKeyEnabled": head.bucket_key_enabled,
+                }
+            )
+        self.copy_object(
+            path,
+            path,
+            # botocore accepts only a dict, not another mapping such as an
+            # S3Metadata.
+            Metadata=dict(metadata),
+            MetadataDirective="REPLACE",
+            **{
+                **{k: v for k, v in retained.items() if v is not None},
+                **params,
+            },
+        )
+
+    def generate_presigned_url(
+        self,
+        path: S3Path,
+        client_method: str = "get_object",
+        expires_in: int = 3600,
+        **params,
+    ) -> str:
+        """Generate a presigned URL for a request on an object.
+
+        The URL is signed locally with the client's credentials; no request
+        is sent. ``request_kwargs`` are not added to the signed parameters.
+
+        Args:
+            path: The path of the object, with the version ID to sign for,
+                if any. A path without a key is not rejected; botocore
+                validates the parameters of the method.
+            client_method: The name of the client method to sign, such as
+                ``get_object`` or ``put_object``.
+            expires_in: The number of seconds for which the URL is valid.
+            **params: Parameters of the method to sign. They take precedence
+                over the bucket, key and version ID of the path.
+
+        Returns:
+            The presigned URL.
+        """
+        request: dict[str, Any] = {"Bucket": path.bucket, "Key": path.key}
+        if path.version_id:
+            request.update({"VersionId": path.version_id})
+        _logger.debug(f"Generate signed url: {path.uri}")
+        return cast(
+            str,
+            self.call(
+                self._client.generate_presigned_url,
+                ClientMethod=client_method,
+                Params={**request, **params},
+                ExpiresIn=expires_in,
+            ),
         )
 
     @staticmethod

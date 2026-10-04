@@ -161,34 +161,6 @@ class S3FileSystem(AbstractFileSystem):
     """
 
     DEFAULT_BLOCK_SIZE: int = 5 * 2**20  # 5MiB
-    # https://docs.aws.amazon.com/AmazonS3/latest/userguide/acl-overview.html#canned-acl
-    OBJECT_ACLS: frozenset[str] = frozenset(
-        {
-            "private",
-            "public-read",
-            "public-read-write",
-            "authenticated-read",
-            "aws-exec-read",
-            "bucket-owner-read",
-            "bucket-owner-full-control",
-        }
-    )
-    BUCKET_ACLS: frozenset[str] = frozenset(
-        {"private", "public-read", "public-read-write", "authenticated-read"}
-    )
-    # https://docs.aws.amazon.com/AmazonS3/latest/API/API_CopyObject.html
-    # The CopyObject parameters that set the encryption of the copy.
-    _SSE_COPY_PARAMS: frozenset[str] = frozenset(
-        {
-            "ServerSideEncryption",
-            "SSEKMSKeyId",
-            "SSEKMSEncryptionContext",
-            "BucketKeyEnabled",
-            "SSECustomerAlgorithm",
-            "SSECustomerKey",
-            "SSECustomerKeyMD5",
-        }
-    )
     PATTERN_PATH: Pattern[str] = S3Path.PATTERN
 
     protocol = ("s3", "s3a")
@@ -1282,8 +1254,8 @@ class S3FileSystem(AbstractFileSystem):
                     "Set allow_bucket_creation=True on the filesystem to enable it."
                 )
             acl = kwargs.pop("acl", "")
-            if acl and acl not in self.BUCKET_ACLS:
-                raise ValueError(f"ACL not in {self.BUCKET_ACLS}.")
+            if acl and acl not in self.core.BUCKET_ACLS:
+                raise ValueError(f"ACL not in {self.core.BUCKET_ACLS}.")
             request: dict[str, Any] = {"Bucket": s3_path.bucket}
             if acl:
                 request.update({"ACL": acl})
@@ -2197,23 +2169,9 @@ class S3FileSystem(AbstractFileSystem):
             ...     client_method="put_object"
             ... )
         """
-        s3_path = S3Path.parse(path)
         client_method = kwargs.pop("client_method", "get_object")
-        params = {"Bucket": s3_path.bucket, "Key": s3_path.key}
-        if s3_path.version_id:
-            params.update({"VersionId": s3_path.version_id})
-        if kwargs:
-            params.update(kwargs)
-        request = {
-            "ClientMethod": client_method,
-            "Params": params,
-            "ExpiresIn": expiration,
-        }
-
-        _logger.debug(f"Generate signed url: {s3_path.uri}")
-        return self._call(
-            self._client.generate_presigned_url,
-            **request,
+        return self.core.generate_presigned_url(
+            S3Path.parse(path), client_method, expiration, **kwargs
         )
 
     def metadata(self, path: str, **kwargs) -> S3Metadata:
@@ -2295,43 +2253,7 @@ class S3FileSystem(AbstractFileSystem):
                 metadata.pop(k, None)
             else:
                 metadata[k] = v
-
-        # With the REPLACE directive, S3 does not copy what the request
-        # omits: the system-defined metadata is dropped, and the copy is
-        # written as STANDARD with the default encryption of the bucket.
-        kept: dict[str, Any] = {
-            "CacheControl": head.cache_control,
-            "ContentDisposition": head.content_disposition,
-            "ContentEncoding": head.content_encoding,
-            "ContentLanguage": head.content_language,
-            "ContentType": head.content_type,
-            "Expires": head.expires,
-            "WebsiteRedirectLocation": head.website_redirect_location,
-            "StorageClass": head.storage_class,
-        }
-        copy_kwargs = copy_kwargs if copy_kwargs else {}
-        if not self._SSE_COPY_PARAMS.intersection(copy_kwargs):
-            kept.update(
-                {
-                    "ServerSideEncryption": head.server_side_encryption,
-                    "SSEKMSKeyId": head.sse_kms_key_id,
-                    "BucketKeyEnabled": head.bucket_key_enabled,
-                }
-            )
-
-        _logger.debug(f"Set object metadata: {s3_path.uri}")
-        self._call(
-            self._client.copy_object,
-            CopySource={"Bucket": s3_path.bucket, "Key": s3_path.key},
-            Bucket=s3_path.bucket,
-            Key=s3_path.key,
-            Metadata=metadata,
-            MetadataDirective="REPLACE",
-            **{
-                **{k: v for k, v in kept.items() if v is not None},
-                **copy_kwargs,
-            },
-        )
+        self.core.replace_object_metadata(s3_path, head, metadata, **(copy_kwargs or {}))
         self.invalidate_cache(path)
 
     def get_tags(self, path: str) -> dict[str, str]:
@@ -2346,16 +2268,7 @@ class S3FileSystem(AbstractFileSystem):
         s3_path = S3Path.parse(path)
         if not s3_path.key:
             raise ValueError("Cannot get tags of a bucket.")
-        request: dict[str, Any] = {"Bucket": s3_path.bucket, "Key": s3_path.key}
-        if s3_path.version_id:
-            request.update({"VersionId": s3_path.version_id})
-
-        _logger.debug(f"Get object tagging: {s3_path.uri}")
-        response = self._call(
-            self._client.get_object_tagging,
-            **request,
-        )
-        return {v["Key"]: v["Value"] for v in response["TagSet"]}
+        return self.core.get_object_tagging(s3_path)
 
     def put_tags(self, path: str, tags: dict[str, str], mode: str = "o") -> None:
         """Set the tags for the given existing key.
@@ -2377,26 +2290,12 @@ class S3FileSystem(AbstractFileSystem):
         if not s3_path.key:
             raise ValueError("Cannot put tags of a bucket.")
         if mode == "m":
-            existing_tags = self.get_tags(path)
-            existing_tags.update(tags)
-            new_tags = [{"Key": k, "Value": v} for k, v in existing_tags.items()]
+            new_tags = {**self.core.get_object_tagging(s3_path), **tags}
         elif mode == "o":
-            new_tags = [{"Key": k, "Value": v} for k, v in tags.items()]
+            new_tags = tags
         else:
             raise ValueError(f"Mode must be {{'o', 'm'}}, not {mode}.")
-        request: dict[str, Any] = {
-            "Bucket": s3_path.bucket,
-            "Key": s3_path.key,
-            "Tagging": {"TagSet": new_tags},
-        }
-        if s3_path.version_id:
-            request.update({"VersionId": s3_path.version_id})
-
-        _logger.debug(f"Put object tagging: {s3_path.uri}")
-        self._call(
-            self._client.put_object_tagging,
-            **request,
-        )
+        self.core.put_object_tagging(s3_path, new_tags)
 
     def chmod(self, path: str, acl: str, recursive: bool = False, **kwargs) -> None:
         """Set the Access Control on a bucket/key.
@@ -2414,10 +2313,10 @@ class S3FileSystem(AbstractFileSystem):
         s3_path = S3Path.parse(path)
         # Validate before any ACL is applied so that a recursive call cannot
         # partially apply object ACLs and then fail on the bucket ACL.
-        if not s3_path.key and acl not in self.BUCKET_ACLS:
-            raise ValueError(f"ACL not in {self.BUCKET_ACLS}.")
-        if s3_path.key and acl not in self.OBJECT_ACLS:
-            raise ValueError(f"ACL not in {self.OBJECT_ACLS}.")
+        if not s3_path.key and acl not in self.core.BUCKET_ACLS:
+            raise ValueError(f"ACL not in {self.core.BUCKET_ACLS}.")
+        if s3_path.key and acl not in self.core.OBJECT_ACLS:
+            raise ValueError(f"ACL not in {self.core.OBJECT_ACLS}.")
         if recursive:
             with self._create_executor(max_workers=self.max_workers) as executor:
                 futures = [
@@ -2431,24 +2330,9 @@ class S3FileSystem(AbstractFileSystem):
                 # below it have ACLs.
                 return
         if s3_path.key:
-            request: dict[str, Any] = {"Bucket": s3_path.bucket, "Key": s3_path.key, "ACL": acl}
-            if s3_path.version_id:
-                request.update({"VersionId": s3_path.version_id})
-
-            _logger.debug(f"Put object acl: {s3_path.uri}")
-            self._call(
-                self._client.put_object_acl,
-                **request,
-                **kwargs,
-            )
+            self.core.put_object_acl(s3_path, acl, **kwargs)
         else:
-            _logger.debug(f"Put bucket acl: {s3_path.uri}")
-            self._call(
-                self._client.put_bucket_acl,
-                Bucket=s3_path.bucket,
-                ACL=acl,
-                **kwargs,
-            )
+            self.core.put_bucket_acl(s3_path.bucket, acl, **kwargs)
 
     def list_multipart_uploads(self, path: str) -> list[S3MultipartUpload]:
         """List in-progress (incomplete) multipart uploads in a bucket.

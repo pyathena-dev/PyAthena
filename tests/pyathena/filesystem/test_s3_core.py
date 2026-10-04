@@ -8,6 +8,8 @@
 import io
 from datetime import UTC, datetime
 from itertools import pairwise
+from unittest import mock
+from urllib.parse import parse_qs, urlsplit
 
 import boto3
 import botocore.exceptions
@@ -28,7 +30,7 @@ from pyathena.filesystem.s3_core import (
     S3MultipartCopyPlan,
     S3ObjectSummary,
 )
-from pyathena.filesystem.s3_object import S3MultipartUpload, S3MultipartUploadPart
+from pyathena.filesystem.s3_object import S3Metadata, S3MultipartUpload, S3MultipartUploadPart
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.util import RetryConfig
 from tests.pyathena.util import (
@@ -1248,6 +1250,270 @@ class TestS3Core:
         with stubber:
             core.complete_multipart_upload(upload, [part])
         stubber.assert_no_pending_responses()
+
+    @pytest.mark.parametrize(
+        ("version_id", "request_version"),
+        [(None, {}), ("v1", {"VersionId": "v1"}), ("null", {"VersionId": "null"})],
+    )
+    def test_object_tagging(self, version_id, request_version):
+        core, stubber = _make_core(request_kwargs={"ExpectedBucketOwner": "111122223333"})
+        expected = {
+            "Bucket": "bucket",
+            "Key": "key",
+            **request_version,
+            "ExpectedBucketOwner": "111122223333",
+        }
+        stubber.add_response(
+            "get_object_tagging",
+            {"TagSet": [{"Key": "b", "Value": "2"}, {"Key": "a", "Value": "1"}]},
+            expected,
+        )
+        stubber.add_response(
+            "put_object_tagging",
+            {},
+            {
+                **expected,
+                "Tagging": {"TagSet": [{"Key": "c", "Value": "3"}, {"Key": "d", "Value": "4"}]},
+                "RequestPayer": "requester",
+            },
+        )
+        path = S3Path("bucket", "key", version_id)
+        with stubber:
+            tags = core.get_object_tagging(path)
+            # In the order of the response.
+            assert list(tags.items()) == [("b", "2"), ("a", "1")]
+            core.put_object_tagging(path, {"c": "3", "d": "4"}, RequestPayer="requester")
+        stubber.assert_no_pending_responses()
+
+    @pytest.mark.parametrize(
+        ("version_id", "request_version"),
+        [(None, {}), ("v1", {"VersionId": "v1"}), ("null", {"VersionId": "null"})],
+    )
+    def test_put_object_acl(self, version_id, request_version):
+        core, stubber = _make_core()
+        stubber.add_response(
+            "put_object_acl",
+            {},
+            {
+                "Bucket": "bucket",
+                "Key": "key",
+                **request_version,
+                "ACL": "bucket-owner-full-control",
+                "ExpectedBucketOwner": "111122223333",
+            },
+        )
+        with stubber:
+            core.put_object_acl(
+                S3Path("bucket", "key", version_id),
+                "bucket-owner-full-control",
+                ExpectedBucketOwner="111122223333",
+            )
+        stubber.assert_no_pending_responses()
+
+    def test_put_bucket_acl(self):
+        core, stubber = _make_core()
+        stubber.add_response(
+            "put_bucket_acl",
+            {},
+            {"Bucket": "bucket", "ACL": "private", "ExpectedBucketOwner": "111122223333"},
+        )
+        with stubber:
+            core.put_bucket_acl("bucket", "private", ExpectedBucketOwner="111122223333")
+        stubber.assert_no_pending_responses()
+
+    @pytest.mark.parametrize(
+        ("method", "args"),
+        [
+            ("put_object_acl", (S3Path("bucket", "key"), "invalid")),
+            # An object ACL that a bucket does not accept.
+            ("put_bucket_acl", ("bucket", "bucket-owner-full-control")),
+        ],
+    )
+    def test_acl_validation(self, method, args):
+        core, stubber = _make_core()
+        with stubber, pytest.raises(ValueError, match="ACL not in"):
+            getattr(core, method)(*args)
+
+    @pytest.mark.parametrize(
+        ("method", "args", "match"),
+        [
+            ("get_object_tagging", (S3Path("bucket"),), "has no key"),
+            ("put_object_tagging", (S3Path("bucket"), {}), "has no key"),
+            ("put_object_acl", (S3Path("bucket"), "private"), "has no key"),
+            (
+                "replace_object_metadata",
+                (S3Path("bucket"), S3Metadata({}), {}),
+                "has no key",
+            ),
+            (
+                "replace_object_metadata",
+                (S3Path("bucket", "key", "v1"), S3Metadata({}), {}),
+                "Cannot write to a version",
+            ),
+            (
+                "replace_object_metadata",
+                (S3Path("bucket", "key", "null"), S3Metadata({}), {}),
+                "Cannot write to a version",
+            ),
+        ],
+    )
+    def test_object_operations_reject_paths(self, method, args, match):
+        core, stubber = _make_core()
+        with stubber, pytest.raises(ValueError, match=match):
+            getattr(core, method)(*args)
+
+    def test_replace_object_metadata(self):
+        core, stubber = _make_core()
+        expires = datetime(2030, 1, 1, tzinfo=UTC)
+        head = S3Metadata(
+            {
+                "CacheControl": "max-age=60",
+                "ContentDisposition": "attachment",
+                "ContentEncoding": "gzip",
+                "ContentLanguage": "en",
+                "ContentType": "text/csv",
+                "Expires": expires,
+                "WebsiteRedirectLocation": "/other",
+                "StorageClass": "STANDARD_IA",
+                "ServerSideEncryption": "aws:kms",
+                "SSEKMSKeyId": "k",
+                "BucketKeyEnabled": True,
+                "Metadata": {"old": "1"},
+            }
+        )
+        request = {
+            "CopySource": {"Bucket": "bucket", "Key": "key"},
+            "Bucket": "bucket",
+            "Key": "key",
+            "Metadata": {"new": "2"},
+            "MetadataDirective": "REPLACE",
+            "CacheControl": "max-age=60",
+            "ContentDisposition": "attachment",
+            "ContentEncoding": "gzip",
+            "ContentLanguage": "en",
+            "Expires": expires,
+            "WebsiteRedirectLocation": "/other",
+            "StorageClass": "STANDARD_IA",
+        }
+        stubber.add_response(
+            "copy_object",
+            {},
+            {
+                **request,
+                "ContentType": "text/csv",
+                "ServerSideEncryption": "aws:kms",
+                "SSEKMSKeyId": "k",
+                "BucketKeyEnabled": True,
+            },
+        )
+        # A parameter takes precedence over the retained field, and an
+        # encryption parameter replaces all the retained encryption.
+        stubber.add_response(
+            "copy_object",
+            {},
+            {**request, "ContentType": "text/plain", "SSECustomerAlgorithm": "AES256"},
+        )
+        with stubber:
+            core.replace_object_metadata(S3Path("bucket", "key"), head, {"new": "2"})
+            core.replace_object_metadata(
+                S3Path("bucket", "key"),
+                head,
+                {"new": "2"},
+                ContentType="text/plain",
+                SSECustomerAlgorithm="AES256",
+            )
+        stubber.assert_no_pending_responses()
+
+    def test_replace_object_metadata_omits_unset_fields(self):
+        core, stubber = _make_core()
+        stubber.add_response(
+            "copy_object",
+            {},
+            {
+                "CopySource": {"Bucket": "bucket", "Key": "key"},
+                "Bucket": "bucket",
+                "Key": "key",
+                "Metadata": {},
+                "MetadataDirective": "REPLACE",
+                # S3Metadata reports STANDARD when HeadObject omits it.
+                "StorageClass": "STANDARD",
+            },
+        )
+        # The user-defined metadata can be any mapping, such as an S3Metadata.
+        stubber.add_response(
+            "copy_object",
+            {},
+            {
+                "CopySource": {"Bucket": "bucket", "Key": "key"},
+                "Bucket": "bucket",
+                "Key": "key",
+                "Metadata": {"a": "1"},
+                "MetadataDirective": "REPLACE",
+                "StorageClass": "STANDARD",
+            },
+        )
+        with stubber:
+            core.replace_object_metadata(S3Path("bucket", "key"), S3Metadata({}), {})
+            head = S3Metadata({"Metadata": {"a": "1"}})
+            core.replace_object_metadata(S3Path("bucket", "key"), head, head)
+        stubber.assert_no_pending_responses()
+
+    @pytest.mark.parametrize(
+        "name", ["Metadata", "MetadataDirective", "CopySource", "Bucket", "Key"]
+    )
+    def test_replace_object_metadata_rejects_fields_of_the_copy(self, name):
+        core, stubber = _make_core()
+        with stubber, pytest.raises(TypeError, match=name):
+            core.replace_object_metadata(S3Path("bucket", "key"), S3Metadata({}), {}, **{name: "x"})
+
+    @pytest.mark.parametrize(
+        ("path", "client_method", "params", "expected"),
+        [
+            (S3Path("bucket", "key"), "get_object", {}, {"Bucket": "bucket", "Key": "key"}),
+            (
+                S3Path("bucket", "key", "null"),
+                "get_object",
+                {"ResponseContentType": "text/csv"},
+                {
+                    "Bucket": "bucket",
+                    "Key": "key",
+                    "VersionId": "null",
+                    "ResponseContentType": "text/csv",
+                },
+            ),
+            # The parameters take precedence over the path.
+            (
+                S3Path("bucket", "key", "v1"),
+                "put_object",
+                {"Key": "other", "VersionId": None},
+                {"Bucket": "bucket", "Key": "other", "VersionId": None},
+            ),
+        ],
+    )
+    def test_generate_presigned_url(self, path, client_method, params, expected):
+        core, _ = _make_core(request_kwargs={"RequestPayer": "requester"})
+        core.call = mock.MagicMock(return_value="https://signed")
+        assert (
+            core.generate_presigned_url(path, client_method, expires_in=60, **params)
+            == "https://signed"
+        )
+        # request_kwargs are not signed.
+        core.call.assert_called_once_with(
+            core.client.generate_presigned_url,
+            ClientMethod=client_method,
+            Params=expected,
+            ExpiresIn=60,
+        )
+
+    def test_generate_presigned_url_signs_locally(self):
+        # No request is sent, so the stubber has no responses to return.
+        core, stubber = _make_core(request_kwargs={"RequestPayer": "requester"})
+        with stubber:
+            url = core.generate_presigned_url(S3Path("bucket", "key", "v1"))
+        query = parse_qs(urlsplit(url).query)
+        assert query["versionId"] == ["v1"]
+        # request_kwargs are not signed.
+        assert not any(k.lower() == "x-amz-request-payer" for k in query)
 
 
 class TestS3DeleteBatch:
