@@ -1744,9 +1744,9 @@ class S3FileSystem(AbstractFileSystem):
         parts are copied in parallel with UploadPartCopy, and the
         annotations are copied onto the destination after the upload
         completes. A failed part or completion aborts the upload, and so does
-        an interrupt, including one while the upload is being created, once
-        the running requests have finished; a failed annotation copy is
-        raised and leaves the destination in place. If HeadObject reports a
+        an interrupt, after the creation of the upload and the running part
+        copies have finished; a failed annotation copy is raised and leaves
+        the destination in place. If HeadObject reports a
         size that fits in a single CopyObject request, the reported version
         is copied with CopyObject instead.
 

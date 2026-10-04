@@ -3407,12 +3407,12 @@ class TestS3FileSystem:
         # upload that it created before any part is copied, and is re-raised.
         # The created upload used to be left incomplete.
         fs = self._make_fs()
-        started = threading.Event()
+        waiting = threading.Event()
+        interrupted = threading.Event()
 
         def create_multipart_upload(*args, **kw):
-            started.set()
             # Still running when the interrupt arrives.
-            time.sleep(0.5)
+            interrupted.wait(5)
             return SimpleNamespace(upload_id="uploadid")
 
         fs.core.create_multipart_upload = mock.MagicMock(side_effect=create_multipart_upload)
@@ -3420,25 +3420,50 @@ class TestS3FileSystem:
         # The HeadObject of the source.
         fs._call.return_value = {"ContentLength": 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE}
         fs._abort_multipart_upload = mock.MagicMock()
+        executor = S3ThreadPoolExecutor(max_workers=2)
+        submit = executor.submit
+
+        def submit_creation(fn, *args, **kwargs):
+            future = submit(fn, *args, **kwargs)
+            if fn is fs.core.create_multipart_upload:
+                result = future.result
+
+                def wait_for_result(timeout=None):
+                    # The interrupt is sent once the copy waits for the creation.
+                    waiting.set()
+                    return result(timeout)
+
+                future.result = wait_for_result  # type: ignore[method-assign]
+            return future
+
+        executor.submit = submit_creation  # type: ignore[method-assign]
+        fs._create_executor = mock.MagicMock(return_value=executor)
+
+        def handle_interrupt(signum, frame):
+            interrupted.set()
+            raise KeyboardInterrupt
 
         def interrupt():
-            if started.wait(5):
-                # Lets the main thread return from submit() and wait for the
-                # creation, where an interrupt during the request arrives.
-                time.sleep(0.1)
+            if waiting.wait(5):
                 signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
 
+        previous_handler = signal.signal(signal.SIGINT, handle_interrupt)
         thread = threading.Thread(target=interrupt, daemon=True)
         thread.start()
-        with pytest.raises(KeyboardInterrupt):
-            fs._copy_object_with_multipart_upload(
-                S3Path("bucket", "src"),
-                S3Path("bucket", "dst"),
-                MetadataDirective="REPLACE",
-                TaggingDirective="REPLACE",
-                AnnotationDirective="EXCLUDE",
-            )
-        thread.join(5)
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                fs._copy_object_with_multipart_upload(
+                    S3Path("bucket", "src"),
+                    S3Path("bucket", "dst"),
+                    MetadataDirective="REPLACE",
+                    TaggingDirective="REPLACE",
+                    AnnotationDirective="EXCLUDE",
+                )
+        finally:
+            waiting.set()
+            thread.join(5)
+            signal.signal(signal.SIGINT, previous_handler)
+            interrupted.set()
 
         fs._abort_multipart_upload.assert_called_once_with("bucket", "dst", "uploadid", {})
         fs.core.upload_part_copy.assert_not_called()

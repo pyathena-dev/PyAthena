@@ -585,13 +585,6 @@ class AioS3FileSystem(AsyncFileSystem):
             # See S3FileSystem._copy_object_with_multipart_upload.
             await asyncio.to_thread(self.core.copy_object, plan.source, plan.destination, **kwargs)
             return
-        # A task, so that _abort() can wait for an upload that is created
-        # after a cancellation.
-        creation = asyncio.ensure_future(
-            asyncio.to_thread(
-                self.core.create_multipart_upload, plan.destination, **plan.create_params
-            )
-        )
         upload_id: str
 
         semaphore = asyncio.Semaphore(max_workers)
@@ -643,6 +636,14 @@ class AioS3FileSystem(AsyncFileSystem):
                 plan.abort_params,
             )
 
+        # A task, so that _abort() can wait for an upload that is created
+        # after a cancellation; scheduled right before the try, so that
+        # nothing can fail between the two.
+        creation = asyncio.ensure_future(
+            asyncio.to_thread(
+                self.core.create_multipart_upload, plan.destination, **plan.create_params
+            )
+        )
         try:
             # shield keeps a cancellation from cancelling the creation, whose
             # thread would keep running, so that _abort() can wait for it.
