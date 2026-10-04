@@ -282,8 +282,8 @@ directories below the bucket level) and is always a no-op.
 `S3FileSystem.core` is an `S3Core`, the typed operations that the filesystem sends
 its listing, lookup, delete, multipart upload and copy requests with. It can also be
 built on a boto3 S3 client. Each operation sends one request (one per page for the
-iterators and `list_object_annotations()`), except the copy operations described below,
-with the retry policy, raises `FileNotFoundError` for a missing bucket or
+iterators and `list_object_annotations()`), except `plan_multipart_copy()` and
+`copy_object_annotation()`, described below, with the retry policy, raises `FileNotFoundError` for a missing bucket or
 multipart upload, or for a missing object or version that it reads, and caches
 nothing. Requests sent
 through `fs.core` do not invalidate the filesystem's cache: call

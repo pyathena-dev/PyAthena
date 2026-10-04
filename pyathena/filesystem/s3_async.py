@@ -573,8 +573,9 @@ class AioS3FileSystem(AsyncFileSystem):
                 receives those that it accepts.
 
         Raises:
-            ValueError: If ``block_size`` is out of the part size limits or a
-                directive has an invalid value.
+            ValueError: If ``block_size`` is out of the part size limits, a
+                directive has an invalid value, or HeadObject reports no
+                size.
         """
         max_workers = max_workers if max_workers else self._sync_fs.max_workers
         plan = await asyncio.to_thread(

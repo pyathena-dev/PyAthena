@@ -1757,8 +1757,9 @@ class S3FileSystem(AbstractFileSystem):
                 receives those that it accepts.
 
         Raises:
-            ValueError: If ``block_size`` is out of the part size limits or a
-                directive has an invalid value.
+            ValueError: If ``block_size`` is out of the part size limits, a
+                directive has an invalid value, or HeadObject reports no
+                size.
         """
         max_workers = max_workers if max_workers else self.max_workers
         plan = self.core.plan_multipart_copy(source, destination, block_size, **kwargs)

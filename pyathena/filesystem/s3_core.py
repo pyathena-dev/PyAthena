@@ -446,7 +446,7 @@ class S3MultipartCopyPlan:
 
 
 class S3Core:
-    """Typed S3 operations, one request each, on a boto3 S3 client.
+    """Typed S3 operations on a boto3 S3 client.
 
     Each operation sends one request, or one per page for the iterators,
     except those that say otherwise, such as :meth:`plan_multipart_copy`
