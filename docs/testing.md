@@ -147,6 +147,32 @@ Include failed and skipped tests and explain any unrun coverage.
 Separate real AWS results from mock-based tests and static checks.
 Sanitize logs before sharing them.
 
+## Organize tests
+
+Group cursor and engine integration tests in classes, and use standalone functions for stateless helpers.
+A unit-test class can group the behavior of one object or common setup, as in `TestTypeSignatureParser`.
+Function-oriented utility tests can remain standalone when they use AWS fixtures; `tests/pyathena/pandas/test_util.py` follows this pattern.
+SQLAlchemy compliance tests retain the classes, decorators, and plugin setup required by the upstream suite.
+Preserve attribution for adapted tests as documented in `NOTICE`.
+
+Parameter definitions should make inputs, options, and expected behavior visible.
+Build mocks, configured result sets, and one-shot readers during fixture setup or test execution.
+Pure values and framework type or expression objects can be constructed in parameters.
+Choose explicit parameter IDs when generated IDs obscure the case, and keep existing IDs, marks, and fixture scopes when reorganizing tests.
+
+Use literal expected values for contract-specific behavior.
+A library comparison is useful when matching that library is the contract, such as joining pandas chunks versus reading the whole file.
+Express intentional differences directly rather than recreating the implementation in the expected-value builder.
+Retain dtype and schema checks, option contexts, resource cleanup, and equivalent synchronous and asynchronous scenarios where applicable.
+
+The [test conventions audit](testing-audit.md) records the reviewed areas, source evidence, improvements, and intentional exceptions for issue #1079.
+
+```{toctree}
+:hidden:
+
+testing-audit
+```
+
 ## GitHub Actions
 
 The Test workflow runs for pull requests that change files other than `docs/` and Markdown.

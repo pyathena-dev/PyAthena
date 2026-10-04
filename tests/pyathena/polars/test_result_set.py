@@ -258,11 +258,16 @@ class TestAthenaPolarsResultSet:
 class TestPolarsDataFrameIterator:
     @pytest.mark.parametrize(
         "reader",
-        [pl.DataFrame({"a": [1, 2]}), (df for df in [pl.DataFrame({"a": [1]})] * 2)],
+        ["dataframe", "generator"],
         ids=["dataframe", "generator"],
     )
     def test_close_stops_iteration(self, reader):
         """A closed iterator yields nothing for either reader kind."""
+        reader = (
+            pl.DataFrame({"a": [1, 2]})
+            if reader == "dataframe"
+            else (pl.DataFrame({"a": [1]}) for _ in range(2))
+        )
         df_iter = PolarsDataFrameIterator(reader, {}, ["a"])
         df_iter.close()
         assert list(df_iter) == []
