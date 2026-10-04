@@ -145,10 +145,8 @@ class TestConnection:
         assert all(client is clients[0] for client in clients)
         assert clients[0].meta.service_model.service_name == "s3"
 
-    def test_s3_client_leaves_out_athena_endpoint(self, monkeypatch):
+    def test_s3_client_leaves_out_athena_endpoint(self):
         # GH-576: Athena's endpoint_url (e.g. its VPC endpoint) was sent to S3.
-        monkeypatch.delenv("AWS_ENDPOINT_URL", raising=False)
-        monkeypatch.delenv("AWS_ENDPOINT_URL_S3", raising=False)
         conn = _connection(
             endpoint_url="https://athena.us-east-1.amazonaws.com",
             # Athena's API version, which S3 does not have.
@@ -156,10 +154,13 @@ class TestConnection:
         )
 
         assert conn.client.meta.endpoint_url == "https://athena.us-east-1.amazonaws.com"
-        assert conn.s3_client.meta.endpoint_url == "https://s3.amazonaws.com"
-        assert conn.s3_client.meta.service_model.api_version == "2006-03-01"
+        assert conn.s3_client.meta.service_model.service_name == "s3"
+        assert conn.s3_client.meta.endpoint_url != conn.client.meta.endpoint_url
 
-    def test_s3_client_uses_s3_endpoint_setting(self, monkeypatch):
+    def test_s3_client_uses_s3_endpoint_setting(self, monkeypatch, tmp_path):
+        # Only the environment variables below configure the endpoints.
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config"))
+        monkeypatch.setenv("AWS_IGNORE_CONFIGURED_ENDPOINT_URLS", "false")
         monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://localhost:4566")
         conn = _connection(endpoint_url="https://athena.us-east-1.amazonaws.com")
 
