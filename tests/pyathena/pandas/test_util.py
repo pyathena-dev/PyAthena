@@ -1,13 +1,20 @@
+import contextlib
 import textwrap
 import uuid
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import date, datetime
 from decimal import Decimal
+from multiprocessing import get_context
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 import pytest
+from boto3.session import Session
+from botocore.config import Config
 
 from pyathena import OperationalError
+from pyathena.pandas import util
 from pyathena.pandas.util import (
     as_pandas,
     generate_ddl,
@@ -16,6 +23,7 @@ from pyathena.pandas.util import (
     to_sql,
 )
 from tests import ENV
+from tests.pyathena.conftest import connect
 
 
 def test_get_chunks():
@@ -476,6 +484,83 @@ def test_to_sql_athena_endpoint_url(cursor):
     to_sql(df, table_name, cursor._connection, location, schema=ENV.schema, if_exists="fail")
     cursor.execute(f"SELECT * FROM {table_name}")
     assert cursor.fetchall() == [(1,)]
+
+
+class SpawnProcessPoolExecutor(ProcessPoolExecutor):
+    """Process pool whose workers exit with it and keep no environment for later pools."""
+
+    def __init__(self, max_workers=None):
+        super().__init__(max_workers, mp_context=get_context("spawn"))
+
+
+@pytest.mark.parametrize(
+    ("executor_class", "connect_kwargs"),
+    [
+        (ThreadPoolExecutor, {}),
+        (SpawnProcessPoolExecutor, {}),
+        # As SQLAlchemy passes them without credentials in the URL.
+        (ThreadPoolExecutor, {"aws_access_key_id": None, "aws_secret_access_key": None}),
+    ],
+)
+def test_to_sql_session_credentials_and_s3_config(monkeypatch, executor_class, connect_kwargs):
+    # GH-1067: the upload workers used the default credential chain instead of
+    # the credentials of connect(session=...), and no S3 request used s3_config.
+    credentials = Session().get_credentials().get_frozen_credentials()
+    session = Session(
+        aws_access_key_id=credentials.access_key,
+        aws_secret_access_key=credentials.secret_key,
+        aws_session_token=credentials.token,
+        region_name=ENV.region_name,
+    )
+    # The default credential chain, as the workers would resolve it, fails.
+    for key in ("AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_SESSION_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "invalid")
+    df = pd.DataFrame({"col_int": np.int32([1, 2])})
+    table_name = f"""to_sql_{str(uuid.uuid4()).replace("-", "")}"""
+    location = f"{ENV.s3_staging_dir}{ENV.schema}/{table_name}/"
+    resource = Session.resource
+    with (
+        contextlib.closing(
+            connect(
+                schema_name=ENV.schema,
+                session=session,
+                s3_config=Config(max_pool_connections=37),
+                **connect_kwargs,
+            )
+        ) as conn,
+        patch.object(Session, "resource", autospec=True, side_effect=resource) as resources,
+    ):
+        to_sql(
+            df,
+            table_name,
+            conn,
+            location,
+            schema=ENV.schema,
+            chunksize=1,
+            executor_class=executor_class,
+            max_workers=2,
+        )
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT * FROM {table_name} ORDER BY col_int")
+        assert cursor.fetchall() == [(1,), (2,)]
+    # The bucket resource, and with threads also the workers' resources.
+    expected = 1 if executor_class is SpawnProcessPoolExecutor else 3
+    assert len(resources.call_args_list) == expected
+    assert all(c.kwargs["config"].max_pool_connections == 37 for c in resources.call_args_list)
+
+
+def test_to_sql_workers_resolve_credentials(cursor):
+    # Without a given session, the workers resolve the credentials themselves,
+    # so refreshable credentials stay refreshable.
+    df = pd.DataFrame({"col_int": np.int32([1])})
+    table_name = f"""to_sql_{str(uuid.uuid4()).replace("-", "")}"""
+    location = f"{ENV.s3_staging_dir}{ENV.schema}/{table_name}/"
+    with patch.object(util, "to_parquet", side_effect=util.to_parquet) as to_parquet:
+        to_sql(df, table_name, cursor._connection, location, schema=ENV.schema)
+    session_kwargs = to_parquet.call_args.args[4]
+    assert "aws_secret_access_key" not in session_kwargs
 
 
 def test_to_sql_with_partitions(cursor):
