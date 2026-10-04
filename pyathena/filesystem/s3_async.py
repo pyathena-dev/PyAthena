@@ -13,13 +13,14 @@ import asyncio
 import logging
 import mimetypes
 import os
+from collections.abc import Callable
 from multiprocessing import cpu_count
 from typing import TYPE_CHECKING, Any, cast
 
 from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.callbacks import _DEFAULT_CALLBACK
 from fsspec.core import get_compression
-from fsspec.implementations.local import LocalFileSystem, make_path_posix
+from fsspec.implementations.local import LocalFileSystem, make_path_posix, trailing_sep
 from fsspec.utils import check_contained
 
 from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
@@ -142,11 +143,6 @@ class AioS3FileSystem(AsyncFileSystem):
     def core(self) -> S3Core:
         """The typed S3 operations of the wrapped ``S3FileSystem``."""
         return self._sync_fs.core
-
-    @property
-    def pairing(self) -> S3PathPairing:
-        """The pairing of the paths of the wrapped ``S3FileSystem``."""
-        return self._sync_fs.pairing
 
     @staticmethod
     def parse_path(path: str) -> tuple[str, str | None, str | None]:
@@ -329,10 +325,32 @@ class AioS3FileSystem(AsyncFileSystem):
             ValueError: If a path is a bucket.
             OSError: If S3 could not delete some of the objects.
         """
-        paths = await asyncio.to_thread(
-            self.pairing.delete_paths, path, recursive=recursive, maxdepth=maxdepth
-        )
+        paths = await self._delete_paths(path, recursive=recursive, maxdepth=maxdepth)
         await self._delete_objects(paths, **kwargs)
+
+    async def _delete_paths(
+        self, path: str | list[str], recursive: bool = False, maxdepth: int | None = None
+    ) -> list[str]:
+        """Expand the paths that ``_rm()`` deletes, as ``S3FileSystem._delete_paths`` does.
+
+        Args:
+            path: S3 path or list of paths.
+            recursive: Whether to include all objects below the paths.
+            maxdepth: Maximum depth to expand when ``recursive`` is True.
+
+        Returns:
+            The paths with a version ID as given, followed by the expansion
+            of the other paths by ``_expand_path``.
+
+        Raises:
+            ValueError: If a path is a bucket.
+        """
+        versioned_paths, unversioned_paths = S3PathPairing.delete_paths(path)
+        if not unversioned_paths:
+            return versioned_paths
+        return versioned_paths + await self._expand_path(
+            unversioned_paths, recursive=recursive, maxdepth=maxdepth
+        )
 
     async def _delete_objects(self, paths: list[str], **kwargs) -> None:
         """Delete objects with DeleteObjects requests run with ``asyncio.gather``.
@@ -377,9 +395,7 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         if path1 == path2:
             return
-        pairs = await asyncio.to_thread(
-            self.pairing.move_pairs, path1, path2, recursive=recursive, maxdepth=maxdepth
-        )
+        pairs = await self._move_pairs(path1, path2, recursive=recursive, maxdepth=maxdepth)
         # Every copy finishes before a failure is raised, as in fsspec's
         # _copy(), and nothing is deleted after a failure.
         results = await asyncio.gather(
@@ -391,6 +407,69 @@ class AioS3FileSystem(AsyncFileSystem):
         await self._delete_objects(
             [p1 for (p1, _), copied in zip(pairs, results, strict=True) if copied]
         )
+
+    async def _move_pairs(
+        self,
+        path1: str | list[str],
+        path2: str | list[str],
+        recursive: bool = False,
+        maxdepth: int | None = None,
+    ) -> list[tuple[str, str]]:
+        """Pair and check the paths of a move, as ``S3FileSystem._move_pairs`` does.
+
+        Args:
+            path1: Source S3 path, glob pattern, or list of paths.
+            path2: Destination S3 path, or list of paths when ``path1`` is a
+                list.
+            recursive: Whether to include the contents of the directories.
+            maxdepth: Maximum depth of the expansion.
+
+        Returns:
+            The sources and destinations that are moved.
+
+        Raises:
+            ValueError: If the move has conflicting paths.
+        """
+        pairs = await self._copy_pairs(path1, path2, recursive=recursive, maxdepth=maxdepth)
+        missing = set()
+        for source in S3PathPairing.conflict_candidates(pairs):
+            if await asyncio.to_thread(self._sync_fs._head_object, source) is None:
+                missing.add(source)
+        return S3PathPairing.move_pairs(pairs, missing=missing)
+
+    async def _copy_pairs(
+        self,
+        path1: str | list[str],
+        path2: str | list[str],
+        recursive: bool = False,
+        maxdepth: int | None = None,
+        isdir: Callable[[str], bool] | None = None,
+    ) -> list[tuple[str, str]]:
+        """Expand and pair the paths of a copy, as ``S3FileSystem._copy_pairs`` does.
+
+        Args:
+            path1: Source S3 path, glob pattern, or list of them.
+            path2: Destination path, or list of paths when ``path1`` is a
+                list.
+            recursive: Whether to include the contents of the directories.
+            maxdepth: Maximum depth of the expansion.
+            isdir: Whether the destination is a directory, by default
+                ``self._isdir``; ``_get()`` passes the local filesystem's.
+
+        Returns:
+            The sources and their destinations.
+        """
+        if not S3PathPairing.expands(path1, path2):
+            return S3PathPairing.copy_pairs(path1, path2)
+        sources = await self._expand_path(path1, recursive=recursive, maxdepth=maxdepth)
+        if S3PathPairing.skips_directories(path1, recursive, maxdepth):
+            sources = [p for p in sources if not (trailing_sep(p) or await self._isdir(p))]
+        destination_is_dir = None
+        if sources and S3PathPairing.looks_up_destination(path1, path2):
+            # A string, as looks_up_destination() checks.
+            destination = cast(str, path2)
+            destination_is_dir = isdir(destination) if isdir else await self._isdir(destination)
+        return S3PathPairing.copy_pairs(path1, path2, sources, destination_is_dir)
 
     def mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs) -> None:
         """Move files from one S3 location to another.
@@ -435,9 +514,7 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         sources = [path1] if isinstance(path1, (str, os.PathLike)) else path1
         if isinstance(path2, str) and any(S3Path.has_version_id(p) for p in sources):
-            pairs = await asyncio.to_thread(
-                self.pairing.copy_pairs, path1, path2, recursive=recursive, maxdepth=maxdepth
-            )
+            pairs = await self._copy_pairs(path1, path2, recursive=recursive, maxdepth=maxdepth)
             if not pairs:
                 return
             path1, path2 = [p1 for p1, _ in pairs], [p2 for _, p2 in pairs]
@@ -475,13 +552,8 @@ class AioS3FileSystem(AsyncFileSystem):
         sources = [rpath] if isinstance(rpath, (str, os.PathLike)) else rpath
         if isinstance(lpath, (str, os.PathLike)) and any(S3Path.has_version_id(p) for p in sources):
             root = make_path_posix(lpath)
-            pairs = await asyncio.to_thread(
-                self.pairing.copy_pairs,
-                rpath,
-                root,
-                recursive=recursive,
-                maxdepth=maxdepth,
-                isdir=LocalFileSystem().isdir,
+            pairs = await self._copy_pairs(
+                rpath, root, recursive=recursive, maxdepth=maxdepth, isdir=LocalFileSystem().isdir
             )
             rpath, lpath = [p1 for p1, _ in pairs], [p2 for _, p2 in pairs]
             check_contained(root, lpath)

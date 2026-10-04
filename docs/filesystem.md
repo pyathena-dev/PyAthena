@@ -348,17 +348,22 @@ instead. `copy_object_annotation()` copies one annotation onto the destination a
 the upload completes, with GetObjectAnnotation and PutObjectAnnotation. The
 filesystems' `cp_file()`, `copy()` and `mv()` run these plans.
 
-`S3FileSystem.pairing` is an `S3PathPairing`, the expansion and pairing of the paths
-that `copy()`, `get()`, `mv()` and `rm()` operate on, as fsspec pairs them;
-`AioS3FileSystem.pairing` is the same object. `copy_pairs()` and `move_pairs()` return
-the `(source, destination)` pairs, and `delete_paths()` the paths that `rm()` deletes. A
-path with a version ID names that version, and its destination is named after its key.
-The pairing lists and looks up paths through the filesystem and its cache, and writes
-nothing.
+## Path pairing
+
+`S3PathPairing` holds the rules by which `copy()`, `get()`, `mv()` and `rm()` pair
+their paths, as fsspec pairs them, except that a path with a version ID names that
+version, and its destination is named after its key. The rules are pure functions:
+the filesystems expand the paths, make the lookups that the rules ask for
+(`skips_directories()`, `looks_up_destination()` and `conflict_candidates()`), and
+pass the results to `copy_pairs()`, `move_pairs()` and `delete_paths()`. A rule that
+needs a lookup that is not passed raises `ValueError`.
 
 ```python
-for source, destination in fs.pairing.copy_pairs(
-    "s3://YOUR_S3_BUCKET/src/", "s3://YOUR_S3_BUCKET/dst/", recursive=True
+from pyathena.filesystem.s3_path_pairing import S3PathPairing
+
+sources = fs.expand_path("s3://YOUR_S3_BUCKET/src/", recursive=True)
+for source, destination in S3PathPairing.copy_pairs(
+    "s3://YOUR_S3_BUCKET/src/", "s3://YOUR_S3_BUCKET/dst/", sources
 ):
     print(source, "->", destination)
 ```
