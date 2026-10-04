@@ -1683,6 +1683,23 @@ class TestS3FileSystem:
         fs.invalidate_cache("s3://bucket/dir/what?.txt")
         assert list(fs.dircache) == ["bucket/dir/what"]
 
+    @pytest.mark.parametrize(
+        "kwargs",
+        [{"path": "s3://bucket/dir?versionId=v1"}, {"path": "s3://bucket/dir", "version_id": "v1"}],
+    )
+    def test_info_missing_version_is_not_a_prefix(self, kwargs):
+        # GH-979: a version names an object, so a missing version is not
+        # found even if its key is a key prefix, which info() used to return
+        # as a directory.
+        fs = self._make_fs()
+        self._serve_keys(fs, {"dir/child"})
+
+        with pytest.raises(FileNotFoundError):
+            fs.info(**kwargs)
+        assert not fs.exists("s3://bucket/dir?versionId=v1")
+        methods = {c.args[0] for c in fs._call.call_args_list}
+        assert fs._client.list_objects_v2 not in methods
+
     @pytest.mark.parametrize("recursive", [False, True])
     def test_expand_path_version(self, recursive):
         # GH-979: "?" of a version ID query is not a glob character, and a
@@ -3507,12 +3524,11 @@ class TestS3FileSystem:
         # so a missing version evicts it for every spelling.
         fs = self._make_fs()
         kwargs = self.LOOKUP_KWARGS if lookup else {}
+        # A missing version is not looked up as a key prefix.
         fs._call.side_effect = [
             {"ContentLength": 4, "ETag": '"etag"', "VersionId": "v1"},
             FileNotFoundError("key"),
-            {"KeyCount": 0},
             FileNotFoundError("key"),
-            {"KeyCount": 0},
         ]
 
         assert fs.info("s3://bucket/key?versionId=v1", **kwargs).size == 4
@@ -3523,7 +3539,7 @@ class TestS3FileSystem:
             fs.info("s3://bucket/key?version_id=v1", refresh=True, **kwargs)
         with pytest.raises(FileNotFoundError):
             fs.info("s3://bucket/key?versionId=v1", **kwargs)
-        assert fs._call.call_count == 5
+        assert fs._call.call_count == 3
 
     def test_info_does_not_cache_null_version(self):
         fs = self._make_fs()

@@ -818,10 +818,11 @@ class S3FileSystem(AbstractFileSystem):
         missing, or find a key prefix, the cached listing of the parent is
         removed. With ``version_aware``, a cached file
         entry without a version ID is looked up again. With an explicit
-        version, the cached entries of the path are skipped, and the
+        version, the cached entries of the path are skipped, the
         HeadObject result is cached under the version-qualified path apart
         from other versions, except for the ``null`` version, which an
-        overwrite replaces. With request parameters on which the
+        overwrite replaces, and a missing version is not looked up as a key
+        prefix, since a version names an object. With request parameters on which the
         authorization of the requests depends (``ExpectedBucketOwner``,
         ``RequestPayer``, and the ``SSECustomer*`` parameters of an object
         encrypted with a customer-provided key), each request receives those
@@ -906,6 +907,8 @@ class S3FileSystem(AbstractFileSystem):
             )
             if object_info:
                 return object_info
+            if version_id:
+                raise FileNotFoundError(path)
         else:
             bucket_info = self._head_bucket(path, refresh=refresh, lookup_kwargs=lookup_kwargs)
             if bucket_info:
