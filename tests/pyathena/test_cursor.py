@@ -1266,6 +1266,52 @@ class TestCursor:
         assert from_kwargs == [cursor.query_id]
         assert cursor.fetchone() == (1,)
 
+    def test_execute_internal_options_passthrough(self):
+        """The private _execute() forwards its options to the request and the cache (no AWS)."""
+        cursor = Cursor.__new__(Cursor)  # bypass __init__ to avoid AWS calls
+        cursor._connection = MagicMock()
+        cursor._connection.client.start_query_execution.return_value = {
+            "QueryExecutionId": "test_query_id"
+        }
+        cursor._retry_config = RetryConfig()
+        cursor._kill_on_interrupt = True
+
+        with (
+            patch.object(
+                Cursor, "_build_start_query_execution_request", return_value={}
+            ) as request_mock,
+            patch.object(Cursor, "_find_previous_query_id", return_value=None) as cache_mock,
+        ):
+            query_id = cursor._execute(
+                "SELECT 1",
+                parameters=None,
+                options=ExecuteOptions(
+                    work_group="test_work_group",
+                    s3_staging_dir="s3://test-bucket/path/",
+                    cache_size=10,
+                    cache_expiration_time=100,
+                    result_reuse_enable=True,
+                    result_reuse_minutes=5,
+                    paramstyle="qmark",
+                ),
+            )
+
+        assert query_id == "test_query_id"
+        request_mock.assert_called_once_with(
+            query="SELECT 1",
+            work_group="test_work_group",
+            s3_staging_dir="s3://test-bucket/path/",
+            result_reuse_enable=True,
+            result_reuse_minutes=5,
+            execution_parameters=None,
+        )
+        cache_mock.assert_called_once_with(
+            "SELECT 1",
+            "test_work_group",
+            cache_size=10,
+            cache_expiration_time=100,
+        )
+
     def test_execute_qmark_parameters_skip_cache(self):
         """A qmark query with parameters never searches the cache (no AWS, #941)."""
         cursor = Cursor.__new__(Cursor)  # bypass __init__ to avoid AWS calls
