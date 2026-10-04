@@ -3407,12 +3407,14 @@ class TestS3FileSystem:
         # upload that it created before any part is copied, and is re-raised.
         # The created upload used to be left incomplete.
         fs = self._make_fs()
+        started = threading.Event()
         waiting = threading.Event()
         interrupted = threading.Event()
 
         def create_multipart_upload(*args, **kw):
-            # Still running when the interrupt arrives.
-            interrupted.wait(5)
+            started.set()
+            # Still running when the interrupt arrives, which releases it.
+            interrupted.wait(30)
             return SimpleNamespace(upload_id="uploadid")
 
         fs.core.create_multipart_upload = mock.MagicMock(side_effect=create_multipart_upload)
@@ -3444,13 +3446,15 @@ class TestS3FileSystem:
             raise KeyboardInterrupt
 
         def interrupt():
-            if waiting.wait(5):
+            # Sent only while the creation is running and the copy waits for
+            # it, which the creation cannot stop doing before the interrupt.
+            if started.wait(5) and waiting.wait(5):
                 signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
 
-        previous_handler = signal.signal(signal.SIGINT, handle_interrupt)
         thread = threading.Thread(target=interrupt, daemon=True)
-        thread.start()
+        previous_handler = signal.signal(signal.SIGINT, handle_interrupt)
         try:
+            thread.start()
             with pytest.raises(KeyboardInterrupt):
                 fs._copy_object_with_multipart_upload(
                     S3Path("bucket", "src"),
@@ -3460,8 +3464,12 @@ class TestS3FileSystem:
                     AnnotationDirective="EXCLUDE",
                 )
         finally:
+            # A late interrupt is ignored instead of reaching a later test.
+            signal.signal(signal.SIGINT, lambda signum, frame: None)
+            started.set()
             waiting.set()
-            thread.join(5)
+            if thread.ident is not None:
+                thread.join()
             signal.signal(signal.SIGINT, previous_handler)
             interrupted.set()
 
