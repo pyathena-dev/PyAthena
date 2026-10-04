@@ -1272,7 +1272,7 @@ class TestAioS3FileSystem:
         data = b"x" * (block_size + 1)
         path = (
             f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_open_multipart_with_checksum/{uuid.uuid4()}"
+            f"filesystem/test_async_open_multipart_with_checksum/{uuid.uuid4()}"
         )
         kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
         try:
@@ -1291,7 +1291,7 @@ class TestAioS3FileSystem:
         data = b"x" * (block_size + 1)
         path = (
             f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_put_file_multipart_with_checksum/{uuid.uuid4()}"
+            f"filesystem/test_async_put_file_multipart_with_checksum/{uuid.uuid4()}"
         )
         kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
         try:
@@ -1311,7 +1311,7 @@ class TestAioS3FileSystem:
         data = b"x" * (block_size + 1)
         path = (
             f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_pipe_file_multipart_with_checksum/{uuid.uuid4()}"
+            f"filesystem/test_async_pipe_file_multipart_with_checksum/{uuid.uuid4()}"
         )
         kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
         try:
@@ -1329,7 +1329,7 @@ class TestAioS3FileSystem:
         data = b"x" * (block_size + 1)
         path = (
             f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_append_multipart_with_checksum/{uuid.uuid4()}"
+            f"filesystem/test_async_append_multipart_with_checksum/{uuid.uuid4()}"
         )
         kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
         try:
@@ -1347,7 +1347,8 @@ class TestAioS3FileSystem:
     def test_clear_multipart_uploads_after_listed_upload_is_aborted(self, fs):
         sync_fs = fs._sync_fs
         prefix = (
-            f"{ENV.s3_staging_key}{ENV.schema}/filesystem/test_clear_multipart_race/{uuid.uuid4()}/"
+            f"{ENV.s3_staging_key}{ENV.schema}/filesystem/test_async_clear_multipart_race/"
+            f"{uuid.uuid4()}/"
         )
         path = f"s3://{ENV.s3_staging_bucket}/{prefix}"
         gone_path = S3Path(ENV.s3_staging_bucket, f"{prefix}gone")
@@ -1363,8 +1364,11 @@ class TestAioS3FileSystem:
                 sync_fs.core.abort_multipart_upload(gone_path, gone.upload_id)
                 return uploads
 
-            with mock.patch.object(sync_fs, "list_multipart_uploads", side_effect=list_then_abort):
+            with mock.patch.object(
+                sync_fs, "list_multipart_uploads", side_effect=list_then_abort
+            ) as list_mock:
                 fs.clear_multipart_uploads(path)
+                list_mock.assert_called_once_with(path)
             assert fs.list_multipart_uploads(path) == []
         finally:
             fs.clear_multipart_uploads(path)

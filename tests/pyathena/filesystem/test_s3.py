@@ -4235,8 +4235,11 @@ class TestS3FileSystem:
                 fs.core.abort_multipart_upload(gone_path, gone.upload_id)
                 return uploads
 
-            with mock.patch.object(fs, "list_multipart_uploads", side_effect=list_then_abort):
+            with mock.patch.object(
+                fs, "list_multipart_uploads", side_effect=list_then_abort
+            ) as list_mock:
                 fs.clear_multipart_uploads(path)
+                list_mock.assert_called_once_with(path)
             assert fs.list_multipart_uploads(path) == []
         finally:
             fs.clear_multipart_uploads(path)
