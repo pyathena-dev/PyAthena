@@ -1186,7 +1186,7 @@ class TestS3FileSystem:
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
         fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
         )
         fs.core.upload_part = mock.MagicMock(
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
@@ -1492,6 +1492,7 @@ class TestS3FileSystem:
             S3Path("bucket", "key"),
             "uploadid",
             [part.result()],
+            checksum_algorithm=None,
             RequestPayer="requester",
             SSECustomerAlgorithm="AES256",
         )
@@ -1859,7 +1860,7 @@ class TestS3FileSystem:
         # parameters of the copy that they accept.
         fs = self._make_fs()
         fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
         )
         fs.core.upload_part_copy = mock.MagicMock(
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
@@ -1979,7 +1980,7 @@ class TestS3FileSystem:
             "VersionId": "null",
         }
         fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
         )
         fs.core.upload_part_copy = mock.MagicMock()
         fs._finish_multipart_upload = mock.MagicMock()
@@ -2147,7 +2148,7 @@ class TestS3FileSystem:
         fs._transaction = None
         fs._put_object = mock.MagicMock()
         fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
         )
         fs.core.upload_part = mock.MagicMock(
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
@@ -2170,7 +2171,7 @@ class TestS3FileSystem:
         fs.default_cache_type = "bytes"
         fs._put_object = mock.MagicMock()
         fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
         )
         fs.core.upload_part = mock.MagicMock(
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
@@ -2199,7 +2200,7 @@ class TestS3FileSystem:
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
         fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
         )
         fs.core.upload_part = mock.MagicMock(
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
@@ -2273,7 +2274,7 @@ class TestS3FileSystem:
         fs.default_cache_type = "bytes"
         fs._transaction = None
         fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
         )
         fs.core.upload_part = mock.MagicMock(
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
@@ -2347,7 +2348,7 @@ class TestS3FileSystem:
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
         fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
         )
         fs._finish_multipart_upload = mock.MagicMock()
         executor = mock.MagicMock()
@@ -2402,7 +2403,7 @@ class TestS3FileSystem:
         fs.default_cache_type = "bytes"
         fs._transaction = None
         fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
         )
         fs.core.upload_part = mock.MagicMock(
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
@@ -3227,7 +3228,10 @@ class TestS3FileSystem:
             bucket="bucket", key="key", upload_id="uploadid", futures=futures
         )
         fs.core.complete_multipart_upload.assert_called_once_with(
-            S3Path("bucket", "key"), "uploadid", [f.result() for f in futures]
+            S3Path("bucket", "key"),
+            "uploadid",
+            [f.result() for f in futures],
+            checksum_algorithm=None,
         )
         fs._call.assert_not_called()
 
@@ -3371,7 +3375,7 @@ class TestS3FileSystem:
         # as one part larger than 5 GiB.
         fs = self._make_fs()
         fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
         )
         fs.core.upload_part_copy = mock.MagicMock()
         fs._finish_multipart_upload = mock.MagicMock()
@@ -5351,7 +5355,7 @@ class TestS3File:
         file.blocksize = 4
         file.fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE = 4
         file.fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE = 8
-        file.multipart_upload = SimpleNamespace(upload_id="uploadid")
+        file.multipart_upload = SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
         file._executor = ThreadPoolExecutor(max_workers=1)
         file.fs.core.upload_part.side_effect = lambda **kw: SimpleNamespace(
             etag=f'"e{kw["part_number"]}"', part_number=kw["part_number"]
@@ -5374,7 +5378,9 @@ class TestS3File:
             key="key.txt",
         )
         fs.cat_file.return_value = existing
-        fs.core.create_multipart_upload.return_value = SimpleNamespace(upload_id="uploadid")
+        fs.core.create_multipart_upload.return_value = SimpleNamespace(
+            upload_id="uploadid", checksum_algorithm=None
+        )
 
         def part(**kw):
             return SimpleNamespace(etag=f'"e{kw["part_number"]}"', part_number=kw["part_number"])
@@ -5820,7 +5826,7 @@ class TestS3File:
         # may be stored after the abort, so the abort waits for it. The
         # parts that have not started are cancelled.
         file = self._make_write_file(b"", autocommit=False)
-        file.multipart_upload = SimpleNamespace(upload_id="uploadid")
+        file.multipart_upload = SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
         events = []
         file.fs._call.side_effect = lambda *args, **kwargs: events.append("abort")
         started = threading.Event()
@@ -5915,7 +5921,7 @@ class TestS3File:
         # waited for, so a rollback on the thread of the event loop that
         # would run them does not block.
         file = self._make_write_file(b"", autocommit=False)
-        file.multipart_upload = SimpleNamespace(upload_id="uploadid")
+        file.multipart_upload = SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
         parts = []
 
         async def rollback():

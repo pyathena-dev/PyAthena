@@ -1811,6 +1811,7 @@ class S3FileSystem(AbstractFileSystem):
                 # Filtered again for the completion and the abort, which
                 # leaves the plan's parameters of each unchanged.
                 request_kwargs={**plan.complete_params, **plan.abort_params},
+                checksum_algorithm=multipart_upload.checksum_algorithm,
             )
         for name in plan.annotations:
             self.core.copy_object_annotation(
@@ -1936,6 +1937,7 @@ class S3FileSystem(AbstractFileSystem):
         futures: list[Future[S3MultipartUploadPart]],
         request_kwargs: Mapping[str, Any] | None = None,
         abort: bool = True,
+        checksum_algorithm: str | None = None,
     ) -> S3CompleteMultipartUpload:
         """Collect the uploaded parts and complete the multipart upload.
 
@@ -1955,6 +1957,7 @@ class S3FileSystem(AbstractFileSystem):
                 the abort receive those that they accept.
             abort: Whether to abort the multipart upload on failure. A caller
                 that keeps the upload to abort it itself passes false.
+            checksum_algorithm: The algorithm returned when the upload was created.
 
         Returns:
             S3CompleteMultipartUpload of the completed upload.
@@ -1967,6 +1970,7 @@ class S3FileSystem(AbstractFileSystem):
                 S3Path(bucket, key),
                 upload_id,
                 parts,
+                checksum_algorithm=checksum_algorithm,
                 **self.core.operation_params("complete_multipart_upload", request_kwargs),
             )
         except BaseException:
@@ -3444,6 +3448,7 @@ class S3File(AbstractBufferedFile):
                     futures=self.multipart_upload_parts,
                     request_kwargs=self.s3_additional_kwargs,
                     abort=False,
+                    checksum_algorithm=self.multipart_upload.checksum_algorithm,
                 )
             except BaseException:
                 # discard() keeps the upload if the abort fails or is

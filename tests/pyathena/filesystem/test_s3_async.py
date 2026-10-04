@@ -160,7 +160,7 @@ class TestAioS3FileSystem:
         )
         sync_fs = fs._sync_fs
         sync_fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
         )
         sync_fs.core.upload_part_copy = mock.MagicMock(
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
@@ -308,7 +308,7 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(connection=mock.MagicMock(), max_workers=2, skip_instance_cache=True)
         sync_fs = fs._sync_fs
         sync_fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
         )
         events = []
         failed = threading.Event()
@@ -357,7 +357,7 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(connection=mock.MagicMock(), max_workers=2, skip_instance_cache=True)
         sync_fs = fs._sync_fs
         sync_fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
         )
         events = []
         lock = threading.Lock()
@@ -433,7 +433,7 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
         sync_fs = fs._sync_fs
         sync_fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
         )
         events = []
         started = threading.Event()
@@ -1046,7 +1046,7 @@ class TestAioS3FileSystem:
         sync_fs = fs._sync_fs
         sync_fs.core.copy_object = mock.MagicMock()
         sync_fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
         )
         running = []
         concurrency = []
@@ -1945,7 +1945,7 @@ class TestAioS3File:
 
         sync_fs = fs._sync_fs
         sync_fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=SimpleNamespace(upload_id="uploadid")
+            return_value=SimpleNamespace(upload_id="uploadid", checksum_algorithm=None)
         )
         sync_fs.core.upload_part = track(
             lambda **kw: S3MultipartUploadPart(kw["part_number"], {"ETag": '"e"'})
@@ -2184,14 +2184,91 @@ def test_clear_multipart_uploads_preserves_unclassified_file_not_found():
     assert raised.value is error
 
 
+@pytest.mark.parametrize("fs_class", [S3FileSystem, AioS3FileSystem])
+@pytest.mark.parametrize("algorithm", [None, "SHA256", "CRC32"])
+@pytest.mark.asyncio
+async def test_multipart_copy_uses_creation_algorithm(fs_class, algorithm):
+    fs = fs_class(
+        key="dummy",
+        secret="dummy",
+        region_name="us-east-1",
+        max_workers=1,
+        skip_instance_cache=True,
+    )
+    block_size = 5 * 2**30
+    size = 2 * block_size
+    checksum_kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
+    expected_parts = []
+    with Stubber(fs.core.client) as stubber:
+        stubber.add_response(
+            "head_object", {"ContentLength": size}, {"Bucket": "bucket", "Key": "src"}
+        )
+        stubber.add_response(
+            "create_multipart_upload",
+            {"Bucket": "bucket", "Key": "dst", "UploadId": "u", **checksum_kwargs},
+            {"Bucket": "bucket", "Key": "dst", **checksum_kwargs},
+        )
+        for number, range_ in (
+            (1, f"bytes=0-{block_size - 1}"),
+            (2, f"bytes={block_size}-{size - 1}"),
+        ):
+            result = {"ETag": f'"p{number}"', f"Checksum{algorithm or 'CRC32'}": "checksum"}
+            stubber.add_response(
+                "upload_part_copy",
+                {"CopyPartResult": result},
+                {
+                    "Bucket": "bucket",
+                    "Key": "dst",
+                    "UploadId": "u",
+                    "PartNumber": number,
+                    "CopySource": {"Bucket": "bucket", "Key": "src"},
+                    "CopySourceRange": range_,
+                },
+            )
+            expected_parts.append(
+                {
+                    "ETag": result["ETag"],
+                    "PartNumber": number,
+                    **({f"Checksum{algorithm}": "checksum"} if algorithm else {}),
+                }
+            )
+        stubber.add_response(
+            "complete_multipart_upload",
+            {"ETag": '"done"'},
+            {
+                "Bucket": "bucket",
+                "Key": "dst",
+                "UploadId": "u",
+                "MultipartUpload": {"Parts": expected_parts},
+            },
+        )
+        kwargs = {
+            "bucket1": "bucket",
+            "key1": "src",
+            "size1": size,
+            "bucket2": "bucket",
+            "key2": "dst",
+            "block_size": block_size,
+            "MetadataDirective": "REPLACE",
+            "TaggingDirective": "REPLACE",
+            "AnnotationDirective": "EXCLUDE",
+            **checksum_kwargs,
+        }
+        if isinstance(fs, AioS3FileSystem):
+            await fs._copy_object_with_multipart_upload(**kwargs)
+        else:
+            fs._copy_object_with_multipart_upload(**kwargs)
+        stubber.assert_no_pending_responses()
+
+
 @pytest.mark.parametrize("fs", [S3FileSystem, AioS3FileSystem], indirect=True)
 class TestMultipartUploadRegression:
     @pytest.fixture
     def fs(self, request):
         return request.param(connect(), max_workers=1, skip_instance_cache=True)
 
-    @pytest.mark.parametrize("algorithm", ["SHA256", "CRC32"])
-    @pytest.mark.parametrize("method", ["open", "put_file", "pipe_file"])
+    @pytest.mark.parametrize("algorithm", [None, "SHA256", "CRC32"])
+    @pytest.mark.parametrize("method", ["open", "put_file", "pipe_file", "append"])
     def test_multipart_write_with_checksum(self, fs, tmp_path, algorithm, method):
         block_size = 5 * 2**20
         data = b"x" * (block_size + 1)
@@ -2201,10 +2278,17 @@ class TestMultipartUploadRegression:
         )
         kwargs = {
             "block_size": block_size,
-            "s3_additional_kwargs": {"ChecksumAlgorithm": algorithm},
+            "s3_additional_kwargs": {"ChecksumAlgorithm": algorithm} if algorithm else {},
         }
+        expected = data
         try:
-            if method == "open":
+            if method == "append":
+                original = b"y" * block_size
+                fs.pipe_file(path, original)
+                with fs.open(path, "ab", **kwargs) as file:
+                    file.write(data)
+                expected = original + data
+            elif method == "open":
                 with fs.open(path, "wb", **kwargs) as file:
                     file.write(data)
             elif method == "put_file":
@@ -2213,7 +2297,7 @@ class TestMultipartUploadRegression:
                 fs.put_file(str(local), path, **kwargs)
             else:
                 fs.pipe_file(path, data, **kwargs)
-            assert fs.cat_file(path) == data
+            assert fs.cat_file(path) == expected
             assert fs.list_multipart_uploads(path) == []
         finally:
             fs.clear_multipart_uploads(path)

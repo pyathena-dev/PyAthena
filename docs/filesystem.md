@@ -348,6 +348,12 @@ instead. `copy_object_annotation()` copies one annotation onto the destination a
 the upload completes, with GetObjectAnnotation and PutObjectAnnotation. The
 filesystems' `cp_file()`, `copy()` and `mv()` run these plans.
 
+Pass `checksum_algorithm=upload.checksum_algorithm` when completing an upload
+created with a checksum algorithm, where `upload` is the result of
+`create_multipart_upload()`.
+Completion sends only the matching part checksum; the default `None` sends the
+ETag and part number without checksums that the SDK may add to part uploads.
+
 ## Async filesystem
 
 `AioS3FileSystem` provides the same functionality on top of fsspec's

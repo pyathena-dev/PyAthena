@@ -1023,8 +1023,43 @@ def test_complete_multipart_upload_preserves_part_checksums(field, copy):
             S3Path("bucket", "key"),
             "u",
             parts,
+            checksum_algorithm=field.removeprefix("Checksum"),
             RequestPayer="requester",
             MultipartUpload={"Parts": []},
         )
     stubber.assert_no_pending_responses()
     assert completed.etag == '"done"'
+
+
+@pytest.mark.parametrize("algorithm", [None, "SHA256"])
+def test_complete_multipart_upload_uses_creation_algorithm(algorithm):
+    core, stubber = _make_core()
+    part = S3MultipartUploadPart(
+        1,
+        {
+            "ETag": '"part"',
+            "ChecksumCRC32": "sdk-crc",
+            "ChecksumSHA256": "upload-sha",
+        },
+    )
+    expected = {"ETag": '"part"', "PartNumber": 1}
+    if algorithm:
+        expected["ChecksumSHA256"] = "upload-sha"
+    stubber.add_response(
+        "complete_multipart_upload",
+        {"ETag": '"done"'},
+        {
+            "Bucket": "bucket",
+            "Key": "key",
+            "UploadId": "u",
+            "MultipartUpload": {"Parts": [expected]},
+        },
+    )
+    with stubber:
+        if algorithm is None:
+            core.complete_multipart_upload(S3Path("bucket", "key"), "u", [part])
+        else:
+            core.complete_multipart_upload(
+                S3Path("bucket", "key"), "u", [part], checksum_algorithm=algorithm
+            )
+    stubber.assert_no_pending_responses()

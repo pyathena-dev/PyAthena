@@ -665,6 +665,7 @@ class AioS3FileSystem(AsyncFileSystem):
                     plan.destination,
                     upload_id,
                     cast(list[S3MultipartUploadPart], parts),
+                    checksum_algorithm=multipart_upload.checksum_algorithm,
                     **plan.complete_params,
                 )
             )

@@ -762,7 +762,13 @@ class S3Core:
         return S3MultipartUploadPart(part_number, response)
 
     def complete_multipart_upload(
-        self, path: S3Path, upload_id: str, parts: Sequence[S3MultipartUploadPart], **params
+        self,
+        path: S3Path,
+        upload_id: str,
+        parts: Sequence[S3MultipartUploadPart],
+        *,
+        checksum_algorithm: str | None = None,
+        **params,
     ) -> S3CompleteMultipartUpload:
         """Complete a multipart upload with CompleteMultipartUpload.
 
@@ -770,6 +776,10 @@ class S3Core:
             path: The path of the object that the upload writes.
             upload_id: The ID of the multipart upload.
             parts: The uploaded parts, in part-number order.
+            checksum_algorithm: The algorithm returned by CreateMultipartUpload.
+                Only its matching checksum is included for each part. None
+                sends only the ETag and part number, even if UploadPart returned
+                a checksum added by the SDK.
             **params: Additional request parameters. The fields that the
                 other arguments set take precedence over parameters of the
                 same name.
@@ -782,11 +792,19 @@ class S3Core:
         """
         if not path.key:
             raise ValueError(f"The path has no key: {path.uri}.")
+        part_fields = {"ETag", "PartNumber"}
+        if checksum_algorithm is not None:
+            part_fields.add(f"Checksum{checksum_algorithm}")
         request: dict[str, Any] = {
             "Bucket": path.bucket,
             "Key": path.key,
             "UploadId": upload_id,
-            "MultipartUpload": {"Parts": [part.to_api_repr() for part in parts]},
+            "MultipartUpload": {
+                "Parts": [
+                    {key: value for key, value in part.to_api_repr().items() if key in part_fields}
+                    for part in parts
+                ]
+            },
         }
         _logger.debug(f"Complete multipart upload {upload_id} to {path.uri}.")
         response = self.call(self._client.complete_multipart_upload, **{**params, **request})
