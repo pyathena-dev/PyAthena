@@ -44,7 +44,12 @@ def _no_trunc_date(df: DataFrame) -> DataFrame:
 
 
 class _CSVObject:
-    """A converted CSV value that pandas keeps as is instead of inferring a dtype from it."""
+    """A converted CSV value that ``pandas.read_csv()`` keeps as is.
+
+    pandas infers a dtype from the values that a converter returns, so JSON numbers
+    with NULL become float64. A converter from ``wrap()`` returns its values in this
+    class, and ``unwrap()`` restores them as object columns after reading.
+    """
 
     __slots__ = ("value",)
 
@@ -56,24 +61,66 @@ class _CSVObject:
         """
         self.value = value
 
+    @classmethod
+    def wrap(cls, converter: Callable[[str | None], Any]) -> Callable[[str | None], _CSVObject]:
+        """Wrap a converter so that it returns its values in this class.
 
-def _convert_csv_object(converter: Callable[[str | None], Any], value: str) -> _CSVObject:
-    return _CSVObject(converter(value))
+        Args:
+            converter: The conversion function.
 
+        Returns:
+            The conversion function that wraps the converted values.
+        """
+        return lambda value: cls(converter(value))
 
-def _unwrap_csv_objects(values: Series | Index) -> list[Any] | None:
-    """Unwrap the values of a column whose CSV values a converter kept as objects.
+    @classmethod
+    def unwrap(cls, df: DataFrame) -> DataFrame:
+        """Restore the wrapped values in the columns and the index of a DataFrame.
 
-    Args:
-        values: The values of a column or an index.
+        Args:
+            df: The DataFrame or chunk that ``pandas.read_csv()`` returned.
 
-    Returns:
-        The converted values, or None if the values are not wrapped.
-    """
-    array = values.array
-    if values.dtype != object or not len(array) or not isinstance(array[0], _CSVObject):
-        return None
-    return [v.value if isinstance(v, _CSVObject) else v for v in array]
+        Returns:
+            The same DataFrame, with the wrapped values in object columns and levels.
+        """
+        import pandas as pd
+
+        for i in range(df.shape[1]):
+            if (values := cls._unwrap_values(df.iloc[:, i])) is not None:
+                df.isetitem(i, pd.Series(values, index=df.index, dtype=object))
+        index = df.index
+        levels = (
+            [index.get_level_values(i) for i in range(index.nlevels)]
+            if isinstance(index, pd.MultiIndex)
+            else [index]
+        )
+        unwrapped = [cls._unwrap_values(level) for level in levels]
+        if any(values is not None for values in unwrapped):
+            levels = [
+                level if values is None else pd.Index(values, dtype=object, name=level.name)
+                for level, values in zip(levels, unwrapped, strict=True)
+            ]
+            df.index = (
+                pd.MultiIndex.from_arrays(levels, names=index.names)
+                if isinstance(index, pd.MultiIndex)
+                else levels[0]
+            )
+        return df
+
+    @classmethod
+    def _unwrap_values(cls, values: Series | Index) -> list[Any] | None:
+        """Unwrap the values of a column or an index level.
+
+        Args:
+            values: The values of a column or an index level.
+
+        Returns:
+            The converted values, or None if the values are not wrapped.
+        """
+        array = values.array
+        if values.dtype != object or not len(array) or not isinstance(array[0], cls):
+            return None
+        return [v.value if isinstance(v, cls) else v for v in array]
 
 
 class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
@@ -562,35 +609,13 @@ class AthenaPandasResultSet(AthenaResultSet):
         Returns:
             The same DataFrame.
         """
-        import pandas as pd
-
-        for i in range(df.shape[1]):
-            if (values := _unwrap_csv_objects(df.iloc[:, i])) is not None:
-                df.isetitem(i, pd.Series(values, index=df.index, dtype=object))
-        index = df.index
-        levels = (
-            [index.get_level_values(i) for i in range(index.nlevels)]
-            if isinstance(index, pd.MultiIndex)
-            else [index]
-        )
-        unwrapped = [_unwrap_csv_objects(level) for level in levels]
-        if any(values is not None for values in unwrapped):
-            levels = [
-                level if values is None else pd.Index(values, dtype=object, name=level.name)
-                for level, values in zip(levels, unwrapped, strict=True)
-            ]
-            df.index = (
-                pd.MultiIndex.from_arrays(levels, names=index.names)
-                if isinstance(index, pd.MultiIndex)
-                else levels[0]
-            )
-        return self._trunc_date(df)
+        return self._trunc_date(_CSVObject.unwrap(df))
 
     def _get_csv_converter(self, type_: str) -> Callable[[str | None], Any]:
         """Get the converter that ``pandas.read_csv()`` applies to a column type.
 
-        The values of json columns are wrapped, so that pandas does not infer a
-        numeric dtype from them, and ``_finish_csv_frame()`` unwraps them.
+        The values of json columns are wrapped in ``_CSVObject``, so that pandas does
+        not infer a numeric dtype from them, and ``_finish_csv_frame()`` unwraps them.
 
         Args:
             type_: The Athena type of the column.
@@ -600,7 +625,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         """
         converter = self._converter.get(type_)
         if type_ == "json":
-            return partial(_convert_csv_object, converter)
+            return _CSVObject.wrap(converter)
         return converter
 
     def _trunc_date(self, df: DataFrame) -> DataFrame:
