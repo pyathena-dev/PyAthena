@@ -31,7 +31,6 @@ from pyathena.filesystem.s3_object import (
     S3StorageClass,
 )
 from pyathena.filesystem.s3_path import S3Path
-from pyathena.filesystem.s3_path_pairing import S3PathPairing
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
@@ -880,13 +879,12 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
         sync_fs = fs._sync_fs
         sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={})
-        # The paths are expanded with the coroutines of fsspec's _expand_path().
-        fs._find = mock.AsyncMock(return_value=["bucket/dir/a"])
-        fs._exists = mock.AsyncMock(return_value=True)
+        sync_fs.find = mock.MagicMock(return_value=["bucket/dir/a"])
+        sync_fs.exists = mock.MagicMock(return_value=True)
 
         # batch_size is part of fsspec's async _rm() signature.
         await fs._rm("s3://bucket/dir", recursive=True, maxdepth=1, batch_size=10)
-        fs._find.assert_awaited_once_with("bucket/dir", maxdepth=1, withdirs=True)
+        sync_fs.find.assert_called_once_with("bucket/dir", maxdepth=1, withdirs=True, detail=False)
         (call,) = sync_fs._call.call_args_list
         assert call.kwargs["Delete"]["Objects"] == [{"Key": "dir"}, {"Key": "dir/a"}]
 
@@ -1118,62 +1116,6 @@ class TestAioS3FileSystem:
                 sync_fs.core.complete_multipart_upload.call_args.kwargs["RequestPayer"]
                 == "requester"
             )
-
-    @pytest.mark.parametrize(
-        ("path2", "lookups", "expected"),
-        [
-            ("s3://bucket/d", ["bucket/b?versionId=v1", "s3://bucket/d"], "s3://bucket/d/b"),
-            ("s3://bucket/d/", ["bucket/b?versionId=v1"], "s3://bucket/d/b"),
-        ],
-    )
-    @pytest.mark.asyncio
-    async def test_copy_pairs_destination_lookup(self, path2, lookups, expected):
-        # See TestS3FileSystem.test_copy_pairs_destination_lookup; the aio
-        # filesystem expands and looks up the paths with its own coroutines.
-        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
-        # Only the destination is a directory; the paths are looked up in a
-        # thread with the cached isdir of the wrapped filesystem.
-        fs._sync_fs.isdir = mock.MagicMock(side_effect=lambda p: p.rstrip("/").endswith("/d"))
-
-        pairs = await fs._copy_pairs(S3PathPairing("s3://bucket/b?versionId=v1", path2))
-
-        assert pairs == [("bucket/b?versionId=v1", expected)]
-        assert [c.args[0] for c in fs._sync_fs.isdir.call_args_list] == lookups
-
-    @pytest.mark.asyncio
-    async def test_move_pairs_looks_up_only_conflict_candidates(self):
-        # See TestS3FileSystem.test_move_pairs_looks_up_only_conflict_candidates.
-        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
-        fs._sync_fs._head_object = mock.MagicMock(return_value=None)
-
-        pairs = await fs._move_pairs(
-            ["s3://bucket/d", "s3://bucket/d/x", "s3://bucket/e/y", "s3://bucket/f"],
-            ["s3://bucket/e", "s3://bucket/e", "s3://bucket/out", "s3://bucket/g"],
-        )
-
-        assert len(pairs) == 4
-        fs._sync_fs._head_object.assert_called_once_with("bucket/d")
-
-    @pytest.mark.asyncio
-    async def test_move_pairs_raises_the_first_lookup_error(self):
-        # The conflict lookups run in order, as in S3FileSystem, so the first
-        # error is raised and stops them.
-        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
-
-        def head_object(path):
-            if path == "bucket/d1":
-                time.sleep(0.1)
-                raise PermissionError(path)
-            raise TimeoutError(path)
-
-        fs._sync_fs._head_object = mock.MagicMock(side_effect=head_object)
-
-        with pytest.raises(PermissionError, match="bucket/d1"):
-            await fs._move_pairs(
-                ["s3://bucket/d1", "s3://bucket/d1/x", "s3://bucket/d2", "s3://bucket/d2/x"],
-                ["s3://bucket/o", "s3://bucket/o", "s3://bucket/p", "s3://bucket/p"],
-            )
-        assert fs._sync_fs._head_object.call_count == 1
 
     def test_internal_file_system_not_cached(self):
         # GH-978: the internal S3FileSystem was kept in the fsspec instance

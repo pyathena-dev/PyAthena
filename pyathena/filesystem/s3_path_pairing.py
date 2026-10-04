@@ -128,15 +128,12 @@ class S3PathPairing:
             raise ValueError("destination_is_dir is needed to pair the paths.")
         source_is_str = isinstance(path1, str)
         glob = isinstance(path1, str) and self._is_glob(path1)
+        # As in fsspec's copy(); destination_is_dir is None only when the
+        # destination is a list or ends with a slash, or the source is a glob
+        # pattern or ends with a slash, which decide without it.
+        dest_is_dir = isinstance(path2, str) and (trailing_sep(path2) or bool(destination_is_dir))
         exists = source_is_str and (
-            (glob and len(sources) == 1)
-            or (
-                not glob
-                and not trailing_sep(path1)
-                and isinstance(path2, str)
-                and trailing_sep(path2)
-            )
-            or (self.looks_up_destination and bool(destination_is_dir))
+            (glob and len(sources) == 1) or (not glob and dest_is_dir and not trailing_sep(path1))
         )
         names = [S3Path.split_version_id(p)[0] for p in sources]
         destinations = other_paths(names, path2, exists=exists, flatten=not source_is_str)
@@ -160,7 +157,7 @@ class S3PathPairing:
             another source below them and a destination that conflicts, in the
             order of the pairs; empty if nothing needs to be looked up.
         """
-        return S3PathPairing._moves(pairs)[2]
+        return self._moves(pairs)[2]
 
     def move_pairs(
         self, pairs: Sequence[tuple[str, str]], missing: Collection[str] | None = None
@@ -187,7 +184,7 @@ class S3PathPairing:
         """
         if isinstance(missing, str):
             raise TypeError("missing is a collection of paths, not a path.")
-        named, sources, candidates = S3PathPairing._moves(pairs)
+        named, sources, candidates = self._moves(pairs)
         if missing is None and candidates:
             raise ValueError("missing is needed to check the pairs.")
         # A directory without an object at its key writes no destination.
