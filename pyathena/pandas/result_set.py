@@ -43,6 +43,104 @@ def _no_trunc_date(df: DataFrame) -> DataFrame:
     return df
 
 
+def _read_csv_with_pyarrow(source: str | IOBase, read_csv_kwargs: dict[str, Any]) -> DataFrame:
+    """Read a CSV result with pyarrow as ``pandas.read_csv(engine="pyarrow")`` does.
+
+    pandas' PyArrow engine does not set ``newlines_in_values``, so pyarrow
+    raises or returns wrong values when a quoted value containing a newline
+    crosses one of its read blocks. This reads the file with that option and
+    converts the table as pandas does for the options that
+    ``AthenaPandasResultSet._reads_csv_with_pyarrow()`` accepts: NULL-typed
+    columns become float64, integer columns without a ``dtype`` entry get
+    NumPy integer types, the ``dtype`` mapping is applied before and after the
+    ``parse_dates`` columns are parsed with ``pandas.to_datetime()``, and
+    without ``future.infer_string``, strings become objects.
+
+    Args:
+        source: The result file.
+        read_csv_kwargs: The pandas.read_csv() options built by
+            ``AthenaPandasResultSet._get_csv_read_options()``.
+
+    Returns:
+        The result as a DataFrame.
+    """
+    import pandas as pd
+    import pyarrow as pa
+    from pyarrow import csv as pyarrow_csv
+
+    header = read_csv_kwargs["header"]
+    names = read_csv_kwargs["names"]
+    null_values = list(read_csv_kwargs["na_values"])
+    table = pyarrow_csv.read_csv(
+        source,
+        read_options=pyarrow_csv.ReadOptions(autogenerate_column_names=header is None),
+        parse_options=pyarrow_csv.ParseOptions(
+            delimiter=read_csv_kwargs["sep"],
+            ignore_empty_lines=read_csv_kwargs["skip_blank_lines"],
+            newlines_in_values=True,
+        ),
+        convert_options=pyarrow_csv.ConvertOptions(
+            null_values=null_values, strings_can_be_null="" in null_values
+        ),
+    )
+    schema = table.schema
+    for index, type_ in enumerate(schema.types):
+        if pa.types.is_null(type_):
+            schema = schema.set(index, schema.field(index).with_type(pa.float64()))
+    integer_dtypes = {
+        pa.int8(): pd.Int8Dtype(),
+        pa.int16(): pd.Int16Dtype(),
+        pa.int32(): pd.Int32Dtype(),
+        pa.int64(): pd.Int64Dtype(),
+    }
+    # Integers become nullable dtypes first so that a dtype entry converts them
+    # without going through float64.
+    df = table.cast(schema).to_pandas(types_mapper=integer_dtypes.get)
+    if header is None:
+        # pandas names the columns beyond the given names by their positions.
+        df.columns = [str(index) for index in range(len(df.columns) - len(names))] + names
+    dtype = dict(read_csv_kwargs["dtype"])
+    for column in df.columns:
+        # Integer columns without a dtype entry get NumPy integer types.
+        if column not in dtype and df[column].dtype in integer_dtypes.values():
+            dtype[column] = df[column].dtype.numpy_dtype
+    dtype = {
+        column: pd.api.types.pandas_dtype(value)
+        for column, value in dtype.items()
+        if column in df.columns
+    }
+    df = df.astype(dtype)
+    if not pd.get_option("future.infer_string"):
+        # Without the string dtype, pandas returns strings, and the string
+        # categories of categorical columns, as objects.
+        for index in range(len(df.columns)):
+            values = df.iloc[:, index]
+            if values.dtype == "str":
+                df.isetitem(index, values.astype(object).fillna(None))
+            elif isinstance(values.dtype, pd.CategoricalDtype) and (
+                values.dtype.categories.dtype == "str"
+            ):
+                categories = values.dtype.categories.astype(object)
+                df.isetitem(
+                    index,
+                    values.astype(pd.CategoricalDtype(categories, ordered=values.dtype.ordered)),
+                )
+    for column in read_csv_kwargs["parse_dates"]:
+        if isinstance(column, int) and column not in df.columns:
+            column = df.columns[column]
+        if df[column].dtype.kind in "Mm":
+            continue
+        values = df[column].astype("string")
+        try:
+            df[column] = pd.to_datetime(values, utc=False)
+        except (ValueError, TypeError):
+            # pandas keeps the column as strings if it cannot parse it.
+            df[column] = values.to_numpy(dtype=object, na_value=float("nan"))
+    # pandas applies the dtype mapping again after parsing dates.
+    df = df.astype(dtype)
+    return df
+
+
 class _JSONConverter:
     """A json converter for ``pandas.read_csv()`` that keeps NULL from making values floats.
 
@@ -329,6 +427,8 @@ class AthenaPandasResultSet(AthenaResultSet):
         "time",
         "timestamp",
     ]
+    # The pandas.read_csv() options given to execute() that _read_csv_with_pyarrow() reads.
+    _PYARROW_READ_CSV_OPTIONS: ClassVar[frozenset[str]] = frozenset({"dtype", "parse_dates"})
 
     def __init__(
         self,
@@ -696,7 +796,10 @@ class AthenaPandasResultSet(AthenaResultSet):
                     source = self._csv_stream = stack.enter_context(
                         self._fs.open(self.output_location, mode="rb")
                     )
-                result = pd.read_csv(source, **read_csv_kwargs)
+                if csv_engine == "pyarrow" and self._reads_csv_with_pyarrow():
+                    result = _read_csv_with_pyarrow(source, read_csv_kwargs)
+                else:
+                    result = pd.read_csv(source, **read_csv_kwargs)
                 if not isinstance(result, pd.DataFrame):
                     # The chunk iterator takes ownership of the stream.
                     stack.pop_all()
@@ -715,6 +818,25 @@ class AthenaPandasResultSet(AthenaResultSet):
         except Exception as e:
             _logger.exception(f"Failed to read {self.output_location}.")
             raise OperationalError(*e.args) from e
+
+    def _reads_csv_with_pyarrow(self) -> bool:
+        """Whether ``_read_csv_with_pyarrow()`` reads the CSV result for the PyArrow engine.
+
+        It reproduces ``pandas.read_csv(engine="pyarrow")`` for PyAthena's default NA
+        values and for ``dtype`` as a mapping and ``parse_dates`` as a list given to
+        ``execute()``. With other options, pandas reads the file.
+
+        Returns:
+            True if ``_read_csv_with_pyarrow()`` reads the result.
+        """
+        return (
+            not self._keep_default_na
+            and isinstance(self._na_values, (list, tuple))
+            and list(self._na_values) == [""]
+            and self._kwargs.keys() <= self._PYARROW_READ_CSV_OPTIONS
+            and isinstance(self._kwargs.get("dtype", {}), dict)
+            and isinstance(self._kwargs.get("parse_dates", []), list)
+        )
 
     def _get_csv_read_options(self, csv_engine: str, chunksize: int | None) -> dict[str, Any]:
         """Build pandas options for Athena CSV or tab-separated results."""

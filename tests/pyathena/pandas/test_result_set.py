@@ -5,16 +5,20 @@
 #
 # SPDX-License-Identifier: MIT
 
+import csv
 import io
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pandas as pd
 import pytest
+from pandas.testing import assert_frame_equal
 
+from pyathena.pandas.converter import DefaultPandasTypeConverter
 from pyathena.pandas.result_set import (
     AthenaPandasResultSet,
     PandasDataFrameIterator,
     _no_trunc_date,
+    _read_csv_with_pyarrow,
 )
 
 
@@ -113,3 +117,164 @@ class TestAthenaPandasResultSet:
             **execute_kwargs,
             **filesystem_kwargs,
         }
+
+
+# A CSV result of Athena with each type the PyArrow engine reads, then a row of NULLs.
+_TYPES_CSV = (
+    '"ti","si","i","bi","r","d","c","v","ml","arr","m","rw","dt","ts","ts6","tm","iv","nul","u",'
+    '"empty","na"\n'
+    '"1","2","3","4","1.5","2.25","ab ","plain","multi\nline ""q"", x","[1, 2]","{k=1}",'
+    '"{a=1, b=x}","2024-02-29","2024-02-29 23:59:58.123","2024-02-29 23:59:58.123456",'
+    '"12:34:56.789","2 00:00:00.000",,"589f6631-9c50-4f58-a121-e2608a04fc64","","NA"\n'
+    ",,,,,,,,,,,,,,,,,,,,\n"
+)
+_TYPES = {
+    "ti": "tinyint",
+    "si": "smallint",
+    "i": "integer",
+    "bi": "bigint",
+    "r": "float",
+    "d": "double",
+    "c": "char",
+    "v": "varchar",
+    "ml": "varchar",
+    "arr": "array",
+    "m": "map",
+    "rw": "row",
+    "dt": "date",
+    "ts": "timestamp",
+    "ts6": "timestamp",
+    "tm": "time",
+    "iv": "interval day to second",
+    "nul": "unknown",
+    "u": "uuid",
+    "empty": "varchar",
+    "na": "varchar",
+}
+
+
+def _pyarrow_read_csv_kwargs(types, tab_separated=False, **kwargs):
+    """Build the pandas.read_csv() options with AthenaPandasResultSet._get_csv_read_options().
+
+    Args:
+        types: The Athena types of the result columns, keyed by column name.
+        tab_separated: Whether the result is a tab-separated ``.txt`` file.
+        **kwargs: The pandas.read_csv() options given to ``execute()``.
+
+    Returns:
+        The options for the PyArrow engine.
+    """
+    with patch("pyathena.pandas.result_set.AthenaResultSet.__init__", return_value=None):
+        result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)
+    result_set._converter = DefaultPandasTypeConverter()
+    result_set._keep_default_na = False
+    result_set._na_values = ("",)
+    result_set._quoting = 1
+    result_set._kwargs = kwargs
+    description = [(name, type_, None, None, 0, 0, "UNKNOWN") for name, type_ in types.items()]
+    location = f"s3://bucket/result.{'txt' if tab_separated else 'csv'}"
+    with (
+        patch.object(
+            AthenaPandasResultSet,
+            "description",
+            new_callable=PropertyMock,
+            return_value=description,
+        ),
+        patch.object(
+            AthenaPandasResultSet,
+            "output_location",
+            new_callable=PropertyMock,
+            return_value=location,
+        ),
+    ):
+        assert result_set._reads_csv_with_pyarrow()
+        return result_set._get_csv_read_options("pyarrow", None)
+
+
+@pytest.mark.filterwarnings("ignore:Could not infer format")
+@pytest.mark.parametrize("infer_string", [True, False])
+@pytest.mark.parametrize(
+    ("data", "read_csv_kwargs"),
+    [
+        (_TYPES_CSV, _pyarrow_read_csv_kwargs(_TYPES)),
+        (
+            _TYPES_CSV,
+            _pyarrow_read_csv_kwargs(
+                _TYPES,
+                dtype={
+                    **_pyarrow_read_csv_kwargs(_TYPES)["dtype"],
+                    "ti": "float32",
+                    "v": "category",
+                    "missing": "int64",
+                },
+            ),
+        ),
+        (_TYPES_CSV, _pyarrow_read_csv_kwargs(_TYPES, parse_dates=[12, "ts"])),
+        (
+            _TYPES_CSV,
+            _pyarrow_read_csv_kwargs(
+                _TYPES, dtype={**_pyarrow_read_csv_kwargs(_TYPES)["dtype"], "dt": "string"}
+            ),
+        ),
+        (
+            '"x","d"\n"1","2024-01-01"\n,\n',
+            _pyarrow_read_csv_kwargs({"x": "integer", "d": "date"}, dtype={"x": None}),
+        ),
+        (
+            '"x","x","d"\n"1","2","2024-01-01"\n,,\n',
+            _pyarrow_read_csv_kwargs({"x": "integer", "d": "date"}),
+        ),
+        (
+            '"v"\n"plain"\n"2024-01-01"\n\n',
+            _pyarrow_read_csv_kwargs({"v": "varchar"}, parse_dates=["v"]),
+        ),
+        (
+            "id    \tint    \t    \nname  \tstring \t    \n",
+            _pyarrow_read_csv_kwargs({"col_name": "varchar"}, True),
+        ),
+        (
+            "x\t1\t2024-01-01\n\t\t\ny y\t3\t2024-01-02\n",
+            _pyarrow_read_csv_kwargs({"a": "varchar", "b": "bigint", "c": "date"}, True),
+        ),
+    ],
+    ids=[
+        "types",
+        "dtype",
+        "parse_dates",
+        "dtype_of_date_column",
+        "dtype_none",
+        "duplicate_names",
+        "unparsed_dates",
+        "tab_separated_extra_fields",
+        "tab_separated",
+    ],
+)
+def test_read_csv_with_pyarrow_matches_pandas(data, read_csv_kwargs, infer_string):
+    # Without values that cross a read block, the result is the one of
+    # pandas.read_csv(engine="pyarrow").
+    with pd.option_context("future.infer_string", infer_string):
+        expected = pd.read_csv(
+            io.BytesIO(data.encode()),
+            **{**read_csv_kwargs, "dtype": dict(read_csv_kwargs["dtype"])},
+        )
+        actual = _read_csv_with_pyarrow(
+            io.BytesIO(data.encode()),
+            {**read_csv_kwargs, "dtype": dict(read_csv_kwargs["dtype"])},
+        )
+    assert_frame_equal(actual, expected, check_exact=True)
+
+
+def test_read_csv_with_pyarrow_multiline_values_across_blocks():
+    # The 2.4 MB file spans several 1 MiB pyarrow read blocks, and its values
+    # contain newlines and quotes.
+    rows = [(i, f'{"x" * 600}\n"{"y" * 598}"' if i % 2 else "z") for i in range(4000)]
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, quoting=csv.QUOTE_ALL, lineterminator="\n")
+    writer.writerow(["id", "v"])
+    writer.writerows(rows)
+    df = _read_csv_with_pyarrow(
+        io.BytesIO(buffer.getvalue().encode()),
+        _pyarrow_read_csv_kwargs({"id": "integer", "v": "varchar"}),
+    )
+    assert df["id"].tolist() == [i for i, _ in rows]
+    assert df["v"].tolist() == [v for _, v in rows]

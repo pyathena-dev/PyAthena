@@ -19,7 +19,11 @@ from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.model import AthenaQueryExecution
 from pyathena.pandas.converter import DefaultPandasTypeConverter
 from pyathena.pandas.cursor import PandasCursor
-from pyathena.pandas.result_set import AthenaPandasResultSet, PandasDataFrameIterator
+from pyathena.pandas.result_set import (
+    AthenaPandasResultSet,
+    PandasDataFrameIterator,
+    _read_csv_with_pyarrow,
+)
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
@@ -298,6 +302,24 @@ class TestPandasCursor:
         if not binary:
             # pandas opens and closes the file itself.
             assert pandas_cursor.result_set._csv_stream is None
+
+    def test_pyarrow_engine_multiline_values_across_blocks(self, pandas_cursor):
+        # The 2.4 MB result spans several 1 MiB pyarrow read blocks, and its
+        # values contain a newline and quotes.
+        with patch(
+            "pyathena.pandas.result_set._read_csv_with_pyarrow", wraps=_read_csv_with_pyarrow
+        ) as read_csv_with_pyarrow:
+            pandas_cursor.execute(
+                """
+                SELECT array_join(repeat('x', 600), '') || chr(10)
+                    || '"' || array_join(repeat('y', 598), '') || '"' AS v
+                FROM UNNEST(sequence(1, 2000)) AS t(i)
+                """,
+                engine="pyarrow",
+            )
+            df = pandas_cursor.as_pandas()
+        read_csv_with_pyarrow.assert_called_once()
+        assert df["v"].tolist() == ["x" * 600 + '\n"' + "y" * 598 + '"'] * 2000
 
     @pytest.mark.parametrize(
         ("pandas_cursor", "parquet_engine", "chunksize"),
@@ -1041,6 +1063,43 @@ class TestPandasCursor:
             ):
                 engine = result_set._get_csv_engine()
                 assert engine == "c"
+
+    @pytest.mark.parametrize(
+        ("keep_default_na", "na_values", "kwargs", "expected"),
+        [
+            (False, ("",), {}, True),
+            (False, ("",), {"dtype": {"a": "str"}, "parse_dates": ["b"]}, True),
+            (True, ("",), {}, False),
+            (False, ("", "NA"), {}, False),
+            (False, np.array([""]), {}, False),
+            (False, ("",), {"storage_options": None}, False),
+            (False, ("",), {"on_bad_lines": "skip"}, False),
+            (False, ("",), {"dtype": "str"}, False),
+            (False, ("",), {"parse_dates": "d"}, False),
+            (False, ("",), {"parse_dates": ("d",)}, False),
+        ],
+        ids=[
+            "default",
+            "dtype_parse_dates",
+            "keep_default_na",
+            "na_values",
+            "na_values_array",
+            "storage_options",
+            "on_bad_lines",
+            "single_dtype",
+            "parse_dates_string",
+            "parse_dates_tuple",
+        ],
+    )
+    def test_reads_csv_with_pyarrow(self, keep_default_na, na_values, kwargs, expected):
+        # PyAthena reads the CSV result for the PyArrow engine only with the options
+        # that _read_csv_with_pyarrow() reproduces; pandas reads it otherwise.
+        with patch("pyathena.pandas.result_set.AthenaResultSet.__init__"):
+            result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)
+            result_set._keep_default_na = keep_default_na
+            result_set._na_values = na_values
+            result_set._kwargs = kwargs
+            assert result_set._reads_csv_with_pyarrow() is expected
 
     @pytest.mark.parametrize(
         ("pandas_cursor", "parquet_engine", "chunksize"),
