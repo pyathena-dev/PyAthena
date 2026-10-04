@@ -669,8 +669,9 @@ class S3Core:
             source: The path of the object to copy, with the version ID to
                 copy, if any.
             range_: The ``(start, end)`` byte range of the source to copy,
-                with an exclusive end. None sends no range, so the whole
-                source is copied unless ``params`` has ``CopySourceRange``.
+                with an exclusive end. None sends no range of its own, so the
+                whole source is copied unless ``params`` or ``request_kwargs``
+                have ``CopySourceRange``.
             **params: Additional request parameters. The fields that the
                 other arguments set take precedence over parameters of the
                 same name.
