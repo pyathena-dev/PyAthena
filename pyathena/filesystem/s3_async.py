@@ -29,6 +29,7 @@ from pyathena.filesystem.s3_object import (
     S3ObjectType,
     S3ObjectVersion,
 )
+from pyathena.filesystem.s3_path import S3Path
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -253,8 +254,7 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         if os.path.isdir(lpath):
             return
-        _, key, _ = self.parse_path(rpath)
-        if not key:
+        if not S3Path.parse(rpath).key:
             return
 
         size = os.path.getsize(lpath)
@@ -429,11 +429,11 @@ class AioS3FileSystem(AsyncFileSystem):
         # Parameters of the multipart copy, not of the S3 requests.
         block_size = kwargs.pop("block_size", None)
         max_workers = kwargs.pop("max_workers", None)
-        bucket1, key1, version_id1 = self.parse_path(path1)
-        bucket2, key2, version_id2 = self.parse_path(path2)
-        if version_id2:
+        source = S3Path.parse(path1)
+        destination = S3Path.parse(path2)
+        if destination.version_id:
             raise ValueError("Cannot copy to a versioned file.")
-        if not key1 or not key2:
+        if not source.key or not destination.key:
             raise ValueError("Cannot copy buckets.")
 
         info1 = await self._info(path1)
@@ -446,21 +446,21 @@ class AioS3FileSystem(AsyncFileSystem):
             if size1 <= S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE:
                 await asyncio.to_thread(
                     self._sync_fs._copy_object,
-                    bucket1=bucket1,
-                    key1=key1,
-                    version_id1=version_id1,
-                    bucket2=bucket2,
-                    key2=key2,
+                    bucket1=source.bucket,
+                    key1=source.key,
+                    version_id1=source.version_id,
+                    bucket2=destination.bucket,
+                    key2=destination.key,
                     **kwargs,
                 )
             else:
                 await self._copy_object_with_multipart_upload(
-                    bucket1=bucket1,
-                    key1=key1,
-                    version_id1=version_id1,
+                    bucket1=source.bucket,
+                    key1=source.key,
+                    version_id1=source.version_id,
                     size1=size1,
-                    bucket2=bucket2,
-                    key2=key2,
+                    bucket2=destination.bucket,
+                    key2=destination.key,
                     max_workers=max_workers,
                     block_size=block_size,
                     **kwargs,
