@@ -128,12 +128,12 @@ class Connection(Generic[ConnectionCursor]):
         kill_on_interrupt: bool = ...,
         session: Session | None = ...,
         config: Config | None = ...,
-        s3_config: Config | None = ...,
         result_reuse_enable: bool = ...,
         result_reuse_minutes: int = ...,
         on_start_query_execution: Callable[[str], None] | None = ...,
         on_poll: OnPollCallback | None = ...,
         glue_metadata_fallback: bool = ...,
+        s3_config: Config | None = ...,
         **kwargs,
     ) -> None: ...
 
@@ -162,12 +162,12 @@ class Connection(Generic[ConnectionCursor]):
         kill_on_interrupt: bool = ...,
         session: Session | None = ...,
         config: Config | None = ...,
-        s3_config: Config | None = ...,
         result_reuse_enable: bool = ...,
         result_reuse_minutes: int = ...,
         on_start_query_execution: Callable[[str], None] | None = ...,
         on_poll: OnPollCallback | None = ...,
         glue_metadata_fallback: bool = ...,
+        s3_config: Config | None = ...,
         **kwargs,
     ) -> None: ...
 
@@ -195,12 +195,12 @@ class Connection(Generic[ConnectionCursor]):
         kill_on_interrupt: bool = True,
         session: Session | None = None,
         config: Config | None = None,
-        s3_config: Config | None = None,
         result_reuse_enable: bool = False,
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
         on_start_query_execution: Callable[[str], None] | None = None,
         on_poll: OnPollCallback | None = None,
         glue_metadata_fallback: bool = True,
+        s3_config: Config | None = None,
         **kwargs,
     ) -> None:
         """Initialize a new Athena database connection.
@@ -235,8 +235,6 @@ class Connection(Generic[ConnectionCursor]):
             kill_on_interrupt: Cancel running queries on interrupt. Defaults to True.
             session: Pre-configured boto3 Session. Creates new session if None.
             config: Boto3 Config object for client configuration.
-            s3_config: Botocore Config options for the S3 client only, such as
-                ``max_pool_connections``. They are merged over ``config``.
             result_reuse_enable: Enable Athena query result reuse. Defaults to False.
             result_reuse_minutes: Minutes to reuse cached results.
             on_start_query_execution: Callback invoked with each query ID before the cursor
@@ -249,6 +247,8 @@ class Connection(Generic[ConnectionCursor]):
                 answer a throttled table-metadata, table-listing or
                 database-listing request from the AWS Glue Data Catalog before
                 retrying it. Defaults to True.
+            s3_config: Botocore Config options for the S3 client only, such as
+                ``max_pool_connections``. They are merged over ``config``.
             **kwargs: Additional arguments passed to boto3 Session and client.
 
         Raises:

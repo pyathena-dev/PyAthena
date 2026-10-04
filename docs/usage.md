@@ -771,7 +771,7 @@ conn = connect(
 ```
 
 The client keeps up to `max_pool_connections` connections per host for reuse, 10 by default.
-Concurrent requests beyond that open more connections, which urllib3 closes after use with a "Connection pool is full" warning.
+Concurrent requests beyond that open more connections, which urllib3 closes after use, logging a "Connection pool is full" warning.
 
 `Connection.close()` closes the network connections of the connection's Athena client, and of its Glue and S3 clients if they were built.
 A client used after that opens new connections.
