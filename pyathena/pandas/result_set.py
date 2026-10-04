@@ -808,6 +808,9 @@ class AthenaPandasResultSet(AthenaResultSet):
             with ExitStack() as stack:
                 source: str | IOBase = self.output_location
                 binary_columns = self._configure_binary_csv_read(read_csv_kwargs, labels)
+                if labels is not None:
+                    # After _configure_binary_csv_read(), which checks for the header row.
+                    self._read_csv_header_as_labels(read_csv_kwargs, csv_engine)
                 self._csv_converters = read_csv_kwargs.get("converters") or {}
                 if binary_columns:
                     # Given storage_options, even None, open the file through fsspec
@@ -1057,6 +1060,33 @@ class AthenaPandasResultSet(AthenaResultSet):
                 label for label, d in columns if d[1] in self._PARSE_DATES
             ]
         self._time_columns = [label for label, d in columns if d[1] == "time"]
+
+    def _read_csv_header_as_labels(self, read_csv_kwargs: dict[str, Any], csv_engine: str) -> None:
+        """Read the header of the CSV result file as the labels of columns with the same name.
+
+        pandas gives a column that it renames, such as ``x.1``, the dtype of the first
+        column with the name when it has none of its own. When PyAthena builds the
+        dtypes, the columns are read under their labels, so that each keeps its own type.
+
+        Args:
+            read_csv_kwargs: The options for ``pandas.read_csv()``, updated in place.
+            csv_engine: The CSV engine that reads the file.
+        """
+        names = [d[0] for d in self.description or []]
+        if self._kwargs.keys() & {"dtype", "names"} or len(set(names)) == len(names):
+            return
+        # pandas renames the names in a header row, and copies their dtypes, even with
+        # names given, so the header row is skipped instead.
+        read_csv_kwargs["names"] = self._get_column_names()
+        read_csv_kwargs["header"] = None
+        if csv_engine == "python":
+            # The python engine skips lines, which a name with a newline spans.
+            header = StringIO(newline="")
+            csv.writer(header, quoting=csv.QUOTE_ALL, lineterminator="").writerow(names)
+            read_csv_kwargs["skiprows"] = len(StringIO(header.getvalue(), newline="").readlines())
+        else:
+            # The C engine skips parsed rows.
+            read_csv_kwargs["skiprows"] = 1
 
     def _configure_binary_csv_read(
         self, read_csv_kwargs: dict[str, Any], labels: list[Any] | None

@@ -1743,13 +1743,14 @@ class TestPandasCursor:
     )
     def test_duplicate_column_names(self, pandas_cursor):
         pandas_cursor.execute(
-            "SELECT 1 AS x, 'a' AS x, 'b' AS y, json_parse('[1]') AS j, json_parse('[2]') AS j, "
-            "CAST('12:34:56' AS TIME) AS t, 2 AS t"
+            "SELECT 1 AS x, 'a' AS x, CAST('01:02:03' AS TIME) AS x, 'b' AS y, "
+            "json_parse('[1]') AS j, json_parse('[2]') AS j, CAST('12:34:56' AS TIME) AS t, 2 AS t"
         )
         assert pandas_cursor.fetchall() == [
             (
                 1,
                 "a",
+                datetime(2017, 1, 1, 1, 2, 3).time(),
                 "b",
                 [1],
                 [2],
@@ -1760,12 +1761,26 @@ class TestPandasCursor:
         assert pandas_cursor.as_pandas().columns.tolist() == [
             "x",
             "x.1",
+            "x.2",
             "y",
             "j",
             "j.1",
             "t",
             "t.1",
         ]
+
+    @pytest.mark.parametrize("engine", ["c", "python"])
+    def test_duplicate_column_names_with_newline(self, pandas_cursor, engine):
+        """Columns with the same name keep their own types, with a newline in the name."""
+        pandas_cursor.execute(
+            'SELECT 1 AS "a\nb", CAST(\'01:02:03\' AS TIME) AS "a\nb", '
+            "INTERVAL '2' DAY AS \"a\nb\"",
+            engine=engine,
+        )
+        assert pandas_cursor.fetchall() == [
+            (1, datetime(2017, 1, 1, 1, 2, 3).time(), "2 00:00:00.000")
+        ]
+        assert pandas_cursor.as_pandas().columns.tolist() == ["a\nb", "a\nb.1", "a\nb.2"]
 
     @pytest.mark.parametrize(
         ("execute_kwargs", "expected_row", "expected_columns"),

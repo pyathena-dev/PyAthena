@@ -302,10 +302,20 @@ class AthenaArrowResultSet(AthenaResultSet):
         ):
             return pa.Table.from_pydict({})
         length = self._get_content_length()
-        binary_columns = {d[0] for d in self.description or [] if d[1] == "varbinary"}
+        description = self.description if self.description else []
+        names = [d[0] for d in description]
+        # pyarrow types every column with a name by its column_types entry, so columns
+        # with the same name are read under their positions and get their names back
+        # after reading.
+        has_duplicate_names = len(set(names)) != len(names)
+        column_names = [str(i) for i in range(len(names))] if has_duplicate_names else names
+        column_types = {
+            name: dtype
+            for name, d in zip(column_names, description, strict=True)
+            if (dtype := self._converter.get_dtype(d[1], d[4], d[5])) is not None
+        }
+        binary_columns = {i for i, d in enumerate(description) if d[1] == "varbinary"}
         if length and self.output_location.endswith(".txt"):
-            description = self.description if self.description else []
-            column_names = [d[0] for d in description]
             read_opts = csv.ReadOptions(
                 skip_rows=0,
                 column_names=column_names,
@@ -320,6 +330,11 @@ class AthenaArrowResultSet(AthenaResultSet):
             )
         elif length and self.output_location.endswith(".csv"):
             read_opts = csv.ReadOptions(skip_rows=0, block_size=self._block_size, use_threads=True)
+            if has_duplicate_names:
+                read_opts.column_names = column_names
+                # Skips the header as a parsed row; skip_rows would split a quoted name
+                # that contains a newline.
+                read_opts.skip_rows_after_names = 1
             parse_opts = csv.ParseOptions(
                 delimiter=",",
                 quote_char='"',
@@ -344,12 +359,14 @@ class AthenaArrowResultSet(AthenaResultSet):
                     strings_can_be_null=bool(binary_columns),
                     quoted_strings_can_be_null=False,
                     timestamp_parsers=self.timestamp_parsers,
-                    column_types=self.column_types,
+                    column_types=column_types,
                 ),
             )
+            if has_duplicate_names:
+                table = table.rename_columns(names)
             if binary_columns:
                 for index, field in enumerate(table.schema):
-                    if field.name not in binary_columns and (
+                    if index not in binary_columns and (
                         pa.types.is_string(field.type) or pa.types.is_binary(field.type)
                     ):
                         # Preserve the existing CSV behavior for non-binary Athena columns.
