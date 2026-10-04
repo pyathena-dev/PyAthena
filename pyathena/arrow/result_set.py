@@ -308,12 +308,16 @@ class AthenaArrowResultSet(AthenaResultSet):
         # with the same name are read under their positions and get their names back
         # after reading.
         has_duplicate_names = len(set(names)) != len(names)
-        column_names = [str(i) for i in range(len(names))] if has_duplicate_names else names
-        column_types = {
-            name: dtype
-            for name, d in zip(column_names, description, strict=True)
-            if (dtype := self._converter.get_dtype(d[1], d[4], d[5])) is not None
-        }
+        if has_duplicate_names:
+            column_names = [str(i) for i in range(len(names))]
+            column_types = {
+                str(i): dtype
+                for i, d in enumerate(description)
+                if (dtype := self._converter.get_dtype(d[1], d[4], d[5])) is not None
+            }
+        else:
+            column_names = names
+            column_types = self.column_types
         binary_columns = {i for i, d in enumerate(description) if d[1] == "varbinary"}
         if length and self.output_location.endswith(".txt"):
             read_opts = csv.ReadOptions(
