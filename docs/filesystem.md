@@ -405,7 +405,8 @@ filesystem's `mkdir`/`makedirs` and `rmdir`, not to calls through the core.
 `create_bucket()` sends a `LocationConstraint` for the `region_name` argument, or for
 the client's region by default, except in `us-east-1`. The fields of a
 `CreateBucketConfiguration` passed as a parameter are kept, and the `LocationConstraint`
-is added to it only if it has none of `LocationConstraint`, `Location` and `Bucket`. To
+is added to it only if it has none of `LocationConstraint`, `Location` and `Bucket`; an
+empty or `None` configuration is treated as not passed. To
 create a directory bucket, pass its `Location` and `Bucket` in
 `CreateBucketConfiguration`; no `LocationConstraint` is added.
 

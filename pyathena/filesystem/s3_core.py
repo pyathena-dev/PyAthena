@@ -793,7 +793,8 @@ class S3Core:
                 ``LocationConstraint``, ``Location`` or ``Bucket``. A
                 directory bucket is created with ``Location`` and
                 ``Bucket``, so no ``LocationConstraint`` is added to its
-                configuration. The given configuration is not modified.
+                configuration. An empty or None configuration is treated as
+                not given. The given configuration is not modified.
 
         Raises:
             ValueError: If the ACL is not a canned ACL of buckets.
