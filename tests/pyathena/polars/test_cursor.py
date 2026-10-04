@@ -804,18 +804,18 @@ class TestPolarsCursor:
     )
     def test_duplicate_column_names(self, polars_cursor):
         polars_cursor.execute(
-            "SELECT 1 AS x, 2 AS x, 'a' AS y, json_parse('[1]') AS j, json_parse('[2]') AS j, "
-            "CAST('12:34:56' AS TIME) AS t, CAST('01:02:03' AS TIME) AS t"
+            "SELECT 1 AS x, 'a' AS x, 'b' AS y, json_parse('[1]') AS j, json_parse('[2]') AS j, "
+            "CAST('12:34:56' AS TIME) AS t, 2 AS t"
         )
         assert polars_cursor.fetchall() == [
             (
                 1,
-                2,
                 "a",
+                "b",
                 [1],
                 [2],
                 datetime(2017, 1, 1, 12, 34, 56).time(),
-                datetime(2017, 1, 1, 1, 2, 3).time(),
+                2,
             )
         ]
         assert polars_cursor.as_polars().columns == [
@@ -827,6 +827,14 @@ class TestPolarsCursor:
             "t",
             "t_duplicated_0",
         ]
+
+    def test_duplicate_column_names_new_columns(self, polars_cursor):
+        """The column types follow the columns that new_columns renames."""
+        polars_cursor.execute(
+            "SELECT 1 AS x, 2 AS x, 'c' AS y", new_columns=["y", "x_duplicated_0", "x"]
+        )
+        assert polars_cursor.fetchall() == [(1, 2, "c")]
+        assert polars_cursor.as_polars().columns == ["y", "x_duplicated_0", "x"]
 
     @pytest.mark.parametrize(
         "execute_kwargs",

@@ -1671,18 +1671,18 @@ class TestPandasCursor:
     )
     def test_duplicate_column_names(self, pandas_cursor):
         pandas_cursor.execute(
-            "SELECT 1 AS x, 2 AS x, 'a' AS y, json_parse('[1]') AS j, json_parse('[2]') AS j, "
-            "CAST('12:34:56' AS TIME) AS t, CAST('01:02:03' AS TIME) AS t"
+            "SELECT 1 AS x, 'a' AS x, 'b' AS y, json_parse('[1]') AS j, json_parse('[2]') AS j, "
+            "CAST('12:34:56' AS TIME) AS t, 2 AS t"
         )
         assert pandas_cursor.fetchall() == [
             (
                 1,
-                2,
                 "a",
+                "b",
                 [1],
                 [2],
                 datetime(2017, 1, 1, 12, 34, 56).time(),
-                datetime(2017, 1, 1, 1, 2, 3).time(),
+                2,
             )
         ]
         assert pandas_cursor.as_pandas().columns.tolist() == [
@@ -1694,6 +1694,22 @@ class TestPandasCursor:
             "t",
             "t.1",
         ]
+
+    @pytest.mark.parametrize(
+        ("execute_kwargs", "expected_row", "expected_columns"),
+        [
+            ({"names": ["a", "b", "x.1"]}, (1, 2, "c"), ["a", "b", "x.1"]),
+            ({"usecols": [1, 2]}, (2, "c"), ["x.1", "y"]),
+            ({"usecols": ["x.1", "y"]}, (2, "c"), ["x.1", "y"]),
+        ],
+    )
+    def test_duplicate_column_names_read_options(
+        self, pandas_cursor, execute_kwargs, expected_row, expected_columns
+    ):
+        """The column types follow the columns that the read options rename or select."""
+        pandas_cursor.execute("SELECT 1 AS x, 2 AS x, 'c' AS y", **execute_kwargs)
+        assert pandas_cursor.fetchall() == [expected_row]
+        assert pandas_cursor.as_pandas().columns.tolist() == expected_columns
 
     @pytest.mark.parametrize(
         "execute_kwargs",
