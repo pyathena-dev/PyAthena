@@ -128,6 +128,38 @@ uv run --env-file .env pytest -n 1 tests/pyathena/test_cursor.py -v
 ```
 
 A targeted run helps during development but does not replace other coverage required by the affected callers or features.
+
+(testing-offline)=
+
+### Run self-contained tests offline
+
+The pandas and Polars result-set modules have self-contained tests that can run without AWS access when the session hooks are excluded.
+Reuse the `.env` file described in the AWS environment section if it is already configured.
+For an offline-only setup, create a gitignored `.env` file in the repository root with these placeholder values:
+
+```ini
+AWS_DEFAULT_REGION=us-east-1
+AWS_ATHENA_S3_STAGING_DIR=s3://pyathena-offline-placeholder/
+AWS_ATHENA_WORKGROUP=offline
+AWS_ATHENA_SPARK_WORKGROUP=offline
+AWS_EC2_METADATA_DISABLED=true
+```
+
+After `just lint`, load `.env` and run:
+
+```bash
+uv run --env-file .env pytest --noconftest -p no:rerunfailures -q \
+  tests/pyathena/pandas/test_result_set.py \
+  tests/pyathena/polars/test_result_set.py
+```
+
+The four AWS configuration values are required by `tests/__init__.py`, which pytest still imports with `--noconftest`.
+The offline-only `.env` example disables EC2 metadata to prevent implicit credential lookup through that service.
+`--noconftest` excludes the AWS session hooks and fixtures; disabling the rerun plugin also avoids its local socket setup in restricted environments.
+Use this invocation only for self-contained modules; integration tests need their normal fixtures and a real AWS environment.
+
+### SQLAlchemy suites
+
 The SQLAlchemy compliance suites under `tests/sqlalchemy/` run with different configurations: use `sqla` for synchronous dialects and `sqla-async` for native asyncio dialects.
 They do not run PyAthena's own dialect regression tests under `tests/pyathena/sqlalchemy/` and `tests/pyathena/aio/sqlalchemy/`.
 Run the relevant PyAthena tests too, either through `just test pyathena` or a focused selection during development:
@@ -136,16 +168,38 @@ Run the relevant PyAthena tests too, either through `just test pyathena` or a fo
 uv run --env-file .env pytest -n 1 tests/pyathena/sqlalchemy/ tests/pyathena/aio/sqlalchemy/ -v
 ```
 
+### Run tox
+
 To invoke the configured tox environments locally:
 
 ```bash
 uv run --env-file .env just tox
 ```
 
+### Record results
+
 Record the tested commit, Python and relevant dependency versions, exact commands, and results in the pull request.
 Include failed and skipped tests and explain any unrun coverage.
 Separate real AWS results from mock-based tests and static checks.
 Sanitize logs before sharing them.
+
+## Organize tests
+
+Group cursor and engine integration tests in classes, and use standalone functions for stateless helpers.
+A unit-test class can group the behavior of one object or common setup, as in `TestTypeSignatureParser`.
+Function-oriented utility tests can remain standalone when they use AWS fixtures; `tests/pyathena/pandas/test_util.py` follows this pattern.
+SQLAlchemy compliance tests retain the classes, decorators, and plugin setup required by the upstream suite.
+Preserve attribution for adapted tests as documented in `NOTICE`.
+
+Parameter definitions should make inputs, options, and expected behavior visible.
+Build mocks, configured result sets, and one-shot readers during fixture setup or test execution.
+Pure values and framework type or expression objects can be constructed in parameters.
+Choose explicit parameter IDs when generated IDs obscure the case, and keep existing IDs, marks, and fixture scopes when reorganizing tests.
+
+Use literal expected values for contract-specific behavior.
+A library comparison is useful when matching that library is the contract, such as joining pandas chunks versus reading the whole file.
+Express intentional differences directly rather than recreating the implementation in the expected-value builder.
+Retain dtype and schema checks, option contexts, resource cleanup, and equivalent synchronous and asynchronous scenarios where applicable.
 
 ## GitHub Actions
 

@@ -1775,9 +1775,25 @@ class TestAioS3FileSystem:
         result = await fs._find(dir_, withdirs=False)
         assert len(result) == 4  # Only files
 
-    def test_du(self):
-        # TODO
-        pass
+    @pytest.mark.asyncio
+    async def test_du(self, fs):
+        """Disk usage reports file sizes, their total, and the requested depth."""
+        directory = f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/filesystem/test_async_du"
+        first = f"{directory}/first"
+        second = f"{directory}/nested/second"
+        try:
+            await fs._pipe_file(first, b"abc")
+            await fs._pipe_file(second, b"12345")
+            assert await fs._du(directory) == 8
+            assert await fs._du(directory, total=False) == {
+                fs._strip_protocol(first): 3,
+                fs._strip_protocol(second): 5,
+            }
+            assert await fs._du(directory, maxdepth=1) == 3
+            assert await fs._du(first) == 3
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                await fs._rm(directory, recursive=True)
 
     @pytest.mark.asyncio
     async def test_glob(self, fs):

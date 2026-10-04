@@ -7,7 +7,7 @@
 
 import csv
 import io
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch, sentinel
 
 import pandas as pd
 import pyarrow as pa
@@ -76,8 +76,8 @@ class TestPandasDataFrameIterator:
         assert df_iter.as_pandas() is df
 
 
-_FS = MagicMock(name="pyathena_fs")
-_USER_FS = MagicMock(name="user_fs")
+_FS = sentinel.pyathena_fs
+_USER_FS = sentinel.user_fs
 
 
 class TestAthenaPandasResultSet:
@@ -253,28 +253,20 @@ _TYPES = {
 }
 
 
-def _is_string_dtype(value):
-    """Return whether a dtype mapping value is a string dtype, ignoring invalid values."""
-    try:
-        dtype = pd.api.types.pandas_dtype(value)
-    except TypeError:
-        return False
-    return isinstance(dtype, pd.StringDtype) or dtype.kind == "U"
-
-
-def _pyarrow_read_csv_kwargs(types, tab_separated=False, **kwargs):
+def _pyarrow_read_csv_kwargs(types, tab_separated=False, dtype_overrides=None, **kwargs):
     """Build the pandas.read_csv() options with AthenaPandasResultSet._get_csv_read_options().
 
     Args:
         types: The Athena types of the result columns, keyed by column name.
         tab_separated: Whether the result is a tab-separated ``.txt`` file.
+        dtype_overrides: Entries to add to or replace in the default dtype mapping.
+            A ``dtype`` in kwargs instead replaces the entire mapping.
         **kwargs: The pandas.read_csv() options given to ``execute()``.
 
     Returns:
         The options for the PyArrow engine.
     """
-    with patch("pyathena.pandas.result_set.AthenaResultSet.__init__", return_value=None):
-        result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)
+    result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)
     result_set._converter = DefaultPandasTypeConverter()
     result_set._keep_default_na = False
     result_set._na_values = ("",)
@@ -296,6 +288,8 @@ def _pyarrow_read_csv_kwargs(types, tab_separated=False, **kwargs):
             return_value=location,
         ),
     ):
+        if dtype_overrides is not None:
+            result_set._kwargs["dtype"] = {**result_set.dtypes, **dtype_overrides}
         assert result_set._reads_csv_with_pyarrow()
         return result_set._get_csv_read_options("pyarrow", None)
 
@@ -435,127 +429,232 @@ def test_read_csv_without_json_c_converter_keeps_low_memory_default(types, engin
     assert len(df) == 30
 
 
+def _string_series(values, infer_string):
+    """Express the expected string dtype for the active pandas option."""
+    return pd.Series(values, dtype="str" if infer_string else object)
+
+
+def _types_frame(infer_string, parse_time=True):
+    """Build the typed literal expectation for the all-types CSV."""
+    missing = float("nan")
+    return pd.DataFrame(
+        {
+            "ti": pd.Series([1, None], dtype="Int64"),
+            "si": pd.Series([2, None], dtype="Int64"),
+            "i": pd.Series([3, None], dtype="Int64"),
+            "bi": pd.Series([4, None], dtype="Int64"),
+            "r": pd.Series([1.5, missing], dtype="float64"),
+            "d": pd.Series([2.25, missing], dtype="float64"),
+            "c": _string_series(["ab ", missing], infer_string),
+            "v": _string_series(["plain", missing], infer_string),
+            "ml": _string_series(['multi\nline "q", x', missing], infer_string),
+            "arr": _string_series(["[1, 2]", missing], infer_string),
+            "m": _string_series(["{k=1}", missing], infer_string),
+            "rw": _string_series(["{a=1, b=x}", missing], infer_string),
+            "dt": pd.Series([pd.Timestamp("2024-02-29"), pd.NaT], dtype="datetime64[us]"),
+            "ts": pd.Series(
+                [pd.Timestamp("2024-02-29 23:59:58.123"), pd.NaT], dtype="datetime64[ns]"
+            ),
+            "ts6": pd.Series(
+                [pd.Timestamp("2024-02-29 23:59:58.123456"), pd.NaT], dtype="datetime64[ns]"
+            ),
+            # pandas supplies today's date when it parses a time without a date.
+            "tm": (
+                pd.Series(pd.to_datetime(["12:34:56.789", None]))
+                if parse_time
+                else _string_series(["12:34:56.789", None], infer_string)
+            ),
+            "iv": _string_series(["2 00:00:00.000", None], infer_string),
+            "nul": pd.Series([missing, missing], dtype="float64"),
+            "u": _string_series(["589f6631-9c50-4f58-a121-e2608a04fc64", None], infer_string),
+            "empty": _string_series([missing, missing], infer_string),
+            "na": _string_series(["NA", missing], infer_string),
+        }
+    )
+
+
 @pytest.mark.filterwarnings("ignore:Could not infer format")
 @pytest.mark.parametrize("infer_string", [True, False])
 @pytest.mark.parametrize(
-    ("data", "read_csv_kwargs"),
+    ("data", "types", "read_options", "expected_frame", "pandas_columns"),
     [
-        (_TYPES_CSV, _pyarrow_read_csv_kwargs(_TYPES)),
-        (
+        pytest.param(
             _TYPES_CSV,
-            _pyarrow_read_csv_kwargs(
-                _TYPES,
-                dtype={
-                    **_pyarrow_read_csv_kwargs(_TYPES)["dtype"],
-                    "ti": "float32",
-                    "v": "category",
-                    "missing": "int64",
-                },
-            ),
+            _TYPES,
+            {},
+            _types_frame,
+            [0, 1, 2, 3, 4, 5, 12, 13, 14, 15, 16, 17, 18],
+            id="types",
         ),
-        (_TYPES_CSV, _pyarrow_read_csv_kwargs(_TYPES, parse_dates=[12, "ts"])),
-        (
+        pytest.param(
             _TYPES_CSV,
-            _pyarrow_read_csv_kwargs(
-                _TYPES, dtype={**_pyarrow_read_csv_kwargs(_TYPES)["dtype"], "dt": "string"}
-            ),
+            _TYPES,
+            {"dtype_overrides": {"ti": "float32", "v": "category", "missing": "int64"}},
+            lambda infer: _types_frame(infer).astype({"ti": "float32", "v": "category"}),
+            [0, 1, 2, 3, 4, 5, 7, 12, 13, 14, 15, 16, 17, 18],
+            id="dtype",
         ),
-        (
+        pytest.param(
+            _TYPES_CSV,
+            _TYPES,
+            {"parse_dates": [12, "ts"]},
+            lambda infer: _types_frame(infer, parse_time=False),
+            [0, 1, 2, 3, 4, 5, 12, 13, 14, 15, 16, 17, 18],
+            id="parse_dates",
+        ),
+        pytest.param(
+            _TYPES_CSV,
+            _TYPES,
+            {"dtype_overrides": {"dt": "string"}},
+            lambda infer: _types_frame(infer).assign(
+                dt=pd.Series(["2024-02-29", None], dtype="string")
+            ),
+            [0, 1, 2, 3, 4, 5, 12, 13, 14, 15, 16, 17, 18],
+            id="dtype_of_date_column",
+        ),
+        pytest.param(
             '"x","d"\n"1","2024-01-01"\n,\n',
-            _pyarrow_read_csv_kwargs({"x": "integer", "d": "date"}, dtype={"x": None}),
+            {"x": "integer", "d": "date"},
+            {"dtype": {"x": None}},
+            lambda infer: pd.DataFrame(
+                {
+                    "x": [1.0, float("nan")],
+                    "d": pd.Series([pd.Timestamp("2024-01-01"), pd.NaT], dtype="datetime64[us]"),
+                }
+            ),
+            [0, 1],
+            id="dtype_none",
         ),
-        (
+        pytest.param(
             '"x","x","d"\n"1","2","2024-01-01"\n,,\n',
-            _pyarrow_read_csv_kwargs({"x": "integer", "d": "date"}),
+            {"x": "integer", "d": "date"},
+            {},
+            lambda infer: pd.concat(
+                [
+                    pd.Series([1, None], name="x", dtype="Int64"),
+                    pd.Series([2, None], name="x", dtype="Int64"),
+                    pd.Series(
+                        [pd.Timestamp("2024-01-01"), pd.NaT], name="d", dtype="datetime64[us]"
+                    ),
+                ],
+                axis=1,
+            ),
+            [0, 1, 2],
+            id="duplicate_names",
         ),
-        (
+        pytest.param(
             '"v","n"\n"1","1"\n,\n"nan","3"\n"007","4"\n"1e3","5"\n',
-            _pyarrow_read_csv_kwargs({"v": "varchar", "n": "integer"}),
+            {"v": "varchar", "n": "integer"},
+            {},
+            lambda infer: pd.DataFrame(
+                {
+                    "v": _string_series(["1", float("nan"), "nan", "007", "1e3"], infer),
+                    "n": pd.Series([1, None, 3, 4, 5], dtype="Int64"),
+                }
+            ),
+            [1],
+            id="numeric_looking_strings",
         ),
-        (
+        pytest.param(
             '"v","w","x"\n"007","a","1"\n,,"2"\n',
-            _pyarrow_read_csv_kwargs(
-                {"x": "integer"},
-                dtype={
+            {"x": "integer"},
+            {
+                "dtype": {
                     "v": pd.ArrowDtype(pa.string()),
                     "w": pd.ArrowDtype(pa.large_string()),
                     "x": pd.Int64Dtype(),
-                },
+                }
+            },
+            lambda infer: pd.DataFrame(
+                {
+                    "v": pd.Series(["007", None], dtype=pd.ArrowDtype(pa.string())),
+                    "w": pd.Series(["a", None], dtype=pd.ArrowDtype(pa.large_string())),
+                    "x": pd.Series([1, 2], dtype="Int64"),
+                }
             ),
+            [2],
+            id="arrow_string_dtypes",
         ),
-        (
+        pytest.param(
             "001\t2\t003\n004\t5\t\n",
-            _pyarrow_read_csv_kwargs({"v": "varchar"}, True),
-        ),
-        (
-            '"v","n"\n"007","1"\n',
-            _pyarrow_read_csv_kwargs(
-                {"v": "varchar", "n": "integer"},
-                dtype={**_pyarrow_read_csv_kwargs({"v": "varchar"})["dtype"], 0: str},
+            {"v": "varchar"},
+            {"tab_separated": True},
+            lambda infer: pd.DataFrame(
+                {"0": [1, 4], "1": [2, 5], "v": _string_series(["3", float("nan")], infer)}
             ),
+            [0, 1],
+            id="tab_separated_numeric_fields",
         ),
-        (
+        pytest.param(
+            '"v","n"\n"007","1"\n',
+            {"v": "varchar", "n": "integer"},
+            {"dtype": {"v": str, 0: str}},
+            lambda infer: pd.DataFrame({"v": _string_series(["007"], infer), "n": [1]}),
+            [1],
+            id="dtype_position_key",
+        ),
+        pytest.param(
             '"v"\n"plain"\n"2024-01-01"\n\n',
-            _pyarrow_read_csv_kwargs({"v": "varchar"}, parse_dates=["v"]),
+            {"v": "varchar"},
+            {"parse_dates": ["v"]},
+            lambda infer: pd.DataFrame(
+                {"v": _string_series(["plain", "2024-01-01", float("nan")], infer)}
+            ),
+            [],
+            id="unparsed_dates",
         ),
-        (
+        pytest.param(
             "id    \tint    \t    \nname  \tstring \t    \n",
-            _pyarrow_read_csv_kwargs({"col_name": "varchar"}, True),
+            {"col_name": "varchar"},
+            {"tab_separated": True},
+            lambda infer: pd.DataFrame(
+                {
+                    "0": _string_series(["id    ", "name  "], infer),
+                    "1": _string_series(["int    ", "string "], infer),
+                    "col_name": _string_series(["    ", "    "], infer),
+                }
+            ),
+            [0, 1, 2],
+            id="tab_separated_extra_fields",
         ),
-        (
+        pytest.param(
             "x\t1\t2024-01-01\n\t\t\ny y\t3\t2024-01-02\n",
-            _pyarrow_read_csv_kwargs({"a": "varchar", "b": "bigint", "c": "date"}, True),
+            {"a": "varchar", "b": "bigint", "c": "date"},
+            {"tab_separated": True},
+            lambda infer: pd.DataFrame(
+                {
+                    "a": _string_series(["x", float("nan"), "y y"], infer),
+                    "b": pd.Series([1, None, 3], dtype="Int64"),
+                    "c": pd.Series(
+                        [pd.Timestamp("2024-01-01"), pd.NaT, pd.Timestamp("2024-01-02")],
+                        dtype="datetime64[us]",
+                    ),
+                }
+            ),
+            [1, 2],
+            id="tab_separated",
         ),
-    ],
-    ids=[
-        "types",
-        "dtype",
-        "parse_dates",
-        "dtype_of_date_column",
-        "dtype_none",
-        "duplicate_names",
-        "numeric_looking_strings",
-        "arrow_string_dtypes",
-        "tab_separated_numeric_fields",
-        "dtype_position_key",
-        "unparsed_dates",
-        "tab_separated_extra_fields",
-        "tab_separated",
     ],
 )
-def test_read_csv_with_pyarrow_matches_pandas(data, read_csv_kwargs, infer_string):
-    # Without values that cross a read block, the result is the one of
-    # pandas.read_csv(engine="pyarrow"), except that the columns with a string
-    # dtype have the values of pandas' C engine, and in a header-less file, its
-    # missing values. Where the C engine parses a parse_dates column despite its
-    # string dtype, the PyArrow engine's applying the dtype again is kept.
+def test_read_csv_with_pyarrow_matches_pandas(
+    data, types, read_options, expected_frame, pandas_columns, infer_string
+):
+    """CSV results match literal expectations and pandas where their contracts agree."""
     with pd.option_context("future.infer_string", infer_string):
-        expected = pd.read_csv(
-            io.BytesIO(data.encode()),
-            **{**read_csv_kwargs, "dtype": dict(read_csv_kwargs["dtype"])},
-        )
-        c_engine = pd.read_csv(
-            io.BytesIO(data.encode()),
-            **{**read_csv_kwargs, "engine": "c", "dtype": dict(read_csv_kwargs["dtype"])},
-        )
-        string_columns = {
-            column for column, value in read_csv_kwargs["dtype"].items() if _is_string_dtype(value)
-        }
-        for index, column in enumerate(expected.columns):
-            if column not in string_columns or c_engine[column].dtype.kind == "M":
-                continue
-            if read_csv_kwargs["header"] is None:
-                # Header-less fields keep the inferred types, and only their missing
-                # values follow the C engine, which makes extra fields the index.
-                missing = c_engine[column].isna().to_numpy()
-                expected.isetitem(index, expected.iloc[:, index].mask(missing, float("nan")))
-            else:
-                expected.isetitem(index, c_engine[column].array)
-        actual = _read_csv_with_pyarrow(
-            io.BytesIO(data.encode()),
-            {**read_csv_kwargs, "dtype": dict(read_csv_kwargs["dtype"])},
-        )
-    assert_frame_equal(actual, expected, check_exact=True)
+        read_csv_kwargs = _pyarrow_read_csv_kwargs(types, **read_options)
+        expected = expected_frame(infer_string)
+        actual = _read_csv_with_pyarrow(io.BytesIO(data.encode()), read_csv_kwargs)
+        assert_frame_equal(actual, expected, check_exact=True)
+        # Explicit positions retain duplicate names and headerless-column parity.
+        # Mapped string columns use PyAthena's preservation contract instead.
+        if pandas_columns:
+            reference = pd.read_csv(
+                io.BytesIO(data.encode()),
+                **{**read_csv_kwargs, "dtype": dict(read_csv_kwargs["dtype"])},
+            )
+            assert_frame_equal(
+                actual.iloc[:, pandas_columns], reference.iloc[:, pandas_columns], check_exact=True
+            )
 
 
 @pytest.mark.parametrize("infer_string", [True, False])
@@ -579,11 +678,10 @@ def test_read_csv_with_pyarrow_ignores_unused_dtype_entries():
         dtype={"v": str, "unused": "not-a-dtype", "unsupported": "decimal128(10, 2)[pyarrow]"},
     )
     data = b'"v"\n"007"\n'
-    expected = pd.read_csv(io.BytesIO(data), **{**read_csv_kwargs, "dtype": {"v": str}})
     actual = _read_csv_with_pyarrow(
         io.BytesIO(data), {**read_csv_kwargs, "dtype": dict(read_csv_kwargs["dtype"])}
     )
-    assert actual.columns.tolist() == expected.columns.tolist() == ["v"]
+    assert actual.columns.tolist() == ["v"]
     assert actual["v"].tolist() == ["007"]
 
 

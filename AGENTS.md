@@ -82,7 +82,8 @@ uv run --env-file .env pytest -n 1 tests/pyathena/test_cursor.py -v
 #### Test Conventions
 
 - **Class-based tests** for integration tests that use fixtures (cursors, engines): `class TestCursor:` with methods like `def test_fetchone(self, cursor):`
-- **Standalone functions** for unit tests of pure logic (converters, parsers, utils): `def test_to_struct_json_formats(input_value, expected):`
+- **Standalone functions** are the default for stateless helpers: `def test_to_struct_json_formats(input_value, expected):`. Unit tests may use a class when it groups the behavior of one object or meaningful common setup, such as `TestTypeSignatureParser`.
+- Function-oriented utility tests may remain standalone even when they use AWS fixtures, as in `tests/pyathena/pandas/test_util.py`. Fixture use alone does not determine the grouping.
 - Test file naming mirrors source: `pyathena/parser.py` → `tests/pyathena/test_parser.py`
 - **Fixtures**: Cursor/engine fixtures are defined in `conftest.py` and injected by name (e.g., `cursor`, `engine`, `async_cursor`). Use `indirect=True` parametrization to pass connection options:
 
@@ -93,6 +94,9 @@ uv run --env-file .env pytest -n 1 tests/pyathena/test_cursor.py -v
   ```
 
 - **Parametrize** with `@pytest.mark.parametrize(("input", "expected"), [...])` for data-driven tests
+- Keep parameter definitions declarative. Build mocks, configured result sets, and one-shot readers during fixture setup or test execution. Pure values and framework type/expression objects may be constructed in parameter definitions.
+- Make expected values independent of the implementation under test. A library comparison is appropriate when matching that library is the contract; describe intentional differences with explicit expected values.
+- Preserve test IDs, parameter coverage, marks, fixture scopes, and resource cleanup when reorganizing tests. SQLAlchemy compliance tests retain their upstream class and plugin conventions and applicable attribution.
 - **Integration tests** (need AWS) use cursor/engine fixtures with real Athena queries; **unit tests** (no AWS) call functions directly with test data
 
 ### Markdown Lint

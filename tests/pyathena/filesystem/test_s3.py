@@ -4870,9 +4870,26 @@ class TestS3FileSystem:
         result = fs.find(dir_, withdirs=False)
         assert len(result) == 4  # Only files
 
-    def test_du(self):
-        # TODO
-        pass
+    def test_du(self, fs):
+        """Disk usage reports file sizes, their total, and the requested depth."""
+        directory = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/filesystem/test_du"
+        )
+        first = f"{directory}/first"
+        second = f"{directory}/nested/second"
+        try:
+            fs.pipe_file(first, b"abc")
+            fs.pipe_file(second, b"12345")
+            assert fs.du(directory) == 8
+            assert fs.du(directory, total=False) == {
+                fs._strip_protocol(first): 3,
+                fs._strip_protocol(second): 5,
+            }
+            assert fs.du(directory, maxdepth=1) == 3
+            assert fs.du(first) == 3
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                fs.rm(directory, recursive=True)
 
     def test_glob(self, fs):
         dir_ = f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/filesystem/test_glob"
