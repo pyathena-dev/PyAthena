@@ -399,8 +399,9 @@ class S3Core:
     Each operation sends one request, or one per page for the iterators,
     with the retry policy, and translates S3 errors into ``OSError``
     subclasses (see :class:`~pyathena.filesystem.s3_errors.S3ClientError`):
-    a missing object, version or bucket raises ``FileNotFoundError``, and a
-    denied request ``PermissionError``. Nothing is cached.
+    a missing bucket, or a missing object or version that an operation reads,
+    raises ``FileNotFoundError``, and a denied request ``PermissionError``.
+    As in S3, deleting a missing key is not an error. Nothing is cached.
 
     Example:
         >>> core = S3Core(boto3.client("s3"))
@@ -540,6 +541,7 @@ class S3Core:
 
         Raises:
             ValueError: If the path has no key.
+            FileNotFoundError: If the bucket does not exist.
         """
         if not path.key:
             raise ValueError(f"The path has no key: {path.uri}.")
@@ -558,6 +560,9 @@ class S3Core:
         Returns:
             The result, with the objects that S3 could not delete in its
             ``errors``.
+
+        Raises:
+            FileNotFoundError: If the bucket does not exist.
         """
         objects = []
         for path in batch.objects:

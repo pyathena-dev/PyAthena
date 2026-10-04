@@ -1091,10 +1091,17 @@ class S3FileSystem(AbstractFileSystem):
             path: S3 path (s3://bucket/key) of the object to delete.
             **kwargs: Accepted for fsspec compatibility; not used in the
                 request.
+
+        Raises:
+            TypeError: If kwargs has ``bucket``, ``key`` or ``version_id``,
+                which the path gives.
         """
         s3_path = S3Path.parse(path)
         if not s3_path.key:
             return
+        for name in ("bucket", "key", "version_id"):
+            if name in kwargs:
+                raise TypeError(f"rm_file() got multiple values for keyword argument '{name}'")
         _logger.debug(f"Delete object: {s3_path.uri}")
         self.core.delete_object(s3_path)
         self.invalidate_cache(path)

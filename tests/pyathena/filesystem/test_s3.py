@@ -514,6 +514,16 @@ class TestS3FileSystem:
         fs._call.side_effect = [FileNotFoundError("bucket/a/c.txt"), {}]
         assert not fs.exists("s3://bucket/a/c.txt")
 
+    @pytest.mark.parametrize("name", ["bucket", "key", "version_id"])
+    def test_rm_file_path_kwargs(self, name):
+        # The path gives these; rm_file() must not delete another version
+        # than the one asked for.
+        fs = self._make_fs()
+
+        with pytest.raises(TypeError, match=f"multiple values for keyword argument '{name}'"):
+            fs.rm_file("s3://bucket/a", **{name: "v1"})
+        fs._call.assert_not_called()
+
     @staticmethod
     def _sent_delete_objects(fs):
         return sorted(
