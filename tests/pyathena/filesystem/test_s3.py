@@ -6547,7 +6547,7 @@ class TestS3File:
 
     def test_upload_chunk_empty_file_touches(self):
         # An intentionally empty file (tell() == 0) is created via touch(),
-        # never via _put_object.
+        # never via a PutObject request of the file.
         file = self._make_write_file(b"", autocommit=True)
 
         assert file._upload_chunk(final=True) is False

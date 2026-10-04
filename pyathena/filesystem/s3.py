@@ -1402,7 +1402,8 @@ class S3FileSystem(AbstractFileSystem):
         if not s3_path.key:
             raise ValueError("Cannot touch the bucket.")
 
-        # The body is given, so that a body among kwargs is rejected.
+        # The empty body is passed, so that a body keyword argument raises
+        # TypeError, as it did before.
         object_ = self.core.put_object(s3_path, None, **kwargs)
         self.invalidate_cache(path)
         return object_.to_dict()

@@ -656,8 +656,9 @@ class S3Core:
                 raise ValueError(f"Invalid range: {range_}.")
             else:
                 request.update({"Range": f"bytes={start}-{end - 1}"})
+        request = {**params, **request}
         _logger.debug(f"Get object: {path.uri} range={request.get('Range')}")
-        response = self.call(self._client.get_object, **{**params, **request})
+        response = self.call(self._client.get_object, **request)
         # Read through the StreamingBody, which verifies the length and the
         # checksum of the data; entering it would return the raw stream.
         with contextlib.closing(response["Body"]) as body:
