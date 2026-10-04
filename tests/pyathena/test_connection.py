@@ -5,6 +5,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -59,6 +60,21 @@ def _connection(**kwargs: Any) -> Connection[Any]:
         aws_secret_access_key="secret_key",
         **kwargs,
     )
+
+
+@pytest.fixture
+def isolated_aws_config(monkeypatch, tmp_path):
+    """Hide the developer's AWS environment variables and config files.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: The pytest temporary directory, holding no config files.
+    """
+    for key in list(os.environ):
+        if key.startswith("AWS_"):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config"))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "credentials"))
 
 
 class TestConnection:
@@ -145,7 +161,7 @@ class TestConnection:
         assert all(client is clients[0] for client in clients)
         assert clients[0].meta.service_model.service_name == "s3"
 
-    def test_s3_client_leaves_out_athena_endpoint(self):
+    def test_s3_client_leaves_out_athena_endpoint(self, isolated_aws_config):
         # GH-576: Athena's endpoint_url (e.g. its VPC endpoint) was sent to S3.
         conn = _connection(
             endpoint_url="https://athena.us-east-1.amazonaws.com",
@@ -154,15 +170,10 @@ class TestConnection:
         )
 
         assert conn.client.meta.endpoint_url == "https://athena.us-east-1.amazonaws.com"
-        assert conn.s3_client.meta.service_model.service_name == "s3"
-        assert conn.s3_client.meta.endpoint_url != conn.client.meta.endpoint_url
+        assert conn.s3_client.meta.endpoint_url == "https://s3.amazonaws.com"
+        assert conn.s3_client.meta.service_model.api_version == "2006-03-01"
 
-    def test_s3_client_uses_s3_endpoint_setting(self, monkeypatch, tmp_path):
-        # Only the environment variables below configure the endpoints.
-        monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config"))
-        monkeypatch.delenv("AWS_PROFILE", raising=False)
-        monkeypatch.delenv("AWS_DEFAULT_PROFILE", raising=False)
-        monkeypatch.setenv("AWS_IGNORE_CONFIGURED_ENDPOINT_URLS", "false")
+    def test_s3_client_uses_s3_endpoint_setting(self, isolated_aws_config, monkeypatch):
         monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://localhost:4566")
         conn = _connection(endpoint_url="https://athena.us-east-1.amazonaws.com")
 
