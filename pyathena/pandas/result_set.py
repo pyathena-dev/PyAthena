@@ -84,9 +84,10 @@ class _CSVObject:
             The same DataFrame, with the wrapped values in object columns and levels.
         """
         import pandas as pd
+        from pandas.api.types import is_object_dtype
 
-        for i in range(df.shape[1]):
-            if (values := cls._unwrap_values(df.iloc[:, i])) is not None:
+        for i, dtype in enumerate(df.dtypes):
+            if is_object_dtype(dtype) and (values := cls._unwrap_values(df.iloc[:, i])) is not None:
                 df.isetitem(i, pd.Series(values, index=df.index, dtype=object))
         index = df.index
         levels = (
@@ -117,8 +118,11 @@ class _CSVObject:
         Returns:
             The converted values, or None if the values are not wrapped.
         """
-        array = values.array
-        if values.dtype != object or not len(array) or not isinstance(array[0], cls):
+        if values.dtype != object:
+            return None
+        # Iterating an object ndarray is much faster than iterating values.array.
+        array = values.to_numpy()
+        if not len(array) or not isinstance(array[0], cls):
             return None
         return [v.value if isinstance(v, cls) else v for v in array]
 
