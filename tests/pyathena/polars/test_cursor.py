@@ -828,6 +828,12 @@ class TestPolarsCursor:
             "t_duplicated_0",
         ]
 
+    @pytest.mark.parametrize("chunksize", [None, 1])
+    def test_new_columns_renaming_first_columns(self, polars_cursor, chunksize):
+        """The types stay with the columns when new_columns renames only the first ones."""
+        polars_cursor.execute("SELECT '001' AS x, 2 AS y", new_columns=["z"], chunksize=chunksize)
+        assert polars_cursor.fetchall() == [("001", 2)]
+
     def test_duplicate_column_names_new_columns(self, polars_cursor):
         """The column types follow the columns that new_columns renames."""
         polars_cursor.execute(

@@ -12,7 +12,7 @@ from typing import (
 
 from pyathena import OperationalError
 from pyathena.arrow.util import to_column_info
-from pyathena.converter import Converter, _text_value_converter, _to_default
+from pyathena.converter import _TEXT_VALUE_TYPES, Converter, _text_value_converter, _to_default
 from pyathena.error import ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet
@@ -254,19 +254,19 @@ class AthenaArrowResultSet(AthenaResultSet):
         except StopIteration:
             return
         else:
-            # Read the columns by position; to_pydict() keeps one column per name.
+            # Read the columns and their converters by position; to_pydict() and the
+            # converters property keep one column per name.
             columns = [column.to_pylist() for column in rows.columns]
-            converters = (
-                self.converters
-                if self._convert_rows
-                else self._text_value_converters(self.converters)
-            )
-            if converters:
-                column_converters = [
-                    converters.get(name, _to_default) for name in rows.schema.names
-                ]
+            description = self.description if self.description else []
+            converters = [
+                self._converter.get(d[1])
+                if self._convert_rows or d[1] in _TEXT_VALUE_TYPES
+                else _to_default
+                for d in description
+            ]
+            if any(convert is not _to_default for convert in converters):
                 processed_rows = [
-                    tuple(convert(v) for convert, v in zip(column_converters, row, strict=False))
+                    tuple(convert(v) for convert, v in zip(converters, row, strict=False))
                     for row in zip(*columns, strict=False)
                 ]
             else:

@@ -394,6 +394,11 @@ class AthenaPolarsResultSet(AthenaResultSet):
         description = self.description if self.description else []
         return self._get_converters([d[0] for d in description])
 
+    @property
+    def _csv_dtypes(self) -> dict[str, Any]:
+        """The Polars data types of the result columns, keyed by the header of a CSV file."""
+        return self._get_dtypes(self._get_column_names())
+
     def _get_dtypes(self, column_names: list[str]) -> dict[str, Any]:
         """Get the Polars data types of the result columns.
 
@@ -554,19 +559,19 @@ class AthenaPolarsResultSet(AthenaResultSet):
             raise ProgrammingError("output_location is not available.")
 
         separator, has_header, new_columns = self._get_csv_params()
+        read_kwargs = self._read_kwargs(
+            lambda: self._csv_storage_options,
+            separator=separator,
+            has_header=has_header,
+            schema_overrides=self._csv_dtypes,
+        )
+        # Renamed after reading, so that Polars matches the types to the header.
+        read_kwargs.pop("new_columns", None)
 
         try:
-            df = pl.read_csv(
-                self.output_location,
-                **self._read_kwargs(
-                    lambda: self._csv_storage_options,
-                    separator=separator,
-                    has_header=has_header,
-                    schema_overrides=self._get_dtypes(self._get_frame_column_names()),
-                ),
-            )
+            df = pl.read_csv(self.output_location, **read_kwargs)
             if new_columns:
-                df.columns = new_columns
+                df.columns = [*new_columns, *df.columns[len(new_columns) :]]
             return df
         except Exception as e:
             _logger.exception(f"Failed to read {self.output_location}.")
@@ -713,7 +718,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """Get CSV parsing parameters based on file type.
 
         Returns:
-            Tuple of (separator, has_header, new_columns).
+            Tuple of (separator, has_header, new_columns). ``new_columns`` are the
+            names of the first columns, which the readers set after reading as Polars
+            sets the ``new_columns`` given to ``execute()``.
         """
         if self.output_location and self.output_location.endswith(".txt"):
             separator = "\t"
@@ -722,7 +729,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         else:
             separator = ","
             has_header = True
-            new_columns = None
+            new_columns = self._kwargs.get("new_columns")
         return separator, has_header, new_columns
 
     def _iter_csv_chunks(self) -> Iterator[pl.DataFrame]:
@@ -744,22 +751,22 @@ class AthenaPolarsResultSet(AthenaResultSet):
             raise ProgrammingError("output_location is not available.")
 
         separator, has_header, new_columns = self._get_csv_params()
+        # scan_csv uses Rust's native object_store (like scan_parquet),
+        # not fsspec, so we use the same storage options as Parquet
+        read_kwargs = self._read_kwargs(
+            lambda: self._parquet_storage_options,
+            separator=separator,
+            has_header=has_header,
+            schema_overrides=self._csv_dtypes,
+        )
+        # Renamed after reading, so that Polars matches the types to the header.
+        read_kwargs.pop("new_columns", None)
 
         try:
-            # scan_csv uses Rust's native object_store (like scan_parquet),
-            # not fsspec, so we use the same storage options as Parquet
-            lazy_df = pl.scan_csv(
-                self.output_location,
-                **self._read_kwargs(
-                    lambda: self._parquet_storage_options,
-                    separator=separator,
-                    has_header=has_header,
-                    schema_overrides=self._get_dtypes(self._get_frame_column_names()),
-                ),
-            )
+            lazy_df = pl.scan_csv(self.output_location, **read_kwargs)
             for batch in lazy_df.collect_batches(chunk_size=self._chunksize):
                 if new_columns:
-                    batch.columns = new_columns
+                    batch.columns = [*new_columns, *batch.columns[len(new_columns) :]]
                 yield batch
         except Exception as e:
             _logger.exception(f"Failed to read {self.output_location}.")

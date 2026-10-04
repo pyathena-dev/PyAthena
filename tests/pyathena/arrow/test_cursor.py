@@ -1071,7 +1071,7 @@ class TestArrowCursor:
     )
     def test_duplicate_column_names(self, arrow_cursor):
         arrow_cursor.execute(
-            "SELECT 1 AS x, 2 AS x, 'a' AS y, json_parse('[1]') AS j, json_parse('[2]') AS j, "
+            "SELECT 1 AS x, 2 AS x, 'a' AS y, json_parse('[1]') AS j, 'b' AS j, "
             "CAST('12:34:56' AS TIME) AS t, CAST('01:02:03' AS TIME) AS t"
         )
         assert arrow_cursor.fetchall() == [
@@ -1080,7 +1080,7 @@ class TestArrowCursor:
                 2,
                 "a",
                 [1],
-                [2],
+                "b",
                 datetime(2017, 1, 1, 12, 34, 56).time(),
                 datetime(2017, 1, 1, 1, 2, 3).time(),
             )

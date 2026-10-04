@@ -45,7 +45,7 @@ class TestAthenaPolarsResultSet:
             ),
             patch.object(
                 AthenaPolarsResultSet,
-                "dtypes",
+                "_csv_dtypes",
                 new_callable=PropertyMock,
                 return_value={"a": pl.Int64},
             ),
@@ -101,7 +101,7 @@ class TestAthenaPolarsResultSet:
             ),
             patch.object(
                 AthenaPolarsResultSet,
-                "dtypes",
+                "_csv_dtypes",
                 new_callable=PropertyMock,
                 return_value={"1;x": pl.Int64},
             ),
@@ -146,7 +146,7 @@ class TestAthenaPolarsResultSet:
                 return_value="s3://bucket/result.csv",
             ),
             patch.object(
-                AthenaPolarsResultSet, "dtypes", new_callable=PropertyMock, return_value={}
+                AthenaPolarsResultSet, "_csv_dtypes", new_callable=PropertyMock, return_value={}
             ),
             patch.object(
                 AthenaPolarsResultSet,

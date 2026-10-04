@@ -472,13 +472,16 @@ class AthenaPandasResultSet(AthenaResultSet):
         # checks pass; otherwise fall through to the C engine default.
         if self._engine == "pyarrow":
             effective_chunksize = chunksize if chunksize is not None else self._chunksize
-            column_names = [d[0] for d in self.description or []]
             is_compatible = (
                 effective_chunksize is None
                 and self._quoting == 1
                 and not self.converters
-                # The pyarrow engine does not rename columns with the same name.
-                and len(set(column_names)) == len(column_names)
+                # The pyarrow engine does not rename columns with the same name, and
+                # the column labels cannot be resolved for it (see
+                # _get_csv_column_labels()).
+                and not self._needs_csv_column_name_resolution(
+                    [d[0] for d in self.description or []]
+                )
                 and (file_size_bytes is None or file_size_bytes >= self.PYARROW_MIN_FILE_SIZE_BYTES)
             )
             if is_compatible:
@@ -883,8 +886,8 @@ class AthenaPandasResultSet(AthenaResultSet):
         """
         import pandas as pd
 
-        # The pyarrow engine runs only when the column names do not repeat
-        # (see _get_csv_engine()), and does not support reading only the header.
+        # The pyarrow engine runs only when no labels need resolving (see
+        # _get_csv_engine()), and does not support reading only the header.
         if csv_engine == "pyarrow" or not self._is_standard_csv_parsing(read_csv_kwargs):
             return None
         column_names = [d[0] for d in self.description or []]
