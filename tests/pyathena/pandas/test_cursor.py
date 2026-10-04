@@ -961,6 +961,7 @@ class TestPandasCursor:
             result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)
             result_set._chunksize = None  # Default values
             result_set._quoting = 1
+            result_set._metadata = None
 
             # Test C engine specification
             result_set._engine = "c"
@@ -982,6 +983,22 @@ class TestPandasCursor:
             ):
                 engine = result_set._get_csv_engine()
                 assert engine == "pyarrow"
+
+            # Test PyArrow with column names that repeat, which it does not rename
+            with (
+                patch.object(result_set, "_get_available_engine", return_value="pyarrow"),
+                patch.object(
+                    type(result_set), "converters", new_callable=PropertyMock, return_value={}
+                ),
+                patch.object(
+                    type(result_set),
+                    "description",
+                    new_callable=PropertyMock,
+                    return_value=[("x", "integer"), ("x", "integer")],
+                ),
+            ):
+                engine = result_set._get_csv_engine()
+                assert engine == "c"
 
             # Test PyArrow with incompatible chunksize (via parameter)
             with (
