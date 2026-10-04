@@ -160,6 +160,8 @@ class TestConnection:
     def test_s3_client_uses_s3_endpoint_setting(self, monkeypatch, tmp_path):
         # Only the environment variables below configure the endpoints.
         monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config"))
+        monkeypatch.delenv("AWS_PROFILE", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_PROFILE", raising=False)
         monkeypatch.setenv("AWS_IGNORE_CONFIGURED_ENDPOINT_URLS", "false")
         monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://localhost:4566")
         conn = _connection(endpoint_url="https://athena.us-east-1.amazonaws.com")
