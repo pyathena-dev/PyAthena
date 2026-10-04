@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, Any, cast
 from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.callbacks import _DEFAULT_CALLBACK
 from fsspec.core import get_compression
+from fsspec.implementations.local import LocalFileSystem, make_path_posix
+from fsspec.utils import check_contained
 
 from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3Executor, S3ThreadPoolExecutor
@@ -395,6 +397,87 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         sync(self.loop, self._mv, path1, path2, recursive=recursive, maxdepth=maxdepth, **kwargs)
 
+    async def _copy(
+        self,
+        path1,
+        path2,
+        recursive=False,
+        on_error=None,
+        maxdepth=None,
+        batch_size=None,
+        **kwargs,
+    ) -> None:
+        """Copy files within S3.
+
+        See :meth:`S3FileSystem.copy`. The copies run as in fsspec's
+        ``_copy()``.
+
+        Args:
+            path1: Source S3 path, glob pattern, or list of them.
+            path2: Destination S3 path, or list of paths when ``path1`` is a
+                list.
+            recursive: Whether to copy the directories with their contents.
+            on_error: ``"raise"`` or ``"ignore"`` for a missing source.
+            maxdepth: Maximum depth of a recursive copy.
+            batch_size: Number of copies to run at the same time.
+            **kwargs: Additional S3 copy parameters passed to ``_cp_file()``.
+        """
+        sources = [path1] if isinstance(path1, (str, os.PathLike)) else path1
+        if isinstance(path2, str) and any(S3Path.has_version_id(p) for p in sources):
+            path1, path2 = await asyncio.to_thread(
+                self._sync_fs._copy_paths, path1, path2, recursive=recursive, maxdepth=maxdepth
+            )
+            if not path1:
+                return
+        await super()._copy(
+            path1,
+            path2,
+            recursive=recursive,
+            on_error=on_error,
+            maxdepth=maxdepth,
+            batch_size=batch_size,
+            **kwargs,
+        )
+
+    async def _get(
+        self, rpath, lpath, recursive=False, callback=_DEFAULT_CALLBACK, maxdepth=None, **kwargs
+    ) -> None:
+        """Copy files from S3 to the local filesystem.
+
+        See :meth:`S3FileSystem.get`. The downloads run as in fsspec's
+        ``_get()``.
+
+        Args:
+            rpath: Source S3 path, glob pattern, or list of them.
+            lpath: Local destination path, or list of paths when ``rpath`` is
+                a list.
+            recursive: Whether to copy the directories with their contents.
+            callback: Progress callback.
+            maxdepth: Maximum depth of a recursive copy.
+            **kwargs: Additional parameters passed to ``_get_file()``.
+
+        Raises:
+            ValueError: If a source with a version ID is paired, and a
+                destination lies outside ``lpath``.
+        """
+        sources = [rpath] if isinstance(rpath, (str, os.PathLike)) else rpath
+        if isinstance(lpath, (str, os.PathLike)) and any(S3Path.has_version_id(p) for p in sources):
+            root = make_path_posix(lpath)
+            rpath, lpath = await asyncio.to_thread(
+                self._sync_fs._copy_paths,
+                rpath,
+                root,
+                recursive=recursive,
+                maxdepth=maxdepth,
+                isdir=LocalFileSystem().isdir,
+            )
+            check_contained(root, lpath)
+            if not rpath:
+                return
+        await super()._get(
+            rpath, lpath, recursive=recursive, callback=callback, maxdepth=maxdepth, **kwargs
+        )
+
     async def _cp_file(self, path1: str, path2: str, **kwargs) -> None:
         """Copy an S3 object, using async parallel multipart upload for large files.
 
@@ -426,9 +509,6 @@ class AioS3FileSystem(AsyncFileSystem):
         Raises:
             ValueError: If trying to copy to a versioned file or copy buckets.
         """
-        # fsspec < 2026.6.0 leaks the typo'd "onerror" keyword from mv();
-        # see S3FileSystem.cp_file.
-        kwargs.pop("onerror", None)
         # Parameters of the multipart copy, not of the S3 requests.
         block_size = kwargs.pop("block_size", None)
         max_workers = kwargs.pop("max_workers", None)
@@ -693,6 +773,45 @@ class AioS3FileSystem(AsyncFileSystem):
         if detail:
             return {f.name: f for f in files}
         return [f.name for f in files]
+
+    async def _expand_path(self, path, recursive=False, maxdepth=None, **kwargs) -> list[str]:
+        """Expand glob patterns and directories into the paths they match.
+
+        See :meth:`S3FileSystem.expand_path`. The other paths are expanded by
+        fsspec's ``_expand_path()``, whose glob lists only the keys under the
+        literal part of the pattern.
+
+        Args:
+            path: S3 path, glob pattern, or list of them.
+            recursive: Whether to include the paths below the directories.
+            maxdepth: Maximum depth of the expansion, at least 1.
+            **kwargs: Additional arguments passed to fsspec's
+                ``_expand_path()``, such as ``assume_literal``.
+
+        Returns:
+            The sorted matching paths.
+
+        Raises:
+            ValueError: If ``maxdepth`` is less than 1.
+            FileNotFoundError: If nothing matches.
+        """
+        if maxdepth is not None and maxdepth < 1:
+            raise ValueError("maxdepth must be at least 1")
+        versions, others = self._sync_fs._split_version_paths(path)
+        out = {p for p in versions if not recursive or await self._exists(p)}
+        if others:
+            try:
+                out.update(
+                    await super()._expand_path(
+                        others, recursive=recursive, maxdepth=maxdepth, **kwargs
+                    )
+                )
+            except FileNotFoundError:
+                if not out:
+                    raise
+        if not out:
+            raise FileNotFoundError(path)
+        return sorted(out)
 
     def _create_executor(self, max_workers: int) -> S3Executor:
         """Create the executor for the parallel operations of a file.

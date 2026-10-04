@@ -38,6 +38,7 @@ from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
 from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import S3Object, S3ObjectType, S3StorageClass
+from pyathena.filesystem.s3_path import S3Path
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
@@ -149,16 +150,15 @@ class TestS3FileSystem:
             S3FileSystem.parse_path("s3://bucket?foo=bar")
 
         with pytest.raises(ValueError, match="Invalid S3 path format"):
-            S3FileSystem.parse_path("s3://bucket/path/to/obj?foo=bar")
-
-        with pytest.raises(ValueError, match="Invalid S3 path format"):
             S3FileSystem.parse_path("s3a://bucket?")
 
         with pytest.raises(ValueError, match="Invalid S3 path format"):
             S3FileSystem.parse_path("s3a://bucket?foo=bar")
 
-        with pytest.raises(ValueError, match="Invalid S3 path format"):
-            S3FileSystem.parse_path("s3a://bucket/path/to/obj?foo=bar")
+        # GH-979: a "?" in a key that does not start a trailing version ID
+        # query is part of the key.
+        for path in ("s3://bucket/path/to/obj?foo=bar", "s3a://bucket/path/to/obj?foo=bar"):
+            assert S3FileSystem.parse_path(path) == ("bucket", "path/to/obj?foo=bar", None)
 
     @staticmethod
     def _make_fs():
@@ -1654,6 +1654,166 @@ class TestS3FileSystem:
         ]
         assert deletes == [[{"Key": "b", "VersionId": "v1"}]]
 
+    def test_question_mark_keys(self):
+        # GH-979: keys containing "?" are keys, not version ID queries.
+        fs = self._make_fs()
+        keys = self._serve_keys(fs, {"dir/a.txt", "dir/what?.txt", "dir/q?version_id"})
+
+        assert fs.ls("s3://bucket/dir") == [
+            "bucket/dir/a.txt",
+            "bucket/dir/q?version_id",
+            "bucket/dir/what?.txt",
+        ]
+        assert fs.info("s3://bucket/dir/what?.txt")["name"] == "bucket/dir/what?.txt"
+        fs.invalidate_cache()
+        assert fs.exists("s3://bucket/dir/q?version_id")
+        heads = [c.kwargs for c in fs._call.call_args_list if c.args[0] is fs._client.head_object]
+        assert heads[-1] == {"Bucket": "bucket", "Key": "dir/q?version_id"}
+
+        fs.rm("s3://bucket/dir", recursive=True)
+        assert keys == set()
+
+    def test_invalidate_cache_question_mark_key(self):
+        # A "?" that does not start a trailing version ID query is part of
+        # the key, whose parents are invalidated.
+        fs = self._make_fs()
+        for key in ("bucket/dir/what?.txt", ("bucket/dir", "/"), "bucket/dir/what"):
+            fs.dircache[key] = []
+
+        fs.invalidate_cache("s3://bucket/dir/what?.txt")
+        assert list(fs.dircache) == ["bucket/dir/what"]
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [{"path": "s3://bucket/dir?versionId=v1"}, {"path": "s3://bucket/dir", "version_id": "v1"}],
+    )
+    def test_info_missing_version_is_not_a_prefix(self, kwargs):
+        # GH-979: a version names an object, so a missing version is not
+        # found even if its key is a key prefix, which info() used to return
+        # as a directory.
+        fs = self._make_fs()
+        self._serve_keys(fs, {"dir/child"})
+
+        with pytest.raises(FileNotFoundError):
+            fs.info(**kwargs)
+        assert not fs.exists("s3://bucket/dir?versionId=v1")
+        methods = {c.args[0] for c in fs._call.call_args_list}
+        assert fs._client.list_objects_v2 not in methods
+
+    @pytest.mark.parametrize("recursive", [False, True])
+    def test_expand_path_version(self, recursive):
+        # GH-979: "?" of a version ID query is not a glob character, and a
+        # version is not expanded below its key.
+        fs = self._make_fs()
+        self._serve_keys(fs, {"b", "bc", "c"})
+
+        assert fs.expand_path("s3://bucket/b?versionId=v1", recursive=recursive) == [
+            "bucket/b?versionId=v1"
+        ]
+        assert fs.expand_path(
+            ["s3://bucket/b?versionId=v1", "s3://bucket/c*"], recursive=recursive
+        ) == ["bucket/b?versionId=v1", "bucket/c"]
+        with pytest.raises(ValueError, match="maxdepth"):
+            fs.expand_path("s3://bucket/b?versionId=v1", maxdepth=0)
+
+    def test_expand_path_recursive_version_lookup_error(self):
+        # A failed lookup is raised, not taken for a missing version.
+        fs = self._make_fs()
+        self._serve_keys(fs, {"a", "b"})
+        serve = fs._call.side_effect
+
+        def call(method, **kwargs):
+            if method is fs._client.head_object and kwargs["Key"] == "b":
+                raise PermissionError("b")
+            return serve(method, **kwargs)
+
+        fs._call.side_effect = call
+        with pytest.raises(PermissionError):
+            fs.expand_path(
+                ["s3://bucket/a?versionId=v1", "s3://bucket/b?versionId=v2"], recursive=True
+            )
+
+    def test_expand_path_recursive_missing_version(self):
+        # With recursive, a version is included only if it is a file, as
+        # fsspec includes a path that exists; a key prefix of the same name
+        # is not a version.
+        fs = self._make_fs()
+        self._serve_keys(fs, {"b", "dir/child"})
+
+        assert fs.expand_path(
+            ["s3://bucket/b?versionId=v1", "s3://bucket/dir?versionId=v2"], recursive=True
+        ) == ["bucket/b?versionId=v1"]
+        with pytest.raises(FileNotFoundError):
+            fs.expand_path("s3://bucket/dir?versionId=v2", recursive=True)
+
+    @pytest.mark.parametrize(
+        ("path1", "path2", "expected"),
+        [
+            ("s3://bucket/b?versionId=v1", "s3://bucket/out", "out"),
+            ("s3://bucket/b?version_id=v1", "s3://bucket/d/", "d/b"),
+            (["s3://bucket/b?versionId=v1"], "s3://bucket/d", "d/b"),
+            # The key may contain "?" too.
+            ("s3://bucket/q?x?versionId=v1", "s3://bucket/d/", "d/q?x"),
+        ],
+    )
+    @pytest.mark.parametrize("method", ["copy", "mv"])
+    def test_copy_version(self, method, path1, path2, expected):
+        # GH-979: a version is copied to a destination named after its key,
+        # not globbed with "?" as a wildcard.
+        fs = self._make_fs()
+        self._serve_keys(fs, {"b", "q?x", "d/x"})
+
+        getattr(fs, method)(path1, path2)
+        copies = [c.kwargs for c in fs._call.call_args_list if c.args[0] is fs._client.copy_object]
+        source = S3Path.parse(path1 if isinstance(path1, str) else path1[0])
+        assert [(c["CopySource"], c["Key"]) for c in copies] == [
+            ({"Bucket": "bucket", "Key": source.key, "VersionId": "v1"}, expected)
+        ]
+
+    @pytest.mark.parametrize(
+        ("rpath", "lpath", "expected"),
+        [
+            ("s3://bucket/key?versionId=v1", "f.txt", "f.txt"),
+            ("s3://bucket/key?versionId=v1", "d/", "d/key"),
+            (["s3://bucket/key?versionId=v1"], "d", "d/key"),
+            (Path("bucket/key?versionId=v1"), "d/", "d/key"),
+            ("s3://bucket/key?versionId=v1", Path("f.txt"), "f.txt"),
+            # A sequence of destinations is paired by fsspec, as before.
+            ("s3://bucket/key?versionId=v1", ("f.txt",), "f.txt"),
+        ],
+    )
+    def test_get_version(self, tmp_path, monkeypatch, rpath, lpath, expected):
+        # Path sources and destinations are accepted as fsspec accepts them.
+        # GH-979: a version is downloaded to a local path named after its
+        # key, which used to be the version-qualified name of the source.
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "d").mkdir()
+        fs, _ = self._make_object_fs(b"data")
+
+        fs.get(rpath, lpath)
+        assert sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*")) == sorted(
+            {"d", expected}
+        )
+        assert (tmp_path / expected).read_bytes() == b"data"
+
+    @pytest.mark.parametrize(
+        "rpath",
+        [
+            "s3://bucket/a/..?versionId=v1",
+            # The sources without a version are named by the same pairing.
+            ["s3://bucket/x/..", "s3://bucket/key?versionId=v1"],
+        ],
+    )
+    def test_get_version_outside_destination(self, tmp_path, rpath):
+        # A destination named after a key must stay under lpath, which
+        # fsspec checks for the destinations that it names.
+        (tmp_path / "d").mkdir()
+        fs, _ = self._make_object_fs(b"data")
+
+        with pytest.raises(ValueError, match="outside"):
+            fs.get(rpath, f"{tmp_path}/d/")
+        assert sorted(p.name for p in tmp_path.rglob("*")) == ["d"]
+
     def test_mv_nothing_within_maxdepth(self):
         # Only directories within maxdepth: nothing is moved, as with copy().
         fs = self._make_fs()
@@ -2428,6 +2588,32 @@ class TestS3FileSystem:
         # The argument must match the version in the path.
         with pytest.raises(ValueError, match="do not match"):
             fs.open("s3://bucket/key?versionId=v2", "rb", version_id="v1")
+
+    def test_open_version_aware_pins_version_in_path(self):
+        # GH-979: the version observed at open time is carried in the path as
+        # an explicit version is, so that the metadata, attributes and URL of
+        # the file describe that version, not the latest one.
+        fs = self._make_fs()
+        fs.version_aware = True
+        fs.default_cache_type = "bytes"
+        fs._call.side_effect = lambda method, **request: (
+            "https://signed"
+            if method is fs._client.generate_presigned_url
+            else {"ContentLength": 4, "ETag": '"e"', "VersionId": "v1", "Metadata": {"a": "1"}}
+        )
+
+        with fs.open("s3://bucket/key", "rb") as f:
+            assert f.version_id == "v1"
+            assert f.path == "bucket/key?versionId=v1"
+            assert f.metadata()["a"] == "1"
+            assert f.getxattr("a") == "1"
+            assert f.url() == "https://signed"
+        requests = [c.kwargs for c in fs._call.call_args_list]
+        # The open-time lookup, then metadata(), getxattr() and url().
+        assert requests[1:3] == [{"Bucket": "bucket", "Key": "key", "VersionId": "v1"}] * 2
+        assert requests[3]["Params"] == {"Bucket": "bucket", "Key": "key", "VersionId": "v1"}
+        # A reopened (e.g., unpickled) file reads the same version.
+        assert f.__reduce__()[1][1] == "bucket/key?versionId=v1"
 
     @pytest.mark.parametrize("mode", ["wb", "ab", "xb"])
     @pytest.mark.parametrize(
@@ -3364,12 +3550,11 @@ class TestS3FileSystem:
         # so a missing version evicts it for every spelling.
         fs = self._make_fs()
         kwargs = self.LOOKUP_KWARGS if lookup else {}
+        # A missing version is not looked up as a key prefix.
         fs._call.side_effect = [
             {"ContentLength": 4, "ETag": '"etag"', "VersionId": "v1"},
             FileNotFoundError("key"),
-            {"KeyCount": 0},
             FileNotFoundError("key"),
-            {"KeyCount": 0},
         ]
 
         assert fs.info("s3://bucket/key?versionId=v1", **kwargs).size == 4
@@ -3380,7 +3565,7 @@ class TestS3FileSystem:
             fs.info("s3://bucket/key?version_id=v1", refresh=True, **kwargs)
         with pytest.raises(FileNotFoundError):
             fs.info("s3://bucket/key?versionId=v1", **kwargs)
-        assert fs._call.call_count == 5
+        assert fs._call.call_count == 3
 
     def test_info_does_not_cache_null_version(self):
         fs = self._make_fs()
@@ -3530,6 +3715,7 @@ class TestS3FileSystem:
             "Versions": [
                 {"Key": "path/key", "VersionId": "v2", "IsLatest": True, "Size": 4},
                 {"Key": "path/key", "VersionId": "v1", "IsLatest": False, "Size": 2},
+                {"Key": "path/other", "VersionId": "null", "IsLatest": True, "Size": 1},
             ],
             "IsTruncated": False,
         }
@@ -3538,13 +3724,17 @@ class TestS3FileSystem:
         fs._call.assert_called_once_with(
             fs._client.list_object_versions, Bucket="bucket", Prefix="path/", Delimiter="/"
         )
+        # GH-979: each version is named so that it can be addressed, except
+        # the "null" version, which a write to the key replaces.
         assert [(f.name, f.version_id, f.is_latest) for f in actual] == [
             ("bucket/path/dir", None, None),
-            ("bucket/path/key", "v2", True),
-            ("bucket/path/key", "v1", False),
+            ("bucket/path/key?versionId=v2", "v2", True),
+            ("bucket/path/key?versionId=v1", "v1", False),
+            ("bucket/path/other", "null", True),
         ]
         assert actual[1].size == 4
         assert actual[2].size == 2
+        assert fs.ls("s3://bucket/path", versions=True) == [f.name for f in actual]
 
     def test_ls_versions_object_path_falls_back_to_the_key(self):
         fs = self._make_fs()
@@ -3568,8 +3758,8 @@ class TestS3FileSystem:
             fs._client.list_object_versions, Bucket="bucket", Prefix="path/key", Delimiter="/"
         )
         assert [(f.name, f.version_id, f.size) for f in actual] == [
-            ("bucket/path/key", "v2", 4),
-            ("bucket/path/key", "v1", 2),
+            ("bucket/path/key?versionId=v2", "v2", 4),
+            ("bucket/path/key?versionId=v1", "v1", 2),
         ]
 
     def test_dir_filesystem(self):
@@ -4955,6 +5145,28 @@ class TestS3FileSystem:
             for _ in range(2):
                 with fs.open(f"{path}?versionId=null", "rb") as f:
                     assert f.read() == data
+
+    def test_question_mark_keys_and_null_version(self, fs, tmp_path):
+        # GH-979: keys containing "?" can be written, listed, read and
+        # deleted, and a version path, here the "null" version of an
+        # unversioned bucket, is copied and downloaded under its key.
+        base = (
+            f"{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_question_mark_keys/{uuid.uuid4()}"
+        )
+        fs.pipe(f"s3://{base}/what?.txt", b"1")
+        assert fs.ls(f"s3://{base}") == [f"{base}/what?.txt"]
+        assert fs.info(f"s3://{base}/what?.txt")["size"] == 1
+        assert fs.cat(f"s3://{base}/what?.txt") == b"1"
+
+        fs.copy(f"s3://{base}/what?.txt?versionId=null", f"s3://{base}/copy/")
+        assert fs.cat(f"s3://{base}/copy/what?.txt") == b"1"
+        fs.get(f"s3://{base}/what?.txt?versionId=null", f"{tmp_path}/")
+        assert (tmp_path / "what?.txt").read_bytes() == b"1"
+
+        fs.rm(f"s3://{base}", recursive=True)
+        assert not fs.exists(f"s3://{base}/what?.txt")
+        assert not fs.exists(f"s3://{base}/copy/what?.txt")
 
     def test_file_url_metadata_getxattr_setxattr(self, fs):
         path = (
