@@ -1789,8 +1789,8 @@ class S3FileSystem(AbstractFileSystem):
                 key=cast(str, plan.destination.key),
                 upload_id=upload_id,
                 futures=futures,
-                # The completion and the abort each receive those that they
-                # accept, as filtered for the plan.
+                # Filtered again for the completion and the abort, which
+                # leaves the plan's parameters of each unchanged.
                 request_kwargs={**plan.complete_params, **plan.abort_params},
             )
         for name in plan.annotations:

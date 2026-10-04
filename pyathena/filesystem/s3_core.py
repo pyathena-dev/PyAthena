@@ -967,7 +967,7 @@ class S3Core:
         if head.content_length is None:
             raise ValueError(f"HeadObject reported no size for {source.uri}.")
         if not source.version_id and head.version_id and head.version_id != "null":
-            source = S3Path(source.bucket, source.key, head.version_id)
+            source = source.with_version_id(head.version_id)
         if head.content_length <= self.MULTIPART_UPLOAD_MAX_PART_SIZE:
             # Copied with CopyObject instead, which applies the directives.
             return S3MultipartCopyPlan(
@@ -1008,14 +1008,12 @@ class S3Core:
                 tags = [(t["Key"], t["Value"]) for t in response["TagSet"]]
                 if tags:
                     request.update({"Tagging": urlencode(tags)})
-        copy_members = self._client.meta.service_model.operation_model(
-            "CopyObject"
-        ).input_shape.members
+        copy_params = self.operation_params("copy_object", request)
         create_params = {
             **self.operation_params("create_multipart_upload", request),
             # A parameter that CopyObject does not accept either is sent as
             # is, so that botocore rejects it as it does for CopyObject.
-            **{k: v for k, v in request.items() if k not in copy_members},
+            **{k: v for k, v in request.items() if k not in copy_params},
         }
         ranges = tuple(self.part_ranges(head.content_length, block_size))
         # The annotations are listed before the caller writes anything, so

@@ -31,6 +31,11 @@ from pyathena.filesystem.s3_core import (
 from pyathena.filesystem.s3_object import S3MultipartUploadPart
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.util import RetryConfig
+from tests.pyathena.util import (
+    MULTIPART_COPY_BLOCK_SIZE,
+    MULTIPART_COPY_KWARGS,
+    MULTIPART_COPY_SIZE,
+)
 
 MODIFIED = datetime(2026, 10, 4, tzinfo=UTC)
 
@@ -688,7 +693,7 @@ class TestS3Core:
         # the parameters, and its annotations are listed on every page. The
         # source's expected owner reaches the reads under their own names.
         core, stubber = _make_core()
-        size = core.MULTIPART_UPLOAD_MAX_PART_SIZE + core.MULTIPART_UPLOAD_MIN_PART_SIZE
+        size = MULTIPART_COPY_SIZE
         source_params = {"RequestPayer": "requester", "ExpectedBucketOwner": "222222222222"}
         self._stub_head(
             stubber,
@@ -715,18 +720,12 @@ class TestS3Core:
             {"Annotations": [{"AnnotationName": "a2", "LastModified": MODIFIED, "Size": 1}]},
             {**source, "ContinuationToken": "next"},
         )
-        params = {
-            "ContentType": "text/plain",
-            "Tagging": "ignored=1",
-            "StorageClass": "STANDARD_IA",
-            "RequestPayer": "requester",
-            "ExpectedBucketOwner": "111111111111",
-            "ExpectedSourceBucketOwner": "222222222222",
-            "CopySourceIfMatch": '"src"',
-        }
         with stubber:
             plan = core.plan_multipart_copy(
-                S3Path("bucket", "src"), S3Path("bucket", "dst"), **params
+                S3Path("bucket", "src"),
+                S3Path("bucket", "dst"),
+                MULTIPART_COPY_BLOCK_SIZE,
+                **MULTIPART_COPY_KWARGS,
             )
         stubber.assert_no_pending_responses()
 
@@ -735,10 +734,7 @@ class TestS3Core:
             source=S3Path("bucket", "src", "v-src"),
             destination=S3Path("bucket", "dst"),
             size=size,
-            ranges=(
-                (0, core.MULTIPART_UPLOAD_MAX_PART_SIZE),
-                (core.MULTIPART_UPLOAD_MAX_PART_SIZE, size),
-            ),
+            ranges=((0, MULTIPART_COPY_BLOCK_SIZE), (MULTIPART_COPY_BLOCK_SIZE, size)),
             create_params={
                 **destination_params,
                 "ContentType": "text/csv",

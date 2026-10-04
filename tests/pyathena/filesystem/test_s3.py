@@ -1905,9 +1905,9 @@ class TestS3FileSystem:
         )
 
     @staticmethod
-    def _multipart_copy(fs, bucket1="bucket", **kwargs):
+    def _multipart_copy(fs, source_bucket="bucket", **kwargs):
         fs._copy_object_with_multipart_upload(
-            S3Path(bucket1, "src"),
+            S3Path(source_bucket, "src"),
             S3Path("bucket", "dst"),
             block_size=MULTIPART_COPY_BLOCK_SIZE,
             **kwargs,
@@ -2114,7 +2114,7 @@ class TestS3FileSystem:
             for _ in (1, 2):
                 stubber.add_response("upload_part_copy", {"CopyPartResult": {"ETag": '"p"'}}, None)
             stubber.add_response("complete_multipart_upload", {"ETag": '"dst"'}, None)
-            self._multipart_copy(fs, bucket1=bucket)
+            self._multipart_copy(fs, source_bucket=bucket)
             stubber.assert_no_pending_responses()
 
     def test_pipe_file_invalid_path_raises(self):
