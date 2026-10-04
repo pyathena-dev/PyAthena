@@ -162,11 +162,15 @@ Run the relevant PyAthena tests too, either through `just test pyathena` or a fo
 uv run --env-file .env pytest -n 1 tests/pyathena/sqlalchemy/ tests/pyathena/aio/sqlalchemy/ -v
 ```
 
+### Run tox
+
 To invoke the configured tox environments locally:
 
 ```bash
 uv run --env-file .env just tox
 ```
+
+### Record results
 
 Record the tested commit, Python and relevant dependency versions, exact commands, and results in the pull request.
 Include failed and skipped tests and explain any unrun coverage.
