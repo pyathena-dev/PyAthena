@@ -4192,6 +4192,37 @@ class TestS3FileSystem:
             fs._client.put_object_acl, Bucket="bucket", Key="key2", ACL="private"
         )
 
+    def test_put_tags_merge(self):
+        fs = self._make_fs()
+        fs._call.side_effect = [
+            {"TagSet": [{"Key": "a", "Value": "1"}, {"Key": "b", "Value": "2"}]},
+            {},
+        ]
+
+        fs.put_tags("s3://bucket/key?versionId=v1", {"b": "3", "c": "4"}, mode="m")
+        request = {"Bucket": "bucket", "Key": "key", "VersionId": "v1"}
+        assert fs._call.call_args_list == [
+            mock.call(fs._client.get_object_tagging, **request),
+            mock.call(
+                fs._client.put_object_tagging,
+                **request,
+                Tagging={
+                    "TagSet": [
+                        {"Key": "a", "Value": "1"},
+                        {"Key": "b", "Value": "3"},
+                        {"Key": "c", "Value": "4"},
+                    ]
+                },
+            ),
+        ]
+
+    def test_put_tags_invalid_mode(self):
+        fs = self._make_fs()
+
+        with pytest.raises(ValueError, match="Mode must be"):
+            fs.put_tags("s3://bucket/key", {"a": "1"}, mode="x")
+        fs._call.assert_not_called()
+
     def test_list_multipart_uploads_paginates(self):
         fs = self._make_fs()
         fs._call.side_effect = [
