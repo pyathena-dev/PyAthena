@@ -215,8 +215,10 @@ def to_sql(
     as Parquet files to S3 and executing the appropriate DDL statements.
     Supports partitioning, compression, and parallel uploads.
 
-    The S3 requests use the connection's ``s3_config`` and the credentials of
-    its session, which the upload workers receive once, when the uploads start.
+    The S3 requests use the connection's ``s3_config`` and credentials. The
+    upload workers resolve the credentials themselves, except for a connection
+    given a ``session``, whose credentials they receive once, when the uploads
+    start.
 
     Args:
         df: The DataFrame to write to Athena.
@@ -299,16 +301,19 @@ def to_sql(
         reset_index(df, index_label)
     with executor_class(max_workers=max_workers) as e:
         futures: list[concurrent.futures.Future[Any]] = []
-        # The workers build their own sessions from picklable arguments, for a
-        # ProcessPoolExecutor, with the credentials of the connection's session.
-        # A given botocore session already has them, and boto3 would set the
-        # credentials on it.
+        # The workers build their own sessions from these arguments, which
+        # resolve the connection's credentials again unless the connection was
+        # given its session. Then they get its credentials as of now, unless
+        # explicit keys or a botocore session, which boto3 would set them on,
+        # take precedence.
         session_kwargs = deepcopy(conn._session_kwargs)
         session_kwargs.update({"profile_name": conn.profile_name})
-        credentials = (
-            None if "botocore_session" in session_kwargs else conn.session.get_credentials()
-        )
-        if credentials:
+        if (
+            conn._session_given
+            and "aws_access_key_id" not in conn._s3_client_kwargs
+            and "botocore_session" not in session_kwargs
+            and (credentials := conn.session.get_credentials())
+        ):
             frozen_credentials = credentials.get_frozen_credentials()
             session_kwargs.update(
                 {

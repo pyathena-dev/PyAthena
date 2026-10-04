@@ -4,6 +4,7 @@ import uuid
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import date, datetime
 from decimal import Decimal
+from multiprocessing import get_context
 from unittest.mock import patch
 
 import numpy as np
@@ -13,6 +14,7 @@ from boto3.session import Session
 from botocore.config import Config
 
 from pyathena import OperationalError
+from pyathena.pandas import util
 from pyathena.pandas.util import (
     as_pandas,
     generate_ddl,
@@ -484,7 +486,14 @@ def test_to_sql_athena_endpoint_url(cursor):
     assert cursor.fetchall() == [(1,)]
 
 
-@pytest.mark.parametrize("executor_class", [ThreadPoolExecutor, ProcessPoolExecutor])
+class SpawnProcessPoolExecutor(ProcessPoolExecutor):
+    """Process pool whose workers exit with it and keep no environment for later pools."""
+
+    def __init__(self, max_workers=None):
+        super().__init__(max_workers, mp_context=get_context("spawn"))
+
+
+@pytest.mark.parametrize("executor_class", [ThreadPoolExecutor, SpawnProcessPoolExecutor])
 def test_to_sql_session_credentials_and_s3_config(monkeypatch, executor_class):
     # GH-1067: the upload workers used the default credential chain instead of
     # the credentials of connect(session=...), and no S3 request used s3_config.
@@ -528,9 +537,21 @@ def test_to_sql_session_credentials_and_s3_config(monkeypatch, executor_class):
         cursor.execute(f"SELECT * FROM {table_name} ORDER BY col_int")
         assert cursor.fetchall() == [(1,), (2,)]
     # The bucket resource, and with threads also the workers' resources.
-    expected = 1 if executor_class is ProcessPoolExecutor else 3
+    expected = 1 if executor_class is SpawnProcessPoolExecutor else 3
     assert len(resources.call_args_list) == expected
     assert all(c.kwargs["config"].max_pool_connections == 37 for c in resources.call_args_list)
+
+
+def test_to_sql_workers_resolve_credentials(cursor):
+    # Without a given session, the workers resolve the credentials themselves,
+    # so refreshable credentials stay refreshable.
+    df = pd.DataFrame({"col_int": np.int32([1])})
+    table_name = f"""to_sql_{str(uuid.uuid4()).replace("-", "")}"""
+    location = f"{ENV.s3_staging_dir}{ENV.schema}/{table_name}/"
+    with patch.object(util, "to_parquet", side_effect=util.to_parquet) as to_parquet:
+        to_sql(df, table_name, cursor._connection, location, schema=ENV.schema)
+    session_kwargs = to_parquet.call_args.args[4]
+    assert "aws_secret_access_key" not in session_kwargs
 
 
 def test_to_sql_with_partitions(cursor):

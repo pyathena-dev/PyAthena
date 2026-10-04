@@ -295,6 +295,9 @@ class Connection(Generic[ConnectionCursor]):
         if self.s3_staging_dir and not self.s3_staging_dir.endswith("/"):
             self.s3_staging_dir = f"{self.s3_staging_dir}/"
 
+        # Whether the session was given rather than built from the arguments,
+        # which then do not reproduce its credentials.
+        self._session_given = bool(session)
         if session:
             self._session = session
         else:
