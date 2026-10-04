@@ -899,6 +899,12 @@ class AthenaPandasResultSet(AthenaResultSet):
                     # After _configure_binary_csv_read(), which checks for the header row.
                     self._read_csv_header_as_labels(read_csv_kwargs, csv_engine)
                 self._csv_converters = read_csv_kwargs.get("converters") or {}
+                if csv_engine == "c" and any(
+                    isinstance(converter, _JSONConverter)
+                    for converter in self._csv_converters.values()
+                ):
+                    # A NULL placeholder can give internal parser blocks different dtypes.
+                    read_csv_kwargs.setdefault("low_memory", False)
                 if data is not None:
                     # The rows are in memory, with nothing to open with storage options.
                     read_csv_kwargs.pop("storage_options", None)

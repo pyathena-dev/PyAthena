@@ -552,9 +552,17 @@ cursor.execute("SELECT * FROM typed_table",
 Common performance options:
 
 - `engine`: CSV parsing engine ('auto', 'c', 'python', 'pyarrow'); 'auto' uses the C engine
-- `low_memory`: Parse the file in internal chunks to reduce memory use (C engine only; pandas default `True`)
+- `low_memory`: Parse the file in internal chunks to reduce memory use (C engine only)
 - `dtype`: Explicit column data types
 - `parse_dates`: Columns to parse as dates
+
+When the C engine's converter mapping includes PyAthena's JSON converter, `low_memory` defaults to `False`.
+This avoids pandas' `DtypeWarning` when JSON numbers or booleans and NULLs occur in different internal parser blocks.
+The setting applies to the entire CSV read, including other columns whose dtypes pandas infers.
+Parsing each result or chunk at once can use more memory; `chunksize` still limits the rows read per chunk.
+An explicit `low_memory=True` or `low_memory=False` passed to `execute()` takes precedence.
+With `low_memory=True`, the warning can return.
+Without PyAthena's JSON converter, the C engine keeps pandas' default `low_memory=True`.
 
 With `engine="pyarrow"`, PandasCursor uses the PyArrow engine only when the result is not a tab-separated `.txt` file, pyarrow is installed, no chunksize is set (explicitly or by `auto_optimize_chunksize`), `quoting` is the default, the result has no columns that need a converter (`boolean`, `decimal`, `varbinary`, `json`, `time with time zone`, and `timestamp with time zone` with the default converter), and the result file is at least `AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES` bytes.
 Otherwise, it falls back to the C engine.
