@@ -519,7 +519,8 @@ class Connection(Generic[ConnectionCursor]):
         """The S3 client shared by the connection's result sets, filesystems and Spark cursors.
 
         It is built on first use from the connection's session, region,
-        ``s3_config`` and client arguments.
+        ``s3_config`` and client arguments, except Athena's ``endpoint_url``
+        and ``api_version``.
         """
         with self._s3_client_lock:
             if self._s3_client is None:
@@ -527,7 +528,11 @@ class Connection(Generic[ConnectionCursor]):
                     "s3",
                     region_name=self.region_name,
                     config=self.s3_config,
-                    **self._client_kwargs,
+                    **{
+                        k: v
+                        for k, v in self._client_kwargs.items()
+                        if k not in ("endpoint_url", "api_version")
+                    },
                 )
             return self._s3_client
 

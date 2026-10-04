@@ -145,6 +145,27 @@ class TestConnection:
         assert all(client is clients[0] for client in clients)
         assert clients[0].meta.service_model.service_name == "s3"
 
+    def test_s3_client_leaves_out_athena_endpoint(self, monkeypatch):
+        # GH-576: Athena's endpoint_url (e.g. its VPC endpoint) was sent to S3.
+        monkeypatch.delenv("AWS_ENDPOINT_URL", raising=False)
+        monkeypatch.delenv("AWS_ENDPOINT_URL_S3", raising=False)
+        conn = _connection(
+            endpoint_url="https://athena.us-east-1.amazonaws.com",
+            # Athena's API version, which S3 does not have.
+            api_version="2017-05-18",
+        )
+
+        assert conn.client.meta.endpoint_url == "https://athena.us-east-1.amazonaws.com"
+        assert conn.s3_client.meta.endpoint_url == "https://s3.amazonaws.com"
+        assert conn.s3_client.meta.service_model.api_version == "2006-03-01"
+
+    def test_s3_client_uses_s3_endpoint_setting(self, monkeypatch):
+        monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://localhost:4566")
+        conn = _connection(endpoint_url="https://athena.us-east-1.amazonaws.com")
+
+        assert conn.s3_client.meta.endpoint_url == "http://localhost:4566"
+        assert conn.client.meta.endpoint_url == "https://athena.us-east-1.amazonaws.com"
+
     def test_s3_filesystem_uses_connection_s3_client(self):
         conn = _connection()
 

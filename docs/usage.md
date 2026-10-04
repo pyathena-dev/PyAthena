@@ -757,6 +757,8 @@ The result sets of `Cursor`, `DictCursor`, and their asynchronous versions do no
 `ArrowCursor` reads the query results through pyarrow's own S3 filesystem and uses the shared client for its other S3 requests.
 
 The S3 client is built from the connection's session, region, and client arguments, with the botocore `config` merged with `s3_config`.
+It does not use the connection's `endpoint_url` and `api_version`, which are Athena's.
+To send S3 requests to another endpoint, use botocore's [service-specific endpoint settings](https://docs.aws.amazon.com/sdkref/latest/guide/feature-ss-endpoints.html), such as the `AWS_ENDPOINT_URL_S3` environment variable.
 Options set in `s3_config` take precedence over those in `config` for the S3 client only:
 
 ```python
