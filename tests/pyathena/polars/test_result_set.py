@@ -123,6 +123,42 @@ class TestAthenaPolarsResultSet:
             df = result if isinstance(result, pl.DataFrame) else pl.concat(list(result))
         assert df.to_dict(as_series=False) == {"column_1": ["1", "2"], "column_2": ["x", "y"]}
 
+    @pytest.mark.parametrize("reader", ["_read_csv", "_iter_csv_chunks"])
+    def test_txt_new_columns_with_schema_overrides(self, tmp_path, reader):
+        """schema_overrides given with new_columns reach Polars with them for a .txt file."""
+        path = tmp_path / "result.txt"
+        path.write_text("001\tx\n")
+        result_set = _chunked_result_set()
+        result_set._kwargs = {"new_columns": ["z"], "schema_overrides": {"z": pl.Utf8}}
+        with (
+            patch.object(
+                AthenaPolarsResultSet,
+                "output_location",
+                new_callable=PropertyMock,
+                return_value=str(path),
+            ),
+            patch.object(AthenaPolarsResultSet, "_get_column_names", return_value=["a", "b"]),
+            patch.object(
+                AthenaPolarsResultSet, "_csv_dtypes", new_callable=PropertyMock, return_value={}
+            ),
+            patch.object(
+                AthenaPolarsResultSet,
+                "_csv_storage_options",
+                new_callable=PropertyMock,
+                return_value={},
+            ),
+            patch.object(
+                AthenaPolarsResultSet,
+                "_parquet_storage_options",
+                new_callable=PropertyMock,
+                return_value={},
+            ),
+            patch.object(AthenaPolarsResultSet, "_is_csv_readable", return_value=True),
+        ):
+            result = getattr(result_set, reader)()
+            df = result if isinstance(result, pl.DataFrame) else pl.concat(list(result))
+        assert df.to_dict(as_series=False) == {"z": ["001"], "b": ["x"]}
+
     @pytest.mark.parametrize(
         ("reader", "function"),
         [

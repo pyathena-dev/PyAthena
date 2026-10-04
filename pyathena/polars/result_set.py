@@ -565,7 +565,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             has_header=has_header,
             schema_overrides=self._csv_dtypes,
         )
-        if new_columns:
+        if "schema_overrides" not in self._kwargs:
             # Renamed after reading, so that Polars matches the types to the header.
             read_kwargs.pop("new_columns", None)
 
@@ -764,7 +764,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             has_header=has_header,
             schema_overrides=self._csv_dtypes,
         )
-        if new_columns:
+        if "schema_overrides" not in self._kwargs:
             # Renamed after reading, so that Polars matches the types to the header.
             read_kwargs.pop("new_columns", None)
 
