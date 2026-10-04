@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from collections.abc import Callable
 from typing import (
@@ -132,6 +133,7 @@ class Connection(Generic[ConnectionCursor]):
         on_start_query_execution: Callable[[str], None] | None = ...,
         on_poll: OnPollCallback | None = ...,
         glue_metadata_fallback: bool = ...,
+        s3_config: Config | None = ...,
         **kwargs,
     ) -> None: ...
 
@@ -165,6 +167,7 @@ class Connection(Generic[ConnectionCursor]):
         on_start_query_execution: Callable[[str], None] | None = ...,
         on_poll: OnPollCallback | None = ...,
         glue_metadata_fallback: bool = ...,
+        s3_config: Config | None = ...,
         **kwargs,
     ) -> None: ...
 
@@ -197,6 +200,7 @@ class Connection(Generic[ConnectionCursor]):
         on_start_query_execution: Callable[[str], None] | None = None,
         on_poll: OnPollCallback | None = None,
         glue_metadata_fallback: bool = True,
+        s3_config: Config | None = None,
         **kwargs,
     ) -> None:
         """Initialize a new Athena database connection.
@@ -243,6 +247,8 @@ class Connection(Generic[ConnectionCursor]):
                 answer a throttled table-metadata, table-listing or
                 database-listing request from the AWS Glue Data Catalog before
                 retrying it. Defaults to True.
+            s3_config: Botocore Config options for the S3 client only, such as
+                ``max_pool_connections``. They are merged over ``config``.
             **kwargs: Additional arguments passed to boto3 Session and client.
 
         Raises:
@@ -331,16 +337,16 @@ class Connection(Generic[ConnectionCursor]):
                 **self._session_kwargs,
             )
 
-        if not self.config.user_agent_extra or (
-            pyathena.user_agent_extra not in self.config.user_agent_extra
-        ):
-            self.config.user_agent_extra = (
-                f"{pyathena.user_agent_extra}"
-                f"{' ' + self.config.user_agent_extra if self.config.user_agent_extra else ''}"
-            )
+        self._add_user_agent(self.config)
+        self.s3_config: Config = self.config.merge(s3_config) if s3_config else self.config
+        self._add_user_agent(self.s3_config)
         self._client = self._session.client(
             "athena", region_name=self.region_name, config=self.config, **self._client_kwargs
         )
+        # Built on first use, once per connection even when several threads
+        # need it at the same time.
+        self._s3_client_lock = threading.Lock()
+        self._s3_client: BaseClient | None = None
         self._converter = converter
         self._formatter = formatter if formatter else DefaultParameterFormatter()
         self._retry_config = retry_config if retry_config else RetryConfig()
@@ -355,6 +361,19 @@ class Connection(Generic[ConnectionCursor]):
         self._glue = GlueMetadataClient(
             self._session, self.region_name, self.config, self._client_kwargs
         )
+
+    @staticmethod
+    def _add_user_agent(config: Config) -> None:
+        """Add PyAthena's user agent to a botocore config unless it has it.
+
+        Args:
+            config: The config to update in place.
+        """
+        if not config.user_agent_extra or pyathena.user_agent_extra not in config.user_agent_extra:
+            config.user_agent_extra = (
+                f"{pyathena.user_agent_extra}"
+                f"{' ' + config.user_agent_extra if config.user_agent_extra else ''}"
+            )
 
     def _assume_role(
         self,
@@ -478,6 +497,18 @@ class Connection(Generic[ConnectionCursor]):
         return {k: v for k, v in self._kwargs.items() if k in self._CLIENT_PASSING_ARGS}
 
     @property
+    def _s3_client_kwargs(self) -> dict[str, Any]:
+        """Get client keyword arguments for S3 client creation.
+
+        Returns:
+            The client keyword arguments without Athena's ``endpoint_url``
+            and ``api_version``.
+        """
+        return {
+            k: v for k, v in self._client_kwargs.items() if k not in ("endpoint_url", "api_version")
+        }
+
+    @property
     def session(self) -> Session:
         """Get the boto3 session used for AWS API calls.
 
@@ -494,6 +525,24 @@ class Connection(Generic[ConnectionCursor]):
             The configured boto3 Athena client.
         """
         return self._client
+
+    @property
+    def s3_client(self) -> BaseClient:
+        """The S3 client shared by the connection's result sets, filesystems and Spark cursors.
+
+        It is built on first use from the connection's session, region,
+        ``s3_config`` and client arguments, except Athena's ``endpoint_url``
+        and ``api_version``.
+        """
+        with self._s3_client_lock:
+            if self._s3_client is None:
+                self._s3_client = self._session.client(
+                    "s3",
+                    region_name=self.region_name,
+                    config=self.s3_config,
+                    **self._s3_client_kwargs,
+                )
+            return self._s3_client
 
     @property
     def retry_config(self) -> RetryConfig:
@@ -587,14 +636,19 @@ class Connection(Generic[ConnectionCursor]):
     def close(self) -> None:
         """Close the connection.
 
-        Closes the database connection. This method is provided for DB API 2.0
-        compatibility. Since Athena connections are stateless, this method
-        currently does not perform any actual cleanup operations.
+        Closes the network connections of the Athena client and of the Glue and
+        S3 clients if they were built. A client used after this opens new
+        network connections.
 
         Note:
             This method is called automatically when using the connection
             as a context manager (with statement).
         """
+        self._client.close()
+        self._glue.close()
+        with self._s3_client_lock:
+            if self._s3_client is not None:
+                self._s3_client.close()
 
     def commit(self) -> None:
         """Commit any pending transaction.

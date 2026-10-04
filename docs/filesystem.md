@@ -41,7 +41,8 @@ fsspec.register_implementation("s3", s3fs.S3FileSystem, clobber=True)
 
 ## Basic usage
 
-The filesystem can be constructed from a PyAthena connection, or directly with
+The filesystem can be constructed from a PyAthena connection, whose S3 client it
+then uses (see "S3 client" in [Usage](usage.md)), or directly with
 s3fs-compatible credential arguments:
 
 ```python

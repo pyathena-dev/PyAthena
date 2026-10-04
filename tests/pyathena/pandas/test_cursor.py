@@ -269,6 +269,30 @@ class TestPandasCursor:
             assert pandas_cursor.result_set._csv_stream.closed
 
     @pytest.mark.parametrize(
+        "pandas_cursor",
+        [{"endpoint_url": f"https://athena.{ENV.region_name}.amazonaws.com"}],
+        indirect=True,
+    )
+    def test_athena_endpoint_url(self, pandas_cursor):
+        # GH-576: the S3 requests were sent to Athena's endpoint_url.
+        pandas_cursor.execute("SELECT * FROM one_row")
+        assert pandas_cursor.fetchall() == [(1,)]
+
+    def test_result_sets_share_s3_client(self, pandas_cursor):
+        # GH-1011: each result set and its filesystem built their own S3 client,
+        # so every query opened new connections to S3.
+        conn = pandas_cursor.connection
+        session_client = conn.session.client
+        file_systems = []
+        with patch.object(conn.session, "client", side_effect=session_client) as client:
+            for _ in range(2):
+                pandas_cursor.execute("SELECT * FROM one_row")
+                assert pandas_cursor.fetchall() == [(1,)]
+                file_systems.append(pandas_cursor.result_set._fs)
+        assert [c.args for c in client.call_args_list] == [("s3",)]
+        assert all(fs._client is conn.s3_client for fs in file_systems)
+
+    @pytest.mark.parametrize(
         ("query", "expected", "binary"),
         [
             ("SELECT * FROM one_row", [(1,)], False),
