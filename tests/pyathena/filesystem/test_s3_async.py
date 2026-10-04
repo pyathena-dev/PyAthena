@@ -586,7 +586,7 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
-        put_object = fs._sync_fs._put_object = mock.MagicMock()
+        put_object = fs._sync_fs.core.put_object = mock.MagicMock()
         local = tmp_path / "local.txt"
         local.write_bytes(b"local")
 
@@ -601,7 +601,7 @@ class TestAioS3FileSystem:
         if commit:
             write()
             assert [
-                (c.kwargs["key"], c.kwargs["body"], c.kwargs.get("ContentType"))
+                (c.args[0].key, c.args[1], c.kwargs.get("ContentType"))
                 for c in put_object.call_args_list
             ] == [("k1", b"data", None), ("k2", b"local", "text/plain")]
         else:
@@ -663,21 +663,21 @@ class TestAioS3FileSystem:
         # GH-1037: the value is compressed before it is uploaded, also in a
         # transaction of this filesystem.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
-        put_object = fs._sync_fs._put_object = mock.MagicMock()
+        put_object = fs._sync_fs.core.put_object = mock.MagicMock()
 
         with fs.transaction if intrans else contextlib.nullcontext():
             fs.pipe_file(path, b"data", compression=compression)
 
-        ((_, kwargs),) = put_object.call_args_list
+        (((_, body), kwargs),) = put_object.call_args_list
         assert "compression" not in kwargs
-        assert gzip.decompress(kwargs["body"]) == b"data"
+        assert gzip.decompress(body) == b"data"
 
     def test_transaction_pipe_file_write(self):
         # GH-997: in a transaction, a non-contiguous memoryview is written,
         # and a failed write does not replace the object with an empty one
         # when the transaction commits.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
-        put_object = fs._sync_fs._put_object = mock.MagicMock()
+        put_object = fs._sync_fs.core.put_object = mock.MagicMock()
 
         with fs.transaction:
             with (
@@ -687,9 +687,7 @@ class TestAioS3FileSystem:
                 fs.pipe_file("s3://bucket/k1", b"data")
             fs.pipe_file("s3://bucket/k2", memoryview(b"ab" * 4)[::2])
 
-        assert [(c.kwargs["key"], c.kwargs["body"]) for c in put_object.call_args_list] == [
-            ("k2", b"aaaa")
-        ]
+        assert [(c.args[0].key, c.args[1]) for c in put_object.call_args_list] == [("k2", b"aaaa")]
 
     @pytest.mark.parametrize("error", [RuntimeError, PermissionError])
     def test_transaction_put_file_failed_write(self, tmp_path, error):
@@ -697,7 +695,7 @@ class TestAioS3FileSystem:
         # cannot be read does not replace the object with the data written
         # so far, or with an empty one, when the transaction commits.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
-        put_object = fs._sync_fs._put_object = mock.MagicMock()
+        put_object = fs._sync_fs.core.put_object = mock.MagicMock()
         local = tmp_path / "local"
         local.write_bytes(b"a")
         failing = tmp_path / "failing"
@@ -717,9 +715,7 @@ class TestAioS3FileSystem:
                 fs.put_file(str(failing), "s3://bucket/k1")
             fs.put_file(str(local), "s3://bucket/k2")
 
-        assert [(c.kwargs["key"], c.kwargs["body"]) for c in put_object.call_args_list] == [
-            ("k2", b"a")
-        ]
+        assert [(c.args[0].key, c.args[1]) for c in put_object.call_args_list] == [("k2", b"a")]
 
     @pytest.mark.parametrize("kwargs", [{"block_size": 4}, {}])
     def test_transaction_pipe_put_file_exceeding_max_parts(self, tmp_path, kwargs):
@@ -1429,11 +1425,11 @@ class TestAioS3FileSystem:
         indirect=["fs"],
     )
     def test_read(self, fs, start, end, target_data):
-        # lowest level access: use _get_object
-        data = fs._sync_fs._get_object(
-            ENV.s3_staging_bucket, ENV.s3_filesystem_test_file_key, ranges=(start, end)
+        # lowest level access: use the core
+        data = fs._sync_fs.core.get_object(
+            S3Path(ENV.s3_staging_bucket, ENV.s3_filesystem_test_file_key), (start, end)
         )
-        assert data == (start, target_data), data
+        assert data == target_data, data
         with fs.open(
             f"s3://{ENV.s3_staging_bucket}/{ENV.s3_filesystem_test_file_key}", "rb"
         ) as file:
@@ -2083,7 +2079,7 @@ class TestAioS3FileSystem:
         fs.pipe_file(path, b"foo")
         checksum = fs.checksum(path)
         fs.ls(path)  # caching
-        fs._sync_fs._put_object(bucket=bucket, key=key, body=b"bar")
+        fs._sync_fs.core.put_object(S3Path(bucket, key), b"bar")
         assert checksum == fs.checksum(path)
         assert checksum != fs.checksum(path, refresh=True)
 
@@ -2229,7 +2225,7 @@ class TestAioS3File:
         state = {"active": 0, "peak": 0}
 
         def track(result):
-            def call(**kwargs):
+            def call(*args, **kwargs):
                 with condition:
                     state["active"] += 1
                     state["peak"] = max(state["peak"], state["active"])
@@ -2241,7 +2237,7 @@ class TestAioS3File:
                     condition.wait_for(lambda: state["active"] >= 3, timeout=0.2)
                 with condition:
                     state["active"] -= 1
-                return result(**kwargs)
+                return result(*args, **kwargs)
 
             return mock.MagicMock(side_effect=call)
 
@@ -2255,9 +2251,7 @@ class TestAioS3File:
             lambda **kw: S3MultipartUploadPart(kw["part_number"], {"ETag": '"e"'})
         )
         sync_fs.core.complete_multipart_upload = mock.MagicMock()
-        sync_fs._get_object = track(
-            lambda **kw: (kw["ranges"][0], b"a" * (kw["ranges"][1] - kw["ranges"][0]))
-        )
+        sync_fs.core.get_object = track(lambda path, range_, **kw: b"a" * (range_[1] - range_[0]))
         sync_fs.info = mock.MagicMock(
             return_value=S3Object(
                 init={"Key": "key"},
@@ -2284,7 +2278,7 @@ class TestAioS3File:
 
         state["peak"] = 0
         assert await asyncio.to_thread(read) == b"a" * size
-        assert sync_fs._get_object.call_count == 4
+        assert sync_fs.core.get_object.call_count == 4
         assert state["peak"] == 2
 
     def test_open_invalid_max_workers(self):
@@ -2328,21 +2322,6 @@ class TestAioS3File:
         fs._sync_fs.info.assert_called_once_with("bucket/key", version_id=None, **sse_c)
 
     @pytest.mark.parametrize(
-        ("objects", "target"),
-        [
-            ([(0, b"")], b""),
-            ([(0, b"foo")], b"foo"),
-            ([(0, b"foo"), (1, b"bar")], b"foobar"),
-            ([(1, b"foo"), (0, b"bar")], b"barfoo"),
-            ([(1, b""), (0, b"bar")], b"bar"),
-            ([(1, b"foo"), (0, b"")], b"foo"),
-            ([(2, b"foo"), (1, b"bar"), (3, b"baz")], b"barfoobaz"),
-        ],
-    )
-    def test_merge_objects(self, objects, target):
-        assert S3File._merge_objects(objects) == target
-
-    @pytest.mark.parametrize(
         ("start", "end", "max_workers", "worker_block_size", "ranges"),
         [
             (42, 1337, 1, 999, [(42, 1337)]),  # single worker
@@ -2371,6 +2350,3 @@ class TestAioS3File:
             )
             == ranges
         )
-
-    def test_format_ranges(self):
-        assert S3File._format_ranges((0, 100)) == "bytes=0-99"

@@ -159,6 +159,133 @@ class TestS3Core:
             with pytest.raises(FileNotFoundError):
                 core.head_bucket("bucket")
 
+    @pytest.mark.parametrize(
+        ("version_id", "range_", "expected"),
+        [
+            (None, None, {}),
+            ("null", None, {"VersionId": "null"}),
+            ("v1", (0, 100), {"VersionId": "v1", "Range": "bytes=0-99"}),
+            (None, (100, None), {"Range": "bytes=100-"}),
+            (None, (-8, None), {"Range": "bytes=-8"}),
+        ],
+    )
+    def test_get_object(self, version_id, range_, expected):
+        core, stubber = _make_core(request_kwargs={"ServerSideEncryption": "AES256"})
+        # ServerSideEncryption, which GetObject does not accept, is not sent.
+        stubber.add_response(
+            "get_object",
+            {"Body": StreamingBody(io.BytesIO(b"data"), 4)},
+            {"Bucket": "bucket", "Key": "key", "IfMatch": '"e"', **expected},
+        )
+        with stubber:
+            data = core.get_object(S3Path("bucket", "key", version_id), range_, IfMatch='"e"')
+        stubber.assert_no_pending_responses()
+        assert data == b"data"
+
+    @pytest.mark.parametrize(
+        ("range_", "expected"),
+        [
+            # The range of the call takes precedence over a parameter.
+            ((0, 3), "bytes=0-2"),
+            # Without one, the parameter is sent.
+            (None, "bytes=1-2"),
+        ],
+    )
+    def test_get_object_range_parameter(self, range_, expected):
+        core, stubber = _make_core()
+        stubber.add_response(
+            "get_object",
+            {"Body": StreamingBody(io.BytesIO(b"ab"), 2)},
+            {"Bucket": "bucket", "Key": "key", "Range": expected},
+        )
+        with stubber:
+            core.get_object(S3Path("bucket", "key"), range_, Range="bytes=1-2")
+        stubber.assert_no_pending_responses()
+
+    @pytest.mark.parametrize(
+        ("path", "range_", "match"),
+        [
+            (S3Path("bucket"), None, "no key"),
+            # S3 would ignore these ranges and return the whole object.
+            (S3Path("bucket", "key"), (5, 5), "Invalid range"),
+            (S3Path("bucket", "key"), (6, 5), "Invalid range"),
+            (S3Path("bucket", "key"), (-8, 5), "Invalid range"),
+        ],
+    )
+    def test_get_object_invalid(self, path, range_, match):
+        core, stubber = _make_core()
+        # No request is stubbed, so one that is sent fails the test.
+        with stubber, pytest.raises(ValueError, match=match):
+            core.get_object(path, range_)
+
+    def test_get_object_closes_body(self):
+        class FailingStream(io.BytesIO):
+            def read(self, size=-1):
+                raise botocore.exceptions.ReadTimeoutError(endpoint_url="https://s3")
+
+        core, stubber = _make_core()
+        raws = [io.BytesIO(b"data"), FailingStream(b"data")]
+        stubber.add_response("get_object", {"Body": StreamingBody(raws[0], 4)})
+        stubber.add_response("get_object", {"Body": StreamingBody(raws[1], 4)})
+        with stubber:
+            assert core.get_object(S3Path("bucket", "key")) == b"data"
+            # The failure is neither translated nor retried.
+            with pytest.raises(botocore.exceptions.ReadTimeoutError):
+                core.get_object(S3Path("bucket", "key"))
+        stubber.assert_no_pending_responses()
+        assert [raw.closed for raw in raws] == [True, True]
+
+    @pytest.mark.parametrize(
+        ("status", "code", "error"),
+        [(404, "NoSuchKey", FileNotFoundError), (416, "InvalidRange", OSError)],
+    )
+    def test_get_object_translates_errors(self, status, code, error):
+        core, stubber = _make_core()
+        stubber.add_client_error("get_object", service_error_code=code, http_status_code=status)
+        with stubber, pytest.raises(error) as e:
+            core.get_object(S3Path("bucket", "key"), (10, None))
+        assert isinstance(e.value.__cause__, botocore.exceptions.ClientError)
+        assert e.value.__cause__.response["Error"]["Code"] == code
+
+    @pytest.mark.parametrize(
+        ("body", "params", "expected"),
+        [
+            (b"data", {}, {"Body": b"data"}),
+            # An empty body sends no body of its own.
+            (None, {}, {}),
+            (b"", {}, {}),
+            (None, {"Body": b"x"}, {"Body": b"x"}),
+            # The body of the call takes precedence over a parameter.
+            (b"data", {"Body": b"x"}, {"Body": b"data"}),
+            # So do the bucket and the key of the path.
+            (None, {"Bucket": "other", "Key": "other"}, {}),
+        ],
+    )
+    def test_put_object(self, body, params, expected):
+        core, stubber = _make_core(request_kwargs={"ServerSideEncryption": "AES256"})
+        stubber.add_response(
+            "put_object",
+            {"ETag": '"e"', "VersionId": "v1"},
+            {"Bucket": "bucket", "Key": "key", "ServerSideEncryption": "AES256", **expected},
+        )
+        with stubber:
+            result = core.put_object(S3Path("bucket", "key"), body, **params)
+        stubber.assert_no_pending_responses()
+        assert (result.etag, result.version_id) == ('"e"', "v1")
+
+    @pytest.mark.parametrize(
+        ("path", "match"),
+        [
+            (S3Path("bucket"), "no key"),
+            (S3Path("bucket", "key", "v1"), "Cannot write to a version"),
+            (S3Path("bucket", "key", "null"), "Cannot write to a version"),
+        ],
+    )
+    def test_put_object_rejects_paths(self, path, match):
+        core, stubber = _make_core()
+        with stubber, pytest.raises(ValueError, match=match):
+            core.put_object(path, b"data")
+
     def test_list_objects(self):
         core, stubber = _make_core()
         stubber.add_response(

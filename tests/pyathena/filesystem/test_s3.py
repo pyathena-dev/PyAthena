@@ -1095,19 +1095,32 @@ class TestS3FileSystem:
             fs.rmdir("s3://bucket")
         fs._call.assert_not_called()
 
+    def test_touch_put_object(self):
+        fs = self._make_fs()
+        fs._call.return_value = {"ETag": '"e"'}
+
+        assert fs.touch("s3://bucket/key", ContentType="text/plain")["_etag"] == '"e"'
+        fs._call.assert_called_once_with(
+            fs._client.put_object, Bucket="bucket", Key="key", ContentType="text/plain"
+        )
+        # touch() writes no data, so a body is rejected.
+        fs._call.reset_mock()
+        with pytest.raises(TypeError, match="body"):
+            fs.touch("s3://bucket/key", body=b"data")
+        fs._call.assert_not_called()
+
     def test_pipe_file_small_uses_put_object(self):
         fs = self._make_fs()
         fs.default_block_size = S3FileSystem.DEFAULT_BLOCK_SIZE
         fs.s3_additional_kwargs = {"ServerSideEncryption": "AES256"}
-        fs._put_object = mock.MagicMock()
+        fs.core.put_object = mock.MagicMock()
 
         # The filesystem-level s3_additional_kwargs are merged with the
         # call-level kwargs, as in the open() path.
         fs.pipe_file("s3://bucket/key", b"data", ContentType="text/plain")
-        fs._put_object.assert_called_once_with(
-            bucket="bucket",
-            key="key",
-            body=b"data",
+        fs.core.put_object.assert_called_once_with(
+            S3Path("bucket", "key"),
+            b"data",
             ServerSideEncryption="AES256",
             ContentType="text/plain",
         )
@@ -1157,8 +1170,8 @@ class TestS3FileSystem:
                 key="key",
             )
         )
-        fs._get_object = mock.MagicMock(return_value=(0, b"abc"))
-        fs._put_object = mock.MagicMock()
+        fs.core.get_object = mock.MagicMock(return_value=b"abc")
+        fs.core.put_object = mock.MagicMock()
         kwargs = {"StorageClass": "GLACIER_IR", "ExpectedBucketOwner": "111122223333"}
 
         with fs.open("s3://bucket/key", "rb", s3_additional_kwargs=kwargs) as f:
@@ -1169,13 +1182,12 @@ class TestS3FileSystem:
             f.write(b"x")
 
         assert kwargs == {"StorageClass": "GLACIER_IR", "ExpectedBucketOwner": "111122223333"}
-        fs._get_object.assert_called_once_with(
-            "bucket", "key", (0, 3), None, ExpectedBucketOwner="111122223333", IfMatch='"e"'
+        fs.core.get_object.assert_called_once_with(
+            S3Path("bucket", "key"), (0, 3), ExpectedBucketOwner="111122223333", IfMatch='"e"'
         )
-        fs._put_object.assert_called_once_with(
-            bucket="bucket",
-            key="key",
-            body=b"x",
+        fs.core.put_object.assert_called_once_with(
+            S3Path("bucket", "key"),
+            b"x",
             ServerSideEncryption="AES256",
             StorageClass="GLACIER_IR",
             ExpectedBucketOwner="111122223333",
@@ -1198,14 +1210,14 @@ class TestS3FileSystem:
             side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
         )
         fs.core.complete_multipart_upload = mock.MagicMock()
-        fs._put_object = mock.MagicMock()
+        fs.core.put_object = mock.MagicMock()
         data = b"x" * (fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE + 1)
 
         if transaction:
             with fs.transaction:
                 fs.pipe_file("s3://bucket/key", b"x", ContentType="text/csv")
-            fs._put_object.assert_called_once_with(
-                bucket="bucket", key="key", body=b"x", ContentType="text/csv"
+            fs.core.put_object.assert_called_once_with(
+                S3Path("bucket", "key"), b"x", ContentType="text/csv"
             )
         else:
             fs.pipe_file("s3://bucket/key", data, ContentType="text/csv")
@@ -2191,12 +2203,12 @@ class TestS3FileSystem:
         # A non-contiguous memoryview within the block size, 4 items of 2
         # bytes here, is uploaded with PutObject.
         fs = self._make_fs()
-        fs._put_object = mock.MagicMock()
+        fs.core.put_object = mock.MagicMock()
         value = memoryview(b"ab" * 8).cast("H")[::2]
 
         fs.pipe_file("s3://bucket/key", value, block_size=8)
 
-        fs._put_object.assert_called_once_with(bucket="bucket", key="key", body=b"ab" * 4)
+        fs.core.put_object.assert_called_once_with(S3Path("bucket", "key"), b"ab" * 4)
 
     @pytest.mark.parametrize("intrans", [False, True])
     @pytest.mark.parametrize("size", [1, S3FileSystem.DEFAULT_BLOCK_SIZE + 1])
@@ -2207,7 +2219,7 @@ class TestS3FileSystem:
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
         fs._transaction = None
-        fs._put_object = mock.MagicMock()
+        fs.core.put_object = mock.MagicMock()
         fs.core.create_multipart_upload = mock.MagicMock(
             return_value=S3MultipartUpload(
                 {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
@@ -2221,7 +2233,7 @@ class TestS3FileSystem:
         with fs.transaction if intrans else contextlib.nullcontext():
             fs.pipe_file("s3://bucket/dir/key/", b"a" * size)
 
-        keys = [c.kwargs["key"] for c in fs._put_object.call_args_list] + [
+        keys = [c.args[0].key for c in fs.core.put_object.call_args_list] + [
             c.args[0].key for c in fs.core.create_multipart_upload.call_args_list
         ]
         assert keys == ["dir/key"]
@@ -2232,7 +2244,7 @@ class TestS3FileSystem:
         # to PutObject, which accepts at most 5 GiB.
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
-        fs._put_object = mock.MagicMock()
+        fs.core.put_object = mock.MagicMock()
         fs.core.create_multipart_upload = mock.MagicMock(
             return_value=S3MultipartUpload(
                 {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
@@ -2246,17 +2258,17 @@ class TestS3FileSystem:
 
         fs.pipe_file("s3://bucket/key", memoryview(data).cast("I"))
 
-        fs._put_object.assert_not_called()
+        fs.core.put_object.assert_not_called()
         assert b"".join(c.kwargs["body"] for c in fs.core.upload_part.call_args_list) == data
         fs.core.complete_multipart_upload.assert_called_once()
 
     def test_pipe_file_small_drops_max_workers(self):
         fs = self._make_fs()
-        fs._put_object = mock.MagicMock()
+        fs.core.put_object = mock.MagicMock()
 
         # max_workers is an open() parameter and is not sent to PutObject.
         fs.pipe_file("s3://bucket/key", b"data", max_workers=2)
-        fs._put_object.assert_called_once_with(bucket="bucket", key="key", body=b"data")
+        fs.core.put_object.assert_called_once_with(S3Path("bucket", "key"), b"data")
 
     def test_pipe_file_buffered_non_contiguous_memoryview(self):
         # GH-997: a non-contiguous memoryview larger than the block size is
@@ -2290,7 +2302,7 @@ class TestS3FileSystem:
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
         fs._transaction = None
-        fs._put_object = mock.MagicMock()
+        fs.core.put_object = mock.MagicMock()
 
         with (
             mock.patch.object(S3File, "write", side_effect=RuntimeError("write failed")),
@@ -2299,7 +2311,7 @@ class TestS3FileSystem:
         ):
             fs.pipe_file("s3://bucket/key", b"a" * (S3FileSystem.DEFAULT_BLOCK_SIZE + 1))
 
-        fs._put_object.assert_not_called()
+        fs.core.put_object.assert_not_called()
         fs._call.assert_not_called()
 
     @pytest.mark.parametrize(
@@ -2321,17 +2333,17 @@ class TestS3FileSystem:
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
         fs._transaction = None
-        fs._put_object = mock.MagicMock()
+        fs.core.put_object = mock.MagicMock()
         value = b"a" * size
 
         with fs.transaction if intrans else contextlib.nullcontext():
             fs.pipe_file(path, value, compression=compression)
 
         # The compressed value fits in one block.
-        ((_, kwargs),) = fs._put_object.call_args_list
-        assert kwargs["key"] == key
+        (((path, body), kwargs),) = fs.core.put_object.call_args_list
+        assert path.key == key
         assert "compression" not in kwargs
-        assert gzip.decompress(kwargs["body"]) == value
+        assert gzip.decompress(body) == value
 
     @pytest.mark.parametrize("intrans", [False, True])
     def test_pipe_file_compression_multipart(self, intrans):
@@ -2361,23 +2373,23 @@ class TestS3FileSystem:
 
     def test_pipe_file_compression_non_contiguous_memoryview(self):
         fs = self._make_fs()
-        fs._put_object = mock.MagicMock()
+        fs.core.put_object = mock.MagicMock()
 
         fs.pipe_file("s3://bucket/key", memoryview(b"ab" * 4)[::2], compression="gzip")
 
-        assert gzip.decompress(fs._put_object.call_args.kwargs["body"]) == b"aaaa"
+        assert gzip.decompress(fs.core.put_object.call_args.args[1]) == b"aaaa"
 
     def test_pipe_file_compression_inferred_none(self):
         # "infer" uploads the value as it is for a path without the
         # extension of a codec, as open() does.
         fs = self._make_fs()
-        fs._put_object = mock.MagicMock()
+        fs.core.put_object = mock.MagicMock()
 
         fs.pipe_file("s3://bucket/key.txt", b"a", compression="infer")
 
-        ((_, kwargs),) = fs._put_object.call_args_list
+        (((_, body), kwargs),) = fs.core.put_object.call_args_list
         assert "compression" not in kwargs
-        assert kwargs["body"] == b"a"
+        assert body == b"a"
 
     def test_pipe_file_unsupported_compression(self):
         fs = self._make_fs()
@@ -2395,7 +2407,7 @@ class TestS3FileSystem:
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
         fs._transaction = None
-        fs._put_object = mock.MagicMock()
+        fs.core.put_object = mock.MagicMock()
         # Random bytes stay larger than the block size when compressed, so
         # that the buffered path also writes them outside a transaction.
         value = b"a" if intrans else os.urandom(S3FileSystem.DEFAULT_BLOCK_SIZE + 1)
@@ -2408,7 +2420,7 @@ class TestS3FileSystem:
             fs.pipe_file("s3://bucket/key", value, compression="gzip")
         gc.collect()
 
-        fs._put_object.assert_not_called()
+        fs.core.put_object.assert_not_called()
         fs._call.assert_not_called()
 
     def test_pipe_file_failed_write_aborts_multipart_upload(self):
@@ -2454,7 +2466,7 @@ class TestS3FileSystem:
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
         fs._transaction = None
-        fs._put_object = mock.MagicMock()
+        fs.core.put_object = mock.MagicMock()
         lpath = tmp_path / "data"
         lpath.write_bytes(b"a")
         callback = Callback()
@@ -2471,7 +2483,7 @@ class TestS3FileSystem:
         ):
             fs.put_file(str(lpath), "s3://bucket/key", callback=callback)
 
-        fs._put_object.assert_not_called()
+        fs.core.put_object.assert_not_called()
         fs._call.assert_not_called()
 
     @pytest.mark.parametrize("intrans", [False, True])
@@ -2599,12 +2611,12 @@ class TestS3FileSystem:
         fs.core.MULTIPART_UPLOAD_MAX_PARTS = 3
         fs.default_block_size = 4
         fs.open = mock.MagicMock()
-        fs._put_object = mock.MagicMock()
+        fs.core.put_object = mock.MagicMock()
 
         with pytest.raises(ValueError, match="block_size"):
             fs.pipe_file("s3://bucket/key", value, **kwargs)
         fs.open.assert_not_called()
-        fs._put_object.assert_not_called()
+        fs.core.put_object.assert_not_called()
         fs._call.assert_not_called()
 
     def test_open_max_workers(self):
@@ -2717,13 +2729,13 @@ class TestS3FileSystem:
             "Metadata": {"k": "v"},
         }
         fs.cat_file = mock.MagicMock(return_value=b"aa")
-        fs._put_object = mock.MagicMock()
+        fs.core.put_object = mock.MagicMock()
 
         with fs.open("s3://bucket/key", "ab") as f:
             f.write(b"bb")
         fs._call.assert_called_once_with(fs._client.head_object, Bucket="bucket", Key="key")
-        request = fs._put_object.call_args.kwargs
-        assert (request["body"], request["ContentType"], request["Metadata"]) == (
+        (_, body), request = fs.core.put_object.call_args
+        assert (body, request["ContentType"], request["Metadata"]) == (
             b"aabb",
             "text/plain",
             {"k": "v"},
@@ -3258,13 +3270,6 @@ class TestS3FileSystem:
             b"",
         ]
         assert sorted(ranges) == ["bytes=0-2", "bytes=0-4", "bytes=12-19"]
-
-    def test_get_object_empty_range(self):
-        fs = self._make_fs()
-
-        with pytest.raises(ValueError, match="empty range"):
-            fs._get_object("bucket", "key", ranges=(5, 5))
-        fs._call.assert_not_called()
 
     @pytest.mark.parametrize(
         ("size", "offset", "open_kwargs"),
@@ -4425,11 +4430,11 @@ class TestS3FileSystem:
         indirect=["fs"],
     )
     def test_read(self, fs, start, end, target_data):
-        # lowest level access: use _get_object
-        data = fs._get_object(
-            ENV.s3_staging_bucket, ENV.s3_filesystem_test_file_key, ranges=(start, end)
+        # lowest level access: use the core
+        data = fs.core.get_object(
+            S3Path(ENV.s3_staging_bucket, ENV.s3_filesystem_test_file_key), (start, end)
         )
-        assert data == (start, target_data), data
+        assert data == target_data, data
         with fs.open(
             f"s3://{ENV.s3_staging_bucket}/{ENV.s3_filesystem_test_file_key}", "rb"
         ) as file:
@@ -5322,7 +5327,7 @@ class TestS3FileSystem:
         fs.pipe_file(path, b"foo")
         checksum = fs.checksum(path)
         fs.ls(path)  # caching
-        fs._put_object(bucket=bucket, key=key, body=b"bar")
+        fs.core.put_object(S3Path(bucket, key), b"bar")
         assert checksum == fs.checksum(path)
         assert checksum != fs.checksum(path, refresh=True)
 
@@ -5876,7 +5881,7 @@ class TestS3File:
             fs.core.upload_part.assert_not_called()
             fs.core.upload_part_copy.assert_not_called()
             fs.core.complete_multipart_upload.assert_not_called()
-            fs._put_object.assert_not_called()
+            fs.core.put_object.assert_not_called()
             fs.touch.assert_not_called()
             if abort_fails:
                 fs._call.side_effect = None
@@ -5962,7 +5967,7 @@ class TestS3File:
             file.commit()
             fs.core.upload_part.assert_not_called()
             fs.core.complete_multipart_upload.assert_not_called()
-            fs._put_object.assert_not_called()
+            fs.core.put_object.assert_not_called()
             fs.touch.assert_not_called()
             if abort_fails:
                 fs._call.side_effect = None
@@ -5994,7 +5999,7 @@ class TestS3File:
         fs.core.create_multipart_upload.assert_not_called()
         fs._call.assert_not_called()
         file.commit()
-        fs._put_object.assert_not_called()
+        fs.core.put_object.assert_not_called()
 
     def test_creation_failure(self):
         fs = self._make_append_fs(b"")
@@ -6009,7 +6014,7 @@ class TestS3File:
         assert file.multipart_upload is None
         fs._call.assert_not_called()
         file.commit()
-        fs._put_object.assert_not_called()
+        fs.core.put_object.assert_not_called()
 
     async def test_cancelled_async_write_finishes(self):
         # Cancelling to_thread does not interrupt the buffered writer's thread.
@@ -6060,9 +6065,10 @@ class TestS3File:
         fs._client = S3_CLIENT
         fs.core = S3Core(S3_CLIENT)
         # The requests of the core go to the mocked _call, and the
-        # multipart requests whose results the tests build are mocked.
+        # uploads whose results the tests build are mocked.
         fs.core.call = fs._call
         for name in (
+            "put_object",
             "create_multipart_upload",
             "upload_part",
             "upload_part_copy",
@@ -6143,9 +6149,9 @@ class TestS3File:
     def _uploaded_object(fs, existing: bytes) -> bytes:
         # Rebuild the object S3 would store from the mocked upload calls.
         # A part copy without a range copies the whole existing object.
-        if fs._put_object.called:
+        if fs.core.put_object.called:
             fs.core.create_multipart_upload.assert_not_called()
-            return fs._put_object.call_args.kwargs["body"]
+            return fs.core.put_object.call_args.args[1]
         fs.core.complete_multipart_upload.assert_called_once()
         parts = []
         for c in fs.core.upload_part_copy.call_args_list:
@@ -6310,7 +6316,7 @@ class TestS3File:
             S3_CLIENT.abort_multipart_upload, Bucket="bucket", Key="key.txt", UploadId="uploadid"
         )
         fs.core.complete_multipart_upload.assert_not_called()
-        fs._put_object.assert_not_called()
+        fs.core.put_object.assert_not_called()
 
     @pytest.mark.parametrize("autocommit", [True, False])
     def test_write_exceeding_max_parts_abort_failure(self, caplog, autocommit):
@@ -6345,7 +6351,7 @@ class TestS3File:
         executor.shutdown.assert_called()
         fs._call.assert_called_once()
         fs.core.complete_multipart_upload.assert_not_called()
-        fs._put_object.assert_not_called()
+        fs.core.put_object.assert_not_called()
         assert "Failed to abort multipart upload uploadid to s3://bucket/key.txt." in caplog.text
 
         assert f.multipart_upload is not None
@@ -6381,7 +6387,7 @@ class TestS3File:
         executor.shutdown.assert_called()
         fs._call.assert_called_once()
         fs.core.complete_multipart_upload.assert_not_called()
-        fs._put_object.assert_not_called()
+        fs.core.put_object.assert_not_called()
 
         assert f.multipart_upload is not None
         fs._call.side_effect = None
@@ -6484,22 +6490,7 @@ class TestS3File:
             ExpectedBucketOwner="123",
         )
         fs.core.complete_multipart_upload.assert_not_called()
-        fs._put_object.assert_not_called()
-
-    @pytest.mark.parametrize(
-        ("objects", "target"),
-        [
-            ([(0, b"")], b""),
-            ([(0, b"foo")], b"foo"),
-            ([(0, b"foo"), (1, b"bar")], b"foobar"),
-            ([(1, b"foo"), (0, b"bar")], b"barfoo"),
-            ([(1, b""), (0, b"bar")], b"bar"),
-            ([(1, b"foo"), (0, b"")], b"foo"),
-            ([(2, b"foo"), (1, b"bar"), (3, b"baz")], b"barfoobaz"),
-        ],
-    )
-    def test_merge_objects(self, objects, target):
-        assert S3File._merge_objects(objects) == target
+        fs.core.put_object.assert_not_called()
 
     @pytest.mark.parametrize(
         ("start", "end", "max_workers", "worker_block_size", "ranges"),
@@ -6535,11 +6526,6 @@ class TestS3File:
             == ranges
         )
 
-    def test_format_ranges(self):
-        assert S3File._format_ranges((0, 100)) == "bytes=0-99"
-        assert S3File._format_ranges((100, None)) == "bytes=100-"
-        assert S3File._format_ranges((-8, None)) == "bytes=-8"
-
     @pytest.mark.parametrize("autocommit", [True, False])
     def test_upload_chunk_small_file(self, autocommit):
         # Single (one-shot PutObject) upload via _upload_chunk + commit.
@@ -6555,9 +6541,9 @@ class TestS3File:
         assert file._upload_chunk(final=True) is False
         if not autocommit:
             # Deferred: nothing is uploaded until commit() runs.
-            file.fs._put_object.assert_not_called()
+            file.fs.core.put_object.assert_not_called()
             file.commit()
-        file.fs._put_object.assert_called_once_with(bucket="bucket", key="key.txt", body=data)
+        file.fs.core.put_object.assert_called_once_with(S3Path("bucket", "key.txt"), data)
 
     def test_upload_chunk_empty_file_touches(self):
         # An intentionally empty file (tell() == 0) is created via touch(),
@@ -6566,7 +6552,7 @@ class TestS3File:
 
         assert file._upload_chunk(final=True) is False
         file.fs.touch.assert_called_once()
-        file.fs._put_object.assert_not_called()
+        file.fs.core.put_object.assert_not_called()
 
     @pytest.mark.parametrize("multipart", [False, True])
     def test_discard(self, multipart):
@@ -6585,7 +6571,7 @@ class TestS3File:
             assert file.fs._call.call_args.args[0] == S3_CLIENT.abort_multipart_upload
         else:
             file.fs._call.assert_not_called()
-        file.fs._put_object.assert_not_called()
+        file.fs.core.put_object.assert_not_called()
         assert file.multipart_upload is None
         assert file.multipart_upload_parts == []
 
@@ -6727,7 +6713,7 @@ class TestS3File:
             file.fs.core.complete_multipart_upload.assert_not_called()
             file.commit()
         file.fs.core.complete_multipart_upload.assert_called_once()
-        file.fs._put_object.assert_not_called()
+        file.fs.core.put_object.assert_not_called()
 
 
 class TestCompressedBuffer:

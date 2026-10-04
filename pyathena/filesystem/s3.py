@@ -44,7 +44,6 @@ from pyathena.filesystem.s3_object import (
     S3Object,
     S3ObjectType,
     S3ObjectVersion,
-    S3PutObject,
     S3StorageClass,
 )
 from pyathena.filesystem.s3_path import S3Path
@@ -1403,7 +1402,8 @@ class S3FileSystem(AbstractFileSystem):
         if not s3_path.key:
             raise ValueError("Cannot touch the bucket.")
 
-        object_ = self._put_object(bucket=s3_path.bucket, key=s3_path.key, body=None, **kwargs)
+        # The body is given, so that a body among kwargs is rejected.
+        object_ = self.core.put_object(s3_path, None, **kwargs)
         self.invalidate_cache(path)
         return object_.to_dict()
 
@@ -1844,7 +1844,7 @@ class S3FileSystem(AbstractFileSystem):
             # buffered path does.
             value = bytes(value)
 
-        self._put_object(bucket=s3_path.bucket, key=s3_path.key, body=value, **request_kwargs)
+        self.core.put_object(s3_path, value, **request_kwargs)
         self.invalidate_cache(path)
 
     def _finish_multipart_upload(
@@ -1983,13 +1983,7 @@ class S3FileSystem(AbstractFileSystem):
                     return b""
                 ranges = (start, end)
         try:
-            return self._get_object(
-                bucket=s3_path.bucket,
-                key=s3_path.key,
-                ranges=ranges,
-                version_id=version_id,
-                **kwargs,
-            )[1]
+            return self.core.get_object(s3_path.with_version_id(version_id), ranges, **kwargs)
         except OSError as e:
             if (
                 ranges
@@ -2840,69 +2834,6 @@ class S3FileSystem(AbstractFileSystem):
             **kwargs,
         )
 
-    def _get_object(
-        self,
-        bucket: str,
-        key: str,
-        ranges: tuple[int, int | None] | None = None,
-        version_id: str | None = None,
-        **kwargs,
-    ) -> tuple[int, bytes]:
-        """Read an object or a byte range of it with GetObject.
-
-        Args:
-            bucket: The bucket name.
-            key: The object key.
-            ranges: The ``(start, end)`` byte range to read, with an exclusive
-                end or ``None`` to read to the end of the object (the last
-                ``-start`` bytes for a negative start), or ``None`` to read
-                the whole object.
-            version_id: The version ID to read, or ``None`` for the latest.
-            **kwargs: Additional parameters passed to the GetObject API.
-
-        Returns:
-            Tuple of the start of the range as given (0 for the whole
-            object) and the bytes read.
-
-        Raises:
-            ValueError: If the range is empty. S3 ignores a range whose last
-                byte precedes its first byte and returns the whole object.
-        """
-        request = {"Bucket": bucket, "Key": key}
-        if ranges:
-            if ranges[1] is not None and ranges[0] >= ranges[1]:
-                raise ValueError(f"Invalid empty range: {ranges}.")
-            range_ = S3File._format_ranges(ranges)
-            request.update({"Range": range_})
-        else:
-            ranges = (0, 0)
-            range_ = "bytes=0-"
-        if version_id:
-            request.update({"VersionId": version_id})
-
-        _logger.debug(f"Get object: {S3Path(bucket, key, version_id).uri} range={range_}")
-        response = self._call(
-            self._client.get_object,
-            # The fields of the request take precedence over inherited
-            # parameters of the same name.
-            **{**kwargs, **request},
-        )
-        return ranges[0], cast(bytes, response["Body"].read())
-
-    def _put_object(self, bucket: str, key: str, body: bytes | None, **kwargs) -> S3PutObject:
-        request: dict[str, Any] = {"Bucket": bucket, "Key": key}
-        if body:
-            request.update({"Body": body})
-
-        _logger.debug(f"Put object: s3://{bucket}/{key}")
-        response = self._call(
-            self._client.put_object,
-            # The fields of the request take precedence over inherited
-            # parameters of the same name.
-            **{**kwargs, **request},
-        )
-        return S3PutObject(response)
-
     def _call(self, method: str | Callable[..., Any], **kwargs) -> dict[str, Any]:
         """Send a request with the core (see :meth:`S3Core.call`).
 
@@ -3335,11 +3266,8 @@ class S3File(AbstractBufferedFile):
             # Upload files smaller than block size.
             self.buffer.seek(0)
             data = self.buffer.read()
-            self.fs._put_object(
-                bucket=self.bucket,
-                key=self.key,
-                body=data,
-                **self._get_request_kwargs("put_object"),
+            self.fs.core.put_object(
+                S3Path(self.bucket, self.key), data, **self._get_request_kwargs("put_object")
             )
         else:
             if not self.multipart_upload:
@@ -3459,45 +3387,18 @@ class S3File(AbstractBufferedFile):
         ranges = self._get_ranges(
             start, end, max_workers=self.max_workers, worker_block_size=self.blocksize
         )
+        path = S3Path(self.bucket, self.key, self.version_id)
+        request_kwargs = self._get_request_kwargs("get_object")
         if len(ranges) > 1:
             futures = [
-                self._executor.submit(
-                    self.fs._get_object,
-                    bucket=self.bucket,
-                    key=self.key,
-                    ranges=r,
-                    version_id=self.version_id,
-                    **self._get_request_kwargs("get_object"),
-                )
+                self._executor.submit(self.fs.core.get_object, path, r, **request_kwargs)
                 for r in ranges
             ]
-            object_ = self._merge_objects([f.result() for f in as_completed(futures)])
-        else:
-            object_ = self.fs._get_object(
-                self.bucket,
-                self.key,
-                ranges[0],
-                self.version_id,
-                **self._get_request_kwargs("get_object"),
-            )[1]
-        return object_
-
-    @staticmethod
-    def _format_ranges(ranges: tuple[int, int | None]) -> str:
-        """Format a byte range as the value of an HTTP ``Range`` header.
-
-        Args:
-            ranges: The ``(start, end)`` byte range, with an exclusive end or
-                ``None`` for the end of the object. A negative start with no
-                end selects the last ``-start`` bytes.
-
-        Returns:
-            The range, such as ``bytes=0-99``, ``bytes=100-`` or ``bytes=-8``.
-        """
-        start, end = ranges
-        if end is None:
-            return f"bytes={start}" if start < 0 else f"bytes={start}-"
-        return f"bytes={start}-{end - 1}"
+            for future in as_completed(futures):
+                # The failure of the first read to finish is raised.
+                future.result()
+            return b"".join(f.result() for f in futures)
+        return self.fs.core.get_object(path, ranges[0], **request_kwargs)
 
     @staticmethod
     def _get_ranges(
@@ -3519,8 +3420,3 @@ class S3File(AbstractBufferedFile):
         else:
             ranges.append((start, end))
         return ranges
-
-    @staticmethod
-    def _merge_objects(objects: list[tuple[int, bytes]]) -> bytes:
-        objects.sort(key=lambda x: x[0])
-        return b"".join([obj for start, obj in objects])
