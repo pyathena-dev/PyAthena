@@ -49,6 +49,40 @@ def _split_array_items(inner: str) -> list[str]:
     return items
 
 
+def _split_native_array_items(inner: str) -> list[str]:
+    """Split the items of an array in Athena's native format.
+
+    Athena joins the items with ``", "``, so only a top-level comma followed by a space
+    separates items. Other commas, leading and trailing spaces, and empty items belong
+    to the items. Brace and bracket groupings are respected.
+
+    Args:
+        inner: Interior content of the array without brackets, not stripped.
+
+    Returns:
+        List of item strings.
+    """
+    items: list[str] = []
+    current: list[str] = []
+    depth = 0
+    index = 0
+    while index < len(inner):
+        char = inner[index]
+        if char in "{[":
+            depth += 1
+        elif char in "}]":
+            depth -= 1
+        elif char == "," and depth == 0 and inner.startswith(" ", index + 1):
+            items.append("".join(current))
+            current = []
+            index += 2
+            continue
+        current.append(char)
+        index += 1
+    items.append("".join(current))
+    return items
+
+
 @dataclass
 class TypeNode:
     """Parsed representation of an Athena DDL type signature.
@@ -321,9 +355,14 @@ class TypedValueConverter:
 
         element_type = type_node.children[0] if type_node.children else TypeNode("varchar")
 
-        # Try JSON first (only if content looks like JSON)
+        # Try JSON first if the elements are JSON, whose values Athena renders as JSON
+        # text, or if the content looks like JSON
         inner_preview = value[1:10] if len(value) > 10 else value[1:-1]
-        if '"' in inner_preview or value.startswith(("[{", "[null", "[[")):
+        if (
+            element_type.type_name == "json"
+            or '"' in inner_preview
+            or value.startswith(("[{", "[null", "[["))
+        ):
             try:
                 parsed = json.loads(value)
                 if isinstance(parsed, list):
@@ -337,19 +376,16 @@ class TypedValueConverter:
                 pass
 
         # Native format
-        inner = value[1:-1].strip()
+        inner = value[1:-1]
         if not inner:
             return []
 
         if "[" in inner:
             return None  # Nested arrays not supported in native format
 
-        items = _split_array_items(inner)
+        items = _split_native_array_items(inner)
         result: list[Any] = []
         for item in items:
-            item = item.strip()
-            if not item:
-                continue
             if item.startswith("{") and item.endswith("}"):
                 if element_type.type_name in ("row", "struct"):
                     result.append(self._convert_typed_struct(item, element_type))
