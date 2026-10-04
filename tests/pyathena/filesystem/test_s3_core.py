@@ -219,18 +219,15 @@ class TestS3Core:
             core.get_object(path, range_)
 
     def test_get_object_closes_body(self):
-        class FailingStream(io.BytesIO):
-            def read(self, size=-1):
-                raise botocore.exceptions.ReadTimeoutError(endpoint_url="https://s3")
-
         core, stubber = _make_core()
-        raws = [io.BytesIO(b"data"), FailingStream(b"data")]
+        raws = [io.BytesIO(b"data"), io.BytesIO(b"da")]
         stubber.add_response("get_object", {"Body": StreamingBody(raws[0], 4)})
+        # The body is shorter than its length, which the read verifies.
         stubber.add_response("get_object", {"Body": StreamingBody(raws[1], 4)})
         with stubber:
             assert core.get_object(S3Path("bucket", "key")) == b"data"
             # The failure is neither translated nor retried.
-            with pytest.raises(botocore.exceptions.ReadTimeoutError):
+            with pytest.raises(botocore.exceptions.IncompleteReadError):
                 core.get_object(S3Path("bucket", "key"))
         stubber.assert_no_pending_responses()
         assert [raw.closed for raw in raws] == [True, True]

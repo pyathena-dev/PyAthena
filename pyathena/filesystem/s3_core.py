@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -657,7 +658,9 @@ class S3Core:
                 request.update({"Range": f"bytes={start}-{end - 1}"})
         _logger.debug(f"Get object: {path.uri} range={request.get('Range')}")
         response = self.call(self._client.get_object, **{**params, **request})
-        with response["Body"] as body:
+        # Read through the StreamingBody, which verifies the length and the
+        # checksum of the data; entering it would return the raw stream.
+        with contextlib.closing(response["Body"]) as body:
             return cast(bytes, body.read())
 
     def put_object(self, path: S3Path, body: bytes | None = None, **params) -> S3PutObject:
