@@ -77,9 +77,6 @@ class AioS3FileSystem(AsyncFileSystem):
         >>> files = AioS3FileSystem().ls('s3://my-bucket/data/')
     """
 
-    # https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjects.html
-    DELETE_OBJECTS_MAX_KEYS: int = 1000
-
     protocol = ("s3", "s3a")
     mirror_sync_methods = True
     async_impl = True
@@ -333,22 +330,23 @@ class AioS3FileSystem(AsyncFileSystem):
     async def _delete_objects(self, paths: list[str], **kwargs) -> None:
         """Delete objects with DeleteObjects requests run with ``asyncio.gather``.
 
+        See :meth:`S3FileSystem._delete_objects`.
+
         Args:
             paths: Paths of the objects to delete. Bucket paths are skipped.
             **kwargs: Additional parameters passed to the DeleteObjects API.
+                ``Quiet`` (default True) sets the quiet mode of the requests.
 
         Raises:
+            TypeError: If kwargs has ``Bucket`` or ``Delete``.
             OSError: If S3 could not delete some of the objects.
         """
-        requests = self._sync_fs._delete_objects_requests(paths, **kwargs)
+        batches, params = self._sync_fs._delete_batches(paths, **kwargs)
         results = await asyncio.gather(
-            *[
-                asyncio.to_thread(self._sync_fs._delete_objects_request, request)
-                for request in requests
-            ],
+            *[asyncio.to_thread(self._sync_fs._delete_batch, batch, **params) for batch in batches],
             return_exceptions=True,
         )
-        self._sync_fs._raise_delete_objects_errors(requests, results)
+        self._sync_fs._raise_delete_errors(results)
 
     async def _mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs) -> None:
         """Move files from one S3 location to another.

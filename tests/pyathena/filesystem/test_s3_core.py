@@ -16,6 +16,9 @@ from pyathena.filesystem.s3_core import (
     S3Bucket,
     S3CommonPrefix,
     S3Core,
+    S3DeleteBatch,
+    S3DeleteError,
+    S3DeleteResult,
     S3ListBucketsPage,
     S3ListObjectsPage,
     S3ListObjectVersionsPage,
@@ -336,6 +339,128 @@ class TestS3Core:
             ),
             S3ListBucketsPage(buckets=(S3Bucket("b"),)),
         ]
+
+    def test_delete_object(self):
+        core, stubber = _make_core()
+        stubber.add_response("delete_object", {}, {"Bucket": "bucket", "Key": "key"})
+        stubber.add_response(
+            "delete_object",
+            {},
+            {
+                "Bucket": "bucket",
+                "Key": "key",
+                "VersionId": "v1",
+                "BypassGovernanceRetention": True,
+            },
+        )
+        with stubber:
+            core.delete_object(S3Path("bucket", "key"))
+            core.delete_object(S3Path("bucket", "key", "v1"), BypassGovernanceRetention=True)
+        stubber.assert_no_pending_responses()
+
+    def test_delete_object_requires_a_key(self):
+        core, _ = _make_core()
+        with pytest.raises(ValueError, match="has no key"):
+            core.delete_object(S3Path("bucket"))
+
+    def test_delete_objects(self):
+        core, stubber = _make_core()
+        stubber.add_response(
+            "delete_objects",
+            {
+                "Deleted": [{"Key": "a", "DeleteMarker": True, "DeleteMarkerVersionId": "m1"}],
+                "Errors": [
+                    {"Key": "b", "VersionId": "v1", "Code": "AccessDenied", "Message": "Denied"}
+                ],
+            },
+            {
+                "Bucket": "bucket",
+                "Delete": {
+                    "Objects": [{"Key": "a"}, {"Key": "b", "VersionId": "v1"}],
+                    "Quiet": False,
+                },
+                "ExpectedBucketOwner": "111122223333",
+            },
+        )
+        batch = S3DeleteBatch(
+            "bucket", (S3Path("bucket", "a"), S3Path("bucket", "b", "v1")), quiet=False
+        )
+        with stubber:
+            result = core.delete_objects(batch, ExpectedBucketOwner="111122223333")
+        # A 200 response with errors is a result, not an exception.
+        assert result == S3DeleteResult(
+            "bucket",
+            deleted=(S3Path("bucket", "a"),),
+            errors=(S3DeleteError(S3Path("bucket", "b", "v1"), "AccessDenied", "Denied"),),
+        )
+
+    def test_delete_objects_quiet(self):
+        core, stubber = _make_core()
+        stubber.add_response(
+            "delete_objects",
+            {},
+            {"Bucket": "bucket", "Delete": {"Objects": [{"Key": "a"}], "Quiet": True}},
+        )
+        with stubber:
+            result = core.delete_objects(S3DeleteBatch("bucket", (S3Path("bucket", "a"),)))
+        assert result == S3DeleteResult("bucket")
+
+    def test_delete_objects_translates_errors(self):
+        core, stubber = _make_core()
+        stubber.add_client_error(
+            "delete_objects", service_error_code="AccessDenied", http_status_code=403
+        )
+        with stubber, pytest.raises(PermissionError):
+            core.delete_objects(S3DeleteBatch("bucket", (S3Path("bucket", "a"),)))
+
+
+class TestS3DeleteBatch:
+    def test_from_paths(self):
+        paths = [S3Path("b1", f"k{i}") for i in range(S3DeleteBatch.MAX_KEYS + 1)]
+        paths.insert(1, S3Path("b2", "a", "v1"))
+
+        batches = S3DeleteBatch.from_paths(paths, quiet=False)
+        # Grouped by bucket in the order of the paths, MAX_KEYS keys each.
+        assert [(b.bucket, len(b.objects), b.quiet) for b in batches] == [
+            ("b1", S3DeleteBatch.MAX_KEYS, False),
+            ("b1", 1, False),
+            ("b2", 1, False),
+        ]
+        assert batches[0].objects[:2] == (S3Path("b1", "k0"), S3Path("b1", "k1"))
+        assert batches[1].objects == (S3Path("b1", f"k{S3DeleteBatch.MAX_KEYS}"),)
+        assert batches[2].objects == (S3Path("b2", "a", "v1"),)
+        assert S3DeleteBatch.from_paths([]) == []
+
+    @pytest.mark.parametrize(
+        ("objects", "match"),
+        [
+            ((), "1 to 1000 objects, not 0"),
+            (
+                tuple(S3Path("bucket", f"k{i}") for i in range(S3DeleteBatch.MAX_KEYS + 1)),
+                "1 to 1000 objects, not 1001",
+            ),
+            ((S3Path("bucket"),), "Not an object of the bucket bucket: s3://bucket"),
+            ((S3Path("bucket", ""),), "Not an object of the bucket bucket: s3://bucket"),
+            ((S3Path("other", "a"),), "Not an object of the bucket bucket: s3://other/a"),
+        ],
+    )
+    def test_invalid(self, objects, match):
+        with pytest.raises(ValueError, match=match):
+            S3DeleteBatch("bucket", objects)
+
+    def test_from_paths_rejects_bucket_paths(self):
+        with pytest.raises(ValueError, match="Not an object of the bucket bucket: s3://bucket"):
+            S3DeleteBatch.from_paths([S3Path("bucket", "a"), S3Path("bucket")])
+
+
+class TestS3DeleteError:
+    def test_from_response(self):
+        error = S3DeleteError.from_response(
+            "bucket", {"Key": "a", "VersionId": "v1", "Code": "InternalError", "Message": "Error"}
+        )
+        assert error == S3DeleteError(S3Path("bucket", "a", "v1"), "InternalError", "Error")
+        assert str(error) == "bucket/a?versionId=v1 (InternalError: Error)"
+        assert str(S3DeleteError.from_response("bucket", {"Key": "a"})) == "bucket/a (None: None)"
 
 
 class TestS3ObjectSummary:
