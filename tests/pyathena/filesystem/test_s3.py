@@ -16,6 +16,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+import weakref
 from base64 import b64encode
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
@@ -43,6 +44,7 @@ from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import S3MultipartUpload, S3Object, S3ObjectType, S3StorageClass
 from pyathena.filesystem.s3_path import S3Path
+from pyathena.filesystem.s3_path_pairing import S3PathPairing
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
@@ -1814,6 +1816,55 @@ class TestS3FileSystem:
         with pytest.raises(ValueError, match="outside"):
             fs.get(rpath, f"{tmp_path}/d/")
         assert sorted(p.name for p in tmp_path.rglob("*")) == ["d"]
+
+    @pytest.mark.parametrize(
+        ("path2", "lookups", "expected"),
+        [
+            # The source is checked for a directory; the destination decides
+            # the pairing, so it is looked up too.
+            ("s3://bucket/d", ["bucket/b?versionId=v1", "s3://bucket/d"], "s3://bucket/d/b"),
+            # A trailing slash decides it without a lookup.
+            ("s3://bucket/d/", ["bucket/b?versionId=v1"], "s3://bucket/d/b"),
+        ],
+    )
+    def test_copy_pairs_destination_lookup(self, path2, lookups, expected):
+        fs = self._make_fs()
+        self._serve_keys(fs, {"b"})
+        # Only the destination is a directory.
+        fs.isdir = mock.MagicMock(side_effect=lambda p: p.rstrip("/").endswith("/d"))
+
+        pairs = fs._copy_pairs(S3PathPairing("s3://bucket/b?versionId=v1", path2))
+
+        assert pairs == [("bucket/b?versionId=v1", expected)]
+        assert [c.args[0] for c in fs.isdir.call_args_list] == lookups
+
+    def test_move_pairs_looks_up_only_conflict_candidates(self):
+        # Only a source that may be a directory and whose destination
+        # conflicts is looked up with HeadObject.
+        fs = self._make_fs()
+        self._serve_keys(fs, {"d/x", "e/y", "f"})
+        fs._head_object = mock.MagicMock(return_value=None)
+
+        pairs = fs._move_pairs(
+            ["s3://bucket/d", "s3://bucket/d/x", "s3://bucket/e/y", "s3://bucket/f"],
+            ["s3://bucket/e", "s3://bucket/e", "s3://bucket/out", "s3://bucket/g"],
+        )
+
+        assert len(pairs) == 4
+        fs._head_object.assert_called_once_with("bucket/d")
+
+    def test_freed_by_reference_counting(self):
+        # The filesystem holds no reference cycle, so a filesystem that is
+        # not cached, such as the internal one of a cursor (GH-978), is freed
+        # as soon as it is unused.
+        fs = self._stubbed_fs()
+        ref = weakref.ref(fs)
+        gc.disable()
+        try:
+            del fs
+            assert ref() is None
+        finally:
+            gc.enable()
 
     def test_mv_nothing_within_maxdepth(self):
         # Only directories within maxdepth: nothing is moved, as with copy().

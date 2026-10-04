@@ -123,3 +123,17 @@ class TestS3Path:
         assert path == S3Path("bucket", "key", "v1")
         with pytest.raises(AttributeError):
             path.key = "other"  # type: ignore[misc]
+
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            # A write to the key replaces its "null" version.
+            (S3Path("bucket", "key", "null"), S3Path("bucket", "key")),
+            # Any other path is its own target.
+            (S3Path("bucket", "key", "v1"), S3Path("bucket", "key", "v1")),
+            (S3Path("bucket", "key"), S3Path("bucket", "key")),
+            (S3Path("bucket"), S3Path("bucket")),
+        ],
+    )
+    def test_target(self, path, expected):
+        assert path.target == expected
