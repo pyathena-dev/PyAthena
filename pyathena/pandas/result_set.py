@@ -43,88 +43,73 @@ def _no_trunc_date(df: DataFrame) -> DataFrame:
     return df
 
 
-class _CSVObject:
-    """A converted CSV value that ``pandas.read_csv()`` keeps as is.
+class _JSONConverter:
+    """A json converter for ``pandas.read_csv()`` that keeps NULL from making values floats.
 
     pandas infers a dtype from the values that a converter returns, so JSON numbers
-    with NULL become float64. A converter from ``wrap()`` returns its values in this
-    class, and ``unwrap()`` restores them as object columns after reading.
+    with NULL become float64. This converter returns ``NULL`` in place of None, which
+    keeps the column object, and ``restore()`` puts None back after reading.
     """
 
-    __slots__ = ("value",)
+    NULL: ClassVar[object] = object()
 
-    def __init__(self, value: Any) -> None:
-        """Wrap a converted value.
+    __slots__ = ("_converter", "_has_null")
+
+    def __init__(self, converter: Callable[[str | None], Any]) -> None:
+        """Wrap a json conversion function.
 
         Args:
-            value: The value that a converter returned.
+            converter: The conversion function, which returns None for NULL.
         """
-        self.value = value
+        self._converter = converter
+        self._has_null = False
 
-    @classmethod
-    def wrap(cls, converter: Callable[[str | None], Any]) -> Callable[[str | None], _CSVObject]:
-        """Wrap a converter so that it returns its values in this class.
+    def __call__(self, value: str | None) -> Any:
+        """Convert a CSV value.
 
         Args:
-            converter: The conversion function.
+            value: The value as text.
 
         Returns:
-            The conversion function that wraps the converted values.
+            The converted value, or ``NULL`` in place of None.
         """
-        return lambda value: cls(converter(value))
+        converted = self._converter(value)
+        if converted is None:
+            self._has_null = True
+            return self.NULL
+        return converted
 
-    @classmethod
-    def unwrap(cls, df: DataFrame) -> DataFrame:
-        """Restore the wrapped values in the columns and the index of a DataFrame.
+    def restore(self, df: DataFrame, name: Any) -> None:
+        """Put None back in place of ``NULL`` in a DataFrame that ``read_csv()`` returned.
+
+        Only does anything if this converter returned ``NULL`` since the last call,
+        so call it for each DataFrame or chunk right after reading it.
 
         Args:
-            df: The DataFrame or chunk that ``pandas.read_csv()`` returned.
-
-        Returns:
-            The same DataFrame, with the wrapped values in object columns and levels.
+            df: The DataFrame or chunk.
+            name: The name of the column that this converter converted, which can
+                also be an index level.
         """
+        if not self._has_null:
+            return
+        self._has_null = False
+
         import pandas as pd
-        from pandas.api.types import is_object_dtype
 
-        for i, dtype in enumerate(df.dtypes):
-            if is_object_dtype(dtype) and (values := cls._unwrap_values(df.iloc[:, i])) is not None:
-                df.isetitem(i, pd.Series(values, index=df.index, dtype=object))
         index = df.index
-        levels = (
-            [index.get_level_values(i) for i in range(index.nlevels)]
-            if isinstance(index, pd.MultiIndex)
-            else [index]
-        )
-        unwrapped = [cls._unwrap_values(level) for level in levels]
-        if any(values is not None for values in unwrapped):
-            levels = [
-                level if values is None else pd.Index(values, dtype=object, name=level.name)
-                for level, values in zip(levels, unwrapped, strict=True)
-            ]
-            df.index = (
-                pd.MultiIndex.from_arrays(levels, names=index.names)
-                if isinstance(index, pd.MultiIndex)
-                else levels[0]
-            )
-        return df
+        if name in df.columns:
+            df[name] = pd.Series(self._restore_values(df[name]), index=index, dtype=object)
+        elif isinstance(index, pd.MultiIndex) and name in index.names:
+            levels = [index.get_level_values(i) for i in range(index.nlevels)]
+            i = index.names.index(name)
+            levels[i] = pd.Index(self._restore_values(levels[i]), dtype=object, name=name)
+            df.index = pd.MultiIndex.from_arrays(levels, names=index.names)
+        elif index.name == name:
+            df.index = pd.Index(self._restore_values(index), dtype=object, name=name)
 
     @classmethod
-    def _unwrap_values(cls, values: Series | Index) -> list[Any] | None:
-        """Unwrap the values of a column or an index level.
-
-        Args:
-            values: The values of a column or an index level.
-
-        Returns:
-            The converted values, or None if the values are not wrapped.
-        """
-        if values.dtype != object:
-            return None
-        # Iterating an object ndarray is much faster than iterating values.array.
-        array = values.to_numpy()
-        if not len(array) or not isinstance(array[0], cls):
-            return None
-        return [v.value if isinstance(v, cls) else v for v in array]
+    def _restore_values(cls, values: Series | Index) -> list[Any]:
+        return [None if v is cls.NULL else v for v in values.to_numpy()]
 
 
 class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
@@ -423,6 +408,8 @@ class AthenaPandasResultSet(AthenaResultSet):
         self._kwargs = kwargs
         self._fs = self._create_s3_file_system()
         self._csv_stream: IOBase | None = None
+        # The converters that pandas.read_csv() applies, keyed by column name.
+        self._csv_converters: dict[Any, Callable[[str | None], Any]] = {}
 
         # Cache time column names for efficient _trunc_date processing
         description = self.description if self.description else []
@@ -604,8 +591,7 @@ class AthenaPandasResultSet(AthenaResultSet):
     def _finish_csv_frame(self, df: DataFrame) -> DataFrame:
         """Finish a DataFrame read from the CSV result file.
 
-        Unwraps the values that converters kept as objects and truncates the time
-        columns.
+        Puts None back in the json columns and truncates the time columns.
 
         Args:
             df: The DataFrame or chunk that ``pandas.read_csv()`` returned.
@@ -613,13 +599,16 @@ class AthenaPandasResultSet(AthenaResultSet):
         Returns:
             The same DataFrame.
         """
-        return self._trunc_date(_CSVObject.unwrap(df))
+        for name, converter in self._csv_converters.items():
+            if isinstance(converter, _JSONConverter):
+                converter.restore(df, name)
+        return self._trunc_date(df)
 
     def _get_csv_converter(self, type_: str) -> Callable[[str | None], Any]:
         """Get the converter that ``pandas.read_csv()`` applies to a column type.
 
-        The values of json columns are wrapped in ``_CSVObject``, so that pandas does
-        not infer a numeric dtype from them, and ``_finish_csv_frame()`` unwraps them.
+        json columns get a ``_JSONConverter``, so that NULL does not make pandas infer
+        a numeric dtype, and ``_finish_csv_frame()`` puts None back.
 
         Args:
             type_: The Athena type of the column.
@@ -629,7 +618,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         """
         converter = self._converter.get(type_)
         if type_ == "json":
-            return _CSVObject.wrap(converter)
+            return _JSONConverter(converter)
         return converter
 
     def _trunc_date(self, df: DataFrame) -> DataFrame:
@@ -692,6 +681,7 @@ class AthenaPandasResultSet(AthenaResultSet):
             with ExitStack() as stack:
                 source: str | IOBase = self.output_location
                 binary_columns = self._configure_binary_csv_read(read_csv_kwargs, pd.read_csv)
+                self._csv_converters = read_csv_kwargs.get("converters") or {}
                 if binary_columns:
                     # Given storage_options, even None, open the file through fsspec
                     # as pandas does.
@@ -970,13 +960,14 @@ class AthenaPandasResultSet(AthenaResultSet):
         columns = [d[0] for d in description]
         columnar = self._rows_to_columnar(rows, columns)
         # Integer columns get the dtype that the CSV result file reads them with,
-        # and json values stay as decoded, so that NULL does not make them floats.
+        # and json columns with NULL stay objects as there, so that NULL does not
+        # make their values floats.
         dtypes: dict[str, Any] = {}
         for d in description:
             if d[1] in self._INTEGER_TYPES:
                 if (dtype := self._converter.get_dtype(d[1], d[4], d[5])) is not None:
                     dtypes[d[0]] = dtype
-            elif d[1] == "json":
+            elif d[1] == "json" and None in columnar[d[0]]:
                 dtypes[d[0]] = object
         return pd.DataFrame(
             {

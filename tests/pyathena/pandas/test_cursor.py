@@ -1711,8 +1711,8 @@ class TestPandasCursor:
         [
             pytest.param({}, {}, id="default"),
             pytest.param({}, {"chunksize": 1}, id="chunked"),
-            pytest.param({}, {"index_col": "col_json_index"}, id="index"),
-            pytest.param({}, {"index_col": ["col_int", "col_json_index"]}, id="multi_index"),
+            pytest.param({}, {"index_col": "col_json"}, id="index"),
+            pytest.param({}, {"index_col": ["col_int", "col_json"]}, id="multi_index"),
             pytest.param(
                 {},
                 {
@@ -1721,7 +1721,7 @@ class TestPandasCursor:
                         "col_bigint",
                         "col_json",
                         "col_binary",
-                        "col_json_index",
+                        "col_json_not_null",
                         "col_time",
                     ]
                 },
@@ -1746,7 +1746,7 @@ class TestPandasCursor:
               (1, BIGINT '9007199254740993', json_parse('9007199254740993'), X'01',
                json_parse('9007199254740995'), CAST('01:02:03' AS TIME)),
               (2, NULL, NULL, NULL, json_parse('9007199254740997'), CAST('04:05:06' AS TIME))
-            ) AS t(col_int, col_bigint, col_json, col_binary, col_json_index, col_time)
+            ) AS t(col_int, col_bigint, col_json, col_binary, col_json_not_null, col_time)
             ORDER BY col_int
             """,
             **kwargs,
@@ -1763,10 +1763,18 @@ class TestPandasCursor:
         assert column("col_int").dtype == pd.Int64Dtype()
         assert column("col_bigint").dtype == pd.Int64Dtype()
         assert column("col_json").dtype == np.object_
-        assert column("col_json_index").dtype == np.object_
+        # A json column without NULL keeps the dtype that pandas infers.
+        assert column("col_json_not_null").dtype == np.int64
         assert column("col_bigint").tolist() == [9007199254740993, pd.NA]
-        assert column("col_json").tolist() == [9007199254740993, None]
-        assert column("col_json_index").tolist() == [9007199254740995, 9007199254740997]
+        if isinstance(df.index, pd.MultiIndex):
+            # A MultiIndex level holds None as NaN.
+            json_values = column("col_json").tolist()
+            assert json_values[0] == 9007199254740993
+            assert isinstance(json_values[0], int)
+            assert pd.isna(json_values[1])
+        else:
+            assert column("col_json").tolist() == [9007199254740993, None]
+        assert column("col_json_not_null").tolist() == [9007199254740995, 9007199254740997]
         assert column("col_binary").tolist() == [b"\x01", None]
         assert column("col_time").tolist() == [
             datetime(2017, 1, 1, 1, 2, 3).time(),
