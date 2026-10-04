@@ -1439,8 +1439,23 @@ class TestS3Core:
                 "StorageClass": "STANDARD",
             },
         )
+        # The user-defined metadata can be any mapping, such as an S3Metadata.
+        stubber.add_response(
+            "copy_object",
+            {},
+            {
+                "CopySource": {"Bucket": "bucket", "Key": "key"},
+                "Bucket": "bucket",
+                "Key": "key",
+                "Metadata": {"a": "1"},
+                "MetadataDirective": "REPLACE",
+                "StorageClass": "STANDARD",
+            },
+        )
         with stubber:
             core.replace_object_metadata(S3Path("bucket", "key"), S3Metadata({}), {})
+            head = S3Metadata({"Metadata": {"a": "1"}})
+            core.replace_object_metadata(S3Path("bucket", "key"), head, head)
         stubber.assert_no_pending_responses()
 
     @pytest.mark.parametrize(
@@ -1492,10 +1507,13 @@ class TestS3Core:
 
     def test_generate_presigned_url_signs_locally(self):
         # No request is sent, so the stubber has no responses to return.
-        core, stubber = _make_core()
+        core, stubber = _make_core(request_kwargs={"RequestPayer": "requester"})
         with stubber:
             url = core.generate_presigned_url(S3Path("bucket", "key", "v1"))
-        assert parse_qs(urlsplit(url).query)["versionId"] == ["v1"]
+        query = parse_qs(urlsplit(url).query)
+        assert query["versionId"] == ["v1"]
+        # request_kwargs are not signed.
+        assert not any(k.lower() == "x-amz-request-payer" for k in query)
 
 
 class TestS3DeleteBatch:

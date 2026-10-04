@@ -1419,7 +1419,9 @@ class S3Core:
         self.copy_object(
             path,
             path,
-            Metadata=metadata,
+            # botocore accepts only a dict, not another mapping such as an
+            # S3Metadata.
+            Metadata=dict(metadata),
             MetadataDirective="REPLACE",
             **{
                 **{k: v for k, v in retained.items() if v is not None},
