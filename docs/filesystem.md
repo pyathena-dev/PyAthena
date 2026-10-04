@@ -123,7 +123,9 @@ from that version, which needs `s3:GetObjectVersion` and, to copy the tags,
 `s3:GetObjectVersionTagging` on the source. A `null` version is not pinned. The annotations are listed before anything is written and copied after the
 upload completes, so the destination exists without them until the last one is
 written. If an annotation fails to copy, the error is raised and the destination is
-kept. A failed part copy aborts the multipart upload.
+kept. A failed part copy aborts the multipart upload. So does an interrupt, or the
+cancellation of an `AioS3FileSystem` copy, unless the upload has already completed; the
+requests in flight, including a CreateMultipartUpload request, finish first.
 
 Paths are normalized as in fsspec, which drops a trailing slash, so `info`, `isfile`,
 and `open` treat `s3://YOUR_S3_BUCKET/dir/` as `s3://YOUR_S3_BUCKET/dir`: the object

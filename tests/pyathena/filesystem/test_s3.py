@@ -8,6 +8,7 @@ import io
 import lzma
 import os
 import re
+import signal
 import sys
 import tempfile
 import threading
@@ -3396,6 +3397,51 @@ class TestS3FileSystem:
             (1, (0, 5 * 2**29 + 2**19)),
             (2, (5 * 2**29 + 2**19, 5 * 2**30 + 2**20)),
         ]
+
+    @pytest.mark.skipif(
+        threading.current_thread() is not threading.main_thread(),
+        reason="SIGINT interrupts the main thread.",
+    )
+    def test_copy_object_with_multipart_upload_interrupted_creation(self):
+        # An interrupt during CreateMultipartUpload waits for it, aborts the
+        # upload that it created before any part is copied, and is re-raised.
+        # The created upload used to be left incomplete.
+        fs = self._make_fs()
+        started = threading.Event()
+
+        def create_multipart_upload(*args, **kw):
+            started.set()
+            # Still running when the interrupt arrives.
+            time.sleep(0.5)
+            return SimpleNamespace(upload_id="uploadid")
+
+        fs.core.create_multipart_upload = mock.MagicMock(side_effect=create_multipart_upload)
+        fs.core.upload_part_copy = mock.MagicMock()
+        # The HeadObject of the source.
+        fs._call.return_value = {"ContentLength": 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE}
+        fs._abort_multipart_upload = mock.MagicMock()
+
+        def interrupt():
+            if started.wait(5):
+                # Lets the main thread return from submit() and wait for the
+                # creation, where an interrupt during the request arrives.
+                time.sleep(0.1)
+                signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+
+        thread = threading.Thread(target=interrupt, daemon=True)
+        thread.start()
+        with pytest.raises(KeyboardInterrupt):
+            fs._copy_object_with_multipart_upload(
+                S3Path("bucket", "src"),
+                S3Path("bucket", "dst"),
+                MetadataDirective="REPLACE",
+                TaggingDirective="REPLACE",
+                AnnotationDirective="EXCLUDE",
+            )
+        thread.join(5)
+
+        fs._abort_multipart_upload.assert_called_once_with("bucket", "dst", "uploadid", {})
+        fs.core.upload_part_copy.assert_not_called()
 
     @pytest.mark.parametrize(
         "block_size",

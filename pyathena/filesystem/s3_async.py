@@ -558,11 +558,11 @@ class AioS3FileSystem(AsyncFileSystem):
 
         See :meth:`S3FileSystem._copy_object_with_multipart_upload`. The part
         and annotation copies run in parallel as asyncio tasks with
-        ``asyncio.to_thread``. On a cancellation after the upload is
-        created, the running part copies and the completion are waited for,
-        the upload is aborted unless it has completed, and the cancellation
-        is re-raised. A repeated cancellation returns without stopping this
-        cleanup.
+        ``asyncio.to_thread``. On a cancellation, the creation of the upload,
+        the running part copies and the completion are waited for, the
+        upload is aborted if it was created and has not completed, and the
+        cancellation is re-raised. A repeated cancellation returns without
+        stopping this cleanup.
 
         Args:
             source: Source S3 path, with the version ID to copy, if any.
@@ -585,10 +585,14 @@ class AioS3FileSystem(AsyncFileSystem):
             # See S3FileSystem._copy_object_with_multipart_upload.
             await asyncio.to_thread(self.core.copy_object, plan.source, plan.destination, **kwargs)
             return
-        multipart_upload = await asyncio.to_thread(
-            self.core.create_multipart_upload, plan.destination, **plan.create_params
+        # A task, so that _abort() can wait for an upload that is created
+        # after a cancellation.
+        creation = asyncio.ensure_future(
+            asyncio.to_thread(
+                self.core.create_multipart_upload, plan.destination, **plan.create_params
+            )
         )
-        upload_id = cast(str, multipart_upload.upload_id)
+        upload_id: str
 
         semaphore = asyncio.Semaphore(max_workers)
         failed = False
@@ -614,10 +618,14 @@ class AioS3FileSystem(AsyncFileSystem):
                     failed = True
                     raise
 
-        tasks = [asyncio.ensure_future(_upload_part(i, r)) for i, r in enumerate(plan.ranges)]
+        tasks: list[asyncio.Future[S3MultipartUploadPart | None]] = []
         completion: asyncio.Task[S3CompleteMultipartUpload] | None = None
 
         async def _abort() -> None:
+            await asyncio.wait([creation])
+            if creation.cancelled() or creation.exception() is not None:
+                # No upload was created.
+                return
             # A part that is still copying when the upload is aborted may be
             # stored after the abort, so wait for the running parts first.
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -631,11 +639,16 @@ class AioS3FileSystem(AsyncFileSystem):
                 self._sync_fs._abort_multipart_upload,
                 plan.destination.bucket,
                 cast(str, plan.destination.key),
-                upload_id,
+                cast(str, creation.result().upload_id),
                 plan.abort_params,
             )
 
         try:
+            # shield keeps a cancellation from cancelling the creation, whose
+            # thread would keep running, so that _abort() can wait for it.
+            multipart_upload = await asyncio.shield(creation)
+            upload_id = cast(str, multipart_upload.upload_id)
+            tasks = [asyncio.ensure_future(_upload_part(i, r)) for i, r in enumerate(plan.ranges)]
             # Unlike gather, wait does not cancel the parts when this task is
             # cancelled; their threads would keep copying, so they are waited
             # for in _abort().

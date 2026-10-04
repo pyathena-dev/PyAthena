@@ -487,6 +487,64 @@ class TestAioS3FileSystem:
 
         assert events == (["complete", "abort"] if completion_fails else ["complete"])
 
+    @pytest.mark.parametrize("creation_fails", [False, True])
+    @pytest.mark.asyncio
+    async def test_copy_object_with_multipart_upload_cancelled_creation(self, creation_fails):
+        # A cancellation during CreateMultipartUpload waits for it, aborts
+        # the upload that it created before any part is copied, and is
+        # re-raised. The created upload used to be left incomplete.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        events = []
+        started = threading.Event()
+        release = threading.Event()
+
+        def create_multipart_upload(*args, **kw):
+            started.set()
+            # The finally blocks of the test always release it.
+            release.wait()
+            events.append("create")
+            if creation_fails:
+                raise OSError("creation failed")
+            return SimpleNamespace(upload_id="uploadid")
+
+        sync_fs.core.create_multipart_upload = mock.MagicMock(side_effect=create_multipart_upload)
+        sync_fs.core.upload_part_copy = mock.MagicMock()
+        # The HeadObject of the source, with 2 parts of the default block size.
+        size = 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE
+        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
+        sync_fs._abort_multipart_upload = mock.MagicMock(
+            side_effect=lambda *args: events.append(("abort", args[2]))
+        )
+
+        task = asyncio.ensure_future(
+            fs._copy_object_with_multipart_upload(
+                S3Path("bucket", "src"),
+                S3Path("bucket", "dst"),
+                MetadataDirective="REPLACE",
+                TaggingDirective="REPLACE",
+                AnnotationDirective="EXCLUDE",
+            )
+        )
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            # Gives the cleanup time to return, which it must not do while
+            # the creation is held.
+            await asyncio.sleep(0.1)
+            assert not task.done()
+            assert events == []
+        except BaseException:
+            task.cancel()
+            raise
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert events == (["create"] if creation_fails else ["create", ("abort", "uploadid")])
+        sync_fs.core.upload_part_copy.assert_not_called()
+
     @pytest.mark.parametrize(
         "block_size",
         [

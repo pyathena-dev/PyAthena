@@ -1743,10 +1743,12 @@ class S3FileSystem(AbstractFileSystem):
         source and lists its annotations before anything is written. The
         parts are copied in parallel with UploadPartCopy, and the
         annotations are copied onto the destination after the upload
-        completes. A failed part or completion aborts the upload; a failed
-        annotation copy is raised and leaves the destination in place. If
-        HeadObject reports a size that fits in a single CopyObject request,
-        the reported version is copied with CopyObject instead.
+        completes. A failed part or completion aborts the upload, and so does
+        an interrupt, including one while the upload is being created, once
+        the running requests have finished; a failed annotation copy is
+        raised and leaves the destination in place. If HeadObject reports a
+        size that fits in a single CopyObject request, the reported version
+        is copied with CopyObject instead.
 
         Args:
             source: Source S3 path, with the version ID to copy, if any.
@@ -1769,9 +1771,26 @@ class S3FileSystem(AbstractFileSystem):
             # single CopyObject request.
             self.core.copy_object(plan.source, plan.destination, **kwargs)
             return
-        multipart_upload = self.core.create_multipart_upload(plan.destination, **plan.create_params)
-        upload_id = cast(str, multipart_upload.upload_id)
         with self._create_executor(max_workers=max_workers) as executor:
+            # Created on the executor, so that an interrupt while it is being
+            # created lets the request finish and the upload be aborted.
+            creation = executor.submit(
+                self.core.create_multipart_upload, plan.destination, **plan.create_params
+            )
+            try:
+                multipart_upload = creation.result()
+            except BaseException:
+                if not creation.cancel():
+                    wait([creation])
+                    if creation.exception() is None:
+                        self._abort_multipart_upload(
+                            plan.destination.bucket,
+                            cast(str, plan.destination.key),
+                            cast(str, creation.result().upload_id),
+                            plan.abort_params,
+                        )
+                raise
+            upload_id = cast(str, multipart_upload.upload_id)
             futures = [
                 executor.submit(
                     self.core.upload_part_copy,
