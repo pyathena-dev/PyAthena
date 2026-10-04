@@ -359,6 +359,42 @@ for batch in S3DeleteBatch.from_paths(paths):
         print(error)  # path (code: message)
 ```
 
+`get_object_tagging()` returns the tags of an object as a dictionary, and
+`put_object_tagging()` replaces all of its tags with the given ones. Both act on the
+version ID of the path, if any, including `null`. `put_object_acl()` and
+`put_bucket_acl()` apply a canned ACL, which must be in `S3Core.OBJECT_ACLS` or
+`S3Core.BUCKET_ACLS`, respectively; another value raises `ValueError`, and an object
+ACL also applies to the version ID of the path.
+
+`replace_object_metadata()` replaces the user-defined metadata of an object, given the
+`head_object()` result of the same path, by copying the object onto itself. The copy
+rewrites the object, or creates a new version in a versioned bucket, so the path must
+not have a version ID. The copy retains the content headers (`CacheControl`,
+`ContentDisposition`, `ContentEncoding`, `ContentLanguage`, `ContentType`), `Expires`,
+`WebsiteRedirectLocation`, `StorageClass`, and the `ServerSideEncryption`,
+`SSEKMSKeyId` and `BucketKeyEnabled` of the object. Additional CopyObject parameters
+take precedence over the retained fields, and any encryption parameter replaces all of
+the retained encryption fields.
+
+```python
+path = S3Path.parse("s3://YOUR_S3_BUCKET/path/to/object")
+core.put_object_tagging(path, {**core.get_object_tagging(path), "tag2": "value2"})
+
+head = core.head_object(path)
+core.replace_object_metadata(path, head, {**head, "attr1": "value1"})
+```
+
+`generate_presigned_url()` signs a URL locally, for `get_object` unless another client
+method is given, and sends no request. Its parameters take precedence over the
+`Bucket`, `Key` and `VersionId` of the path. The `request_kwargs` of the core, such as
+`RequestPayer`, are not included in the signed parameters; pass them to the call to
+sign them.
+
+```python
+url = core.generate_presigned_url(path, expires_in=600)
+upload_url = core.generate_presigned_url(path, "put_object", ContentType="text/csv")
+```
+
 ### Multipart writer
 
 `S3MultipartWriter` provides synchronous multipart requests and part planning without fsspec.
