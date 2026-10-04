@@ -1091,6 +1091,20 @@ class TestAioS3FileSystem:
             fs._copy_file.assert_not_awaited()
             fs._delete_objects.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_mv_null_version_directory_bucket_does_not_read_bucket_state(self):
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        fs._sync_fs._call = mock.MagicMock()
+        fs._copy_file = mock.AsyncMock(return_value=True)
+        fs._delete_objects = mock.AsyncMock()
+        key = "s3://example--usw2-az1--x-s3/key"
+
+        await fs._mv([f"{key}?versionId=null"], [key])
+
+        fs._sync_fs._call.assert_not_called()
+        fs._copy_file.assert_not_awaited()
+        fs._delete_objects.assert_awaited_once_with([])
+
     @pytest.mark.parametrize("stage", ["lookup", "copy"])
     @pytest.mark.asyncio
     async def test_mv_null_version_failure_does_not_delete(self, stage):

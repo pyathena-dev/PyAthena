@@ -271,6 +271,8 @@ A move compares a null version with its unversioned key using `GetBucketVersioni
 which requires `s3:GetBucketVersioning`. Each relevant bucket is looked up once
 during planning; other moves do not make this request. The result is not cached
 between moves. A failed lookup stops the move before any copy or deletion.
+Directory buckets do not support versioning, so their null versions are treated
+as the key itself without a versioning lookup.
 
 The opt-in S3 versioning integration tests create dedicated temporary buckets and
 check unversioned, enabled, and suspended states. See [Testing](testing.md) for the

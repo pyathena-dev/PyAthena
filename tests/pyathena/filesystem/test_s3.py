@@ -1762,6 +1762,27 @@ class TestS3FileSystem:
         fs.mv([source], [dest])
         fs._call.assert_not_called()
 
+    @pytest.mark.parametrize("same_key", [False, True])
+    def test_mv_null_version_directory_bucket_does_not_read_bucket_state(self, same_key):
+        fs = self._make_fs()
+        fs._copy_file = mock.MagicMock(return_value=True)
+        fs._delete_objects = mock.MagicMock()
+        key = "s3://example--usw2-az1--x-s3/key"
+        sources = [f"{key}?versionId=null"] if same_key else [f"{key}?versionId=null", key]
+        destinations = [key] if same_key else [f"{key}-copy1", f"{key}-copy2"]
+
+        fs.mv(sources, destinations)
+
+        fs._call.assert_not_called()
+        if same_key:
+            fs._copy_file.assert_not_called()
+            fs._delete_objects.assert_called_once_with([])
+        else:
+            assert fs._copy_file.call_args_list == [
+                mock.call(source, dest) for source, dest in zip(sources, destinations, strict=True)
+            ]
+            fs._delete_objects.assert_called_once_with(sources)
+
     def test_mv_null_version_reads_each_bucket(self):
         fs = self._make_fs()
         fs._call.side_effect = lambda method, **request: (

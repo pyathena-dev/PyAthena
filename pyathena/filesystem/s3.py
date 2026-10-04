@@ -1424,7 +1424,7 @@ class S3FileSystem(AbstractFileSystem):
         Comparing a ``null`` version with its unversioned key calls
         GetBucketVersioning once per bucket during the move's planning and
         requires ``s3:GetBucketVersioning``. The result is not cached across
-        moves.
+        moves. Directory buckets do not support versioning and need no lookup.
 
         Args:
             path1: Source S3 path, glob pattern, or list of paths.
@@ -1476,7 +1476,11 @@ class S3FileSystem(AbstractFileSystem):
         paths = {p: S3Path.parse(p) for pair in pairs for p in pair}
         unversioned = {p.name for p in paths.values() if not p.version_id}
         buckets = {
-            p.bucket for p in paths.values() if p.version_id == "null" and p.name in unversioned
+            p.bucket
+            for p in paths.values()
+            if p.version_id == "null"
+            and p.name in unversioned
+            and not self.core._is_directory_bucket(p.bucket)
         }
         versioned_buckets = {
             bucket
