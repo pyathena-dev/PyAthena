@@ -23,7 +23,7 @@ from fsspec.implementations.local import LocalFileSystem, make_path_posix
 from fsspec.utils import check_contained
 
 from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
-from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch
+from pyathena.filesystem.s3_core import S3Core
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3Executor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
@@ -76,8 +76,6 @@ class AioS3FileSystem(AsyncFileSystem):
         >>> # without asynchronous=True; they block the caller until done
         >>> files = AioS3FileSystem().ls('s3://my-bucket/data/')
     """
-
-    DELETE_OBJECTS_MAX_KEYS: int = S3DeleteBatch.MAX_KEYS
 
     protocol = ("s3", "s3a")
     mirror_sync_methods = True

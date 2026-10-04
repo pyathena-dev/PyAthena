@@ -170,7 +170,6 @@ class S3FileSystem(AbstractFileSystem):
     # https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
     # The maximum number of parts per multipart upload is 10,000.
     MULTIPART_UPLOAD_MAX_PARTS: int = 10_000
-    DELETE_OBJECTS_MAX_KEYS: int = S3DeleteBatch.MAX_KEYS
     DEFAULT_BLOCK_SIZE: int = 5 * 2**20  # 5MiB
     # https://docs.aws.amazon.com/AmazonS3/latest/userguide/acl-overview.html#canned-acl
     OBJECT_ACLS: frozenset[str] = frozenset(
