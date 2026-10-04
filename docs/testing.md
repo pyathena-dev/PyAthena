@@ -134,7 +134,7 @@ A targeted run helps during development but does not replace other coverage requ
 ### Run self-contained tests offline
 
 The pandas and Polars result-set modules have self-contained tests that can run without AWS access when the session hooks are excluded.
-Reuse the `.env` file from [AWS environment](#aws-environment) if it is already configured.
+Reuse the `.env` file described in the AWS environment section if it is already configured.
 For an offline-only setup, create a gitignored `.env` file in the repository root with these placeholder values:
 
 ```ini
