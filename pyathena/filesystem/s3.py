@@ -3214,8 +3214,8 @@ class S3File(AbstractBufferedFile):
 
         Args:
             creation: A pending multipart creation to cancel or wait for before
-                aborting. Further KeyboardInterrupts during this wait are delayed
-                until the request finishes, so its upload ID can be recovered.
+                aborting. KeyboardInterrupts raised by the blocking wait are
+                suppressed to allow the upload ID to be recovered.
         """
         if self.buffer is None and getattr(self, "closed", False):
             return

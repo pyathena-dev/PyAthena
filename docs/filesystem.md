@@ -374,7 +374,8 @@ The writer does not invalidate the filesystem cache; call `fs.invalidate_cache()
 
 When an `S3File` wait for multipart creation is interrupted, it waits for any creation that has already started and recovers the successful response before aborting.
 It drops the buffer and closes the file before waiting, so a later close or deferred commit cannot upload the interrupted write.
-Further Ctrl-C interrupts during this recovery wait are delayed until creation finishes, so its upload ID can still be aborted.
+It suppresses Ctrl-C during the blocking recovery wait and re-raises the original error when cleanup finishes.
+An additional interruption outside that wait can stop cleanup; once the upload identity is known, `discard()` can retry the abort.
 An abort failure retains the upload identity for `discard()` to retry.
 Cancelling an async buffered write through `asyncio.to_thread` still allows its writer thread to finish.
 
