@@ -379,7 +379,8 @@ class TestAioS3FileSystem:
             with lock:
                 events.append(f"start {part_number}")
             started.release()
-            release.wait(5)
+            # The finally blocks of the test always release it.
+            release.wait()
             with lock:
                 events.append(f"end {part_number}")
             return SimpleNamespace(etag='"e"', part_number=part_number)
@@ -452,7 +453,8 @@ class TestAioS3FileSystem:
 
         def complete_multipart_upload(**kw):
             started.set()
-            release.wait(5)
+            # The finally blocks of the test always release it.
+            release.wait()
             events.append("complete")
             if completion_fails:
                 raise OSError("completion failed")
@@ -484,9 +486,9 @@ class TestAioS3FileSystem:
         try:
             assert await asyncio.to_thread(started.wait, 5)
             task.cancel()
-            # Lets the copy enter its cleanup.
-            await asyncio.sleep(0)
-            # The copy waits for the completion, which is still held.
+            # Gives the cleanup time to abort early or to return, which it
+            # must not do while the completion is held.
+            await asyncio.sleep(0.1)
             assert not task.done()
             assert events == []
         except BaseException:
