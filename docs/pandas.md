@@ -113,7 +113,7 @@ print(cursor.fetchall())
 Conversion to Parquet and upload to S3 use [ThreadPoolExecutor](https://docs.python.org/3/library/concurrent.futures.html#threadpoolexecutor) by default.
 It is also possible to use [ProcessPoolExecutor](https://docs.python.org/3/library/concurrent.futures.html#processpoolexecutor).
 The S3 requests use the connection's `s3_config` (see "S3 client" in [Usage](usage.md)) and credentials.
-The upload workers resolve the credentials themselves, except for a connection given a `session`, whose credentials they receive once, when the uploads start.
+The upload workers resolve the credentials themselves, except for a connection given a `session` and no explicit keys, whose session's credentials they receive once, when the uploads start.
 
 ```python
 import pandas as pd

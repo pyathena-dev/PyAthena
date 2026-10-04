@@ -217,8 +217,8 @@ def to_sql(
 
     The S3 requests use the connection's ``s3_config`` and credentials. The
     upload workers resolve the credentials themselves, except for a connection
-    given a ``session``, whose credentials they receive once, when the uploads
-    start.
+    given a ``session`` and no explicit keys, whose session's credentials they
+    receive once, when the uploads start.
 
     Args:
         df: The DataFrame to write to Athena.
@@ -310,8 +310,8 @@ def to_sql(
         session_kwargs.update({"profile_name": conn.profile_name})
         if (
             conn._session_given
-            and "aws_access_key_id" not in conn._s3_client_kwargs
-            and "botocore_session" not in session_kwargs
+            and not conn._s3_client_kwargs.get("aws_access_key_id")
+            and not session_kwargs.get("botocore_session")
             and (credentials := conn.session.get_credentials())
         ):
             frozen_credentials = credentials.get_frozen_credentials()

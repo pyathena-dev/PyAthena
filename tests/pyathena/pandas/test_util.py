@@ -493,8 +493,16 @@ class SpawnProcessPoolExecutor(ProcessPoolExecutor):
         super().__init__(max_workers, mp_context=get_context("spawn"))
 
 
-@pytest.mark.parametrize("executor_class", [ThreadPoolExecutor, SpawnProcessPoolExecutor])
-def test_to_sql_session_credentials_and_s3_config(monkeypatch, executor_class):
+@pytest.mark.parametrize(
+    ("executor_class", "connect_kwargs"),
+    [
+        (ThreadPoolExecutor, {}),
+        (SpawnProcessPoolExecutor, {}),
+        # As SQLAlchemy passes them without credentials in the URL.
+        (ThreadPoolExecutor, {"aws_access_key_id": None, "aws_secret_access_key": None}),
+    ],
+)
+def test_to_sql_session_credentials_and_s3_config(monkeypatch, executor_class, connect_kwargs):
     # GH-1067: the upload workers used the default credential chain instead of
     # the credentials of connect(session=...), and no S3 request used s3_config.
     credentials = Session().get_credentials().get_frozen_credentials()
@@ -519,6 +527,7 @@ def test_to_sql_session_credentials_and_s3_config(monkeypatch, executor_class):
                 schema_name=ENV.schema,
                 session=session,
                 s3_config=Config(max_pool_connections=37),
+                **connect_kwargs,
             )
         ) as conn,
         patch.object(Session, "resource", autospec=True, side_effect=resource) as resources,
