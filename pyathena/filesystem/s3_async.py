@@ -590,8 +590,15 @@ class AioS3FileSystem(AsyncFileSystem):
 
         tasks = [asyncio.ensure_future(_upload_part(i, r)) for i, r in enumerate(ranges)]
         try:
-            # gather keeps the part-number order of the tasks.
-            parts = await asyncio.gather(*tasks)
+            # Unlike gather, wait does not cancel the parts when this task is
+            # cancelled; their threads would keep copying, so they are waited
+            # for below.
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            for task in done:
+                if (error := task.exception()) is not None:
+                    raise error
+            # The tasks are in part-number order.
+            parts = [task.result() for task in tasks]
             completed = await asyncio.to_thread(
                 self._sync_fs._complete_multipart_upload,
                 bucket=bucket2,
@@ -600,7 +607,9 @@ class AioS3FileSystem(AsyncFileSystem):
                 parts=cast(list[dict[str, Any]], parts),
                 **self._sync_fs._get_operation_kwargs("complete_multipart_upload", kwargs),
             )
-        except Exception:
+        except BaseException:
+            # Also on cancellation, as S3FileSystem._finish_multipart_upload
+            # does on an interrupt.
             failed = True
             # A part that is still copying when the upload is aborted may be
             # stored after the abort, so wait for the running parts first.

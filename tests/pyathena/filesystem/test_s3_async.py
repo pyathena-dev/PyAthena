@@ -356,6 +356,63 @@ class TestAioS3FileSystem:
         assert events[2:] == ["end 1", "abort"]
         sync_fs._complete_multipart_upload.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_copy_object_with_multipart_upload_cancelled(self):
+        # GH-1046: a cancellation waits for the part copies that are running,
+        # aborts the upload, and is re-raised, as S3FileSystem does on an
+        # interrupt.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), max_workers=2, skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        sync_fs._create_multipart_upload = mock.MagicMock(
+            return_value=SimpleNamespace(upload_id="uploadid")
+        )
+        events = []
+        lock = threading.Lock()
+        started = threading.Semaphore(0)
+
+        def upload_part_copy(**kw):
+            part_number = kw["part_number"]
+            with lock:
+                events.append(f"start {part_number}")
+            started.release()
+            time.sleep(0.2)
+            with lock:
+                events.append(f"end {part_number}")
+            return SimpleNamespace(etag='"e"', part_number=part_number)
+
+        sync_fs._upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
+        sync_fs._complete_multipart_upload = mock.MagicMock()
+        # The HeadObject of the source, for its version.
+        sync_fs._call = mock.MagicMock(return_value={})
+        sync_fs._abort_multipart_upload = mock.MagicMock(
+            side_effect=lambda *args: events.append("abort")
+        )
+
+        task = asyncio.ensure_future(
+            fs._copy_object_with_multipart_upload(
+                bucket1="bucket",
+                key1="src",
+                size1=3 * S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE,
+                bucket2="bucket",
+                key2="dst",
+                block_size=S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE,
+                MetadataDirective="REPLACE",
+                TaggingDirective="REPLACE",
+                AnnotationDirective="EXCLUDE",
+            )
+        )
+        for _ in range(2):
+            assert await asyncio.to_thread(started.acquire, timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # Part 3 waits for a worker and is not started after the cancellation.
+        assert sorted(events[:2]) == ["start 1", "start 2"]
+        assert sorted(events[2:4]) == ["end 1", "end 2"]
+        assert events[4:] == ["abort"]
+        sync_fs._complete_multipart_upload.assert_not_called()
+
     @pytest.mark.parametrize(
         "block_size",
         [
