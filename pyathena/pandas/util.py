@@ -215,6 +215,9 @@ def to_sql(
     as Parquet files to S3 and executing the appropriate DDL statements.
     Supports partitioning, compression, and parallel uploads.
 
+    The S3 requests use the connection's ``s3_config`` and the credentials of
+    its session, which the upload workers receive once, when the uploads start.
+
     Args:
         df: The DataFrame to write to Athena.
         name: Name of the table to create.
@@ -259,7 +262,7 @@ def to_sql(
 
     bucket_name, key_prefix = parse_output_location(location)
     bucket = conn.session.resource(
-        "s3", region_name=conn.region_name, **conn._s3_client_kwargs
+        "s3", region_name=conn.region_name, config=conn.s3_config, **conn._s3_client_kwargs
     ).Bucket(bucket_name)
     cursor = conn.cursor()
 
@@ -296,10 +299,22 @@ def to_sql(
         reset_index(df, index_label)
     with executor_class(max_workers=max_workers) as e:
         futures: list[concurrent.futures.Future[Any]] = []
+        # The workers build their own sessions from picklable arguments, for a
+        # ProcessPoolExecutor, with the credentials of the connection's session.
         session_kwargs = deepcopy(conn._session_kwargs)
         session_kwargs.update({"profile_name": conn.profile_name})
+        credentials = conn.session.get_credentials()
+        if credentials:
+            frozen_credentials = credentials.get_frozen_credentials()
+            session_kwargs.update(
+                {
+                    "aws_access_key_id": frozen_credentials.access_key,
+                    "aws_secret_access_key": frozen_credentials.secret_key,
+                    "aws_session_token": frozen_credentials.token,
+                }
+            )
         client_kwargs = deepcopy(conn._s3_client_kwargs)
-        client_kwargs.update({"region_name": conn.region_name})
+        client_kwargs.update({"region_name": conn.region_name, "config": conn.s3_config})
         partition_prefixes = []
         if partitions:
             for keys, group in df.groupby(by=partitions, observed=True):
