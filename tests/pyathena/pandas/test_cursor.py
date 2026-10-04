@@ -989,6 +989,8 @@ class TestPandasCursor:
             result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)
             result_set._chunksize = None  # Default values
             result_set._quoting = 1
+            result_set._metadata = None
+            result_set._kwargs = {}
 
             # Test C engine specification
             result_set._engine = "c"
@@ -1010,6 +1012,34 @@ class TestPandasCursor:
             ):
                 engine = result_set._get_csv_engine()
                 assert engine == "pyarrow"
+
+            # Test PyArrow with column names that repeat, which it does not rename
+            with (
+                patch.object(result_set, "_get_available_engine", return_value="pyarrow"),
+                patch.object(
+                    type(result_set), "converters", new_callable=PropertyMock, return_value={}
+                ),
+                patch.object(
+                    type(result_set),
+                    "description",
+                    new_callable=PropertyMock,
+                    return_value=[("x", "integer"), ("x", "integer")],
+                ),
+            ):
+                engine = result_set._get_csv_engine()
+                assert engine == "c"
+
+            # Test PyArrow with read options that rename the columns
+            result_set._kwargs = {"names": ["b", "a"]}
+            with (
+                patch.object(result_set, "_get_available_engine", return_value="pyarrow"),
+                patch.object(
+                    type(result_set), "converters", new_callable=PropertyMock, return_value={}
+                ),
+            ):
+                engine = result_set._get_csv_engine()
+                assert engine == "c"
+            result_set._kwargs = {}
 
             # Test PyArrow with incompatible chunksize (via parameter)
             with (
@@ -1695,6 +1725,63 @@ class TestPandasCursor:
 
         pandas_cursor.execute(CONVERTED_VALUES_QUERY)
         assert pandas_cursor.fetchall() == [CONVERTED_VALUES_ROW]
+
+    @pytest.mark.parametrize(
+        "pandas_cursor",
+        [
+            pytest.param({}, id="default"),
+            pytest.param(
+                {"work_group": ENV.managed_work_group, "s3_staging_dir": ""},
+                id="managed",
+                marks=pytest.mark.skipif(
+                    not ENV.managed_work_group,
+                    reason="AWS_ATHENA_MANAGED_WORKGROUP not set",
+                ),
+            ),
+        ],
+        indirect=["pandas_cursor"],
+    )
+    def test_duplicate_column_names(self, pandas_cursor):
+        pandas_cursor.execute(
+            "SELECT 1 AS x, 'a' AS x, 'b' AS y, json_parse('[1]') AS j, json_parse('[2]') AS j, "
+            "CAST('12:34:56' AS TIME) AS t, 2 AS t"
+        )
+        assert pandas_cursor.fetchall() == [
+            (
+                1,
+                "a",
+                "b",
+                [1],
+                [2],
+                datetime(2017, 1, 1, 12, 34, 56).time(),
+                2,
+            )
+        ]
+        assert pandas_cursor.as_pandas().columns.tolist() == [
+            "x",
+            "x.1",
+            "y",
+            "j",
+            "j.1",
+            "t",
+            "t.1",
+        ]
+
+    @pytest.mark.parametrize(
+        ("execute_kwargs", "expected_row", "expected_columns"),
+        [
+            ({"names": ["a", "b", "x.1"]}, (1, 2, "c"), ["a", "b", "x.1"]),
+            ({"usecols": [1, 2]}, (2, "c"), ["x.1", "y"]),
+            ({"usecols": ["x.1", "y"]}, (2, "c"), ["x.1", "y"]),
+        ],
+    )
+    def test_duplicate_column_names_read_options(
+        self, pandas_cursor, execute_kwargs, expected_row, expected_columns
+    ):
+        """The column types follow the columns that the read options rename or select."""
+        pandas_cursor.execute("SELECT 1 AS x, 2 AS x, 'c' AS y", **execute_kwargs)
+        assert pandas_cursor.fetchall() == [expected_row]
+        assert pandas_cursor.as_pandas().columns.tolist() == expected_columns
 
     @pytest.mark.parametrize(
         "execute_kwargs",

@@ -12,7 +12,7 @@ from typing import (
 
 from pyathena import OperationalError
 from pyathena.arrow.util import to_column_info
-from pyathena.converter import Converter, _text_value_converter, _to_default
+from pyathena.converter import _TEXT_VALUE_TYPES, Converter, _text_value_converter, _to_default
 from pyathena.error import ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet
@@ -254,23 +254,23 @@ class AthenaArrowResultSet(AthenaResultSet):
         except StopIteration:
             return
         else:
-            dict_rows = rows.to_pydict()
-            converters = (
-                self.converters
-                if self._convert_rows
-                else self._text_value_converters(self.converters)
-            )
-            if converters:
-                column_names = dict_rows.keys()
+            # Read the columns and their converters by position; to_pydict() and the
+            # converters property keep one column per name.
+            columns = [column.to_pylist() for column in rows.columns]
+            description = self.description if self.description else []
+            converters = [
+                self._converter.get(d[1])
+                if self._convert_rows or d[1] in _TEXT_VALUE_TYPES
+                else _to_default
+                for d in description
+            ]
+            if any(convert is not _to_default for convert in converters):
                 processed_rows = [
-                    tuple(
-                        converters.get(k, _to_default)(v)
-                        for k, v in zip(column_names, row, strict=False)
-                    )
-                    for row in zip(*dict_rows.values(), strict=False)
+                    tuple(convert(v) for convert, v in zip(converters, row, strict=False))
+                    for row in zip(*columns, strict=False)
                 ]
             else:
-                processed_rows = list(zip(*dict_rows.values(), strict=False))
+                processed_rows = list(zip(*columns, strict=False))
             self._rows.extend(processed_rows)
 
     @override
@@ -403,8 +403,8 @@ class AthenaArrowResultSet(AthenaResultSet):
         if not rows:
             return pa.Table.from_pydict({})
         description = self.description if self.description else []
-        columns = [d[0] for d in description]
-        return pa.table(self._rows_to_columnar(rows, columns))
+        columns = [list(column) for column in zip(*rows, strict=True)]
+        return pa.table(columns, names=[d[0] for d in description])
 
     def as_arrow(self) -> Table:
         """Return the query results as an Apache Arrow Table.
@@ -447,4 +447,4 @@ class AthenaArrowResultSet(AthenaResultSet):
 
         super().close()
         self._table = pa.Table.from_pydict({})
-        self._batches = []
+        self._batches = iter([])

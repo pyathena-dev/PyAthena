@@ -1055,6 +1055,39 @@ class TestArrowCursor:
         ]
 
     @pytest.mark.parametrize(
+        "arrow_cursor",
+        [
+            pytest.param({}, id="default"),
+            pytest.param(
+                {"work_group": ENV.managed_work_group, "s3_staging_dir": ""},
+                id="managed",
+                marks=pytest.mark.skipif(
+                    not ENV.managed_work_group,
+                    reason="AWS_ATHENA_MANAGED_WORKGROUP not set",
+                ),
+            ),
+        ],
+        indirect=["arrow_cursor"],
+    )
+    def test_duplicate_column_names(self, arrow_cursor):
+        arrow_cursor.execute(
+            "SELECT 1 AS x, 2 AS x, 'a' AS y, json_parse('[1]') AS j, 'b' AS j, "
+            "CAST('12:34:56' AS TIME) AS t, CAST('01:02:03' AS TIME) AS t"
+        )
+        assert arrow_cursor.fetchall() == [
+            (
+                1,
+                2,
+                "a",
+                [1],
+                "b",
+                datetime(2017, 1, 1, 12, 34, 56).time(),
+                datetime(2017, 1, 1, 1, 2, 3).time(),
+            )
+        ]
+        assert arrow_cursor.as_arrow().column_names == ["x", "x", "y", "j", "j", "t", "t"]
+
+    @pytest.mark.parametrize(
         "execute_kwargs", [{}, {"connect_timeout": 3.0, "request_timeout": 4.0}]
     )
     def test_read_options(self, execute_kwargs):

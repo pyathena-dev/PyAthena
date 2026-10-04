@@ -788,6 +788,68 @@ class TestPolarsCursor:
         ]
 
     @pytest.mark.parametrize(
+        "polars_cursor",
+        [
+            pytest.param({}, id="default"),
+            pytest.param(
+                {"work_group": ENV.managed_work_group, "s3_staging_dir": ""},
+                id="managed",
+                marks=pytest.mark.skipif(
+                    not ENV.managed_work_group,
+                    reason="AWS_ATHENA_MANAGED_WORKGROUP not set",
+                ),
+            ),
+        ],
+        indirect=["polars_cursor"],
+    )
+    def test_duplicate_column_names(self, polars_cursor):
+        polars_cursor.execute(
+            "SELECT 1 AS x, 'a' AS x, 'b' AS y, json_parse('[1]') AS j, json_parse('[2]') AS j, "
+            "CAST('12:34:56' AS TIME) AS t, 2 AS t"
+        )
+        assert polars_cursor.fetchall() == [
+            (
+                1,
+                "a",
+                "b",
+                [1],
+                [2],
+                datetime(2017, 1, 1, 12, 34, 56).time(),
+                2,
+            )
+        ]
+        assert polars_cursor.as_polars().columns == [
+            "x",
+            "x_duplicated_0",
+            "y",
+            "j",
+            "j_duplicated_0",
+            "t",
+            "t_duplicated_0",
+        ]
+
+    @pytest.mark.parametrize("chunksize", [None, 1])
+    def test_new_columns_renaming_first_columns(self, polars_cursor, chunksize):
+        """The types stay with the columns when new_columns renames only the first ones."""
+        polars_cursor.execute("SELECT '001' AS x, 2 AS y", new_columns=["z"], chunksize=chunksize)
+        assert polars_cursor.fetchall() == [("001", 2)]
+
+    def test_new_columns_with_schema_overrides(self, polars_cursor):
+        """schema_overrides given with new_columns are keyed by the new names, as in Polars."""
+        polars_cursor.execute(
+            "SELECT '001' AS x, 2 AS y", new_columns=["z"], schema_overrides={"z": pl.String}
+        )
+        assert polars_cursor.fetchall() == [("001", 2)]
+
+    def test_duplicate_column_names_new_columns(self, polars_cursor):
+        """The column types follow the columns that new_columns renames."""
+        polars_cursor.execute(
+            "SELECT 1 AS x, 2 AS x, 'c' AS y", new_columns=["y", "x_duplicated_0", "x"]
+        )
+        assert polars_cursor.fetchall() == [(1, 2, "c")]
+        assert polars_cursor.as_polars().columns == ["y", "x_duplicated_0", "x"]
+
+    @pytest.mark.parametrize(
         "execute_kwargs",
         [{}, {"block_size": 2048, "cache_type": "none", "max_workers": 3, "chunksize": 20}],
     )
