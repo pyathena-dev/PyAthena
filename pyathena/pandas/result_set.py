@@ -112,16 +112,19 @@ def _read_csv_with_pyarrow(source: IOBase, read_csv_kwargs: dict[str, Any]) -> D
     for column, value in read_csv_kwargs["dtype"].items():
         try:
             column_dtype = pd.api.types.pandas_dtype(value)
-        except TypeError:
+        except (TypeError, ValueError, NotImplementedError):
             # pandas validates only the entries of columns in the result.
             continue
         if isinstance(column_dtype, pd.StringDtype) or column_dtype.kind == "U":
             string_columns.add(column)
     if header is None:
         # pyarrow names the fields of a header-less file f0, f1, ..., and pandas
-        # gives the names to the last fields, so count the fields of the first line.
-        offset = len(source.readline().split(read_csv_kwargs["sep"].encode())) - len(names)
+        # gives the names to the last fields, so count the fields of the first
+        # record, which has one field even if it is empty.
+        lines = (line.decode("utf-8") for line in iter(source.readline, b""))
+        first_record = next(csv.reader(lines, delimiter=read_csv_kwargs["sep"]), [])
         source.seek(0)
+        offset = max(len(first_record), 1) - len(names)
         column_types = {
             f"f{offset + index}": pa.string()
             for index, name in enumerate(names)

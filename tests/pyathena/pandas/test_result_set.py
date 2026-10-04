@@ -254,6 +254,14 @@ def _pyarrow_read_csv_kwargs(types, tab_separated=False, **kwargs):
             _pyarrow_read_csv_kwargs({"v": "varchar"}, True),
         ),
         (
+            '007\t"a\tb"\n010\tc\n',
+            _pyarrow_read_csv_kwargs({"v": "varchar", "x": "varchar"}, True),
+        ),
+        (
+            '007\t"a\nb"\n010\tc\n',
+            _pyarrow_read_csv_kwargs({"v": "varchar", "x": "varchar"}, True),
+        ),
+        (
             '"v","n"\n"007","1"\n',
             _pyarrow_read_csv_kwargs(
                 {"v": "varchar", "n": "integer"},
@@ -283,6 +291,8 @@ def _pyarrow_read_csv_kwargs(types, tab_separated=False, **kwargs):
         "numeric_looking_strings",
         "arrow_string_dtypes",
         "tab_separated_numeric_fields",
+        "tab_separated_quoted_tab",
+        "tab_separated_quoted_newline",
         "dtype_position_key",
         "unparsed_dates",
         "tab_separated_extra_fields",
@@ -335,7 +345,8 @@ def test_read_csv_with_pyarrow_ignores_unused_dtype_entries():
     # As with pandas' PyArrow engine, a dtype entry for a column that is not in
     # the result is not validated.
     read_csv_kwargs = _pyarrow_read_csv_kwargs(
-        {"v": "varchar"}, dtype={"v": str, "unused": "not-a-dtype"}
+        {"v": "varchar"},
+        dtype={"v": str, "unused": "not-a-dtype", "unsupported": "decimal128(10, 2)[pyarrow]"},
     )
     data = b'"v"\n"007"\n'
     expected = pd.read_csv(io.BytesIO(data), **{**read_csv_kwargs, "dtype": {"v": str}})
