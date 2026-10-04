@@ -429,6 +429,32 @@ class AthenaPandasResultSet(AthenaResultSet):
     ]
     # The pandas.read_csv() options given to execute() that _read_csv_with_pyarrow() reads.
     _PYARROW_READ_CSV_OPTIONS: ClassVar[frozenset[str]] = frozenset({"dtype", "parse_dates"})
+    # The pandas.read_csv() options given to execute() that do not change how pandas reads
+    # the header row, with which _read_csv_header_as_labels() replaces the header.
+    _LABELED_HEADER_READ_CSV_OPTIONS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "cache_dates",
+            "converters",
+            "date_format",
+            "dayfirst",
+            "decimal",
+            "dtype_backend",
+            "false_values",
+            "float_precision",
+            "index_col",
+            "keep_default_na",
+            "low_memory",
+            "na_filter",
+            "na_values",
+            "nrows",
+            "on_bad_lines",
+            "parse_dates",
+            "skipfooter",
+            "thousands",
+            "true_values",
+            "usecols",
+        }
+    )
 
     def __init__(
         self,
@@ -808,6 +834,9 @@ class AthenaPandasResultSet(AthenaResultSet):
             with ExitStack() as stack:
                 source: str | IOBase = self.output_location
                 binary_columns = self._configure_binary_csv_read(read_csv_kwargs, labels)
+                if labels is not None:
+                    # After _configure_binary_csv_read(), which checks for the header row.
+                    self._read_csv_header_as_labels(read_csv_kwargs, csv_engine)
                 self._csv_converters = read_csv_kwargs.get("converters") or {}
                 if binary_columns:
                     # Given storage_options, even None, open the file through fsspec
@@ -1057,6 +1086,41 @@ class AthenaPandasResultSet(AthenaResultSet):
                 label for label, d in columns if d[1] in self._PARSE_DATES
             ]
         self._time_columns = [label for label, d in columns if d[1] == "time"]
+
+    def _read_csv_header_as_labels(self, read_csv_kwargs: dict[str, Any], csv_engine: str) -> None:
+        """Read the header of the CSV result file as the labels of columns with the same name.
+
+        pandas gives a column that it renames, such as ``x.1``, the dtype of the first
+        column with the name when it has none of its own. When PyAthena builds the
+        dtypes, the columns are read under their labels, so that each keeps its own type.
+
+        Args:
+            read_csv_kwargs: The options for ``pandas.read_csv()``, updated in place.
+            csv_engine: The CSV engine that reads the file.
+        """
+        import pandas as pd
+
+        names = [d[0] for d in self.description or []]
+        if len(set(names)) == len(names):
+            return
+        if not self._kwargs.keys() <= self._LABELED_HEADER_READ_CSV_OPTIONS:
+            # Other options, such as dtype, names, sep, comment, or encoding, keep the
+            # header row as pandas reads it.
+            return
+        # pandas renames the names in a header row, and copies their dtypes, even with
+        # names given, so the header row is skipped instead.
+        read_csv_kwargs["names"] = self._resolve_csv_column_names(
+            names, read_csv_kwargs, pd.read_csv
+        )[0]
+        read_csv_kwargs["header"] = None
+        if csv_engine == "python":
+            # The python engine skips lines, which a name with a newline spans.
+            header = StringIO(newline="")
+            csv.writer(header, quoting=csv.QUOTE_ALL, lineterminator="").writerow(names)
+            read_csv_kwargs["skiprows"] = len(StringIO(header.getvalue(), newline="").readlines())
+        else:
+            # The C engine skips parsed rows.
+            read_csv_kwargs["skiprows"] = 1
 
     def _configure_binary_csv_read(
         self, read_csv_kwargs: dict[str, Any], labels: list[Any] | None

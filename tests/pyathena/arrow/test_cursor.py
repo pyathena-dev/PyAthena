@@ -32,13 +32,14 @@ from tests.pyathena.util import CONVERTED_VALUES_QUERY, CONVERTED_VALUES_ROW
 
 class TestArrowCursor:
     def test_binary_null_vs_empty(self, arrow_cursor):
-        query = """SELECT * FROM (VALUES
+        # The text column has the name of the binary column, and keeps its own NULL.
+        query = """SELECT id, value, label, text_value AS value FROM (VALUES
                     (1, CAST(NULL AS VARBINARY), 'null', CAST(NULL AS VARCHAR)),
                     (2, X'', 'empty', ''),
                     (3, X'00ff275c25', 'comma, quote" and' || chr(10) || 'newline', 'NULL')
                 ) AS t(id, value, label, text_value) ORDER BY id"""
         arrow_cursor.execute(query)
-        assert arrow_cursor.as_arrow().column("value").to_pylist() == [None, "", "00 ff 27 5c 25"]
+        assert arrow_cursor.as_arrow().column(1).to_pylist() == [None, "", "00 ff 27 5c 25"]
         rows = arrow_cursor.fetchall()
         assert [row[:3] for row in rows] == [
             (1, None, "null"),
@@ -1071,13 +1072,15 @@ class TestArrowCursor:
     )
     def test_duplicate_column_names(self, arrow_cursor):
         arrow_cursor.execute(
-            "SELECT 1 AS x, 2 AS x, 'a' AS y, json_parse('[1]') AS j, 'b' AS j, "
-            "CAST('12:34:56' AS TIME) AS t, CAST('01:02:03' AS TIME) AS t"
+            "SELECT 1 AS x, 2 AS x, CAST('01:02:03' AS TIME) AS x, 'a' AS y, "
+            "json_parse('[1]') AS j, 'b' AS j, CAST('12:34:56' AS TIME) AS t, "
+            "CAST('01:02:03' AS TIME) AS t"
         )
         assert arrow_cursor.fetchall() == [
             (
                 1,
                 2,
+                datetime(2017, 1, 1, 1, 2, 3).time(),
                 "a",
                 [1],
                 "b",
@@ -1085,7 +1088,13 @@ class TestArrowCursor:
                 datetime(2017, 1, 1, 1, 2, 3).time(),
             )
         ]
-        assert arrow_cursor.as_arrow().column_names == ["x", "x", "y", "j", "j", "t", "t"]
+        assert arrow_cursor.as_arrow().column_names == ["x", "x", "x", "y", "j", "j", "t", "t"]
+
+    def test_duplicate_column_names_with_newline(self, arrow_cursor):
+        """Columns with the same name keep their own types, with a newline in the name."""
+        arrow_cursor.execute('SELECT 1 AS "a\nb", CAST(\'01:02:03\' AS TIME) AS "a\nb"')
+        assert arrow_cursor.fetchall() == [(1, datetime(2017, 1, 1, 1, 2, 3).time())]
+        assert arrow_cursor.as_arrow().column_names == ["a\nb", "a\nb"]
 
     @pytest.mark.parametrize(
         "execute_kwargs", [{}, {"connect_timeout": 3.0, "request_timeout": 4.0}]
