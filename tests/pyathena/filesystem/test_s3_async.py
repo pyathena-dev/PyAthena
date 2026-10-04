@@ -483,9 +483,16 @@ class TestAioS3FileSystem:
         )
         try:
             assert await asyncio.to_thread(started.wait, 5)
-        finally:
-            # The completion is held until the copy has been cancelled.
             task.cancel()
+            # Lets the copy enter its cleanup.
+            await asyncio.sleep(0)
+            # The copy waits for the completion, which is still held.
+            assert not task.done()
+            assert events == []
+        except BaseException:
+            task.cancel()
+            raise
+        finally:
             release.set()
         with pytest.raises(asyncio.CancelledError):
             await task

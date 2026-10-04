@@ -489,10 +489,11 @@ class AioS3FileSystem(AsyncFileSystem):
 
         See :meth:`S3FileSystem._copy_object_with_multipart_upload`. The part
         and annotation copies run in parallel as asyncio tasks with
-        ``asyncio.to_thread``. On a cancellation, the running part copies
-        and the completion are waited for, the upload is aborted unless it
-        has completed, and the cancellation is re-raised. A repeated
-        cancellation returns without stopping this cleanup.
+        ``asyncio.to_thread``. On a cancellation after the upload is
+        created, the running part copies and the completion are waited for,
+        the upload is aborted unless it has completed, and the cancellation
+        is re-raised. A repeated cancellation returns without stopping this
+        cleanup.
 
         Args:
             bucket1: Source S3 bucket name.
