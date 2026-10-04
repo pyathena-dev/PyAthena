@@ -412,8 +412,8 @@ class S3MultipartCopyPlan:
     AbortMultipartUpload with ``abort_params`` after a failure, and finally
     the copy of each annotation with :meth:`S3Core.copy_object_annotation`.
     If ``fits_single_request`` is true, the source is copied with
-    :meth:`S3Core.copy_object` instead, and the fields after ``size`` are
-    empty.
+    :meth:`S3Core.copy_object` instead, and ``ranges``, the parameters and
+    ``annotations`` are empty.
 
     Attributes:
         source: The object to copy, with the version that HeadObject
