@@ -47,6 +47,18 @@ class TestArrowCursor:
         ]
         assert [row[3] for row in rows] == ["", "", "NULL"]
 
+    def test_multiline_values_across_blocks(self, arrow_cursor):
+        # The 50 two-line values of 301 bytes span several 1024-byte blocks.
+        arrow_cursor.execute(
+            """
+            SELECT array_join(repeat('x', 150), '') || chr(10) || array_join(repeat('y', 150), '')
+                AS v
+            FROM UNNEST(sequence(1, 50)) AS t(i)
+            """,
+            block_size=1024,
+        )
+        assert arrow_cursor.fetchall() == [("x" * 150 + "\n" + "y" * 150,)] * 50
+
     def test_binary_single_null(self, arrow_cursor):
         arrow_cursor.execute("SELECT CAST(NULL AS VARBINARY) AS value")
         assert arrow_cursor.fetchall() == [(None,)]
