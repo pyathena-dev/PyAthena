@@ -195,14 +195,6 @@ A library comparison is useful when matching that library is the contract, such 
 Express intentional differences directly rather than recreating the implementation in the expected-value builder.
 Retain dtype and schema checks, option contexts, resource cleanup, and equivalent synchronous and asynchronous scenarios where applicable.
 
-The [test conventions audit](testing-audit.md) records the reviewed areas, source evidence, improvements, and intentional exceptions for issue #1079.
-
-```{toctree}
-:hidden:
-
-testing-audit
-```
-
 ## GitHub Actions
 
 The Test workflow runs for pull requests that change files other than `docs/` and Markdown.
