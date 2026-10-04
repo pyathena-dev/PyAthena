@@ -75,6 +75,14 @@ if TYPE_CHECKING:
 # https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-integrations-query-athena.html
 S3_TABLES_CATALOG_PREFIX = "s3tablescatalog/"
 
+# A string literal in TBLPROPERTIES, quoted with ``'`` or ``"``, in which a
+# backslash escapes the next character.
+_TABLE_PROPERTY_LITERAL = r"""'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*\""""
+# A ``'key' = 'value'`` pair in TBLPROPERTIES given as a string.
+_TABLE_PROPERTY_PATTERN = re.compile(
+    rf"({_TABLE_PROPERTY_LITERAL})\s*=\s*({_TABLE_PROPERTY_LITERAL})", re.DOTALL
+)
+
 
 class AthenaTypeCompiler(GenericTypeCompiler):
     """Type compiler for Amazon Athena DDL types.
@@ -1334,12 +1342,22 @@ class AthenaDDLCompiler(DDLCompiler):
             connect_opts: The dialect connection options.
 
         Returns:
-            True if the rendered TBLPROPERTIES set ``table_type`` to Iceberg.
+            True if the ``table_type`` property is ``ICEBERG``, compared
+            case-insensitively. Other properties do not affect the result.
         """
-        table_properties = self._get_table_properties_specification(
-            dialect_opts, connect_opts
-        ).lower()
-        return ("table_type" in table_properties) and ("iceberg" in table_properties)
+        properties = self._get_table_properties(dialect_opts, connect_opts)
+        if not properties:
+            return False
+        if isinstance(properties, dict):
+            pairs = [(str(key), str(value)) for key, value in properties.items()]
+        else:
+            pairs = [
+                (key[1:-1], value[1:-1])
+                for key, value in _TABLE_PROPERTY_PATTERN.findall(properties)
+            ]
+        return any(
+            key.lower() == "table_type" and value.lower() == "iceberg" for key, value in pairs
+        )
 
     def _validate_s3_tables_create_table(
         self, dialect_opts: _DialectArgDict, connect_opts: Mapping[str, Any]
