@@ -21,6 +21,7 @@ from sqlalchemy import types
 
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.filesystem.s3_async import AioS3FileSystem
+from pyathena.filesystem.s3_core import S3Core
 from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaCalculationExecutionStatus, AthenaQueryExecution
 
@@ -249,8 +250,8 @@ def interrupt_start_waits(started, release, interrupts=1):
 # A source object larger than a single CopyObject request allows, copied
 # from bucket/src to bucket/dst by a multipart copy of two parts with the
 # maximum block size (GH-973).
-MULTIPART_COPY_BLOCK_SIZE = S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE
-MULTIPART_COPY_SIZE = MULTIPART_COPY_BLOCK_SIZE + S3FileSystem.MULTIPART_UPLOAD_MIN_PART_SIZE
+MULTIPART_COPY_BLOCK_SIZE = S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE
+MULTIPART_COPY_SIZE = MULTIPART_COPY_BLOCK_SIZE + S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
 MULTIPART_COPY_EXPIRES = datetime(2030, 1, 1, tzinfo=UTC)
 MULTIPART_COPY_KWARGS = {
     # Ignored with the default COPY directives, as CopyObject ignores them.

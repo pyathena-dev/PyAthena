@@ -6,6 +6,7 @@
 # SPDX-License-Identifier: MIT
 
 from datetime import UTC, datetime
+from itertools import pairwise
 
 import boto3
 import botocore.exceptions
@@ -24,6 +25,7 @@ from pyathena.filesystem.s3_core import (
     S3ListObjectVersionsPage,
     S3ObjectSummary,
 )
+from pyathena.filesystem.s3_object import S3MultipartUploadPart
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.util import RetryConfig
 
@@ -412,6 +414,196 @@ class TestS3Core:
         )
         with stubber, pytest.raises(PermissionError):
             core.delete_objects(S3DeleteBatch("bucket", (S3Path("bucket", "a"),)))
+
+    def test_create_multipart_upload(self):
+        core, stubber = _make_core()
+        stubber.add_response(
+            "create_multipart_upload",
+            {"Bucket": "bucket", "Key": "key", "UploadId": "u"},
+            {"Bucket": "bucket", "Key": "key", "ContentType": "text/csv"},
+        )
+        with stubber:
+            # The key of the path takes precedence over a parameter.
+            upload = core.create_multipart_upload(
+                S3Path("bucket", "key"), ContentType="text/csv", Key="other"
+            )
+        assert upload.upload_id == "u"
+
+    def test_upload_part(self):
+        core, stubber = _make_core()
+        stubber.add_response(
+            "upload_part",
+            {"ETag": '"e1"'},
+            {
+                "Bucket": "bucket",
+                "Key": "key",
+                "UploadId": "u",
+                "PartNumber": 1,
+                "Body": b"data",
+                "SSECustomerAlgorithm": "AES256",
+            },
+        )
+        with stubber:
+            part = core.upload_part(
+                S3Path("bucket", "key"),
+                "u",
+                1,
+                b"data",
+                SSECustomerAlgorithm="AES256",
+                PartNumber=99,
+            )
+        assert (part.part_number, part.etag) == (1, '"e1"')
+
+    def test_upload_part_copy(self):
+        core, stubber = _make_core()
+        stubber.add_response(
+            "upload_part_copy",
+            {"CopyPartResult": {"ETag": '"p2"'}},
+            {
+                "Bucket": "bucket",
+                "Key": "dst",
+                "CopySource": {"Bucket": "src-bucket", "Key": "src", "VersionId": "v1"},
+                "UploadId": "u",
+                "PartNumber": 2,
+                "CopySourceRange": "bytes=10-19",
+                "CopySourceIfMatch": '"src"',
+            },
+        )
+        # Without a range, the whole source is copied.
+        stubber.add_response(
+            "upload_part_copy",
+            {"CopyPartResult": {"ETag": '"p1"'}},
+            {
+                "Bucket": "bucket",
+                "Key": "dst",
+                "CopySource": {"Bucket": "bucket", "Key": "dst"},
+                "UploadId": "u",
+                "PartNumber": 1,
+            },
+        )
+        with stubber:
+            part = core.upload_part_copy(
+                S3Path("bucket", "dst"),
+                "u",
+                2,
+                S3Path("src-bucket", "src", "v1"),
+                range_=(10, 20),
+                CopySourceIfMatch='"src"',
+            )
+            whole = core.upload_part_copy(S3Path("bucket", "dst"), "u", 1, S3Path("bucket", "dst"))
+        stubber.assert_no_pending_responses()
+        assert (part.part_number, part.etag) == (2, '"p2"')
+        assert (whole.part_number, whole.etag) == (1, '"p1"')
+
+    def test_complete_multipart_upload(self):
+        core, stubber = _make_core()
+        stubber.add_response(
+            "complete_multipart_upload",
+            {"ETag": '"dst"', "VersionId": "v-dst"},
+            {
+                "Bucket": "bucket",
+                "Key": "key",
+                "UploadId": "u",
+                "MultipartUpload": {
+                    "Parts": [{"ETag": '"e1"', "PartNumber": 1}, {"ETag": '"e2"', "PartNumber": 2}]
+                },
+                "RequestPayer": "requester",
+            },
+        )
+        parts = [S3MultipartUploadPart(n, {"ETag": f'"e{n}"'}) for n in (1, 2)]
+        with stubber:
+            completed = core.complete_multipart_upload(
+                S3Path("bucket", "key"), "u", parts, RequestPayer="requester"
+            )
+        assert (completed.etag, completed.version_id) == ('"dst"', "v-dst")
+
+    def test_abort_multipart_upload(self):
+        core, stubber = _make_core()
+        stubber.add_response(
+            "abort_multipart_upload",
+            {},
+            {"Bucket": "bucket", "Key": "key", "UploadId": "u", "RequestPayer": "requester"},
+        )
+        # Unlike the callers that log a failed abort, the core raises it.
+        stubber.add_client_error(
+            "abort_multipart_upload", service_error_code="NoSuchUpload", http_status_code=404
+        )
+        with stubber:
+            core.abort_multipart_upload(S3Path("bucket", "key"), "u", RequestPayer="requester")
+            with pytest.raises(FileNotFoundError):
+                core.abort_multipart_upload(S3Path("bucket", "key"), "u")
+
+    @pytest.mark.parametrize(
+        ("method", "args"),
+        [
+            ("create_multipart_upload", (S3Path("bucket"),)),
+            ("upload_part", (S3Path("bucket"), "u", 1, b"")),
+            ("upload_part_copy", (S3Path("bucket"), "u", 1, S3Path("bucket", "src"))),
+            ("upload_part_copy", (S3Path("bucket", "dst"), "u", 1, S3Path("bucket"))),
+            ("complete_multipart_upload", (S3Path("bucket"), "u", [])),
+            ("abort_multipart_upload", (S3Path("bucket"), "u")),
+        ],
+    )
+    def test_multipart_upload_requires_keys(self, method, args):
+        core, _ = _make_core()
+        with pytest.raises(ValueError, match="has no key"):
+            getattr(core, method)(*args)
+
+    @pytest.mark.parametrize(
+        ("size", "block_size", "ranges"),
+        [
+            # A single range.
+            (5 * 2**20, 5 * 2**20, [(0, 5 * 2**20)]),
+            # The size is an exact multiple of the block size.
+            (10 * 2**30, 5 * 2**30, [(0, 5 * 2**30), (5 * 2**30, 10 * 2**30)]),
+            # A last range of the minimum part size is kept.
+            (
+                5 * 2**30 + 5 * 2**20,
+                5 * 2**30,
+                [(0, 5 * 2**30), (5 * 2**30, 5 * 2**30 + 5 * 2**20)],
+            ),
+            # GH-951: a last range shorter than the minimum part size is
+            # merged into the previous one,
+            (15 * 2**20 - 1, 5 * 2**20, [(0, 5 * 2**20), (5 * 2**20, 15 * 2**20 - 1)]),
+            # which is split in half if it exceeds the maximum part size.
+            (
+                5 * 2**30 + 2**20,
+                5 * 2**30,
+                [(0, 5 * 2**29 + 2**19), (5 * 2**29 + 2**19, 5 * 2**30 + 2**20)],
+            ),
+        ],
+    )
+    def test_part_ranges(self, size, block_size, ranges):
+        core, _ = _make_core()
+        assert core.part_ranges(size, block_size) == ranges
+
+    @pytest.mark.parametrize(
+        ("size", "num_ranges"),
+        [
+            # The block size splits the object into the maximum number of parts.
+            (10_000 * 5 * 2**20, 10_000),
+            # GH-953: a larger object is split by a larger size instead of
+            # into more parts than the maximum,
+            (10_000 * 5 * 2**20 + 1, 9_999),
+            (50 * 2**30, 10_000),
+            # including the maximum object size.
+            (5 * 2**40, 10_000),
+        ],
+    )
+    def test_part_ranges_max_parts(self, size, num_ranges):
+        core, _ = _make_core()
+        ranges = core.part_ranges(size, 5 * 2**20)
+
+        assert len(ranges) == num_ranges
+        assert ranges[0][0] == 0
+        assert ranges[-1][1] == size
+        assert all(end == start for (_, end), (start, _) in pairwise(ranges))
+        assert all(
+            core.MULTIPART_UPLOAD_MIN_PART_SIZE
+            <= end - start
+            <= core.MULTIPART_UPLOAD_MAX_PART_SIZE
+            for start, end in ranges
+        )
 
 
 class TestS3DeleteBatch:

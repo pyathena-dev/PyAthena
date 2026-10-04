@@ -161,15 +161,6 @@ class S3FileSystem(AbstractFileSystem):
         stored in S3, but can also be used independently for S3 file operations.
     """
 
-    # https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
-    # The minimum size of a part in a multipart upload is 5MiB.
-    MULTIPART_UPLOAD_MIN_PART_SIZE: int = 5 * 2**20  # 5MiB
-    # https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
-    # The maximum size of a part in a multipart upload is 5GiB.
-    MULTIPART_UPLOAD_MAX_PART_SIZE: int = 5 * 2**30  # 5GiB
-    # https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
-    # The maximum number of parts per multipart upload is 10,000.
-    MULTIPART_UPLOAD_MAX_PARTS: int = 10_000
     DEFAULT_BLOCK_SIZE: int = 5 * 2**20  # 5MiB
     # https://docs.aws.amazon.com/AmazonS3/latest/userguide/acl-overview.html#canned-acl
     OBJECT_ACLS: frozenset[str] = frozenset(
@@ -1734,7 +1725,7 @@ class S3FileSystem(AbstractFileSystem):
             return False
         size1 = info1.get("size", 0)
         try:
-            if size1 <= self.MULTIPART_UPLOAD_MAX_PART_SIZE:
+            if size1 <= self.core.MULTIPART_UPLOAD_MAX_PART_SIZE:
                 self._copy_object(
                     bucket1=source.bucket,
                     key1=source.key,
@@ -1829,21 +1820,22 @@ class S3FileSystem(AbstractFileSystem):
                 directive has an invalid value.
         """
         max_workers = max_workers if max_workers else self.max_workers
-        block_size = block_size if block_size else self.MULTIPART_UPLOAD_MAX_PART_SIZE
+        block_size = block_size if block_size else self.core.MULTIPART_UPLOAD_MAX_PART_SIZE
         if (
-            block_size < self.MULTIPART_UPLOAD_MIN_PART_SIZE
-            or block_size > self.MULTIPART_UPLOAD_MAX_PART_SIZE
+            block_size < self.core.MULTIPART_UPLOAD_MIN_PART_SIZE
+            or block_size > self.core.MULTIPART_UPLOAD_MAX_PART_SIZE
         ):
             raise ValueError(
                 "Block size must be between "
-                f"5 MiB ({self.MULTIPART_UPLOAD_MIN_PART_SIZE} bytes) and "
-                f"5 GiB ({self.MULTIPART_UPLOAD_MAX_PART_SIZE} bytes), inclusive: {block_size}."
+                f"5 MiB ({self.core.MULTIPART_UPLOAD_MIN_PART_SIZE} bytes) and "
+                f"5 GiB ({self.core.MULTIPART_UPLOAD_MAX_PART_SIZE} bytes), "
+                f"inclusive: {block_size}."
             )
 
         create_kwargs, version_id1, head_size = self._get_multipart_copy_kwargs(
             bucket1, key1, version_id1, kwargs
         )
-        if head_size is not None and head_size <= self.MULTIPART_UPLOAD_MAX_PART_SIZE:
+        if head_size is not None and head_size <= self.core.MULTIPART_UPLOAD_MAX_PART_SIZE:
             # The size that the caller found, which may come from a cached
             # listing, was larger than the copied version, which fits in a
             # single CopyObject request.
@@ -1857,13 +1849,9 @@ class S3FileSystem(AbstractFileSystem):
             )
             return
         # The size of the copied version, not the one that the caller found.
-        ranges = self._get_copy_ranges(size1 if head_size is None else head_size, block_size)
-        copy_source = {
-            "Bucket": bucket1,
-            "Key": key1,
-        }
-        if version_id1:
-            copy_source.update({"VersionId": version_id1})
+        ranges = self.core.part_ranges(size1 if head_size is None else head_size, block_size)
+        source = S3Path(bucket1, key1, version_id1)
+        destination = S3Path(bucket2, key2)
         # The annotations are listed before anything is written, so that a
         # missing permission fails first.
         annotations = (
@@ -1871,21 +1859,16 @@ class S3FileSystem(AbstractFileSystem):
             if self._copies_annotations(bucket1, kwargs)
             else []
         )
-        multipart_upload = self._create_multipart_upload(
-            bucket=bucket2,
-            key=key2,
-            **create_kwargs,
-        )
+        multipart_upload = self.core.create_multipart_upload(destination, **create_kwargs)
         with self._create_executor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(
-                    self._upload_part_copy,
-                    bucket=bucket2,
-                    key=key2,
-                    copy_source=copy_source,
+                    self.core.upload_part_copy,
+                    path=destination,
                     upload_id=cast(str, multipart_upload.upload_id),
                     part_number=i + 1,
-                    copy_source_ranges=range_,
+                    source=source,
+                    range_=range_,
                     **self.core.operation_params("upload_part_copy", kwargs),
                 )
                 for i, range_ in enumerate(ranges)
@@ -2001,7 +1984,7 @@ class S3FileSystem(AbstractFileSystem):
             source.update({"VersionId": version_id})
         if (
             head.content_length is not None
-            and head.content_length <= self.MULTIPART_UPLOAD_MAX_PART_SIZE
+            and head.content_length <= self.core.MULTIPART_UPLOAD_MAX_PART_SIZE
         ):
             # Copied with CopyObject instead, which applies the directives.
             return {}, version_id, head.content_length
@@ -2156,40 +2139,6 @@ class S3FileSystem(AbstractFileSystem):
             **{**self.core.operation_params("put_object_annotation", kwargs), **destination},
         )
 
-    def _get_copy_ranges(self, size: int, block_size: int) -> list[tuple[int, int]]:
-        """Split an object into the source ranges of a multipart copy.
-
-        The object is split into ranges of ``block_size`` bytes, whatever the
-        number of workers, or of a larger size that splits it into at most
-        ``MULTIPART_UPLOAD_MAX_PARTS`` ranges. A last range shorter than
-        ``MULTIPART_UPLOAD_MIN_PART_SIZE`` is merged into the previous one,
-        which is split in half if the result exceeds
-        ``MULTIPART_UPLOAD_MAX_PART_SIZE``. Every range is then within the
-        S3 part size limits, including the last one unless the whole object
-        is smaller than the minimum part size, so that more parts can follow
-        the copied ones, as in an append.
-
-        Args:
-            size: The size of the source object in bytes.
-            block_size: The size in bytes to split the object by, between
-                ``MULTIPART_UPLOAD_MIN_PART_SIZE`` and
-                ``MULTIPART_UPLOAD_MAX_PART_SIZE``. It is raised to
-                ``size`` divided by ``MULTIPART_UPLOAD_MAX_PARTS``, rounded
-                up, if smaller. The range that a short last range is merged
-                into can be longer, up to ``MULTIPART_UPLOAD_MAX_PART_SIZE``.
-
-        Returns:
-            The ``(start, end)`` byte ranges, with an exclusive end, that
-            cover the whole object in order.
-        """
-        block_size = max(block_size, math.ceil(size / self.MULTIPART_UPLOAD_MAX_PARTS))
-        starts = list(range(0, size, block_size))
-        if len(starts) > 1 and size - starts[-1] < self.MULTIPART_UPLOAD_MIN_PART_SIZE:
-            starts.pop()
-            if size - starts[-1] > self.MULTIPART_UPLOAD_MAX_PART_SIZE:
-                starts.append(starts[-1] + (size - starts[-1]) // 2)
-        return list(zip(starts, [*starts[1:], size], strict=True))
-
     def _check_multipart_upload_size(self, path: str, size: int, block_size: int) -> None:
         """Check that data fits in a multipart upload before uploading it.
 
@@ -2200,16 +2149,16 @@ class S3FileSystem(AbstractFileSystem):
 
         Raises:
             ValueError: If the data takes more than
-                ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
+                ``S3Core.MULTIPART_UPLOAD_MAX_PARTS`` blocks.
         """
-        if size > block_size * self.MULTIPART_UPLOAD_MAX_PARTS:
+        if size > block_size * self.core.MULTIPART_UPLOAD_MAX_PARTS:
             min_block_size = max(
-                math.ceil(size / self.MULTIPART_UPLOAD_MAX_PARTS),
-                self.MULTIPART_UPLOAD_MIN_PART_SIZE,
+                math.ceil(size / self.core.MULTIPART_UPLOAD_MAX_PARTS),
+                self.core.MULTIPART_UPLOAD_MIN_PART_SIZE,
             )
             raise ValueError(
                 f"Cannot upload {size} bytes to {path} in "
-                f"{self.MULTIPART_UPLOAD_MAX_PARTS} parts with a block size of "
+                f"{self.core.MULTIPART_UPLOAD_MAX_PARTS} parts with a block size of "
                 f"{block_size} bytes. Write the file with a block_size, or a "
                 "default_block_size of the filesystem, of at least "
                 f"{min_block_size} bytes."
@@ -2249,7 +2198,7 @@ class S3FileSystem(AbstractFileSystem):
                 committed.
             ValueError: If the path does not contain a key or specifies a
                 version, if the compression is not supported, or if the data
-                takes more than ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
+                takes more than ``S3Core.MULTIPART_UPLOAD_MAX_PARTS`` blocks.
         """
         # Normalized as open() normalizes it, so that the key written, and
         # the codec that "infer" takes from its extension, do not depend on
@@ -2264,7 +2213,7 @@ class S3FileSystem(AbstractFileSystem):
         # The size in bytes; the length of a memoryview counts its items.
         size = memoryview(value).nbytes
         self._check_multipart_upload_size(path, size, block_size)
-        if self._intrans or size > min(block_size, self.MULTIPART_UPLOAD_MAX_PART_SIZE):
+        if self._intrans or size > min(block_size, self.core.MULTIPART_UPLOAD_MAX_PART_SIZE):
             # Defer to the buffered open() path, which keeps the
             # deferred-commit semantics of fsspec transactions and uploads
             # large data as a parallel multipart upload.
@@ -2330,13 +2279,11 @@ class S3FileSystem(AbstractFileSystem):
         request_kwargs = request_kwargs or {}
         try:
             # The futures are in part-number order.
-            results = [future.result() for future in futures]
-            parts = [{"ETag": r.etag, "PartNumber": r.part_number} for r in results]
-            return self._complete_multipart_upload(
-                bucket=bucket,
-                key=key,
-                upload_id=upload_id,
-                parts=parts,
+            parts = [future.result() for future in futures]
+            return self.core.complete_multipart_upload(
+                S3Path(bucket, key),
+                upload_id,
+                parts,
                 **self.core.operation_params("complete_multipart_upload", request_kwargs),
             )
         except BaseException:
@@ -2365,14 +2312,10 @@ class S3FileSystem(AbstractFileSystem):
                 those that it accepts.
         """
         try:
-            self._call(
-                self._client.abort_multipart_upload,
-                **{
-                    **self.core.operation_params("abort_multipart_upload", request_kwargs),
-                    "Bucket": bucket,
-                    "Key": key,
-                    "UploadId": upload_id,
-                },
+            self.core.abort_multipart_upload(
+                S3Path(bucket, key),
+                upload_id,
+                **self.core.operation_params("abort_multipart_upload", request_kwargs),
             )
         except Exception:
             _logger.exception(
@@ -2495,7 +2438,7 @@ class S3FileSystem(AbstractFileSystem):
                 exists, or an object is created at it before the upload is
                 committed.
             ValueError: If the file takes more than
-                ``MULTIPART_UPLOAD_MAX_PARTS`` blocks.
+                ``S3Core.MULTIPART_UPLOAD_MAX_PARTS`` blocks.
 
         Note:
             Directories are not supported for upload. If lpath is a directory,
@@ -3009,11 +2952,9 @@ class S3FileSystem(AbstractFileSystem):
         with self._create_executor(max_workers=self.max_workers) as executor:
             futures = [
                 executor.submit(
-                    self._call,
-                    self._client.abort_multipart_upload,
-                    Bucket=upload.bucket,
-                    Key=upload.key,
-                    UploadId=upload.upload_id,
+                    self.core.abort_multipart_upload,
+                    S3Path(cast(str, upload.bucket), cast(str, upload.key)),
+                    cast(str, upload.upload_id),
                 )
                 for upload in uploads
             ]
@@ -3351,97 +3292,6 @@ class S3FileSystem(AbstractFileSystem):
         )
         return S3PutObject(response)
 
-    def _create_multipart_upload(self, bucket: str, key: str, **kwargs) -> S3MultipartUpload:
-        request = {
-            "Bucket": bucket,
-            "Key": key,
-        }
-
-        _logger.debug(f"Create multipart upload to s3://{bucket}/{key}.")
-        response = self._call(
-            self._client.create_multipart_upload,
-            # The fields of the request take precedence over inherited
-            # parameters of the same name.
-            **{**kwargs, **request},
-        )
-        return S3MultipartUpload(response)
-
-    def _upload_part_copy(
-        self,
-        bucket: str,
-        key: str,
-        copy_source: str | dict[str, Any],
-        upload_id: str,
-        part_number: int,
-        copy_source_ranges: tuple[int, int] | None = None,
-        **kwargs,
-    ) -> S3MultipartUploadPart:
-        request = {
-            "Bucket": bucket,
-            "Key": key,
-            "CopySource": copy_source,
-            "UploadId": upload_id,
-            "PartNumber": part_number,
-        }
-        if copy_source_ranges:
-            range_ = S3File._format_ranges(copy_source_ranges)
-            request.update({"CopySourceRange": range_})
-        _logger.debug(
-            f"Upload part copy from {copy_source} to s3://{bucket}/{key} as part {part_number}."
-        )
-        response = self._call(
-            self._client.upload_part_copy,
-            # The fields of the request take precedence over inherited
-            # parameters of the same name.
-            **{**kwargs, **request},
-        )
-        return S3MultipartUploadPart(part_number, response)
-
-    def _upload_part(
-        self,
-        bucket: str,
-        key: str,
-        upload_id: str,
-        part_number: int,
-        body: bytes,
-        **kwargs,
-    ) -> S3MultipartUploadPart:
-        request = {
-            "Bucket": bucket,
-            "Key": key,
-            "UploadId": upload_id,
-            "PartNumber": part_number,
-            "Body": body,
-        }
-
-        _logger.debug(f"Upload part of {upload_id} to s3://{bucket}/{key} as part {part_number}.")
-        response = self._call(
-            self._client.upload_part,
-            # The fields of the request take precedence over inherited
-            # parameters of the same name.
-            **{**kwargs, **request},
-        )
-        return S3MultipartUploadPart(part_number, response)
-
-    def _complete_multipart_upload(
-        self, bucket: str, key: str, upload_id: str, parts: list[dict[str, Any]], **kwargs
-    ) -> S3CompleteMultipartUpload:
-        request = {
-            "Bucket": bucket,
-            "Key": key,
-            "UploadId": upload_id,
-            "MultipartUpload": {"Parts": parts},
-        }
-
-        _logger.debug(f"Complete multipart upload {upload_id} to s3://{bucket}/{key}.")
-        response = self._call(
-            self._client.complete_multipart_upload,
-            # The fields of the request take precedence over inherited
-            # parameters of the same name.
-            **{**kwargs, **request},
-        )
-        return S3CompleteMultipartUpload(response)
-
     def _call(self, method: str | Callable[..., Any], **kwargs) -> dict[str, Any]:
         """Send a request with the core (see :meth:`S3Core.call`).
 
@@ -3484,7 +3334,7 @@ class S3File(AbstractBufferedFile):
 
         In read mode, the object is looked up with ``info()`` and the reads
         are made conditional on its ETag (``IfMatch``). In append mode, an
-        existing object smaller than ``MULTIPART_UPLOAD_MIN_PART_SIZE`` is
+        existing object smaller than ``S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE`` is
         read into the write buffer; a larger one is copied with
         ``UploadPartCopy`` as the first parts of a multipart upload, whatever
         the block size. In exclusive-create mode, the object must not exist
@@ -3504,8 +3354,8 @@ class S3File(AbstractBufferedFile):
             executor: The executor for parallel operations. If None, a new
                 ``S3ThreadPoolExecutor`` is created.
             block_size: The block size for reads and writes. Must be between
-                ``MULTIPART_UPLOAD_MIN_PART_SIZE`` and
-                ``MULTIPART_UPLOAD_MAX_PART_SIZE``, inclusive, unless reading.
+                ``S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE`` and
+                ``S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE``, inclusive, unless reading.
             cache_type: The fsspec cache type for reads.
             autocommit: Whether to commit the written data when the file is
                 closed. If False, :meth:`commit` must be called.
@@ -3525,8 +3375,8 @@ class S3File(AbstractBufferedFile):
                 including when the path is a prefix.
             ValueError: If the path has no key, the version IDs do not match,
                 a version is given for writing, or the block size is not
-                between ``MULTIPART_UPLOAD_MIN_PART_SIZE`` and
-                ``MULTIPART_UPLOAD_MAX_PART_SIZE`` for writing.
+                between ``S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE`` and
+                ``S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE`` for writing.
         """
         self.max_workers = max_workers
         # A new dictionary, so that the caller's is not modified.
@@ -3559,14 +3409,16 @@ class S3File(AbstractBufferedFile):
             # so that a reopened (e.g., unpickled) file reads the same version.
             path = f"{path}?versionId={self.version_id}"
         if "r" not in mode and not (
-            fs.MULTIPART_UPLOAD_MIN_PART_SIZE <= block_size <= fs.MULTIPART_UPLOAD_MAX_PART_SIZE
+            fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE
+            <= block_size
+            <= fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE
         ):
             # When writing, every full block is uploaded as a part of a
             # multipart upload.
             raise ValueError(
                 "Block size for writing must be between "
-                f"5 MiB ({fs.MULTIPART_UPLOAD_MIN_PART_SIZE} bytes) and "
-                f"5 GiB ({fs.MULTIPART_UPLOAD_MAX_PART_SIZE} bytes), inclusive: {block_size}."
+                f"5 MiB ({fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE} bytes) and "
+                f"5 GiB ({fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE} bytes), inclusive: {block_size}."
             )
 
         self._details: S3Object | dict[str, Any] = {}
@@ -3603,7 +3455,7 @@ class S3File(AbstractBufferedFile):
                 append_info = fs.info(path, refresh=True, **lookup_kwargs)
             if (
                 append_info is not None
-                and append_info.get("size", 0) < fs.MULTIPART_UPLOAD_MIN_PART_SIZE
+                and append_info.get("size", 0) < fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE
             ):
                 # Too small to be a part of a multipart upload: rewritten
                 # from the buffer. Only the lookup parameters are sent, so
@@ -3732,45 +3584,41 @@ class S3File(AbstractBufferedFile):
             # a multipart upload, whatever the block size.
             return
 
-        self.multipart_upload = self.fs._create_multipart_upload(
-            bucket=self.bucket,
-            key=self.key,
-            **self._get_request_kwargs("create_multipart_upload"),
+        self.multipart_upload = self.fs.core.create_multipart_upload(
+            S3Path(self.bucket, self.key), **self._get_request_kwargs("create_multipart_upload")
         )
         if self.append_block:
-            if self.tell() > self.fs.MULTIPART_UPLOAD_MAX_PART_SIZE:
+            if self.tell() > self.fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE:
                 info = self.fs.info(
                     self.path,
                     version_id=self.version_id,
                     **self.fs._get_lookup_kwargs(self.s3_additional_kwargs),
                 )
-                ranges = self.fs._get_copy_ranges(
+                ranges = self.fs.core.part_ranges(
                     # Set copy source file byte size
                     info.get("size", 0),
-                    self.fs.MULTIPART_UPLOAD_MAX_PART_SIZE,
+                    self.fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE,
                 )
                 for i, range_ in enumerate(ranges):
                     self.multipart_upload_parts.append(
                         self._executor.submit(
-                            self.fs._upload_part_copy,
-                            bucket=self.bucket,
-                            key=self.key,
-                            copy_source=self.path,
+                            self.fs.core.upload_part_copy,
+                            path=S3Path(self.bucket, self.key),
                             upload_id=cast(str, self.multipart_upload.upload_id),
                             part_number=i + 1,
-                            copy_source_ranges=range_,
+                            source=S3Path(self.bucket, self.key),
+                            range_=range_,
                             **self._get_request_kwargs("upload_part_copy"),
                         )
                     )
             else:
                 self.multipart_upload_parts.append(
                     self._executor.submit(
-                        self.fs._upload_part_copy,
-                        bucket=self.bucket,
-                        key=self.key,
-                        copy_source=self.path,
+                        self.fs.core.upload_part_copy,
+                        path=S3Path(self.bucket, self.key),
                         upload_id=cast(str, self.multipart_upload.upload_id),
                         part_number=1,
+                        source=S3Path(self.bucket, self.key),
                         **self._get_request_kwargs("upload_part_copy"),
                     )
                 )
@@ -3805,10 +3653,10 @@ class S3File(AbstractBufferedFile):
             # ahead one block and merge a short last block into this one.
             next_data = buffer.read(self.blocksize)
             next_data_size = len(next_data)
-            if 0 < next_data_size < self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE:
+            if 0 < next_data_size < self.fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE:
                 upload_data = data + next_data
                 upload_data_size = len(upload_data)
-                if upload_data_size < self.fs.MULTIPART_UPLOAD_MAX_PART_SIZE:
+                if upload_data_size < self.fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE:
                     uploads = [upload_data]
                 else:
                     split_size = upload_data_size // 2
@@ -3818,22 +3666,21 @@ class S3File(AbstractBufferedFile):
                 uploads = [data]
 
             for upload in uploads:
-                if part_number >= self.fs.MULTIPART_UPLOAD_MAX_PARTS:
+                if part_number >= self.fs.core.MULTIPART_UPLOAD_MAX_PARTS:
                     self._close_without_commit()
                     raise ValueError(
-                        f"Cannot upload more than {self.fs.MULTIPART_UPLOAD_MAX_PARTS} "
+                        f"Cannot upload more than {self.fs.core.MULTIPART_UPLOAD_MAX_PARTS} "
                         f"parts to s3://{self.bucket}/{self.key} with a block size of "
                         f"{self.blocksize} bytes. Write the file with a block_size, or "
                         "a default_block_size of the filesystem, large enough for it to "
-                        f"fit in {self.fs.MULTIPART_UPLOAD_MAX_PARTS} parts, including "
+                        f"fit in {self.fs.core.MULTIPART_UPLOAD_MAX_PARTS} parts, including "
                         "the parts copied from the existing object in an append."
                     )
                 part_number += 1
                 self.multipart_upload_parts.append(
                     self._executor.submit(
-                        self.fs._upload_part,
-                        bucket=self.bucket,
-                        key=self.key,
+                        self.fs.core.upload_part,
+                        path=S3Path(self.bucket, self.key),
                         upload_id=cast(str, self.multipart_upload.upload_id),
                         part_number=part_number,
                         body=upload,
@@ -3923,14 +3770,10 @@ class S3File(AbstractBufferedFile):
             # be stored after the abort, so wait for the parts that could not
             # be cancelled first.
             wait([f for f in self.multipart_upload_parts if not f.cancel()])
-            self.fs._call(
-                "abort_multipart_upload",
-                **{
-                    **self._get_request_kwargs("abort_multipart_upload"),
-                    "Bucket": self.bucket,
-                    "Key": self.key,
-                    "UploadId": self.multipart_upload.upload_id,
-                },
+            self.fs.core.abort_multipart_upload(
+                S3Path(self.bucket, self.key),
+                cast(str, self.multipart_upload.upload_id),
+                **self._get_request_kwargs("abort_multipart_upload"),
             )
 
         self.multipart_upload = None

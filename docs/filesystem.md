@@ -280,10 +280,12 @@ directories below the bucket level) and is always a no-op.
 ## Typed S3 operations
 
 `S3FileSystem.core` is an `S3Core`, the typed operations that the filesystem sends
-its listing, lookup and delete requests with. It can also be built on a boto3 S3
-client. Each operation sends one request (one per page for the iterators) with the
-retry policy, raises `FileNotFoundError` for a missing bucket, or for a missing object
-or version that it reads, and caches nothing.
+its listing, lookup, delete and multipart upload requests with. It can also be built
+on a boto3 S3 client. Each operation sends one request (one per page for the
+iterators) with the retry policy, raises `FileNotFoundError` for a missing bucket, or
+for a missing object or version that it reads, and caches nothing. Requests sent
+through `fs.core` do not invalidate the filesystem's cache: call
+`fs.invalidate_cache()` after a change, or make it through the filesystem.
 
 ```python
 import boto3
@@ -306,8 +308,7 @@ for page in core.list_objects("YOUR_S3_BUCKET", prefix="path/to/", delimiter="/"
 DeleteObjects request accepts. `S3DeleteBatch.from_paths()` groups paths into batches
 of up to 1,000 objects per bucket. The objects that S3 could not delete are in the
 `errors` of the returned `S3DeleteResult`, not raised; as in S3, deleting a key that
-does not exist is not an error. Requests sent through `fs.core` do not invalidate the
-filesystem's cache: call `fs.invalidate_cache()` after them, or delete with `fs.rm()`.
+does not exist is not an error.
 
 ```python
 from pyathena.filesystem.s3_core import S3DeleteBatch
@@ -321,6 +322,13 @@ for batch in S3DeleteBatch.from_paths(paths):
     for error in result.errors:
         print(error)  # path (code: message)
 ```
+
+`create_multipart_upload()`, `upload_part()`, `upload_part_copy()`,
+`complete_multipart_upload()` and `abort_multipart_upload()` send the requests of a
+multipart upload. `part_ranges()` splits an object into the byte ranges of the parts
+that copy it, by the part limits `MULTIPART_UPLOAD_MIN_PART_SIZE` (5 MiB),
+`MULTIPART_UPLOAD_MAX_PART_SIZE` (5 GiB) and `MULTIPART_UPLOAD_MAX_PARTS` (10,000) of
+`S3Core`.
 
 ## Async filesystem
 
