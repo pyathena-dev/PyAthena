@@ -201,6 +201,10 @@ def _pyarrow_read_csv_kwargs(types, tab_separated=False, **kwargs):
             ),
         ),
         (
+            '"x","d"\n"1","2024-01-01"\n,\n',
+            _pyarrow_read_csv_kwargs({"x": "integer", "d": "date"}, dtype={"x": None}),
+        ),
+        (
             '"x","x","d"\n"1","2","2024-01-01"\n,,\n',
             _pyarrow_read_csv_kwargs({"x": "integer", "d": "date"}),
         ),
@@ -214,6 +218,7 @@ def _pyarrow_read_csv_kwargs(types, tab_separated=False, **kwargs):
         "dtype",
         "parse_dates",
         "dtype_of_date_column",
+        "dtype_none",
         "duplicate_names",
         "tab_separated",
     ],

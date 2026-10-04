@@ -1069,6 +1069,8 @@ class TestPandasCursor:
             (False, ("",), {"storage_options": None}, False),
             (False, ("",), {"on_bad_lines": "skip"}, False),
             (False, ("",), {"dtype": "str"}, False),
+            (False, ("",), {"parse_dates": "d"}, False),
+            (False, ("",), {"parse_dates": ("d",)}, False),
         ],
         ids=[
             "default",
@@ -1079,6 +1081,8 @@ class TestPandasCursor:
             "storage_options",
             "on_bad_lines",
             "single_dtype",
+            "parse_dates_string",
+            "parse_dates_tuple",
         ],
     )
     def test_reads_csv_with_pyarrow(self, keep_default_na, na_values, kwargs, expected):

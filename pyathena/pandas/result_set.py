@@ -103,7 +103,11 @@ def _read_csv_with_pyarrow(source: str | IOBase, read_csv_kwargs: dict[str, Any]
         # Integer columns without a dtype entry get NumPy integer types.
         if column not in dtype and df[column].dtype in integer_dtypes.values():
             dtype[column] = df[column].dtype.numpy_dtype
-    dtype = {column: value for column, value in dtype.items() if column in df.columns}
+    dtype = {
+        column: pd.api.types.pandas_dtype(value)
+        for column, value in dtype.items()
+        if column in df.columns
+    }
     df = df.astype(dtype)
     if not pd.get_option("future.infer_string"):
         # Without the string dtype, pandas returns strings, and the string
@@ -120,8 +124,7 @@ def _read_csv_with_pyarrow(source: str | IOBase, read_csv_kwargs: dict[str, Any]
                     index,
                     values.astype(pd.CategoricalDtype(categories, ordered=values.dtype.ordered)),
                 )
-    parse_dates = read_csv_kwargs["parse_dates"]
-    for column in parse_dates if isinstance(parse_dates, list) else []:
+    for column in read_csv_kwargs["parse_dates"]:
         if isinstance(column, int) and column not in df.columns:
             column = df.columns[column]
         if df[column].dtype.kind in "Mm":
@@ -713,7 +716,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         """Whether ``_read_csv_with_pyarrow()`` reads the CSV result for the PyArrow engine.
 
         It reproduces ``pandas.read_csv(engine="pyarrow")`` for PyAthena's default NA
-        values and for the ``dtype`` mapping and ``parse_dates`` options given to
+        values and for ``dtype`` as a mapping and ``parse_dates`` as a list given to
         ``execute()``. With other options, pandas reads the file.
 
         Returns:
@@ -725,6 +728,7 @@ class AthenaPandasResultSet(AthenaResultSet):
             and list(self._na_values) == [""]
             and self._kwargs.keys() <= self._PYARROW_READ_CSV_OPTIONS
             and isinstance(self._kwargs.get("dtype", {}), dict)
+            and isinstance(self._kwargs.get("parse_dates", []), list)
         )
 
     def _get_csv_read_options(self, csv_engine: str, chunksize: int | None) -> dict[str, Any]:
