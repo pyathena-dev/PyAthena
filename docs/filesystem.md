@@ -328,6 +328,59 @@ for batch in S3DeleteBatch.from_paths(paths):
         print(error)  # path (code: message)
 ```
 
+### Multipart writer
+
+`S3MultipartWriter` provides synchronous multipart requests and part planning without fsspec.
+It is the writer used by `S3File`; applications can also construct it on an `S3Core`.
+The constructor validates the destination and block size without sending a request.
+The caller owns the buffer and executor, collects part results in number order, and waits for running requests before completing or aborting.
+Serialize initiation and finalization; part requests can run in parallel after initiation.
+
+```python
+from io import BytesIO
+
+from pyathena.filesystem.s3_writer import S3MultipartWriter
+
+writer = S3MultipartWriter(
+    core,
+    S3Path("YOUR_S3_BUCKET", "path/to/object"),
+    block_size=5 * 2**20,
+    request_kwargs={"ChecksumAlgorithm": "SHA256"},
+)
+writer.initiate()
+try:
+    parts = [
+        writer.upload_part(number, body)
+        for number, body in writer.iter_parts(BytesIO(b"your data"))
+    ]
+    result = writer.complete(parts)
+except BaseException:
+    writer.abort()
+    raise
+```
+
+`iter_parts()` consumes a blocking binary stream from its current position and produces numbered part bodies without sending requests.
+It merges a short tail into the preceding block and splits the result if it reaches the maximum part size.
+A stream shorter than the minimum part size must be the final part.
+`iter_copy_parts(size)` produces numbered source ranges for copying an existing object before appending data.
+A source smaller than the minimum part size must be the final part; `S3File` reads a small existing object into its buffer when appending.
+Both planners accept `first_part_number` to include previously copied or uploaded parts in the 10,000-part limit.
+`upload_part_copy()` sends a planned range with an exclusive end; `None` sends no range of its own, as with the core primitive.
+
+The writer filters inherited and per-request parameters by operation; per-request parameters take precedence.
+It retains the upload identity after completion and after an abort failure, and clears it only after a successful abort.
+The caller can therefore retry a failed abort.
+The writer does not invalidate the filesystem cache; call `fs.invalidate_cache()` after a direct write.
+
+When an `S3File` wait for multipart creation is interrupted, it waits for any creation that has already started and recovers the successful response before aborting.
+It drops the buffer and closes the file before waiting, so a later close or deferred commit cannot upload the interrupted write.
+It suppresses Ctrl-C during the blocking recovery wait and re-raises the original error when cleanup finishes.
+An additional interruption outside that wait can stop cleanup; once the upload identity is known, `discard()` can retry the abort.
+An abort failure retains the upload identity for `discard()` to retry.
+Cancelling an async buffered write through `asyncio.to_thread` still allows its writer thread to finish.
+
+### Multipart requests
+
 `create_multipart_upload()`, `upload_part()`, `upload_part_copy()`,
 `complete_multipart_upload()` and `abort_multipart_upload()` send the requests of a
 multipart upload. `part_ranges()` sends no request: it splits an object into the byte
