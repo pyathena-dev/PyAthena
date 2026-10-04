@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+from pathlib import Path
+
 import pytest
 
 from pyathena.filesystem.s3_path import S3Path
@@ -99,6 +101,19 @@ class TestS3Path:
     )
     def test_split_version_id(self, path, expected):
         assert S3Path.split_version_id(path) == expected
+
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            ("bucket/key", False),
+            ("bucket/key?versionId=v1", True),
+            ("bucket/what?.txt", False),
+            (Path("bucket/key"), False),
+            (Path("bucket/key?version_id=v1"), True),
+        ],
+    )
+    def test_has_version_id(self, path, expected):
+        assert S3Path.has_version_id(path) is expected
 
     def test_with_version_id(self):
         path = S3Path("bucket", "key", "v1")

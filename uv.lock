@@ -978,7 +978,7 @@ dev = [
 requires-dist = [
     { name = "boto3", specifier = ">=1.43.31" },
     { name = "botocore", specifier = ">=1.43.31" },
-    { name = "fsspec" },
+    { name = "fsspec", specifier = ">=2026.9.0" },
     { name = "pandas", marker = "extra == 'pandas'", specifier = ">=3.0.0" },
     { name = "polars", marker = "extra == 'polars'", specifier = ">=1.39.0" },
     { name = "pyarrow", marker = "extra == 'arrow'", specifier = ">=22.0.0" },

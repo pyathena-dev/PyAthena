@@ -20,14 +20,9 @@ from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.callbacks import _DEFAULT_CALLBACK
 from fsspec.core import get_compression
 from fsspec.implementations.local import LocalFileSystem, make_path_posix
+from fsspec.utils import check_contained
 
-from pyathena.filesystem.s3 import (
-    CompressedBuffer,
-    S3File,
-    S3FileSystem,
-    _check_contained,
-    _has_version_id,
-)
+from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3Executor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import (
     S3Metadata,
@@ -424,7 +419,8 @@ class AioS3FileSystem(AsyncFileSystem):
             batch_size: Number of copies to run at the same time.
             **kwargs: Additional S3 copy parameters passed to ``_cp_file()``.
         """
-        if isinstance(path2, str) and _has_version_id(path1):
+        sources = [path1] if isinstance(path1, (str, os.PathLike)) else path1
+        if isinstance(path2, str) and any(S3Path.has_version_id(p) for p in sources):
             path1, path2 = await asyncio.to_thread(
                 self._sync_fs._copy_paths, path1, path2, recursive=recursive, maxdepth=maxdepth
             )
@@ -461,7 +457,8 @@ class AioS3FileSystem(AsyncFileSystem):
             ValueError: If a source with a version ID is paired, and a
                 destination lies outside ``lpath``.
         """
-        if isinstance(lpath, (str, os.PathLike)) and _has_version_id(rpath):
+        sources = [rpath] if isinstance(rpath, (str, os.PathLike)) else rpath
+        if isinstance(lpath, (str, os.PathLike)) and any(S3Path.has_version_id(p) for p in sources):
             root = make_path_posix(lpath)
             rpath, lpath = await asyncio.to_thread(
                 self._sync_fs._copy_paths,
@@ -471,7 +468,7 @@ class AioS3FileSystem(AsyncFileSystem):
                 maxdepth=maxdepth,
                 isdir=LocalFileSystem().isdir,
             )
-            _check_contained(root, lpath)
+            check_contained(root, lpath)
             if not rpath:
                 return
         await super()._get(
@@ -509,9 +506,6 @@ class AioS3FileSystem(AsyncFileSystem):
         Raises:
             ValueError: If trying to copy to a versioned file or copy buckets.
         """
-        # fsspec < 2026.6.0 leaks the typo'd "onerror" keyword from mv();
-        # see S3FileSystem.cp_file.
-        kwargs.pop("onerror", None)
         # Parameters of the multipart copy, not of the S3 requests.
         block_size = kwargs.pop("block_size", None)
         max_workers = kwargs.pop("max_workers", None)

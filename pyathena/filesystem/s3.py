@@ -31,7 +31,7 @@ from fsspec.compression import compr
 from fsspec.core import get_compression
 from fsspec.implementations.local import LocalFileSystem, make_path_posix, trailing_sep
 from fsspec.spec import AbstractBufferedFile
-from fsspec.utils import isfilelike, other_paths, tokenize
+from fsspec.utils import check_contained, isfilelike, other_paths, tokenize
 
 import pyathena
 from pyathena.connection import Connection
@@ -67,45 +67,6 @@ _LOOKUP_REQUEST_PARAMETERS = frozenset(
 # The second element of the dircache key, ``(path, _LOOKUPS_CACHE_KEY)``, of
 # the lookup results of a path made with lookup request parameters.
 _LOOKUPS_CACHE_KEY = "lookups"
-
-
-def _has_version_id(path: str | os.PathLike[str] | list[str]) -> bool:
-    """Return whether a path, or a path of a list, ends with a version ID query.
-
-    fsspec's ``copy()`` and ``get()`` take ``?`` for a glob character and
-    name the destinations after the sources, so sources with a version ID are
-    paired with their destinations by ``S3FileSystem._copy_paths``.
-
-    Args:
-        path: A path or a list of paths.
-
-    Returns:
-        Whether a path has a version ID query.
-    """
-    paths = [path] if isinstance(path, (str, os.PathLike)) else path
-    return any(S3Path.split_version_id(os.fspath(p))[1] for p in paths)
-
-
-def _check_contained(root: str, paths: list[str]) -> None:
-    """Raise if a local destination lies outside the destination root.
-
-    The destinations are named after the source keys, whose ``..`` segments
-    would otherwise place a download above the root, as fsspec's ``get()``
-    checks for the destinations that it names.
-
-    Args:
-        root: The local destination root.
-        paths: The local destinations named below it.
-
-    Raises:
-        ValueError: If a destination lies outside the root.
-    """
-    root_key = os.path.normcase(os.path.abspath(root))
-    prefix = root_key.rstrip(os.sep) + os.sep
-    for path in paths:
-        key = os.path.normcase(os.path.abspath(path))
-        if key != root_key and not key.startswith(prefix):
-            raise ValueError(f"The destination {path!r} is outside {root!r}.")
 
 
 class CompressedBuffer(BytesIO):
@@ -1764,7 +1725,7 @@ class S3FileSystem(AbstractFileSystem):
             paths1 = [p for p in paths1 if not (trailing_sep(p) or self.isdir(p))]
             if not paths1:
                 return [], []
-        glob = isinstance(path1, str) and has_magic(path1) and not _has_version_id(path1)
+        glob = isinstance(path1, str) and has_magic(path1) and not S3Path.has_version_id(path1)
         # The destination is looked up only when it decides the mapping.
         exists = source_is_str and (
             (glob and len(paths1) == 1)
@@ -1796,7 +1757,8 @@ class S3FileSystem(AbstractFileSystem):
                 otherwise.
             **kwargs: Additional S3 copy parameters passed to ``cp_file()``.
         """
-        if isinstance(path2, str) and _has_version_id(path1):
+        sources = [path1] if isinstance(path1, (str, os.PathLike)) else path1
+        if isinstance(path2, str) and any(S3Path.has_version_id(p) for p in sources):
             path1, path2 = self._copy_paths(path1, path2, recursive=recursive, maxdepth=maxdepth)
             if not path1:
                 return
@@ -1827,12 +1789,13 @@ class S3FileSystem(AbstractFileSystem):
             ValueError: If a source with a version ID is paired, and a
                 destination lies outside ``lpath``.
         """
-        if isinstance(lpath, (str, os.PathLike)) and _has_version_id(rpath):
+        sources = [rpath] if isinstance(rpath, (str, os.PathLike)) else rpath
+        if isinstance(lpath, (str, os.PathLike)) and any(S3Path.has_version_id(p) for p in sources):
             root = make_path_posix(lpath)
             rpath, lpath = self._copy_paths(
                 rpath, root, recursive=recursive, maxdepth=maxdepth, isdir=LocalFileSystem().isdir
             )
-            _check_contained(root, lpath)
+            check_contained(root, lpath)
             if not rpath:
                 return
         super().get(
@@ -1906,13 +1869,6 @@ class S3FileSystem(AbstractFileSystem):
         Raises:
             ValueError: If trying to copy to a versioned file or copy buckets.
         """
-        # fsspec < 2026.6.0: AbstractFileSystem.mv() passed the typo'd
-        # "onerror" keyword (instead of "on_error", which copy() consumes),
-        # so it leaked through copy(**kwargs) into cp_file and must not
-        # reach the S3 API. Remove this once the fsspec requirement is
-        # >= 2026.6.0, where mv() passes on_error correctly.
-        # https://github.com/fsspec/filesystem_spec/commit/346a589fef9308550ffa3d0d510f2db67281bb05
-        kwargs.pop("onerror", None)
         # Parameters of the multipart copy, not of the S3 requests.
         block_size = kwargs.pop("block_size", None)
         max_workers = kwargs.pop("max_workers", None)

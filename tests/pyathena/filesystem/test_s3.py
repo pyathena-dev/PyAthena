@@ -34,7 +34,7 @@ from fsspec.implementations.memory import MemoryFileSystem
 
 import pyathena
 from pyathena.filesystem import register_s3_filesystem
-from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem, _has_version_id
+from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
 from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import S3Object, S3ObjectType, S3StorageClass
@@ -1813,19 +1813,6 @@ class TestS3FileSystem:
         with pytest.raises(ValueError, match="outside"):
             fs.get(rpath, f"{tmp_path}/d/")
         assert sorted(p.name for p in tmp_path.rglob("*")) == ["d"]
-
-    @pytest.mark.parametrize(
-        ("path", "expected"),
-        [
-            ("bucket/key", False),
-            ("bucket/key?versionId=v1", True),
-            (Path("bucket/key"), False),
-            (Path("bucket/key?versionId=v1"), True),
-            (["bucket/a", Path("bucket/b?versionId=v1")], True),
-        ],
-    )
-    def test_has_version_id(self, path, expected):
-        assert _has_version_id(path) is expected
 
     def test_mv_nothing_within_maxdepth(self):
         # Only directories within maxdepth: nothing is moved, as with copy().

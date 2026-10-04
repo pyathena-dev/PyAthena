@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, replace
 from re import Pattern
@@ -101,6 +102,21 @@ class S3Path:
         if not match:
             return path, None
         return path[: match.start()], match.group("version_id")
+
+    @classmethod
+    def has_version_id(cls, path: str | os.PathLike[str]) -> bool:
+        """Return whether a path string ends with a version ID query.
+
+        Unlike :meth:`parse`, any string is accepted, as with
+        :meth:`split_version_id`.
+
+        Args:
+            path: The path.
+
+        Returns:
+            Whether the path ends with a version ID query.
+        """
+        return cls.split_version_id(os.fspath(path))[1] is not None
 
     @property
     def is_bucket(self) -> bool:
