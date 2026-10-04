@@ -11,6 +11,7 @@ from typing import (
 )
 
 from pyathena import OperationalError
+from pyathena.arrow.converter import _to_timestamp
 from pyathena.arrow.util import to_column_info
 from pyathena.converter import Converter, _to_default
 from pyathena.model import AthenaQueryExecution
@@ -19,37 +20,11 @@ from pyathena.util import RetryConfig, override, parse_output_location
 
 if TYPE_CHECKING:
     import polars as pl
-    from pyarrow import ChunkedArray, Table, TimestampType
+    from pyarrow import Table
 
     from pyathena.connection import Connection
 
 _logger = logging.getLogger(__name__)
-
-# The length of timestamp text, such as "2020-01-02 03:04:05.123456", that holds the
-# fraction a timestamp unit can represent.
-_TIMESTAMP_TEXT_LENGTHS: dict[str, int] = {"s": 19, "ms": 23, "us": 26, "ns": 29}
-
-
-def _to_timestamp(column: ChunkedArray, type_: TimestampType) -> ChunkedArray:
-    """Convert timestamp text to a timestamp type, truncating finer fractions.
-
-    Athena writes up to 12 fractional digits, which pyarrow does not parse into a
-    timestamp type whose unit holds fewer.
-
-    Args:
-        column: The timestamp text, with NULL as null or as an empty string.
-        type_: The timestamp type.
-
-    Returns:
-        The timestamps.
-    """
-    import pyarrow as pa
-    import pyarrow.compute as pc
-
-    length = _TIMESTAMP_TEXT_LENGTHS[type_.unit]
-    if (pc.max(pc.utf8_length(column)).as_py() or 0) > length:
-        column = pc.utf8_slice_codeunits(column, 0, length)
-    return pc.if_else(pc.equal(column, ""), pa.scalar(None, pa.string()), column).cast(type_)
 
 
 class AthenaArrowResultSet(AthenaResultSet):

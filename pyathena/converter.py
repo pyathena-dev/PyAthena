@@ -68,6 +68,11 @@ def _to_datetime(varchar_value: str | None) -> datetime | None:
     return _parse_datetime(varchar_value)
 
 
+# The length of Athena timestamp text, such as "2020-01-02 03:04:05.123456", that holds
+# the fraction a time unit can represent. Athena writes up to 12 fractional digits.
+_TIMESTAMP_TEXT_LENGTHS: dict[str, int] = {"s": 19, "ms": 23, "us": 26, "ns": 29}
+
+
 _UTC_OFFSET_PATTERN: re.Pattern[str] = re.compile(r"([+-])(\d{2}):(\d{2})")
 
 
