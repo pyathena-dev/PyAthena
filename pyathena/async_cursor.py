@@ -8,6 +8,7 @@ from concurrent.futures.thread import ThreadPoolExecutor
 from multiprocessing import cpu_count
 from typing import Any, cast
 
+from pyathena._kwargs import validate_kwargs
 from pyathena.common import BaseCursor, CursorIterator
 from pyathena.error import NotSupportedError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
@@ -240,7 +241,7 @@ class AsyncCursor(BaseCursor):
             options: Shared execution options as an
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.
-            **kwargs: Additional execution parameters.
+            **kwargs: Unknown keyword arguments raise TypeError.
 
         Returns:
             Tuple of (query_id, future) where:
@@ -253,6 +254,7 @@ class AsyncCursor(BaseCursor):
             >>> # Do other work while query runs...
             >>> result_set = future.result()  # Wait for completion
         """
+        validate_kwargs(f"{type(self).__name__}.execute", kwargs)
         options = ExecuteOptions.resolve(
             options,
             work_group=work_group,

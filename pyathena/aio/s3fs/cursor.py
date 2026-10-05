@@ -14,6 +14,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from pyathena._kwargs import validate_kwargs
 from pyathena.aio.common import WithAsyncFetch
 from pyathena.common import CursorIterator
 from pyathena.error import OperationalError
@@ -146,13 +147,14 @@ class AioS3FSCursor(WithAsyncFetch):
             options: Shared execution options as an
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.
-            **kwargs: Additional execution parameters.
+            **kwargs: Supported S3FS result-set overrides. Unknown names raise TypeError.
                 ``block_size`` sets the read block size for this query, and
                 ``csv_reader`` overrides the cursor's value.
 
         Returns:
             Self reference for method chaining.
         """
+        validate_kwargs(f"{type(self).__name__}.execute", kwargs, ("block_size", "csv_reader"))
         self._reset_state()
         options = ExecuteOptions.resolve(
             options,

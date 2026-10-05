@@ -13,6 +13,7 @@ import csv
 import logging
 from collections import abc
 from collections.abc import Callable, Iterator
+from importlib import import_module
 from io import BytesIO, StringIO
 from multiprocessing import cpu_count
 from typing import (
@@ -22,6 +23,7 @@ from typing import (
 )
 
 from pyathena import OperationalError
+from pyathena._kwargs import keyword_parameters, validate_kwargs
 from pyathena.converter import Converter
 from pyathena.error import ProgrammingError
 from pyathena.model import AthenaQueryExecution
@@ -37,6 +39,32 @@ if TYPE_CHECKING:
     from pyathena.connection import Connection
 
 _logger = logging.getLogger(__name__)
+
+
+def validate_execute_kwargs(
+    method: str, kwargs: dict[str, Any], unload: bool, chunksize: int | None
+) -> None:
+    """Validate extra execution keyword names before starting a query.
+
+    Args:
+        method: The cursor method name included in an error.
+        kwargs: Extra execution arguments, including result-set overrides.
+        unload: Whether the cursor reads UNLOAD Parquet results.
+        chunksize: The effective chunk size, or None for eager reading.
+
+    Raises:
+        TypeError: If an argument is not supported by the selected reader.
+    """
+    if not kwargs:
+        return
+    polars = import_module("polars")
+    if unload:
+        reader = polars.scan_parquet if chunksize is not None else polars.read_parquet
+    else:
+        reader = polars.scan_csv if chunksize is not None else polars.read_csv
+    allowed = keyword_parameters(reader) - {"source"}
+    allowed |= {"block_size", "cache_type", "max_workers", "chunksize"}
+    validate_kwargs(method, kwargs, allowed)
 
 
 def _identity(x: Any) -> Any:

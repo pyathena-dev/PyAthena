@@ -21,6 +21,7 @@ from boto3.session import Session
 from botocore.config import Config
 
 import pyathena
+from pyathena._kwargs import constructor_keyword_parameters
 from pyathena.common import BaseCursor, CursorIterator, OnPollCallback
 from pyathena.converter import Converter
 from pyathena.cursor import Cursor
@@ -609,7 +610,12 @@ class Connection(Generic[ConnectionCursor]):
             >>> pandas_cursor = connection.cursor(PandasCursor)
             >>> df = pandas_cursor.execute("SELECT * FROM my_table").fetchall()
         """
-        kwargs = {**self.cursor_kwargs, **kwargs}
+        return self._cursor(cursor, **{**self.cursor_kwargs, **kwargs})
+
+    def _cursor(
+        self, cursor: type[FunctionalCursor] | None = None, **kwargs: Any
+    ) -> FunctionalCursor | ConnectionCursor:
+        """Create a cursor from already resolved cursor defaults."""
         _cursor = cursor or self.cursor_class
         converter = kwargs.pop("converter", self._converter)
         if not converter:
@@ -635,6 +641,15 @@ class Connection(Generic[ConnectionCursor]):
             on_poll=kwargs.pop("on_poll", self.on_poll),
             **kwargs,
         )
+
+    def _internal_cursor(self, cursor: type[FunctionalCursor]) -> FunctionalCursor:
+        """Create an API cursor without the default backend's result settings."""
+        backend_options = constructor_keyword_parameters(self.cursor_class) - (
+            constructor_keyword_parameters(cursor)
+        )
+        kwargs = {k: v for k, v in self.cursor_kwargs.items() if k not in backend_options}
+        kwargs["converter"] = cursor.get_default_converter()
+        return cast(FunctionalCursor, self._cursor(cursor, **kwargs))
 
     def close(self) -> None:
         """Close the connection.

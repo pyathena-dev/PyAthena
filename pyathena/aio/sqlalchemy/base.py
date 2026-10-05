@@ -276,6 +276,11 @@ class AsyncAdapt_pyathena_connection(AdaptedConnection):
         raw_cursor = self._connection.cursor(_ASYNC_CURSOR_CLASSES.get(cursor, cursor), **kwargs)
         return AsyncAdapt_pyathena_cursor(raw_cursor)
 
+    def _internal_cursor(self, cursor: Any) -> AsyncAdapt_pyathena_cursor:
+        """Adapt an API cursor with the default backend's result settings excluded."""
+        raw_cursor = self._connection._internal_cursor(_ASYNC_CURSOR_CLASSES.get(cursor, cursor))
+        return AsyncAdapt_pyathena_cursor(raw_cursor)
+
     def close(self) -> None:
         """Close the wrapped connection."""
         self._connection.close()

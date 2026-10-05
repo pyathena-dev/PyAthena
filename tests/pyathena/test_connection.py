@@ -47,8 +47,8 @@ UNCAPPED_CURSORS = [
 
 
 class RecordingCursor(Cursor):
-    def __init__(self, **kwargs: Any) -> None:
-        self.kwargs = kwargs
+    def __init__(self, custom_option: Any = None, **kwargs: Any) -> None:
+        self.kwargs = {**kwargs, "custom_option": custom_option}
         super().__init__(**kwargs)
 
 
@@ -85,7 +85,7 @@ class TestConnection:
             ("kill_on_interrupt", False, True),
             ("retry_config", RetryConfig(attempt=1), RetryConfig(attempt=2)),
             ("schema_name", "configured", "explicit"),
-            ("unload", True, False),
+            ("custom_option", True, False),
         ],
     )
     def test_cursor_arguments_override_cursor_kwargs(self, key, configured, explicit):

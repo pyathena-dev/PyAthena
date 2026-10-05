@@ -6,6 +6,7 @@ import logging
 from collections.abc import Callable
 from typing import Any, cast
 
+from pyathena._kwargs import validate_kwargs
 from pyathena.common import CursorIterator
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
@@ -148,7 +149,7 @@ class Cursor(WithFetch):
             options: Shared execution options as an
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.
-            **kwargs: Additional execution parameters.
+            **kwargs: Unknown keyword arguments raise TypeError.
 
         Returns:
             Self reference for method chaining.
@@ -162,6 +163,7 @@ class Cursor(WithFetch):
             ...     }
             ... )
         """
+        validate_kwargs(f"{type(self).__name__}.execute", kwargs)
         self._reset_state()
         options = ExecuteOptions.resolve(
             options,

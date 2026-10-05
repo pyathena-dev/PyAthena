@@ -17,7 +17,7 @@ from pyathena.pandas.converter import (
     DefaultPandasTypeConverter,
     DefaultPandasUnloadTypeConverter,
 )
-from pyathena.pandas.result_set import AthenaPandasResultSet
+from pyathena.pandas.result_set import AthenaPandasResultSet, validate_execute_kwargs
 from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
@@ -241,6 +241,7 @@ class AsyncPandasCursor(AsyncCursor):
         Returns:
             Tuple of (query_id, future) where future resolves to AthenaPandasResultSet.
         """
+        validate_execute_kwargs(f"{type(self).__name__}.execute", kwargs, self._unload)
         options = ExecuteOptions.resolve(
             options,
             work_group=work_group,

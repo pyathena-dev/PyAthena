@@ -21,7 +21,11 @@ from pyathena.pandas.converter import (
     DefaultPandasTypeConverter,
     DefaultPandasUnloadTypeConverter,
 )
-from pyathena.pandas.result_set import AthenaPandasResultSet, PandasDataFrameIterator
+from pyathena.pandas.result_set import (
+    AthenaPandasResultSet,
+    PandasDataFrameIterator,
+    validate_execute_kwargs,
+)
 from pyathena.util import override
 
 if TYPE_CHECKING:
@@ -176,6 +180,7 @@ class AioPandasCursor(WithAsyncFetch):
         Returns:
             Self reference for method chaining.
         """
+        validate_execute_kwargs(f"{type(self).__name__}.execute", kwargs, self._unload)
         self._reset_state()
         options = ExecuteOptions.resolve(
             options,

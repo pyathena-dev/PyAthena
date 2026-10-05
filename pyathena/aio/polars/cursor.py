@@ -17,7 +17,7 @@ from pyathena.polars.converter import (
     DefaultPolarsTypeConverter,
     DefaultPolarsUnloadTypeConverter,
 )
-from pyathena.polars.result_set import AthenaPolarsResultSet
+from pyathena.polars.result_set import AthenaPolarsResultSet, validate_execute_kwargs
 from pyathena.util import override
 
 if TYPE_CHECKING:
@@ -160,6 +160,12 @@ class AioPolarsCursor(WithAsyncFetch):
         Returns:
             Self reference for method chaining.
         """
+        validate_execute_kwargs(
+            f"{type(self).__name__}.execute",
+            kwargs,
+            self._unload,
+            kwargs.get("chunksize", self._chunksize),
+        )
         self._reset_state()
         options = ExecuteOptions.resolve(
             options,

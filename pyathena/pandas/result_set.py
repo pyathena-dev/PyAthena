@@ -8,6 +8,7 @@ from collections import abc
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack
 from functools import partial
+from importlib import import_module
 from io import BufferedReader, BytesIO, IOBase, StringIO, TextIOWrapper
 from multiprocessing import cpu_count
 from typing import (
@@ -19,6 +20,7 @@ from typing import (
 from fsspec import open as filesystem_open
 
 from pyathena import OperationalError
+from pyathena._kwargs import keyword_parameters, validate_kwargs
 from pyathena.converter import Converter
 from pyathena.error import ProgrammingError
 from pyathena.model import AthenaQueryExecution
@@ -33,6 +35,37 @@ if TYPE_CHECKING:
     from pyathena.connection import Connection
 
 _logger = logging.getLogger(__name__)
+
+
+def validate_execute_kwargs(method: str, kwargs: dict[str, Any], unload: bool) -> None:
+    """Validate extra execution keyword names before starting a query.
+
+    Args:
+        method: The cursor method name included in an error.
+        kwargs: Extra execution arguments, including result-set overrides.
+        unload: Whether the cursor reads UNLOAD Parquet results.
+
+    Raises:
+        TypeError: If an argument is not supported by the selected reader.
+    """
+    if not kwargs:
+        return
+    pandas = import_module("pandas")
+    if unload:
+        parquet = import_module("pyarrow.parquet")
+        allowed = keyword_parameters(pandas.read_parquet) | keyword_parameters(parquet.read_table)
+    else:
+        allowed = keyword_parameters(pandas.read_csv)
+    allowed -= {"filepath_or_buffer", "path", "source"}
+    allowed |= {
+        "engine",
+        "chunksize",
+        "block_size",
+        "cache_type",
+        "max_workers",
+        "auto_optimize_chunksize",
+    }
+    validate_kwargs(method, kwargs, allowed)
 
 
 def _convert_binary_csv(converter: Callable[[str | None], Any], value: str) -> Any:

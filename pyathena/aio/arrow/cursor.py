@@ -7,6 +7,7 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
+from pyathena._kwargs import validate_kwargs
 from pyathena.aio.common import WithAsyncFetch
 from pyathena.arrow.converter import (
     DefaultArrowTypeConverter,
@@ -143,13 +144,19 @@ class AioArrowCursor(WithAsyncFetch):
             options: Shared execution options as an
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.
-            **kwargs: Additional execution parameters.
+            **kwargs: Result-set overrides: ``block_size``, ``connect_timeout``,
+                and ``request_timeout``. Unknown names raise TypeError.
                 ``block_size`` sets the read block size for this query, and
                 ``connect_timeout`` and ``request_timeout`` override the cursor's values.
 
         Returns:
             Self reference for method chaining.
         """
+        validate_kwargs(
+            f"{type(self).__name__}.execute",
+            kwargs,
+            ("block_size", "connect_timeout", "request_timeout"),
+        )
         self._reset_state()
         options = ExecuteOptions.resolve(
             options,

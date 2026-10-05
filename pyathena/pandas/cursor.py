@@ -19,7 +19,11 @@ from pyathena.pandas.converter import (
     DefaultPandasTypeConverter,
     DefaultPandasUnloadTypeConverter,
 )
-from pyathena.pandas.result_set import AthenaPandasResultSet, PandasDataFrameIterator
+from pyathena.pandas.result_set import (
+    AthenaPandasResultSet,
+    PandasDataFrameIterator,
+    validate_execute_kwargs,
+)
 from pyathena.result_set import WithFetch
 from pyathena.util import override
 
@@ -207,6 +211,7 @@ class PandasCursor(WithFetch):
             ...                {"year": 2023})
             >>> df = cursor.as_pandas()  # Returns pandas DataFrame
         """
+        validate_execute_kwargs(f"{type(self).__name__}.execute", kwargs, self._unload)
         self._reset_state()
         options = ExecuteOptions.resolve(
             options,

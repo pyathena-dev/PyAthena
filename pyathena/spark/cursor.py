@@ -13,6 +13,7 @@ import logging
 from typing import Any, cast
 
 from pyathena import OperationalError, ProgrammingError
+from pyathena._kwargs import validate_kwargs
 from pyathena.model import AthenaCalculationExecution, AthenaCalculationExecutionStatus
 from pyathena.spark.common import SparkBaseCursor, WithCalculationExecution
 from pyathena.util import override
@@ -110,6 +111,7 @@ class SparkCursor(SparkBaseCursor, WithCalculationExecution):
         work_group: str | None = None,
         **kwargs,
     ) -> SparkCursor:
+        validate_kwargs(f"{type(self).__name__}.execute", kwargs)
         # A failure below must not leave the previous calculation on the cursor.
         self._calculation_id = None
         self._calculation_execution = None

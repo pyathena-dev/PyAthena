@@ -211,7 +211,6 @@ class BaseCursor(metaclass=ABCMeta):
         result_reuse_minutes: int,
         on_start_query_execution: Callable[[str], None] | None = None,
         on_poll: OnPollCallback | None = None,
-        **kwargs,
     ) -> None:
         """Initialize the cursor with the settings it uses to run queries.
 
@@ -235,7 +234,6 @@ class BaseCursor(metaclass=ABCMeta):
                 waits for the query, by cursors whose ``execute()`` supports it.
             on_poll: Callback invoked once per poll iteration with the current
                 execution object.
-            **kwargs: Ignored.
         """
         super().__init__()
         self._connection = connection

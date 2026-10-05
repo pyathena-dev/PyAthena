@@ -14,6 +14,7 @@ import logging
 import uuid
 from typing import Any, cast
 
+from pyathena._kwargs import validate_kwargs
 from pyathena.aio.util import async_retry_api_call
 from pyathena.error import DatabaseError, NotSupportedError, OperationalError, ProgrammingError
 from pyathena.model import (
@@ -352,11 +353,12 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
             description: Calculation description.
             client_request_token: Idempotency token.
             work_group: Unused, kept for API compatibility.
-            **kwargs: Additional parameters.
+            **kwargs: Unknown keyword arguments raise TypeError.
 
         Returns:
             Self reference for method chaining.
         """
+        validate_kwargs(f"{type(self).__name__}.execute", kwargs)
         # A failure below must not leave the previous calculation on the cursor.
         self._calculation_id = None
         self._calculation_execution = None
