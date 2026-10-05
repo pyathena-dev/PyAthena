@@ -179,8 +179,10 @@ class Adapter:
     def cursor(self, connection: Any) -> Any:
         case = self.case
         kwargs: dict[str, Any] = {"arraysize": case.arraysize}
-        if case.api == "thread" or case.family in {"pandas", "polars"}:
+        if case.api == "thread":
             kwargs["max_workers"] = self.settings.executor_workers
+        if case.family in {"pandas", "polars"}:
+            kwargs["s3_max_workers"] = self.settings.executor_workers
         if case.family in {"pandas", "polars", "arrow"}:
             kwargs["unload"] = case.transport == "unload"
         if case.family in {"pandas", "polars"}:
@@ -251,14 +253,8 @@ async def measure_query(adapter: Adapter, cursor: Any, sql: str, expected: int) 
             count = consume(result, case)
             query_id = None  # The botocore observer captures IDs even for iterators.
         elif case.api == "thread":
-            # AsyncPandasCursor forwards result-reader options through execute().
-            options = (
-                {"max_workers": adapter.settings.executor_workers}
-                if case.family == "pandas"
-                else {}
-            )
             query_id, future = await asyncio.to_thread(
-                cursor.execute, sql, cache_size=0, result_reuse_enable=False, **options
+                cursor.execute, sql, cache_size=0, result_reuse_enable=False
             )
             result = await asyncio.wrap_future(future)
             ready = time.perf_counter()

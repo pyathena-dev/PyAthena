@@ -129,13 +129,20 @@ class TestAdapter:
         session = boto3.Session(
             aws_access_key_id="testing", aws_secret_access_key="testing", region_name="us-west-2"
         )
-        for case in matrix(Settings(), "single", "flat"):
+        settings = Settings(executor_workers=3)
+        for case in matrix(settings, "single", "flat"):
             if case.family == "wrangler" or case.unsupported:
                 continue
-            adapter = Adapter(Settings(), case, session, "scratch", "s3://out/", "temp")
+            adapter = Adapter(settings, case, session, "scratch", "s3://out/", "temp")
             with adapter.connection() as connection:
                 cursor = adapter.cursor(connection)
                 assert cursor.arraysize == case.arraysize
+                if case.api == "thread":
+                    assert cursor._executor._max_workers == 3
+                if case.family in {"pandas", "polars"}:
+                    assert cursor._s3_max_workers == 3
+                elif case.family == "arrow":
+                    assert cursor._s3_max_workers is None
                 cursor.close()
 
     @pytest.mark.parametrize("api", ["sync", "thread", "aio"])

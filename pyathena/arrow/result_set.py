@@ -182,12 +182,13 @@ class AthenaArrowResultSet(AthenaResultSet):
                     overrides["connect_timeout"] = self._connect_timeout
                 if self._request_timeout is not None:
                     overrides["read_timeout"] = self._request_timeout
-                client = connection.session.client(
-                    "s3",
-                    region_name=connection.region_name,
-                    config=connection.s3_config.merge(Config(**overrides)),
-                    **connection._s3_client_kwargs,
-                )
+                with connection._s3_client_lock:
+                    client = connection.session.client(
+                        "s3",
+                        region_name=connection.region_name,
+                        config=connection.s3_config.merge(Config(**overrides)),
+                        **connection._s3_client_kwargs,
+                    )
                 self._s3_resources.callback(client.close)
             filesystem = S3FileSystem(
                 connection=connection,

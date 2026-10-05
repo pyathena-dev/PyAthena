@@ -4,6 +4,8 @@
 # See LICENSE or https://opensource.org/licenses/MIT.
 #
 # SPDX-License-Identifier: MIT
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from io import BytesIO
 from unittest.mock import MagicMock, patch
@@ -19,6 +21,7 @@ from fsspec.implementations.memory import MemoryFileSystem
 
 from pyathena.arrow.converter import DefaultArrowTypeConverter
 from pyathena.arrow.result_set import AthenaArrowResultSet
+from pyathena.connection import Connection
 from pyathena.filesystem.s3_executor import S3ThreadPoolExecutor
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet
@@ -201,3 +204,46 @@ class TestAthenaArrowResultSet:
             access_key="dummy", secret_key="dummy", session_token=None, region="us-east-1"
         )
         connection.session.client.assert_not_called()
+
+    def test_s3_workers_serializes_client_creation(self):
+        """Dedicated and shared S3 clients use the same creation lock."""
+        session = MagicMock()
+        connection = Connection(
+            session=session, region_name="us-east-1", s3_staging_dir="s3://bucket/path/"
+        )
+        created = []
+
+        def create_client(*args, **kwargs):
+            assert args == ("s3",)
+            assert connection._s3_client_lock.locked()
+            client = MagicMock()
+            created.append(client)
+            return client
+
+        session.client.side_effect = create_client
+        barrier = threading.Barrier(4)
+
+        def create_result(index):
+            barrier.wait(timeout=5)
+            if index == 0:
+                return connection.s3_client
+            return AthenaArrowResultSet(
+                connection=connection,
+                converter=DefaultArrowTypeConverter(),
+                query_execution=MagicMock(state=AthenaQueryExecution.STATE_FAILED),
+                arraysize=1,
+                retry_config=RetryConfig(),
+                s3_max_workers=2,
+                request_timeout=4.5,
+            )
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(executor.map(create_result, range(4)))
+        assert len(created) == 4
+        shared_client = results[0]
+        for client in created:
+            if client is shared_client:
+                client.close.assert_not_called()
+            else:
+                client.close.assert_called_once_with()
+        assert not connection._s3_client_lock.locked()
