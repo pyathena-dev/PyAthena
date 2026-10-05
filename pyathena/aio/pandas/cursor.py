@@ -180,8 +180,6 @@ class AioPandasCursor(WithAsyncFetch):
         Returns:
             Self reference for method chaining.
         """
-        validate_execute_kwargs(f"{type(self).__name__}.execute", kwargs, self._unload)
-        self._reset_state()
         options = ExecuteOptions.resolve(
             options,
             work_group=work_group,
@@ -195,6 +193,12 @@ class AioPandasCursor(WithAsyncFetch):
             result_set_type_hints=result_set_type_hints,
         )
         operation, unload_location = self._prepare_unload(operation, options.s3_staging_dir)
+        validate_execute_kwargs(
+            f"{type(self).__name__}.execute",
+            kwargs,
+            self._unload and operation.strip().upper().startswith("UNLOAD"),
+        )
+        self._reset_state()
         self.query_id = await self._execute(
             operation,
             parameters=parameters,

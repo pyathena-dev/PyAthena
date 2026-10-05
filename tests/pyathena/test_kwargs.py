@@ -107,10 +107,10 @@ async def _close(cursor):
         cursor.close()
 
 
-async def _execute(cursor, **kwargs):
+async def _execute(cursor, operation="SELECT 1", **kwargs):
     if iscoroutinefunction(cursor.execute):
-        return await cursor.execute("SELECT 1", **kwargs)
-    return cursor.execute("SELECT 1", **kwargs)
+        return await cursor.execute(operation, **kwargs)
+    return cursor.execute(operation, **kwargs)
 
 
 @pytest.mark.parametrize("cursor_class", CURSORS)
@@ -151,6 +151,9 @@ async def test_unknown_execute_keyword_preserves_state(offline_connection, curso
     cursor = cursor_class(**_constructor_kwargs(offline_connection, cursor_class))
     cursor._query_id = "previous"
     cursor._result_set = MagicMock()
+    if isinstance(cursor, SparkBaseCursor):
+        cursor._calculation_id = "previous-calculation"
+        cursor._calculation_execution = MagicMock()
     before = vars(cursor).copy()
     try:
         with pytest.raises(TypeError, match="unexpected keyword argument 'work_gruop'"):
@@ -252,6 +255,53 @@ async def test_polars_selects_effective_chunk_reader(offline_connection, cursor_
 
 
 @pytest.mark.parametrize(
+    ("cursor_class", "options"),
+    [(cls, {"nrows": 10}) for cls in (PandasCursor, AsyncPandasCursor, AioPandasCursor)]
+    + [
+        (cls, {"separator": "\t", "null_values": "NULL"})
+        for cls in (PolarsCursor, AsyncPolarsCursor, AioPolarsCursor)
+    ],
+)
+async def test_unload_non_select_uses_csv_keywords(offline_connection, cursor_class, options):
+    cursor = offline_connection.cursor(cursor_class, unload=True)
+    try:
+        with (
+            patch.object(cursor, "_execute", side_effect=RuntimeError("execution reached")),
+            pytest.raises(RuntimeError, match="execution reached"),
+        ):
+            await _execute(cursor, operation="DESCRIBE t", **options)
+    finally:
+        await _close(cursor)
+
+
+@pytest.mark.parametrize("cursor_class", [PolarsCursor, AsyncPolarsCursor, AioPolarsCursor])
+async def test_polars_chunked_csv_allows_managed_reader_options(offline_connection, cursor_class):
+    cursor = offline_connection.cursor(cursor_class, chunksize=10)
+    try:
+        with (
+            patch.object(cursor, "_execute", side_effect=RuntimeError("execution reached")),
+            pytest.raises(RuntimeError, match="execution reached"),
+        ):
+            await _execute(cursor, columns=["a"], n_threads=1, use_pyarrow=False, batch_size=1024)
+    finally:
+        await _close(cursor)
+
+
+@pytest.mark.parametrize("cursor_class", [PolarsCursor, AsyncPolarsCursor, AioPolarsCursor])
+@pytest.mark.parametrize("unload", [False, True])
+async def test_polars_accepts_reader_aliases(offline_connection, cursor_class, unload):
+    cursor = offline_connection.cursor(cursor_class, unload=unload)
+    try:
+        with (
+            patch.object(cursor, "_execute", side_effect=RuntimeError("execution reached")),
+            pytest.raises(RuntimeError, match="execution reached"),
+        ):
+            await _execute(cursor, row_count_name="row_number", row_count_offset=2)
+    finally:
+        await _close(cursor)
+
+
+@pytest.mark.parametrize(
     "cursor_class",
     [PandasCursor, ArrowCursor, PolarsCursor, AioPandasCursor, AioArrowCursor, AioPolarsCursor],
 )
@@ -269,8 +319,9 @@ async def test_internal_cursor_isolates_backend_defaults(cursor_class):
     )
     adapted = AsyncAdapt_pyathena_connection(MagicMock(), conn) if is_async else conn
     raw_connection = SimpleNamespace(driver_connection=adapted)
-    internal = AthenaDialect._internal_cursor(raw_connection)
+    cursor = None
     try:
+        internal = AthenaDialect._internal_cursor(raw_connection)
         cursor = internal._cursor if is_async else internal
         assert type(cursor) is (AioCursor if is_async else Cursor)
         assert cursor._schema_name == "configured"
@@ -281,7 +332,8 @@ async def test_internal_cursor_isolates_backend_defaults(cursor_class):
         with pytest.raises(TypeError, match="unexpected keyword argument 'unload'"):
             conn.cursor(AioCursor if is_async else Cursor)
     finally:
-        await _close(cursor)
+        if cursor is not None:
+            await _close(cursor)
         conn.close()
 
 

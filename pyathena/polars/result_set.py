@@ -42,7 +42,12 @@ _logger = logging.getLogger(__name__)
 
 
 def validate_execute_kwargs(
-    method: str, kwargs: dict[str, Any], unload: bool, chunksize: int | None
+    method: str,
+    kwargs: dict[str, Any],
+    unload: bool,
+    chunksize: int | None,
+    *,
+    allow_eager_fallback: bool = True,
 ) -> None:
     """Validate extra execution keyword names before starting a query.
 
@@ -51,6 +56,7 @@ def validate_execute_kwargs(
         kwargs: Extra execution arguments, including result-set overrides.
         unload: Whether the cursor reads UNLOAD Parquet results.
         chunksize: The effective chunk size, or None for eager reading.
+        allow_eager_fallback: Include eager CSV options until the result location is known.
 
     Raises:
         TypeError: If an argument is not supported by the selected reader.
@@ -63,6 +69,18 @@ def validate_execute_kwargs(
     else:
         reader = polars.scan_csv if chunksize is not None else polars.read_csv
     allowed = keyword_parameters(reader) - {"source"}
+    if not unload and chunksize is not None and allow_eager_fallback:
+        # Managed query results use read_csv even when chunking was requested.
+        allowed |= keyword_parameters(polars.read_csv) - {"source"}
+    # Polars still accepts these renamed parameters through its reader decorators.
+    for old, new in {
+        "dtypes": "schema_overrides",
+        "row_count_name": "row_index_name",
+        "row_count_offset": "row_index_offset",
+        "missing_utf8_is_empty_string": "empty_string_is_null",
+    }.items():
+        if new in allowed:
+            allowed.add(old)
     allowed |= {"block_size", "cache_type", "max_workers", "chunksize"}
     validate_kwargs(method, kwargs, allowed)
 
@@ -597,6 +615,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """
         import polars as pl
 
+        validate_execute_kwargs("Polars CSV reader", self._kwargs, False, None)
         if not self._is_csv_readable():
             return pl.DataFrame()
 
@@ -794,6 +813,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """
         import polars as pl
 
+        validate_execute_kwargs(
+            "Polars CSV reader", self._kwargs, False, self._chunksize, allow_eager_fallback=False
+        )
         if not self._is_csv_readable():
             return
 

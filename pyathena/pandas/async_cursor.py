@@ -241,7 +241,6 @@ class AsyncPandasCursor(AsyncCursor):
         Returns:
             Tuple of (query_id, future) where future resolves to AthenaPandasResultSet.
         """
-        validate_execute_kwargs(f"{type(self).__name__}.execute", kwargs, self._unload)
         options = ExecuteOptions.resolve(
             options,
             work_group=work_group,
@@ -254,6 +253,11 @@ class AsyncPandasCursor(AsyncCursor):
             result_set_type_hints=result_set_type_hints,
         )
         operation, unload_location = self._prepare_unload(operation, options.s3_staging_dir)
+        validate_execute_kwargs(
+            f"{type(self).__name__}.execute",
+            kwargs,
+            self._unload and operation.strip().upper().startswith("UNLOAD"),
+        )
         query_id = self._execute(
             operation,
             parameters=parameters,

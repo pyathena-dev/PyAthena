@@ -244,12 +244,6 @@ class AsyncPolarsCursor(AsyncCursor):
             >>> result_set = future.result()
             >>> df = result_set.as_polars()  # Returns Polars DataFrame
         """
-        validate_execute_kwargs(
-            f"{type(self).__name__}.execute",
-            kwargs,
-            self._unload,
-            kwargs.get("chunksize", self._chunksize),
-        )
         options = ExecuteOptions.resolve(
             options,
             work_group=work_group,
@@ -262,6 +256,12 @@ class AsyncPolarsCursor(AsyncCursor):
             result_set_type_hints=result_set_type_hints,
         )
         operation, unload_location = self._prepare_unload(operation, options.s3_staging_dir)
+        validate_execute_kwargs(
+            f"{type(self).__name__}.execute",
+            kwargs,
+            self._unload and operation.strip().upper().startswith("UNLOAD"),
+            kwargs.get("chunksize", self._chunksize),
+        )
         query_id = self._execute(
             operation,
             parameters=parameters,
