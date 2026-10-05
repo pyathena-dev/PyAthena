@@ -299,6 +299,24 @@ directories below the bucket level) and is always a no-op.
 
 ## Typed S3 operations
 
+### Parse an S3 path
+
+Use `S3Path.parse()` to obtain the bucket, key and version ID of a path:
+
+```python
+from pyathena.filesystem.s3_path import S3Path
+
+path = S3Path.parse("s3://bucket/key?versionId=v1")
+print(path.bucket, path.key, path.version_id)
+```
+
+In 4.0, `S3FileSystem.PATTERN_PATH` and the `parse_path()` methods of
+`S3FileSystem` and `AioS3FileSystem` are removed.
+`S3Path.parse()` returns an `S3Path` object; access its attributes instead of
+unpacking the tuple returned by `parse_path()`.
+
+### Send S3 requests
+
 `S3FileSystem.core` is an `S3Core`, the typed operations that the filesystem sends
 its listing, lookup, read, write, delete, multipart upload, copy, tagging, ACL and
 metadata replacement requests with. It can also be built on a boto3 S3 client. Each

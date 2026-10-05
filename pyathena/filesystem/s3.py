@@ -14,7 +14,6 @@ from copy import deepcopy
 from datetime import datetime
 from io import BytesIO
 from multiprocessing import cpu_count
-from re import Pattern
 from typing import Any, BinaryIO, cast
 from urllib.parse import unquote_plus
 
@@ -160,7 +159,6 @@ class S3FileSystem(AbstractFileSystem):
     """
 
     DEFAULT_BLOCK_SIZE: int = 5 * 2**20  # 5MiB
-    PATTERN_PATH: Pattern[str] = S3Path.PATTERN
 
     protocol = ("s3", "s3a")
     _extra_tokenize_attributes = ("default_block_size",)
@@ -312,25 +310,6 @@ class S3FileSystem(AbstractFileSystem):
             config=Config(**config_kwargs),
             **{k: v for k, v in client_kwargs.items() if k in Connection._CLIENT_PASSING_ARGS},
         )
-
-    @staticmethod
-    def parse_path(path: str) -> tuple[str, str | None, str | None]:
-        """Parse an S3 path into its bucket, key and version ID.
-
-        See :meth:`S3Path.parse`, which returns them as an :class:`S3Path`.
-
-        Args:
-            path: The S3 path (e.g., "s3://bucket/key?versionId=...").
-
-        Returns:
-            Tuple of the bucket, the key (None for a bucket path) and the
-            version ID (None if the path has none).
-
-        Raises:
-            ValueError: If the path is not a valid S3 path.
-        """
-        s3_path = S3Path.parse(path)
-        return s3_path.bucket, s3_path.key, s3_path.version_id
 
     @staticmethod
     def _directory_object(bucket: str, key: str | None, version_id: str | None = None) -> S3Object:

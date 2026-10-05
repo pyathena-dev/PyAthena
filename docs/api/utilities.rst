@@ -30,6 +30,10 @@ Utility Functions
 
 .. autofunction:: pyathena.util.strtobool
 
+.. versionchanged:: 4.0
+   ``strtobool`` returns ``True`` or ``False`` instead of ``1`` or ``0``.
+   Call ``int(strtobool(value))`` if an integer result is required.
+
 Common Base Classes
 -------------------
 

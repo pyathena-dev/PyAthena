@@ -27,15 +27,46 @@ def test_parse_output_location():
         parse_output_location("http://foobar")
 
 
-def test_strtobool():
-    yes = ("y", "Y", "yes", "True", "t", "true", "True", "On", "on", "1")
-    no = ("n", "no", "f", "false", "off", "0", "Off", "No", "N")
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("y", True),
+        ("Y", True),
+        ("yes", True),
+        ("YES", True),
+        ("t", True),
+        ("T", True),
+        ("true", True),
+        ("True", True),
+        ("TRUE", True),
+        ("on", True),
+        ("On", True),
+        ("ON", True),
+        ("1", True),
+        ("n", False),
+        ("N", False),
+        ("no", False),
+        ("No", False),
+        ("NO", False),
+        ("f", False),
+        ("F", False),
+        ("false", False),
+        ("False", False),
+        ("FALSE", False),
+        ("off", False),
+        ("Off", False),
+        ("OFF", False),
+        ("0", False),
+    ],
+)
+def test_strtobool(value, expected):
+    assert strtobool(value) is expected
 
-    for y in yes:
-        assert strtobool(y)
 
-    for n in no:
-        assert not strtobool(n)
+@pytest.mark.parametrize("value", ["", "invalid", "2", " true "])
+def test_strtobool_invalid(value):
+    with pytest.raises(ValueError, match="invalid truth value"):
+        strtobool(value)
 
 
 class _WithCodeError(Exception):

@@ -77,24 +77,26 @@ def parse_output_location(output_location: str) -> tuple[str, str]:
     raise DataError("Unknown `output_location` format.")
 
 
-def strtobool(val):
+def strtobool(val: str) -> bool:
     """Convert a string representation of truth to True or False.
 
-    This function replaces the deprecated distutils.util.strtobool method.
-    It converts string representations of boolean values to actual boolean values.
+    This function accepts the same strings as the deprecated
+    distutils.util.strtobool, but returns bool instead of int.
 
     Args:
         val: String representation of a boolean value.
 
     Returns:
-        1 for True values, 0 for False values.
+        True for true values, False for false values.
 
     Raises:
         ValueError: If the input string is not a recognized boolean representation.
 
     Example:
-        >>> strtobool("yes")  # 1
-        >>> strtobool("false")  # 0
+        >>> strtobool("yes")
+        True
+        >>> strtobool("false")
+        False
         >>> strtobool("invalid")  # ValueError
 
     Note:
@@ -107,9 +109,9 @@ def strtobool(val):
     """
     val = val.lower()
     if val in ("y", "yes", "t", "true", "on", "1"):
-        return 1
+        return True
     if val in ("n", "no", "f", "false", "off", "0"):
-        return 0
+        return False
     raise ValueError(f"invalid truth value {val!r}")
 
 

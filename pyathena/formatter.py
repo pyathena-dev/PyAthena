@@ -201,16 +201,6 @@ def _escape_trino(val: str) -> str:
     return f"'{escaped}'"
 
 
-def _escape_presto(val: str) -> str:
-    # Backward-compatible alias. Athena's engine is Trino (engine v3; formerly
-    # Presto in engine v1/v2), and Trino and Presto escape string literals
-    # identically -- a single quote is doubled and a backslash is not an escape
-    # character. `_escape_trino` is the canonical name; `_escape_presto` is kept
-    # so external callers that import it (e.g. dbt-athena) keep working.
-    # Deprecated; candidate for removal in a future major release.
-    return _escape_trino(val)
-
-
 _LEADING_COMMENT_PATTERN = re.compile(
     r"^(?:\s*(?:/\*.*?\*/|--[^\n]*(?:\n|$)))+",
     re.DOTALL,

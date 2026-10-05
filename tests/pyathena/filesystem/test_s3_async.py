@@ -53,103 +53,6 @@ def register_async_filesystem():
 
 @pytest.mark.usefixtures("register_async_filesystem")
 class TestAioS3FileSystem:
-    def test_parse_path(self):
-        actual = AioS3FileSystem.parse_path("s3://bucket")
-        assert actual[0] == "bucket"
-        assert actual[1] is None
-        assert actual[2] is None
-
-        actual = AioS3FileSystem.parse_path("s3://bucket/")
-        assert actual[0] == "bucket"
-        assert actual[1] is None
-        assert actual[2] is None
-
-        actual = AioS3FileSystem.parse_path("s3://bucket/path/to/obj")
-        assert actual[0] == "bucket"
-        assert actual[1] == "path/to/obj"
-        assert actual[2] is None
-
-        actual = AioS3FileSystem.parse_path("s3://bucket/path/to/obj?versionId=12345abcde")
-        assert actual[0] == "bucket"
-        assert actual[1] == "path/to/obj"
-        assert actual[2] == "12345abcde"
-
-        actual = AioS3FileSystem.parse_path("s3a://bucket")
-        assert actual[0] == "bucket"
-        assert actual[1] is None
-        assert actual[2] is None
-
-        actual = AioS3FileSystem.parse_path("s3a://bucket/")
-        assert actual[0] == "bucket"
-        assert actual[1] is None
-        assert actual[2] is None
-
-        actual = AioS3FileSystem.parse_path("s3a://bucket/path/to/obj")
-        assert actual[0] == "bucket"
-        assert actual[1] == "path/to/obj"
-        assert actual[2] is None
-
-        actual = AioS3FileSystem.parse_path("s3a://bucket/path/to/obj?versionId=12345abcde")
-        assert actual[0] == "bucket"
-        assert actual[1] == "path/to/obj"
-        assert actual[2] == "12345abcde"
-
-        actual = AioS3FileSystem.parse_path("bucket")
-        assert actual[0] == "bucket"
-        assert actual[1] is None
-        assert actual[2] is None
-
-        actual = AioS3FileSystem.parse_path("bucket/")
-        assert actual[0] == "bucket"
-        assert actual[1] is None
-        assert actual[2] is None
-
-        actual = AioS3FileSystem.parse_path("bucket/path/to/obj")
-        assert actual[0] == "bucket"
-        assert actual[1] == "path/to/obj"
-        assert actual[2] is None
-
-        actual = AioS3FileSystem.parse_path("bucket/path/to/obj?versionId=12345abcde")
-        assert actual[0] == "bucket"
-        assert actual[1] == "path/to/obj"
-        assert actual[2] == "12345abcde"
-
-        actual = AioS3FileSystem.parse_path("bucket/path/to/obj?versionID=12345abcde")
-        assert actual[0] == "bucket"
-        assert actual[1] == "path/to/obj"
-        assert actual[2] == "12345abcde"
-
-        actual = AioS3FileSystem.parse_path("bucket/path/to/obj?versionid=12345abcde")
-        assert actual[0] == "bucket"
-        assert actual[1] == "path/to/obj"
-        assert actual[2] == "12345abcde"
-
-        actual = AioS3FileSystem.parse_path("bucket/path/to/obj?version_id=12345abcde")
-        assert actual[0] == "bucket"
-        assert actual[1] == "path/to/obj"
-        assert actual[2] == "12345abcde"
-
-    def test_parse_path_invalid(self):
-        with pytest.raises(ValueError, match="Invalid S3 path format"):
-            AioS3FileSystem.parse_path("http://bucket")
-
-        with pytest.raises(ValueError, match="Invalid S3 path format"):
-            AioS3FileSystem.parse_path("s3://bucket?")
-
-        with pytest.raises(ValueError, match="Invalid S3 path format"):
-            AioS3FileSystem.parse_path("s3://bucket?foo=bar")
-
-        with pytest.raises(ValueError, match="Invalid S3 path format"):
-            AioS3FileSystem.parse_path("s3a://bucket?")
-
-        with pytest.raises(ValueError, match="Invalid S3 path format"):
-            AioS3FileSystem.parse_path("s3a://bucket?foo=bar")
-
-        # GH-979: a "?" in a key that does not start a trailing version ID
-        # query is part of the key.
-        for path in ("s3://bucket/path/to/obj?foo=bar", "s3a://bucket/path/to/obj?foo=bar"):
-            assert AioS3FileSystem.parse_path(path) == ("bucket", "path/to/obj?foo=bar", None)
-
     @pytest.mark.parametrize("max_workers", [1, 4])
     @pytest.mark.asyncio
     async def test_copy_object_with_multipart_upload_part_sizes(self, max_workers):
@@ -1669,32 +1572,32 @@ class TestAioS3FileSystem:
     @pytest.mark.asyncio
     async def test_info_bucket(self, fs):
         dir_ = f"s3://{ENV.s3_staging_bucket}"
-        bucket, key, version_id = fs.parse_path(dir_)
+        s3_path = S3Path.parse(dir_)
         info = await fs._info(dir_)
 
         assert info.name == fs._strip_protocol(dir_)
-        assert info.bucket == bucket
+        assert info.bucket == s3_path.bucket
         assert info.key is None
         assert info.last_modified is None
         assert info.size == 0
         assert info.etag is None
         assert info.type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
         assert info.storage_class == S3StorageClass.S3_STORAGE_CLASS_BUCKET
-        assert info.version_id == version_id
+        assert info.version_id == s3_path.version_id
 
         dir_ = f"s3://{ENV.s3_staging_bucket}/"
-        bucket, key, version_id = fs.parse_path(dir_)
+        s3_path = S3Path.parse(dir_)
         info = await fs._info(dir_)
 
         assert info.name == fs._strip_protocol(dir_)
-        assert info.bucket == bucket
+        assert info.bucket == s3_path.bucket
         assert info.key is None
         assert info.last_modified is None
         assert info.size == 0
         assert info.etag is None
         assert info.type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
         assert info.storage_class == S3StorageClass.S3_STORAGE_CLASS_BUCKET
-        assert info.version_id == version_id
+        assert info.version_id == s3_path.version_id
 
     @pytest.mark.asyncio
     async def test_info_dir(self, fs):
@@ -1709,20 +1612,20 @@ class TestAioS3FileSystem:
             await fs._info(f"s3://{uuid.uuid4()}")
 
         await fs._pipe_file(file, b"a")
-        bucket, key, version_id = fs.parse_path(dir_)
+        s3_path = S3Path.parse(dir_)
         fs.invalidate_cache()
         info = await fs._info(dir_)
         fs.invalidate_cache()
 
         assert info.name == fs._strip_protocol(dir_)
-        assert info.bucket == bucket
-        assert info.key == key.rstrip("/")
+        assert info.bucket == s3_path.bucket
+        assert info.key == s3_path.key.rstrip("/")
         assert info.last_modified is None
         assert info.size == 0
         assert info.etag is None
         assert info.type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
         assert info.storage_class == S3StorageClass.S3_STORAGE_CLASS_DIRECTORY
-        assert info.version_id == version_id
+        assert info.version_id == s3_path.version_id
 
     @pytest.mark.asyncio
     async def test_info_file(self, fs):
@@ -1738,7 +1641,7 @@ class TestAioS3FileSystem:
 
         now = datetime.now(UTC)
         await fs._pipe_file(file, b"a")
-        bucket, key, version_id = fs.parse_path(file)
+        s3_path = S3Path.parse(file)
         fs.invalidate_cache()
         info = await fs._info(file)
         fs.invalidate_cache()
@@ -1746,14 +1649,14 @@ class TestAioS3FileSystem:
 
         assert info == ls_info
         assert info.name == fs._strip_protocol(file)
-        assert info.bucket == bucket
-        assert info.key == key
+        assert info.bucket == s3_path.bucket
+        assert info.key == s3_path.key
         assert info.last_modified >= now
         assert info.size == 1
         assert info.etag is not None
         assert info.type == S3ObjectType.S3_OBJECT_TYPE_FILE
         assert info.storage_class == S3StorageClass.S3_STORAGE_CLASS_STANDARD
-        assert info.version_id == version_id
+        assert info.version_id == s3_path.version_id
 
     @pytest.mark.asyncio
     async def test_find(self, fs):
@@ -2253,19 +2156,19 @@ class TestAioS3FileSystem:
             f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
             f"filesystem/test_async_checksum/{uuid.uuid4()}"
         )
-        bucket, key, _ = fs.parse_path(path)
+        s3_path = S3Path.parse(path)
 
         fs.pipe_file(path, b"foo")
         checksum = fs.checksum(path)
         fs.ls(path)  # caching
-        fs._sync_fs.core.put_object(S3Path(bucket, key), b"bar")
+        fs._sync_fs.core.put_object(s3_path, b"bar")
         assert checksum == fs.checksum(path)
         assert checksum != fs.checksum(path, refresh=True)
 
         fs.pipe_file(path, b"foo")
         checksum = fs.checksum(path)
         fs.ls(path)  # caching
-        fs.core.delete_object(S3Path(bucket, key))
+        fs.core.delete_object(s3_path)
         assert checksum == fs.checksum(path)
         with pytest.raises(FileNotFoundError):
             fs.checksum(path, refresh=True)
