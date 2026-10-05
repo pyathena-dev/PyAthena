@@ -2425,8 +2425,9 @@ class S3FileSystem(AbstractFileSystem):
         The cached bucket listing is removed only by the root path (``""``,
         ``"/"`` or ``"s3://"``), not by the paths of buckets or keys.
         A version-qualified path invalidates the version under every query
-        spelling that :meth:`S3Path.parse` accepts, and also the object path without
-        the version, because deleting or copying a version can change the
+        spelling that :meth:`S3Path.parse <pyathena.filesystem.s3_path.S3Path.parse>`
+        accepts, and also the object path without the version, because deleting
+        or copying a version can change the
         current version of the object.
 
         Args:
