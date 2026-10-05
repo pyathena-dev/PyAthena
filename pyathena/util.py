@@ -103,6 +103,10 @@ def strtobool(val: str) -> bool:
         True values: y, yes, t, true, on, 1 (case-insensitive)
         False values: n, no, f, false, off, 0 (case-insensitive)
 
+    .. versionchanged:: 4.0
+       Returns True or False instead of 1 or 0. Call ``int(strtobool(value))``
+       if an integer result is required.
+
     References:
         - https://peps.python.org/pep-0632/
         - https://github.com/pypa/distutils/blob/main/distutils/util.py#L340-L353

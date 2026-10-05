@@ -25,6 +25,9 @@ Type Converters
 Parameter Formatters
 --------------------
 
+In 4.0, the private ``pyathena.formatter._escape_presto`` helper is removed.
+Callers of that helper can use ``pyathena.formatter._escape_trino`` instead.
+
 .. autoclass:: pyathena.formatter.Formatter
    :members:
 

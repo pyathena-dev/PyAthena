@@ -314,6 +314,8 @@ In 4.0, `S3FileSystem.PATTERN_PATH` and the `parse_path()` methods of
 `S3FileSystem` and `AioS3FileSystem` are removed.
 `S3Path.parse()` returns an `S3Path` object; access its attributes instead of
 unpacking the tuple returned by `parse_path()`.
+For direct access to the regular expression, use `S3Path.PATTERN` instead of
+`S3FileSystem.PATTERN_PATH`.
 
 ### Send S3 requests
 

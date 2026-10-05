@@ -637,7 +637,7 @@ class S3FileSystem(AbstractFileSystem):
         refresh = kwargs.pop("refresh", False)
         path = self._strip_protocol(path)
         if path in ["/", ""]:
-            # parse_path rejects the root path.
+            # S3Path.parse rejects the root path.
             return S3Object(
                 init={
                     "ContentLength": 0,
@@ -2425,7 +2425,7 @@ class S3FileSystem(AbstractFileSystem):
         The cached bucket listing is removed only by the root path (``""``,
         ``"/"`` or ``"s3://"``), not by the paths of buckets or keys.
         A version-qualified path invalidates the version under every query
-        spelling that ``parse_path`` accepts, and also the object path without
+        spelling that :meth:`S3Path.parse` accepts, and also the object path without
         the version, because deleting or copying a version can change the
         current version of the object.
 
