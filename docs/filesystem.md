@@ -401,6 +401,9 @@ upload_url = core.generate_presigned_url(path, "put_object", ContentType="text/c
 `create_bucket()` and `delete_bucket()` create and delete a bucket when called. The
 `allow_bucket_creation` and `allow_bucket_deletion` options apply only to the
 filesystem's `mkdir`/`makedirs` and `rmdir`, not to calls through the core.
+`get_bucket_versioning()` returns the versioning state of a bucket, `Enabled` or
+`Suspended`, or `None` if versioning has never been enabled on it.
+`S3Path.is_directory_bucket` tells whether the bucket of a path is a directory bucket.
 
 `create_bucket()` sends a `LocationConstraint` for the `region_name` argument, or for
 the client's region by default, except in `us-east-1`. The fields of a

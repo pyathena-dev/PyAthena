@@ -66,6 +66,18 @@ class TestS3Path:
         assert path.is_bucket is expected
 
     @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            (S3Path("bucket--usw2-az1--x-s3", "key"), True),
+            (S3Path("bucket--usw2-az1--x-s3"), True),
+            (S3Path("bucket", "key--x-s3"), False),
+            (S3Path("bucket--x-s3-other"), False),
+        ],
+    )
+    def test_is_directory_bucket(self, path, expected):
+        assert path.is_directory_bucket is expected
+
+    @pytest.mark.parametrize(
         ("path", "name", "string", "uri"),
         [
             (S3Path("bucket"), "bucket", "bucket", "s3://bucket"),

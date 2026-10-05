@@ -1438,15 +1438,10 @@ class S3FileSystem(AbstractFileSystem):
         buckets = {
             p.bucket
             for p in paths.values()
-            if p.version_id == "null"
-            and p.name in unversioned
-            and not self.core._is_directory_bucket(p.bucket)
+            if p.version_id == "null" and p.name in unversioned and not p.is_directory_bucket
         }
         versioned_buckets = {
-            bucket
-            for bucket in buckets
-            if self._call(self._client.get_bucket_versioning, Bucket=bucket).get("Status")
-            == "Enabled"
+            bucket for bucket in buckets if self.core.get_bucket_versioning(bucket) == "Enabled"
         }
         missing = {
             source
