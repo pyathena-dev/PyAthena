@@ -60,7 +60,7 @@ class TestAthenaPolarsResultSet:
             frame = result_set._read_csv()
         assert frame.to_dict(as_series=False) == {"a": [1, 2]}
 
-    @pytest.mark.parametrize("reader", ["_read_csv", "_iter_csv_chunks"])
+    @pytest.mark.parametrize("reader", ["_read_csv", "_create_dataframe_iterator"])
     def test_csv_rejects_options_for_other_actual_reader(self, reader):
         result_set = _chunked_result_set()
         result_set._query_execution = None
@@ -342,9 +342,17 @@ class TestAthenaPolarsResultSet:
         ("kwargs", "expected"),
         [
             ({}, {"t": [datetime(2020, 1, 2, 3, 4, 5, 123456), None]}),
+            ({"dtypes": {"t": pl.Datetime("ms")}}, OperationalError),
+            ({"schema_overrides": {"t": pl.Datetime("ms")}}, OperationalError),
+            ({"dtypes": {"v": pl.Int64}}, OperationalError),
+            ({"schema_overrides": {"v": pl.Int64}}, OperationalError),
             (
-                {"dtypes": {"t": pl.Datetime("us")}},
-                {"t": [datetime(2020, 1, 2, 3, 4, 5, 123456), None]},
+                {"dtypes": {"t2": pl.Datetime("us")}, "new_columns": ["t2", "v2"]},
+                OperationalError,
+            ),
+            (
+                {"schema_overrides": {"t2": pl.Datetime("us")}, "new_columns": ["t2", "v2"]},
+                OperationalError,
             ),
             ({"columns": ["v"]}, {}),
             ({"new_columns": ["t2", "v2"]}, {"t2": [datetime(2020, 1, 2, 3, 4, 5, 123456), None]}),
@@ -355,6 +363,8 @@ class TestAthenaPolarsResultSet:
         """Timestamps that fail to parse are read again as text and truncated.
 
         ``with_column_names`` is a scan-only option and is rejected by the eager reader.
+        Explicit schema overrides, including the dtypes alias, retain reader errors
+        instead of retrying with inferred types.
         No AWS calls; the GetQueryResults rows are mocked.
         """
         result_set = AthenaPolarsResultSet.__new__(AthenaPolarsResultSet)  # bypass __init__
@@ -375,6 +385,10 @@ class TestAthenaPolarsResultSet:
                 return_value={},
             ),
         ):
+            if expected is OperationalError:
+                with pytest.raises(OperationalError, match="could not parse"):
+                    result_set._read_csv()
+                return
             if expected is TypeError:
                 with pytest.raises(
                     TypeError, match="unexpected keyword argument 'with_column_names'"

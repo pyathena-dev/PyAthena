@@ -482,17 +482,20 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """Get the Datetime dtypes of the timestamp columns, which are read as text.
 
         Args:
-            has_header: Whether the CSV data has a header. Without one, or with
-                ``schema_overrides`` or ``with_column_names`` given to ``execute()``,
-                Polars does not name the columns by the header, and they are not read
-                as text.
+            has_header: Whether the CSV data has a header. The fallback is disabled
+                without a header or with ``schema_overrides``, its ``dtypes`` alias,
+                or ``with_column_names`` given to ``execute()``.
 
         Returns:
             The Datetime dtypes keyed by the header of a CSV file.
         """
         import polars as pl
 
-        if not has_header or self._kwargs.keys() & {"schema_overrides", "with_column_names"}:
+        if not has_header or self._kwargs.keys() & {
+            "schema_overrides",
+            "dtypes",
+            "with_column_names",
+        }:
             return {}
         dtypes = self._csv_dtypes
         return {
@@ -658,7 +661,6 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 # Athena writes up to 12 fractional digits, which Polars does not parse
                 # into a Datetime whose time unit holds fewer, so the data is read again
                 # with the timestamp columns as text.
-                kwargs.pop("dtypes", None)
                 kwargs["schema_overrides"] = {
                     **self._csv_dtypes,
                     **dict.fromkeys(timestamp_dtypes, pl.String),
