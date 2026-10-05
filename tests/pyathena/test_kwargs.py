@@ -24,6 +24,7 @@ from pyathena.arrow.cursor import ArrowCursor
 from pyathena.async_cursor import AsyncCursor, AsyncDictCursor
 from pyathena.connection import Connection
 from pyathena.cursor import Cursor, DictCursor
+from pyathena.error import ProgrammingError
 from pyathena.formatter import DefaultParameterFormatter
 from pyathena.pandas.async_cursor import AsyncPandasCursor
 from pyathena.pandas.cursor import PandasCursor
@@ -150,7 +151,7 @@ async def test_shared_constructor_callbacks(offline_connection, cursor_class):
 async def test_unknown_execute_keyword_preserves_state(offline_connection, cursor_class):
     cursor = cursor_class(**_constructor_kwargs(offline_connection, cursor_class))
     cursor._query_id = "previous"
-    cursor._result_set = MagicMock()
+    cursor._result_set = MagicMock(is_closed=False)
     if isinstance(cursor, SparkBaseCursor):
         cursor._calculation_id = "previous-calculation"
         cursor._calculation_execution = MagicMock()
@@ -160,6 +161,76 @@ async def test_unknown_execute_keyword_preserves_state(offline_connection, curso
             await _execute(cursor, work_gruop="typo")
         assert vars(cursor) == before
         cursor._result_set.close.assert_not_called()
+    finally:
+        await _close(cursor)
+
+
+@pytest.mark.parametrize(
+    "cursor_class",
+    [
+        PandasCursor,
+        AsyncPandasCursor,
+        AioPandasCursor,
+        PolarsCursor,
+        AsyncPolarsCursor,
+        AioPolarsCursor,
+    ],
+)
+@pytest.mark.parametrize(
+    "failure", ["empty", "missing_staging", "invalid_options", "invalid_operation"]
+)
+@pytest.mark.parametrize("unknown_keyword", [False, True])
+async def test_preparation_failure_resets_state_except_unknown_keyword(
+    offline_connection, cursor_class, failure, unknown_keyword
+):
+    cursor = offline_connection.cursor(cursor_class, unload=True)
+    previous_result = MagicMock(is_closed=False)
+    cursor._query_id = "previous"
+    cursor._result_set = previous_result
+    operation, options = "SELECT 1", {}
+    if failure == "empty":
+        operation = " "
+    elif failure == "missing_staging":
+        cursor._s3_staging_dir = None
+    elif failure == "invalid_options":
+        options["options"] = object()
+    else:
+        operation = object()
+    if unknown_keyword:
+        options["work_gruop"] = "typo"
+    before = vars(cursor).copy()
+    error = (
+        TypeError
+        if unknown_keyword
+        else (
+            AttributeError
+            if failure in ("invalid_options", "invalid_operation")
+            else ProgrammingError
+        )
+    )
+    message = (
+        "unexpected keyword argument 'work_gruop'"
+        if unknown_keyword
+        else (
+            "merge"
+            if failure == "invalid_options"
+            else (
+                "strip"
+                if failure == "invalid_operation"
+                else "Query is none|s3_staging_dir is required"
+            )
+        )
+    )
+    try:
+        with pytest.raises(error, match=message):
+            await _execute(cursor, operation=operation, **options)
+        if unknown_keyword or cursor_class.__name__.startswith("Async"):
+            assert vars(cursor) == before
+            previous_result.close.assert_not_called()
+        else:
+            assert cursor.query_id is None
+            assert cursor.result_set is None
+            previous_result.close.assert_called_once()
     finally:
         await _close(cursor)
 
@@ -316,6 +387,7 @@ async def test_internal_cursor_isolates_backend_defaults(cursor_class):
         aws_secret_access_key="secret_key",
         cursor_class=cursor_class,
         cursor_kwargs=defaults,
+        converter=cursor_class.get_default_converter(True),
     )
     adapted = AsyncAdapt_pyathena_connection(MagicMock(), conn) if is_async else conn
     raw_connection = SimpleNamespace(driver_connection=adapted)

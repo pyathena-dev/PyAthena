@@ -63,14 +63,62 @@ class TestAthenaPolarsResultSet:
     @pytest.mark.parametrize("reader", ["_read_csv", "_iter_csv_chunks"])
     def test_csv_rejects_options_for_other_actual_reader(self, reader):
         result_set = _chunked_result_set()
+        result_set._query_execution = None
+        result_set._unload = False
         key = "include_file_paths" if reader == "_read_csv" else "columns"
         result_set._kwargs = {key: "a"}
-        with pytest.raises(TypeError, match=f"unexpected keyword argument '{key}'"):
-            (
+        for _ in range(2):
+            with pytest.raises(TypeError, match=f"unexpected keyword argument '{key}'"):
+                (
+                    result_set._read_csv()
+                    if reader == "_read_csv"
+                    else result_set._create_dataframe_iterator()
+                )
+
+    @pytest.mark.parametrize("reader", ["_read_csv", "_iter_csv_chunks"])
+    @pytest.mark.parametrize("rename", [False, True])
+    def test_csv_dtypes_alias_replaces_inferred_schema(self, tmp_path, reader, rename):
+        path = tmp_path / "result.csv"
+        path.write_text("a\n001\n002\n")
+        result_set = _chunked_result_set()
+        name = "z" if rename else "a"
+        result_set._kwargs = {"dtypes": {name: pl.String}}
+        if rename:
+            result_set._kwargs["new_columns"] = [name]
+        with (
+            patch.object(
+                AthenaPolarsResultSet,
+                "output_location",
+                new_callable=PropertyMock,
+                return_value=str(path),
+            ),
+            patch.object(
+                AthenaPolarsResultSet,
+                "_csv_dtypes",
+                new_callable=PropertyMock,
+                return_value={"a": pl.Int64},
+            ),
+            patch.object(
+                AthenaPolarsResultSet,
+                "_csv_storage_options",
+                new_callable=PropertyMock,
+                return_value={},
+            ),
+            patch.object(
+                AthenaPolarsResultSet,
+                "_parquet_storage_options",
+                new_callable=PropertyMock,
+                return_value={},
+            ),
+            patch.object(AthenaPolarsResultSet, "_is_csv_readable", return_value=True),
+            pytest.warns(DeprecationWarning, match="dtypes"),
+        ):
+            frame = (
                 result_set._read_csv()
                 if reader == "_read_csv"
-                else list(result_set._iter_csv_chunks())
+                else pl.concat(list(result_set._iter_csv_chunks()))
             )
+        assert frame.to_dict(as_series=False) == {name: ["001", "002"]}
 
     @pytest.mark.parametrize("reader", ["_read_csv", "_iter_csv_chunks"])
     def test_csv_keeps_deprecated_row_index_options(self, tmp_path, reader):
@@ -294,6 +342,10 @@ class TestAthenaPolarsResultSet:
         ("kwargs", "expected"),
         [
             ({}, {"t": [datetime(2020, 1, 2, 3, 4, 5, 123456), None]}),
+            (
+                {"dtypes": {"t": pl.Datetime("us")}},
+                {"t": [datetime(2020, 1, 2, 3, 4, 5, 123456), None]},
+            ),
             ({"columns": ["v"]}, {}),
             ({"new_columns": ["t2", "v2"]}, {"t2": [datetime(2020, 1, 2, 3, 4, 5, 123456), None]}),
             ({"with_column_names": lambda names: [n.upper() for n in names]}, TypeError),
@@ -303,8 +355,7 @@ class TestAthenaPolarsResultSet:
         """Timestamps that fail to parse are read again as text and truncated.
 
         ``with_column_names`` is a scan-only option and is rejected by the eager reader.
-        No AWS calls; the
-        GetQueryResults rows are mocked.
+        No AWS calls; the GetQueryResults rows are mocked.
         """
         result_set = AthenaPolarsResultSet.__new__(AthenaPolarsResultSet)  # bypass __init__
         result_set._query_execution = None
@@ -325,7 +376,9 @@ class TestAthenaPolarsResultSet:
             ),
         ):
             if expected is TypeError:
-                with pytest.raises(TypeError):
+                with pytest.raises(
+                    TypeError, match="unexpected keyword argument 'with_column_names'"
+                ):
                     result_set._read_csv()
                 return
             df = result_set._read_csv()

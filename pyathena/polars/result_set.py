@@ -374,6 +374,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
             The arguments for the read function. A value given to ``execute()`` replaces
             the one the result set chose, including the whole ``storage_options``.
         """
+        if "dtypes" in self._kwargs and "schema_overrides" not in self._kwargs:
+            defaults.pop("schema_overrides", None)
         return {
             **defaults,
             **self._kwargs,
@@ -545,6 +547,13 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """
         reader: Iterator[pl.DataFrame]
         if not self.is_unload:
+            validate_execute_kwargs(
+                "Polars CSV reader",
+                self._kwargs,
+                False,
+                self._chunksize,
+                allow_eager_fallback=False,
+            )
             reader = self._iter_csv_chunks()
         elif self._prepare_parquet_location():
             self._metadata = self._read_parquet_schema()
@@ -626,7 +635,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             has_header=has_header,
             schema_overrides=self._csv_dtypes,
         )
-        if "schema_overrides" not in self._kwargs:
+        if not {"schema_overrides", "dtypes"}.intersection(self._kwargs):
             # Renamed after reading, so that Polars matches the types to the header.
             kwargs.pop("new_columns", None)
         source: str | bytes
@@ -649,6 +658,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 # Athena writes up to 12 fractional digits, which Polars does not parse
                 # into a Datetime whose time unit holds fewer, so the data is read again
                 # with the timestamp columns as text.
+                kwargs.pop("dtypes", None)
                 kwargs["schema_overrides"] = {
                     **self._csv_dtypes,
                     **dict.fromkeys(timestamp_dtypes, pl.String),
@@ -797,7 +807,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
             separator = ","
             has_header = True
             new_columns = (
-                None if "schema_overrides" in self._kwargs else self._kwargs.get("new_columns")
+                None
+                if {"schema_overrides", "dtypes"}.intersection(self._kwargs)
+                else self._kwargs.get("new_columns")
             )
         return separator, has_header, new_columns
 
@@ -813,9 +825,6 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """
         import polars as pl
 
-        validate_execute_kwargs(
-            "Polars CSV reader", self._kwargs, False, self._chunksize, allow_eager_fallback=False
-        )
         if not self._is_csv_readable():
             return
 
@@ -831,7 +840,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             has_header=has_header,
             schema_overrides=self._csv_dtypes,
         )
-        if "schema_overrides" not in self._kwargs:
+        if not {"schema_overrides", "dtypes"}.intersection(self._kwargs):
             # Renamed after reading, so that Polars matches the types to the header.
             read_kwargs.pop("new_columns", None)
 

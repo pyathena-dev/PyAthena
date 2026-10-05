@@ -16,7 +16,8 @@ For native asyncio cursors, `execute()` validates arguments when awaited.
 Pandas and Polars cursors continue to accept their reader options, with names checked against the installed library and the prepared query's CSV or UNLOAD mode.
 Polars also checks the chunking mode.
 For chunked CSV queries, both eager and scan options are accepted before execution because managed query results use the eager reader.
-Options specific to the other CSV reader raise `TypeError` when the result is read.
+Options specific to the other CSV reader raise `TypeError` when the result set is created.
+For Future-based cursors, this error is reported by `future.result()`.
 Invalid values and combinations remain subject to the reader's validation.
 Arrow and S3FS cursors accept their supported result-set options; arbitrary reader options are rejected.
 

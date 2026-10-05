@@ -160,19 +160,33 @@ class AioPolarsCursor(WithAsyncFetch):
         Returns:
             Self reference for method chaining.
         """
-        options = ExecuteOptions.resolve(
-            options,
-            work_group=work_group,
-            s3_staging_dir=s3_staging_dir,
-            cache_size=cache_size,
-            cache_expiration_time=cache_expiration_time,
-            result_reuse_enable=result_reuse_enable,
-            result_reuse_minutes=result_reuse_minutes,
-            paramstyle=paramstyle,
-            on_start_query_execution=on_start_query_execution,
-            result_set_type_hints=result_set_type_hints,
-        )
-        operation, unload_location = self._prepare_unload(operation, options.s3_staging_dir)
+        try:
+            options = ExecuteOptions.resolve(
+                options,
+                work_group=work_group,
+                s3_staging_dir=s3_staging_dir,
+                cache_size=cache_size,
+                cache_expiration_time=cache_expiration_time,
+                result_reuse_enable=result_reuse_enable,
+                result_reuse_minutes=result_reuse_minutes,
+                paramstyle=paramstyle,
+                on_start_query_execution=on_start_query_execution,
+                result_set_type_hints=result_set_type_hints,
+            )
+            operation, unload_location = self._prepare_unload(operation, options.s3_staging_dir)
+        except Exception:
+            validate_execute_kwargs(
+                f"{type(self).__name__}.execute",
+                kwargs,
+                bool(
+                    self._unload
+                    and isinstance(operation, str)
+                    and operation.strip().upper().startswith(("SELECT", "WITH", "UNLOAD"))
+                ),
+                kwargs.get("chunksize", self._chunksize),
+            )
+            self._reset_state()
+            raise
         validate_execute_kwargs(
             f"{type(self).__name__}.execute",
             kwargs,
