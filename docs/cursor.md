@@ -11,7 +11,7 @@ cursor = connection.cursor(work_group="analytics")
 cursor.execute("SELECT 1", work_group="analytics")
 ```
 
-The validation happens before starting a query or a Spark calculation.
+Unknown keyword names are rejected before starting a query or a Spark calculation.
 For native asyncio cursors, `execute()` validates arguments when awaited.
 Pandas and Polars cursors continue to accept their reader options, with names checked against the installed library and the prepared query's CSV or UNLOAD mode.
 Polars also checks the chunking mode.
