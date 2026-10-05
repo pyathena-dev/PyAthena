@@ -913,7 +913,7 @@ class WithResultSet:
     ``CursorIterator``, so that these members take precedence over theirs.
     """
 
-    def __init__(self, arraysize: int | None = None, **kwargs) -> None:
+    def __init__(self, *, arraysize: int | None = None, **kwargs) -> None:
         """Initialize the cursor with no query ID and no result set.
 
         Args:

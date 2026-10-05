@@ -337,6 +337,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
         self,
         operation: str,
         parameters: dict[str, Any] | list[str] | None = None,
+        *,
         session_id: str | None = None,
         description: str | None = None,
         client_request_token: str | None = None,
