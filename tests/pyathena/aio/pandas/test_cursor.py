@@ -147,7 +147,7 @@ class TestAioPandasCursor:
             {
                 "block_size": 2048,
                 "cache_type": "none",
-                "max_workers": 3,
+                "s3_max_workers": 3,
                 "auto_optimize_chunksize": False,
             },
         ],
@@ -160,7 +160,7 @@ class TestAioPandasCursor:
         cursor_kwargs = {
             "block_size": 1024,
             "cache_type": "bytes",
-            "max_workers": 2,
+            "s3_max_workers": 2,
             "auto_optimize_chunksize": True,
         }
         cursor = AioPandasCursor(
@@ -177,6 +177,14 @@ class TestAioPandasCursor:
             patch("pyathena.aio.pandas.cursor.AthenaPandasResultSet") as result_set_class,
         ):
             await cursor.execute("SELECT 1", **execute_kwargs)
-        kwargs = result_set_class.call_args.kwargs
+            first_kwargs = result_set_class.call_args.kwargs.copy()
+            await cursor.execute("SELECT 1")
+        kwargs = first_kwargs
         expected = {**cursor_kwargs, **execute_kwargs}
+        expected["max_workers"] = expected.pop("s3_max_workers")
         assert {key: kwargs[key] for key in expected} == expected
+
+        defaults = cursor_kwargs.copy()
+        defaults["max_workers"] = defaults.pop("s3_max_workers")
+        second_kwargs = result_set_class.call_args.kwargs
+        assert {key: second_kwargs[key] for key in defaults} == defaults

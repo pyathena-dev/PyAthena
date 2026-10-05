@@ -136,7 +136,7 @@ class TestAioPolarsCursor:
 
     @pytest.mark.parametrize(
         "execute_kwargs",
-        [{}, {"block_size": 2048, "cache_type": "none", "max_workers": 3, "chunksize": 20}],
+        [{}, {"block_size": 2048, "cache_type": "none", "s3_max_workers": 3, "chunksize": 20}],
     )
     async def test_read_options(self, execute_kwargs):
         """The cursor's read options reach the result set, and execute() overrides them.
@@ -146,7 +146,7 @@ class TestAioPolarsCursor:
         cursor_kwargs = {
             "block_size": 1024,
             "cache_type": "bytes",
-            "max_workers": 2,
+            "s3_max_workers": 2,
             "chunksize": 10,
         }
         cursor = AioPolarsCursor(
@@ -163,6 +163,14 @@ class TestAioPolarsCursor:
             patch("pyathena.aio.polars.cursor.AthenaPolarsResultSet") as result_set_class,
         ):
             await cursor.execute("SELECT 1", **execute_kwargs)
-        kwargs = result_set_class.call_args.kwargs
+            first_kwargs = result_set_class.call_args.kwargs.copy()
+            await cursor.execute("SELECT 1")
+        kwargs = first_kwargs
         expected = {**cursor_kwargs, **execute_kwargs}
+        expected["max_workers"] = expected.pop("s3_max_workers")
         assert {key: kwargs[key] for key in expected} == expected
+
+        defaults = cursor_kwargs.copy()
+        defaults["max_workers"] = defaults.pop("s3_max_workers")
+        second_kwargs = result_set_class.call_args.kwargs
+        assert {key: second_kwargs[key] for key in defaults} == defaults

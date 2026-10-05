@@ -21,7 +21,7 @@ from pyathena.polars.converter import (
 )
 from pyathena.polars.result_set import AthenaPolarsResultSet
 from pyathena.result_set import WithFetch
-from pyathena.util import override
+from pyathena.util import _validate_s3_max_workers, override
 
 if TYPE_CHECKING:
     import polars as pl
@@ -81,7 +81,7 @@ class PolarsCursor(WithFetch):
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
         block_size: int | None = None,
         cache_type: str | None = None,
-        max_workers: int = (cpu_count() or 1) * 5,
+        s3_max_workers: int = (cpu_count() or 1) * 5,
         chunksize: int | None = None,
         **kwargs,
     ) -> None:
@@ -101,7 +101,7 @@ class PolarsCursor(WithFetch):
             result_reuse_minutes: Minutes to reuse cached results.
             block_size: S3 read block size.
             cache_type: S3 caching strategy.
-            max_workers: Maximum worker threads for parallel S3 operations.
+            s3_max_workers: Maximum worker threads for parallel S3 operations.
             chunksize: Number of rows per chunk for memory-efficient processing.
                       If specified, data is loaded lazily in chunks for all data
                       access methods including fetchone(), fetchmany(), and iter_chunks().
@@ -112,6 +112,7 @@ class PolarsCursor(WithFetch):
             >>> # With chunked processing
             >>> cursor = connection.cursor(PolarsCursor, chunksize=50000)
         """
+        _validate_s3_max_workers(s3_max_workers, kwargs)
         super().__init__(
             s3_staging_dir=s3_staging_dir,
             schema_name=schema_name,
@@ -128,7 +129,7 @@ class PolarsCursor(WithFetch):
         self._unload = unload
         self._block_size = block_size
         self._cache_type = cache_type
-        self._max_workers = max_workers
+        self._s3_max_workers = s3_max_workers
         self._chunksize = chunksize
 
     @staticmethod
@@ -190,7 +191,7 @@ class PolarsCursor(WithFetch):
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.
             **kwargs: Additional execution parameters passed to Polars read functions.
-                ``block_size``, ``cache_type``, ``max_workers``, and ``chunksize``
+                ``block_size``, ``cache_type``, ``s3_max_workers``, and ``chunksize``
                 override the cursor's values for this query.
                 Read function arguments replace the ones the result set chooses, such as
                 ``separator``, ``has_header``, ``schema_overrides``, and ``storage_options``
@@ -204,6 +205,7 @@ class PolarsCursor(WithFetch):
             >>> df = cursor.as_polars()  # Returns Polars DataFrame
         """
         self._reset_state()
+        _validate_s3_max_workers(kwargs.get("s3_max_workers", self._s3_max_workers), kwargs)
         options = ExecuteOptions.resolve(
             options,
             work_group=work_group,
@@ -237,7 +239,7 @@ class PolarsCursor(WithFetch):
                 unload_location=unload_location,
                 block_size=kwargs.pop("block_size", self._block_size),
                 cache_type=kwargs.pop("cache_type", self._cache_type),
-                max_workers=kwargs.pop("max_workers", self._max_workers),
+                max_workers=kwargs.pop("s3_max_workers", self._s3_max_workers),
                 chunksize=kwargs.pop("chunksize", self._chunksize),
                 result_set_type_hints=options.result_set_type_hints,
                 **kwargs,

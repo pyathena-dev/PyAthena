@@ -18,6 +18,21 @@ from tests.pyathena.conftest import connect
 
 
 class TestAsyncArrowCursor:
+    @pytest.mark.parametrize(
+        "async_arrow_cursor",
+        [
+            {"cursor_kwargs": {"s3_max_workers": 2, "unload": False}},
+            {"cursor_kwargs": {"s3_max_workers": 2, "unload": True}},
+        ],
+        indirect=True,
+    )
+    def test_s3_workers_read_results(self, async_arrow_cursor):
+        """CSV and Parquet results use the configured PyAthena S3 reader."""
+        _, future = async_arrow_cursor.execute("SELECT 1 AS value", s3_max_workers=1)
+        result = future.result()
+        assert result.fetchall() == [(1,)]
+        assert result._fs.handler.fs.max_workers == 1
+
     def test_binary_null_vs_empty(self, async_arrow_cursor):
         query = """SELECT * FROM (VALUES
                     (1, CAST(NULL AS VARBINARY), 'null', CAST(NULL AS VARCHAR)),
@@ -327,14 +342,19 @@ class TestAsyncArrowCursor:
         assert table.shape[1] == 0
 
     @pytest.mark.parametrize(
-        "execute_kwargs", [{}, {"connect_timeout": 3.0, "request_timeout": 4.0}]
+        "execute_kwargs",
+        [
+            {},
+            {"connect_timeout": 3.0, "request_timeout": 4.0, "s3_max_workers": 3},
+            {"s3_max_workers": None},
+        ],
     )
     def test_read_options(self, execute_kwargs):
         """The cursor's read options reach the result set, and execute() overrides them.
 
         No AWS calls; the query and its result set are mocked.
         """
-        cursor_kwargs = {"connect_timeout": 1.0, "request_timeout": 2.0}
+        cursor_kwargs = {"connect_timeout": 1.0, "request_timeout": 2.0, "s3_max_workers": 2}
         query_execution = MagicMock(state=AthenaQueryExecution.STATE_SUCCEEDED)
         with (
             AsyncArrowCursor(
@@ -342,6 +362,7 @@ class TestAsyncArrowCursor:
                 converter=MagicMock(),
                 formatter=MagicMock(),
                 retry_config=RetryConfig(),
+                max_workers=1,
                 **cursor_kwargs,
             ) as cursor,
             patch.object(AsyncArrowCursor, "_execute", return_value="query_id"),
@@ -350,6 +371,14 @@ class TestAsyncArrowCursor:
         ):
             _, future = cursor.execute("SELECT 1", **execute_kwargs)
             future.result()
-        kwargs = result_set_class.call_args.kwargs
+            first_kwargs = result_set_class.call_args.kwargs.copy()
+            _, future = cursor.execute("SELECT 1")
+            future.result()
+        kwargs = first_kwargs
         expected = {**cursor_kwargs, **execute_kwargs}
         assert {key: kwargs[key] for key in expected} == expected
+
+        defaults = cursor_kwargs.copy()
+        second_kwargs = result_set_class.call_args.kwargs
+        assert {key: second_kwargs[key] for key in defaults} == defaults
+        assert cursor._executor._max_workers == 1

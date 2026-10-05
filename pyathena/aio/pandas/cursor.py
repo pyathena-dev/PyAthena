@@ -22,7 +22,7 @@ from pyathena.pandas.converter import (
     DefaultPandasUnloadTypeConverter,
 )
 from pyathena.pandas.result_set import AthenaPandasResultSet, PandasDataFrameIterator
-from pyathena.util import override
+from pyathena.util import _validate_s3_max_workers, override
 
 if TYPE_CHECKING:
     from pandas import DataFrame
@@ -60,7 +60,7 @@ class AioPandasCursor(WithAsyncFetch):
         chunksize: int | None = None,
         block_size: int | None = None,
         cache_type: str | None = None,
-        max_workers: int = (cpu_count() or 1) * 5,
+        s3_max_workers: int = (cpu_count() or 1) * 5,
         result_reuse_enable: bool = False,
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
         auto_optimize_chunksize: bool = False,
@@ -84,7 +84,7 @@ class AioPandasCursor(WithAsyncFetch):
                 it takes precedence over ``auto_optimize_chunksize``.
             block_size: Default block size of the S3 filesystem that reads the results.
             cache_type: Default cache type of the S3 filesystem that reads the results.
-            max_workers: Maximum number of workers of the S3 filesystem.
+            s3_max_workers: Maximum number of workers of the S3 filesystem.
             result_reuse_enable: Whether to enable Athena query result reuse.
             result_reuse_minutes: Maximum age of a reused query result in minutes.
             auto_optimize_chunksize: Whether to choose a chunk size from the size of the
@@ -92,6 +92,7 @@ class AioPandasCursor(WithAsyncFetch):
             **kwargs: Other cursor arguments, such as ``connection`` and ``arraysize``,
                 passed to the parent ``__init__``.
         """
+        _validate_s3_max_workers(s3_max_workers, kwargs)
         super().__init__(
             s3_staging_dir=s3_staging_dir,
             schema_name=schema_name,
@@ -110,7 +111,7 @@ class AioPandasCursor(WithAsyncFetch):
         self._chunksize = chunksize
         self._block_size = block_size
         self._cache_type = cache_type
-        self._max_workers = max_workers
+        self._s3_max_workers = s3_max_workers
         self._auto_optimize_chunksize = auto_optimize_chunksize
         self._result_set: AthenaPandasResultSet | None = None
 
@@ -168,7 +169,7 @@ class AioPandasCursor(WithAsyncFetch):
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.
             **kwargs: Additional pandas read_csv/read_parquet parameters.
-                ``engine``, ``chunksize``, ``block_size``, ``cache_type``, ``max_workers``,
+                ``engine``, ``chunksize``, ``block_size``, ``cache_type``, ``s3_max_workers``,
                 and ``auto_optimize_chunksize`` override the cursor's values for this query.
                 ``storage_options`` and, for UNLOAD results, ``filesystem`` replace
                 PyAthena's S3 filesystem (see
@@ -178,6 +179,7 @@ class AioPandasCursor(WithAsyncFetch):
             Self reference for method chaining.
         """
         self._reset_state()
+        _validate_s3_max_workers(kwargs.get("s3_max_workers", self._s3_max_workers), kwargs)
         options = ExecuteOptions.resolve(
             options,
             work_group=work_group,
@@ -218,7 +220,7 @@ class AioPandasCursor(WithAsyncFetch):
                 chunksize=kwargs.pop("chunksize", self._chunksize),
                 block_size=kwargs.pop("block_size", self._block_size),
                 cache_type=kwargs.pop("cache_type", self._cache_type),
-                max_workers=kwargs.pop("max_workers", self._max_workers),
+                max_workers=kwargs.pop("s3_max_workers", self._s3_max_workers),
                 auto_optimize_chunksize=kwargs.pop(
                     "auto_optimize_chunksize", self._auto_optimize_chunksize
                 ),

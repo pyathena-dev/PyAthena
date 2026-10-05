@@ -637,7 +637,7 @@ class TestAsyncPandasCursor:
             {
                 "block_size": 2048,
                 "cache_type": "none",
-                "max_workers": 3,
+                "s3_max_workers": 3,
                 "auto_optimize_chunksize": False,
             },
         ],
@@ -647,7 +647,12 @@ class TestAsyncPandasCursor:
 
         No AWS calls; the query and its result set are mocked.
         """
-        cursor_kwargs = {"block_size": 1024, "cache_type": "bytes", "auto_optimize_chunksize": True}
+        cursor_kwargs = {
+            "block_size": 1024,
+            "cache_type": "bytes",
+            "auto_optimize_chunksize": True,
+            "s3_max_workers": 2,
+        }
         query_execution = MagicMock(state=AthenaQueryExecution.STATE_SUCCEEDED)
         with (
             AsyncPandasCursor(
@@ -655,6 +660,7 @@ class TestAsyncPandasCursor:
                 converter=MagicMock(),
                 formatter=MagicMock(),
                 retry_config=RetryConfig(),
+                max_workers=1,
                 **cursor_kwargs,
             ) as cursor,
             patch.object(AsyncPandasCursor, "_execute", return_value="query_id"),
@@ -663,9 +669,19 @@ class TestAsyncPandasCursor:
         ):
             _, future = cursor.execute("SELECT 1", **execute_kwargs)
             future.result()
-        kwargs = result_set_class.call_args.kwargs
+            first_kwargs = result_set_class.call_args.kwargs.copy()
+            _, future = cursor.execute("SELECT 1")
+            future.result()
+        kwargs = first_kwargs
         expected = {**cursor_kwargs, **execute_kwargs}
+        expected["max_workers"] = expected.pop("s3_max_workers")
         assert {key: kwargs[key] for key in expected} == expected
+
+        defaults = cursor_kwargs.copy()
+        defaults["max_workers"] = defaults.pop("s3_max_workers")
+        second_kwargs = result_set_class.call_args.kwargs
+        assert {key: second_kwargs[key] for key in defaults} == defaults
+        assert cursor._executor._max_workers == 1
 
     @pytest.mark.parametrize(
         "async_pandas_cursor",

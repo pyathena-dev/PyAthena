@@ -18,7 +18,7 @@ from pyathena.pandas.converter import (
     DefaultPandasUnloadTypeConverter,
 )
 from pyathena.pandas.result_set import AthenaPandasResultSet
-from pyathena.util import override
+from pyathena.util import _validate_s3_max_workers, override
 
 _logger = logging.getLogger(__name__)
 
@@ -83,6 +83,7 @@ class AsyncPandasCursor(AsyncCursor):
         block_size: int | None = None,
         cache_type: str | None = None,
         auto_optimize_chunksize: bool = False,
+        s3_max_workers: int = (cpu_count() or 1) * 5,
         **kwargs,
     ) -> None:
         """Initialize an AsyncPandasCursor.
@@ -98,7 +99,7 @@ class AsyncPandasCursor(AsyncCursor):
             kill_on_interrupt: Cancel a query whose start in ``execute()`` is interrupted by
                 ``KeyboardInterrupt``. Waiting runs on worker threads, which do not
                 receive the interrupt.
-            max_workers: Maximum number of threads that run queries concurrently.
+            max_workers: Size of the cursor thread pool for waiting and collecting results.
             arraysize: Number of rows to fetch per batch. Must be a positive integer.
             unload: Whether to wrap queries in ``UNLOAD`` and read the Parquet output.
             engine: Parsing engine (``auto``, ``c``, ``python``, or ``pyarrow``).
@@ -110,9 +111,11 @@ class AsyncPandasCursor(AsyncCursor):
             cache_type: Default cache type of the S3 filesystem that reads the results.
             auto_optimize_chunksize: Whether to choose a chunk size from the size of the
                 CSV result file when ``chunksize`` is None.
+            s3_max_workers: Maximum worker threads per S3 file reader.
             **kwargs: Other cursor arguments, such as ``connection`` and ``converter``,
                 passed to ``AsyncCursor.__init__``.
         """
+        _validate_s3_max_workers(s3_max_workers, kwargs)
         super().__init__(
             s3_staging_dir=s3_staging_dir,
             schema_name=schema_name,
@@ -128,6 +131,7 @@ class AsyncPandasCursor(AsyncCursor):
             result_reuse_minutes=result_reuse_minutes,
             **kwargs,
         )
+        self._s3_max_workers = s3_max_workers
         self._unload = unload
         self._engine = engine
         self._chunksize = chunksize
@@ -184,6 +188,7 @@ class AsyncPandasCursor(AsyncCursor):
             chunksize=kwargs.pop("chunksize", self._chunksize),
             block_size=kwargs.pop("block_size", self._block_size),
             cache_type=kwargs.pop("cache_type", self._cache_type),
+            max_workers=kwargs.pop("s3_max_workers", self._s3_max_workers),
             auto_optimize_chunksize=kwargs.pop(
                 "auto_optimize_chunksize", self._auto_optimize_chunksize
             ),
@@ -237,11 +242,12 @@ class AsyncPandasCursor(AsyncCursor):
                 ``storage_options`` and, for UNLOAD results, ``filesystem`` replace
                 PyAthena's S3 filesystem (see
                 :class:`~pyathena.pandas.result_set.AthenaPandasResultSet`).
-                ``max_workers`` sets the number of S3 read workers for this query.
+                ``s3_max_workers`` sets the number of S3 read workers for this query.
 
         Returns:
             Tuple of (query_id, future) where future resolves to AthenaPandasResultSet.
         """
+        _validate_s3_max_workers(kwargs.get("s3_max_workers", self._s3_max_workers), kwargs)
         options = ExecuteOptions.resolve(
             options,
             work_group=work_group,

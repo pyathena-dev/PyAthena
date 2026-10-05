@@ -17,7 +17,7 @@ from pyathena.polars.converter import (
     DefaultPolarsUnloadTypeConverter,
 )
 from pyathena.polars.result_set import AthenaPolarsResultSet
-from pyathena.util import override
+from pyathena.util import _validate_s3_max_workers, override
 
 _logger = logging.getLogger(__name__)
 
@@ -78,6 +78,7 @@ class AsyncPolarsCursor(AsyncCursor):
         block_size: int | None = None,
         cache_type: str | None = None,
         chunksize: int | None = None,
+        s3_max_workers: int = (cpu_count() or 1) * 5,
         **kwargs,
     ) -> None:
         """Initialize an AsyncPolarsCursor.
@@ -91,7 +92,7 @@ class AsyncPolarsCursor(AsyncCursor):
             encryption_option: S3 encryption option (SSE_S3, SSE_KMS, CSE_KMS).
             kms_key: KMS key ARN for encryption.
             kill_on_interrupt: Cancel running query on keyboard interrupt.
-            max_workers: Maximum number of workers for concurrent execution.
+            max_workers: Size of the cursor thread pool for waiting and collecting results.
             arraysize: Number of rows to fetch per batch.
             unload: Enable UNLOAD for high-performance Parquet output.
             result_reuse_enable: Enable Athena query result reuse.
@@ -101,6 +102,7 @@ class AsyncPolarsCursor(AsyncCursor):
             chunksize: Number of rows per chunk for memory-efficient processing.
                       If specified, data is loaded lazily in chunks for all data
                       access methods including fetchone(), fetchmany(), and iter_chunks().
+            s3_max_workers: Maximum worker threads per S3 file reader.
             **kwargs: Additional connection parameters.
 
         Example:
@@ -108,6 +110,7 @@ class AsyncPolarsCursor(AsyncCursor):
             >>> # With chunked processing
             >>> cursor = connection.cursor(AsyncPolarsCursor, chunksize=50000)
         """
+        _validate_s3_max_workers(s3_max_workers, kwargs)
         super().__init__(
             s3_staging_dir=s3_staging_dir,
             schema_name=schema_name,
@@ -123,6 +126,7 @@ class AsyncPolarsCursor(AsyncCursor):
             result_reuse_minutes=result_reuse_minutes,
             **kwargs,
         )
+        self._s3_max_workers = s3_max_workers
         self._unload = unload
         self._block_size = block_size
         self._cache_type = cache_type
@@ -186,7 +190,7 @@ class AsyncPolarsCursor(AsyncCursor):
             unload_location=unload_location,
             block_size=kwargs.pop("block_size", self._block_size),
             cache_type=kwargs.pop("cache_type", self._cache_type),
-            max_workers=kwargs.pop("max_workers", self._max_workers),
+            max_workers=kwargs.pop("s3_max_workers", self._s3_max_workers),
             chunksize=kwargs.pop("chunksize", self._chunksize),
             result_set_type_hints=result_set_type_hints,
             **kwargs,
@@ -231,7 +235,7 @@ class AsyncPolarsCursor(AsyncCursor):
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.
             **kwargs: Additional execution parameters passed to Polars read functions.
-                ``block_size``, ``cache_type``, ``max_workers``, and ``chunksize``
+                ``block_size``, ``cache_type``, ``s3_max_workers``, and ``chunksize``
                 override the cursor's values for this query.
                 Read function arguments replace the ones the result set chooses, such as
                 ``separator``, ``has_header``, ``schema_overrides``, and ``storage_options``
@@ -245,6 +249,7 @@ class AsyncPolarsCursor(AsyncCursor):
             >>> result_set = future.result()
             >>> df = result_set.as_polars()  # Returns Polars DataFrame
         """
+        _validate_s3_max_workers(kwargs.get("s3_max_workers", self._s3_max_workers), kwargs)
         options = ExecuteOptions.resolve(
             options,
             work_group=work_group,
