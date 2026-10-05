@@ -363,8 +363,8 @@ class TestAthenaPolarsResultSet:
         """Timestamps that fail to parse are read again as text and truncated.
 
         ``with_column_names`` is a scan-only option and is rejected by the eager reader.
-        Explicit schema overrides, including the dtypes alias, retain reader errors
-        instead of retrying with inferred types.
+        The ``schema_overrides`` option and its ``dtypes`` alias disable timestamp
+        retries and preserve reader errors.
         No AWS calls; the GetQueryResults rows are mocked.
         """
         result_set = AthenaPolarsResultSet.__new__(AthenaPolarsResultSet)  # bypass __init__
