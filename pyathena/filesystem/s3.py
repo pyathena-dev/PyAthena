@@ -271,6 +271,11 @@ class S3FileSystem(AbstractFileSystem):
                     Bucket=bucket,
                 )
             except FileNotFoundError:
+                self.dircache.pop(bucket, None)
+                # Evict the cached bucket listing only if it still lists the bucket.
+                buckets = self.dircache.get("")
+                if buckets and any(b.name == bucket for b in buckets):
+                    self.dircache.pop("", None)
                 return None
             file = S3Object(
                 init={
@@ -308,6 +313,7 @@ class S3FileSystem(AbstractFileSystem):
                     **request,
                 )
             except FileNotFoundError:
+                self.dircache.pop(path, None)
                 return None
             if self.version_aware and not version_id:
                 # Pin the version of the object so that subsequent reads see
@@ -360,13 +366,34 @@ class S3FileSystem(AbstractFileSystem):
         max_keys: int | None = None,
         refresh: bool = False,
     ) -> list[S3Object]:
+        """List the objects and common prefixes under a path.
+
+        A complete, non-empty listing of the path is cached under
+        ``(path, delimiter)``, and an empty one evicts it.
+        ``invalidate_cache`` drops it when the path or a path under it is
+        invalidated.
+
+        Args:
+            path: The bucket or directory path to list.
+            prefix: Key prefix to filter by, relative to the path. A prefixed
+                listing is neither read from nor written to the cache.
+            delimiter: Delimiter to group keys by; ``""`` lists recursively.
+            next_token: Continuation token to start listing from. A listing
+                that starts from a token is neither read from nor written to
+                the cache.
+            max_keys: Maximum number of keys per ListObjectsV2 request.
+            refresh: If True, bypass the cache and list from S3.
+
+        Returns:
+            The listed directories and files.
+        """
         bucket, key, version_id = self.parse_path(path)
+        use_cache = not prefix and not next_token
         if key:
             prefix = f"{key}/{prefix if prefix else ''}"
 
-        # Create a cache key that includes the delimiter
         cache_key = (path, delimiter)
-        if cache_key in self.dircache and not refresh:
+        if use_cache and cache_key in self.dircache and not refresh:
             return cast(list[S3Object], self.dircache[cache_key])
 
         files: list[S3Object] = []
@@ -400,8 +427,11 @@ class S3FileSystem(AbstractFileSystem):
             next_token = response.get("NextContinuationToken")
             if not next_token:
                 break
-        if files:
-            self.dircache[cache_key] = files
+        if use_cache:
+            if files:
+                self.dircache[cache_key] = files
+            else:
+                self.dircache.pop(cache_key, None)
         return files
 
     def ls(
@@ -629,13 +659,15 @@ class S3FileSystem(AbstractFileSystem):
             raise ValueError("Cannot traverse all files in S3.")
         bucket, key, _ = self.parse_path(path)
         prefix = kwargs.pop("prefix", "")
+        # Keep refresh in kwargs so that the recursive calls also refresh.
+        refresh = kwargs.get("refresh", False)
 
         # When maxdepth is specified, use a recursive approach with delimiter
         if maxdepth is not None:
             result: list[S3Object] = []
 
             # List files and directories at current level
-            current_items = self._ls_dirs(path, prefix=prefix, delimiter="/")
+            current_items = self._ls_dirs(path, prefix=prefix, delimiter="/", refresh=refresh)
 
             for item in current_items:
                 if item.type == S3ObjectType.S3_OBJECT_TYPE_FILE:
@@ -657,16 +689,17 @@ class S3FileSystem(AbstractFileSystem):
             return result
 
         # For unlimited depth, use the original approach (get all files at once)
-        files = self._ls_dirs(path, prefix=prefix, delimiter="")
+        files = self._ls_dirs(path, prefix=prefix, delimiter="", refresh=refresh)
         if not files and key:
             try:
-                files = [self.info(path)]
+                files = [self.info(path, refresh=refresh)]
             except FileNotFoundError:
                 files = []
 
         # If withdirs is True, we need to derive directories from file paths
         if withdirs:
-            files.extend(self._extract_parent_directories(files, bucket, key))
+            # Build a new list; files may be the cached listing.
+            files = files + self._extract_parent_directories(files, bucket, key)
 
         # Filter directories if withdirs is False (default)
         if withdirs is False or withdirs is None:
@@ -693,7 +726,11 @@ class S3FileSystem(AbstractFileSystem):
             maxdepth: Maximum depth to recurse (None for unlimited).
             withdirs: Whether to include directories in results (None = default behavior).
             detail: If True, return dict of {path: S3Object}; if False, return list of paths.
-            **kwargs: Additional arguments.
+            **kwargs: Additional arguments including:
+                prefix: Key prefix, relative to the path, to filter the listed keys
+                    by. Without maxdepth, if nothing is listed and the path itself is
+                    an object, that object is returned regardless of the prefix.
+                refresh: If True, bypass the cache and list from S3.
 
         Returns:
             Dictionary mapping paths to S3Objects (if detail=True) or
@@ -717,7 +754,8 @@ class S3FileSystem(AbstractFileSystem):
 
         Args:
             path: S3 path to check (e.g., "s3://bucket" or "s3://bucket/key").
-            **kwargs: Additional arguments (unused).
+            **kwargs: Additional arguments including:
+                refresh: If True, bypass the cache and query S3.
 
         Returns:
             True if the path exists, False otherwise.
@@ -727,6 +765,7 @@ class S3FileSystem(AbstractFileSystem):
             >>> fs.exists("s3://my-bucket/file.txt")
             >>> fs.exists("s3://my-bucket/")
         """
+        refresh = kwargs.pop("refresh", False)
         path = self._strip_protocol(path)
         if path in ["", "/"]:
             # The root always exists.
@@ -734,22 +773,22 @@ class S3FileSystem(AbstractFileSystem):
         bucket, key, _ = self.parse_path(path)
         if key:
             try:
-                if self._ls_from_cache(path):
+                if not refresh and self._ls_from_cache(path):
                     return True
-                info = self.info(path)
+                info = self.info(path, refresh=refresh)
                 return bool(info)
             except FileNotFoundError:
                 return False
-        elif self.dircache.get(bucket, False):
-            return True
-        else:
+        if not refresh:
+            if self.dircache.get(bucket, False):
+                return True
             try:
                 if self._ls_from_cache(bucket):
                     return True
             except FileNotFoundError:
                 pass
-            file = self._head_bucket(bucket)
-            return bool(file)
+        file = self._head_bucket(bucket, refresh=refresh)
+        return bool(file)
 
     def rm_file(self, path: str, **kwargs) -> None:
         bucket, key, version_id = self.parse_path(path)
@@ -1737,6 +1776,9 @@ class S3FileSystem(AbstractFileSystem):
             path = self._strip_protocol(path)
             while path:
                 self.dircache.pop(path, None)
+                # _ls_dirs caches listings under (path, delimiter).
+                for delimiter in ("/", ""):
+                    self.dircache.pop((path, delimiter), None)
                 path = self._parent(path)
 
     def _ls_from_cache(self, path: str) -> list[S3Object] | S3Object | None:

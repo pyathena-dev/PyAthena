@@ -148,6 +148,16 @@ class TestS3FileSystem:
         fs.version_aware = False
         return fs
 
+    @staticmethod
+    def _file_object(key):
+        # Build a listed file entry in the bucket named "bucket".
+        return S3Object(
+            init={"Key": key},
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket="bucket",
+            key=key,
+        )
+
     def test_get_client_compatible_with_s3fs(self):
         # Only constructs a boto3 client; no AWS access.
         fs = S3FileSystem(
@@ -191,6 +201,137 @@ class TestS3FileSystem:
         # through to the S3 API instead (fsspec's implementation assumes
         # every cache value is a listing and raises TypeError here).
         assert fs._ls_from_cache("bucket/key/child") is None
+
+    def test_invalidate_cache_drops_listings_of_path_and_parents(self):
+        fs = self._make_fs()
+        invalidated = [
+            "bucket/a/b/c.txt",
+            ("bucket/a/b", "/"),
+            ("bucket/a/b", ""),
+            ("bucket/a", "/"),
+            ("bucket/a", ""),
+            ("bucket", "/"),
+            ("bucket", ""),
+        ]
+        kept = ["", ("bucket/a/x", "/")]
+        for cache_key in invalidated + kept:
+            fs.dircache[cache_key] = []
+
+        fs.invalidate_cache("s3://bucket/a/b/c.txt")
+        assert list(fs.dircache) == kept
+
+    @pytest.mark.parametrize(
+        ("prefix", "next_token"),
+        [
+            ("test_", None),
+            ("", "token"),
+        ],
+    )
+    def test_ls_dirs_partial_listing_bypasses_cache(self, prefix, next_token):
+        fs = self._make_fs()
+        cached = self._file_object("dir/cached")
+        fs.dircache[("bucket/dir", "")] = [cached]
+        fs._call.return_value = {"Contents": [{"Key": "dir/test_1"}]}
+
+        files = fs._ls_dirs("bucket/dir", prefix=prefix, delimiter="", next_token=next_token)
+        assert [f.name for f in files] == ["bucket/dir/test_1"]
+        assert fs.dircache[("bucket/dir", "")] == [cached]
+
+        # A complete listing of the path is still served from the cache.
+        fs._call.reset_mock()
+        assert fs._ls_dirs("bucket/dir", delimiter="") == [cached]
+        fs._call.assert_not_called()
+
+    def test_ls_dirs_empty_refresh_evicts_cached_listing(self):
+        fs = self._make_fs()
+        fs.dircache[("bucket/dir", "/")] = [self._file_object("dir/deleted")]
+        fs._call.return_value = {}
+
+        assert fs._ls_dirs("bucket/dir", refresh=True) == []
+        # The next listing must not return the deleted object from the cache.
+        fs._call.reset_mock()
+        assert fs._ls_dirs("bucket/dir") == []
+        fs._call.assert_called_once()
+
+    def test_find_withdirs_does_not_modify_cached_listing(self):
+        fs = self._make_fs()
+        fs.dircache[("bucket/dir", "")] = [self._file_object("dir/sub/file")]
+
+        expected = ["bucket/dir/sub", "bucket/dir/sub/file"]
+        assert sorted(fs.find("s3://bucket/dir", withdirs=True)) == expected
+        assert sorted(fs.find("s3://bucket/dir", withdirs=True)) == expected
+        assert fs.find("s3://bucket/dir") == ["bucket/dir/sub/file"]
+        fs._call.assert_not_called()
+
+    def test_find_refresh_bypasses_cached_listings(self):
+        fs = self._make_fs()
+        fs.dircache[("bucket/dir", "")] = [self._file_object("dir/old")]
+        fs.dircache[("bucket/dir", "/")] = [self._file_object("dir/old")]
+        fs.dircache[("bucket/dir/sub", "/")] = [self._file_object("dir/sub/old")]
+        responses = {
+            ("dir/", ""): {"Contents": [{"Key": "dir/sub/new"}]},
+            ("dir/", "/"): {"CommonPrefixes": [{"Prefix": "dir/sub/"}]},
+            ("dir/sub/", "/"): {"Contents": [{"Key": "dir/sub/new"}]},
+        }
+        fs._call.side_effect = lambda method, **kwargs: responses[
+            (kwargs["Prefix"], kwargs["Delimiter"])
+        ]
+
+        assert fs.find("s3://bucket/dir", refresh=True) == ["bucket/dir/sub/new"]
+        # The subdirectory listings of maxdepth are refreshed as well.
+        assert fs.find("s3://bucket/dir", maxdepth=1, refresh=True) == ["bucket/dir/sub/new"]
+
+    def test_refresh_evicts_cached_object_and_bucket_not_found(self):
+        fs = self._make_fs()
+        fs.dircache["bucket/key"] = self._file_object("key")
+        fs.dircache["bucket"] = fs._directory_object("bucket", None)
+        fs.dircache[""] = [fs._directory_object("bucket", None)]
+
+        def call(method, **kwargs):
+            if method in (fs._client.head_object, fs._client.head_bucket):
+                raise FileNotFoundError
+            return {}
+
+        fs._call.side_effect = call
+
+        assert fs.ls("s3://bucket/key", refresh=True) == []
+        # The next lookups must not return the deleted object and bucket from the cache.
+        assert fs.ls("s3://bucket/key") == []
+        assert not fs.exists("s3://bucket/key")
+        with pytest.raises(FileNotFoundError):
+            fs.info("s3://bucket", refresh=True)
+        assert not fs.exists("s3://bucket")
+
+    def test_exists_refresh_bypasses_cache(self):
+        fs = self._make_fs()
+        fs.dircache["bucket/key"] = self._file_object("key")
+        fs.dircache["bucket"] = fs._directory_object("bucket", None)
+        fs.dircache[""] = [fs._directory_object("bucket", None)]
+
+        def call(method, **kwargs):
+            if method in (fs._client.head_object, fs._client.head_bucket):
+                raise FileNotFoundError
+            return {}
+
+        fs._call.side_effect = call
+
+        assert fs.exists("s3://bucket/key")
+        assert fs.exists("s3://bucket")
+        fs._call.assert_not_called()
+
+        assert not fs.exists("s3://bucket/key", refresh=True)
+        assert not fs.exists("s3://bucket", refresh=True)
+
+    def test_missing_bucket_keeps_bucket_listing_without_it(self):
+        fs = self._make_fs()
+        fs.dircache[""] = [fs._directory_object("bucket", None)]
+        fs._call.side_effect = FileNotFoundError
+
+        assert not fs.exists("s3://missing")
+        # Other buckets are still answered from the cached bucket listing.
+        fs._call.reset_mock()
+        assert fs.exists("s3://bucket")
+        fs._call.assert_not_called()
 
     def test_mkdir_creates_bucket(self):
         fs = self._make_fs()
@@ -718,6 +859,29 @@ class TestS3FileSystem:
         assert len(test_1_detail) == 1
         assert test_1_detail[0].name == fs._strip_protocol(f"{dir_}/prefix/test_1")
         assert test_1_detail[0].size == 1
+
+    def test_ls_and_find_reflect_changes_through_the_filesystem(self, fs):
+        dir_ = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_ls_and_find_reflect_changes/{uuid.uuid4()}"
+        )
+        path = fs._strip_protocol(dir_)
+        fs.touch(f"{dir_}/a.txt")
+        fs.touch(f"{dir_}/b.txt")
+        assert sorted(fs.ls(dir_)) == [f"{path}/a.txt", f"{path}/b.txt"]
+        assert sorted(fs.find(dir_)) == [f"{path}/a.txt", f"{path}/b.txt"]
+
+        fs.rm(f"{dir_}/a.txt")
+        assert fs.ls(dir_) == [f"{path}/b.txt"]
+        assert fs.find(dir_) == [f"{path}/b.txt"]
+
+        fs.touch(f"{dir_}/c.txt")
+        assert sorted(fs.ls(dir_)) == [f"{path}/b.txt", f"{path}/c.txt"]
+        assert sorted(fs.find(dir_)) == [f"{path}/b.txt", f"{path}/c.txt"]
+        # A prefixed find must not be served from the unprefixed listing.
+        assert fs.find(dir_, prefix="c") == [f"{path}/c.txt"]
+
+        fs.rm(dir_, recursive=True)
 
     def test_info_bucket(self, fs):
         dir_ = f"s3://{ENV.s3_staging_bucket}"
