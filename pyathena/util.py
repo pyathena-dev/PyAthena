@@ -109,7 +109,7 @@ def strtobool(val: str) -> bool:
 
     References:
         - https://peps.python.org/pep-0632/
-        - https://github.com/pypa/distutils/blob/main/distutils/util.py#L340-L353
+        - https://github.com/pypa/distutils/blob/e32c71f38d6faf95c8241f4bfe4b6abf06a2ded9/distutils/util.py#L340-L353
     """
     val = val.lower()
     if val in ("y", "yes", "t", "true", "on", "1"):
