@@ -60,12 +60,16 @@ class AioBaseCursor(BaseCursor):
             result_reuse_minutes=options.result_reuse_minutes,
             execution_parameters=execution_parameters,
         )
-        query_id = await self._find_previous_query_id(
-            query,
-            options.work_group,
-            cache_size=options.cache_size,
-            cache_expiration_time=options.cache_expiration_time,
-        )
+        query_id = None
+        # Athena does not return the ExecutionParameters of earlier executions,
+        # so the cache cannot tell which parameters an execution ran with (#941).
+        if not request.get("ExecutionParameters"):
+            query_id = await self._find_previous_query_id(
+                query,
+                options.work_group,
+                cache_size=options.cache_size,
+                cache_expiration_time=options.cache_expiration_time,
+            )
         if query_id is None:
             try:
                 response = await async_retry_api_call(

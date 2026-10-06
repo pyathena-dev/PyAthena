@@ -258,6 +258,7 @@ cursor.execute("SELECT * FROM one_row", cache_size=100, cache_expiration_time=36
 
 Results will only be re-used if the query strings match *exactly*,
 and the query was a DML statement (the assumption being that you always want to re-run queries like `CREATE TABLE` and `DROP TABLE`).
+The cache is not used for a `qmark` query with parameters.
 
 The S3 staging directory is not checked, so it's possible that the location of the results is not in your provided `s3_staging_dir`.
 

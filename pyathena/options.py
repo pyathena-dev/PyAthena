@@ -38,6 +38,7 @@ class ExecuteOptions:
             caching. 0 (default) disables the cache lookup, unless
             ``cache_expiration_time`` is set to a positive value, in which
             case all queries within the expiration window are scanned.
+            A ``qmark`` query with parameters is never looked up.
         cache_expiration_time: Maximum age in seconds of a cached query
             result to consider for reuse. 0 (default) means no age limit.
         result_reuse_enable: Enable Athena server-side result reuse for this
