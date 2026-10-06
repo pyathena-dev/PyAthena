@@ -214,6 +214,11 @@ class TestAthenaTypeCompiler:
         assert dialect.type_compiler_instance.process(type_) == ddl
         assert str(cast(column("x"), type_).compile(dialect=dialect)) == f"CAST(x AS {cast_type})"
 
+    def test_null_type_cast_is_unchanged(self):
+        assert str(cast(column("x"), types.NullType()).compile(dialect=AthenaDialect())) == (
+            "CAST(x AS NULL)"
+        )
+
 
 class TestAthenaStatementCompiler:
     """Test cases for Athena statement compiler functionality."""

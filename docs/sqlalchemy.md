@@ -719,6 +719,10 @@ That includes top-level columns, fields of a STRUCT, STRUCT values inside MAP, a
 Integer fields, and integer MAP keys and values, use `INT` in that DDL.
 `CAST` and other SQL expressions keep `ROW(...)`, `MAP(...)`, and `ARRAY(...)`, and spell integers as `INTEGER`.
 
+Reflected STRUCT and ROW columns use `AthenaStruct` with their field names and types.
+A field type that the dialect does not recognize is reflected as `NullType` with a warning.
+Selecting such a column returns the value from the cursor, as described under Data format support below; SQLAlchemy does not convert it to the reflected field types.
+
 #### Querying STRUCT data
 
 PyAthena automatically converts STRUCT data between different formats:
@@ -867,6 +871,10 @@ CREATE TABLE products (
 
 `CREATE TABLE` renders integer MAP keys and values as `INT`.
 `CAST` still spells those integers as `INTEGER`.
+
+Reflected MAP columns use `AthenaMap` with their key and value types.
+A key or value type that the dialect does not recognize is reflected as `NullType` with a warning.
+Selecting such a column returns the value from the cursor, as described under Data format support below; SQLAlchemy does not convert it to the reflected key and value types.
 
 #### Querying MAP data
 
