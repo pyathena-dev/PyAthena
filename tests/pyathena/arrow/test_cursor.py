@@ -35,9 +35,37 @@ class TestArrowCursor:
         ]
         assert [row[3] for row in rows] == ["", "", "NULL"]
 
+    def test_multiline_values_across_blocks(self, arrow_cursor):
+        # The 50 two-line values of 301 bytes span several 1024-byte blocks.
+        arrow_cursor.execute(
+            """
+            SELECT array_join(repeat('x', 150), '') || chr(10) || array_join(repeat('y', 150), '')
+                AS v
+            FROM UNNEST(sequence(1, 50)) AS t(i)
+            """,
+            block_size=1024,
+        )
+        assert arrow_cursor.fetchall() == [("x" * 150 + "\n" + "y" * 150,)] * 50
+
     def test_binary_single_null(self, arrow_cursor):
         arrow_cursor.execute("SELECT CAST(NULL AS VARBINARY) AS value")
         assert arrow_cursor.fetchall() == [(None,)]
+
+    @pytest.mark.parametrize(
+        ("query", "expected"),
+        [
+            (
+                "SELECT x FROM (VALUES 1, NULL, 2) AS t(x) ORDER BY x NULLS FIRST",
+                [(None,), (1,), (2,)],
+            ),
+            # Arrow reads a NULL string from a CSV result as an empty string.
+            ("SELECT CAST(NULL AS VARCHAR) AS v", [("",)]),
+        ],
+    )
+    def test_single_column_null(self, arrow_cursor, query, expected):
+        arrow_cursor.execute(query)
+        assert arrow_cursor.as_arrow().num_rows == len(expected)
+        assert arrow_cursor.fetchall() == expected
 
     @pytest.mark.parametrize(
         "arrow_cursor",
@@ -962,5 +990,16 @@ class TestArrowCursor:
         indirect=["arrow_cursor"],
     )
     def test_fetch_all_rows(self, arrow_cursor):
-        arrow_cursor.execute("SELECT 1 AS col")
-        assert arrow_cursor.fetchall() == [(1,)]
+        arrow_cursor.execute(
+            """
+            SELECT
+              1 AS col
+              ,CAST('12:34:56' AS TIME) AS col_time
+              ,X'0102' AS col_varbinary
+              ,json_parse('{"a": 1}') AS col_json
+              ,CAST('{"a": 1}' AS JSON) AS col_json_string
+            """
+        )
+        assert arrow_cursor.fetchall() == [
+            (1, datetime(2017, 1, 1, 12, 34, 56).time(), b"\x01\x02", {"a": 1}, '{"a": 1}')
+        ]

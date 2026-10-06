@@ -475,6 +475,10 @@ for chunk in cursor.iter_chunks():
     process_chunk(chunk)
 ```
 
+Without an explicit `chunksize`, `as_pandas()` returns a single DataFrame even when a chunk size was chosen automatically.
+It reads every chunk and joins them, so the whole result is held in memory.
+Use `iter_chunks()`, `fetchone()`, or `fetchmany()` to read a large result one chunk at a time.
+
 **Priority of chunksize settings:**
 
 1. **Explicit chunksize** (highest priority): Always respected
@@ -550,6 +554,8 @@ Common performance options:
 - `buffer_lines`: Buffer size for C engine
 - `dtype`: Explicit column data types
 - `parse_dates`: Columns to parse as dates
+
+With `engine="pyarrow"`, tab-separated `.txt` results from DDL statements such as `SHOW TABLES`, `SHOW COLUMNS`, and `DESCRIBE` use the C engine to preserve leading zeros, exponent notation, and padding in string values.
 
 ### Unload options
 

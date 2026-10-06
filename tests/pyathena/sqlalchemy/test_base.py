@@ -20,6 +20,7 @@ from sqlalchemy.sql.schema import Column, MetaData, Table
 from sqlalchemy.sql.selectable import TextualSelect
 from sqlalchemy.util import PluginLoader
 
+from pyathena.sqlalchemy.base import AthenaDialect
 from pyathena.sqlalchemy.rest import AthenaRestDialect
 from pyathena.sqlalchemy.types import (
     TINYINT,
@@ -80,6 +81,54 @@ class TestAthenaDialect:
         }
         assert entry_points
         assert {name: load() for name, load in loader.impls.items()} == entry_points
+
+    @pytest.mark.parametrize(
+        ("map_type", "struct_type"),
+        [
+            # Metadata API (Hive) spellings.
+            ("map<int,string>", "struct<a:int,`b c`:array<struct<x:int>>>"),
+            # information_schema (Trino) spellings.
+            ("map(integer, varchar)", 'row(a integer, "b c" array(row(x integer)))'),
+        ],
+    )
+    def test_top_level_map_and_struct_reflect_their_types(self, map_type, struct_type):
+        dialect = AthenaDialect()
+        map_ = dialect._get_column_type(map_type)
+        struct = dialect._get_column_type(struct_type)
+
+        assert isinstance(map_, AthenaMap)
+        assert isinstance(map_.key_type, types.INTEGER)
+        assert isinstance(map_.value_type, (types.String, types.VARCHAR))
+        assert isinstance(struct, AthenaStruct)
+        assert list(struct.fields) == ["a", "b c"]
+        assert isinstance(struct.fields["a"], types.INTEGER)
+        assert isinstance(struct.fields["b c"], AthenaArray)
+        assert list(struct.fields["b c"].item_type.fields) == ["x"]
+
+        table = Table(
+            "t",
+            MetaData(),
+            Column("m", map_),
+            Column("s", struct),
+            awsathena_location="s3://bucket/path/",
+        )
+        ddl = str(CreateTable(table).compile(dialect=dialect))
+        assert "\tm MAP<INT, STRING>,\n" in ddl
+        assert "\ts STRUCT<a:INT, `b c`:ARRAY<STRUCT<x:INT>>>\n" in ddl
+
+    def test_unrecognized_field_type_reflects_null_type(self):
+        dialect = AthenaDialect()
+        with pytest.warns(sqlalchemy.exc.SAWarning, match="Did not recognize type"):
+            struct = dialect._get_column_type("struct<a:int,b:timestamp(3) with time zone>")
+        assert isinstance(struct.fields["a"], types.INTEGER)
+        assert isinstance(struct.fields["b"], types.NullType)
+
+    @pytest.mark.parametrize(
+        "type_", ["map<int>", "struct<a>", "row(a)", "struct<a:map<int>>", "map<int,struct<a>>"]
+    )
+    def test_unrecognized_top_level_map_or_struct_reflects_null_type(self, type_):
+        with pytest.warns(sqlalchemy.exc.SAWarning, match="Did not recognize type"):
+            assert isinstance(AthenaDialect()._get_column_type(type_), types.NullType)
 
 
 class TestSQLAlchemyAthena:
@@ -616,10 +665,15 @@ class TestSQLAlchemyAthena:
         assert isinstance(one_row_complex.c.col_binary.type, types.BINARY)
         assert isinstance(one_row_complex.c.col_array.type, AthenaArray)
         assert isinstance(one_row_complex.c.col_array.type.item_type, types.INTEGER)
-        assert isinstance(one_row_complex.c.col_map.type, types.String)
-        # With struct support, col_struct should now be recognized as AthenaStruct
-
+        assert isinstance(one_row_complex.c.col_map.type, AthenaMap)
+        assert isinstance(one_row_complex.c.col_map.type.key_type, types.INTEGER)
+        assert isinstance(one_row_complex.c.col_map.type.value_type, types.INTEGER)
         assert isinstance(one_row_complex.c.col_struct.type, AthenaStruct)
+        assert list(one_row_complex.c.col_struct.type.fields) == ["a", "b"]
+        assert isinstance(one_row_complex.c.col_struct.type.fields["a"], types.INTEGER)
+        ddl = str(CreateTable(one_row_complex).compile(dialect=engine.dialect))
+        assert "\tcol_map MAP<INT, INT>,\n" in ddl
+        assert "\tcol_struct STRUCT<a:INT, b:INT>,\n" in ddl
         assert isinstance(
             one_row_complex.c.col_decimal.type,
             types.DECIMAL,
@@ -669,11 +723,13 @@ class TestSQLAlchemyAthena:
         assert isinstance(dialect._get_column_type("date"), types.DATE)
         assert isinstance(dialect._get_column_type("binary"), types.BINARY)
         assert isinstance(dialect._get_column_type("array<integer>"), AthenaArray)
-        assert isinstance(dialect._get_column_type("map<int, int>"), types.String)
-        # With struct support, struct types should be recognized as AthenaStruct
-
-        assert isinstance(dialect._get_column_type("struct<a: int, b: int>"), AthenaStruct)
-        assert isinstance(dialect._get_column_type("row<name: string, age: int>"), AthenaStruct)
+        assert isinstance(dialect._get_column_type("map<int, int>"), AthenaMap)
+        struct = dialect._get_column_type("struct<a: int, b: int>")
+        assert isinstance(struct, AthenaStruct)
+        assert list(struct.fields) == ["a", "b"]
+        row = dialect._get_column_type("row<name: string, age: int>")
+        assert isinstance(row, AthenaStruct)
+        assert list(row.fields) == ["name", "age"]
         decimal_with_args = dialect._get_column_type("decimal(10,1)")
         assert isinstance(decimal_with_args, types.DECIMAL)
         assert decimal_with_args.precision == 10

@@ -384,6 +384,34 @@ class AthenaDialect(DefaultDialect):
         return columns
 
     def _get_column_type(self, type_: str, _nested: bool = False):
+        """Map an Athena column type string to a SQLAlchemy type.
+
+        Accepts both the Hive (``struct<a:int>``, ``map<int,int>``) and the
+        Trino (``row(a integer)``, ``map(integer, integer)``) spellings, and
+        parses the element, key, value, and field types of ARRAY, MAP, and
+        STRUCT/ROW types.
+
+        Args:
+            type_: The column type reported by Athena.
+            _nested: Whether ``type_`` is nested in another type. A nested MAP
+                or STRUCT/ROW that cannot be parsed raises, so that the
+                enclosing type is reported as unrecognized.
+
+        Returns:
+            The SQLAlchemy type. A type name that is not recognized, such as
+            ``foo`` in ``struct<a:foo>``, becomes ``NullType`` in place with a
+            warning. A type that cannot be parsed, such as ``map<int>`` or
+            ``varchar(x)``, makes its innermost enclosing ARRAY ``NullType``
+            with a warning; without an enclosing ARRAY, a top-level MAP or
+            STRUCT/ROW becomes ``NullType`` instead.
+
+        Raises:
+            ValueError: If a type cannot be parsed and neither an enclosing
+                ARRAY nor a top-level MAP or STRUCT/ROW handles it, for example
+                a top-level ``varchar(x)`` or a nested ``map<int>``.
+            TypeError: In the same case, for a DECIMAL type with more
+                arguments than SQLAlchemy's ``DECIMAL`` accepts.
+        """
         type_ = type_.strip()
         match = self._pattern_column_type.match(type_)
         if match:
@@ -396,6 +424,12 @@ class AthenaDialect(DefaultDialect):
         if name == "array":
             try:
                 return AthenaArray(self._get_column_type(length, _nested=True) if length else None)
+            except (TypeError, ValueError):
+                util.warn(f"Did not recognize type '{type_}'")
+                return types.NullType()
+        if not _nested and name in ("map", "row", "struct") and length:
+            try:
+                return self._get_column_type(type_, _nested=True)
             except (TypeError, ValueError):
                 util.warn(f"Did not recognize type '{type_}'")
                 return types.NullType()

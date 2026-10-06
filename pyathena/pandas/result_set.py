@@ -166,7 +166,15 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
             raise
 
     def as_pandas(self) -> DataFrame:
-        """Collect all chunks into a single DataFrame.
+        """Collect all remaining chunks into a single DataFrame.
+
+        The chunks keep their index, so the result has the row numbers or the
+        ``index_col`` values of the CSV file. Categorical columns and a categorical
+        index stay categorical. Categories given in the dtype keep their order;
+        when the chunks inferred different categories, they are inferred again from
+        all chunks in sorted order. A whole-file read of a large file can order
+        inferred categories differently, because pandas joins its internal parser
+        blocks in the order they were read.
 
         Returns:
             Single pandas DataFrame containing all data.
@@ -178,7 +186,20 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
             return pd.DataFrame()
         if len(dfs) == 1:
             return dfs[0]
-        return pd.concat(dfs, ignore_index=True)
+        df = pd.concat(dfs)
+        # Each chunk infers its own categories, and concat turns categorical columns
+        # and indexes whose categories differ into object or string ones.
+        for column, dtype in dfs[0].dtypes.items():
+            if isinstance(dtype, pd.CategoricalDtype) and not isinstance(
+                df[column].dtype, pd.CategoricalDtype
+            ):
+                df[column] = df[column].astype(pd.CategoricalDtype(ordered=dtype.ordered))
+        index_dtype = dfs[0].index.dtype
+        if isinstance(index_dtype, pd.CategoricalDtype) and not isinstance(
+            df.index.dtype, pd.CategoricalDtype
+        ):
+            df.index = df.index.astype(pd.CategoricalDtype(ordered=index_dtype.ordered))
+        return df
 
 
 class AthenaPandasResultSet(AthenaResultSet):
@@ -358,6 +379,10 @@ class AthenaPandasResultSet(AthenaResultSet):
         # Use PyArrow only when explicitly requested and all compatibility
         # checks pass; otherwise fall through to the C engine default.
         if self._engine == "pyarrow":
+            # Header-less DDL results lose numeric-looking strings and their padding
+            # when PyArrow infers types before applying the string dtypes.
+            if self.output_location and self.output_location.endswith(".txt"):
+                return "c"
             effective_chunksize = chunksize if chunksize is not None else self._chunksize
             is_compatible = (
                 effective_chunksize is None
@@ -828,20 +853,20 @@ class AthenaPandasResultSet(AthenaResultSet):
 
     def as_pandas(self) -> PandasDataFrameIterator | DataFrame:
         if self._chunksize is None:
-            return next(self._df_iter)
+            return self._df_iter.as_pandas()
         return self._df_iter
 
     def iter_chunks(self) -> PandasDataFrameIterator:
         """Iterate over result chunks as pandas DataFrames.
 
         This method provides an iterator interface for processing large result sets.
-        When chunksize is specified, it yields DataFrames in chunks for memory-efficient
-        processing. When chunksize is not specified, it yields the entire result as a
-        single DataFrame.
+        When chunksize is specified, or ``auto_optimize_chunksize`` chose a chunk size
+        for a large CSV result, it yields DataFrames in chunks for memory-efficient
+        processing. Otherwise, it yields the entire result as a single DataFrame.
 
         Returns:
             PandasDataFrameIterator that yields pandas DataFrames for each chunk
-            of rows, or the entire DataFrame if chunksize was not specified.
+            of rows, or the entire DataFrame if the result was not read in chunks.
 
         Example:
             >>> # With chunking for large datasets

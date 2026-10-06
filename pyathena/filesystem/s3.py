@@ -271,6 +271,11 @@ class S3FileSystem(AbstractFileSystem):
                     Bucket=bucket,
                 )
             except FileNotFoundError:
+                self.dircache.pop(bucket, None)
+                # Evict the cached bucket listing only if it still lists the bucket.
+                buckets = self.dircache.get("")
+                if buckets and any(b.name == bucket for b in buckets):
+                    self.dircache.pop("", None)
                 return None
             file = S3Object(
                 init={
@@ -308,6 +313,7 @@ class S3FileSystem(AbstractFileSystem):
                     **request,
                 )
             except FileNotFoundError:
+                self.dircache.pop(path, None)
                 return None
             if self.version_aware and not version_id:
                 # Pin the version of the object so that subsequent reads see
@@ -360,13 +366,34 @@ class S3FileSystem(AbstractFileSystem):
         max_keys: int | None = None,
         refresh: bool = False,
     ) -> list[S3Object]:
+        """List the objects and common prefixes under a path.
+
+        A complete, non-empty listing of the path is cached under
+        ``(path, delimiter)``, and an empty one evicts it.
+        ``invalidate_cache`` drops it when the path or a path under it is
+        invalidated.
+
+        Args:
+            path: The bucket or directory path to list.
+            prefix: Key prefix to filter by, relative to the path. A prefixed
+                listing is neither read from nor written to the cache.
+            delimiter: Delimiter to group keys by; ``""`` lists recursively.
+            next_token: Continuation token to start listing from. A listing
+                that starts from a token is neither read from nor written to
+                the cache.
+            max_keys: Maximum number of keys per ListObjectsV2 request.
+            refresh: If True, bypass the cache and list from S3.
+
+        Returns:
+            The listed directories and files.
+        """
         bucket, key, version_id = self.parse_path(path)
+        use_cache = not prefix and not next_token
         if key:
             prefix = f"{key}/{prefix if prefix else ''}"
 
-        # Create a cache key that includes the delimiter
         cache_key = (path, delimiter)
-        if cache_key in self.dircache and not refresh:
+        if use_cache and cache_key in self.dircache and not refresh:
             return cast(list[S3Object], self.dircache[cache_key])
 
         files: list[S3Object] = []
@@ -400,8 +427,11 @@ class S3FileSystem(AbstractFileSystem):
             next_token = response.get("NextContinuationToken")
             if not next_token:
                 break
-        if files:
-            self.dircache[cache_key] = files
+        if use_cache:
+            if files:
+                self.dircache[cache_key] = files
+            else:
+                self.dircache.pop(cache_key, None)
         return files
 
     def ls(
@@ -629,13 +659,15 @@ class S3FileSystem(AbstractFileSystem):
             raise ValueError("Cannot traverse all files in S3.")
         bucket, key, _ = self.parse_path(path)
         prefix = kwargs.pop("prefix", "")
+        # Keep refresh in kwargs so that the recursive calls also refresh.
+        refresh = kwargs.get("refresh", False)
 
         # When maxdepth is specified, use a recursive approach with delimiter
         if maxdepth is not None:
             result: list[S3Object] = []
 
             # List files and directories at current level
-            current_items = self._ls_dirs(path, prefix=prefix, delimiter="/")
+            current_items = self._ls_dirs(path, prefix=prefix, delimiter="/", refresh=refresh)
 
             for item in current_items:
                 if item.type == S3ObjectType.S3_OBJECT_TYPE_FILE:
@@ -657,16 +689,17 @@ class S3FileSystem(AbstractFileSystem):
             return result
 
         # For unlimited depth, use the original approach (get all files at once)
-        files = self._ls_dirs(path, prefix=prefix, delimiter="")
+        files = self._ls_dirs(path, prefix=prefix, delimiter="", refresh=refresh)
         if not files and key:
             try:
-                files = [self.info(path)]
+                files = [self.info(path, refresh=refresh)]
             except FileNotFoundError:
                 files = []
 
         # If withdirs is True, we need to derive directories from file paths
         if withdirs:
-            files.extend(self._extract_parent_directories(files, bucket, key))
+            # Build a new list; files may be the cached listing.
+            files = files + self._extract_parent_directories(files, bucket, key)
 
         # Filter directories if withdirs is False (default)
         if withdirs is False or withdirs is None:
@@ -693,7 +726,11 @@ class S3FileSystem(AbstractFileSystem):
             maxdepth: Maximum depth to recurse (None for unlimited).
             withdirs: Whether to include directories in results (None = default behavior).
             detail: If True, return dict of {path: S3Object}; if False, return list of paths.
-            **kwargs: Additional arguments.
+            **kwargs: Additional arguments including:
+                prefix: Key prefix, relative to the path, to filter the listed keys
+                    by. Without maxdepth, if nothing is listed and the path itself is
+                    an object, that object is returned regardless of the prefix.
+                refresh: If True, bypass the cache and list from S3.
 
         Returns:
             Dictionary mapping paths to S3Objects (if detail=True) or
@@ -717,7 +754,8 @@ class S3FileSystem(AbstractFileSystem):
 
         Args:
             path: S3 path to check (e.g., "s3://bucket" or "s3://bucket/key").
-            **kwargs: Additional arguments (unused).
+            **kwargs: Additional arguments including:
+                refresh: If True, bypass the cache and query S3.
 
         Returns:
             True if the path exists, False otherwise.
@@ -727,6 +765,7 @@ class S3FileSystem(AbstractFileSystem):
             >>> fs.exists("s3://my-bucket/file.txt")
             >>> fs.exists("s3://my-bucket/")
         """
+        refresh = kwargs.pop("refresh", False)
         path = self._strip_protocol(path)
         if path in ["", "/"]:
             # The root always exists.
@@ -734,22 +773,22 @@ class S3FileSystem(AbstractFileSystem):
         bucket, key, _ = self.parse_path(path)
         if key:
             try:
-                if self._ls_from_cache(path):
+                if not refresh and self._ls_from_cache(path):
                     return True
-                info = self.info(path)
+                info = self.info(path, refresh=refresh)
                 return bool(info)
             except FileNotFoundError:
                 return False
-        elif self.dircache.get(bucket, False):
-            return True
-        else:
+        if not refresh:
+            if self.dircache.get(bucket, False):
+                return True
             try:
                 if self._ls_from_cache(bucket):
                     return True
             except FileNotFoundError:
                 pass
-            file = self._head_bucket(bucket)
-            return bool(file)
+        file = self._head_bucket(bucket, refresh=refresh)
+        return bool(file)
 
     def rm_file(self, path: str, **kwargs) -> None:
         bucket, key, version_id = self.parse_path(path)
@@ -1104,12 +1143,7 @@ class S3FileSystem(AbstractFileSystem):
         if version_id1:
             copy_source.update({"VersionId": version_id1})
 
-        ranges = S3File._get_ranges(
-            0,
-            size1,
-            max_workers,
-            block_size,
-        )
+        ranges = self._get_copy_ranges(size1, block_size)
         multipart_upload = self._create_multipart_upload(
             bucket=bucket2,
             key=key2,
@@ -1134,6 +1168,37 @@ class S3FileSystem(AbstractFileSystem):
                 upload_id=cast(str, multipart_upload.upload_id),
                 futures=futures,
             )
+
+    def _get_copy_ranges(self, size: int, block_size: int) -> list[tuple[int, int]]:
+        """Split an object into the source ranges of a multipart copy.
+
+        The object is split into ranges of ``block_size`` bytes, whatever the
+        number of workers. A last range shorter than
+        ``MULTIPART_UPLOAD_MIN_PART_SIZE`` is merged into the previous one,
+        which is split in half if the result exceeds
+        ``MULTIPART_UPLOAD_MAX_PART_SIZE``. Every range is then within the
+        S3 part size limits, including the last one unless the whole object
+        is smaller than the minimum part size, so that more parts can follow
+        the copied ones, as in an append.
+
+        Args:
+            size: The size of the source object in bytes.
+            block_size: The size in bytes to split the object by, between
+                ``MULTIPART_UPLOAD_MIN_PART_SIZE`` and
+                ``MULTIPART_UPLOAD_MAX_PART_SIZE``. The range that a short
+                last range is merged into can be longer, up to
+                ``MULTIPART_UPLOAD_MAX_PART_SIZE``.
+
+        Returns:
+            The ``(start, end)`` byte ranges, with an exclusive end, that
+            cover the whole object in order.
+        """
+        starts = list(range(0, size, block_size))
+        if len(starts) > 1 and size - starts[-1] < self.MULTIPART_UPLOAD_MIN_PART_SIZE:
+            starts.pop()
+            if size - starts[-1] > self.MULTIPART_UPLOAD_MAX_PART_SIZE:
+                starts.append(starts[-1] + (size - starts[-1]) // 2)
+        return list(zip(starts, [*starts[1:], size], strict=True))
 
     def pipe_file(
         self, path: str, value: bytes | bytearray | memoryview, mode: str = "overwrite", **kwargs
@@ -1737,6 +1802,9 @@ class S3FileSystem(AbstractFileSystem):
             path = self._strip_protocol(path)
             while path:
                 self.dircache.pop(path, None)
+                # _ls_dirs caches listings under (path, delimiter).
+                for delimiter in ("/", ""):
+                    self.dircache.pop((path, delimiter), None)
                 path = self._parent(path)
 
     def _ls_from_cache(self, path: str) -> list[S3Object] | S3Object | None:
@@ -2004,11 +2072,15 @@ class S3File(AbstractBufferedFile):
                 self.s3_additional_kwargs.update({"IfMatch": etag})
             self._details = info
         elif "a" in mode and self.fs.exists(path):
-            self.append_block = True
             info = self.fs.info(self.path, version_id=self.version_id)
             loc = info.get("size", 0)
             if loc < self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE:
+                # Too small to be a part of a multipart upload: rewrite it
+                # from the buffer.
                 self.write(self.fs.cat(self.path))
+            else:
+                # Copied with UploadPartCopy as the leading part(s).
+                self.append_block = True
             self.loc = loc
             self.s3_additional_kwargs.update(info.to_api_repr())
             self._details = info
@@ -2023,8 +2095,10 @@ class S3File(AbstractBufferedFile):
         self._executor.shutdown()
 
     def _initiate_upload(self) -> None:
-        if self.tell() < self.blocksize:
+        if not self.append_block and self.tell() < self.blocksize:
             # Files smaller than block size in size cannot be multipart uploaded.
+            # An append to an object copied with UploadPartCopy always uses
+            # a multipart upload, whatever the block size.
             return
 
         self.multipart_upload = self.fs._create_multipart_upload(
@@ -2033,14 +2107,12 @@ class S3File(AbstractBufferedFile):
             **self.s3_additional_kwargs,
         )
         if self.append_block:
-            if self.tell() > S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE:
+            if self.tell() > self.fs.MULTIPART_UPLOAD_MAX_PART_SIZE:
                 info = self.fs.info(self.path, version_id=self.version_id)
-                ranges = self._get_ranges(
-                    0,
+                ranges = self.fs._get_copy_ranges(
                     # Set copy source file byte size
                     info.get("size", 0),
-                    self.max_workers,
-                    S3FileSystem.MULTIPART_UPLOAD_MAX_PART_SIZE,
+                    self.fs.MULTIPART_UPLOAD_MAX_PART_SIZE,
                 )
                 for i, range_ in enumerate(ranges):
                     self.multipart_upload_parts.append(
@@ -2074,7 +2146,7 @@ class S3File(AbstractBufferedFile):
         # can still read the bytes; resetting it there would upload an empty
         # object for small files. Mid-stream chunks (final=False) return True so
         # fsspec clears the already-uploaded buffer between parts.
-        if self.tell() < self.blocksize:
+        if not self.append_block and self.tell() < self.blocksize:
             # Files smaller than block size in size cannot be multipart uploaded.
             if self.autocommit and final:
                 self.commit()
@@ -2085,9 +2157,12 @@ class S3File(AbstractBufferedFile):
 
         part_number = len(self.multipart_upload_parts)
         self.buffer.seek(0)
-        while data := self.buffer.read(self.blocksize):
-            # The last part of a multipart request should be adjusted
-            # to be larger than the minimum part size.
+        data = self.buffer.read(self.blocksize)
+        while data:
+            # Only the last part of a multipart upload may be smaller than the
+            # minimum part size, and more data may follow a mid-stream chunk.
+            # A single write() can leave several blocks in the buffer, so look
+            # ahead one block and merge a short last block into this one.
             next_data = self.buffer.read(self.blocksize)
             next_data_size = len(next_data)
             if 0 < next_data_size < self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE:
@@ -2098,10 +2173,9 @@ class S3File(AbstractBufferedFile):
                 else:
                     split_size = upload_data_size // 2
                     uploads = [upload_data[:split_size], upload_data[split_size:]]
+                next_data = b""
             else:
                 uploads = [data]
-                if next_data:
-                    uploads.append(next_data)
 
             for upload in uploads:
                 part_number += 1
@@ -2116,8 +2190,7 @@ class S3File(AbstractBufferedFile):
                     )
                 )
 
-            if not next_data:
-                break
+            data = next_data
 
         if self.autocommit and final:
             self.commit()
@@ -2163,12 +2236,19 @@ class S3File(AbstractBufferedFile):
         if self.multipart_upload:
             for f in self.multipart_upload_parts:
                 f.cancel()
+            # s3_additional_kwargs also holds object parameters (e.g., the
+            # existing object's metadata in append mode) that
+            # AbortMultipartUpload rejects.
             self.fs._call(
                 "abort_multipart_upload",
                 Bucket=self.bucket,
                 Key=self.key,
                 UploadId=self.multipart_upload.upload_id,
-                **self.s3_additional_kwargs,
+                **{
+                    k: v
+                    for k, v in self.s3_additional_kwargs.items()
+                    if k in ("RequestPayer", "ExpectedBucketOwner")
+                },
             )
 
         self.multipart_upload = None

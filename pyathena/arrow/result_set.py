@@ -119,6 +119,9 @@ class AthenaArrowResultSet(AthenaResultSet):
             import pyarrow as pa
 
             self._table = pa.Table.from_pydict({})
+        # The fetch methods convert only the values read from a result file.
+        # GetQueryResults values are already converted.
+        self._convert_rows = bool(self.output_location)
         self._batches = iter(self._table.to_batches(arraysize))
 
     def __s3_file_system(self):
@@ -215,11 +218,15 @@ class AthenaArrowResultSet(AthenaResultSet):
             return
         else:
             dict_rows = rows.to_pydict()
-            column_names = dict_rows.keys()
-            processed_rows = [
-                tuple(self.converters[k](v) for k, v in zip(column_names, row, strict=False))
-                for row in zip(*dict_rows.values(), strict=False)
-            ]
+            if self._convert_rows:
+                converters = self.converters
+                column_names = dict_rows.keys()
+                processed_rows = [
+                    tuple(converters[k](v) for k, v in zip(column_names, row, strict=False))
+                    for row in zip(*dict_rows.values(), strict=False)
+                ]
+            else:
+                processed_rows = list(zip(*dict_rows.values(), strict=False))
             self._rows.extend(processed_rows)
 
     def fetchone(
@@ -297,9 +304,13 @@ class AthenaArrowResultSet(AthenaResultSet):
             parse_opts = csv.ParseOptions(
                 delimiter=",",
                 quote_char='"',
-                ignore_empty_lines=not binary_columns,
+                # Athena writes a single-column row with a NULL value as an empty line.
+                ignore_empty_lines=False,
                 double_quote=True,
                 escape_char=False,
+                # A quoted value can contain a newline, so the reader must not split
+                # blocks inside quotes.
+                newlines_in_values=True,
             )
         else:
             return pa.Table.from_pydict({})

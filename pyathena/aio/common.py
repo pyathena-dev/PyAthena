@@ -4,7 +4,7 @@ import asyncio
 import logging
 import sys
 from datetime import datetime, timedelta, timezone
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 from pyathena.aio.util import async_retry_api_call
 from pyathena.common import BaseCursor, CursorIterator
@@ -60,12 +60,16 @@ class AioBaseCursor(BaseCursor):
             result_reuse_minutes=options.result_reuse_minutes,
             execution_parameters=execution_parameters,
         )
-        query_id = await self._find_previous_query_id(
-            query,
-            options.work_group,
-            cache_size=options.cache_size,
-            cache_expiration_time=options.cache_expiration_time,
-        )
+        query_id = None
+        # Athena does not return the ExecutionParameters of earlier executions,
+        # so the cache cannot tell which parameters an execution ran with (#941).
+        if not request.get("ExecutionParameters"):
+            query_id = await self._find_previous_query_id(
+                query,
+                options.work_group,
+                cache_size=options.cache_size,
+                cache_expiration_time=options.cache_expiration_time,
+            )
         if query_id is None:
             try:
                 response = await async_retry_api_call(
@@ -376,6 +380,7 @@ class WithAsyncFetch(AioBaseCursor, CursorIterator, WithResultSet):
     ``rownumber``, ``rowcount``), lifecycle methods (``close``, ``executemany``,
     ``cancel``), default sync fetch (for cursors whose result sets load all
     data eagerly in ``__init__``), and the async iteration protocol.
+    Synchronous iteration raises ``TypeError``.
 
     Subclasses override ``execute()`` and optionally ``__init__`` and
     format-specific helpers.
@@ -503,6 +508,14 @@ class WithAsyncFetch(AioBaseCursor, CursorIterator, WithResultSet):
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaResultSet, self.result_set)
         return result_set.fetchall()
+
+    def __iter__(self) -> NoReturn:
+        """Reject synchronous iteration; use ``async for`` instead.
+
+        Raises:
+            TypeError: Always, because the fetch methods are coroutines.
+        """
+        raise TypeError(f"'{type(self).__name__}' object is not iterable; use 'async for' instead.")
 
     def __aiter__(self):
         return self

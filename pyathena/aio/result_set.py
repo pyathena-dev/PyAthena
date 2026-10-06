@@ -4,6 +4,7 @@ import logging
 from typing import (
     TYPE_CHECKING,
     Any,
+    NoReturn,
     cast,
 )
 
@@ -25,7 +26,8 @@ class AthenaAioResultSet(AthenaResultSet):
 
     Skips the synchronous ``_pre_fetch`` by passing ``_pre_fetch=False`` to
     the parent ``__init__`` and provides an ``async create()`` classmethod
-    factory instead.
+    factory instead. Synchronous iteration raises ``TypeError``; use
+    ``async for`` instead.
     """
 
     def __init__(
@@ -190,6 +192,14 @@ class AthenaAioResultSet(AthenaResultSet):
             else:
                 break
         return rows
+
+    def __iter__(self) -> NoReturn:
+        """Reject synchronous iteration; use ``async for`` instead.
+
+        Raises:
+            TypeError: Always, because the fetch methods are coroutines.
+        """
+        raise TypeError(f"'{type(self).__name__}' object is not iterable; use 'async for' instead.")
 
     def __aiter__(self):
         return self

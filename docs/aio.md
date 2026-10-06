@@ -191,6 +191,7 @@ df = cursor.as_pandas()  # In-memory conversion, no await needed
 
 The `as_pandas()`, `as_arrow()`, and `as_polars()` convenience methods operate on
 already-loaded data and remain synchronous.
+With a chunk size chosen by `auto_optimize_chunksize`, `as_pandas()` reads every remaining chunk.
 
 See each cursor's documentation page for detailed usage examples.
 

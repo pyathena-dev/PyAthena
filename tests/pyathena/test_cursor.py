@@ -92,6 +92,9 @@ class TestCursor:
         assert list(cursor) == [(1,)]
         pytest.raises(StopIteration, cursor.__next__)
 
+    # Cache hits are asserted in ENV.work_group: the default work group runs most test
+    # queries, which can push earlier executions out of the cache_size window.
+    @pytest.mark.parametrize("cursor", [{"work_group": ENV.work_group}], indirect=["cursor"])
     def test_cache_size(self, cursor):
         # To test caching, we need to make sure the query is unique, otherwise
         # we might accidentally pick up the cache results from another CI run.
@@ -127,6 +130,24 @@ class TestCursor:
         assert first_query_id != second_query_id
         assert third_query_id in [first_query_id, second_query_id]
 
+    @pytest.mark.parametrize("cursor", [{"work_group": ENV.work_group}], indirect=["cursor"])
+    def test_cache_size_with_qmark_parameters(self, cursor):
+        query = f"SELECT ? AS v -- {datetime.now(timezone.utc)!s}"
+
+        cursor.execute(query, ["'1'"], paramstyle="qmark")
+        first_query_id = cursor.query_id
+
+        # Different parameters must not reuse the earlier execution (#941).
+        cursor.execute(query, ["'2'"], paramstyle="qmark", cache_size=100)
+        assert cursor.query_id != first_query_id
+        assert cursor.fetchall() == [("2",)]
+
+        # Athena does not return the parameters of earlier executions,
+        # so even the same parameters run again.
+        cursor.execute(query, ["'1'"], paramstyle="qmark", cache_size=100)
+        assert cursor.query_id != first_query_id
+        assert cursor.fetchall() == [("1",)]
+
     def test_cache_expiration_time(self, cursor):
         query = f"SELECT * FROM one_row -- {datetime.now(timezone.utc)!s}"
 
@@ -142,6 +163,7 @@ class TestCursor:
         assert query_id_1 != query_id_2
         assert query_id_3 in [query_id_1, query_id_2]
 
+    @pytest.mark.parametrize("cursor", [{"work_group": ENV.work_group}], indirect=["cursor"])
     def test_cache_expiration_time_with_cache_size(self, cursor):
         # Cache miss
         query = f"SELECT * FROM one_row -- {datetime.now(timezone.utc)!s}"
@@ -1063,6 +1085,32 @@ class TestCursor:
             cache_size=10,
             cache_expiration_time=100,
         )
+
+    def test_execute_qmark_parameters_skip_cache(self):
+        """A qmark query with parameters never searches the cache (no AWS, #941)."""
+        cursor = Cursor.__new__(Cursor)  # bypass __init__ to avoid AWS calls
+        cursor._connection = MagicMock()
+        cursor._connection.client.start_query_execution.return_value = {
+            "QueryExecutionId": "test_query_id"
+        }
+        cursor._retry_config = RetryConfig()
+        cursor._kill_on_interrupt = True
+
+        with (
+            patch.object(
+                Cursor,
+                "_build_start_query_execution_request",
+                return_value={"ExecutionParameters": ["'1'"]},
+            ) as request_mock,
+            patch.object(Cursor, "_find_previous_query_id", return_value="cached") as cache_mock,
+        ):
+            query_id = cursor._execute(
+                "SELECT ?", ["'1'"], paramstyle="qmark", cache_size=10, cache_expiration_time=100
+            )
+
+        assert query_id == "test_query_id"
+        assert request_mock.call_args.kwargs["execution_parameters"] == ["'1'"]
+        cache_mock.assert_not_called()
 
     def test_connection_level_callback(self):
         """Test connection-level default callback."""
