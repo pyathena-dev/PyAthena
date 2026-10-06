@@ -2133,9 +2133,12 @@ class S3File(AbstractBufferedFile):
 
         part_number = len(self.multipart_upload_parts)
         self.buffer.seek(0)
-        while data := self.buffer.read(self.blocksize):
-            # The last part of a multipart request should be adjusted
-            # to be larger than the minimum part size.
+        data = self.buffer.read(self.blocksize)
+        while data:
+            # Only the last part of a multipart upload may be smaller than the
+            # minimum part size, and more data may follow a mid-stream chunk.
+            # A single write() can leave several blocks in the buffer, so look
+            # ahead one block and merge a short last block into this one.
             next_data = self.buffer.read(self.blocksize)
             next_data_size = len(next_data)
             if 0 < next_data_size < self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE:
@@ -2146,10 +2149,9 @@ class S3File(AbstractBufferedFile):
                 else:
                     split_size = upload_data_size // 2
                     uploads = [upload_data[:split_size], upload_data[split_size:]]
+                next_data = b""
             else:
                 uploads = [data]
-                if next_data:
-                    uploads.append(next_data)
 
             for upload in uploads:
                 part_number += 1
@@ -2164,8 +2166,7 @@ class S3File(AbstractBufferedFile):
                     )
                 )
 
-            if not next_data:
-                break
+            data = next_data
 
         if self.autocommit and final:
             self.commit()
