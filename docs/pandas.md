@@ -555,6 +555,8 @@ Common performance options:
 - `dtype`: Explicit column data types
 - `parse_dates`: Columns to parse as dates
 
+With `engine="pyarrow"`, tab-separated `.txt` results from DDL statements such as `SHOW TABLES`, `SHOW COLUMNS`, and `DESCRIBE` use the C engine to preserve leading zeros, exponent notation, and padding in string values.
+
 ### Unload options
 
 PandasCursor also supports the unload option, as does {ref}`arrow-cursor`.

@@ -898,6 +898,7 @@ class TestPandasCursor:
             result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)
             result_set._chunksize = None  # Default values
             result_set._quoting = 1
+            result_set._query_execution = None
 
             # Test C engine specification
             result_set._engine = "c"
