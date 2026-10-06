@@ -8,6 +8,7 @@
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from inspect import Parameter, signature
 from typing import Any
 from unittest.mock import patch
 
@@ -18,6 +19,7 @@ import pyathena
 from pyathena.arrow.async_cursor import AsyncArrowCursor
 from pyathena.arrow.cursor import ArrowCursor
 from pyathena.async_cursor import AsyncCursor, AsyncDictCursor
+from pyathena.common import BaseCursor
 from pyathena.connection import Connection
 from pyathena.converter import DefaultTypeConverter
 from pyathena.cursor import Cursor, DictCursor
@@ -27,8 +29,12 @@ from pyathena.pandas.async_cursor import AsyncPandasCursor
 from pyathena.pandas.cursor import PandasCursor
 from pyathena.polars.async_cursor import AsyncPolarsCursor
 from pyathena.polars.cursor import PolarsCursor
+from pyathena.result_set import WithResultSet
 from pyathena.s3fs.async_cursor import AsyncS3FSCursor
 from pyathena.s3fs.cursor import S3FSCursor
+from pyathena.spark.async_cursor import AsyncSparkCursor
+from pyathena.spark.common import SparkBaseCursor
+from pyathena.spark.cursor import SparkCursor
 from pyathena.util import RetryConfig
 
 # Cursors whose arraysize is the GetQueryResults page size, capped at 1000.
@@ -44,6 +50,51 @@ UNCAPPED_CURSORS = [
     AsyncPolarsCursor,
     AsyncS3FSCursor,
 ]
+CURSOR_CLASSES = PAGED_CURSORS + UNCAPPED_CURSORS + [SparkCursor, AsyncSparkCursor]
+
+
+@pytest.mark.parametrize("factory", [pyathena.connect, Connection])
+def test_connect_keyword_only(factory):
+    assert all(
+        parameter.kind in (Parameter.KEYWORD_ONLY, Parameter.VAR_KEYWORD)
+        for parameter in signature(factory).parameters.values()
+    )
+    with patch("pyathena.connection.Session") as session:
+        with pytest.raises(TypeError, match="positional"):
+            factory("s3://bucket/path/", "us-east-1")
+        session.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "cursor_class", [*CURSOR_CLASSES, BaseCursor, SparkBaseCursor, WithResultSet]
+)
+def test_cursor_constructor_keyword_only(cursor_class):
+    constructor = cursor_class.__init__
+    assert [
+        parameter.name
+        for parameter in signature(constructor).parameters.values()
+        if parameter.kind in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD)
+    ] == ["self"]
+    with pytest.raises(TypeError, match="positional"):
+        constructor(object(), "positional-setting")
+
+
+@pytest.mark.parametrize("cursor_class", CURSOR_CLASSES)
+def test_cursor_execute_keyword_only(cursor_class):
+    execute_signature = signature(cursor_class.execute)
+    assert [
+        parameter.name
+        for parameter in execute_signature.parameters.values()
+        if parameter.kind in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD)
+    ] == ["self", "operation", "parameters"]
+    parameters = {"value": 1}
+    cursor = object.__new__(cursor_class)
+    bound = execute_signature.bind(cursor, "SELECT %(value)s", parameters, work_group="group")
+    assert bound.arguments["parameters"] is parameters
+    assert bound.arguments["work_group"] == "group"
+    execute_signature.bind(cursor, operation="SELECT 1")
+    with pytest.raises(TypeError, match="positional"):
+        cursor.execute("SELECT %(value)s", parameters, "group")
 
 
 class RecordingCursor(Cursor):

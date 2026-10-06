@@ -59,6 +59,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
 
     def __init__(
         self,
+        *,
         session_id: str | None = None,
         description: str | None = None,
         engine_configuration: dict[str, Any] | None = None,

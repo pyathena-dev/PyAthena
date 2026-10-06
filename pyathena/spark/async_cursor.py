@@ -75,6 +75,7 @@ class AsyncSparkCursor(SparkBaseCursor):
 
     def __init__(
         self,
+        *,
         session_id: str | None = None,
         description: str | None = None,
         engine_configuration: dict[str, Any] | None = None,
@@ -204,6 +205,7 @@ class AsyncSparkCursor(SparkBaseCursor):
         self,
         operation: str,
         parameters: dict[str, Any] | list[str] | None = None,
+        *,
         session_id: str | None = None,
         description: str | None = None,
         client_request_token: str | None = None,

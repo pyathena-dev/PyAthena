@@ -64,6 +64,7 @@ class AsyncPandasCursor(AsyncCursor):
 
     def __init__(
         self,
+        *,
         s3_staging_dir: str | None = None,
         schema_name: str | None = None,
         catalog_name: str | None = None,
@@ -195,6 +196,7 @@ class AsyncPandasCursor(AsyncCursor):
         self,
         operation: str,
         parameters: dict[str, Any] | list[str] | None = None,
+        *,
         work_group: str | None = None,
         s3_staging_dir: str | None = None,
         cache_size: int | None = None,
@@ -206,7 +208,6 @@ class AsyncPandasCursor(AsyncCursor):
         keep_default_na: bool = False,
         na_values: Iterable[str] | None = ("",),
         quoting: int = 1,
-        *,
         options: ExecuteOptions | None = None,
         **kwargs,
     ) -> tuple[str, Future[AthenaPandasResultSet | Any]]:

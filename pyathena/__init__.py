@@ -73,26 +73,22 @@ Binary: type[bytes] = bytes
 
 
 @overload
-def connect(*args, cursor_class: None = ..., **kwargs) -> Connection[Cursor]: ...
+def connect(*, cursor_class: None = ..., **kwargs) -> Connection[Cursor]: ...
 
 
 @overload
-def connect(
-    *args, cursor_class: type[ConnectionCursor], **kwargs
-) -> Connection[ConnectionCursor]: ...
+def connect(*, cursor_class: type[ConnectionCursor], **kwargs) -> Connection[ConnectionCursor]: ...
 
 
-def connect(*args, **kwargs) -> Connection[Any]:
+def connect(**kwargs) -> Connection[Any]:
     """Create a new database connection to Amazon Athena.
 
     This function provides the main entry point for establishing connections
     to Amazon Athena. It follows the DB API 2.0 specification and returns
     a Connection object that can be used to create cursors for executing
-    SQL queries.
+    SQL queries. Connection settings must be passed as keyword arguments.
 
     Args:
-        *args: Positional arguments passed to the Connection constructor, in the
-            order of its parameters (``s3_staging_dir``, ``region_name``, ...).
         s3_staging_dir: S3 location to store query results. Required if not
             using workgroups or if the workgroup doesn't have a result location.
             Pass an empty string to explicitly disable S3 staging and skip
@@ -137,10 +133,10 @@ def connect(*args, **kwargs) -> Connection[Any]:
     """
     from pyathena.connection import Connection
 
-    return Connection(*args, **kwargs)
+    return Connection(**kwargs)
 
 
-async def aio_connect(*args, **kwargs) -> AioConnection:
+async def aio_connect(**kwargs) -> AioConnection:
     """Create a new async database connection to Amazon Athena.
 
     This is the async counterpart of :func:`connect`. It returns an
@@ -148,8 +144,6 @@ async def aio_connect(*args, **kwargs) -> AioConnection:
     and API calls, keeping the event loop free.
 
     Args:
-        *args: Forwarded to ``AioConnection.create()``, which accepts keyword
-            arguments only.
         **kwargs: Arguments forwarded to ``AioConnection.create()``.
             See :func:`connect` for the full list of supported arguments.
 
@@ -168,4 +162,4 @@ async def aio_connect(*args, **kwargs) -> AioConnection:
     """
     from pyathena.aio.connection import AioConnection
 
-    return await AioConnection.create(*args, **kwargs)
+    return await AioConnection.create(**kwargs)
