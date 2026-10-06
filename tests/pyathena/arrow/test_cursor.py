@@ -40,6 +40,22 @@ class TestArrowCursor:
         assert arrow_cursor.fetchall() == [(None,)]
 
     @pytest.mark.parametrize(
+        ("query", "expected"),
+        [
+            (
+                "SELECT x FROM (VALUES 1, NULL, 2) AS t(x) ORDER BY x NULLS FIRST",
+                [(None,), (1,), (2,)],
+            ),
+            # Arrow reads a NULL string from a CSV result as an empty string.
+            ("SELECT CAST(NULL AS VARCHAR) AS v", [("",)]),
+        ],
+    )
+    def test_single_column_null(self, arrow_cursor, query, expected):
+        arrow_cursor.execute(query)
+        assert arrow_cursor.as_arrow().num_rows == len(expected)
+        assert arrow_cursor.fetchall() == expected
+
+    @pytest.mark.parametrize(
         "arrow_cursor",
         [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
         indirect=["arrow_cursor"],
