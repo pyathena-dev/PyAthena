@@ -94,7 +94,7 @@ def get_athena_type(type_: DataType) -> tuple[str, int, int]:
         return "date", 0, 0
     if type_.id == types.Type_TIMESTAMP:  # 18
         return "timestamp", 3, 0
-    if type_.id in [types.Type_DECIMAL128, types.Decimal256Type]:  # 23, 24
+    if type_.id in [types.Type_DECIMAL128, types.Type_DECIMAL256]:  # 23, 24
         type_ = cast(types.Decimal128Type, type_)
         return "decimal", type_.precision, type_.scale
     if type_.id in [
