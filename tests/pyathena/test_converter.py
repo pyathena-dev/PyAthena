@@ -1,8 +1,12 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
+from dateutil.tz import gettz
 
 from pyathena.converter import (
     DefaultTypeConverter,
     _to_array,
+    _to_datetime_with_tz,
     _to_map,
     _to_struct,
 )
@@ -533,3 +537,36 @@ class TestDefaultTypeConverter:
             type_hint="array<row(a int, b varchar)>",
         )
         assert result == [{"a": 1, "b": "hello"}]
+
+
+@pytest.mark.parametrize(
+    ("input_value", "expected"),
+    [
+        (None, None),
+        (
+            "2024-02-29 23:59:58.123 +05:30",
+            datetime(
+                2024, 2, 29, 23, 59, 58, 123000, tzinfo=timezone(timedelta(hours=5, minutes=30))
+            ),
+        ),
+        (
+            "2024-02-29 23:59:58.123456 -08:00",
+            datetime(2024, 2, 29, 23, 59, 58, 123456, tzinfo=timezone(-timedelta(hours=8))),
+        ),
+        (
+            "2024-02-29 23:59:58.123 UTC",
+            datetime(2024, 2, 29, 23, 59, 58, 123000, tzinfo=gettz("UTC")),
+        ),
+        (
+            "2024-02-29 23:59:58.123 America/New_York",
+            datetime(2024, 2, 29, 23, 59, 58, 123000, tzinfo=gettz("America/New_York")),
+        ),
+    ],
+)
+def test_to_datetime_with_tz_offsets_and_zone_names(input_value, expected):
+    """Numeric UTC offsets give fixed-offset time zones; zone names keep their zone."""
+    result = _to_datetime_with_tz(input_value)
+    assert result == expected
+    if expected is not None:
+        assert result.utcoffset() == expected.utcoffset()
+        assert result.tzinfo is not None

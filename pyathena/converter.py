@@ -7,7 +7,7 @@ import re
 from abc import ABCMeta, abstractmethod
 from collections.abc import Callable
 from copy import deepcopy
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any, ClassVar
 
@@ -40,11 +40,33 @@ def _to_datetime(varchar_value: str | None) -> datetime | None:
     return datetime.strptime(varchar_value, "%Y-%m-%d %H:%M:%S.%f")
 
 
+_UTC_OFFSET_PATTERN: re.Pattern[str] = re.compile(r"([+-])(\d{2}):(\d{2})")
+
+
+def _parse_utc_offset(value: str) -> timezone | None:
+    """Parse a ``+HH:MM`` or ``-HH:MM`` UTC offset.
+
+    Args:
+        value: The text to parse.
+
+    Returns:
+        The fixed-offset time zone, or None if the text is not an offset.
+    """
+    match = _UTC_OFFSET_PATTERN.fullmatch(value)
+    if not match:
+        return None
+    sign, hours, minutes = match.groups()
+    offset = timedelta(hours=int(hours), minutes=int(minutes))
+    return timezone(-offset if sign == "-" else offset)
+
+
 def _to_datetime_with_tz(varchar_value: str | None) -> datetime | None:
     if varchar_value is None:
         return None
     datetime_, _, tz = varchar_value.rpartition(" ")
-    return datetime.strptime(datetime_, "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=gettz(tz))
+    return datetime.strptime(datetime_, "%Y-%m-%d %H:%M:%S.%f").replace(
+        tzinfo=_parse_utc_offset(tz) or gettz(tz)
+    )
 
 
 def _to_time(varchar_value: str | None) -> time | None:
