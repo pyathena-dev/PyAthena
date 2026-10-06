@@ -5,14 +5,21 @@
 #
 # SPDX-License-Identifier: MIT
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
+from botocore.exceptions import ClientError
 
 from pyathena import OperationalError
+from pyathena.aio.spark.cursor import AioSparkCursor
 from pyathena.model import AthenaSessionStatus
+from pyathena.spark.async_cursor import AsyncSparkCursor
+from pyathena.spark.common import SparkBaseCursor
 from pyathena.spark.cursor import SparkCursor
 from pyathena.util import RetryConfig
+
+SPARK_CURSOR_CLASSES = [SparkCursor, AsyncSparkCursor, AioSparkCursor]
 
 
 def _session_status(state: str, reason: str | None = None) -> AthenaSessionStatus:
@@ -27,6 +34,36 @@ def _cursor() -> SparkCursor:
     cursor._retry_config = RetryConfig()
     cursor._poll_interval = 0
     return cursor
+
+
+def _connection():
+    connection = MagicMock()
+    connection.client.start_session.return_value = {"SessionId": "new-session"}
+    connection.client.get_session.return_value = {"SessionId": "supplied-session"}
+    connection.client.get_session_status.return_value = {
+        "Status": {"State": AthenaSessionStatus.STATE_IDLE}
+    }
+    return connection
+
+
+def _init_cursor(cursor_class, connection, **kwargs):
+    return cursor_class(
+        connection=connection,
+        converter=MagicMock(),
+        formatter=MagicMock(),
+        retry_config=RetryConfig(),
+        s3_staging_dir=None,
+        schema_name=None,
+        catalog_name=None,
+        work_group="spark",
+        poll_interval=0,
+        encryption_option=None,
+        kms_key=None,
+        kill_on_interrupt=False,
+        result_reuse_enable=False,
+        result_reuse_minutes=60,
+        **kwargs,
+    )
 
 
 class TestSparkBaseCursor:
@@ -97,3 +134,105 @@ class TestSparkBaseCursor:
         ):
             cursor._exists_session("session_id")
         cursor._connection.client.get_session.assert_called_once_with(SessionId="session_id")
+
+    @pytest.mark.parametrize("cursor_class", SPARK_CURSOR_CLASSES)
+    def test_init_starts_session(self, cursor_class):
+        connection = _connection()
+        with patch.object(SparkBaseCursor, "_wait_for_idle_session"):
+            cursor = _init_cursor(cursor_class, connection)
+
+        assert cursor.session_id == "new-session"
+        connection.client.terminate_session.assert_not_called()
+
+    @pytest.mark.parametrize("cursor_class", SPARK_CURSOR_CLASSES)
+    @pytest.mark.parametrize(
+        "error",
+        [OperationalError("Session did not become idle."), KeyboardInterrupt()],
+    )
+    def test_init_terminates_new_session_that_does_not_become_idle(self, cursor_class, error):
+        connection = _connection()
+        with (
+            patch.object(SparkBaseCursor, "_wait_for_idle_session", side_effect=error),
+            pytest.raises(type(error)) as exc_info,
+        ):
+            _init_cursor(cursor_class, connection)
+
+        assert exc_info.value is error
+        connection.client.terminate_session.assert_called_once_with(SessionId="new-session")
+
+    @pytest.mark.parametrize("cursor_class", SPARK_CURSOR_CLASSES)
+    @pytest.mark.parametrize(
+        "state",
+        [
+            AthenaSessionStatus.STATE_TERMINATED,
+            AthenaSessionStatus.STATE_DEGRADED,
+            AthenaSessionStatus.STATE_FAILED,
+        ],
+    )
+    def test_init_terminates_new_session_in_failure_state(self, cursor_class, state):
+        connection = _connection()
+        connection.client.get_session_status.return_value = {
+            "SessionId": "new-session",
+            "Status": {"State": state, "StateChangeReason": "session failure reason"},
+        }
+        with (
+            patch("pyathena.spark.common.time.sleep", side_effect=AssertionError("slept")),
+            pytest.raises(
+                OperationalError,
+                match=rf"^Session: new-session is {state}\. session failure reason$",
+            ),
+        ):
+            _init_cursor(cursor_class, connection)
+
+        connection.client.get_session_status.assert_called_once_with(SessionId="new-session")
+        connection.client.terminate_session.assert_called_once_with(SessionId="new-session")
+
+    @pytest.mark.parametrize("cursor_class", SPARK_CURSOR_CLASSES)
+    def test_init_keeps_original_error_when_cleanup_fails(self, cursor_class, caplog):
+        connection = _connection()
+        connection.client.terminate_session.side_effect = ClientError(
+            {"Error": {"Code": "InternalServerException", "Message": "Cleanup failed."}},
+            "TerminateSession",
+        )
+        error = OperationalError("Session did not become idle.")
+        with (
+            caplog.at_level(logging.ERROR, logger="pyathena.spark.common"),
+            patch.object(SparkBaseCursor, "_wait_for_idle_session", side_effect=error),
+            pytest.raises(OperationalError) as exc_info,
+        ):
+            _init_cursor(cursor_class, connection)
+
+        assert exc_info.value is error
+        connection.client.terminate_session.assert_called_once_with(SessionId="new-session")
+        assert "Failed to terminate session: new-session." in caplog.text
+
+    @pytest.mark.parametrize("cursor_class", SPARK_CURSOR_CLASSES)
+    def test_init_does_not_terminate_supplied_session(self, cursor_class):
+        connection = _connection()
+        error = OperationalError("Session did not become idle.")
+        with (
+            patch.object(SparkBaseCursor, "_wait_for_idle_session", side_effect=error),
+            pytest.raises(OperationalError) as exc_info,
+        ):
+            _init_cursor(cursor_class, connection, session_id="supplied-session")
+
+        assert exc_info.value is error
+        connection.client.start_session.assert_not_called()
+        connection.client.terminate_session.assert_not_called()
+
+    @pytest.mark.parametrize("cursor_class", SPARK_CURSOR_CLASSES)
+    def test_init_does_not_start_session_when_s3_client_fails(self, cursor_class):
+        connection = _connection()
+        connection.session.client.side_effect = ValueError("Invalid S3 client configuration.")
+        with pytest.raises(ValueError, match=r"^Invalid S3 client configuration\.$"):
+            _init_cursor(cursor_class, connection)
+
+        connection.client.start_session.assert_not_called()
+        connection.client.terminate_session.assert_not_called()
+
+    def test_async_init_does_not_start_session_when_executor_fails(self):
+        connection = _connection()
+        with pytest.raises(ValueError, match="max_workers must be greater than 0"):
+            _init_cursor(AsyncSparkCursor, connection, max_workers=0)
+
+        connection.client.start_session.assert_not_called()
