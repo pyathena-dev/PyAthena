@@ -2046,11 +2046,15 @@ class S3File(AbstractBufferedFile):
                 self.s3_additional_kwargs.update({"IfMatch": etag})
             self._details = info
         elif "a" in mode and self.fs.exists(path):
-            self.append_block = True
             info = self.fs.info(self.path, version_id=self.version_id)
             loc = info.get("size", 0)
             if loc < self.fs.MULTIPART_UPLOAD_MIN_PART_SIZE:
+                # Too small to be a part of a multipart upload: rewrite it
+                # from the buffer.
                 self.write(self.fs.cat(self.path))
+            else:
+                # Copied with UploadPartCopy as the leading part(s).
+                self.append_block = True
             self.loc = loc
             self.s3_additional_kwargs.update(info.to_api_repr())
             self._details = info
@@ -2065,8 +2069,10 @@ class S3File(AbstractBufferedFile):
         self._executor.shutdown()
 
     def _initiate_upload(self) -> None:
-        if self.tell() < self.blocksize:
+        if not self.append_block and self.tell() < self.blocksize:
             # Files smaller than block size in size cannot be multipart uploaded.
+            # An append to an object copied with UploadPartCopy always uses
+            # a multipart upload, whatever the block size.
             return
 
         self.multipart_upload = self.fs._create_multipart_upload(
@@ -2116,7 +2122,7 @@ class S3File(AbstractBufferedFile):
         # can still read the bytes; resetting it there would upload an empty
         # object for small files. Mid-stream chunks (final=False) return True so
         # fsspec clears the already-uploaded buffer between parts.
-        if self.tell() < self.blocksize:
+        if not self.append_block and self.tell() < self.blocksize:
             # Files smaller than block size in size cannot be multipart uploaded.
             if self.autocommit and final:
                 self.commit()
@@ -2205,12 +2211,19 @@ class S3File(AbstractBufferedFile):
         if self.multipart_upload:
             for f in self.multipart_upload_parts:
                 f.cancel()
+            # s3_additional_kwargs also holds object parameters (e.g., the
+            # existing object's metadata in append mode) that
+            # AbortMultipartUpload rejects.
             self.fs._call(
                 "abort_multipart_upload",
                 Bucket=self.bucket,
                 Key=self.key,
                 UploadId=self.multipart_upload.upload_id,
-                **self.s3_additional_kwargs,
+                **{
+                    k: v
+                    for k, v in self.s3_additional_kwargs.items()
+                    if k in ("RequestPayer", "ExpectedBucketOwner")
+                },
             )
 
         self.multipart_upload = None
