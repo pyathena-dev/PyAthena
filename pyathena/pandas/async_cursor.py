@@ -258,17 +258,13 @@ class AsyncPandasCursor(AsyncCursor):
             validate_execute_kwargs(
                 f"{type(self).__name__}.execute",
                 kwargs,
-                bool(
-                    self._unload
-                    and isinstance(operation, str)
-                    and operation.strip().upper().startswith(("SELECT", "WITH", "UNLOAD"))
-                ),
+                self._is_unload_query(operation, prepared=False),
             )
             raise
         validate_execute_kwargs(
             f"{type(self).__name__}.execute",
             kwargs,
-            self._unload and operation.strip().upper().startswith("UNLOAD"),
+            self._is_unload_query(operation),
         )
         query_id = self._execute(
             operation,

@@ -236,6 +236,45 @@ async def test_preparation_failure_resets_state_except_unknown_keyword(
 
 
 @pytest.mark.parametrize(
+    "cursor_class",
+    [
+        PandasCursor,
+        AsyncPandasCursor,
+        AioPandasCursor,
+        PolarsCursor,
+        AsyncPolarsCursor,
+        AioPolarsCursor,
+    ],
+)
+@pytest.mark.parametrize(
+    ("operation", "unload_reader"),
+    [
+        (" \n sElEcT 1", True),
+        (" \n wItH t AS (SELECT 1) SELECT * FROM t", True),
+        (
+            " \n uNlOaD (SELECT 1) TO 's3://bucket/path/' WITH (format='PARQUET')",
+            True,
+        ),
+        (" \n dEsCrIbE t", False),
+    ],
+)
+async def test_preparation_failure_preserves_supported_reader_keywords(
+    offline_connection, cursor_class, operation, unload_reader
+):
+    cursor = offline_connection.cursor(cursor_class, unload=True)
+    cursor._s3_staging_dir = None
+    if "Polars" in cursor_class.__name__:
+        options = {"parallel": "none"} if unload_reader else {"separator": "|"}
+    else:
+        options = {"use_threads": False} if unload_reader else {"sep": "|"}
+    try:
+        with pytest.raises(ProgrammingError, match="s3_staging_dir is required"):
+            await _execute(cursor, operation=operation, **options)
+    finally:
+        await _close(cursor)
+
+
+@pytest.mark.parametrize(
     ("cursor_class", "settings", "options"),
     [(cls, {}, {"parse_dates": []}) for cls in (PandasCursor, AsyncPandasCursor, AioPandasCursor)]
     + [

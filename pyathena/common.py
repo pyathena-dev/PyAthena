@@ -1193,6 +1193,22 @@ class BaseCursor(metaclass=ABCMeta):
         _logger.debug(query)
         return query, execution_parameters
 
+    def _is_unload_query(self, operation: object, *, prepared: bool = True) -> bool:
+        """Check whether an operation selects the UNLOAD Parquet reader.
+
+        Args:
+            operation: The SQL operation, or an invalid value to be checked later.
+            prepared: Whether ``_prepare_unload()`` completed. Before preparation,
+                SELECT and WITH operations also select the UNLOAD reader when enabled.
+
+        Returns:
+            True if UNLOAD is enabled and the operation selects its reader.
+        """
+        if not getattr(self, "_unload", False) or not isinstance(operation, str):
+            return False
+        prefixes = ("UNLOAD",) if prepared else ("SELECT", "WITH", "UNLOAD")
+        return operation.strip().upper().startswith(prefixes)
+
     def _prepare_unload(
         self,
         operation: str,
