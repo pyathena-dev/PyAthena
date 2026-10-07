@@ -211,6 +211,7 @@ class Connection(Generic[ConnectionCursor]):
         Args:
             s3_staging_dir: S3 location to store query results. Required if not
                 using workgroups or if workgroup doesn't have result location.
+                None uses the ``AWS_ATHENA_S3_STAGING_DIR`` environment variable.
                 Pass an empty string to explicitly disable S3 staging and skip
                 the ``AWS_ATHENA_S3_STAGING_DIR`` environment variable fallback.
                 This is required when connecting to a workgroup with managed
@@ -220,6 +221,9 @@ class Connection(Generic[ConnectionCursor]):
             catalog_name: Data catalog name. Defaults to "awsdatacatalog".
             work_group: Athena workgroup name. Can substitute for s3_staging_dir
                 if workgroup has result location configured.
+                None uses the ``AWS_ATHENA_WORK_GROUP`` environment variable.
+                Pass an empty string to skip that environment variable fallback
+                and leave the workgroup unset.
             poll_interval: Seconds between query status polls. Defaults to 1.0.
             encryption_option: S3 encryption for results ("SSE_S3", "SSE_KMS", "CSE_KMS").
             kms_key: KMS key ID when using SSE_KMS or CSE_KMS encryption.
@@ -260,7 +264,8 @@ class Connection(Generic[ConnectionCursor]):
         Note:
             Either s3_staging_dir or work_group must be specified. Environment
             variables AWS_ATHENA_S3_STAGING_DIR and AWS_ATHENA_WORK_GROUP are
-            checked if parameters are not provided.
+            checked only when the corresponding argument is omitted or None.
+            An explicit empty string disables that fallback and becomes None.
 
             When using a workgroup with managed query result storage, pass
             ``s3_staging_dir=""`` to prevent the environment variable fallback
@@ -282,8 +287,8 @@ class Connection(Generic[ConnectionCursor]):
         self.region_name = region_name
         self.schema_name = schema_name
         self.catalog_name = catalog_name
-        if work_group:
-            self.work_group: str | None = work_group
+        if work_group is not None:
+            self.work_group: str | None = work_group or None
         else:
             self.work_group = os.getenv(self._ENV_WORK_GROUP)
         self.poll_interval = poll_interval

@@ -55,6 +55,66 @@ CURSOR_CLASSES = PAGED_CURSORS + UNCAPPED_CURSORS + [SparkCursor, AsyncSparkCurs
 READER_CURSOR_CLASSES = [PandasCursor, PolarsCursor, AsyncPandasCursor, AsyncPolarsCursor]
 
 
+@pytest.mark.parametrize("factory", [Connection, pyathena.connect])
+@pytest.mark.parametrize("setting", ["s3_staging_dir", "work_group"])
+@pytest.mark.parametrize(
+    ("arguments", "environment", "expected"),
+    [
+        ({}, "from-environment", "from-environment"),
+        ({"value": None}, "from-environment", "from-environment"),
+        ({"value": ""}, "from-environment", None),
+        ({"value": "explicit"}, "from-environment", "explicit"),
+        ({}, None, None),
+        ({"value": None}, None, None),
+        ({"value": ""}, None, None),
+        ({"value": "explicit"}, None, "explicit"),
+        ({}, "", ""),
+        ({"value": None}, "", ""),
+        ({"value": ""}, "", None),
+        ({"value": "explicit"}, "", "explicit"),
+    ],
+)
+def test_environment_fallback(factory, setting, arguments, environment, expected, monkeypatch):
+    environment_name = (
+        "AWS_ATHENA_S3_STAGING_DIR" if setting == "s3_staging_dir" else "AWS_ATHENA_WORK_GROUP"
+    )
+    if environment is None:
+        monkeypatch.delenv(environment_name, raising=False)
+    else:
+        monkeypatch.setenv(environment_name, environment)
+    settings = (
+        {"work_group": "other"}
+        if setting == "s3_staging_dir"
+        else {"s3_staging_dir": "s3://bucket/path/"}
+    )
+    if arguments:
+        settings[setting] = arguments["value"]
+    connection = factory(
+        region_name="us-east-1",
+        aws_access_key_id="access_key",
+        aws_secret_access_key="secret_key",
+        **settings,
+    )
+    try:
+        if setting == "s3_staging_dir" and expected:
+            expected += "/"
+        assert getattr(connection, setting) == expected
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("factory", [Connection, pyathena.connect])
+def test_empty_settings_disable_both_environment_fallbacks(factory, monkeypatch):
+    monkeypatch.setenv("AWS_ATHENA_S3_STAGING_DIR", "s3://environment/path/")
+    monkeypatch.setenv("AWS_ATHENA_WORK_GROUP", "environment-workgroup")
+    with (
+        patch("pyathena.connection.Session") as session,
+        pytest.raises(ProgrammingError, match="Required argument"),
+    ):
+        factory(s3_staging_dir="", work_group="")
+    session.assert_not_called()
+
+
 @pytest.mark.parametrize("factory", [pyathena.connect, Connection])
 def test_connect_keyword_only(factory):
     assert all(
@@ -91,9 +151,13 @@ def test_cursor_execute_keyword_only(cursor_class):
     ] == ["self", "operation", "parameters"]
     parameters = {"value": 1}
     cursor = object.__new__(cursor_class)
-    bound = execute_signature.bind(cursor, "SELECT %(value)s", parameters, work_group="group")
+    bound = execute_signature.bind(cursor, "SELECT %(value)s", parameters)
     assert bound.arguments["parameters"] is parameters
-    assert bound.arguments["work_group"] == "group"
+    if cursor_class in (SparkCursor, AsyncSparkCursor):
+        assert "work_group" not in execute_signature.parameters
+    else:
+        bound = execute_signature.bind(cursor, "SELECT %(value)s", parameters, work_group="group")
+        assert bound.arguments["work_group"] == "group"
     execute_signature.bind(cursor, operation="SELECT 1")
     with pytest.raises(TypeError, match="positional"):
         cursor.execute("SELECT %(value)s", parameters, "group")

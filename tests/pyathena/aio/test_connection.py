@@ -33,6 +33,49 @@ READER_CURSOR_CLASSES = [AioPandasCursor, AioPolarsCursor]
 
 
 @pytest.mark.parametrize("factory", [pyathena.aio_connect, AioConnection.create])
+@pytest.mark.parametrize("setting", ["s3_staging_dir", "work_group"])
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(None, "from-environment"), ("", None), ("explicit", "explicit")],
+)
+async def test_environment_fallback(factory, setting, value, expected, monkeypatch):
+    environment_name = (
+        "AWS_ATHENA_S3_STAGING_DIR" if setting == "s3_staging_dir" else "AWS_ATHENA_WORK_GROUP"
+    )
+    monkeypatch.setenv(environment_name, "from-environment")
+    settings = (
+        {"work_group": "other"}
+        if setting == "s3_staging_dir"
+        else {"s3_staging_dir": "s3://bucket/path/"}
+    )
+    settings[setting] = value
+    connection = await factory(
+        region_name="us-east-1",
+        aws_access_key_id="access_key",
+        aws_secret_access_key="secret_key",
+        **settings,
+    )
+    try:
+        if setting == "s3_staging_dir" and expected:
+            expected += "/"
+        assert getattr(connection, setting) == expected
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("factory", [pyathena.aio_connect, AioConnection.create])
+async def test_empty_settings_disable_both_environment_fallbacks(factory, monkeypatch):
+    monkeypatch.setenv("AWS_ATHENA_S3_STAGING_DIR", "s3://environment/path/")
+    monkeypatch.setenv("AWS_ATHENA_WORK_GROUP", "environment-workgroup")
+    with (
+        patch("pyathena.connection.Session") as session,
+        pytest.raises(ProgrammingError, match="Required argument"),
+    ):
+        await factory(s3_staging_dir="", work_group="")
+    session.assert_not_called()
+
+
+@pytest.mark.parametrize("factory", [pyathena.aio_connect, AioConnection.create])
 async def test_connect_keyword_only(factory):
     assert all(
         parameter.kind in (Parameter.KEYWORD_ONLY, Parameter.VAR_KEYWORD)
@@ -73,9 +116,13 @@ def test_cursor_execute_keyword_only(cursor_class):
     ] == ["self", "operation", "parameters"]
     parameters = {"value": 1}
     cursor = object.__new__(cursor_class)
-    bound = execute_signature.bind(cursor, "SELECT %(value)s", parameters, work_group="group")
+    bound = execute_signature.bind(cursor, "SELECT %(value)s", parameters)
     assert bound.arguments["parameters"] is parameters
-    assert bound.arguments["work_group"] == "group"
+    if cursor_class is AioSparkCursor:
+        assert "work_group" not in execute_signature.parameters
+    else:
+        bound = execute_signature.bind(cursor, "SELECT %(value)s", parameters, work_group="group")
+        assert bound.arguments["work_group"] == "group"
     execute_signature.bind(cursor, operation="SELECT 1")
     with pytest.raises(TypeError, match="positional"):
         cursor.execute("SELECT %(value)s", parameters, "group")

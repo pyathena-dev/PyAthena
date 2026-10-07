@@ -12,6 +12,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from multiprocessing import cpu_count
 from typing import TYPE_CHECKING, Any, cast
 
+from pyathena import NotSupportedError
 from pyathena.model import AthenaCalculationExecution
 from pyathena.spark.common import SparkBaseCursor
 from pyathena.util import override
@@ -209,10 +210,28 @@ class AsyncSparkCursor(SparkBaseCursor):
         session_id: str | None = None,
         description: str | None = None,
         client_request_token: str | None = None,
-        work_group: str | None = None,
         **kwargs,
     ) -> tuple[str, "Future[AthenaQueryExecution | AthenaCalculationExecution]"]:
+        """Start a PySpark calculation and return its ID and polling future.
+
+        Args:
+            operation: PySpark code to execute.
+            parameters: Must be None; Spark calculations do not support parameters.
+            session_id: Spark session ID override.
+            description: Calculation description.
+            client_request_token: Idempotency token.
+            **kwargs: Unknown keyword arguments raise TypeError.
+
+        Returns:
+            The calculation ID and a future containing its terminal execution.
+
+        Raises:
+            TypeError: If an unknown keyword argument is given.
+            NotSupportedError: If ``parameters`` is not None.
+        """
         self._validate_execute_kwargs(kwargs)
+        if parameters is not None:
+            raise NotSupportedError("Spark cursors do not support parameters.")
         calculation_id = self._calculate(
             session_id=session_id if session_id else self._session_id,
             code_block=operation,

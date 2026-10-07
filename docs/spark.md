@@ -65,6 +65,18 @@ with Connection(region_name="us-west-2",
 
 This cursor allows you to send PySpark code blocks and use Spark DataFrame and SQL.
 
+### Breaking changes in PyAthena 4.0
+
+`SparkCursor.execute()`, `AsyncSparkCursor.execute()`, and `AioSparkCursor.execute()` raise
+`NotSupportedError` when `parameters` is not `None`, including an empty dictionary or list.
+Earlier versions silently ignored these parameters and executed the code block without them.
+Omit `parameters` or pass `None` when executing Spark code.
+
+These methods no longer accept `work_group`; passing it raises `TypeError`, even if its value is `None`.
+Earlier versions silently ignored this argument.
+Set the Spark workgroup when creating the connection or cursor instead.
+The calculation runs in the Spark session selected by the cursor's `session_id` or the execution's `session_id` override.
+
 (spark-session-lifecycle)=
 
 ### Session lifecycle
