@@ -235,6 +235,7 @@ cursor = connection.cursor(S3FSCursor, csv_reader=EmptyStringAsNullCSVReader)
 ```
 
 The opt-in behavior is preserved, and `AthenaCSVReader` remains the default.
+Custom readers must now expose `empty_strings_as_null`; use `False` to retain empty strings, or `True` to treat them as NULL in result files.
 
 ### Custom CSV readers
 

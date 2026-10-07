@@ -29,8 +29,8 @@ class TestAsyncS3FSCursor:
         ("async_s3fs_cursor", "expected_empty"),
         [
             ({}, ""),
-            ({"csv_reader": AthenaCSVReader}, ""),
-            ({"csv_reader": EmptyStringAsNullCSVReader}, None),
+            ({"cursor_kwargs": {"csv_reader": AthenaCSVReader}}, ""),
+            ({"cursor_kwargs": {"csv_reader": EmptyStringAsNullCSVReader}}, None),
         ],
         indirect=["async_s3fs_cursor"],
     )
