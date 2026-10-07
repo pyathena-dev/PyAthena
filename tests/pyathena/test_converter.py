@@ -341,6 +341,13 @@ def test_nested_json_empty_string(value, type_hint, expected):
 
 class TestDefaultTypeConverter:
     @pytest.mark.parametrize(
+        ("value", "expected"),
+        [("true", True), ("false", False), ("1", True), ("0", False), (None, None), ("", None)],
+    )
+    def test_boolean_conversion(self, value, expected):
+        assert DefaultTypeConverter().convert("boolean", value) is expected
+
+    @pytest.mark.parametrize(
         ("input_value", "expected"),
         [
             ('{"name": "Alice", "age": 25}', {"name": "Alice", "age": 25}),

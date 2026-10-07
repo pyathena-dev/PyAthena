@@ -53,7 +53,7 @@ class AthenaAioArrowDialect(AthenaAioDialect):
         opts.update({"cursor_class": AioArrowCursor})
         cursor_kwargs = {}
         if "unload" in opts:
-            cursor_kwargs.update({"unload": bool(strtobool(opts.pop("unload")))})
+            cursor_kwargs.update({"unload": strtobool(opts.pop("unload"))})
         if cursor_kwargs:
             opts.update({"cursor_kwargs": cursor_kwargs})
         self._connect_options = opts

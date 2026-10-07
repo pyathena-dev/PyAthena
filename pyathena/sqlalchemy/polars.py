@@ -57,7 +57,7 @@ class AthenaPolarsDialect(AthenaDialect):
         opts.update({"cursor_class": PolarsCursor})
         cursor_kwargs = {}
         if "unload" in opts:
-            cursor_kwargs.update({"unload": bool(strtobool(opts.pop("unload")))})
+            cursor_kwargs.update({"unload": strtobool(opts.pop("unload"))})
         if cursor_kwargs:
             opts.update({"cursor_kwargs": cursor_kwargs})
         return [[], opts]

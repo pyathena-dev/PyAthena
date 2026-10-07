@@ -69,103 +69,6 @@ def register_filesystem():
 
 @pytest.mark.usefixtures("register_filesystem")
 class TestS3FileSystem:
-    def test_parse_path(self):
-        actual = S3FileSystem.parse_path("s3://bucket")
-        assert actual[0] == "bucket"
-        assert actual[1] is None
-        assert actual[2] is None
-
-        actual = S3FileSystem.parse_path("s3://bucket/")
-        assert actual[0] == "bucket"
-        assert actual[1] is None
-        assert actual[2] is None
-
-        actual = S3FileSystem.parse_path("s3://bucket/path/to/obj")
-        assert actual[0] == "bucket"
-        assert actual[1] == "path/to/obj"
-        assert actual[2] is None
-
-        actual = S3FileSystem.parse_path("s3://bucket/path/to/obj?versionId=12345abcde")
-        assert actual[0] == "bucket"
-        assert actual[1] == "path/to/obj"
-        assert actual[2] == "12345abcde"
-
-        actual = S3FileSystem.parse_path("s3a://bucket")
-        assert actual[0] == "bucket"
-        assert actual[1] is None
-        assert actual[2] is None
-
-        actual = S3FileSystem.parse_path("s3a://bucket/")
-        assert actual[0] == "bucket"
-        assert actual[1] is None
-        assert actual[2] is None
-
-        actual = S3FileSystem.parse_path("s3a://bucket/path/to/obj")
-        assert actual[0] == "bucket"
-        assert actual[1] == "path/to/obj"
-        assert actual[2] is None
-
-        actual = S3FileSystem.parse_path("s3a://bucket/path/to/obj?versionId=12345abcde")
-        assert actual[0] == "bucket"
-        assert actual[1] == "path/to/obj"
-        assert actual[2] == "12345abcde"
-
-        actual = S3FileSystem.parse_path("bucket")
-        assert actual[0] == "bucket"
-        assert actual[1] is None
-        assert actual[2] is None
-
-        actual = S3FileSystem.parse_path("bucket/")
-        assert actual[0] == "bucket"
-        assert actual[1] is None
-        assert actual[2] is None
-
-        actual = S3FileSystem.parse_path("bucket/path/to/obj")
-        assert actual[0] == "bucket"
-        assert actual[1] == "path/to/obj"
-        assert actual[2] is None
-
-        actual = S3FileSystem.parse_path("bucket/path/to/obj?versionId=12345abcde")
-        assert actual[0] == "bucket"
-        assert actual[1] == "path/to/obj"
-        assert actual[2] == "12345abcde"
-
-        actual = S3FileSystem.parse_path("bucket/path/to/obj?versionID=12345abcde")
-        assert actual[0] == "bucket"
-        assert actual[1] == "path/to/obj"
-        assert actual[2] == "12345abcde"
-
-        actual = S3FileSystem.parse_path("bucket/path/to/obj?versionid=12345abcde")
-        assert actual[0] == "bucket"
-        assert actual[1] == "path/to/obj"
-        assert actual[2] == "12345abcde"
-
-        actual = S3FileSystem.parse_path("bucket/path/to/obj?version_id=12345abcde")
-        assert actual[0] == "bucket"
-        assert actual[1] == "path/to/obj"
-        assert actual[2] == "12345abcde"
-
-    def test_parse_path_invalid(self):
-        with pytest.raises(ValueError, match="Invalid S3 path format"):
-            S3FileSystem.parse_path("http://bucket")
-
-        with pytest.raises(ValueError, match="Invalid S3 path format"):
-            S3FileSystem.parse_path("s3://bucket?")
-
-        with pytest.raises(ValueError, match="Invalid S3 path format"):
-            S3FileSystem.parse_path("s3://bucket?foo=bar")
-
-        with pytest.raises(ValueError, match="Invalid S3 path format"):
-            S3FileSystem.parse_path("s3a://bucket?")
-
-        with pytest.raises(ValueError, match="Invalid S3 path format"):
-            S3FileSystem.parse_path("s3a://bucket?foo=bar")
-
-        # GH-979: a "?" in a key that does not start a trailing version ID
-        # query is part of the key.
-        for path in ("s3://bucket/path/to/obj?foo=bar", "s3a://bucket/path/to/obj?foo=bar"):
-            assert S3FileSystem.parse_path(path) == ("bucket", "path/to/obj?foo=bar", None)
-
     @staticmethod
     def _make_fs():
         # Build a minimal S3FileSystem without touching AWS, bypassing
@@ -483,7 +386,7 @@ class TestS3FileSystem:
             (Path("bucket/a/c.txt?versionId=v1"), "bucket/a/c.txt?versionId=v1"),
             # A directory marker object keeps the trailing slash before the query.
             ("s3://bucket/a/c.txt/?versionId=v1", "bucket/a/c.txt/?versionId=v1"),
-            # parse_path accepts other spellings of the query.
+            # S3Path.parse accepts other spellings of the query.
             ("s3://bucket/a/c.txt?version_id=v1", "bucket/a/c.txt?versionId=v1"),
             ("s3://bucket/a/c.txt?versionId=v1", "bucket/a/c.txt?versionid=v1"),
         ],
@@ -4947,32 +4850,32 @@ class TestS3FileSystem:
 
     def test_info_bucket(self, fs):
         dir_ = f"s3://{ENV.s3_staging_bucket}"
-        bucket, key, version_id = fs.parse_path(dir_)
+        s3_path = S3Path.parse(dir_)
         info = fs.info(dir_)
 
         assert info.name == fs._strip_protocol(dir_)
-        assert info.bucket == bucket
+        assert info.bucket == s3_path.bucket
         assert info.key is None
         assert info.last_modified is None
         assert info.size == 0
         assert info.etag is None
         assert info.type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
         assert info.storage_class == S3StorageClass.S3_STORAGE_CLASS_BUCKET
-        assert info.version_id == version_id
+        assert info.version_id == s3_path.version_id
 
         dir_ = f"s3://{ENV.s3_staging_bucket}/"
-        bucket, key, version_id = fs.parse_path(dir_)
+        s3_path = S3Path.parse(dir_)
         info = fs.info(dir_)
 
         assert info.name == fs._strip_protocol(dir_)
-        assert info.bucket == bucket
+        assert info.bucket == s3_path.bucket
         assert info.key is None
         assert info.last_modified is None
         assert info.size == 0
         assert info.etag is None
         assert info.type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
         assert info.storage_class == S3StorageClass.S3_STORAGE_CLASS_BUCKET
-        assert info.version_id == version_id
+        assert info.version_id == s3_path.version_id
 
     def test_info_dir(self, fs):
         dir_ = (
@@ -4986,20 +4889,20 @@ class TestS3FileSystem:
             fs.info(f"s3://{uuid.uuid4()}")
 
         fs.pipe(file, b"a")
-        bucket, key, version_id = fs.parse_path(dir_)
+        s3_path = S3Path.parse(dir_)
         fs.invalidate_cache()
         info = fs.info(dir_)
         fs.invalidate_cache()
 
         assert info.name == fs._strip_protocol(dir_)
-        assert info.bucket == bucket
-        assert info.key == key.rstrip("/")
+        assert info.bucket == s3_path.bucket
+        assert info.key == s3_path.key.rstrip("/")
         assert info.last_modified is None
         assert info.size == 0
         assert info.etag is None
         assert info.type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
         assert info.storage_class == S3StorageClass.S3_STORAGE_CLASS_DIRECTORY
-        assert info.version_id == version_id
+        assert info.version_id == s3_path.version_id
 
     def test_info_file(self, fs):
         dir_ = (
@@ -5014,7 +4917,7 @@ class TestS3FileSystem:
 
         now = datetime.now(UTC)
         fs.pipe(file, b"a")
-        bucket, key, version_id = fs.parse_path(file)
+        s3_path = S3Path.parse(file)
         fs.invalidate_cache()
         info = fs.info(file)
         fs.invalidate_cache()
@@ -5022,14 +4925,14 @@ class TestS3FileSystem:
 
         assert info == ls_info
         assert info.name == fs._strip_protocol(file)
-        assert info.bucket == bucket
-        assert info.key == key
+        assert info.bucket == s3_path.bucket
+        assert info.key == s3_path.key
         assert info.last_modified >= now
         assert info.size == 1
         assert info.etag is not None
         assert info.type == S3ObjectType.S3_OBJECT_TYPE_FILE
         assert info.storage_class == S3StorageClass.S3_STORAGE_CLASS_STANDARD
-        assert info.version_id == version_id
+        assert info.version_id == s3_path.version_id
 
     def test_find(self, fs):
         dir_ = f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/filesystem/test_find"
@@ -5609,19 +5512,19 @@ class TestS3FileSystem:
             f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
             f"filesystem/test_checksum/{uuid.uuid4()}"
         )
-        bucket, key, _ = fs.parse_path(path)
+        s3_path = S3Path.parse(path)
 
         fs.pipe_file(path, b"foo")
         checksum = fs.checksum(path)
         fs.ls(path)  # caching
-        fs.core.put_object(S3Path(bucket, key), b"bar")
+        fs.core.put_object(s3_path, b"bar")
         assert checksum == fs.checksum(path)
         assert checksum != fs.checksum(path, refresh=True)
 
         fs.pipe_file(path, b"foo")
         checksum = fs.checksum(path)
         fs.ls(path)  # caching
-        fs.core.delete_object(S3Path(bucket, key))
+        fs.core.delete_object(s3_path)
         assert checksum == fs.checksum(path)
         with pytest.raises(FileNotFoundError):
             fs.checksum(path, refresh=True)
@@ -5930,10 +5833,10 @@ class TestS3FileSystem:
         versions = fs.object_version_info(path)
         assert len(versions) == 1
         version = versions[0]
-        bucket, key, _ = fs.parse_path(path)
-        assert version.bucket == bucket
-        assert version.key == key
-        assert version.name == f"{bucket}/{key}"
+        s3_path = S3Path.parse(path)
+        assert version.bucket == s3_path.bucket
+        assert version.key == s3_path.key
+        assert version.name == s3_path.name
         assert version.is_latest
         assert not version.is_delete_marker
         assert version.size == 4
