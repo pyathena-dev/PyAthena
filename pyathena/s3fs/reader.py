@@ -10,25 +10,56 @@
 from __future__ import annotations
 
 import csv
-from collections.abc import Iterator
-from typing import Any
+from collections.abc import Iterator, Sequence
+from typing import Any, Protocol
 
 from pyathena.util import override
 
 
-class DefaultCSVReader(Iterator[list[str]]):
-    """CSV reader using Python's standard csv module.
+class CSVReader(Protocol):
+    """Contract for readers of Athena CSV result files.
+
+    Reader classes accept a text stream and a delimiter. They yield sequences
+    containing strings or None, and close the underlying stream when closed.
+    Implementations do not need to inherit from this protocol.
+    """
+
+    def __init__(self, file_obj: Any, delimiter: str = ",") -> None:
+        """Initialize the reader from a text stream and field delimiter."""
+        ...
+
+    @property
+    def empty_strings_as_null(self) -> bool:
+        """Whether the result set converts empty strings to None before conversion."""
+        ...
+
+    def __iter__(self) -> Iterator[Sequence[str | None]]:
+        """Iterate over rows in the result file."""
+        ...
+
+    def __next__(self) -> Sequence[str | None]:
+        """Read the next row, raising StopIteration at the end of the stream."""
+        ...
+
+    def close(self) -> None:
+        """Close the underlying stream."""
+        ...
+
+
+class EmptyStringAsNullCSVReader(Iterator[list[str]]):
+    """CSV reader for treating empty strings as NULL in S3FS cursor results.
 
     This reader wraps Python's standard csv.reader and treats empty fields
     as empty strings. It does not distinguish between NULL and empty strings
     in Athena's CSV output - both become empty strings.
 
-    Use this reader when you need backward compatibility with the behavior
-    where empty strings are treated the same as NULL values.
+    When used by an S3FS cursor, the result set converts these empty strings
+    to None before applying type conversion. Iterating over the reader directly
+    still returns strings from Python's standard csv.reader.
 
     Example:
         >>> from io import StringIO
-        >>> reader = DefaultCSVReader(StringIO(',"",text'))
+        >>> reader = EmptyStringAsNullCSVReader(StringIO(',"",text'))
         >>> list(reader)
         [['', '', 'text']]  # Both NULL and empty string become ''
 
@@ -47,8 +78,13 @@ class DefaultCSVReader(Iterator[list[str]]):
         self._file: Any | None = file_obj
         self._reader = csv.reader(file_obj, delimiter=delimiter)
 
+    @property
+    def empty_strings_as_null(self) -> bool:
+        """Whether the result set converts empty strings to None before conversion."""
+        return True
+
     @override
-    def __iter__(self) -> DefaultCSVReader:
+    def __iter__(self) -> EmptyStringAsNullCSVReader:
         """Iterate over rows in the CSV file."""
         return self
 
@@ -77,7 +113,7 @@ class DefaultCSVReader(Iterator[list[str]]):
             self._file.close()
             self._file = None
 
-    def __enter__(self) -> DefaultCSVReader:
+    def __enter__(self) -> EmptyStringAsNullCSVReader:
         """Enter context manager."""
         return self
 
@@ -106,8 +142,8 @@ class AthenaCSVReader(Iterator[list[str | None]]):
         [[None, '', 'text']]  # NULL and empty string are distinguished
 
     Note:
-        Use DefaultCSVReader if you need backward compatibility where both
-        NULL and empty string are treated as empty string.
+        Use EmptyStringAsNullCSVReader to treat both NULL and empty string as None
+        in S3FS cursor results.
     """
 
     def __init__(self, file_obj: Any, delimiter: str = ",") -> None:
@@ -119,6 +155,11 @@ class AthenaCSVReader(Iterator[list[str | None]]):
         """
         self._file: Any | None = file_obj
         self._delimiter = delimiter
+
+    @property
+    def empty_strings_as_null(self) -> bool:
+        """Whether the result set converts empty strings to None before conversion."""
+        return False
 
     @override
     def __iter__(self) -> AthenaCSVReader:

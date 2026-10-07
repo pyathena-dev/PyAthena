@@ -86,8 +86,9 @@ class AsyncS3FSCursor(AsyncCursor):
             csv_reader: CSV reader class to use for parsing results.
                 Use AthenaCSVReader (default) to distinguish between NULL
                 (unquoted empty) and empty string (quoted empty "").
-                Use DefaultCSVReader for backward compatibility where empty
-                strings are treated as NULL.
+                Use EmptyStringAsNullCSVReader to treat empty strings as NULL.
+                Custom readers must satisfy the
+                :class:`~pyathena.s3fs.reader.CSVReader` protocol.
             **kwargs: Additional connection parameters.
 
         Example:

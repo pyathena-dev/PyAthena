@@ -327,7 +327,7 @@ df = cursor.execute("SELECT * FROM your_table").as_polars()
 `S3FSCursor` supports two CSV readers with different NULL handling behaviors:
 
 - **AthenaCSVReader** (default): Properly distinguishes NULL from empty strings by respecting CSV quoting rules
-- **DefaultCSVReader**: For backward compatibility; both NULL and empty strings become `None`
+- **EmptyStringAsNullCSVReader**: Opt-in behavior; both NULL and empty strings become `None` in cursor results
 
 ### AthenaCSVReader (Default)
 
@@ -361,25 +361,32 @@ for row in cursor:
 # id=3, value='hello', is_none=False
 ```
 
-### DefaultCSVReader (Backward Compatibility)
+### EmptyStringAsNullCSVReader
 
-If you need backward compatibility where both NULL and empty strings are treated as `None`,
-you can explicitly specify `DefaultCSVReader`:
+Specify `EmptyStringAsNullCSVReader` to treat both NULL and empty strings as `None` when reading query result files.
+The result set applies the reader's `empty_strings_as_null` flag before type conversion.
+When iterated directly, this reader returns empty strings for both cases.
+
+PyAthena 4.0 renames `DefaultCSVReader` to `EmptyStringAsNullCSVReader`; the old name is removed.
+Update existing imports and `csv_reader` arguments to use the new name, as shown below.
 
 ```python
 from pyathena import connect
 from pyathena.s3fs.cursor import S3FSCursor
-from pyathena.s3fs.reader import DefaultCSVReader
+from pyathena.s3fs.reader import EmptyStringAsNullCSVReader
 
 cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                  region_name="us-west-2",
                  cursor_class=S3FSCursor,
-                 cursor_kwargs={"csv_reader": DefaultCSVReader}).cursor()
+                 cursor_kwargs={"csv_reader": EmptyStringAsNullCSVReader}).cursor()
 
 cursor.execute("SELECT '' AS empty_col, NULL AS null_col")
 row = cursor.fetchone()
 print(row)  # (None, None) - both become None
 ```
+
+For custom reader requirements, see {ref}`s3fs-cursor`.
+The default and opt-in behavior also apply to `AsyncS3FSCursor` and `AioS3FSCursor`, which use the same result set.
 
 ```{note}
 `S3FSCursor` does not support the `unload` option. However, since `AthenaCSVReader` (the default)

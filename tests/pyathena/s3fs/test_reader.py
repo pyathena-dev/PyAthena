@@ -8,54 +8,54 @@
 from collections.abc import Iterator
 from io import StringIO
 
-from pyathena.s3fs.reader import AthenaCSVReader, DefaultCSVReader
+from pyathena.s3fs.reader import AthenaCSVReader, EmptyStringAsNullCSVReader
 
 
-class TestDefaultCSVReader:
-    """Tests for DefaultCSVReader using Python's standard csv module."""
+class TestEmptyStringAsNullCSVReader:
+    """Tests for EmptyStringAsNullCSVReader using Python's standard csv module."""
 
     def test_basic_parsing(self):
         data = StringIO("a,b,c\n1,2,3\n")
-        reader = DefaultCSVReader(data, delimiter=",")
+        reader = EmptyStringAsNullCSVReader(data, delimiter=",")
         rows = list(reader)
         assert rows == [["a", "b", "c"], ["1", "2", "3"]]
 
     def test_tab_delimiter(self):
         data = StringIO("a\tb\tc\n1\t2\t3\n")
-        reader = DefaultCSVReader(data, delimiter="\t")
+        reader = EmptyStringAsNullCSVReader(data, delimiter="\t")
         rows = list(reader)
         assert rows == [["a", "b", "c"], ["1", "2", "3"]]
 
     def test_empty_field_returns_empty_string(self):
-        """DefaultCSVReader returns empty string for both NULL and empty string."""
+        """EmptyStringAsNullCSVReader returns empty string for both NULL and empty string."""
         # Both ,, (NULL) and ,"", (empty string) become ''
         data = StringIO('a,,b,"",c\n')
-        reader = DefaultCSVReader(data, delimiter=",")
+        reader = EmptyStringAsNullCSVReader(data, delimiter=",")
         rows = list(reader)
         # Standard csv.reader treats both as empty strings
         assert rows == [["a", "", "b", "", "c"]]
 
     def test_quoted_field_with_comma(self):
         data = StringIO('"a,b",c\n')
-        reader = DefaultCSVReader(data, delimiter=",")
+        reader = EmptyStringAsNullCSVReader(data, delimiter=",")
         rows = list(reader)
         assert rows == [["a,b", "c"]]
 
     def test_quoted_field_with_newline(self):
         data = StringIO('"line1\nline2",b\n')
-        reader = DefaultCSVReader(data, delimiter=",")
+        reader = EmptyStringAsNullCSVReader(data, delimiter=",")
         rows = list(reader)
         assert rows == [["line1\nline2", "b"]]
 
     def test_escaped_quote(self):
         data = StringIO('"a""b",c\n')
-        reader = DefaultCSVReader(data, delimiter=",")
+        reader = EmptyStringAsNullCSVReader(data, delimiter=",")
         rows = list(reader)
         assert rows == [['a"b', "c"]]
 
     def test_empty_file(self):
         data = StringIO("")
-        reader = DefaultCSVReader(data, delimiter=",")
+        reader = EmptyStringAsNullCSVReader(data, delimiter=",")
         rows = list(reader)
         assert rows == []
 
@@ -63,20 +63,20 @@ class TestDefaultCSVReader:
         """Empty line returns single empty string (e.g., SELECT NULL)."""
         # Python's csv.reader returns [] for empty lines; we normalize to ['']
         data = StringIO("\n")
-        reader = DefaultCSVReader(data, delimiter=",")
+        reader = EmptyStringAsNullCSVReader(data, delimiter=",")
         rows = list(reader)
         assert rows == [[""]]
 
     def test_implements_iterator_protocol(self):
-        """DefaultCSVReader implements collections.abc.Iterator."""
+        """EmptyStringAsNullCSVReader implements collections.abc.Iterator."""
         data = StringIO("a,b\n")
-        reader = DefaultCSVReader(data, delimiter=",")
+        reader = EmptyStringAsNullCSVReader(data, delimiter=",")
         assert isinstance(reader, Iterator)
 
     def test_close(self):
         """close() releases file resources."""
         data = StringIO("a,b\n")
-        reader = DefaultCSVReader(data, delimiter=",")
+        reader = EmptyStringAsNullCSVReader(data, delimiter=",")
         reader.close()
         # After close, iteration should stop immediately
         rows = list(reader)
@@ -85,7 +85,7 @@ class TestDefaultCSVReader:
     def test_context_manager(self):
         """Reader can be used as context manager."""
         data = StringIO("a,b\n1,2\n")
-        with DefaultCSVReader(data, delimiter=",") as reader:
+        with EmptyStringAsNullCSVReader(data, delimiter=",") as reader:
             rows = list(reader)
         assert rows == [["a", "b"], ["1", "2"]]
         # After exiting context, reader should be closed

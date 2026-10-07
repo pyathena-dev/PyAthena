@@ -14,7 +14,7 @@ from pyathena.error import DatabaseError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.s3fs.converter import DefaultS3FSTypeConverter
 from pyathena.s3fs.cursor import S3FSCursor
-from pyathena.s3fs.reader import AthenaCSVReader, DefaultCSVReader
+from pyathena.s3fs.reader import AthenaCSVReader, EmptyStringAsNullCSVReader
 from pyathena.s3fs.result_set import AthenaS3FSResultSet
 from pyathena.util import RetryConfig
 from tests import ENV
@@ -333,7 +333,7 @@ class TestS3FSCursor:
 
     @pytest.mark.parametrize(
         "csv_reader_class",
-        [DefaultCSVReader, AthenaCSVReader],
+        [EmptyStringAsNullCSVReader, AthenaCSVReader],
     )
     def test_basic_query_with_reader(self, csv_reader_class):
         """Both readers should work for basic queries."""
@@ -353,7 +353,7 @@ class TestS3FSCursor:
 
     @pytest.mark.parametrize(
         "csv_reader_class",
-        [DefaultCSVReader, AthenaCSVReader],
+        [EmptyStringAsNullCSVReader, AthenaCSVReader],
     )
     def test_multiple_columns_with_reader(self, csv_reader_class):
         """Test multiple columns work with both readers."""
@@ -378,14 +378,14 @@ class TestS3FSCursor:
             result = cursor.fetchone()
             assert result == (1, "text", 1.5)
 
-    def test_null_with_default_reader(self):
-        """DefaultCSVReader: NULL is returned as None."""
+    def test_null_with_empty_string_as_null_reader(self):
+        """EmptyStringAsNullCSVReader: NULL is returned as None."""
         with (
             contextlib.closing(
                 connect(
                     schema_name=ENV.schema,
                     cursor_class=S3FSCursor,
-                    cursor_kwargs={"csv_reader": DefaultCSVReader},
+                    cursor_kwargs={"csv_reader": EmptyStringAsNullCSVReader},
                 )
             ) as conn,
             conn.cursor() as cursor,
@@ -410,21 +410,21 @@ class TestS3FSCursor:
             result = cursor.fetchone()
             assert result == (None,)
 
-    def test_empty_string_with_default_reader(self):
-        """DefaultCSVReader: Empty string becomes None (loses distinction)."""
+    def test_empty_string_with_empty_string_as_null_reader(self):
+        """EmptyStringAsNullCSVReader: Empty string becomes None (loses distinction)."""
         with (
             contextlib.closing(
                 connect(
                     schema_name=ENV.schema,
                     cursor_class=S3FSCursor,
-                    cursor_kwargs={"csv_reader": DefaultCSVReader},
+                    cursor_kwargs={"csv_reader": EmptyStringAsNullCSVReader},
                 )
             ) as conn,
             conn.cursor() as cursor,
         ):
             cursor.execute("SELECT '' AS empty_col")
             result = cursor.fetchone()
-            # DefaultCSVReader treats empty string same as NULL
+            # EmptyStringAsNullCSVReader treats empty string same as NULL
             assert result == (None,)
 
     def test_empty_string_with_athena_reader(self):
@@ -447,7 +447,10 @@ class TestS3FSCursor:
     @pytest.mark.parametrize(
         ("csv_reader", "expected_empty"),
         [
-            (DefaultCSVReader, None),  # DefaultCSVReader: empty string becomes None
+            (
+                EmptyStringAsNullCSVReader,
+                None,
+            ),  # EmptyStringAsNullCSVReader: empty string becomes None
             (AthenaCSVReader, ""),  # AthenaCSVReader: empty string is preserved
         ],
     )
@@ -455,10 +458,10 @@ class TestS3FSCursor:
         """
         Test NULL vs empty string handling with different CSV readers.
 
-        DefaultCSVReader: Both NULL and empty string become None.
+        EmptyStringAsNullCSVReader: Both NULL and empty string become None.
         AthenaCSVReader: NULL is None, empty string is preserved as ''.
 
-        See docs/null_handling.rst for details.
+        See docs/null_handling.md for details.
         """
         with (
             contextlib.closing(
@@ -503,7 +506,7 @@ class TestS3FSCursor:
 
     @pytest.mark.parametrize(
         "csv_reader_class",
-        [DefaultCSVReader, AthenaCSVReader],
+        [EmptyStringAsNullCSVReader, AthenaCSVReader],
     )
     def test_quoted_string_with_comma(self, csv_reader_class):
         """Both readers should handle strings containing commas."""
@@ -569,7 +572,7 @@ class TestS3FSCursor:
 
         No AWS calls; the query and its result set are mocked.
         """
-        cursor_kwargs = {"csv_reader": DefaultCSVReader}
+        cursor_kwargs = {"csv_reader": EmptyStringAsNullCSVReader}
         query_execution = MagicMock(state=AthenaQueryExecution.STATE_SUCCEEDED)
         cursor = S3FSCursor(
             connection=MagicMock(),
