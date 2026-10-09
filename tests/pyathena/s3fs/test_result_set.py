@@ -91,85 +91,84 @@ def _result_set(data, csv_reader, suffix=".csv", column_types=None, type_hints=N
     return result_set, stream
 
 
-@pytest.mark.parametrize(
-    ("csv_reader", "expected_empty"),
-    [
-        (None, ""),
-        (AthenaCSVReader, ""),
-        (EmptyStringAsNullCSVReader, None),
-        (_InheritedEmptyStringAsNullCSVReader, None),
-        (_NullifyingAthenaCSVReader, None),
-        (_TupleCSVReader, ""),
-        (_NullifyingTupleCSVReader, None),
-    ],
-)
-@pytest.mark.parametrize(
-    ("suffix", "data"),
-    [
-        (".csv", 'null_col,empty_col,value_col\n,"",text\nnext,"",last\n'),
-        (".txt", '\t""\ttext\nnext\t""\tlast\n'),
-    ],
-)
-def test_reader_null_conversion(csv_reader, expected_empty, suffix, data):
-    result_set, stream = _result_set(data, csv_reader, suffix=suffix)
-    with result_set:
-        assert result_set.fetchmany() == [(None, expected_empty, "text")]
-        assert result_set.fetchall() == [("next", expected_empty, "last")]
-        assert result_set.fetchone() is None
-        assert result_set.rownumber == 2
-    assert stream.closed
-
-
-@pytest.mark.parametrize(
-    ("csv_reader", "expected_empty"),
-    [
-        (AthenaCSVReader, ""),
-        (EmptyStringAsNullCSVReader, None),
-        (_InheritedEmptyStringAsNullCSVReader, None),
-        (_NullifyingAthenaCSVReader, None),
-        (_TupleCSVReader, ""),
-        (_NullifyingTupleCSVReader, None),
-    ],
-)
-def test_reader_null_conversion_with_type_hints(csv_reader, expected_empty):
-    result_set, stream = _result_set(
-        'null_col,empty_col,value_col\n,"","[1, 2]"\n,"",\n',
-        csv_reader,
-        column_types=("varchar", "varchar", "array"),
-        type_hints={"value_col": "array(integer)"},
+class TestAthenaS3FSResultSet:
+    @pytest.mark.parametrize(
+        ("csv_reader", "expected_empty"),
+        [
+            (None, ""),
+            (AthenaCSVReader, ""),
+            (EmptyStringAsNullCSVReader, None),
+            (_InheritedEmptyStringAsNullCSVReader, None),
+            (_NullifyingAthenaCSVReader, None),
+            (_TupleCSVReader, ""),
+            (_NullifyingTupleCSVReader, None),
+        ],
     )
-    with result_set:
-        assert result_set.fetchall() == [
-            (None, expected_empty, [1, 2]),
-            (None, expected_empty, None),
-        ]
-    assert stream.closed
+    @pytest.mark.parametrize(
+        ("suffix", "data"),
+        [
+            (".csv", 'null_col,empty_col,value_col\n,"",text\nnext,"",last\n'),
+            (".txt", '\t""\ttext\nnext\t""\tlast\n'),
+        ],
+    )
+    def test_reader_null_conversion(self, csv_reader, expected_empty, suffix, data):
+        result_set, stream = _result_set(data, csv_reader, suffix=suffix)
+        with result_set:
+            assert result_set.fetchmany() == [(None, expected_empty, "text")]
+            assert result_set.fetchall() == [("next", expected_empty, "last")]
+            assert result_set.fetchone() is None
+            assert result_set.rownumber == 2
+        assert stream.closed
 
+    @pytest.mark.parametrize(
+        ("csv_reader", "expected_empty"),
+        [
+            (AthenaCSVReader, ""),
+            (EmptyStringAsNullCSVReader, None),
+            (_InheritedEmptyStringAsNullCSVReader, None),
+            (_NullifyingAthenaCSVReader, None),
+            (_TupleCSVReader, ""),
+            (_NullifyingTupleCSVReader, None),
+        ],
+    )
+    def test_reader_null_conversion_with_type_hints(self, csv_reader, expected_empty):
+        result_set, stream = _result_set(
+            'null_col,empty_col,value_col\n,"","[1, 2]"\n,"",\n',
+            csv_reader,
+            column_types=("varchar", "varchar", "array"),
+            type_hints={"value_col": "array(integer)"},
+        )
+        with result_set:
+            assert result_set.fetchall() == [
+                (None, expected_empty, [1, 2]),
+                (None, expected_empty, None),
+            ]
+        assert stream.closed
 
-@pytest.mark.parametrize("csv_reader", [AthenaCSVReader, EmptyStringAsNullCSVReader])
-def test_managed_results_preserve_api_values(csv_reader):
-    response = {
-        "ResultSet": {
-            "ResultSetMetadata": {"ColumnInfo": [{"Name": "value", "Type": "varchar"}]},
-            "Rows": [
-                {"Data": [{"VarCharValue": "value"}]},
-                {"Data": [{"VarCharValue": ""}]},
-                {"Data": [{}]},
-            ],
+    @pytest.mark.parametrize("csv_reader", [AthenaCSVReader, EmptyStringAsNullCSVReader])
+    def test_managed_results_preserve_api_values(self, csv_reader):
+        response = {
+            "ResultSet": {
+                "ResultSetMetadata": {"ColumnInfo": [{"Name": "value", "Type": "varchar"}]},
+                "Rows": [
+                    {"Data": [{"VarCharValue": "value"}]},
+                    {"Data": [{"VarCharValue": ""}]},
+                    {"Data": [{}]},
+                ],
+            }
         }
-    }
-    with (
-        patch.object(AthenaS3FSResultSet, "_get_query_results", return_value=response),
-        AthenaS3FSResultSet(
-            connection=MagicMock(),
-            converter=DefaultS3FSTypeConverter(),
-            query_execution=MagicMock(
-                state=AthenaQueryExecution.STATE_SUCCEEDED, output_location=None
-            ),
-            arraysize=1,
-            retry_config=RetryConfig(),
-            csv_reader=csv_reader,
-            filesystem_class=MagicMock(),
-        ) as result_set,
-    ):
-        assert result_set.fetchall() == [("",), (None,)]
+        with (
+            patch.object(AthenaS3FSResultSet, "_get_query_results", return_value=response),
+            AthenaS3FSResultSet(
+                connection=MagicMock(),
+                converter=DefaultS3FSTypeConverter(),
+                query_execution=MagicMock(
+                    state=AthenaQueryExecution.STATE_SUCCEEDED, output_location=None
+                ),
+                arraysize=1,
+                retry_config=RetryConfig(),
+                csv_reader=csv_reader,
+                filesystem_class=MagicMock(),
+            ) as result_set,
+        ):
+            assert result_set.fetchall() == [("",), (None,)]
