@@ -8,7 +8,6 @@ from collections import abc
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack
 from functools import partial
-from importlib import import_module
 from io import BufferedReader, BytesIO, IOBase, StringIO, TextIOWrapper
 from multiprocessing import cpu_count
 from typing import (
@@ -61,9 +60,11 @@ def validate_execute_kwargs(method: str, kwargs: dict[str, Any], unload: bool) -
     """
     if not kwargs or kwargs.keys() <= _CURSOR_KWARGS:
         return
-    pandas = import_module("pandas")
+    import pandas
+
     if unload:
-        parquet = import_module("pyarrow.parquet")
+        import pyarrow.parquet as parquet
+
         allowed = keyword_parameters(pandas.read_parquet) | keyword_parameters(parquet.read_table)
     else:
         allowed = keyword_parameters(pandas.read_csv)

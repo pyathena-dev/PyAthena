@@ -5,6 +5,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+import builtins
 from datetime import datetime
 from unittest.mock import PropertyMock, patch
 
@@ -436,11 +437,14 @@ class TestPolarsDataFrameIterator:
 )
 def test_cursor_settings_skip_reader_imports(kwargs, unload):
     with (
-        patch("pyathena.polars.result_set.import_module") as load_module,
+        patch("builtins.__import__", wraps=builtins.__import__) as load_module,
         patch("pyathena.polars.result_set.keyword_parameters") as reader_parameters,
     ):
         validate_execute_kwargs("Cursor.execute", kwargs, unload, None)
-    load_module.assert_not_called()
+    assert not any(
+        call.args and call.args[0] in {"polars", "pyarrow.parquet"}
+        for call in load_module.call_args_list
+    )
     reader_parameters.assert_not_called()
 
 

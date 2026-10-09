@@ -13,7 +13,6 @@ import csv
 import logging
 from collections import abc
 from collections.abc import Callable, Iterator
-from importlib import import_module
 from io import BytesIO, StringIO
 from multiprocessing import cpu_count
 from typing import (
@@ -72,7 +71,9 @@ def validate_execute_kwargs(
     """
     if not kwargs or kwargs.keys() <= _CURSOR_KWARGS:
         return
-    polars = import_module("polars")
+    import polars
+
+    reader: Callable[..., Any]
     if unload:
         reader = polars.scan_parquet if chunksize is not None else polars.read_parquet
     else:

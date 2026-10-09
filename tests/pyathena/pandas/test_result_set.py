@@ -5,12 +5,14 @@
 #
 # SPDX-License-Identifier: MIT
 
+import builtins
 import csv
 import io
 from unittest.mock import MagicMock, PropertyMock, patch, sentinel
 
 import pandas as pd
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from pandas.testing import assert_frame_equal
 
@@ -720,11 +722,14 @@ def test_read_csv_with_pyarrow_multiline_values_across_blocks():
 )
 def test_cursor_settings_skip_reader_imports(kwargs, unload):
     with (
-        patch("pyathena.pandas.result_set.import_module") as load_module,
+        patch("builtins.__import__", wraps=builtins.__import__) as load_module,
         patch("pyathena.pandas.result_set.keyword_parameters") as reader_parameters,
     ):
         validate_execute_kwargs("Cursor.execute", kwargs, unload)
-    load_module.assert_not_called()
+    assert not any(
+        call.args and call.args[0] in {"pandas", "pyarrow.parquet"}
+        for call in load_module.call_args_list
+    )
     reader_parameters.assert_not_called()
 
 
@@ -741,3 +746,18 @@ def test_reader_replacement_updates_keyword_validation():
         validate_execute_kwargs("Cursor.execute", {"chunksize": 10, "new_option": True}, False)
         with pytest.raises(TypeError, match="unexpected keyword argument 'old_option'"):
             validate_execute_kwargs("Cursor.execute", {"chunksize": 10, "old_option": True}, False)
+
+
+def test_parquet_reader_replacement_updates_keyword_validation():
+    def first_reader(source, *, old_option=None):
+        pass
+
+    def second_reader(source, *, new_option=None):
+        pass
+
+    with patch.object(pq, "read_table", first_reader):
+        validate_execute_kwargs("Cursor.execute", {"old_option": True}, True)
+    with patch.object(pq, "read_table", second_reader):
+        validate_execute_kwargs("Cursor.execute", {"new_option": True}, True)
+        with pytest.raises(TypeError, match="unexpected keyword argument 'old_option'"):
+            validate_execute_kwargs("Cursor.execute", {"old_option": True}, True)
