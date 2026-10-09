@@ -47,6 +47,7 @@ class Cursor(WithFetch):
 
     def __init__(
         self,
+        *,
         s3_staging_dir: str | None = None,
         schema_name: str | None = None,
         catalog_name: str | None = None,
@@ -111,6 +112,7 @@ class Cursor(WithFetch):
         self,
         operation: str,
         parameters: dict[str, Any] | list[str] | None = None,
+        *,
         work_group: str | None = None,
         s3_staging_dir: str | None = None,
         cache_size: int | None = None,
@@ -120,7 +122,6 @@ class Cursor(WithFetch):
         paramstyle: str | None = None,
         on_start_query_execution: Callable[[str], None] | None = None,
         result_set_type_hints: dict[str | int, str] | None = None,
-        *,
         options: ExecuteOptions | None = None,
         **kwargs,
     ) -> Cursor:
@@ -220,7 +221,7 @@ class DictCursor(Cursor):
         ...     print(f"Product {row['id']}: {row['name']} - ${row['price']}")
     """
 
-    def __init__(self, dict_type: type[Any] | None = None, **kwargs) -> None:
+    def __init__(self, *, dict_type: type[Any] | None = None, **kwargs) -> None:
         """Initialize a DictCursor.
 
         Args:

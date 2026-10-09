@@ -17,13 +17,19 @@ class TestS3Path:
         ("path", "expected"),
         [
             ("s3://bucket", S3Path("bucket")),
+            ("s3://bucket/", S3Path("bucket")),
+            ("s3a://bucket", S3Path("bucket")),
             ("s3a://bucket/", S3Path("bucket")),
             ("bucket", S3Path("bucket")),
+            ("bucket/", S3Path("bucket")),
             ("s3://bucket/path/to/obj", S3Path("bucket", "path/to/obj")),
             ("s3a://bucket/path/to/obj", S3Path("bucket", "path/to/obj")),
+            ("bucket/path/to/obj", S3Path("bucket", "path/to/obj")),
             ("bucket/path/to/dir/", S3Path("bucket", "path/to/dir/")),
             ("bucket//", S3Path("bucket", "/")),
             ("s3://bucket/obj?versionId=v1", S3Path("bucket", "obj", "v1")),
+            ("s3a://bucket/obj?versionId=v1", S3Path("bucket", "obj", "v1")),
+            ("bucket/obj?versionId=v1", S3Path("bucket", "obj", "v1")),
             ("bucket/obj?versionID=v1", S3Path("bucket", "obj", "v1")),
             ("bucket/obj?versionid=v1", S3Path("bucket", "obj", "v1")),
             ("bucket/obj?version_id=v1", S3Path("bucket", "obj", "v1")),
@@ -32,6 +38,8 @@ class TestS3Path:
             # part of the key.
             ("bucket/dir/what?.txt", S3Path("bucket", "dir/what?.txt")),
             ("bucket/obj?x=1", S3Path("bucket", "obj?x=1")),
+            ("s3://bucket/obj?foo=bar", S3Path("bucket", "obj?foo=bar")),
+            ("s3a://bucket/obj?foo=bar", S3Path("bucket", "obj?foo=bar")),
             ("bucket/a?b?versionId=v1", S3Path("bucket", "a?b", "v1")),
             ("bucket/obj?versionId=", S3Path("bucket", "obj?versionId=")),
             ("bucket/obj?versionId=a?versionId=b", S3Path("bucket", "obj?versionId=a", "b")),
@@ -47,7 +55,19 @@ class TestS3Path:
     def test_parse(self, path, expected):
         assert S3Path.parse(path) == expected
 
-    @pytest.mark.parametrize("path", ["", "s3://", "http://bucket", "bucket?x=1"])
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "",
+            "s3://",
+            "http://bucket",
+            "bucket?x=1",
+            "s3://bucket?",
+            "s3://bucket?foo=bar",
+            "s3a://bucket?",
+            "s3a://bucket?foo=bar",
+        ],
+    )
     def test_parse_invalid(self, path):
         with pytest.raises(ValueError, match="Invalid S3 path format"):
             S3Path.parse(path)

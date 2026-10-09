@@ -94,7 +94,13 @@ class ExecuteOptions:
 
         Returns:
             The effective ``ExecuteOptions`` for the call.
+
+        Note:
+            Without base options, construct the base class directly from the
+            overrides. Subclass resolvers retain their ``merge()`` dispatch.
         """
+        if options is None and cls is ExecuteOptions:
+            return cls(**{k: v for k, v in overrides.items() if v is not None})
         return (options if options is not None else cls()).merge(**overrides)
 
     def merge(self, **overrides: Any) -> ExecuteOptions:

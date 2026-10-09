@@ -108,3 +108,75 @@ class TestExecuteOptions:
         options = ExecuteOptions(work_group="primary", cache_size=100)
         resolved = ExecuteOptions.resolve(options, work_group="adhoc", cache_size=None)
         assert resolved == ExecuteOptions(work_group="adhoc", cache_size=100)
+
+    @pytest.mark.parametrize(
+        ("overrides", "expected"),
+        [
+            ({"cache_size": None}, {"cache_size": 0}),
+            ({"cache_size": 0}, {"cache_size": 0}),
+            ({"result_reuse_enable": False}, {"result_reuse_enable": False}),
+            ({"work_group": ""}, {"work_group": ""}),
+            ({"work_group": "primary"}, {"work_group": "primary"}),
+            ({"unknown_field": None}, {}),
+        ],
+    )
+    def test_resolve_without_base_preserves_override_values(self, overrides, expected):
+        resolved = ExecuteOptions.resolve(None, **overrides)
+        for name, value in expected.items():
+            assert getattr(resolved, name) == value
+        assert resolved.cache_expiration_time == 0
+        assert resolved.result_reuse_minutes is None
+
+    def test_resolve_returns_distinct_default_instances(self):
+        first = ExecuteOptions.resolve(None)
+        second = ExecuteOptions.resolve(None)
+        assert first == second
+        assert first is not second
+
+    def test_resolve_preserves_callback_and_hint_references(self):
+        def callback(query_id):
+            pass
+
+        first_hints = {"tags": "array(varchar)"}
+        second_hints = {"tags": "map(varchar, integer)"}
+        first = ExecuteOptions.resolve(
+            None, on_start_query_execution=callback, result_set_type_hints=first_hints
+        )
+        second = ExecuteOptions.resolve(None, result_set_type_hints=second_hints)
+        assert first.on_start_query_execution is callback
+        assert first.result_set_type_hints is first_hints
+        assert second.result_set_type_hints is second_hints
+        first_hints["tags"] = "array(bigint)"
+        assert second.result_set_type_hints == {"tags": "map(varchar, integer)"}
+
+    @pytest.mark.parametrize("options", [None, ExecuteOptions(work_group="primary")])
+    def test_resolve_rejects_unknown_non_none_fields(self, options):
+        with pytest.raises(TypeError, match="unknown_field"):
+            ExecuteOptions.resolve(options, unknown_field="value")
+
+    def test_resolve_given_options_preserves_new_instance_behavior(self):
+        options = ExecuteOptions(work_group="primary")
+        resolved = ExecuteOptions.resolve(options, work_group=None)
+        assert resolved == options
+        assert resolved is not options
+
+    @pytest.mark.parametrize("provided", [False, True])
+    def test_resolve_retains_subclass_merge_dispatch(self, provided):
+        @dataclasses.dataclass(frozen=True)
+        class CustomOptions(ExecuteOptions):
+            route: str = "custom"
+
+            def merge(self, **overrides):
+                overrides["work_group"] = self.route
+                return super().merge(**overrides)
+
+        if provided:
+            base = CustomOptions(route="existing")
+            resolved = ExecuteOptions.resolve(base, cache_size=10)
+            expected = "existing"
+        else:
+            resolved = CustomOptions.resolve(None, cache_size=10)
+            expected = "custom"
+        assert isinstance(resolved, CustomOptions)
+        assert resolved.work_group == expected
+        assert resolved.cache_size == 10

@@ -197,6 +197,7 @@ class BaseCursor(metaclass=ABCMeta):
 
     def __init__(
         self,
+        *,
         connection: Connection[Any],
         converter: Converter,
         formatter: Formatter,

@@ -182,7 +182,7 @@ def _to_decimal(varchar_value: str | None) -> Decimal | None:
 def _to_boolean(varchar_value: str | None) -> bool | None:
     if not varchar_value:
         return None
-    return bool(strtobool(varchar_value))
+    return strtobool(varchar_value)
 
 
 def _to_binary(varchar_value: str | None) -> bytes | None:

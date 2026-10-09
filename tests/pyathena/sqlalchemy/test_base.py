@@ -152,6 +152,41 @@ class TestAthenaDialect:
         _, opts = dialect_class().create_connect_args(url)
         assert opts["use_ssl"] is expected
 
+    @pytest.mark.parametrize("dialect_class", [AthenaRestDialect, AthenaAioDialect])
+    @pytest.mark.parametrize(
+        "option", ["verify", "kill_on_interrupt", "result_reuse_enable", "glue_metadata_fallback"]
+    )
+    @pytest.mark.parametrize(("value", "expected"), [("false", False), ("true", True)])
+    def test_conn_str_boolean_options(self, dialect_class, option, value, expected):
+        url = make_url(
+            "awsathena+rest://athena.us-west-2.amazonaws.com:443/default"
+            f"?s3_staging_dir=s3://bucket/path/&{option}={value}"
+        )
+        _, opts = dialect_class().create_connect_args(url)
+        assert opts[option] is expected
+
+    @pytest.mark.parametrize("dialect_class", [AthenaRestDialect, AthenaAioDialect])
+    def test_conn_str_verify_certificate_path(self, dialect_class):
+        url = make_url(
+            "awsathena+rest://athena.us-west-2.amazonaws.com:443/default"
+            "?s3_staging_dir=s3://bucket/path/&verify=/path/to/ca.pem"
+        )
+        _, opts = dialect_class().create_connect_args(url)
+        assert opts["verify"] == "/path/to/ca.pem"
+
+    @pytest.mark.parametrize(
+        "driver", ["pandas", "arrow", "polars", "aiopandas", "aioarrow", "aiopolars"]
+    )
+    @pytest.mark.parametrize(("value", "expected"), [("false", False), ("true", True)])
+    def test_conn_str_unload(self, driver, value, expected):
+        url = make_url(
+            f"awsathena+{driver}://athena.us-west-2.amazonaws.com:443/default"
+            f"?s3_staging_dir=s3://bucket/path/&unload={value}"
+        )
+        _, opts = url.get_dialect()().create_connect_args(url)
+        assert opts["cursor_kwargs"]["unload"] is expected
+        assert "unload" not in opts
+
     @pytest.mark.parametrize("dialect_class", [AthenaDialect, AthenaAioDialect])
     def test_type_compiler(self, dialect_class):
         # SQLAlchemy 2.0 builds the type compiler from type_compiler_cls. A legacy

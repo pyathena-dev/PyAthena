@@ -107,6 +107,7 @@ class Connection(Generic[ConnectionCursor]):
     @overload
     def __init__(
         self: Connection[Cursor],
+        *,
         s3_staging_dir: str | None = ...,
         region_name: str | None = ...,
         schema_name: str | None = ...,
@@ -141,6 +142,7 @@ class Connection(Generic[ConnectionCursor]):
     @overload
     def __init__(
         self: Connection[ConnectionCursor],
+        *,
         s3_staging_dir: str | None = ...,
         region_name: str | None = ...,
         schema_name: str | None = ...,
@@ -174,6 +176,7 @@ class Connection(Generic[ConnectionCursor]):
 
     def __init__(
         self,
+        *,
         s3_staging_dir: str | None = None,
         region_name: str | None = None,
         schema_name: str | None = "default",

@@ -58,7 +58,7 @@ class AthenaPandasDialect(AthenaDialect):
         opts.update({"cursor_class": PandasCursor})
         cursor_kwargs = {}
         if "unload" in opts:
-            cursor_kwargs.update({"unload": bool(strtobool(opts.pop("unload")))})
+            cursor_kwargs.update({"unload": strtobool(opts.pop("unload"))})
         if "engine" in opts:
             cursor_kwargs.update({"engine": opts.pop("engine")})
         if "chunksize" in opts:

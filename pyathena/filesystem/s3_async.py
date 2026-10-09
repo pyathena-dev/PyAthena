@@ -143,23 +143,6 @@ class AioS3FileSystem(AsyncFileSystem):
         """The typed S3 operations of the wrapped ``S3FileSystem``."""
         return self._sync_fs.core
 
-    @staticmethod
-    def parse_path(path: str) -> tuple[str, str | None, str | None]:
-        """Parse an S3 path into its bucket, key and version ID.
-
-        See :meth:`S3FileSystem.parse_path`.
-
-        Args:
-            path: The S3 path.
-
-        Returns:
-            Tuple of the bucket, the key and the version ID.
-
-        Raises:
-            ValueError: If the path is not a valid S3 path.
-        """
-        return S3FileSystem.parse_path(path)
-
     async def _info(self, path: str, **kwargs) -> S3Object:
         return await asyncio.to_thread(self._sync_fs.info, path, **kwargs)
 

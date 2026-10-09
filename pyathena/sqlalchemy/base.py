@@ -304,20 +304,20 @@ class AthenaDialect(DefaultDialect):
             verify = opts["verify"]
             # If a ValueError occurs, it is probably the file name of the CA certificate being used.
             with contextlib.suppress(ValueError):
-                verify = bool(strtobool(verify))
+                verify = strtobool(verify)
             opts.update({"verify": verify})
         if "use_ssl" in opts:
-            opts.update({"use_ssl": bool(strtobool(opts["use_ssl"]))})
+            opts.update({"use_ssl": strtobool(opts["use_ssl"])})
         if "duration_seconds" in opts:
             opts.update({"duration_seconds": int(opts["duration_seconds"])})
         if "poll_interval" in opts:
             opts.update({"poll_interval": float(opts["poll_interval"])})
         if "kill_on_interrupt" in opts:
-            opts.update({"kill_on_interrupt": bool(strtobool(opts["kill_on_interrupt"]))})
+            opts.update({"kill_on_interrupt": strtobool(opts["kill_on_interrupt"])})
         if "result_reuse_enable" in opts:
-            opts.update({"result_reuse_enable": bool(strtobool(opts["result_reuse_enable"]))})
+            opts.update({"result_reuse_enable": strtobool(opts["result_reuse_enable"])})
         if "glue_metadata_fallback" in opts:
-            opts.update({"glue_metadata_fallback": bool(strtobool(opts["glue_metadata_fallback"]))})
+            opts.update({"glue_metadata_fallback": strtobool(opts["glue_metadata_fallback"])})
         if "result_reuse_minutes" in opts:
             opts.update({"result_reuse_minutes": int(opts["result_reuse_minutes"])})
         # Remove these URL options even when an explicit create_engine value
@@ -333,7 +333,7 @@ class AthenaDialect(DefaultDialect):
             use_insertmanyvalues is not None
             and "use_insertmanyvalues" not in self._explicit_engine_options
         ):
-            self.use_insertmanyvalues = bool(strtobool(use_insertmanyvalues))
+            self.use_insertmanyvalues = strtobool(use_insertmanyvalues)
         # Store on the dialect so compilers can consult connection options
         # (e.g. catalog_name for S3 Tables detection). Assigned here rather than
         # in create_connect_args because subclass dialects call this method

@@ -14,6 +14,32 @@ print(cursor.description)
 print(cursor.fetchall())
 ```
 
+## Keyword arguments in PyAthena 4.0
+
+Starting with PyAthena 4.0, connection settings and cursor constructor settings must be passed as keyword arguments.
+This applies to `connect()`, `aio_connect()`, connection classes, and all synchronous, thread-based asynchronous, and native asyncio cursor classes.
+Passing these settings positionally raises `TypeError`.
+
+Replace positional connection settings such as `connect("s3://YOUR_S3_BUCKET/path/to/", "us-west-2")` with:
+
+```python
+connection = connect(
+    s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+    region_name="us-west-2",
+)
+```
+
+For `execute()`, the SQL operation and query parameters can still be passed positionally.
+All subsequent settings require keywords:
+
+```python
+cursor = connection.cursor()
+cursor.execute("SELECT %(value)s", {"value": 1}, work_group="YOUR_WORK_GROUP")
+```
+
+Existing keyword arguments retain their defaults and behavior.
+The cursor class can still be selected positionally with `connection.cursor(DictCursor)`.
+
 ## Managed query result storage
 
 When using a workgroup with [managed query result storage](https://docs.aws.amazon.com/athena/latest/ug/managed-results.html) enabled,
