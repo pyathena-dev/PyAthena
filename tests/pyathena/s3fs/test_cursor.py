@@ -447,10 +447,8 @@ class TestS3FSCursor:
     @pytest.mark.parametrize(
         ("csv_reader", "expected_empty"),
         [
-            (
-                EmptyStringAsNullCSVReader,
-                None,
-            ),  # EmptyStringAsNullCSVReader: empty string becomes None
+            # EmptyStringAsNullCSVReader: empty string becomes None
+            (EmptyStringAsNullCSVReader, None),
             (AthenaCSVReader, ""),  # AthenaCSVReader: empty string is preserved
         ],
     )

@@ -364,8 +364,6 @@ for row in cursor:
 ### EmptyStringAsNullCSVReader
 
 Specify `EmptyStringAsNullCSVReader` to treat both NULL and empty strings as `None` when reading query result files.
-The result set applies the reader's `empty_strings_as_null` flag before type conversion.
-When iterated directly, this reader returns empty strings for both cases.
 
 PyAthena 4.0 renames `DefaultCSVReader` to `EmptyStringAsNullCSVReader`; the old name is removed.
 Update existing imports and `csv_reader` arguments to use the new name, as shown below.

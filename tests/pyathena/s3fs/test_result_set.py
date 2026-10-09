@@ -16,24 +16,11 @@ from pyathena.model import AthenaQueryExecution
 from pyathena.s3fs.converter import DefaultS3FSTypeConverter
 from pyathena.s3fs.reader import AthenaCSVReader, EmptyStringAsNullCSVReader
 from pyathena.s3fs.result_set import AthenaS3FSResultSet
-from pyathena.util import RetryConfig, override
-
-
-class _InheritedEmptyStringAsNullCSVReader(EmptyStringAsNullCSVReader):
-    pass
-
-
-class _NullifyingAthenaCSVReader(AthenaCSVReader):
-    @property
-    @override
-    def empty_strings_as_null(self) -> bool:
-        return True
+from pyathena.util import RetryConfig
 
 
 class _TupleCSVReader:
     """An independent implementation that returns tuples rather than lists."""
-
-    empty_strings_as_null = False
 
     def __init__(self, file_obj: Any, delimiter: str = ",") -> None:
         self._reader = AthenaCSVReader(file_obj, delimiter=delimiter)
@@ -46,10 +33,6 @@ class _TupleCSVReader:
 
     def close(self) -> None:
         self._reader.close()
-
-
-class _NullifyingTupleCSVReader(_TupleCSVReader):
-    empty_strings_as_null = True
 
 
 def _result_set(data, csv_reader, suffix=".csv", column_types=None, type_hints=None):
@@ -98,10 +81,7 @@ class TestAthenaS3FSResultSet:
             (None, ""),
             (AthenaCSVReader, ""),
             (EmptyStringAsNullCSVReader, None),
-            (_InheritedEmptyStringAsNullCSVReader, None),
-            (_NullifyingAthenaCSVReader, None),
             (_TupleCSVReader, ""),
-            (_NullifyingTupleCSVReader, None),
         ],
     )
     @pytest.mark.parametrize(
@@ -125,10 +105,7 @@ class TestAthenaS3FSResultSet:
         [
             (AthenaCSVReader, ""),
             (EmptyStringAsNullCSVReader, None),
-            (_InheritedEmptyStringAsNullCSVReader, None),
-            (_NullifyingAthenaCSVReader, None),
             (_TupleCSVReader, ""),
-            (_NullifyingTupleCSVReader, None),
         ],
     )
     def test_reader_null_conversion_with_type_hints(self, csv_reader, expected_empty):

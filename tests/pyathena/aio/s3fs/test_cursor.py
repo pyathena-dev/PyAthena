@@ -24,7 +24,6 @@ class TestAioS3FSCursor:
         ("aio_s3fs_cursor", "expected_empty"),
         [
             ({}, ""),
-            ({"cursor_kwargs": {"csv_reader": AthenaCSVReader}}, ""),
             ({"cursor_kwargs": {"csv_reader": EmptyStringAsNullCSVReader}}, None),
         ],
         indirect=["aio_s3fs_cursor"],

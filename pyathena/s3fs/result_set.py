@@ -200,9 +200,6 @@ class AthenaS3FSResultSet(AthenaResultSet):
             except StopIteration:
                 break
 
-            if self._csv_reader.empty_strings_as_null:
-                row = [None if value == "" else value for value in row]
-
             if col_hints:
                 converted_row = tuple(
                     self._converter.convert(col_type, value, type_hint=hint)

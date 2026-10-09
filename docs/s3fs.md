@@ -187,9 +187,7 @@ print(row)  # (None, '')  - NULL is None, empty string is ''
 **Treating empty strings as NULL:**
 
 Use `EmptyStringAsNullCSVReader` when empty strings should be treated as NULL.
-Its parser returns empty strings for both NULL and quoted empty fields.
-The result set reads the reader's `empty_strings_as_null` property and replaces empty strings with `None` before applying type conversion.
-Iterating over this reader directly still returns empty strings.
+It parses result files with Python's `csv` module and returns `None` for both NULL and quoted empty fields.
 
 ```python
 from pyathena import connect
@@ -234,8 +232,9 @@ from pyathena.s3fs.reader import EmptyStringAsNullCSVReader
 cursor = connection.cursor(S3FSCursor, csv_reader=EmptyStringAsNullCSVReader)
 ```
 
-The opt-in behavior is preserved, and `AthenaCSVReader` remains the default.
-Custom readers must now expose `empty_strings_as_null`; use `False` to retain empty strings, or `True` to treat them as NULL in result files.
+`AthenaCSVReader` remains the default.
+Iterating over `EmptyStringAsNullCSVReader` directly now returns `None` for empty fields instead of empty strings.
+Cursor results are unchanged.
 
 ### Custom CSV readers
 
@@ -244,12 +243,10 @@ Pass the class through `csv_reader` in the cursor constructor or an individual `
 
 - Accept a text stream as `file_obj` and a `delimiter` keyword argument in the constructor.
 - Implement `__iter__()` and `__next__()` to yield sequences of strings or `None`, and raise `StopIteration` at the end of the stream.
+  The cursor converts each value by its column type and treats `None` as NULL.
 - Implement `close()` to close the underlying stream.
-- Expose `empty_strings_as_null`: set it to `True` to convert empty strings to `None` before type conversion, or `False` to preserve them.
 
-The built-in readers expose this flag as a read-only property, which subclasses can override.
-The result set uses the instance's flag rather than checking the reader class's identity.
-This flag applies when reading result files; managed query results and other API fallback rows retain their existing conversion behavior.
+The reader is used only for result files; managed query results are read through the Athena API.
 
 ### Limitations
 

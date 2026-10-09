@@ -26,14 +26,13 @@ class TestEmptyStringAsNullCSVReader:
         rows = list(reader)
         assert rows == [["a", "b", "c"], ["1", "2", "3"]]
 
-    def test_empty_field_returns_empty_string(self):
-        """EmptyStringAsNullCSVReader returns empty string for both NULL and empty string."""
-        # Both ,, (NULL) and ,"", (empty string) become ''
+    def test_empty_field_returns_none(self):
+        """EmptyStringAsNullCSVReader returns None for both NULL and empty string."""
+        # Both ,, (NULL) and ,"", (empty string) become None
         data = StringIO('a,,b,"",c\n')
         reader = EmptyStringAsNullCSVReader(data, delimiter=",")
         rows = list(reader)
-        # Standard csv.reader treats both as empty strings
-        assert rows == [["a", "", "b", "", "c"]]
+        assert rows == [["a", None, "b", None, "c"]]
 
     def test_quoted_field_with_comma(self):
         data = StringIO('"a,b",c\n')
@@ -60,12 +59,12 @@ class TestEmptyStringAsNullCSVReader:
         assert rows == []
 
     def test_empty_line(self):
-        """Empty line returns single empty string (e.g., SELECT NULL)."""
-        # Python's csv.reader returns [] for empty lines; we normalize to ['']
+        """Empty line returns single None (e.g., SELECT NULL)."""
+        # Python's csv.reader returns [] for empty lines; we normalize to [None]
         data = StringIO("\n")
         reader = EmptyStringAsNullCSVReader(data, delimiter=",")
         rows = list(reader)
-        assert rows == [[""]]
+        assert rows == [[None]]
 
     def test_implements_iterator_protocol(self):
         """EmptyStringAsNullCSVReader implements collections.abc.Iterator."""

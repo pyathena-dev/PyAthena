@@ -20,17 +20,12 @@ class CSVReader(Protocol):
     """Contract for readers of Athena CSV result files.
 
     Reader classes accept a text stream and a delimiter. They yield sequences
-    containing strings or None, and close the underlying stream when closed.
-    Implementations do not need to inherit from this protocol.
+    of field values, with None for NULL, and close the underlying stream when
+    closed. Implementations do not need to inherit from this protocol.
     """
 
     def __init__(self, file_obj: Any, delimiter: str = ",") -> None:
         """Initialize the reader from a text stream and field delimiter."""
-        ...
-
-    @property
-    def empty_strings_as_null(self) -> bool:
-        """Whether the result set converts empty strings to None before conversion."""
         ...
 
     def __iter__(self) -> Iterator[Sequence[str | None]]:
@@ -46,22 +41,18 @@ class CSVReader(Protocol):
         ...
 
 
-class EmptyStringAsNullCSVReader(Iterator[list[str]]):
-    """CSV reader for treating empty strings as NULL in S3FS cursor results.
+class EmptyStringAsNullCSVReader(Iterator[list[str | None]]):
+    """CSV reader that reads both NULL and empty string as None.
 
-    This reader wraps Python's standard csv.reader and treats empty fields
-    as empty strings. It does not distinguish between NULL and empty strings
-    in Athena's CSV output - both become empty strings.
-
-    When used by an S3FS cursor, the result set converts these empty strings
-    to None before applying type conversion. Iterating over the reader directly
-    still returns strings from Python's standard csv.reader.
+    This reader wraps Python's standard csv.reader, which does not distinguish
+    between NULL and empty strings in Athena's CSV output. It returns None for
+    every empty field.
 
     Example:
         >>> from io import StringIO
         >>> reader = EmptyStringAsNullCSVReader(StringIO(',"",text'))
         >>> list(reader)
-        [['', '', 'text']]  # Both NULL and empty string become ''
+        [[None, None, 'text']]  # Both NULL and empty string become None
 
     Note:
         The default reader for S3FSCursor is AthenaCSVReader, which
@@ -78,22 +69,17 @@ class EmptyStringAsNullCSVReader(Iterator[list[str]]):
         self._file: Any | None = file_obj
         self._reader = csv.reader(file_obj, delimiter=delimiter)
 
-    @property
-    def empty_strings_as_null(self) -> bool:
-        """Whether the result set converts empty strings to None before conversion."""
-        return True
-
     @override
     def __iter__(self) -> EmptyStringAsNullCSVReader:
         """Iterate over rows in the CSV file."""
         return self
 
     @override
-    def __next__(self) -> list[str]:
+    def __next__(self) -> list[str | None]:
         """Read and parse the next line.
 
         Returns:
-            List of field values as strings.
+            List of field values, with None for empty fields.
 
         Raises:
             StopIteration: When end of file is reached or reader is closed.
@@ -101,11 +87,11 @@ class EmptyStringAsNullCSVReader(Iterator[list[str]]):
         if self._file is None:
             raise StopIteration
         row = next(self._reader)
-        # Python's csv.reader returns [] for empty lines; normalize to ['']
+        # Python's csv.reader returns [] for empty lines; normalize to [None]
         # to represent a single empty field (consistent with single-value handling)
         if not row:
-            return [""]
-        return row
+            return [None]
+        return [None if value == "" else value for value in row]
 
     def close(self) -> None:
         """Close the underlying file object."""
@@ -155,11 +141,6 @@ class AthenaCSVReader(Iterator[list[str | None]]):
         """
         self._file: Any | None = file_obj
         self._delimiter = delimiter
-
-    @property
-    def empty_strings_as_null(self) -> bool:
-        """Whether the result set converts empty strings to None before conversion."""
-        return False
 
     @override
     def __iter__(self) -> AthenaCSVReader:
