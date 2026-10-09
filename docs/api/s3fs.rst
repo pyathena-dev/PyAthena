@@ -30,10 +30,13 @@ S3FS CSV Readers
 S3FSCursor supports pluggable CSV reader implementations to control how NULL values
 and empty strings are handled when parsing Athena's CSV output.
 
+.. autoclass:: pyathena.s3fs.reader.CSVReader
+   :members:
+
 .. autoclass:: pyathena.s3fs.reader.AthenaCSVReader
    :members:
 
-.. autoclass:: pyathena.s3fs.reader.DefaultCSVReader
+.. autoclass:: pyathena.s3fs.reader.EmptyStringAsNullCSVReader
    :members:
 
 S3FS Data Converters

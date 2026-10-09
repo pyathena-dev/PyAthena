@@ -20,13 +20,13 @@ from pyathena.error import OperationalError, ProgrammingError
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet
-from pyathena.s3fs.reader import AthenaCSVReader, DefaultCSVReader
+from pyathena.s3fs.reader import AthenaCSVReader, CSVReader
 from pyathena.util import RetryConfig, override, parse_output_location
 
 if TYPE_CHECKING:
     from pyathena.connection import Connection
 
-CSVReaderType = type[DefaultCSVReader] | type[AthenaCSVReader]
+CSVReaderType = type[CSVReader]
 
 _logger = logging.getLogger(__name__)
 
@@ -88,7 +88,8 @@ class AthenaS3FSResultSet(AthenaResultSet):
             block_size: The default block size in bytes for the filesystem. If not set,
                 ``DEFAULT_BLOCK_SIZE`` is used.
             csv_reader: The CSV reader class for the results. If None,
-                ``AthenaCSVReader`` is used.
+                ``AthenaCSVReader`` is used. Custom readers must satisfy the
+                :class:`~pyathena.s3fs.reader.CSVReader` protocol.
             filesystem_class: The filesystem class for reading the results. If None,
                 PyAthena's ``S3FileSystem`` is used.
             result_set_type_hints: Athena type signatures for complex-type columns,
@@ -115,7 +116,7 @@ class AthenaS3FSResultSet(AthenaResultSet):
         self._csv_reader_class: CSVReaderType = csv_reader or AthenaCSVReader
         self._filesystem_class: type[AbstractFileSystem] = filesystem_class or S3FileSystem
         self._fs = self._create_s3_file_system()
-        self._csv_reader: Any | None = None
+        self._csv_reader: CSVReader | None = None
 
         if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
             self._init_csv_reader()
@@ -199,37 +200,18 @@ class AthenaS3FSResultSet(AthenaResultSet):
             except StopIteration:
                 break
 
-            # Convert row values using converters
-            # AthenaCSVReader returns None for NULL values directly,
-            # DefaultCSVReader returns empty string which needs conversion
-            if self._csv_reader_class is DefaultCSVReader:
-                if col_hints:
-                    converted_row = tuple(
-                        self._converter.convert(
-                            col_type, value if value != "" else None, type_hint=hint
-                        )
-                        if hint
-                        else self._converter.convert(col_type, value if value != "" else None)
-                        for col_type, value, hint in zip(col_types, row, col_hints, strict=False)
-                    )
-                else:
-                    converted_row = tuple(
-                        self._converter.convert(col_type, value if value != "" else None)
-                        for col_type, value in zip(col_types, row, strict=False)
-                    )
+            if col_hints:
+                converted_row = tuple(
+                    self._converter.convert(col_type, value, type_hint=hint)
+                    if hint
+                    else self._converter.convert(col_type, value)
+                    for col_type, value, hint in zip(col_types, row, col_hints, strict=False)
+                )
             else:
-                if col_hints:
-                    converted_row = tuple(
-                        self._converter.convert(col_type, value, type_hint=hint)
-                        if hint
-                        else self._converter.convert(col_type, value)
-                        for col_type, value, hint in zip(col_types, row, col_hints, strict=False)
-                    )
-                else:
-                    converted_row = tuple(
-                        self._converter.convert(col_type, value)
-                        for col_type, value in zip(col_types, row, strict=False)
-                    )
+                converted_row = tuple(
+                    self._converter.convert(col_type, value)
+                    for col_type, value in zip(col_types, row, strict=False)
+                )
             self._rows.append(converted_row)
             rows_fetched += 1
 

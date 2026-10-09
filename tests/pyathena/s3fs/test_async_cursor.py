@@ -17,7 +17,7 @@ import pytest
 from pyathena.error import ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.s3fs.async_cursor import AsyncS3FSCursor
-from pyathena.s3fs.reader import AthenaCSVReader, DefaultCSVReader
+from pyathena.s3fs.reader import AthenaCSVReader, EmptyStringAsNullCSVReader
 from pyathena.s3fs.result_set import AthenaS3FSResultSet
 from pyathena.util import RetryConfig
 from tests import ENV
@@ -25,6 +25,20 @@ from tests.pyathena.conftest import connect
 
 
 class TestAsyncS3FSCursor:
+    @pytest.mark.parametrize(
+        ("async_s3fs_cursor", "expected_empty"),
+        [
+            ({}, ""),
+            ({"cursor_kwargs": {"csv_reader": EmptyStringAsNullCSVReader}}, None),
+        ],
+        indirect=["async_s3fs_cursor"],
+    )
+    def test_null_vs_empty_string(self, async_s3fs_cursor, expected_empty):
+        _, future = async_s3fs_cursor.execute(
+            "SELECT NULL AS null_col, '' AS empty_col, 'text' AS value_col"
+        )
+        assert future.result().fetchall() == [(None, expected_empty, "text")]
+
     def test_fetchone(self, async_s3fs_cursor):
         query_id, future = async_s3fs_cursor.execute("SELECT * FROM one_row")
         result_set = future.result()
@@ -189,7 +203,7 @@ class TestAsyncS3FSCursor:
 
         No AWS calls; the query and its result set are mocked.
         """
-        cursor_kwargs = {"csv_reader": DefaultCSVReader}
+        cursor_kwargs = {"csv_reader": EmptyStringAsNullCSVReader}
         query_execution = MagicMock(state=AthenaQueryExecution.STATE_SUCCEEDED)
         with (
             AsyncS3FSCursor(

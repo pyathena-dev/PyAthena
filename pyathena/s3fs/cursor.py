@@ -82,17 +82,18 @@ class S3FSCursor(WithFetch):
             csv_reader: CSV reader class to use for parsing results.
                 Use AthenaCSVReader (default) to distinguish between NULL
                 (unquoted empty) and empty string (quoted empty "").
-                Use DefaultCSVReader for backward compatibility where empty
-                strings are treated as NULL.
+                Use EmptyStringAsNullCSVReader to treat empty strings as NULL.
+                Custom readers must satisfy the
+                :class:`~pyathena.s3fs.reader.CSVReader` protocol.
             **kwargs: Additional connection parameters.
 
         Example:
             >>> cursor = connection.cursor(S3FSCursor)
             >>> cursor.execute("SELECT * FROM my_table")
             >>>
-            >>> # Use DefaultCSVReader for backward compatibility
-            >>> from pyathena.s3fs.reader import DefaultCSVReader
-            >>> cursor = connection.cursor(S3FSCursor, csv_reader=DefaultCSVReader)
+            >>> # Treat empty strings as NULL
+            >>> from pyathena.s3fs.reader import EmptyStringAsNullCSVReader
+            >>> cursor = connection.cursor(S3FSCursor, csv_reader=EmptyStringAsNullCSVReader)
         """
         super().__init__(
             s3_staging_dir=s3_staging_dir,
