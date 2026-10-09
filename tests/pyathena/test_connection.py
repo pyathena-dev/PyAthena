@@ -407,3 +407,13 @@ class TestConnection:
 
         assert conn.cursor().trace_id == "x"
         assert type(conn._internal_cursor(Cursor)) is Cursor
+
+    def test_cursor_kwargs_named_cursor(self):
+        class CustomCursor(Cursor):
+            def __init__(self, *, cursor: Any = None, **kwargs: Any) -> None:
+                self.custom_cursor = cursor
+                super().__init__(**kwargs)
+
+        conn = _connection(cursor_class=CustomCursor, cursor_kwargs={"cursor": "x"})
+
+        assert conn.cursor().custom_cursor == "x"

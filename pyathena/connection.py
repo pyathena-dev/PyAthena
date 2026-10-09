@@ -615,7 +615,7 @@ class Connection(Generic[ConnectionCursor]):
         return self._cursor(cursor, **{**self.cursor_kwargs, **kwargs})
 
     def _cursor(
-        self, cursor: type[FunctionalCursor] | None = None, **kwargs: Any
+        self, cursor: type[FunctionalCursor] | None, /, **kwargs: Any
     ) -> FunctionalCursor | ConnectionCursor:
         """Create a cursor without applying the connection's ``cursor_kwargs``.
 
