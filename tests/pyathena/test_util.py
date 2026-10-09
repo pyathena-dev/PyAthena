@@ -398,59 +398,61 @@ S3_WORKER_CURSORS = (
 )
 
 
-class TestS3WorkerOptions:
-    @staticmethod
-    async def _execute(cursor, kwargs):
-        result = cursor.execute("SELECT 1", **kwargs)
-        if isawaitable(result):
-            await result
+async def _execute_s3_worker_query(cursor, kwargs):
+    result = cursor.execute("SELECT 1", **kwargs)
+    if isawaitable(result):
+        await result
 
-    @staticmethod
-    def _cursor(cursor_class, **kwargs):
-        return cursor_class(
-            connection=MagicMock(),
-            converter=MagicMock(),
-            formatter=MagicMock(),
-            retry_config=RetryConfig(),
-            **kwargs,
-        )
 
-    @pytest.mark.parametrize("cursor_class", S3_WORKER_CURSORS)
-    @pytest.mark.parametrize(
-        ("value", "error"), [(0, ValueError), (-1, ValueError), (True, TypeError), (1.5, TypeError)]
+def _s3_worker_cursor(cursor_class, **kwargs):
+    return cursor_class(
+        connection=MagicMock(),
+        converter=MagicMock(),
+        formatter=MagicMock(),
+        retry_config=RetryConfig(),
+        **kwargs,
     )
-    def test_s3_workers_invalid_constructor(self, cursor_class, value, error):
-        with pytest.raises(error, match="s3_max_workers"):
-            self._cursor(cursor_class, s3_max_workers=value)
 
-    @pytest.mark.parametrize("cursor_class", S3_WORKER_CURSORS)
-    @pytest.mark.parametrize(
-        "kwargs", [{"s3_max_workers": 0}, {"s3_max_workers": -1}, {"max_workers": 2}]
-    )
-    async def test_s3_workers_invalid_execute(self, cursor_class, kwargs):
-        cursor = self._cursor(cursor_class)
-        error = TypeError if "max_workers" in kwargs else ValueError
-        try:
-            with patch.object(cursor, "_execute") as execute:
-                with pytest.raises(error, match="s3_max_workers"):
-                    await self._execute(cursor, kwargs)
-                execute.assert_not_called()
-        finally:
-            closed = cursor.close()
-            if isawaitable(closed):
-                await closed
 
-    @pytest.mark.parametrize(
-        "cursor_class",
-        [PandasCursor, PolarsCursor, ArrowCursor, AioPandasCursor, AioPolarsCursor, AioArrowCursor],
-    )
-    def test_s3_workers_reject_former_constructor_keyword(self, cursor_class):
-        with pytest.raises(TypeError, match="s3_max_workers"):
-            self._cursor(cursor_class, max_workers=2)
+@pytest.mark.parametrize("cursor_class", S3_WORKER_CURSORS)
+@pytest.mark.parametrize(
+    ("value", "error"), [(0, ValueError), (-1, ValueError), (True, TypeError), (1.5, TypeError)]
+)
+def test_s3_workers_invalid_constructor(cursor_class, value, error):
+    with pytest.raises(error, match="s3_max_workers"):
+        _s3_worker_cursor(cursor_class, s3_max_workers=value)
 
-    @pytest.mark.parametrize(
-        "cursor_class", [PandasCursor, PolarsCursor, AioPandasCursor, AioPolarsCursor]
-    )
-    def test_s3_workers_none_is_arrow_only(self, cursor_class):
-        with pytest.raises(TypeError, match="s3_max_workers"):
-            self._cursor(cursor_class, s3_max_workers=None)
+
+@pytest.mark.parametrize("cursor_class", S3_WORKER_CURSORS)
+@pytest.mark.parametrize(
+    "kwargs", [{"s3_max_workers": 0}, {"s3_max_workers": -1}, {"max_workers": 2}]
+)
+async def test_s3_workers_invalid_execute(cursor_class, kwargs):
+    cursor = _s3_worker_cursor(cursor_class)
+    error = TypeError if "max_workers" in kwargs else ValueError
+    try:
+        with patch.object(cursor, "_execute") as execute:
+            with pytest.raises(error, match="s3_max_workers"):
+                await _execute_s3_worker_query(cursor, kwargs)
+            execute.assert_not_called()
+    finally:
+        closed = cursor.close()
+        if isawaitable(closed):
+            await closed
+
+
+@pytest.mark.parametrize(
+    "cursor_class",
+    [PandasCursor, PolarsCursor, ArrowCursor, AioPandasCursor, AioPolarsCursor, AioArrowCursor],
+)
+def test_s3_workers_reject_former_constructor_keyword(cursor_class):
+    with pytest.raises(TypeError, match="s3_max_workers"):
+        _s3_worker_cursor(cursor_class, max_workers=2)
+
+
+@pytest.mark.parametrize(
+    "cursor_class", [PandasCursor, PolarsCursor, AioPandasCursor, AioPolarsCursor]
+)
+def test_s3_workers_none_is_arrow_only(cursor_class):
+    with pytest.raises(TypeError, match="s3_max_workers"):
+        _s3_worker_cursor(cursor_class, s3_max_workers=None)
