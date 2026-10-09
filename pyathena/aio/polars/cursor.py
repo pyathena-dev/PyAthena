@@ -17,7 +17,7 @@ from pyathena.polars.converter import (
     DefaultPolarsTypeConverter,
     DefaultPolarsUnloadTypeConverter,
 )
-from pyathena.polars.result_set import AthenaPolarsResultSet, validate_execute_kwargs
+from pyathena.polars.result_set import AthenaPolarsResultSet
 from pyathena.util import override
 
 if TYPE_CHECKING:
@@ -161,12 +161,9 @@ class AioPolarsCursor(WithAsyncFetch):
         Returns:
             Self reference for method chaining.
         """
-        operation, unload_location, options = self._prepare_reader_query(
-            operation,
-            kwargs,
-            validate_execute_kwargs,
-            kwargs.get("chunksize", self._chunksize),
-            options=options,
+        self._reset_state()
+        options = ExecuteOptions.resolve(
+            options,
             work_group=work_group,
             s3_staging_dir=s3_staging_dir,
             cache_size=cache_size,
@@ -176,9 +173,8 @@ class AioPolarsCursor(WithAsyncFetch):
             paramstyle=paramstyle,
             on_start_query_execution=on_start_query_execution,
             result_set_type_hints=result_set_type_hints,
-            on_prepare_error=self._reset_state,
         )
-        self._reset_state()
+        operation, unload_location = self._prepare_unload(operation, options.s3_staging_dir)
         self.query_id = await self._execute(
             operation,
             parameters=parameters,

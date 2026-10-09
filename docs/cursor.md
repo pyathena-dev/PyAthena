@@ -1,30 +1,5 @@
 # Cursor
 
-## Keyword arguments in 4.0.0
-
-Starting in 4.0.0, cursor constructors and `execute()` raise `TypeError` for unknown keyword arguments.
-Earlier versions silently ignored some extra arguments.
-Correct misspelled names and pass backend options to the cursor that supports them:
-
-```python
-cursor = connection.cursor(work_group="analytics")
-cursor.execute("SELECT 1", work_group="analytics")
-```
-
-Unknown keyword names are rejected before starting a query or a Spark calculation.
-For native asyncio cursors, `execute()` validates arguments when awaited.
-Pandas and Polars cursors continue to accept their reader options, with names checked against the installed library and the prepared query's CSV or UNLOAD mode.
-Polars also checks the chunking mode.
-For chunked CSV queries, both eager and scan options are accepted before execution because managed query results use the eager reader.
-Options specific to the other CSV reader raise `TypeError` when the result set is created.
-For Future-based cursors, this error is reported by `future.result()`.
-Invalid values and combinations remain subject to the reader's validation.
-Arrow and S3FS cursors accept their supported result-set options; arbitrary reader options are rejected.
-
-Connection-level `on_start_query_execution` and `on_poll` remain accepted by every cursor constructor.
-The Future-based Async cursors and Spark cursors do not invoke `on_start_query_execution`.
-For reader options, such as pandas `parse_dates`, pass the option to `execute()` rather than the constructor.
-
 (default_cursor)=
 
 ## DefaultCursor

@@ -10,7 +10,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from inspect import Parameter, signature
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from botocore.config import Config
@@ -51,6 +51,8 @@ UNCAPPED_CURSORS = [
     AsyncS3FSCursor,
 ]
 CURSOR_CLASSES = PAGED_CURSORS + UNCAPPED_CURSORS + [SparkCursor, AsyncSparkCursor]
+# Cursors that pass execute() keyword arguments to a DataFrame reader.
+READER_CURSOR_CLASSES = [PandasCursor, PolarsCursor, AsyncPandasCursor, AsyncPolarsCursor]
 
 
 @pytest.mark.parametrize("factory", [pyathena.connect, Connection])
@@ -126,6 +128,104 @@ def isolated_aws_config(monkeypatch, tmp_path):
             monkeypatch.delenv(key)
     monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config"))
     monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "credentials"))
+
+
+@pytest.fixture
+def offline_connection():
+    """Yield a connection whose cursors fail the test if they call AWS.
+
+    A Spark cursor reports a started session without calling AWS.
+    """
+    conn = _connection()
+    with (
+        patch.object(
+            conn.client, "_make_api_call", side_effect=AssertionError("unexpected AWS request")
+        ) as request,
+        patch.object(SparkBaseCursor, "_start_session", return_value="session"),
+    ):
+        yield conn
+    request.assert_not_called()
+    conn.close()
+
+
+def _open_cursor(conn: Connection[Any], cursor_class: type[Any], **kwargs: Any) -> Any:
+    if issubclass(cursor_class, SparkBaseCursor):
+        # The session was not started, so closing the cursor must not terminate it.
+        kwargs["terminate_session_on_close"] = False
+    return conn.cursor(cursor_class, **kwargs)
+
+
+@pytest.mark.parametrize("cursor_class", CURSOR_CLASSES)
+def test_cursor_unknown_constructor_keyword(offline_connection, cursor_class):
+    with pytest.raises(TypeError, match="unexpected keyword argument 'work_gruop'"):
+        offline_connection.cursor(cursor_class, work_gruop="typo")
+    offline_connection.cursor_kwargs = {"work_gruop": "typo"}
+    with pytest.raises(TypeError, match="unexpected keyword argument 'work_gruop'"):
+        offline_connection.cursor(cursor_class)
+
+
+@pytest.mark.parametrize("cursor_class", CURSOR_CLASSES)
+def test_cursor_accepts_connection_callbacks(offline_connection, cursor_class):
+    on_start_query_execution, on_poll = MagicMock(), MagicMock()
+    offline_connection.on_start_query_execution = on_start_query_execution
+    offline_connection.on_poll = on_poll
+
+    with _open_cursor(offline_connection, cursor_class) as cursor:
+        assert cursor._on_start_query_execution is on_start_query_execution
+        assert cursor._on_poll is on_poll
+
+
+@pytest.mark.parametrize(
+    "cursor_class", [c for c in CURSOR_CLASSES if c not in READER_CURSOR_CLASSES]
+)
+def test_cursor_execute_unknown_keyword(offline_connection, cursor_class):
+    with _open_cursor(offline_connection, cursor_class) as cursor:
+        previous = MagicMock(is_closed=False)
+        if isinstance(cursor, SparkBaseCursor):
+            cursor._calculation_id = "previous"
+        elif isinstance(cursor, WithResultSet):
+            cursor._query_id = "previous"
+            cursor._result_set = previous
+        state = vars(cursor).copy()
+
+        with pytest.raises(
+            TypeError,
+            match=rf"{cursor_class.__name__}\.execute\(\) got an unexpected keyword "
+            "argument 'work_gruop'",
+        ):
+            cursor.execute("SELECT 1", work_gruop="typo")
+
+        assert vars(cursor) == state
+        previous.close.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("cursor_class", "kwargs"),
+    [
+        (cursor_class, {"block_size": 64, "connect_timeout": 1, "request_timeout": 2})
+        for cursor_class in (ArrowCursor, AsyncArrowCursor)
+    ]
+    + [
+        (cursor_class, {"block_size": 64, "csv_reader": None, "filesystem_class": None})
+        for cursor_class in (S3FSCursor, AsyncS3FSCursor)
+    ]
+    + [
+        (cursor_class, {"chunksize": 10, "parse_dates": []})
+        for cursor_class in (PandasCursor, AsyncPandasCursor)
+    ]
+    + [
+        (cursor_class, {"chunksize": 10, "separator": "|"})
+        for cursor_class in (PolarsCursor, AsyncPolarsCursor)
+    ],
+)
+def test_cursor_execute_supported_keywords(offline_connection, cursor_class, kwargs):
+    cursor = _open_cursor(offline_connection, cursor_class)
+    with (
+        cursor,
+        patch.object(cursor, "_execute", side_effect=RuntimeError("query started")),
+        pytest.raises(RuntimeError, match="query started"),
+    ):
+        cursor.execute("SELECT 1", **kwargs)
 
 
 class TestConnection:
@@ -278,3 +378,29 @@ class TestConnection:
         athena_close.assert_called_once_with()
         glue_close.assert_called_once_with()
         s3_close.assert_called_once_with()
+
+    def test_internal_cursor_leaves_out_default_cursor_options(self):
+        cursor_kwargs = {"unload": True, "chunksize": 10, "schema_name": "configured"}
+        conn = _connection(
+            cursor_class=PandasCursor,
+            cursor_kwargs=cursor_kwargs,
+            converter=PandasCursor.get_default_converter(True),
+        )
+
+        cursor = conn._internal_cursor(Cursor)
+
+        assert type(cursor) is Cursor
+        assert cursor._schema_name == "configured"
+        assert type(cursor._converter) is DefaultTypeConverter
+        assert conn.cursor_kwargs == cursor_kwargs
+        # Creating the cursor directly still passes the options it does not accept.
+        with pytest.raises(TypeError, match="unexpected keyword argument 'unload'"):
+            conn.cursor(Cursor)
+
+    def test_internal_cursor_unknown_cursor_kwargs(self):
+        conn = _connection(
+            cursor_class=PandasCursor, cursor_kwargs={"unload": True, "work_gruop": "typo"}
+        )
+
+        with pytest.raises(TypeError, match="unexpected keyword argument 'work_gruop'"):
+            conn._internal_cursor(Cursor)

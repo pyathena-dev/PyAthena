@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import logging
-import re
 import sys
 import threading
 import time
 from abc import ABCMeta, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from concurrent.futures import Future, wait
 from datetime import UTC, datetime, timedelta
+from inspect import Parameter, signature
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -48,7 +48,6 @@ _T = TypeVar("_T")
 # a KeyboardInterrupt is raised promptly where an untimed lock wait cannot be
 # interrupted by signals (Windows before Python 3.14).
 _INTERRUPT_CHECK_INTERVAL = 0.1
-_OPERATION_START = re.compile(r"\S")
 
 OnPollCallback = Callable[[AthenaQueryExecution | AthenaCalculationExecutionStatus], None]
 """Type of the optional ``on_poll`` callback.
@@ -272,10 +271,47 @@ class BaseCursor(metaclass=ABCMeta):
         """
         return DefaultTypeConverter()
 
+    @classmethod
+    def _constructor_keyword_names(cls) -> set[str]:
+        """Get the keyword names accepted by the constructors in this class's MRO.
+
+        Returns:
+            The named parameters of each ``__init__`` defined in the MRO,
+            excluding ``self``.
+        """
+        names: set[str] = set()
+        for base in cls.__mro__:
+            if "__init__" in vars(base):
+                names.update(
+                    name
+                    for name, parameter in signature(vars(base)["__init__"]).parameters.items()
+                    if parameter.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
+                )
+        names.discard("self")
+        return names
+
     @property
     def connection(self) -> Connection[Any]:
         """The connection that created this cursor."""
         return self._connection
+
+    def _validate_execute_kwargs(
+        self, kwargs: dict[str, Any], allowed: Collection[str] = ()
+    ) -> None:
+        """Reject the keyword arguments that ``execute()`` does not support.
+
+        Args:
+            kwargs: The extra keyword arguments given to ``execute()``.
+            allowed: The extra keyword names that this cursor supports.
+
+        Raises:
+            TypeError: If a keyword name is not in ``allowed``.
+        """
+        for name in kwargs:
+            if name not in allowed:
+                raise TypeError(
+                    f"{type(self).__name__}.execute() got an unexpected keyword argument '{name}'"
+                )
 
     def _build_start_query_execution_request(
         self,
@@ -1195,100 +1231,6 @@ class BaseCursor(metaclass=ABCMeta):
             execution_parameters = None
         _logger.debug(query)
         return query, execution_parameters
-
-    def _is_unload_query(self, operation: object, *, prepared: bool = True) -> bool:
-        """Check whether an operation selects the UNLOAD Parquet reader.
-
-        Args:
-            operation: The SQL operation, or an invalid value to be checked later.
-            prepared: Whether ``_prepare_unload()`` completed. Before preparation,
-                SELECT and WITH operations also select the UNLOAD reader when enabled.
-
-        Returns:
-            True if UNLOAD is enabled and the operation selects its reader.
-        """
-        if not getattr(self, "_unload", False) or not isinstance(operation, str):
-            return False
-        prefixes = ("UNLOAD",) if prepared else ("SELECT", "WITH", "UNLOAD")
-        start = _OPERATION_START.search(operation)
-        if start is None:
-            return False
-        return operation[start.start() : start.start() + 6].upper().startswith(prefixes)
-
-    def _prepare_reader_query(
-        self,
-        operation: str,
-        kwargs: dict[str, Any],
-        validator: Callable[..., None],
-        *reader_args: Any,
-        options: ExecuteOptions | None = None,
-        work_group: str | None = None,
-        s3_staging_dir: str | None = None,
-        cache_size: int | None = None,
-        cache_expiration_time: int | None = None,
-        result_reuse_enable: bool | None = None,
-        result_reuse_minutes: int | None = None,
-        paramstyle: str | None = None,
-        on_start_query_execution: Callable[[str], None] | None = None,
-        result_set_type_hints: dict[str | int, str] | None = None,
-        on_prepare_error: Callable[[], None] | None = None,
-    ) -> tuple[str, str | None, ExecuteOptions]:
-        """Resolve query options, prepare UNLOAD, and validate reader keywords.
-
-        Args:
-            operation: The SQL operation to prepare.
-            kwargs: Extra execution arguments passed to the reader.
-            validator: The backend's reader keyword validator.
-            *reader_args: Additional settings needed by the validator.
-            options: Shared execution options.
-            work_group: Override for the Athena workgroup.
-            s3_staging_dir: Override for the query result location.
-            cache_size: Override for the number of cached queries to check.
-            cache_expiration_time: Override for cache expiration in seconds.
-            result_reuse_enable: Override for Athena result reuse.
-            result_reuse_minutes: Override for the result reuse duration.
-            paramstyle: Override for the parameter style.
-            on_start_query_execution: Override for the query-start callback.
-            result_set_type_hints: Override for complex-type signatures.
-            on_prepare_error: Reset cursor state after a preparation failure,
-                only if the reader keywords are valid.
-
-        Returns:
-            The prepared operation, UNLOAD location, and resolved options.
-        """
-        try:
-            options = ExecuteOptions.resolve(
-                options,
-                work_group=work_group,
-                s3_staging_dir=s3_staging_dir,
-                cache_size=cache_size,
-                cache_expiration_time=cache_expiration_time,
-                result_reuse_enable=result_reuse_enable,
-                result_reuse_minutes=result_reuse_minutes,
-                paramstyle=paramstyle,
-                on_start_query_execution=on_start_query_execution,
-                result_set_type_hints=result_set_type_hints,
-            )
-            operation, unload_location = self._prepare_unload(operation, options.s3_staging_dir)
-        except Exception:
-            if kwargs:
-                validator(
-                    f"{type(self).__name__}.execute",
-                    kwargs,
-                    self._is_unload_query(operation, prepared=False),
-                    *reader_args,
-                )
-            if on_prepare_error is not None:
-                on_prepare_error()
-            raise
-        if kwargs:
-            validator(
-                f"{type(self).__name__}.execute",
-                kwargs,
-                self._is_unload_query(operation),
-                *reader_args,
-            )
-        return operation, unload_location, options
 
     def _prepare_unload(
         self,

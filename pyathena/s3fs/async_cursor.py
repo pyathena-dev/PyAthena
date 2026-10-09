@@ -7,7 +7,6 @@ from concurrent.futures import Future
 from multiprocessing import cpu_count
 from typing import Any, cast
 
-from pyathena._kwargs import validate_kwargs
 from pyathena.async_cursor import AsyncCursor
 from pyathena.common import CursorIterator
 from pyathena.error import ProgrammingError
@@ -229,11 +228,7 @@ class AsyncS3FSCursor(AsyncCursor):
             >>> result_set = future.result()
             >>> rows = result_set.fetchall()
         """
-        validate_kwargs(
-            f"{type(self).__name__}.execute",
-            kwargs,
-            ("block_size", "csv_reader", "filesystem_class"),
-        )
+        self._validate_execute_kwargs(kwargs, ("block_size", "csv_reader", "filesystem_class"))
         options = ExecuteOptions.resolve(
             options,
             work_group=work_group,

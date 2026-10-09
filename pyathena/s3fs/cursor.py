@@ -6,7 +6,6 @@ import logging
 from collections.abc import Callable
 from typing import Any, cast
 
-from pyathena._kwargs import validate_kwargs
 from pyathena.common import CursorIterator
 from pyathena.error import OperationalError
 from pyathena.model import AthenaQueryExecution
@@ -178,11 +177,7 @@ class S3FSCursor(WithFetch):
             >>> cursor.execute("SELECT * FROM my_table WHERE id = %(id)s", {"id": 123})
             >>> rows = cursor.fetchall()
         """
-        validate_kwargs(
-            f"{type(self).__name__}.execute",
-            kwargs,
-            ("block_size", "csv_reader", "filesystem_class"),
-        )
+        self._validate_execute_kwargs(kwargs, ("block_size", "csv_reader", "filesystem_class"))
         self._reset_state()
         options = ExecuteOptions.resolve(
             options,

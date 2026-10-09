@@ -12,7 +12,6 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from multiprocessing import cpu_count
 from typing import TYPE_CHECKING, Any, cast
 
-from pyathena._kwargs import validate_kwargs
 from pyathena.model import AthenaCalculationExecution
 from pyathena.spark.common import SparkBaseCursor
 from pyathena.util import override
@@ -213,7 +212,7 @@ class AsyncSparkCursor(SparkBaseCursor):
         work_group: str | None = None,
         **kwargs,
     ) -> tuple[str, "Future[AthenaQueryExecution | AthenaCalculationExecution]"]:
-        validate_kwargs(f"{type(self).__name__}.execute", kwargs)
+        self._validate_execute_kwargs(kwargs)
         calculation_id = self._calculate(
             session_id=session_id if session_id else self._session_id,
             code_block=operation,

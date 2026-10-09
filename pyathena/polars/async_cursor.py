@@ -16,7 +16,7 @@ from pyathena.polars.converter import (
     DefaultPolarsTypeConverter,
     DefaultPolarsUnloadTypeConverter,
 )
-from pyathena.polars.result_set import AthenaPolarsResultSet, validate_execute_kwargs
+from pyathena.polars.result_set import AthenaPolarsResultSet
 from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
@@ -245,12 +245,8 @@ class AsyncPolarsCursor(AsyncCursor):
             >>> result_set = future.result()
             >>> df = result_set.as_polars()  # Returns Polars DataFrame
         """
-        operation, unload_location, options = self._prepare_reader_query(
-            operation,
-            kwargs,
-            validate_execute_kwargs,
-            kwargs.get("chunksize", self._chunksize),
-            options=options,
+        options = ExecuteOptions.resolve(
+            options,
             work_group=work_group,
             s3_staging_dir=s3_staging_dir,
             cache_size=cache_size,
@@ -260,6 +256,7 @@ class AsyncPolarsCursor(AsyncCursor):
             paramstyle=paramstyle,
             result_set_type_hints=result_set_type_hints,
         )
+        operation, unload_location = self._prepare_unload(operation, options.s3_staging_dir)
         query_id = self._execute(
             operation,
             parameters=parameters,

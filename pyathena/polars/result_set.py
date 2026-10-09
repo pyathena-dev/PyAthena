@@ -22,7 +22,6 @@ from typing import (
 )
 
 from pyathena import OperationalError
-from pyathena._kwargs import keyword_parameters, validate_kwargs
 from pyathena.converter import Converter
 from pyathena.error import ProgrammingError
 from pyathena.model import AthenaQueryExecution
@@ -38,61 +37,6 @@ if TYPE_CHECKING:
     from pyathena.connection import Connection
 
 _logger = logging.getLogger(__name__)
-
-_CURSOR_KWARGS = frozenset(
-    {
-        "block_size",
-        "cache_type",
-        "max_workers",
-        "chunksize",
-    }
-)
-
-
-def validate_execute_kwargs(
-    method: str,
-    kwargs: dict[str, Any],
-    unload: bool,
-    chunksize: int | None,
-    *,
-    allow_eager_fallback: bool = True,
-) -> None:
-    """Validate extra execution keyword names before starting a query.
-
-    Args:
-        method: The cursor method name included in an error.
-        kwargs: Extra execution arguments, including result-set overrides.
-        unload: Whether the cursor reads UNLOAD Parquet results.
-        chunksize: The effective chunk size, or None for eager reading.
-        allow_eager_fallback: Include eager CSV options until the result location is known.
-
-    Raises:
-        TypeError: If an argument is not supported by the selected reader.
-    """
-    if not kwargs or kwargs.keys() <= _CURSOR_KWARGS:
-        return
-    import polars
-
-    reader: Callable[..., Any]
-    if unload:
-        reader = polars.scan_parquet if chunksize is not None else polars.read_parquet
-    else:
-        reader = polars.scan_csv if chunksize is not None else polars.read_csv
-    allowed = keyword_parameters(reader) - {"source"}
-    if not unload and chunksize is not None and allow_eager_fallback:
-        # Managed query results use read_csv even when chunking was requested.
-        allowed |= keyword_parameters(polars.read_csv) - {"source"}
-    # Polars still accepts these renamed parameters through its reader decorators.
-    for old, new in {
-        "dtypes": "schema_overrides",
-        "row_count_name": "row_index_name",
-        "row_count_offset": "row_index_offset",
-        "missing_utf8_is_empty_string": "empty_string_is_null",
-    }.items():
-        if new in allowed:
-            allowed.add(old)
-    allowed |= _CURSOR_KWARGS
-    validate_kwargs(method, kwargs, allowed)
 
 
 def _identity(x: Any) -> Any:
@@ -384,8 +328,6 @@ class AthenaPolarsResultSet(AthenaResultSet):
             The arguments for the read function. A value given to ``execute()`` replaces
             the one the result set chose, including the whole ``storage_options``.
         """
-        if "dtypes" in self._kwargs and "schema_overrides" not in self._kwargs:
-            defaults.pop("schema_overrides", None)
         return {
             **defaults,
             **self._kwargs,
@@ -492,20 +434,17 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """Get the Datetime dtypes of the timestamp columns, which are read as text.
 
         Args:
-            has_header: Whether the CSV data has a header. The fallback is disabled
-                without a header or with ``schema_overrides``, its ``dtypes`` alias,
-                or ``with_column_names`` given to ``execute()``.
+            has_header: Whether the CSV data has a header. Without one, or with
+                ``schema_overrides`` or ``with_column_names`` given to ``execute()``,
+                Polars does not name the columns by the header, and they are not read
+                as text.
 
         Returns:
             The Datetime dtypes keyed by the header of a CSV file.
         """
         import polars as pl
 
-        if not has_header or self._kwargs.keys() & {
-            "schema_overrides",
-            "dtypes",
-            "with_column_names",
-        }:
+        if not has_header or self._kwargs.keys() & {"schema_overrides", "with_column_names"}:
             return {}
         dtypes = self._csv_dtypes
         return {
@@ -560,13 +499,6 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """
         reader: Iterator[pl.DataFrame]
         if not self.is_unload:
-            validate_execute_kwargs(
-                "Polars CSV reader",
-                self._kwargs,
-                False,
-                self._chunksize,
-                allow_eager_fallback=False,
-            )
             reader = self._iter_csv_chunks()
         elif self._prepare_parquet_location():
             self._metadata = self._read_parquet_schema()
@@ -637,7 +569,6 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """
         import polars as pl
 
-        validate_execute_kwargs("Polars CSV reader", self._kwargs, False, None)
         if not self._is_csv_readable():
             return pl.DataFrame()
 
@@ -648,7 +579,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             has_header=has_header,
             schema_overrides=self._csv_dtypes,
         )
-        if not {"schema_overrides", "dtypes"}.intersection(self._kwargs):
+        if "schema_overrides" not in self._kwargs:
             # Renamed after reading, so that Polars matches the types to the header.
             kwargs.pop("new_columns", None)
         source: str | bytes
@@ -819,9 +750,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             separator = ","
             has_header = True
             new_columns = (
-                None
-                if {"schema_overrides", "dtypes"}.intersection(self._kwargs)
-                else self._kwargs.get("new_columns")
+                None if "schema_overrides" in self._kwargs else self._kwargs.get("new_columns")
             )
         return separator, has_header, new_columns
 
@@ -852,7 +781,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             has_header=has_header,
             schema_overrides=self._csv_dtypes,
         )
-        if not {"schema_overrides", "dtypes"}.intersection(self._kwargs):
+        if "schema_overrides" not in self._kwargs:
             # Renamed after reading, so that Polars matches the types to the header.
             read_kwargs.pop("new_columns", None)
 

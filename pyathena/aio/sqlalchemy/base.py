@@ -277,7 +277,16 @@ class AsyncAdapt_pyathena_connection(AdaptedConnection):
         return AsyncAdapt_pyathena_cursor(raw_cursor)
 
     def _internal_cursor(self, cursor: Any) -> AsyncAdapt_pyathena_cursor:
-        """Adapt an API cursor with the default backend's result settings excluded."""
+        """Create a cursor with the wrapped connection's ``_internal_cursor()`` and adapt it.
+
+        A synchronous cursor class is replaced as in ``cursor()``.
+
+        Args:
+            cursor: The cursor class to create.
+
+        Returns:
+            The created cursor wrapped in ``AsyncAdapt_pyathena_cursor``.
+        """
         raw_cursor = self._connection._internal_cursor(_ASYNC_CURSOR_CLASSES.get(cursor, cursor))
         return AsyncAdapt_pyathena_cursor(raw_cursor)
 

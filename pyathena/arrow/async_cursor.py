@@ -8,7 +8,6 @@ from multiprocessing import cpu_count
 from typing import Any, cast
 
 from pyathena import ProgrammingError
-from pyathena._kwargs import validate_kwargs
 from pyathena.arrow.converter import (
     DefaultArrowTypeConverter,
     DefaultArrowUnloadTypeConverter,
@@ -221,11 +220,7 @@ class AsyncArrowCursor(AsyncCursor):
         Returns:
             Tuple of (query_id, future) where future resolves to AthenaArrowResultSet.
         """
-        validate_kwargs(
-            f"{type(self).__name__}.execute",
-            kwargs,
-            ("block_size", "connect_timeout", "request_timeout"),
-        )
+        self._validate_execute_kwargs(kwargs, ("block_size", "connect_timeout", "request_timeout"))
         options = ExecuteOptions.resolve(
             options,
             work_group=work_group,

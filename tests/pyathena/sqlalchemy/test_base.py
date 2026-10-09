@@ -8,6 +8,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 from urllib.parse import quote_plus
 
 import numpy as np
@@ -24,11 +25,15 @@ from sqlalchemy.sql.schema import Column, MetaData, Table
 from sqlalchemy.sql.selectable import TextualSelect
 from sqlalchemy.util import PluginLoader
 
-from pyathena.aio.sqlalchemy.base import AthenaAioDialect
+from pyathena.aio.connection import AioConnection
+from pyathena.aio.cursor import AioCursor
+from pyathena.aio.pandas.cursor import AioPandasCursor
+from pyathena.aio.sqlalchemy.base import AsyncAdapt_pyathena_connection, AthenaAioDialect
 from pyathena.connection import Connection
 from pyathena.cursor import Cursor
 from pyathena.error import DatabaseError, OperationalError
 from pyathena.formatter import DefaultParameterFormatter
+from pyathena.pandas.cursor import PandasCursor
 from pyathena.sqlalchemy.base import AthenaDialect
 from pyathena.sqlalchemy.compiler import AthenaTypeCompiler
 from pyathena.sqlalchemy.rest import AthenaRestDialect
@@ -186,6 +191,36 @@ class TestAthenaDialect:
         _, opts = url.get_dialect()().create_connect_args(url)
         assert opts["cursor_kwargs"]["unload"] is expected
         assert "unload" not in opts
+
+    @pytest.mark.parametrize(
+        ("connection_class", "cursor_class", "expected"),
+        [(Connection, PandasCursor, Cursor), (AioConnection, AioPandasCursor, AioCursor)],
+    )
+    def test_internal_cursor_leaves_out_default_cursor_options(
+        self, connection_class, cursor_class, expected
+    ):
+        conn = connection_class(
+            region_name="us-west-2",
+            s3_staging_dir="s3://bucket/path/",
+            aws_access_key_id="access_key",
+            aws_secret_access_key="secret_key",
+            cursor_class=cursor_class,
+            cursor_kwargs={"unload": True, "chunksize": 10},
+        )
+        driver_connection = (
+            AsyncAdapt_pyathena_connection(MagicMock(), conn)
+            if connection_class is AioConnection
+            else conn
+        )
+        try:
+            cursor = AthenaDialect._internal_cursor(
+                SimpleNamespace(driver_connection=driver_connection)
+            )
+            if connection_class is AioConnection:
+                cursor = cursor._cursor
+            assert type(cursor) is expected
+        finally:
+            conn.close()
 
     @pytest.mark.parametrize("dialect_class", [AthenaDialect, AthenaAioDialect])
     def test_type_compiler(self, dialect_class):

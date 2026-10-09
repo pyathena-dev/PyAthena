@@ -21,7 +21,6 @@ from boto3.session import Session
 from botocore.config import Config
 
 import pyathena
-from pyathena._kwargs import constructor_keyword_parameters
 from pyathena.common import BaseCursor, CursorIterator, OnPollCallback
 from pyathena.converter import Converter
 from pyathena.cursor import Cursor
@@ -618,7 +617,16 @@ class Connection(Generic[ConnectionCursor]):
     def _cursor(
         self, cursor: type[FunctionalCursor] | None = None, **kwargs: Any
     ) -> FunctionalCursor | ConnectionCursor:
-        """Create a cursor from already resolved cursor defaults."""
+        """Create a cursor without applying the connection's ``cursor_kwargs``.
+
+        Args:
+            cursor: The cursor class. If None, the connection's default cursor class.
+            **kwargs: The cursor constructor arguments. Omitted connection settings
+                default to the connection's values.
+
+        Returns:
+            The created cursor.
+        """
         _cursor = cursor or self.cursor_class
         converter = kwargs.pop("converter", self._converter)
         if not converter:
@@ -646,9 +654,20 @@ class Connection(Generic[ConnectionCursor]):
         )
 
     def _internal_cursor(self, cursor: type[FunctionalCursor]) -> FunctionalCursor:
-        """Create an API cursor without the default backend's result settings."""
-        backend_options = constructor_keyword_parameters(self.cursor_class) - (
-            constructor_keyword_parameters(cursor)
+        """Create a cursor for queries that PyAthena runs on its own behalf.
+
+        The connection's ``cursor_kwargs`` are applied except for the constructor
+        arguments that only the default cursor class accepts, such as ``unload``
+        of a DataFrame cursor. The cursor class's default converter is used.
+
+        Args:
+            cursor: The cursor class.
+
+        Returns:
+            The created cursor.
+        """
+        backend_options = (
+            self.cursor_class._constructor_keyword_names() - cursor._constructor_keyword_names()
         )
         kwargs = {k: v for k, v in self.cursor_kwargs.items() if k not in backend_options}
         kwargs["converter"] = cursor.get_default_converter()

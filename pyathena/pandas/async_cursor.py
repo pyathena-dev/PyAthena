@@ -17,7 +17,7 @@ from pyathena.pandas.converter import (
     DefaultPandasTypeConverter,
     DefaultPandasUnloadTypeConverter,
 )
-from pyathena.pandas.result_set import AthenaPandasResultSet, validate_execute_kwargs
+from pyathena.pandas.result_set import AthenaPandasResultSet
 from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
@@ -242,11 +242,8 @@ class AsyncPandasCursor(AsyncCursor):
         Returns:
             Tuple of (query_id, future) where future resolves to AthenaPandasResultSet.
         """
-        operation, unload_location, options = self._prepare_reader_query(
-            operation,
-            kwargs,
-            validate_execute_kwargs,
-            options=options,
+        options = ExecuteOptions.resolve(
+            options,
             work_group=work_group,
             s3_staging_dir=s3_staging_dir,
             cache_size=cache_size,
@@ -256,6 +253,7 @@ class AsyncPandasCursor(AsyncCursor):
             paramstyle=paramstyle,
             result_set_type_hints=result_set_type_hints,
         )
+        operation, unload_location = self._prepare_unload(operation, options.s3_staging_dir)
         query_id = self._execute(
             operation,
             parameters=parameters,

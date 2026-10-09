@@ -13,7 +13,6 @@ import logging
 from collections.abc import Callable
 from typing import Any, cast
 
-from pyathena._kwargs import validate_kwargs
 from pyathena.aio.common import WithAsyncFetch
 from pyathena.aio.result_set import AthenaAioDictResultSet, AthenaAioResultSet
 from pyathena.common import CursorIterator
@@ -145,7 +144,7 @@ class AioCursor(WithAsyncFetch):
         Returns:
             Self reference for method chaining.
         """
-        validate_kwargs(f"{type(self).__name__}.execute", kwargs)
+        self._validate_execute_kwargs(kwargs)
         self._reset_state()
         options = ExecuteOptions.resolve(
             options,

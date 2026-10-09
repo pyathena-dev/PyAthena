@@ -8,7 +8,6 @@ from concurrent.futures.thread import ThreadPoolExecutor
 from multiprocessing import cpu_count
 from typing import Any, cast
 
-from pyathena._kwargs import validate_kwargs
 from pyathena.common import BaseCursor, CursorIterator
 from pyathena.error import NotSupportedError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
@@ -255,7 +254,7 @@ class AsyncCursor(BaseCursor):
             >>> # Do other work while query runs...
             >>> result_set = future.result()  # Wait for completion
         """
-        validate_kwargs(f"{type(self).__name__}.execute", kwargs)
+        self._validate_execute_kwargs(kwargs)
         options = ExecuteOptions.resolve(
             options,
             work_group=work_group,

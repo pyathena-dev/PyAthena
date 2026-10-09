@@ -6,7 +6,6 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
-from pyathena._kwargs import validate_kwargs
 from pyathena.arrow.converter import (
     DefaultArrowTypeConverter,
     DefaultArrowUnloadTypeConverter,
@@ -183,11 +182,7 @@ class ArrowCursor(WithFetch):
             >>> cursor.execute("SELECT * FROM sales WHERE year = 2023")
             >>> table = cursor.as_arrow()  # Returns Apache Arrow Table
         """
-        validate_kwargs(
-            f"{type(self).__name__}.execute",
-            kwargs,
-            ("block_size", "connect_timeout", "request_timeout"),
-        )
+        self._validate_execute_kwargs(kwargs, ("block_size", "connect_timeout", "request_timeout"))
         self._reset_state()
         options = ExecuteOptions.resolve(
             options,
