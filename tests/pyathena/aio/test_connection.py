@@ -225,7 +225,12 @@ class TestAioConnection:
             conn.cursor(cursor_class, arraysize=0)
 
     async def test_internal_cursor_leaves_out_default_cursor_options(self):
-        cursor_kwargs = {"unload": True, "chunksize": 10, "schema_name": "configured"}
+        cursor_kwargs = {
+            "unload": True,
+            "chunksize": 10,
+            "arraysize": 5000,
+            "schema_name": "configured",
+        }
         conn = await _connection(
             cursor_class=AioPandasCursor,
             cursor_kwargs=cursor_kwargs,
@@ -236,6 +241,7 @@ class TestAioConnection:
 
         assert type(cursor) is AioCursor
         assert cursor._schema_name == "configured"
+        assert cursor.arraysize == AioCursor.DEFAULT_FETCH_SIZE
         assert type(cursor._converter) is DefaultTypeConverter
         assert conn.cursor_kwargs == cursor_kwargs
         # Creating the cursor directly still passes the options it does not accept.

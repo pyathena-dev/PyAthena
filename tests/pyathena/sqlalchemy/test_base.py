@@ -205,7 +205,7 @@ class TestAthenaDialect:
             aws_access_key_id="access_key",
             aws_secret_access_key="secret_key",
             cursor_class=cursor_class,
-            cursor_kwargs={"unload": True, "chunksize": 10},
+            cursor_kwargs={"unload": True, "chunksize": 10, "arraysize": 5000},
         )
         driver_connection = (
             AsyncAdapt_pyathena_connection(MagicMock(), conn)

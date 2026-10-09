@@ -658,7 +658,9 @@ class Connection(Generic[ConnectionCursor]):
 
         Only the connection's ``cursor_kwargs`` that the cursor class accepts are
         applied, leaving out options of the default cursor class such as ``unload``
-        of a DataFrame cursor. The cursor class's default converter is used.
+        of a DataFrame cursor. ``arraysize`` is left out too, since a DataFrame
+        cursor allows values above this cursor's page size limit. The cursor
+        class's default converter is used.
 
         Args:
             cursor: The cursor class.
@@ -666,7 +668,7 @@ class Connection(Generic[ConnectionCursor]):
         Returns:
             The created cursor.
         """
-        accepted = cursor._constructor_keyword_names()
+        accepted = cursor._constructor_keyword_names() - {"arraysize"}
         kwargs = {k: v for k, v in self.cursor_kwargs.items() if k in accepted}
         kwargs["converter"] = cursor.get_default_converter()
         return cast(FunctionalCursor, self._cursor(cursor, **kwargs))

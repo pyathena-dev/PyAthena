@@ -380,7 +380,12 @@ class TestConnection:
         s3_close.assert_called_once_with()
 
     def test_internal_cursor_leaves_out_default_cursor_options(self):
-        cursor_kwargs = {"unload": True, "chunksize": 10, "schema_name": "configured"}
+        cursor_kwargs = {
+            "unload": True,
+            "chunksize": 10,
+            "arraysize": 5000,
+            "schema_name": "configured",
+        }
         conn = _connection(
             cursor_class=PandasCursor,
             cursor_kwargs=cursor_kwargs,
@@ -391,6 +396,7 @@ class TestConnection:
 
         assert type(cursor) is Cursor
         assert cursor._schema_name == "configured"
+        assert cursor.arraysize == Cursor.DEFAULT_FETCH_SIZE
         assert type(cursor._converter) is DefaultTypeConverter
         assert conn.cursor_kwargs == cursor_kwargs
         # Creating the cursor directly still passes the options it does not accept.
