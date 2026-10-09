@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import threading
 import time
@@ -47,6 +48,7 @@ _T = TypeVar("_T")
 # a KeyboardInterrupt is raised promptly where an untimed lock wait cannot be
 # interrupted by signals (Windows before Python 3.14).
 _INTERRUPT_CHECK_INTERVAL = 0.1
+_OPERATION_START = re.compile(r"\S")
 
 OnPollCallback = Callable[[AthenaQueryExecution | AthenaCalculationExecutionStatus], None]
 """Type of the optional ``on_poll`` callback.
@@ -1207,7 +1209,35 @@ class BaseCursor(metaclass=ABCMeta):
         if not getattr(self, "_unload", False) or not isinstance(operation, str):
             return False
         prefixes = ("UNLOAD",) if prepared else ("SELECT", "WITH", "UNLOAD")
-        return operation.strip().upper().startswith(prefixes)
+        start = _OPERATION_START.search(operation)
+        if start is None:
+            return False
+        return operation[start.start() : start.start() + 6].upper().startswith(prefixes)
+
+    def _validate_reader_kwargs(
+        self,
+        operation: object,
+        kwargs: dict[str, Any],
+        validator: Callable[..., None],
+        *reader_args: Any,
+        prepared: bool = True,
+    ) -> None:
+        """Validate reader keyword names when extra arguments are present.
+
+        Args:
+            operation: The SQL operation used to select the reader.
+            kwargs: Extra keyword arguments given to ``execute()``.
+            validator: The backend's reader keyword validator.
+            *reader_args: Additional reader settings needed by the validator.
+            prepared: Whether ``_prepare_unload()`` completed.
+        """
+        if kwargs:
+            validator(
+                f"{type(self).__name__}.execute",
+                kwargs,
+                self._is_unload_query(operation, prepared=prepared),
+                *reader_args,
+            )
 
     def _prepare_unload(
         self,

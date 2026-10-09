@@ -5,12 +5,13 @@
 #
 # SPDX-License-Identifier: MIT
 
-from inspect import iscoroutinefunction
+from inspect import iscoroutinefunction, signature
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from pyathena._kwargs import constructor_keyword_parameters, keyword_parameters
 from pyathena.aio.arrow.cursor import AioArrowCursor
 from pyathena.aio.connection import AioConnection
 from pyathena.aio.cursor import AioCursor, AioDictCursor
@@ -22,6 +23,7 @@ from pyathena.aio.sqlalchemy.base import AsyncAdapt_pyathena_connection
 from pyathena.arrow.async_cursor import AsyncArrowCursor
 from pyathena.arrow.cursor import ArrowCursor
 from pyathena.async_cursor import AsyncCursor, AsyncDictCursor
+from pyathena.common import BaseCursor
 from pyathena.connection import Connection
 from pyathena.cursor import Cursor, DictCursor
 from pyathena.error import ProgrammingError
@@ -61,6 +63,75 @@ CURSORS = [
     AsyncSparkCursor,
     AioSparkCursor,
 ]
+
+
+def test_keyword_parameters_reuses_inspection_without_sharing_mutable_names():
+    def reader(source, /, value=None, *args, option=None, **kwargs):
+        pass
+
+    with patch("pyathena._kwargs.signature", wraps=signature) as inspect_signature:
+        names = keyword_parameters(reader)
+        assert names == {"value", "option"}
+        names.remove("value")
+        names.add("unsupported")
+        assert keyword_parameters(reader) == {"value", "option"}
+        inspect_signature.assert_called_once_with(reader)
+
+
+def test_keyword_parameters_accepts_unhashable_callable():
+    class Reader:
+        __hash__ = None
+
+        def __call__(self, *, setting=None):
+            pass
+
+    reader = Reader()
+    assert keyword_parameters(reader) == {"setting"}
+    assert keyword_parameters(reader) == {"setting"}
+
+
+def test_constructor_keyword_parameters_observes_replaced_constructor():
+    class Parent:
+        def __init__(self, *, shared=None):
+            pass
+
+    class Child(Parent):
+        def __init__(self, *, original=None):
+            pass
+
+    def replacement(self, *, updated=None):
+        pass
+
+    assert constructor_keyword_parameters(Child) == {"shared", "original"}
+    Child.__init__ = replacement
+    assert constructor_keyword_parameters(Child) == {"shared", "updated"}
+
+
+@pytest.mark.parametrize(
+    ("operation", "before_preparation", "after_preparation"),
+    [
+        (" \n sElEcT 1", True, False),
+        ("\u2003WITH t AS (SELECT 1) SELECT * FROM t", True, False),
+        ("\u001cUNLOAD (SELECT 1)", True, True),
+        ("\u017felect 1", True, False),
+        ("w\u0131th t AS (SELECT 1) SELECT * FROM t", True, False),
+        ("w\u0130th t AS (SELECT 1) SELECT * FROM t", False, False),
+        ("\ufeffSELECT 1", False, False),
+        ("SELECTED", True, False),
+        ("DESCRIBE t", False, False),
+        ("", False, False),
+        (" \n\t", False, False),
+        (None, False, False),
+        ("UNLOAD " + "x" * 100_000, True, True),
+    ],
+)
+def test_unload_reader_classification(operation, before_preparation, after_preparation):
+    cursor = SimpleNamespace(_unload=True)
+    assert BaseCursor._is_unload_query(cursor, operation, prepared=False) is before_preparation
+    assert BaseCursor._is_unload_query(cursor, operation) is after_preparation
+    cursor._unload = False
+    assert BaseCursor._is_unload_query(cursor, operation, prepared=False) is False
+    assert BaseCursor._is_unload_query(cursor, operation) is False
 
 
 @pytest.fixture
@@ -112,6 +183,34 @@ async def _execute(cursor, operation="SELECT 1", **kwargs):
     if iscoroutinefunction(cursor.execute):
         return await cursor.execute(operation, **kwargs)
     return cursor.execute(operation, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "cursor_class",
+    [
+        PandasCursor,
+        AsyncPandasCursor,
+        AioPandasCursor,
+        PolarsCursor,
+        AsyncPolarsCursor,
+        AioPolarsCursor,
+    ],
+)
+@pytest.mark.parametrize("preparation_failure", [False, True])
+async def test_execute_without_reader_keywords_skips_classification(
+    offline_connection, cursor_class, preparation_failure
+):
+    cursor = offline_connection.cursor(cursor_class, unload=True)
+    try:
+        target = "_prepare_unload" if preparation_failure else "_execute"
+        with (
+            patch.object(cursor, "_is_unload_query", side_effect=AssertionError("SQL was scanned")),
+            patch.object(cursor, target, side_effect=ProgrammingError("execution stopped")),
+            pytest.raises(ProgrammingError, match="execution stopped"),
+        ):
+            await _execute(cursor)
+    finally:
+        await _close(cursor)
 
 
 @pytest.mark.parametrize("cursor_class", CURSORS)

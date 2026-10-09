@@ -255,16 +255,17 @@ class AsyncPandasCursor(AsyncCursor):
             )
             operation, unload_location = self._prepare_unload(operation, options.s3_staging_dir)
         except Exception:
-            validate_execute_kwargs(
-                f"{type(self).__name__}.execute",
+            self._validate_reader_kwargs(
+                operation,
                 kwargs,
-                self._is_unload_query(operation, prepared=False),
+                validate_execute_kwargs,
+                prepared=False,
             )
             raise
-        validate_execute_kwargs(
-            f"{type(self).__name__}.execute",
+        self._validate_reader_kwargs(
+            operation,
             kwargs,
-            self._is_unload_query(operation),
+            validate_execute_kwargs,
         )
         query_id = self._execute(
             operation,

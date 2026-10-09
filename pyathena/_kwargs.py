@@ -8,8 +8,18 @@
 """Validation of keyword names forwarded by cursors."""
 
 from collections.abc import Callable, Collection
+from functools import lru_cache
 from inspect import Parameter, signature
 from typing import Any
+
+
+@lru_cache(maxsize=64)
+def _cached_keyword_parameters(func: Callable[..., Any]) -> frozenset[str]:
+    return frozenset(
+        name
+        for name, parameter in signature(func).parameters.items()
+        if parameter.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
+    )
 
 
 def keyword_parameters(func: Callable[..., Any]) -> set[str]:
@@ -20,12 +30,20 @@ def keyword_parameters(func: Callable[..., Any]) -> set[str]:
 
     Returns:
         Its positional-or-keyword and keyword-only parameter names.
+
+    Notes:
+        Cache up to 64 callable signatures, returning a fresh set on each call.
+        Replacing a callable selects a new cache entry. In-place signature changes
+        require clearing ``_cached_keyword_parameters.cache_clear()``.
+        Unhashable callables are inspected without caching.
     """
-    return {
-        name
-        for name, parameter in signature(func).parameters.items()
-        if parameter.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
-    }
+    try:
+        hash(func)
+    except TypeError:
+        names = _cached_keyword_parameters.__wrapped__(func)
+    else:
+        names = _cached_keyword_parameters(func)
+    return set(names)
 
 
 def constructor_keyword_parameters(cls: type[Any]) -> set[str]:
