@@ -241,31 +241,19 @@ class AsyncPandasCursor(AsyncCursor):
         Returns:
             Tuple of (query_id, future) where future resolves to AthenaPandasResultSet.
         """
-        try:
-            options = ExecuteOptions.resolve(
-                options,
-                work_group=work_group,
-                s3_staging_dir=s3_staging_dir,
-                cache_size=cache_size,
-                cache_expiration_time=cache_expiration_time,
-                result_reuse_enable=result_reuse_enable,
-                result_reuse_minutes=result_reuse_minutes,
-                paramstyle=paramstyle,
-                result_set_type_hints=result_set_type_hints,
-            )
-            operation, unload_location = self._prepare_unload(operation, options.s3_staging_dir)
-        except Exception:
-            self._validate_reader_kwargs(
-                operation,
-                kwargs,
-                validate_execute_kwargs,
-                prepared=False,
-            )
-            raise
-        self._validate_reader_kwargs(
+        operation, unload_location, options = self._prepare_reader_query(
             operation,
             kwargs,
             validate_execute_kwargs,
+            options=options,
+            work_group=work_group,
+            s3_staging_dir=s3_staging_dir,
+            cache_size=cache_size,
+            cache_expiration_time=cache_expiration_time,
+            result_reuse_enable=result_reuse_enable,
+            result_reuse_minutes=result_reuse_minutes,
+            paramstyle=paramstyle,
+            result_set_type_hints=result_set_type_hints,
         )
         query_id = self._execute(
             operation,

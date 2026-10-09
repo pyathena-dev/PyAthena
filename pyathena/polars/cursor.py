@@ -202,35 +202,22 @@ class PolarsCursor(WithFetch):
             >>> cursor.execute("SELECT * FROM sales WHERE year = 2023")
             >>> df = cursor.as_polars()  # Returns Polars DataFrame
         """
-        try:
-            options = ExecuteOptions.resolve(
-                options,
-                work_group=work_group,
-                s3_staging_dir=s3_staging_dir,
-                cache_size=cache_size,
-                cache_expiration_time=cache_expiration_time,
-                result_reuse_enable=result_reuse_enable,
-                result_reuse_minutes=result_reuse_minutes,
-                paramstyle=paramstyle,
-                on_start_query_execution=on_start_query_execution,
-                result_set_type_hints=result_set_type_hints,
-            )
-            operation, unload_location = self._prepare_unload(operation, options.s3_staging_dir)
-        except Exception:
-            self._validate_reader_kwargs(
-                operation,
-                kwargs,
-                validate_execute_kwargs,
-                kwargs.get("chunksize", self._chunksize),
-                prepared=False,
-            )
-            self._reset_state()
-            raise
-        self._validate_reader_kwargs(
+        operation, unload_location, options = self._prepare_reader_query(
             operation,
             kwargs,
             validate_execute_kwargs,
             kwargs.get("chunksize", self._chunksize),
+            options=options,
+            work_group=work_group,
+            s3_staging_dir=s3_staging_dir,
+            cache_size=cache_size,
+            cache_expiration_time=cache_expiration_time,
+            result_reuse_enable=result_reuse_enable,
+            result_reuse_minutes=result_reuse_minutes,
+            paramstyle=paramstyle,
+            on_start_query_execution=on_start_query_execution,
+            result_set_type_hints=result_set_type_hints,
+            on_prepare_error=self._reset_state,
         )
         self._reset_state()
         self.query_id = self._execute(

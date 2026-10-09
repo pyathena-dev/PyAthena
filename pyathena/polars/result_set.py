@@ -40,6 +40,15 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
+_CURSOR_KWARGS = frozenset(
+    {
+        "block_size",
+        "cache_type",
+        "max_workers",
+        "chunksize",
+    }
+)
+
 
 def validate_execute_kwargs(
     method: str,
@@ -61,7 +70,7 @@ def validate_execute_kwargs(
     Raises:
         TypeError: If an argument is not supported by the selected reader.
     """
-    if not kwargs:
+    if not kwargs or kwargs.keys() <= _CURSOR_KWARGS:
         return
     polars = import_module("polars")
     if unload:
@@ -81,7 +90,7 @@ def validate_execute_kwargs(
     }.items():
         if new in allowed:
             allowed.add(old)
-    allowed |= {"block_size", "cache_type", "max_workers", "chunksize"}
+    allowed |= _CURSOR_KWARGS
     validate_kwargs(method, kwargs, allowed)
 
 

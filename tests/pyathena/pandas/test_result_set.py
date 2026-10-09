@@ -20,6 +20,7 @@ from pyathena.pandas.result_set import (
     PandasDataFrameIterator,
     _no_trunc_date,
     _read_csv_with_pyarrow,
+    validate_execute_kwargs,
 )
 
 
@@ -699,3 +700,44 @@ def test_read_csv_with_pyarrow_multiline_values_across_blocks():
     )
     assert df["id"].tolist() == [i for i, _ in rows]
     assert df["v"].tolist() == [v for _, v in rows]
+
+
+@pytest.mark.parametrize("unload", [False, True])
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {},
+        {"chunksize": 10},
+        {
+            "engine": "c",
+            "chunksize": 10,
+            "block_size": 64,
+            "cache_type": "bytes",
+            "max_workers": 2,
+            "auto_optimize_chunksize": False,
+        },
+    ],
+)
+def test_cursor_settings_skip_reader_imports(kwargs, unload):
+    with (
+        patch("pyathena.pandas.result_set.import_module") as load_module,
+        patch("pyathena.pandas.result_set.keyword_parameters") as reader_parameters,
+    ):
+        validate_execute_kwargs("Cursor.execute", kwargs, unload)
+    load_module.assert_not_called()
+    reader_parameters.assert_not_called()
+
+
+def test_reader_replacement_updates_keyword_validation():
+    def first_reader(source, *, old_option=None):
+        pass
+
+    def second_reader(source, *, new_option=None):
+        pass
+
+    with patch.object(pd, "read_csv", first_reader):
+        validate_execute_kwargs("Cursor.execute", {"old_option": True}, False)
+    with patch.object(pd, "read_csv", second_reader):
+        validate_execute_kwargs("Cursor.execute", {"chunksize": 10, "new_option": True}, False)
+        with pytest.raises(TypeError, match="unexpected keyword argument 'old_option'"):
+            validate_execute_kwargs("Cursor.execute", {"chunksize": 10, "old_option": True}, False)

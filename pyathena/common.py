@@ -1239,6 +1239,69 @@ class BaseCursor(metaclass=ABCMeta):
                 *reader_args,
             )
 
+    def _prepare_reader_query(
+        self,
+        operation: str,
+        kwargs: dict[str, Any],
+        validator: Callable[..., None],
+        *reader_args: Any,
+        options: ExecuteOptions | None = None,
+        work_group: str | None = None,
+        s3_staging_dir: str | None = None,
+        cache_size: int | None = None,
+        cache_expiration_time: int | None = None,
+        result_reuse_enable: bool | None = None,
+        result_reuse_minutes: int | None = None,
+        paramstyle: str | None = None,
+        on_start_query_execution: Callable[[str], None] | None = None,
+        result_set_type_hints: dict[str | int, str] | None = None,
+        on_prepare_error: Callable[[], None] | None = None,
+    ) -> tuple[str, str | None, ExecuteOptions]:
+        """Resolve query options, prepare UNLOAD, and validate reader keywords.
+
+        Args:
+            operation: The SQL operation to prepare.
+            kwargs: Extra execution arguments passed to the reader.
+            validator: The backend's reader keyword validator.
+            *reader_args: Additional settings needed by the validator.
+            options: Shared execution options.
+            work_group: Override for the Athena workgroup.
+            s3_staging_dir: Override for the query result location.
+            cache_size: Override for the number of cached queries to check.
+            cache_expiration_time: Override for cache expiration in seconds.
+            result_reuse_enable: Override for Athena result reuse.
+            result_reuse_minutes: Override for the result reuse duration.
+            paramstyle: Override for the parameter style.
+            on_start_query_execution: Override for the query-start callback.
+            result_set_type_hints: Override for complex-type signatures.
+            on_prepare_error: Reset cursor state after a preparation failure,
+                only if the reader keywords are valid.
+
+        Returns:
+            The prepared operation, UNLOAD location, and resolved options.
+        """
+        try:
+            options = ExecuteOptions.resolve(
+                options,
+                work_group=work_group,
+                s3_staging_dir=s3_staging_dir,
+                cache_size=cache_size,
+                cache_expiration_time=cache_expiration_time,
+                result_reuse_enable=result_reuse_enable,
+                result_reuse_minutes=result_reuse_minutes,
+                paramstyle=paramstyle,
+                on_start_query_execution=on_start_query_execution,
+                result_set_type_hints=result_set_type_hints,
+            )
+            operation, unload_location = self._prepare_unload(operation, options.s3_staging_dir)
+        except Exception:
+            self._validate_reader_kwargs(operation, kwargs, validator, *reader_args, prepared=False)
+            if on_prepare_error is not None:
+                on_prepare_error()
+            raise
+        self._validate_reader_kwargs(operation, kwargs, validator, *reader_args)
+        return operation, unload_location, options
+
     def _prepare_unload(
         self,
         operation: str,

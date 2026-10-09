@@ -552,3 +552,79 @@ def test_internal_cursor_does_not_hide_unknown_defaults(offline_connection):
     offline_connection.cursor_kwargs = {"unload": True, "work_gruop": "typo"}
     with pytest.raises(TypeError, match="unexpected keyword argument 'work_gruop'"):
         offline_connection._internal_cursor(Cursor)
+
+
+@pytest.mark.parametrize(
+    "cursor_class",
+    [
+        PandasCursor,
+        AsyncPandasCursor,
+        AioPandasCursor,
+        PolarsCursor,
+        AsyncPolarsCursor,
+        AioPolarsCursor,
+    ],
+)
+@pytest.mark.parametrize("valid_for_prepared_reader", [False, True])
+async def test_validation_uses_prepared_operation(
+    offline_connection, cursor_class, valid_for_prepared_reader
+):
+    cursor = offline_connection.cursor(cursor_class, unload=True)
+    previous_result = MagicMock(is_closed=False)
+    cursor._query_id = "previous"
+    cursor._result_set = previous_result
+    before = vars(cursor).copy()
+    if "Pandas" in cursor_class.__name__:
+        kwargs = {"sep": "|"} if valid_for_prepared_reader else {"use_threads": False}
+    else:
+        kwargs = {"separator": "|"} if valid_for_prepared_reader else {"parallel": "none"}
+    try:
+        with (
+            patch.object(cursor, "_prepare_unload", return_value=("DESCRIBE t", None)),
+            patch.object(
+                cursor, "_execute", side_effect=RuntimeError("execution reached")
+            ) as execute,
+            pytest.raises(
+                RuntimeError if valid_for_prepared_reader else TypeError,
+                match="execution reached" if valid_for_prepared_reader else "unexpected keyword",
+            ),
+        ):
+            await _execute(cursor, **kwargs)
+        if valid_for_prepared_reader:
+            assert execute.call_args.args[0] == "DESCRIBE t"
+        else:
+            execute.assert_not_called()
+            assert vars(cursor) == before
+            previous_result.close.assert_not_called()
+    finally:
+        await _close(cursor)
+
+
+@pytest.mark.parametrize(
+    "cursor_class",
+    [
+        PandasCursor,
+        AsyncPandasCursor,
+        AioPandasCursor,
+        PolarsCursor,
+        AsyncPolarsCursor,
+        AioPolarsCursor,
+    ],
+)
+@pytest.mark.parametrize("error", [KeyboardInterrupt, SystemExit])
+async def test_preparation_interrupt_preserves_state(offline_connection, cursor_class, error):
+    cursor = offline_connection.cursor(cursor_class, unload=True)
+    previous_result = MagicMock(is_closed=False)
+    cursor._query_id = "previous"
+    cursor._result_set = previous_result
+    before = vars(cursor).copy()
+    try:
+        with (
+            patch.object(cursor, "_prepare_unload", side_effect=error),
+            pytest.raises(error),
+        ):
+            await _execute(cursor, work_gruop="typo")
+        assert vars(cursor) == before
+        previous_result.close.assert_not_called()
+    finally:
+        await _close(cursor)

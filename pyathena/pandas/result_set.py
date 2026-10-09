@@ -36,6 +36,17 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
+_CURSOR_KWARGS = frozenset(
+    {
+        "engine",
+        "chunksize",
+        "block_size",
+        "cache_type",
+        "max_workers",
+        "auto_optimize_chunksize",
+    }
+)
+
 
 def validate_execute_kwargs(method: str, kwargs: dict[str, Any], unload: bool) -> None:
     """Validate extra execution keyword names before starting a query.
@@ -48,7 +59,7 @@ def validate_execute_kwargs(method: str, kwargs: dict[str, Any], unload: bool) -
     Raises:
         TypeError: If an argument is not supported by the selected reader.
     """
-    if not kwargs:
+    if not kwargs or kwargs.keys() <= _CURSOR_KWARGS:
         return
     pandas = import_module("pandas")
     if unload:
@@ -57,14 +68,7 @@ def validate_execute_kwargs(method: str, kwargs: dict[str, Any], unload: bool) -
     else:
         allowed = keyword_parameters(pandas.read_csv)
     allowed -= {"filepath_or_buffer", "path", "source"}
-    allowed |= {
-        "engine",
-        "chunksize",
-        "block_size",
-        "cache_type",
-        "max_workers",
-        "auto_optimize_chunksize",
-    }
+    allowed |= _CURSOR_KWARGS
     validate_kwargs(method, kwargs, allowed)
 
 

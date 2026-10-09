@@ -13,7 +13,11 @@ import pytest
 
 from pyathena.error import OperationalError
 from pyathena.polars.converter import DefaultPolarsTypeConverter
-from pyathena.polars.result_set import AthenaPolarsResultSet, PolarsDataFrameIterator
+from pyathena.polars.result_set import (
+    AthenaPolarsResultSet,
+    PolarsDataFrameIterator,
+    validate_execute_kwargs,
+)
 
 _ROWS_BEFORE_FAILURE = 300_000
 
@@ -419,3 +423,41 @@ class TestPolarsDataFrameIterator:
         df_iter = PolarsDataFrameIterator(reader, {}, ["a"])
         df_iter.close()
         assert list(df_iter) == []
+
+
+@pytest.mark.parametrize("unload", [False, True])
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {},
+        {"chunksize": 10},
+        {"chunksize": 10, "block_size": 64, "cache_type": "bytes", "max_workers": 2},
+    ],
+)
+def test_cursor_settings_skip_reader_imports(kwargs, unload):
+    with (
+        patch("pyathena.polars.result_set.import_module") as load_module,
+        patch("pyathena.polars.result_set.keyword_parameters") as reader_parameters,
+    ):
+        validate_execute_kwargs("Cursor.execute", kwargs, unload, None)
+    load_module.assert_not_called()
+    reader_parameters.assert_not_called()
+
+
+def test_reader_replacement_updates_keyword_validation():
+    def first_reader(source, *, old_option=None):
+        pass
+
+    def second_reader(source, *, new_option=None):
+        pass
+
+    with patch.object(pl, "read_csv", first_reader):
+        validate_execute_kwargs("Cursor.execute", {"old_option": True}, False, None)
+    with patch.object(pl, "read_csv", second_reader):
+        validate_execute_kwargs(
+            "Cursor.execute", {"chunksize": 10, "new_option": True}, False, None
+        )
+        with pytest.raises(TypeError, match="unexpected keyword argument 'old_option'"):
+            validate_execute_kwargs(
+                "Cursor.execute", {"chunksize": 10, "old_option": True}, False, None
+            )
