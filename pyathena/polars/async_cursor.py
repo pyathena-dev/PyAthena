@@ -17,7 +17,7 @@ from pyathena.polars.converter import (
     DefaultPolarsUnloadTypeConverter,
 )
 from pyathena.polars.result_set import AthenaPolarsResultSet
-from pyathena.util import _validate_s3_max_workers, override
+from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
 
@@ -110,7 +110,6 @@ class AsyncPolarsCursor(AsyncCursor):
             >>> # With chunked processing
             >>> cursor = connection.cursor(AsyncPolarsCursor, chunksize=50000)
         """
-        _validate_s3_max_workers(s3_max_workers, kwargs)
         super().__init__(
             s3_staging_dir=s3_staging_dir,
             schema_name=schema_name,
@@ -249,7 +248,6 @@ class AsyncPolarsCursor(AsyncCursor):
             >>> result_set = future.result()
             >>> df = result_set.as_polars()  # Returns Polars DataFrame
         """
-        _validate_s3_max_workers(kwargs.get("s3_max_workers", self._s3_max_workers), kwargs)
         options = ExecuteOptions.resolve(
             options,
             work_group=work_group,

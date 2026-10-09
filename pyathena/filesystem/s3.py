@@ -174,7 +174,6 @@ class S3FileSystem(AbstractFileSystem):
         allow_bucket_deletion: bool = False,
         version_aware: bool = False,
         *args,
-        s3_client: BaseClient | None = None,
         **kwargs,
     ) -> None:
         """Create a filesystem for Amazon S3.
@@ -198,9 +197,6 @@ class S3FileSystem(AbstractFileSystem):
             allow_bucket_deletion: Whether ``rmdir`` may delete a bucket.
             version_aware: Whether reads pin the object version observed at open
                 time.
-            s3_client: Optional S3 client overriding the connection or client
-                factory. The caller owns this client; the filesystem uses
-                the connection's retry policy when a connection is provided.
             *args: Passed to ``fsspec.AbstractFileSystem``.
             **kwargs: Passed to ``fsspec.AbstractFileSystem``; without a
                 ``connection``, also s3fs-compatible client arguments.
@@ -208,13 +204,12 @@ class S3FileSystem(AbstractFileSystem):
                 the operations that accept ``RequestPayer``.
         """
         super().__init__(*args, **kwargs)
-        if s3_client is not None:
-            client = s3_client
-        elif connection:
+        if connection:
             client = connection.s3_client
+            retry_config = connection.retry_config
         else:
             client = self._get_client_compatible_with_s3fs(**kwargs)
-        retry_config = connection.retry_config if connection else RetryConfig()
+            retry_config = RetryConfig()
         self.default_block_size = (
             default_block_size if default_block_size else self.DEFAULT_BLOCK_SIZE
         )

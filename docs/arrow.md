@@ -2,8 +2,6 @@
 
 # Arrow
 
-See {ref}`cursor-workers` for query and S3 worker settings and the 4.0.0 migration.
-
 (arrow-cursor)=
 
 ## ArrowCursor

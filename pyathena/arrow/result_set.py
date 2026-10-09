@@ -4,23 +4,19 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from contextlib import ExitStack
 from typing import (
     TYPE_CHECKING,
     Any,
     ClassVar,
 )
 
-from botocore.config import Config
-
 from pyathena import OperationalError
 from pyathena.arrow.converter import _to_timestamp
 from pyathena.arrow.util import to_column_info
 from pyathena.converter import Converter, _to_default
-from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet
-from pyathena.util import RetryConfig, _validate_s3_max_workers, override, parse_output_location
+from pyathena.util import RetryConfig, override, parse_output_location
 
 if TYPE_CHECKING:
     import polars as pl
@@ -98,8 +94,6 @@ class AthenaArrowResultSet(AthenaResultSet):
         connect_timeout: float | None = None,
         request_timeout: float | None = None,
         result_set_type_hints: dict[str | int, str] | None = None,
-        *,
-        s3_max_workers: int | None = None,
         **kwargs,
     ) -> None:
         """Initialize the result set and load the query results into an Arrow Table.
@@ -117,21 +111,16 @@ class AthenaArrowResultSet(AthenaResultSet):
                 instead of the CSV results.
             unload_location: The S3 location of the ``UNLOAD`` output. If None, it is
                 derived from the first file in the data manifest.
-            connect_timeout: Connection timeout in seconds for the selected S3 filesystem.
-            request_timeout: Native PyArrow request timeout, or boto3 read timeout
-                on the PyAthena path, in seconds.
+            connect_timeout: The connect timeout in seconds for the pyarrow S3 filesystem.
+            request_timeout: The request timeout in seconds for the pyarrow S3 filesystem.
             result_set_type_hints: Athena type signatures for complex-type columns,
                 keyed by column name (case-insensitive) or zero-based column index.
-            s3_max_workers: S3 read workers per file. None uses the native pyarrow
-                filesystem. A positive integer uses PyAthena's S3 filesystem;
-                request_timeout then sets the boto3 read timeout.
             **kwargs: Additional keyword arguments, stored but not used.
 
         Raises:
             ProgrammingError: If ``query_execution`` is not given.
             OperationalError: If reading the query results fails.
         """
-        _validate_s3_max_workers(s3_max_workers, kwargs, allow_none=True)
         super().__init__(
             connection=connection,
             converter=converter,
@@ -148,24 +137,21 @@ class AthenaArrowResultSet(AthenaResultSet):
         self._connect_timeout = connect_timeout
         self._request_timeout = request_timeout
         self._kwargs = kwargs
-        self._s3_max_workers = s3_max_workers
-        self._s3_resources = ExitStack()
-        with self._s3_resources:
-            self._fs = self._create_s3_file_system()
-            if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
-                self._table = self._as_arrow()
-            elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
-                # Without a result file, as with managed query result storage, the rows from
-                # GetQueryResults are read as a CSV result file.
-                self._table = self._read_csv()
-            else:
-                import pyarrow as pa
+        self._fs = self._create_s3_file_system()
+        if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
+            self._table = self._as_arrow()
+        elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
+            # Without a result file, as with managed query result storage, the rows from
+            # GetQueryResults are read as a CSV result file.
+            self._table = self._read_csv()
+        else:
+            import pyarrow as pa
 
-                self._table = pa.Table.from_pydict({})
+            self._table = pa.Table.from_pydict({})
         self._batches = iter(self._table.to_batches(arraysize))
 
     def _create_s3_file_system(self):
-        """Create the selected S3 filesystem from the connection settings.
+        """Create a pyarrow ``S3FileSystem`` from the connection settings.
 
         Returns:
             The pyarrow S3 filesystem for reading the query results.
@@ -173,30 +159,6 @@ class AthenaArrowResultSet(AthenaResultSet):
         from pyarrow import fs
 
         connection = self.connection
-
-        if self._s3_max_workers is not None:
-            client = None
-            if self._connect_timeout is not None or self._request_timeout is not None:
-                overrides = {}
-                if self._connect_timeout is not None:
-                    overrides["connect_timeout"] = self._connect_timeout
-                if self._request_timeout is not None:
-                    overrides["read_timeout"] = self._request_timeout
-                with connection._s3_client_lock:
-                    client = connection.session.client(
-                        "s3",
-                        region_name=connection.region_name,
-                        config=connection.s3_config.merge(Config(**overrides)),
-                        **connection._s3_client_kwargs,
-                    )
-                self._s3_resources.callback(client.close)
-            filesystem = S3FileSystem(
-                connection=connection,
-                max_workers=self._s3_max_workers,
-                s3_client=client,
-                skip_instance_cache=True,
-            )
-            return fs.PyFileSystem(fs.FSSpecHandler(filesystem))
 
         # Build timeout parameters dict
         timeout_kwargs = {}
@@ -406,23 +368,20 @@ class AthenaArrowResultSet(AthenaResultSet):
             return pa.Table.from_pydict({})
 
         try:
-            with (
-                self._fs.open_input_stream(location) if data is None else pa.BufferReader(data)
-            ) as stream:
-                table = csv.read_csv(
-                    stream,
-                    read_options=read_opts,
-                    parse_options=parse_opts,
-                    convert_options=csv.ConvertOptions(
-                        strings_can_be_null=bool(binary_columns),
-                        quoted_strings_can_be_null=False,
-                        timestamp_parsers=self.timestamp_parsers,
-                        column_types={
-                            **column_types,
-                            **{column_names[i]: pa.string() for i in timestamp_types},
-                        },
-                    ),
-                )
+            table = csv.read_csv(
+                self._fs.open_input_stream(location) if data is None else pa.BufferReader(data),
+                read_options=read_opts,
+                parse_options=parse_opts,
+                convert_options=csv.ConvertOptions(
+                    strings_can_be_null=bool(binary_columns),
+                    quoted_strings_can_be_null=False,
+                    timestamp_parsers=self.timestamp_parsers,
+                    column_types={
+                        **column_types,
+                        **{column_names[i]: pa.string() for i in timestamp_types},
+                    },
+                ),
+            )
             for index, type_ in timestamp_types.items():
                 table = table.set_column(
                     index,

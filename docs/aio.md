@@ -2,8 +2,6 @@
 
 # Native Asyncio Cursors
 
-See {ref}`cursor-workers` for query and S3 worker settings and the 4.0.0 migration.
-
 PyAthena provides native asyncio cursor implementations under `pyathena.aio`.
 These cursors use `asyncio.sleep` for polling and `asyncio.to_thread` for boto3 calls,
 keeping the event loop free. Concurrency comes from asyncio tasks rather than a

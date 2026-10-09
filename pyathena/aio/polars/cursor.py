@@ -18,7 +18,7 @@ from pyathena.polars.converter import (
     DefaultPolarsUnloadTypeConverter,
 )
 from pyathena.polars.result_set import AthenaPolarsResultSet
-from pyathena.util import _validate_s3_max_workers, override
+from pyathena.util import override
 
 if TYPE_CHECKING:
     import polars as pl
@@ -84,7 +84,6 @@ class AioPolarsCursor(WithAsyncFetch):
             **kwargs: Other cursor arguments, such as ``connection`` and ``arraysize``,
                 passed to the parent ``__init__``.
         """
-        _validate_s3_max_workers(s3_max_workers, kwargs)
         super().__init__(
             s3_staging_dir=s3_staging_dir,
             schema_name=schema_name,
@@ -163,7 +162,6 @@ class AioPolarsCursor(WithAsyncFetch):
             Self reference for method chaining.
         """
         self._reset_state()
-        _validate_s3_max_workers(kwargs.get("s3_max_workers", self._s3_max_workers), kwargs)
         options = ExecuteOptions.resolve(
             options,
             work_group=work_group,

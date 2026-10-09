@@ -669,18 +669,10 @@ class TestAsyncPandasCursor:
         ):
             _, future = cursor.execute("SELECT 1", **execute_kwargs)
             future.result()
-            first_kwargs = result_set_class.call_args.kwargs.copy()
-            _, future = cursor.execute("SELECT 1")
-            future.result()
-        kwargs = first_kwargs
+        kwargs = result_set_class.call_args.kwargs
         expected = {**cursor_kwargs, **execute_kwargs}
         expected["max_workers"] = expected.pop("s3_max_workers")
         assert {key: kwargs[key] for key in expected} == expected
-
-        defaults = cursor_kwargs.copy()
-        defaults["max_workers"] = defaults.pop("s3_max_workers")
-        second_kwargs = result_set_class.call_args.kwargs
-        assert {key: second_kwargs[key] for key in defaults} == defaults
         assert cursor._executor._max_workers == 1
 
     @pytest.mark.parametrize(

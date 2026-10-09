@@ -18,7 +18,7 @@ from pyathena.pandas.converter import (
     DefaultPandasUnloadTypeConverter,
 )
 from pyathena.pandas.result_set import AthenaPandasResultSet
-from pyathena.util import _validate_s3_max_workers, override
+from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
 
@@ -115,7 +115,6 @@ class AsyncPandasCursor(AsyncCursor):
             **kwargs: Other cursor arguments, such as ``connection`` and ``converter``,
                 passed to ``AsyncCursor.__init__``.
         """
-        _validate_s3_max_workers(s3_max_workers, kwargs)
         super().__init__(
             s3_staging_dir=s3_staging_dir,
             schema_name=schema_name,
@@ -247,7 +246,6 @@ class AsyncPandasCursor(AsyncCursor):
         Returns:
             Tuple of (query_id, future) where future resolves to AthenaPandasResultSet.
         """
-        _validate_s3_max_workers(kwargs.get("s3_max_workers", self._s3_max_workers), kwargs)
         options = ExecuteOptions.resolve(
             options,
             work_group=work_group,

@@ -54,30 +54,6 @@ PATTERN_METADATA_SERVICE_ERROR: Pattern[str] = re.compile(
 )
 
 
-def _validate_s3_max_workers(
-    value: int | None, kwargs: dict[str, Any], *, allow_none: bool = False
-) -> None:
-    """Validate cursor S3 workers and reject the former S3 keyword.
-
-    Args:
-        value: The S3 worker setting to validate.
-        kwargs: Cursor constructor or execution keyword arguments.
-        allow_none: Whether None selects the native Arrow filesystem.
-
-    Raises:
-        TypeError: If max_workers is used as a read option, or value is not an integer.
-        ValueError: If value is not positive.
-    """
-    if "max_workers" in kwargs:
-        raise TypeError("Use s3_max_workers for S3 reads; max_workers configures async cursors.")
-    if value is None and allow_none:
-        return
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise TypeError("s3_max_workers must be a positive integer")
-    if value <= 0:
-        raise ValueError("s3_max_workers must be greater than 0")
-
-
 def parse_output_location(output_location: str) -> tuple[str, str]:
     """Parse an S3 output location URL into bucket and key components.
 

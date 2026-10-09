@@ -19,20 +19,6 @@ from tests.pyathena.aio.conftest import _aio_connect
 
 
 class TestAioArrowCursor:
-    @pytest.mark.parametrize(
-        "aio_arrow_cursor",
-        [
-            {"cursor_kwargs": {"s3_max_workers": 2, "unload": False}},
-            {"cursor_kwargs": {"s3_max_workers": 2, "unload": True}},
-        ],
-        indirect=True,
-    )
-    async def test_s3_workers_read_results(self, aio_arrow_cursor):
-        """CSV and Parquet results use the configured PyAthena S3 reader."""
-        await aio_arrow_cursor.execute("SELECT 1 AS value", s3_max_workers=1)
-        assert await aio_arrow_cursor.fetchall() == [(1,)]
-        assert aio_arrow_cursor.result_set._fs.handler.fs.max_workers == 1
-
     async def test_binary_null_vs_empty(self, aio_arrow_cursor):
         query = """SELECT * FROM (VALUES
                     (1, CAST(NULL AS VARBINARY), 'null', CAST(NULL AS VARCHAR)),
@@ -164,19 +150,14 @@ class TestAioArrowCursor:
         assert table.num_rows == 1
 
     @pytest.mark.parametrize(
-        "execute_kwargs",
-        [
-            {},
-            {"connect_timeout": 3.0, "request_timeout": 4.0, "s3_max_workers": 3},
-            {"s3_max_workers": None},
-        ],
+        "execute_kwargs", [{}, {"connect_timeout": 3.0, "request_timeout": 4.0}]
     )
     async def test_read_options(self, execute_kwargs):
         """The cursor's read options reach the result set, and execute() overrides them.
 
         No AWS calls; the query and its result set are mocked.
         """
-        cursor_kwargs = {"connect_timeout": 1.0, "request_timeout": 2.0, "s3_max_workers": 2}
+        cursor_kwargs = {"connect_timeout": 1.0, "request_timeout": 2.0}
         query_execution = MagicMock(state=AthenaQueryExecution.STATE_SUCCEEDED)
         cursor = AioArrowCursor(
             connection=MagicMock(),
@@ -191,12 +172,6 @@ class TestAioArrowCursor:
             patch("pyathena.aio.arrow.cursor.AthenaArrowResultSet") as result_set_class,
         ):
             await cursor.execute("SELECT 1", **execute_kwargs)
-            first_kwargs = result_set_class.call_args.kwargs.copy()
-            await cursor.execute("SELECT 1")
-        kwargs = first_kwargs
+        kwargs = result_set_class.call_args.kwargs
         expected = {**cursor_kwargs, **execute_kwargs}
         assert {key: kwargs[key] for key in expected} == expected
-
-        defaults = cursor_kwargs.copy()
-        second_kwargs = result_set_class.call_args.kwargs
-        assert {key: second_kwargs[key] for key in defaults} == defaults

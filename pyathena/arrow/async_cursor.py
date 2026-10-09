@@ -17,7 +17,7 @@ from pyathena.async_cursor import AsyncCursor
 from pyathena.common import CursorIterator
 from pyathena.model import AthenaQueryExecution
 from pyathena.options import ExecuteOptions
-from pyathena.util import _validate_s3_max_workers, override
+from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
 
@@ -80,7 +80,6 @@ class AsyncArrowCursor(AsyncCursor):
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
         connect_timeout: float | None = None,
         request_timeout: float | None = None,
-        s3_max_workers: int | None = None,
         **kwargs,
     ) -> None:
         """Initialize an AsyncArrowCursor.
@@ -99,14 +98,12 @@ class AsyncArrowCursor(AsyncCursor):
             unload: Enable UNLOAD for high-performance Parquet output.
             result_reuse_enable: Enable Athena query result reuse.
             result_reuse_minutes: Minutes to reuse cached results.
-            connect_timeout: S3 connection timeout in seconds. If None, use the
-                selected filesystem's default: PyArrow's default on the native path,
-                or the connection's S3 configuration on the PyAthena path.
-            request_timeout: S3 request timeout in seconds on the native PyArrow path,
-                or boto3 read timeout on the PyAthena path. If None, use the selected
-                filesystem's default.
-            s3_max_workers: S3 read workers per file. If None, use the native
-                pyarrow filesystem; otherwise use PyAthena's S3 filesystem.
+            connect_timeout: Socket connection timeout in seconds for S3 operations.
+                Defaults to AWS SDK default (typically 1 second) if not specified.
+            request_timeout: Request timeout in seconds for S3 operations.
+                Defaults to AWS SDK default (typically 3 seconds) if not specified.
+                Increase this value if you experience timeout errors when using
+                role assumption with STS or have high latency to S3.
             **kwargs: Additional connection parameters.
 
         Example:
@@ -117,7 +114,6 @@ class AsyncArrowCursor(AsyncCursor):
             ...     request_timeout=30.0
             ... )
         """
-        _validate_s3_max_workers(s3_max_workers, kwargs, allow_none=True)
         super().__init__(
             s3_staging_dir=s3_staging_dir,
             schema_name=schema_name,
@@ -133,7 +129,6 @@ class AsyncArrowCursor(AsyncCursor):
             result_reuse_minutes=result_reuse_minutes,
             **kwargs,
         )
-        self._s3_max_workers = s3_max_workers
         self._unload = unload
         self._connect_timeout = connect_timeout
         self._request_timeout = request_timeout
@@ -179,7 +174,6 @@ class AsyncArrowCursor(AsyncCursor):
             unload_location=unload_location,
             connect_timeout=kwargs.pop("connect_timeout", self._connect_timeout),
             request_timeout=kwargs.pop("request_timeout", self._request_timeout),
-            s3_max_workers=kwargs.pop("s3_max_workers", self._s3_max_workers),
             result_set_type_hints=result_set_type_hints,
             **kwargs,
         )
@@ -218,17 +212,13 @@ class AsyncArrowCursor(AsyncCursor):
             options: Shared execution options as an
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.
-            **kwargs: Additional execution parameters. ``s3_max_workers``
-                overrides the cursor's S3 read setting for this query.
+            **kwargs: Additional execution parameters.
                 ``block_size`` sets the read block size for this query, and
                 ``connect_timeout`` and ``request_timeout`` override the cursor's values.
 
         Returns:
             Tuple of (query_id, future) where future resolves to AthenaArrowResultSet.
         """
-        _validate_s3_max_workers(
-            kwargs.get("s3_max_workers", self._s3_max_workers), kwargs, allow_none=True
-        )
         options = ExecuteOptions.resolve(
             options,
             work_group=work_group,

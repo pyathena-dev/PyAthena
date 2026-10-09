@@ -141,8 +141,6 @@ class TestAdapter:
                     assert cursor._executor._max_workers == 3
                 if case.family in {"pandas", "polars"}:
                     assert cursor._s3_max_workers == 3
-                elif case.family == "arrow":
-                    assert cursor._s3_max_workers is None
                 cursor.close()
 
     @pytest.mark.parametrize("api", ["sync", "thread", "aio"])

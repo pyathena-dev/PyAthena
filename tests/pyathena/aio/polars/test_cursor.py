@@ -163,14 +163,7 @@ class TestAioPolarsCursor:
             patch("pyathena.aio.polars.cursor.AthenaPolarsResultSet") as result_set_class,
         ):
             await cursor.execute("SELECT 1", **execute_kwargs)
-            first_kwargs = result_set_class.call_args.kwargs.copy()
-            await cursor.execute("SELECT 1")
-        kwargs = first_kwargs
+        kwargs = result_set_class.call_args.kwargs
         expected = {**cursor_kwargs, **execute_kwargs}
         expected["max_workers"] = expected.pop("s3_max_workers")
         assert {key: kwargs[key] for key in expected} == expected
-
-        defaults = cursor_kwargs.copy()
-        defaults["max_workers"] = defaults.pop("s3_max_workers")
-        second_kwargs = result_set_class.call_args.kwargs
-        assert {key: second_kwargs[key] for key in defaults} == defaults

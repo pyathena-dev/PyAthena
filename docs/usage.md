@@ -40,6 +40,26 @@ cursor.execute("SELECT %(value)s", {"value": 1}, work_group="YOUR_WORK_GROUP")
 Existing keyword arguments retain their defaults and behavior.
 The cursor class can still be selected positionally with `connection.cursor(DictCursor)`.
 
+## Worker settings in PyAthena 4.0
+
+The pandas and Polars cursors take the number of threads that read each result file from S3 as `s3_max_workers`.
+It can be set in the cursor constructor and overridden for one query in `execute()`.
+The default is `(cpu_count() or 1) * 5`.
+Polars reads UNLOAD results with its native Parquet reader, which does not use this setting.
+
+The thread-pool cursors, such as `AsyncCursor`, `AsyncPandasCursor`, and `AsyncPolarsCursor`, keep `max_workers` for the size of the thread pool that waits for queries and collects their results.
+
+```python
+from pyathena.pandas.async_cursor import AsyncPandasCursor
+
+cursor = connection.cursor(AsyncPandasCursor, max_workers=4, s3_max_workers=2)
+query_id, future = cursor.execute("SELECT 1", s3_max_workers=3)
+```
+
+Before PyAthena 4.0, `max_workers` set the S3 read workers of `PandasCursor`, `PolarsCursor`, `AioPandasCursor`, and `AioPolarsCursor`, and of `execute()` in the pandas and Polars cursors.
+Replace it with `s3_max_workers` in those places.
+`AsyncPolarsCursor` used its `max_workers` for both the thread pool and the S3 read workers; pass both arguments to keep the former values.
+
 ## Managed query result storage
 
 When using a workgroup with [managed query result storage](https://docs.aws.amazon.com/athena/latest/ug/managed-results.html) enabled,

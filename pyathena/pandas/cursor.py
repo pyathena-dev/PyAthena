@@ -21,7 +21,7 @@ from pyathena.pandas.converter import (
 )
 from pyathena.pandas.result_set import AthenaPandasResultSet, PandasDataFrameIterator
 from pyathena.result_set import WithFetch
-from pyathena.util import _validate_s3_max_workers, override
+from pyathena.util import override
 
 if TYPE_CHECKING:
     from pandas import DataFrame
@@ -115,7 +115,6 @@ class PandasCursor(WithFetch):
                 ``converter``, ``formatter``, and ``retry_config``. Pass pandas
                 ``read_csv``/``read_parquet`` options to ``execute()`` instead.
         """
-        _validate_s3_max_workers(s3_max_workers, kwargs)
         super().__init__(
             s3_staging_dir=s3_staging_dir,
             schema_name=schema_name,
@@ -210,7 +209,6 @@ class PandasCursor(WithFetch):
             >>> df = cursor.as_pandas()  # Returns pandas DataFrame
         """
         self._reset_state()
-        _validate_s3_max_workers(kwargs.get("s3_max_workers", self._s3_max_workers), kwargs)
         options = ExecuteOptions.resolve(
             options,
             work_group=work_group,

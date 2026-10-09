@@ -115,20 +115,6 @@ class TestS3FileSystem:
 
         return BarrierDirCache()
 
-    @pytest.mark.parametrize("with_connection", [False, True])
-    def test_s3_workers_client_override(self, with_connection):
-        """An injected client bypasses client creation and preserves connection retries."""
-        connection = mock.MagicMock() if with_connection else None
-        client = mock.MagicMock()
-        with mock.patch.object(S3FileSystem, "_get_client_compatible_with_s3fs") as factory:
-            fs = S3FileSystem(connection=connection, s3_client=client, skip_instance_cache=True)
-        factory.assert_not_called()
-        assert fs.core.client is client
-        if connection is not None:
-            assert fs.core.retry_config is connection.retry_config
-            assert "s3_client" not in vars(connection)
-        client.close.assert_not_called()
-
     def test_get_client_compatible_with_s3fs(self):
         # Only constructs a boto3 client; no AWS access.
         fs = S3FileSystem(

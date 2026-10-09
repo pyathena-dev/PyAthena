@@ -1,50 +1,5 @@
 # Cursor
 
-(cursor-workers)=
-
-## Worker settings in 4.0.0
-
-The thread-pool cursors use `max_workers` for their pool of tasks that wait for queries and collect results.
-Query submission happens before the task is queued, so this setting does not cap the number of queries running in Athena.
-The pandas, Arrow, and Polars cursors use `s3_max_workers` for the workers of each PyAthena S3 file reader.
-It does not set a shared limit across queries or change the parsing library's CPU thread pool.
-
-| Cursor | `max_workers` | `s3_max_workers` default |
-|--------|---------------|--------------------------|
-| `PandasCursor`, `PolarsCursor`, `AioPandasCursor`, `AioPolarsCursor` | No query pool | `(cpu_count() or 1) * 5` |
-| `AsyncPandasCursor`, `AsyncPolarsCursor` | Query task pool | `(cpu_count() or 1) * 5` |
-| `ArrowCursor`, `AioArrowCursor` | No query pool | `None` (native PyArrow S3 filesystem) |
-| `AsyncArrowCursor` | Query task pool | `None` (native PyArrow S3 filesystem) |
-
-Pass `s3_max_workers` to `execute()` to override the setting for one query.
-The next call without an override uses the cursor's setting again.
-For Arrow, a positive integer selects PyAthena's S3 filesystem through PyArrow's fsspec adapter for both CSV and UNLOAD results.
-An explicit `None` selects the native PyArrow filesystem for that query.
-On the PyAthena path, Arrow's `request_timeout` sets the boto3 read timeout; `connect_timeout` sets the connection timeout.
-The connection's S3 configuration supplies defaults for unspecified timeouts.
-
-```python
-from pyathena.pandas.async_cursor import AsyncPandasCursor
-
-cursor = connection.cursor(AsyncPandasCursor, max_workers=4, s3_max_workers=2)
-query_id, future = cursor.execute("SELECT 1", s3_max_workers=3)
-result = future.result()
-```
-
-The S3 setting applies when PyAthena's S3 filesystem reads the results.
-User-provided pandas `filesystem` or `storage_options` can replace that filesystem and its settings.
-Polars uses PyAthena's filesystem for CSV results; its native Parquet reader uses its own concurrency settings.
-
-### Migrate the former S3 argument
-
-This is a breaking API change in 4.0.0.
-Replace `max_workers=N` with `s3_max_workers=N` in synchronous and native asyncio pandas/Polars cursor constructors, and in pandas/Polars `execute()` calls.
-Keep `max_workers` in thread-pool cursor constructors to size the query task pool.
-For `AsyncPolarsCursor`, specify both arguments to preserve the former behavior of controlling both pools with one value.
-`AsyncPandasCursor` now also accepts an S3 worker default in its constructor.
-The former S3 keyword raises `TypeError`; nonpositive S3 worker values raise `ValueError` before a query starts.
-The `max_workers` names on result sets, S3 filesystems, and pandas upload utilities retain their existing meanings.
-
 (default_cursor)=
 
 ## DefaultCursor
