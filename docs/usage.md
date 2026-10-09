@@ -45,7 +45,8 @@ The cursor class can still be selected positionally with `connection.cursor(Dict
 The pandas and Polars cursors take the number of threads that read each result file from S3 as `s3_max_workers`.
 It can be set in the cursor constructor and overridden for one query in `execute()`.
 The default is `(cpu_count() or 1) * 5`.
-Polars reads UNLOAD results with its native Parquet reader, which does not use this setting.
+Polars uses it only for CSV results read without `chunksize`.
+Chunked CSV reads and UNLOAD results use Polars' native readers, which do not use this setting.
 
 The thread-pool cursors, such as `AsyncCursor`, `AsyncPandasCursor`, and `AsyncPolarsCursor`, keep `max_workers` for the size of the thread pool that waits for queries and collects their results.
 
