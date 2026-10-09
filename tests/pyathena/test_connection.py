@@ -397,10 +397,13 @@ class TestConnection:
         with pytest.raises(TypeError, match="unexpected keyword argument 'unload'"):
             conn.cursor(Cursor)
 
-    def test_internal_cursor_unknown_cursor_kwargs(self):
-        conn = _connection(
-            cursor_class=PandasCursor, cursor_kwargs={"unload": True, "work_gruop": "typo"}
-        )
+    def test_internal_cursor_leaves_out_custom_cursor_options(self):
+        class CustomCursor(Cursor):
+            def __init__(self, **kwargs: Any) -> None:
+                self.trace_id = kwargs.pop("trace_id")
+                super().__init__(**kwargs)
 
-        with pytest.raises(TypeError, match="unexpected keyword argument 'work_gruop'"):
-            conn._internal_cursor(Cursor)
+        conn = _connection(cursor_class=CustomCursor, cursor_kwargs={"trace_id": "x"})
+
+        assert conn.cursor().trace_id == "x"
+        assert type(conn._internal_cursor(Cursor)) is Cursor

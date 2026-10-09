@@ -656,8 +656,8 @@ class Connection(Generic[ConnectionCursor]):
     def _internal_cursor(self, cursor: type[FunctionalCursor]) -> FunctionalCursor:
         """Create a cursor for queries that PyAthena runs on its own behalf.
 
-        The connection's ``cursor_kwargs`` are applied except for the constructor
-        arguments that only the default cursor class accepts, such as ``unload``
+        Only the connection's ``cursor_kwargs`` that the cursor class accepts are
+        applied, leaving out options of the default cursor class such as ``unload``
         of a DataFrame cursor. The cursor class's default converter is used.
 
         Args:
@@ -666,10 +666,8 @@ class Connection(Generic[ConnectionCursor]):
         Returns:
             The created cursor.
         """
-        backend_options = (
-            self.cursor_class._constructor_keyword_names() - cursor._constructor_keyword_names()
-        )
-        kwargs = {k: v for k, v in self.cursor_kwargs.items() if k not in backend_options}
+        accepted = cursor._constructor_keyword_names()
+        kwargs = {k: v for k, v in self.cursor_kwargs.items() if k in accepted}
         kwargs["converter"] = cursor.get_default_converter()
         return cast(FunctionalCursor, self._cursor(cursor, **kwargs))
 
