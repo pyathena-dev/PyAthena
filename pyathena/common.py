@@ -1215,31 +1215,6 @@ class BaseCursor(metaclass=ABCMeta):
             return False
         return operation[start.start() : start.start() + 6].upper().startswith(prefixes)
 
-    def _validate_reader_kwargs(
-        self,
-        operation: object,
-        kwargs: dict[str, Any],
-        validator: Callable[..., None],
-        *reader_args: Any,
-        prepared: bool = True,
-    ) -> None:
-        """Validate reader keyword names when extra arguments are present.
-
-        Args:
-            operation: The SQL operation used to select the reader.
-            kwargs: Extra keyword arguments given to ``execute()``.
-            validator: The backend's reader keyword validator.
-            *reader_args: Additional reader settings needed by the validator.
-            prepared: Whether ``_prepare_unload()`` completed.
-        """
-        if kwargs:
-            validator(
-                f"{type(self).__name__}.execute",
-                kwargs,
-                self._is_unload_query(operation, prepared=prepared),
-                *reader_args,
-            )
-
     def _prepare_reader_query(
         self,
         operation: str,
@@ -1296,11 +1271,23 @@ class BaseCursor(metaclass=ABCMeta):
             )
             operation, unload_location = self._prepare_unload(operation, options.s3_staging_dir)
         except Exception:
-            self._validate_reader_kwargs(operation, kwargs, validator, *reader_args, prepared=False)
+            if kwargs:
+                validator(
+                    f"{type(self).__name__}.execute",
+                    kwargs,
+                    self._is_unload_query(operation, prepared=False),
+                    *reader_args,
+                )
             if on_prepare_error is not None:
                 on_prepare_error()
             raise
-        self._validate_reader_kwargs(operation, kwargs, validator, *reader_args)
+        if kwargs:
+            validator(
+                f"{type(self).__name__}.execute",
+                kwargs,
+                self._is_unload_query(operation),
+                *reader_args,
+            )
         return operation, unload_location, options
 
     def _prepare_unload(
