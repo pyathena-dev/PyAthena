@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime, time, timedelta, timezone
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -737,6 +738,19 @@ def test_to_datetime_with_tz_unknown_zone_name(caplog, zone_name):
     assert [record.getMessage() for record in caplog.records] == [
         f"Unknown time zone {zone_name!r}; returning naive datetimes for it."
     ]
+
+
+def test_to_datetime_with_tz_unreadable_zone_name():
+    """A zone name the database cannot load gives a naive datetime.
+
+    With only the tzdata package, ``ZoneInfo("America")`` opens a directory and
+    raises ``IsADirectoryError``.
+    """
+    _parse_time_zone.cache_clear()
+    with patch("pyathena.converter.ZoneInfo", side_effect=IsADirectoryError("America")):
+        result = _to_datetime_with_tz("2024-02-29 23:59:58 America")
+    _parse_time_zone.cache_clear()
+    assert result == datetime(2024, 2, 29, 23, 59, 58)
 
 
 @pytest.mark.parametrize(

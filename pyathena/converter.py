@@ -97,21 +97,22 @@ def _parse_utc_offset(value: str) -> timezone | None:
 def _parse_time_zone(value: str) -> tzinfo | None:
     """Parse the time zone of an Athena TIMESTAMP WITH TIME ZONE value.
 
-    Results are cached per text, so an unknown zone name logs one warning.
+    Results are cached per text, so an unknown zone name logs a warning only on its
+    first lookup.
 
     Args:
         value: A ``+HH:MM`` or ``-HH:MM`` UTC offset or an IANA time zone name.
 
     Returns:
         The fixed-offset time zone or ``ZoneInfo``, or None if the IANA time zone
-        database available to Python has no zone with the name.
+        database available to Python cannot provide a zone with the name.
     """
     offset = _parse_utc_offset(value)
     if offset is not None:
         return offset
     try:
         return ZoneInfo(value)
-    except (ZoneInfoNotFoundError, ValueError):
+    except (ZoneInfoNotFoundError, ValueError, OSError):
         _logger.warning(f"Unknown time zone {value!r}; returning naive datetimes for it.")
         return None
 
