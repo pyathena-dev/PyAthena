@@ -82,14 +82,17 @@ class S3Executor(metaclass=ABCMeta):
             Args:
                 submitted: The finished future of the submitted run().
             """
+            error: BaseException | None = None
             if submitted.cancelled():
                 future.cancel()
-                # Notify the waiters of the cancellation, as an executor does
-                # when it drops a cancelled callable.
-                future.set_running_or_notify_cancel()
-            elif (error := submitted.exception()) is not None and not future.done():
-                if future.set_running_or_notify_cancel():
-                    future.set_exception(error)
+            elif (error := submitted.exception()) is None:
+                # run() resolved the future.
+                return
+            # A future cancelled here or by the caller is only marked as
+            # notified, which an executor does when it drops a cancelled
+            # callable, so that wait() counts it as done.
+            if future.set_running_or_notify_cancel():
+                future.set_exception(error)
 
         self.submit(run).add_done_callback(settle)
 

@@ -3700,11 +3700,13 @@ class TestS3FileSystem:
         # interrupt used to propagate from submit() without an abort.
         fs = self._make_fs()
         started = threading.Event()
+        release = threading.Event()
 
         def create_multipart_upload(*args, **kw):
             started.set()
-            # Still running when the interrupt is handled.
-            time.sleep(0.1)
+            # Still running when the interrupt is handled, until the copy
+            # waits for it.
+            assert release.wait(5)
             return S3MultipartUpload({"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"})
 
         fs.core.create_multipart_upload = mock.MagicMock(side_effect=create_multipart_upload)
@@ -3721,17 +3723,25 @@ class TestS3FileSystem:
             assert started.wait(5)
             raise KeyboardInterrupt
 
-        with (
-            mock.patch.object(threading.Thread, "start", start_and_interrupt),
-            pytest.raises(KeyboardInterrupt),
-        ):
-            fs._copy_object_with_multipart_upload(
-                S3Path("bucket", "src"),
-                S3Path("bucket", "dst"),
-                MetadataDirective="REPLACE",
-                TaggingDirective="REPLACE",
-                AnnotationDirective="EXCLUDE",
-            )
+        def wait_for_creation(futures):
+            release.set()
+            return wait(futures)
+
+        try:
+            with (
+                mock.patch.object(threading.Thread, "start", start_and_interrupt),
+                mock.patch("pyathena.filesystem.s3.wait", side_effect=wait_for_creation),
+                pytest.raises(KeyboardInterrupt),
+            ):
+                fs._copy_object_with_multipart_upload(
+                    S3Path("bucket", "src"),
+                    S3Path("bucket", "dst"),
+                    MetadataDirective="REPLACE",
+                    TaggingDirective="REPLACE",
+                    AnnotationDirective="EXCLUDE",
+                )
+        finally:
+            release.set()
 
         fs._abort_multipart_upload.assert_called_once()
         upload, _ = fs._abort_multipart_upload.call_args.args
@@ -6268,12 +6278,14 @@ class TestS3File:
         # track that worker, so the upload used to be left without an abort.
         fs = self._make_append_fs(b"")
         started = threading.Event()
+        release = threading.Event()
         upload = fs.core.create_multipart_upload.return_value
 
         def create(*args, **kwargs):
             started.set()
-            # Still running when the interrupt is handled.
-            time.sleep(0.1)
+            # Still running when the interrupt is handled, until the file
+            # waits for it.
+            assert release.wait(5)
             return upload
 
         fs.core.create_multipart_upload.side_effect = create
@@ -6287,11 +6299,19 @@ class TestS3File:
             assert started.wait(5)
             raise KeyboardInterrupt
 
-        with (
-            mock.patch.object(threading.Thread, "start", start_and_interrupt),
-            pytest.raises(KeyboardInterrupt),
-        ):
-            file.write(b"x" * 8)
+        def wait_for_creation(futures):
+            release.set()
+            return wait(futures)
+
+        try:
+            with (
+                mock.patch.object(threading.Thread, "start", start_and_interrupt),
+                mock.patch("pyathena.filesystem.s3.wait", side_effect=wait_for_creation),
+                pytest.raises(KeyboardInterrupt),
+            ):
+                file.write(b"x" * 8)
+        finally:
+            release.set()
 
         fs._call.assert_called_once_with(
             S3_CLIENT.abort_multipart_upload, Bucket="bucket", Key="key.txt", UploadId="uploadid"

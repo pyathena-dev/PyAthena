@@ -221,3 +221,23 @@ class TestS3Executor:
         asyncio.run(main())
 
         assert not future.cancelled()
+
+    def test_submit_to_cancelled_executor_shut_down(self):
+        # A future that the caller cancels before S3AioExecutor reports the
+        # error is marked as notified, so that wait() counts it as done.
+        future: Future[int] = Future()
+
+        async def main():
+            loop = asyncio.get_running_loop()
+            default_executor = ThreadPoolExecutor(max_workers=1)
+            loop.set_default_executor(default_executor)
+            default_executor.shutdown()
+            S3AioExecutor(loop=loop).submit_to(future, sum, [1, 2])
+            assert future.cancel()
+            with ThreadPoolExecutor(max_workers=1) as waiter:
+                return await loop.run_in_executor(waiter, lambda: wait([future], timeout=5))
+
+        _, not_done = asyncio.run(main())
+
+        assert not not_done
+        assert future.cancelled()
