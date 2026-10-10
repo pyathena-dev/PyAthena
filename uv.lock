@@ -930,7 +930,7 @@ dependencies = [
     { name = "botocore" },
     { name = "fsspec" },
     { name = "tenacity" },
-    { name = "tzdata", marker = "sys_platform == 'emscripten' or sys_platform == 'win32'" },
+    { name = "tzdata" },
 ]
 
 [package.optional-dependencies]
@@ -984,7 +984,7 @@ requires-dist = [
     { name = "sqlalchemy", marker = "extra == 'sqlalchemy'", specifier = ">=2.0.0" },
     { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'aiosqlalchemy'", specifier = ">=2.0.0" },
     { name = "tenacity", specifier = ">=8.0.1" },
-    { name = "tzdata", marker = "sys_platform == 'emscripten' or sys_platform == 'win32'" },
+    { name = "tzdata" },
 ]
 provides-extras = ["aiosqlalchemy", "arrow", "pandas", "polars", "sqlalchemy"]
 
