@@ -10,7 +10,7 @@ maintainers = [
 dependencies = [
     "boto3>=1.43.31",
     "botocore>=1.43.31",
-    "tenacity>=4.1.0",
+    "tenacity>=8.0.1",
     "fsspec>=2026.9.0",
     "python-dateutil",
 ]
@@ -18,12 +18,32 @@ requires-python = ">=3.11"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE", "NOTICE"]
+keywords = [
+    "athena",
+    "aws",
+    "amazon-athena",
+    "dbapi",
+    "pep249",
+    "sql",
+    "sqlalchemy",
+    "pandas",
+    "pyarrow",
+    "polars",
+    "fsspec",
+    "s3",
+    "spark",
+    "asyncio",
+]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
+    "Framework :: AsyncIO",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
+    "Topic :: Database",
     "Topic :: Database :: Front-Ends",
+    "Typing :: Typed",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -32,10 +52,11 @@ classifiers = [
 dynamic = ["version"]
 
 [project.urls]
-homepage = "https://github.com/pyathena-dev/PyAthena/"
+homepage = "https://pyathena.dev/"
 repository = "https://github.com/pyathena-dev/PyAthena/"
 documentation = "https://pyathena.dev/"
 issues = "https://github.com/pyathena-dev/PyAthena/issues"
+changelog = "https://github.com/pyathena-dev/PyAthena/releases"
 
 [project.entry-points."sqlalchemy.dialects"]
 awsathena = "pyathena.sqlalchemy.rest:AthenaRestDialect"
@@ -92,9 +113,6 @@ dev = [
 [build-system]
 requires = ["hatchling>=1.27", "hatch-vcs"]
 build-backend = "hatchling.build"
-
-[tool.hatch.metadata]
-allow-direct-references = true
 
 [tool.hatch.build.targets.sdist]
 ignore-vcs = true
