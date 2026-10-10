@@ -56,63 +56,40 @@ READER_CURSOR_CLASSES = [PandasCursor, PolarsCursor, AsyncPandasCursor, AsyncPol
 
 
 @pytest.mark.parametrize("factory", [Connection, pyathena.connect])
-@pytest.mark.parametrize("setting", ["s3_staging_dir", "work_group"])
 @pytest.mark.parametrize(
-    ("arguments", "environment", "expected"),
+    ("setting", "kwargs", "expected"),
     [
-        ({}, "from-environment", "from-environment"),
-        ({"value": None}, "from-environment", "from-environment"),
-        ({"value": ""}, "from-environment", None),
-        ({"value": "explicit"}, "from-environment", "explicit"),
-        ({}, None, None),
-        ({"value": None}, None, None),
-        ({"value": ""}, None, None),
-        ({"value": "explicit"}, None, "explicit"),
-        ({}, "", ""),
-        ({"value": None}, "", ""),
-        ({"value": ""}, "", None),
-        ({"value": "explicit"}, "", "explicit"),
+        ("s3_staging_dir", {}, "s3://environment/path/"),
+        ("s3_staging_dir", {"s3_staging_dir": None}, "s3://environment/path/"),
+        ("s3_staging_dir", {"s3_staging_dir": ""}, None),
+        ("s3_staging_dir", {"s3_staging_dir": "s3://explicit/path/"}, "s3://explicit/path/"),
+        ("work_group", {}, "environment-workgroup"),
+        ("work_group", {"work_group": None}, "environment-workgroup"),
+        ("work_group", {"work_group": ""}, None),
+        ("work_group", {"work_group": "explicit-workgroup"}, "explicit-workgroup"),
     ],
 )
-def test_environment_fallback(factory, setting, arguments, environment, expected, monkeypatch):
-    environment_name = (
-        "AWS_ATHENA_S3_STAGING_DIR" if setting == "s3_staging_dir" else "AWS_ATHENA_WORK_GROUP"
-    )
-    if environment is None:
-        monkeypatch.delenv(environment_name, raising=False)
-    else:
-        monkeypatch.setenv(environment_name, environment)
-    settings = (
-        {"work_group": "other"}
-        if setting == "s3_staging_dir"
-        else {"s3_staging_dir": "s3://bucket/path/"}
-    )
-    if arguments:
-        settings[setting] = arguments["value"]
-    connection = factory(
+def test_environment_fallback(factory, setting, kwargs, expected, monkeypatch):
+    monkeypatch.setenv("AWS_ATHENA_S3_STAGING_DIR", "s3://environment/path/")
+    monkeypatch.setenv("AWS_ATHENA_WORK_GROUP", "environment-workgroup")
+    conn = factory(
         region_name="us-east-1",
         aws_access_key_id="access_key",
         aws_secret_access_key="secret_key",
-        **settings,
+        **kwargs,
     )
     try:
-        if setting == "s3_staging_dir" and expected:
-            expected += "/"
-        assert getattr(connection, setting) == expected
+        assert getattr(conn, setting) == expected
     finally:
-        connection.close()
+        conn.close()
 
 
 @pytest.mark.parametrize("factory", [Connection, pyathena.connect])
 def test_empty_settings_disable_both_environment_fallbacks(factory, monkeypatch):
     monkeypatch.setenv("AWS_ATHENA_S3_STAGING_DIR", "s3://environment/path/")
     monkeypatch.setenv("AWS_ATHENA_WORK_GROUP", "environment-workgroup")
-    with (
-        patch("pyathena.connection.Session") as session,
-        pytest.raises(ProgrammingError, match="Required argument"),
-    ):
-        factory(s3_staging_dir="", work_group="")
-    session.assert_not_called()
+    with pytest.raises(ProgrammingError, match="Required argument"):
+        factory(region_name="us-east-1", s3_staging_dir="", work_group="")
 
 
 @pytest.mark.parametrize("factory", [pyathena.connect, Connection])

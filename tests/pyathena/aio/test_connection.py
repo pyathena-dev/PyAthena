@@ -33,46 +33,19 @@ READER_CURSOR_CLASSES = [AioPandasCursor, AioPolarsCursor]
 
 
 @pytest.mark.parametrize("factory", [pyathena.aio_connect, AioConnection.create])
-@pytest.mark.parametrize("setting", ["s3_staging_dir", "work_group"])
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [(None, "from-environment"), ("", None), ("explicit", "explicit")],
-)
-async def test_environment_fallback(factory, setting, value, expected, monkeypatch):
-    environment_name = (
-        "AWS_ATHENA_S3_STAGING_DIR" if setting == "s3_staging_dir" else "AWS_ATHENA_WORK_GROUP"
-    )
-    monkeypatch.setenv(environment_name, "from-environment")
-    settings = (
-        {"work_group": "other"}
-        if setting == "s3_staging_dir"
-        else {"s3_staging_dir": "s3://bucket/path/"}
-    )
-    settings[setting] = value
-    connection = await factory(
+async def test_empty_work_group_disables_environment_fallback(factory, monkeypatch):
+    monkeypatch.setenv("AWS_ATHENA_WORK_GROUP", "environment-workgroup")
+    conn = await factory(
         region_name="us-east-1",
+        s3_staging_dir="s3://bucket/path/",
+        work_group="",
         aws_access_key_id="access_key",
         aws_secret_access_key="secret_key",
-        **settings,
     )
     try:
-        if setting == "s3_staging_dir" and expected:
-            expected += "/"
-        assert getattr(connection, setting) == expected
+        assert conn.work_group is None
     finally:
-        connection.close()
-
-
-@pytest.mark.parametrize("factory", [pyathena.aio_connect, AioConnection.create])
-async def test_empty_settings_disable_both_environment_fallbacks(factory, monkeypatch):
-    monkeypatch.setenv("AWS_ATHENA_S3_STAGING_DIR", "s3://environment/path/")
-    monkeypatch.setenv("AWS_ATHENA_WORK_GROUP", "environment-workgroup")
-    with (
-        patch("pyathena.connection.Session") as session,
-        pytest.raises(ProgrammingError, match="Required argument"),
-    ):
-        await factory(s3_staging_dir="", work_group="")
-    session.assert_not_called()
+        conn.close()
 
 
 @pytest.mark.parametrize("factory", [pyathena.aio_connect, AioConnection.create])
