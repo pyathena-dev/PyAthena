@@ -49,7 +49,10 @@ class S3Executor(metaclass=ABCMeta):
         keeps a reference to the future even if an interrupt stops the
         scheduling midway, before :meth:`submit` returns. Cancelling the
         future keeps a callable that has not started from running; a started
-        callable sets the future's result or exception.
+        callable sets the future's result or exception. If the executor drops
+        the callable before it starts, as :class:`S3AioExecutor` does when its
+        event loop shuts down, the future is cancelled or gets the error that
+        the executor reported.
 
         Args:
             future: A pending future that no executor has started.
@@ -69,7 +72,26 @@ class S3Executor(metaclass=ABCMeta):
             else:
                 future.set_result(result)
 
-        self.submit(run)
+        def settle(submitted: Future[None]) -> None:
+            """Resolve the future if the executor dropped the callable before it ran.
+
+            run() raises nothing for a future that no executor has started,
+            so a cancelled or failed submission means that it did not run,
+            and the future is still pending or cancelled by the caller.
+
+            Args:
+                submitted: The finished future of the submitted run().
+            """
+            if submitted.cancelled():
+                future.cancel()
+                # Notify the waiters of the cancellation, as an executor does
+                # when it drops a cancelled callable.
+                future.set_running_or_notify_cancel()
+            elif (error := submitted.exception()) is not None and not future.done():
+                if future.set_running_or_notify_cancel():
+                    future.set_exception(error)
+
+        self.submit(run).add_done_callback(settle)
 
     def __enter__(self) -> S3Executor:
         return self
