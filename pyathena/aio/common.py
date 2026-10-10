@@ -738,6 +738,8 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
             operation: SQL query string to execute.
             seq_of_parameters: Sequence of parameter sets, one per execution.
             **kwargs: Additional keyword arguments passed to each ``execute()``.
+                An empty parameter list makes no ``execute()`` call, so it does
+                not report unsupported keyword names.
         """
         self._reset_state()
         rowcount = 0
