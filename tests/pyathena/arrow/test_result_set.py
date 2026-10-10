@@ -104,15 +104,14 @@ class TestAthenaArrowResultSet:
             connection = Connection(
                 region_name="us-east-1", s3_staging_dir="s3://bucket/path/", **connection_kwargs
             )
-        result_set = AthenaArrowResultSet.__new__(AthenaArrowResultSet)  # bypass __init__
-        result_set._connection = connection
-        result_set._connect_timeout = None
-        result_set._request_timeout = None
-
-        fs = result_set._create_s3_file_system()
+        with connection:
+            result_set = AthenaArrowResultSet.__new__(AthenaArrowResultSet)  # bypass __init__
+            result_set._connection = connection
+            result_set._connect_timeout = None
+            result_set._request_timeout = None
+            fs = result_set._create_s3_file_system()
 
         # pyarrow exposes the filesystem options only through its pickle support.
         options = fs.__reduce__()[1][0]
         assert options["access_key"] == expected_access_key
         assert options["role_arn"] == ""
-        connection.close()
