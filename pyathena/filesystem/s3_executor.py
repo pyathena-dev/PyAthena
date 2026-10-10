@@ -42,6 +42,35 @@ class S3Executor(metaclass=ABCMeta):
         """Shut down the executor, freeing any resources."""
         ...
 
+    def submit_to(self, future: Future[T], fn: Callable[..., T], *args: Any, **kwargs: Any) -> None:
+        """Submit a callable whose outcome resolves a future of the caller.
+
+        The caller creates the future before calling this method, so that it
+        keeps a reference to the future even if an interrupt stops the
+        scheduling midway, before :meth:`submit` returns. Cancelling the
+        future keeps a callable that has not started from running; a started
+        callable sets the future's result or exception.
+
+        Args:
+            future: A pending future that no executor has started.
+            fn: The callable to run.
+            *args: Positional arguments passed to the callable.
+            **kwargs: Keyword arguments passed to the callable.
+        """
+
+        def run() -> None:
+            """Run the callable and resolve the future unless it was cancelled."""
+            if not future.set_running_or_notify_cancel():
+                return
+            try:
+                result = fn(*args, **kwargs)
+            except BaseException as e:
+                future.set_exception(e)
+            else:
+                future.set_result(result)
+
+        self.submit(run)
+
     def __enter__(self) -> S3Executor:
         return self
 
