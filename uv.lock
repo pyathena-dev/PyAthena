@@ -929,8 +929,8 @@ dependencies = [
     { name = "boto3" },
     { name = "botocore" },
     { name = "fsspec" },
-    { name = "python-dateutil" },
     { name = "tenacity" },
+    { name = "tzdata" },
 ]
 
 [package.optional-dependencies]
@@ -971,7 +971,6 @@ dev = [
     { name = "sphinx-multiversion" },
     { name = "sphinxext-opengraph" },
     { name = "sqlalchemy", extra = ["asyncio"] },
-    { name = "types-python-dateutil" },
 ]
 
 [package.metadata]
@@ -982,10 +981,10 @@ requires-dist = [
     { name = "pandas", marker = "extra == 'pandas'", specifier = ">=3.0.0" },
     { name = "polars", marker = "extra == 'polars'", specifier = ">=1.39.0" },
     { name = "pyarrow", marker = "extra == 'arrow'", specifier = ">=22.0.0" },
-    { name = "python-dateutil" },
     { name = "sqlalchemy", marker = "extra == 'sqlalchemy'", specifier = ">=2.0.0" },
     { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'aiosqlalchemy'", specifier = ">=2.0.0" },
     { name = "tenacity", specifier = ">=8.0.1" },
+    { name = "tzdata" },
 ]
 provides-extras = ["aiosqlalchemy", "arrow", "pandas", "polars", "sqlalchemy"]
 
@@ -1010,7 +1009,6 @@ dev = [
     { name = "sphinx-multiversion" },
     { name = "sphinxext-opengraph" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.0" },
-    { name = "types-python-dateutil" },
 ]
 
 [[package]]
@@ -1660,15 +1658,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/97/0a/f48b9b0ab5ba8599fd117309e345152bf82c756c72be2ff0f635780c2792/types_psutil-7.2.2.20260906.tar.gz", hash = "sha256:93abf22cf9a62b915f724e433bde702995ac274865425fd4a76d1d9b5828da1a", size = 27396, upload-time = "2026-09-06T06:35:24.499Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/eb/8d/81a86107486e1c23f5ca21bea1e9e5b18a50754242e7a0b82f41f9ae8384/types_psutil-7.2.2.20260906-py3-none-any.whl", hash = "sha256:db00baf7f96c3f63421c4d3d68d373923094a0dfddf13e922c5c5fbc42488159", size = 33383, upload-time = "2026-09-06T06:35:23.575Z" },
-]
-
-[[package]]
-name = "types-python-dateutil"
-version = "2.9.0.20241206"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/a9/60/47d92293d9bc521cd2301e423a358abfac0ad409b3a1606d8fbae1321961/types_python_dateutil-2.9.0.20241206.tar.gz", hash = "sha256:18f493414c26ffba692a72369fea7a154c502646301ebfe3d56a04b3767284cb", size = 13802, upload-time = "2024-12-06T02:56:41.019Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/0f/b3/ca41df24db5eb99b00d97f89d7674a90cb6b3134c52fb8121b6d8d30f15c/types_python_dateutil-2.9.0.20241206-py3-none-any.whl", hash = "sha256:e248a4bc70a486d3e3ec84d0dc30eec3a5f979d6e7ee4123ae043eedbb987f53", size = 14384, upload-time = "2024-12-06T02:56:39.412Z" },
 ]
 
 [[package]]

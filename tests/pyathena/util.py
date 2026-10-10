@@ -11,11 +11,11 @@ from concurrent.futures import wait
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from botocore.response import StreamingBody
-from dateutil.tz import gettz
 from jinja2 import Environment, FileSystemLoader
 from sqlalchemy import types
 
@@ -140,7 +140,7 @@ CONVERTED_VALUES_ROW = (
     None,
     datetime(2024, 2, 29, 23, 59, 58, 123000, tzinfo=timezone(timedelta(hours=5, minutes=30))),
     datetime(2024, 2, 29, 23, 59, 58, 123000, tzinfo=timezone(-timedelta(hours=8))),
-    datetime(2024, 2, 29, 23, 59, 58, 123000, tzinfo=gettz("America/New_York")),
+    datetime(2024, 2, 29, 23, 59, 58, 123000, tzinfo=ZoneInfo("America/New_York")),
     None,
     None,
 )

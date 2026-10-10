@@ -1,10 +1,13 @@
+import logging
 from datetime import datetime, time, timedelta, timezone
+from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import pytest
-from dateutil.tz import gettz
 
 from pyathena.converter import (
     DefaultTypeConverter,
+    _parse_time_zone,
     _to_array,
     _to_datetime,
     _to_datetime_with_tz,
@@ -33,10 +36,10 @@ def test_to_datetime_any_precision(input_value, expected):
 
 def test_to_datetime_with_tz_any_precision():
     assert _to_datetime_with_tz("2020-01-01 00:00:00 UTC") == datetime(
-        2020, 1, 1, tzinfo=gettz("UTC")
+        2020, 1, 1, tzinfo=ZoneInfo("UTC")
     )
     assert _to_datetime_with_tz("2020-01-01 00:00:00.123456789 UTC") == datetime(
-        2020, 1, 1, 0, 0, 0, 123456, tzinfo=gettz("UTC")
+        2020, 1, 1, 0, 0, 0, 123456, tzinfo=ZoneInfo("UTC")
     )
 
 
@@ -702,11 +705,11 @@ def test_typed_time_with_tz_elements():
         ),
         (
             "2024-02-29 23:59:58.123 UTC",
-            datetime(2024, 2, 29, 23, 59, 58, 123000, tzinfo=gettz("UTC")),
+            datetime(2024, 2, 29, 23, 59, 58, 123000, tzinfo=ZoneInfo("UTC")),
         ),
         (
             "2024-02-29 23:59:58.123 America/New_York",
-            datetime(2024, 2, 29, 23, 59, 58, 123000, tzinfo=gettz("America/New_York")),
+            datetime(2024, 2, 29, 23, 59, 58, 123000, tzinfo=ZoneInfo("America/New_York")),
         ),
     ],
 )
@@ -716,7 +719,38 @@ def test_to_datetime_with_tz_offsets_and_zone_names(input_value, expected):
     assert result == expected
     if expected is not None:
         assert result.utcoffset() == expected.utcoffset()
-        assert result.tzinfo is not None
+        assert result.tzinfo == expected.tzinfo
+
+
+@pytest.mark.parametrize("zone_name", ["Foo/Bar", "../etc"])
+def test_to_datetime_with_tz_unknown_zone_name(caplog, zone_name):
+    """An unknown zone name gives a naive datetime and one warning per name."""
+    _parse_time_zone.cache_clear()
+    with caplog.at_level(logging.WARNING, logger="pyathena.converter"):
+        results = [
+            _to_datetime_with_tz(f"2024-02-29 23:59:58.123 {zone_name}"),
+            _to_datetime_with_tz(f"2024-02-29 23:59:59 {zone_name}"),
+        ]
+    assert results == [
+        datetime(2024, 2, 29, 23, 59, 58, 123000),
+        datetime(2024, 2, 29, 23, 59, 59),
+    ]
+    assert [record.getMessage() for record in caplog.records] == [
+        f"Unknown time zone {zone_name!r}; returning naive datetimes for it."
+    ]
+
+
+def test_to_datetime_with_tz_unreadable_zone_name():
+    """A zone name the database cannot load gives a naive datetime.
+
+    With only the tzdata package, ``ZoneInfo("America")`` opens a directory and
+    raises ``IsADirectoryError``.
+    """
+    _parse_time_zone.cache_clear()
+    with patch("pyathena.converter.ZoneInfo", side_effect=IsADirectoryError("America")):
+        result = _to_datetime_with_tz("2024-02-29 23:59:58 America")
+    _parse_time_zone.cache_clear()
+    assert result == datetime(2024, 2, 29, 23, 59, 58)
 
 
 @pytest.mark.parametrize(
