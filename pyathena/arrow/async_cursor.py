@@ -212,13 +212,15 @@ class AsyncArrowCursor(AsyncCursor):
             options: Shared execution options as an
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.
-            **kwargs: Additional execution parameters.
+            **kwargs: Result-set overrides: ``block_size``, ``connect_timeout``,
+                and ``request_timeout``. Unknown names raise TypeError.
                 ``block_size`` sets the read block size for this query, and
                 ``connect_timeout`` and ``request_timeout`` override the cursor's values.
 
         Returns:
             Tuple of (query_id, future) where future resolves to AthenaArrowResultSet.
         """
+        self._validate_execute_kwargs(kwargs, ("block_size", "connect_timeout", "request_timeout"))
         options = ExecuteOptions.resolve(
             options,
             work_group=work_group,

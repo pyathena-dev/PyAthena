@@ -7,9 +7,10 @@ import sys
 import threading
 import time
 from abc import ABCMeta, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from concurrent.futures import Future, wait
 from datetime import UTC, datetime, timedelta
+from inspect import Parameter, signature
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -212,7 +213,6 @@ class BaseCursor(metaclass=ABCMeta):
         result_reuse_minutes: int,
         on_start_query_execution: Callable[[str], None] | None = None,
         on_poll: OnPollCallback | None = None,
-        **kwargs,
     ) -> None:
         """Initialize the cursor with the settings it uses to run queries.
 
@@ -236,7 +236,6 @@ class BaseCursor(metaclass=ABCMeta):
                 waits for the query, by cursors whose ``execute()`` supports it.
             on_poll: Callback invoked once per poll iteration with the current
                 execution object.
-            **kwargs: Ignored.
         """
         super().__init__()
         self._connection = connection
@@ -272,10 +271,47 @@ class BaseCursor(metaclass=ABCMeta):
         """
         return DefaultTypeConverter()
 
+    @classmethod
+    def _constructor_keyword_names(cls) -> set[str]:
+        """Get the keyword names accepted by the constructors in this class's MRO.
+
+        Returns:
+            The named parameters of each ``__init__`` defined in the MRO,
+            excluding ``self``.
+        """
+        names: set[str] = set()
+        for base in cls.__mro__:
+            if "__init__" in vars(base):
+                names.update(
+                    name
+                    for name, parameter in signature(vars(base)["__init__"]).parameters.items()
+                    if parameter.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
+                )
+        names.discard("self")
+        return names
+
     @property
     def connection(self) -> Connection[Any]:
         """The connection that created this cursor."""
         return self._connection
+
+    def _validate_execute_kwargs(
+        self, kwargs: dict[str, Any], allowed: Collection[str] = ()
+    ) -> None:
+        """Reject the keyword arguments that ``execute()`` does not support.
+
+        Args:
+            kwargs: The extra keyword arguments given to ``execute()``.
+            allowed: The extra keyword names that this cursor supports.
+
+        Raises:
+            TypeError: If a keyword name is not in ``allowed``.
+        """
+        for name in kwargs:
+            if name not in allowed:
+                raise TypeError(
+                    f"{type(self).__name__}.execute() got an unexpected keyword argument '{name}'"
+                )
 
     def _build_start_query_execution_request(
         self,

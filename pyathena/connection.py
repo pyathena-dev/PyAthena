@@ -612,7 +612,21 @@ class Connection(Generic[ConnectionCursor]):
             >>> pandas_cursor = connection.cursor(PandasCursor)
             >>> df = pandas_cursor.execute("SELECT * FROM my_table").fetchall()
         """
-        kwargs = {**self.cursor_kwargs, **kwargs}
+        return self._cursor(cursor, **{**self.cursor_kwargs, **kwargs})
+
+    def _cursor(
+        self, cursor: type[FunctionalCursor] | None, /, **kwargs: Any
+    ) -> FunctionalCursor | ConnectionCursor:
+        """Create a cursor without applying the connection's ``cursor_kwargs``.
+
+        Args:
+            cursor: The cursor class. If None, the connection's default cursor class.
+            **kwargs: The cursor constructor arguments. Omitted connection settings
+                default to the connection's values.
+
+        Returns:
+            The created cursor.
+        """
         _cursor = cursor or self.cursor_class
         converter = kwargs.pop("converter", self._converter)
         if not converter:
@@ -638,6 +652,26 @@ class Connection(Generic[ConnectionCursor]):
             on_poll=kwargs.pop("on_poll", self.on_poll),
             **kwargs,
         )
+
+    def _internal_cursor(self, cursor: type[FunctionalCursor]) -> FunctionalCursor:
+        """Create a cursor for queries that PyAthena runs on its own behalf.
+
+        Only the connection's ``cursor_kwargs`` that the cursor class accepts are
+        applied, leaving out options of the default cursor class such as ``unload``
+        of a DataFrame cursor. ``arraysize`` is left out too, since a DataFrame
+        cursor allows values above this cursor's page size limit. The cursor
+        class's default converter is used.
+
+        Args:
+            cursor: The cursor class.
+
+        Returns:
+            The created cursor.
+        """
+        accepted = cursor._constructor_keyword_names() - {"arraysize"}
+        kwargs = {k: v for k, v in self.cursor_kwargs.items() if k in accepted}
+        kwargs["converter"] = cursor.get_default_converter()
+        return cast(FunctionalCursor, self._cursor(cursor, **kwargs))
 
     def close(self) -> None:
         """Close the connection.

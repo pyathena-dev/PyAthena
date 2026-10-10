@@ -86,8 +86,9 @@ class AsyncS3FSCursor(AsyncCursor):
             csv_reader: CSV reader class to use for parsing results.
                 Use AthenaCSVReader (default) to distinguish between NULL
                 (unquoted empty) and empty string (quoted empty "").
-                Use DefaultCSVReader for backward compatibility where empty
-                strings are treated as NULL.
+                Use EmptyStringAsNullCSVReader to treat empty strings as NULL.
+                Custom readers must satisfy the
+                :class:`~pyathena.s3fs.reader.CSVReader` protocol.
             **kwargs: Additional connection parameters.
 
         Example:
@@ -215,9 +216,10 @@ class AsyncS3FSCursor(AsyncCursor):
             options: Shared execution options as an
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.
-            **kwargs: Additional execution parameters.
+            **kwargs: Supported S3FS result-set overrides. Unknown names raise TypeError.
                 ``block_size`` sets the read block size for this query, and
                 ``csv_reader`` overrides the cursor's value.
+                ``filesystem_class`` overrides the filesystem used to read results.
 
         Returns:
             Tuple of (query_id, Future[AthenaS3FSResultSet]).
@@ -227,6 +229,7 @@ class AsyncS3FSCursor(AsyncCursor):
             >>> result_set = future.result()
             >>> rows = result_set.fetchall()
         """
+        self._validate_execute_kwargs(kwargs, ("block_size", "csv_reader", "filesystem_class"))
         options = ExecuteOptions.resolve(
             options,
             work_group=work_group,

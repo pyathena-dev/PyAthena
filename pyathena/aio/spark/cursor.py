@@ -353,11 +353,12 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
             description: Calculation description.
             client_request_token: Idempotency token.
             work_group: Unused, kept for API compatibility.
-            **kwargs: Additional parameters.
+            **kwargs: Unknown keyword arguments raise TypeError.
 
         Returns:
             Self reference for method chaining.
         """
+        self._validate_execute_kwargs(kwargs)
         # A failure below must not leave the previous calculation on the cursor.
         self._calculation_id = None
         self._calculation_execution = None

@@ -212,6 +212,7 @@ class AsyncSparkCursor(SparkBaseCursor):
         work_group: str | None = None,
         **kwargs,
     ) -> tuple[str, "Future[AthenaQueryExecution | AthenaCalculationExecution]"]:
+        self._validate_execute_kwargs(kwargs)
         calculation_id = self._calculate(
             session_id=session_id if session_id else self._session_id,
             code_block=operation,

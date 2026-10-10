@@ -111,6 +111,7 @@ class SparkCursor(SparkBaseCursor, WithCalculationExecution):
         work_group: str | None = None,
         **kwargs,
     ) -> SparkCursor:
+        self._validate_execute_kwargs(kwargs)
         # A failure below must not leave the previous calculation on the cursor.
         self._calculation_id = None
         self._calculation_execution = None

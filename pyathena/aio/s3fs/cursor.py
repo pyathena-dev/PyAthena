@@ -74,7 +74,9 @@ class AioS3FSCursor(WithAsyncFetch):
             result_reuse_minutes: Maximum age of a reused query result in minutes.
             csv_reader: CSV reader class for parsing the result files. If None,
                 ``AthenaCSVReader`` is used, which distinguishes NULL from empty
-                strings. ``DefaultCSVReader`` reads both as empty strings.
+                strings. ``EmptyStringAsNullCSVReader`` treats both as NULL in cursor
+                results. Custom readers must satisfy the
+                :class:`~pyathena.s3fs.reader.CSVReader` protocol.
             **kwargs: Other cursor arguments, such as ``connection`` and ``arraysize``,
                 passed to the parent ``__init__``.
         """
@@ -147,13 +149,14 @@ class AioS3FSCursor(WithAsyncFetch):
             options: Shared execution options as an
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.
-            **kwargs: Additional execution parameters.
+            **kwargs: Supported S3FS result-set overrides. Unknown names raise TypeError.
                 ``block_size`` sets the read block size for this query, and
                 ``csv_reader`` overrides the cursor's value.
 
         Returns:
             Self reference for method chaining.
         """
+        self._validate_execute_kwargs(kwargs, ("block_size", "csv_reader"))
         self._reset_state()
         options = ExecuteOptions.resolve(
             options,

@@ -8,6 +8,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 from urllib.parse import quote_plus
 
 import numpy as np
@@ -24,11 +25,15 @@ from sqlalchemy.sql.schema import Column, MetaData, Table
 from sqlalchemy.sql.selectable import TextualSelect
 from sqlalchemy.util import PluginLoader
 
-from pyathena.aio.sqlalchemy.base import AthenaAioDialect
-from pyathena.converter import DefaultTypeConverter
+from pyathena.aio.connection import AioConnection
+from pyathena.aio.cursor import AioCursor
+from pyathena.aio.pandas.cursor import AioPandasCursor
+from pyathena.aio.sqlalchemy.base import AsyncAdapt_pyathena_connection, AthenaAioDialect
+from pyathena.connection import Connection
 from pyathena.cursor import Cursor
 from pyathena.error import DatabaseError, OperationalError
 from pyathena.formatter import DefaultParameterFormatter
+from pyathena.pandas.cursor import PandasCursor
 from pyathena.sqlalchemy.base import AthenaDialect
 from pyathena.sqlalchemy.compiler import AthenaTypeCompiler
 from pyathena.sqlalchemy.rest import AthenaRestDialect
@@ -187,6 +192,36 @@ class TestAthenaDialect:
         assert opts["cursor_kwargs"]["unload"] is expected
         assert "unload" not in opts
 
+    @pytest.mark.parametrize(
+        ("connection_class", "cursor_class", "expected"),
+        [(Connection, PandasCursor, Cursor), (AioConnection, AioPandasCursor, AioCursor)],
+    )
+    def test_internal_cursor_leaves_out_default_cursor_options(
+        self, connection_class, cursor_class, expected
+    ):
+        conn = connection_class(
+            region_name="us-west-2",
+            s3_staging_dir="s3://bucket/path/",
+            aws_access_key_id="access_key",
+            aws_secret_access_key="secret_key",
+            cursor_class=cursor_class,
+            cursor_kwargs={"unload": True, "chunksize": 10, "arraysize": 5000},
+        )
+        driver_connection = (
+            AsyncAdapt_pyathena_connection(MagicMock(), conn)
+            if connection_class is AioConnection
+            else conn
+        )
+        try:
+            cursor = AthenaDialect._internal_cursor(
+                SimpleNamespace(driver_connection=driver_connection)
+            )
+            if connection_class is AioConnection:
+                cursor = cursor._cursor
+            assert type(cursor) is expected
+        finally:
+            conn.close()
+
     @pytest.mark.parametrize("dialect_class", [AthenaDialect, AthenaAioDialect])
     def test_type_compiler(self, dialect_class):
         # SQLAlchemy 2.0 builds the type compiler from type_compiler_cls. A legacy
@@ -213,11 +248,13 @@ class TestAthenaDialect:
 
         cursor = SimpleNamespace(execute=execute, fetchall=lambda: rows)
 
-        def open_cursor(cursor_class, converter=None):
-            opened.append((cursor_class, type(converter)))
+        def open_cursor(cursor_class):
+            opened.append(cursor_class)
             return contextlib.nullcontext(cursor)
 
-        raw_connection = SimpleNamespace(driver_connection=SimpleNamespace(cursor=open_cursor))
+        raw_connection = SimpleNamespace(
+            driver_connection=SimpleNamespace(_internal_cursor=open_cursor)
+        )
 
         columns = AthenaDialect()._columns_from_information_schema(
             raw_connection, "My_Schema", "O'Neil"
@@ -225,7 +262,7 @@ class TestAthenaDialect:
 
         # The dialect parses these rows itself, so it asks for an API cursor
         # rather than whatever result format the user configured.
-        assert opened == [(Cursor, DefaultTypeConverter)]
+        assert opened == [Cursor]
 
         assert [column["name"] for column in columns] == ["id", "payload", "label", "dt"]
         assert isinstance(columns[0]["type"], types.INTEGER)
@@ -386,7 +423,8 @@ class TestAthenaDialect:
             schema_name=None,
             retry_config=RetryConfig(),
             driver_connection=SimpleNamespace(
-                cursor=lambda *args, **kwargs: contextlib.nullcontext(cursor)
+                cursor=lambda *args, **kwargs: contextlib.nullcontext(cursor),
+                _internal_cursor=lambda cursor_class: contextlib.nullcontext(cursor),
             ),
         )
         connection = SimpleNamespace(connection=raw_connection)
@@ -423,7 +461,8 @@ class TestAthenaDialect:
             schema_name="default",
             retry_config=RetryConfig(),
             driver_connection=SimpleNamespace(
-                cursor=lambda *args, **kwargs: contextlib.nullcontext(cursor)
+                cursor=lambda *args, **kwargs: contextlib.nullcontext(cursor),
+                _internal_cursor=lambda cursor_class: contextlib.nullcontext(cursor),
             ),
         )
         connection = SimpleNamespace(connection=raw_connection)
@@ -476,7 +515,8 @@ class TestAthenaDialect:
             schema_name="default",
             retry_config=RetryConfig(),
             driver_connection=SimpleNamespace(
-                cursor=lambda *args, **kwargs: contextlib.nullcontext(cursor)
+                cursor=lambda *args, **kwargs: contextlib.nullcontext(cursor),
+                _internal_cursor=lambda cursor_class: contextlib.nullcontext(cursor),
             ),
         )
         connection = SimpleNamespace(connection=raw_connection)
@@ -516,7 +556,8 @@ class TestAthenaDialect:
             catalog_name=catalog_name,
             schema_name="default",
             driver_connection=SimpleNamespace(
-                cursor=lambda *args, **kwargs: contextlib.nullcontext(cursor)
+                cursor=lambda *args, **kwargs: contextlib.nullcontext(cursor),
+                _internal_cursor=lambda cursor_class: contextlib.nullcontext(cursor),
             ),
         )
         return SimpleNamespace(connection=raw_connection), error, executed
@@ -596,8 +637,8 @@ class TestAthenaDialect:
         executed = []
         opened = []
 
-        def open_cursor(cursor_class, converter=None):
-            opened.append((cursor_class, type(converter)))
+        def open_cursor(cursor_class):
+            opened.append(cursor_class)
             return contextlib.nullcontext(
                 SimpleNamespace(
                     execute=lambda operation, **kwargs: executed.append(operation),
@@ -608,14 +649,14 @@ class TestAthenaDialect:
         raw_connection = SimpleNamespace(
             cursor_kwargs={},
             schema_name="default",
-            driver_connection=SimpleNamespace(cursor=open_cursor),
+            driver_connection=SimpleNamespace(_internal_cursor=open_cursor),
         )
         connection = SimpleNamespace(connection=raw_connection)
 
         definition = AthenaDialect().get_view_definition(connection, "v")
 
         assert definition == "CREATE VIEW v AS\n\nSELECT 1"
-        assert opened == [(Cursor, DefaultTypeConverter)]
+        assert opened == [Cursor]
         assert executed == ['SHOW CREATE VIEW "default"."v";']
 
     def test_get_view_definition_propagates_a_failed_request(self):
@@ -640,7 +681,7 @@ class TestAthenaDialect:
             cursor_kwargs={},
             schema_name="default",
             driver_connection=SimpleNamespace(
-                cursor=lambda *args, **kwargs: contextlib.nullcontext(
+                _internal_cursor=lambda cursor_class: contextlib.nullcontext(
                     SimpleNamespace(execute=execute, fetchall=list)
                 )
             ),
@@ -1449,7 +1490,14 @@ class TestSQLAlchemyAthena:
             definition = sqlalchemy.inspect(conn).get_view_definition(view_name, schema=ENV.schema)
             # What Athena actually returned, row by row, independent of the
             # dialect. Comparing against this catches a partial loss too.
-            with raw_connection.cursor(Cursor) as cursor:
+            with (
+                Connection(
+                    session=raw_connection.session,
+                    s3_staging_dir=raw_connection.s3_staging_dir,
+                    work_group=raw_connection.work_group,
+                ) as baseline,
+                baseline.cursor() as cursor,
+            ):
                 cursor.execute(f'SHOW CREATE VIEW "{ENV.schema}"."{view_name}";')
                 rows = [row[0] for row in cursor.fetchall()]
         finally:

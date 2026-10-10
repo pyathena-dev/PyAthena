@@ -40,6 +40,12 @@ cursor.execute("SELECT %(value)s", {"value": 1}, work_group="YOUR_WORK_GROUP")
 Existing keyword arguments retain their defaults and behavior.
 The cursor class can still be selected positionally with `connection.cursor(DictCursor)`.
 
+Unknown keyword arguments raise `TypeError` in cursor constructors and in `execute()` instead of being ignored.
+The connection's `cursor_kwargs` are passed to every cursor that it creates, so the requested cursor class must accept them.
+A cursor subclass that receives settings of its own must not pass them on to the base class constructor.
+The pandas and Polars cursors pass the `execute()` keyword arguments that they do not use themselves to the reader, such as `pandas.read_csv()`.
+The reader rejects an unknown name when it reads the query results, which PyAthena raises as `OperationalError`; the name is not checked when there are no results to read.
+
 ## Worker settings in PyAthena 4.0
 
 The pandas and Polars cursors take the number of threads that read each result file from S3 as `s3_max_workers`.
@@ -59,6 +65,7 @@ query_id, future = cursor.execute("SELECT 1", s3_max_workers=3)
 
 Before PyAthena 4.0, `max_workers` set the S3 read workers of `PandasCursor`, `PolarsCursor`, `AioPandasCursor`, and `AioPolarsCursor`, and of `execute()` in the pandas and Polars cursors.
 Replace it with `s3_max_workers` in those places.
+In these cursors, `max_workers` now raises `TypeError` in the constructor, and in `execute()` after the query has run.
 `AsyncPolarsCursor` used its `max_workers` for both the thread pool and the S3 read workers; pass both arguments to keep the former values.
 
 ## Managed query result storage

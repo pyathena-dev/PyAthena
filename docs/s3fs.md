@@ -164,7 +164,7 @@ S3FSCursor supports pluggable CSV reader implementations to control how NULL val
 are handled. Two readers are provided:
 
 - `AthenaCSVReader` (default): Custom parser that distinguishes between NULL and empty string
-- `DefaultCSVReader`: Uses Python's built-in `csv` module (treats both NULL and empty string as empty string)
+- `EmptyStringAsNullCSVReader`: Uses Python's built-in `csv` module; both NULL and empty string become `None` in cursor results
 
 **Default behavior (AthenaCSVReader):**
 
@@ -184,21 +184,20 @@ row = cursor.fetchone()
 print(row)  # (None, '')  - NULL is None, empty string is ''
 ```
 
-**Switching to Python's built-in csv module (DefaultCSVReader):**
+**Treating empty strings as NULL:**
 
-If you prefer to use Python's built-in `csv` module, you can switch to `DefaultCSVReader`.
-Note that this reader cannot distinguish between NULL and empty string - both become empty strings
-in the parsed result, which are then converted to `None` by the type converter.
+Use `EmptyStringAsNullCSVReader` when empty strings should be treated as NULL.
+It parses result files with Python's `csv` module and returns `None` for both NULL and quoted empty fields.
 
 ```python
 from pyathena import connect
 from pyathena.s3fs.cursor import S3FSCursor
-from pyathena.s3fs.reader import DefaultCSVReader
+from pyathena.s3fs.reader import EmptyStringAsNullCSVReader
 
 cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                  region_name="us-west-2",
                  cursor_class=S3FSCursor,
-                 cursor_kwargs={"csv_reader": DefaultCSVReader}).cursor()
+                 cursor_kwargs={"csv_reader": EmptyStringAsNullCSVReader}).cursor()
 
 cursor.execute("SELECT NULL AS null_col, '' AS empty_col")
 row = cursor.fetchone()
@@ -210,7 +209,7 @@ print(row)  # (None, None)  - Both NULL and empty string become None
 | Reader | Implementation | NULL value | Empty string |
 | --- | --- | --- | --- |
 | AthenaCSVReader (default) | Custom parser | None | '' (empty string) |
-| DefaultCSVReader | Python csv module | None | None |
+| EmptyStringAsNullCSVReader | Python csv module | None | None |
 
 **Why the difference?**
 
@@ -221,6 +220,33 @@ Athena's CSV output format distinguishes between NULL values and empty strings:
 
 Python's standard `csv` module parses both cases as empty strings, losing this distinction.
 The `AthenaCSVReader` implements a custom parser that preserves the difference.
+
+### CSV reader rename in PyAthena 4.0
+
+PyAthena 4.0 renames `DefaultCSVReader` to `EmptyStringAsNullCSVReader` and removes the old name.
+Update imports and `csv_reader` arguments to use the new name:
+
+```python
+from pyathena.s3fs.reader import EmptyStringAsNullCSVReader
+
+cursor = connection.cursor(S3FSCursor, csv_reader=EmptyStringAsNullCSVReader)
+```
+
+`AthenaCSVReader` remains the default.
+Iterating over `EmptyStringAsNullCSVReader` directly now returns `None` for empty fields instead of empty strings.
+Cursor results are unchanged.
+
+### Custom CSV readers
+
+Custom reader classes must satisfy the `pyathena.s3fs.reader.CSVReader` protocol; inheriting from it is optional.
+Pass the class through `csv_reader` in the cursor constructor or an individual `execute()` call.
+
+- Accept a text stream as `file_obj` and a `delimiter` keyword argument in the constructor.
+- Implement `__iter__()` and `__next__()` to yield sequences of strings or `None`, and raise `StopIteration` at the end of the stream.
+  The cursor converts each value by its column type and treats `None` as NULL.
+- Implement `close()` to close the underlying stream.
+
+The reader is used only for result files; managed query results are read through the Athena API.
 
 ### Limitations
 
