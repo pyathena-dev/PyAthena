@@ -151,76 +151,25 @@ class AthenaArrowResultSet(AthenaResultSet):
         self._batches = iter(self._table.to_batches(arraysize))
 
     def _create_s3_file_system(self):
-        """Create a pyarrow ``S3FileSystem`` from the connection settings.
+        """Create a pyarrow ``S3FileSystem`` with the credentials of the connection's session.
 
         Returns:
             The pyarrow S3 filesystem for reading the query results.
         """
         from pyarrow import fs
 
-        connection = self.connection
-
-        # Build timeout parameters dict
-        timeout_kwargs = {}
+        kwargs: dict[str, Any] = {"region": self.connection.region_name}
         if self._connect_timeout is not None:
-            timeout_kwargs["connect_timeout"] = self._connect_timeout
+            kwargs["connect_timeout"] = self._connect_timeout
         if self._request_timeout is not None:
-            timeout_kwargs["request_timeout"] = self._request_timeout
-
-        if connection._kwargs.get("role_arn"):
-            external_id = connection._kwargs.get("external_id")
-            fs = fs.S3FileSystem(
-                role_arn=connection._kwargs["role_arn"],
-                session_name=connection._kwargs["role_session_name"],
-                external_id="" if external_id is None else external_id,
-                load_frequency=connection._kwargs["duration_seconds"],
-                region=connection.region_name,
-                **timeout_kwargs,
-            )
-        elif connection.profile_name:
-            profile = connection.session._session.full_config["profiles"][connection.profile_name]
-            fs = fs.S3FileSystem(
-                access_key=profile.get("aws_access_key_id", None),
-                secret_key=profile.get("aws_secret_access_key", None),
-                session_token=profile.get("aws_session_token", None),
-                region=connection.region_name,
-                **timeout_kwargs,
-            )
-        else:
-            # Try explicit credentials first
-            explicit_access_key = connection._kwargs.get("aws_access_key_id")
-            explicit_secret_key = connection._kwargs.get("aws_secret_access_key")
-
-            if explicit_access_key and explicit_secret_key:
-                # Use explicitly provided credentials
-                fs = fs.S3FileSystem(
-                    access_key=explicit_access_key,
-                    secret_key=explicit_secret_key,
-                    session_token=connection._kwargs.get("aws_session_token"),
-                    region=connection.region_name,
-                    **timeout_kwargs,
-                )
-            else:
-                # Fall back to dynamic credentials from boto3 session
-                # This handles EC2 instance profiles, temporary credentials, etc.
-                try:
-                    credentials = connection.session._session.get_credentials()
-                    if credentials:
-                        fs = fs.S3FileSystem(
-                            access_key=credentials.access_key,
-                            secret_key=credentials.secret_key,
-                            session_token=credentials.token,
-                            region=connection.region_name,
-                            **timeout_kwargs,
-                        )
-                    else:
-                        # Fall back to default (no explicit credentials)
-                        fs = fs.S3FileSystem(region=connection.region_name, **timeout_kwargs)
-                except Exception:
-                    # Fall back to default if credential retrieval fails
-                    fs = fs.S3FileSystem(region=connection.region_name, **timeout_kwargs)
-
-        return fs
+            kwargs["request_timeout"] = self._request_timeout
+        credentials = self.connection.session.get_credentials()
+        if credentials:
+            frozen_credentials = credentials.get_frozen_credentials()
+            kwargs["access_key"] = frozen_credentials.access_key
+            kwargs["secret_key"] = frozen_credentials.secret_key
+            kwargs["session_token"] = frozen_credentials.token
+        return fs.S3FileSystem(**kwargs)
 
     @property
     def timestamp_parsers(self) -> list[str]:
