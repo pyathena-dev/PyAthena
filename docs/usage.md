@@ -65,7 +65,8 @@ query_id, future = cursor.execute("SELECT 1", s3_max_workers=3)
 
 Before PyAthena 4.0, `max_workers` set the S3 read workers of `PandasCursor`, `PolarsCursor`, `AioPandasCursor`, and `AioPolarsCursor`, and of `execute()` in the pandas and Polars cursors.
 Replace it with `s3_max_workers` in those places.
-In these cursors, `max_workers` now raises `TypeError` in the constructor, and in `execute()` after the query has run.
+Passing `max_workers` to those four constructors raises `TypeError`.
+Passing it to `execute()` raises `TypeError` after the query has run; with `AsyncPandasCursor` and `AsyncPolarsCursor`, the returned future raises it.
 `AsyncPolarsCursor` used its `max_workers` for both the thread pool and the S3 read workers; pass both arguments to keep the former values.
 
 ## Managed query result storage
