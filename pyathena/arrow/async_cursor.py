@@ -93,7 +93,7 @@ class AsyncArrowCursor(AsyncCursor):
             encryption_option: S3 encryption option (SSE_S3, SSE_KMS, CSE_KMS).
             kms_key: KMS key ARN for encryption.
             kill_on_interrupt: Cancel running query on keyboard interrupt.
-            max_workers: Maximum number of workers for concurrent execution.
+            max_workers: Size of the cursor thread pool for waiting and collecting results.
             arraysize: Number of rows to fetch per batch.
             unload: Enable UNLOAD for high-performance Parquet output.
             result_reuse_enable: Enable Athena query result reuse.

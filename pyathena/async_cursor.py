@@ -84,7 +84,7 @@ class AsyncCursor(BaseCursor):
             kill_on_interrupt: Cancel a query whose start in ``execute()`` is interrupted by
                 ``KeyboardInterrupt``. Waiting runs on worker threads, which do not
                 receive the interrupt.
-            max_workers: Maximum number of threads in the cursor's thread pool.
+            max_workers: Size of the cursor thread pool for waiting and collecting results.
             arraysize: Default number of rows per ``fetchmany()`` call of the result
                 sets the cursor creates.
             result_reuse_enable: Enable Athena query result reuse.

@@ -46,6 +46,29 @@ A cursor subclass that receives settings of its own must not pass them on to the
 The pandas and Polars cursors pass the `execute()` keyword arguments that they do not use themselves to the reader, such as `pandas.read_csv()`.
 The reader rejects an unknown name when it reads the query results, which PyAthena raises as `OperationalError`; the name is not checked when there are no results to read.
 
+## Worker settings in PyAthena 4.0
+
+The pandas and Polars cursors take the number of threads that read each result file from S3 as `s3_max_workers`.
+It can be set in the cursor constructor and overridden for one query in `execute()`.
+The default is `(cpu_count() or 1) * 5`.
+Polars uses it only for CSV results read without `chunksize`.
+Chunked CSV reads and UNLOAD results use Polars' native readers, which do not use this setting.
+
+The thread-pool cursors, such as `AsyncCursor`, `AsyncPandasCursor`, and `AsyncPolarsCursor`, keep `max_workers` for the size of the thread pool that waits for queries and collects their results.
+
+```python
+from pyathena.pandas.async_cursor import AsyncPandasCursor
+
+cursor = connection.cursor(AsyncPandasCursor, max_workers=4, s3_max_workers=2)
+query_id, future = cursor.execute("SELECT 1", s3_max_workers=3)
+```
+
+Before PyAthena 4.0, `max_workers` set the S3 read workers of `PandasCursor`, `PolarsCursor`, `AioPandasCursor`, and `AioPolarsCursor`, and of `execute()` in the pandas and Polars cursors.
+Replace it with `s3_max_workers` in those places.
+Passing `max_workers` to those four constructors raises `TypeError`.
+Passing it to `execute()` raises `TypeError` after the query has run; with `AsyncPandasCursor` and `AsyncPolarsCursor`, the returned future raises it.
+`AsyncPolarsCursor` used its `max_workers` for both the thread pool and the S3 read workers; pass both arguments to keep the former values.
+
 ## Managed query result storage
 
 When using a workgroup with [managed query result storage](https://docs.aws.amazon.com/athena/latest/ug/managed-results.html) enabled,

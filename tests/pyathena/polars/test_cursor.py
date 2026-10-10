@@ -881,7 +881,7 @@ class TestPolarsCursor:
 
     @pytest.mark.parametrize(
         "execute_kwargs",
-        [{}, {"block_size": 2048, "cache_type": "none", "max_workers": 3, "chunksize": 20}],
+        [{}, {"block_size": 2048, "cache_type": "none", "s3_max_workers": 3, "chunksize": 20}],
     )
     def test_read_options(self, execute_kwargs):
         """The cursor's read options reach the result set, and execute() overrides them.
@@ -891,7 +891,7 @@ class TestPolarsCursor:
         cursor_kwargs = {
             "block_size": 1024,
             "cache_type": "bytes",
-            "max_workers": 2,
+            "s3_max_workers": 2,
             "chunksize": 10,
         }
         cursor = PolarsCursor(
@@ -910,4 +910,5 @@ class TestPolarsCursor:
             cursor.execute("SELECT 1", **execute_kwargs)
         kwargs = result_set_class.call_args.kwargs
         expected = {**cursor_kwargs, **execute_kwargs}
+        expected["max_workers"] = expected.pop("s3_max_workers")
         assert {key: kwargs[key] for key in expected} == expected

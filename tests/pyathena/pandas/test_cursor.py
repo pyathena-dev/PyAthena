@@ -1908,7 +1908,7 @@ class TestPandasCursor:
             {
                 "block_size": 2048,
                 "cache_type": "none",
-                "max_workers": 3,
+                "s3_max_workers": 3,
                 "auto_optimize_chunksize": False,
             },
         ],
@@ -1921,7 +1921,7 @@ class TestPandasCursor:
         cursor_kwargs = {
             "block_size": 1024,
             "cache_type": "bytes",
-            "max_workers": 2,
+            "s3_max_workers": 2,
             "auto_optimize_chunksize": True,
         }
         cursor = PandasCursor(
@@ -1940,6 +1940,7 @@ class TestPandasCursor:
             cursor.execute("SELECT 1", **execute_kwargs)
         kwargs = result_set_class.call_args.kwargs
         expected = {**cursor_kwargs, **execute_kwargs}
+        expected["max_workers"] = expected.pop("s3_max_workers")
         assert {key: kwargs[key] for key in expected} == expected
 
     @pytest.mark.parametrize(
