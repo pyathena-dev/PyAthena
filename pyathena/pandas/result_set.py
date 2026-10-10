@@ -339,8 +339,9 @@ class AthenaPandasResultSet(AthenaResultSet):
             trunc_date = _no_trunc_date if self.is_unload else self._trunc_date
             self._df_iter = PandasDataFrameIterator(df, trunc_date, self._csv_stream)
         elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
+            # GetQueryResults values are already converted, so time columns hold times.
             df = self._as_pandas_from_api()
-            self._df_iter = PandasDataFrameIterator(df, self._trunc_date)
+            self._df_iter = PandasDataFrameIterator(df, _no_trunc_date)
         else:
             import pandas as pd
 
