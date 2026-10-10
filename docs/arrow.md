@@ -259,18 +259,16 @@ pyathena.error.OperationalError: SYNTAX_ERROR: line 1:1: Column name not specifi
 ArrowCursor supports configuring S3 connection and request timeouts through `connect_timeout` and `request_timeout` parameters.
 These parameters are particularly useful when experiencing timeout errors due to:
 
-- Role assumption with AWS STS (cross-account access)
 - High network latency between your environment and S3
 - Connecting from regions far from the S3 bucket
 
 By default, PyArrow uses AWS SDK default timeouts (typically 1 second for connection, 3 seconds for requests).
-You can increase these values to accommodate slower authentication or network conditions.
+You can increase these values to accommodate slower network conditions.
 
 ```python
 from pyathena import connect
 from pyathena.arrow.cursor import ArrowCursor
 
-# Configure higher timeouts for role assumption scenarios
 cursor = connect(
     s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
     region_name="us-west-2",
@@ -293,6 +291,7 @@ cursor = connect(
 ```
 
 The timeout parameters accept float values in seconds and apply to the pyarrow S3 filesystem that reads the result CSV and Parquet files.
+The pyarrow S3 filesystem uses the credentials of the connection's boto3 session, including the credentials of an assumed role.
 The other S3 requests, the HeadObject request for the result file size and the GetObject request for the UNLOAD data manifest,
 use the connection's boto3 client and its botocore configuration.
 
