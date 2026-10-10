@@ -1630,10 +1630,12 @@ class S3FileSystem(AbstractFileSystem):
         annotations are copied onto the destination after the upload
         completes. A failed part or completion aborts the upload, and so does
         an interrupt, after the creation of the upload and the running part
-        copies have finished; a failed annotation copy is raised and leaves
-        the destination in place. If HeadObject reports a
-        size that fits in a single CopyObject request, the reported version
-        is copied with CopyObject instead.
+        copies have finished. Further interrupts while the creation is waited
+        for are suppressed; one while the part copies are waited for or the
+        upload is aborted stops the cleanup, and the upload ID is logged. A
+        failed annotation copy is raised and leaves the destination in place.
+        If HeadObject reports a size that fits in a single CopyObject request,
+        the reported version is copied with CopyObject instead.
 
         Args:
             source: Source S3 path, with the version ID to copy, if any.
@@ -1657,11 +1659,13 @@ class S3FileSystem(AbstractFileSystem):
             self.core.copy_object(plan.source, plan.destination, **kwargs)
             return
         with self._create_executor(max_workers=max_workers) as executor:
-            # Created on the executor, so that an interrupt while it is being
-            # created lets the request finish and the upload be aborted. The
-            # future is created first, so that an interrupt while the request
-            # is being scheduled still lets it be cancelled or waited for.
+            # The requests run on the executor, so that an interrupt lets the
+            # running ones finish and the upload be aborted. Each future is
+            # created and tracked first, so that an interrupt while its
+            # request is being scheduled still lets it be cancelled or waited
+            # for.
             creation: Future[S3MultipartUpload] = Future()
+            futures: list[Future[S3MultipartUploadPart]] = []
             try:
                 executor.submit_to(
                     creation,
@@ -1670,33 +1674,51 @@ class S3FileSystem(AbstractFileSystem):
                     **plan.create_params,
                 )
                 multipart_upload = creation.result()
+                for i, range_ in enumerate(plan.ranges):
+                    future: Future[S3MultipartUploadPart] = Future()
+                    futures.append(future)
+                    executor.submit_to(
+                        future,
+                        self.core.upload_part_copy,
+                        upload=multipart_upload,
+                        part_number=i + 1,
+                        source=plan.source,
+                        range_=range_,
+                        **plan.part_params,
+                    )
+                completed = self._finish_multipart_upload(
+                    upload=multipart_upload,
+                    futures=futures,
+                    # Filtered again for the completion, which leaves the
+                    # plan's parameters unchanged.
+                    request_kwargs=plan.complete_params,
+                    # Aborted below, as is an upload whose part scheduling
+                    # is interrupted.
+                    abort=False,
+                )
             except BaseException:
                 if not creation.cancel():
-                    wait([creation])
+                    while not creation.done():
+                        try:
+                            wait([creation])
+                        except KeyboardInterrupt:
+                            # Recover the upload before re-raising the
+                            # interrupt that started cleanup, as S3File does.
+                            continue
                     if creation.exception() is None:
-                        self._abort_multipart_upload(
-                            creation.result(),
-                            plan.abort_params,
-                        )
+                        upload = creation.result()
+                        try:
+                            # A part that is still copying when the upload is
+                            # aborted may be stored after the abort.
+                            wait([future for future in futures if not future.cancel()])
+                            self._abort_multipart_upload(upload, plan.abort_params)
+                        except KeyboardInterrupt:
+                            _logger.warning(
+                                f"Interrupted the abort of multipart upload {upload.upload_id} "
+                                f"to s3://{upload.bucket}/{upload.key}."
+                            )
+                            raise
                 raise
-            futures = [
-                executor.submit(
-                    self.core.upload_part_copy,
-                    upload=multipart_upload,
-                    part_number=i + 1,
-                    source=plan.source,
-                    range_=range_,
-                    **plan.part_params,
-                )
-                for i, range_ in enumerate(plan.ranges)
-            ]
-            completed = self._finish_multipart_upload(
-                upload=multipart_upload,
-                futures=futures,
-                # Filtered again for the completion and the abort, which
-                # leaves the plan's parameters of each unchanged.
-                request_kwargs={**plan.complete_params, **plan.abort_params},
-            )
         for name in plan.annotations:
             self.core.copy_object_annotation(
                 name,
@@ -3012,14 +3034,18 @@ class S3File(AbstractBufferedFile):
                     )
                     size = info.get("size", 0)
                 for part_number, range_ in writer.iter_copy_parts(size):
-                    self.multipart_upload_parts.append(
-                        self._executor.submit(
-                            writer.upload_part_copy,
-                            part_number=part_number,
-                            source=S3Path(self.bucket, self.key),
-                            range_=None if whole_source else range_,
-                            **self._get_request_kwargs("upload_part_copy"),
-                        )
+                    # Tracked before it is scheduled, so that an interrupt
+                    # while it is being scheduled still lets the cleanup
+                    # cancel it or wait for it before the abort.
+                    part: Future[S3MultipartUploadPart] = Future()
+                    self.multipart_upload_parts.append(part)
+                    self._executor.submit_to(
+                        part,
+                        writer.upload_part_copy,
+                        part_number=part_number,
+                        source=S3Path(self.bucket, self.key),
+                        range_=None if whole_source else range_,
+                        **self._get_request_kwargs("upload_part_copy"),
                     )
         except BaseException:
             # A submitted creation may still return an ID after the wait is
@@ -3053,13 +3079,17 @@ class S3File(AbstractBufferedFile):
             for part_number, data in writer.iter_parts(
                 buffer, first_part_number=len(self.multipart_upload_parts) + 1
             ):
-                self.multipart_upload_parts.append(
-                    self._executor.submit(
-                        writer.upload_part,
-                        part_number=part_number,
-                        body=data,
-                        **self._get_request_kwargs("upload_part"),
-                    )
+                # Tracked before it is scheduled, so that an interrupt while
+                # it is being scheduled still lets discard() cancel it or wait
+                # for it before the abort.
+                part: Future[S3MultipartUploadPart] = Future()
+                self.multipart_upload_parts.append(part)
+                self._executor.submit_to(
+                    part,
+                    writer.upload_part,
+                    part_number=part_number,
+                    body=data,
+                    **self._get_request_kwargs("upload_part"),
                 )
         except BaseException:
             self._close_without_commit()
