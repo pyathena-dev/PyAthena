@@ -601,3 +601,33 @@ def test_typed_json_elements(type_hint, value, expected):
     """JSON elements of typed complex values decode their original JSON text."""
     type_ = type_hint.split("(", 1)[0]
     assert DefaultTypeConverter().convert(type_, value, type_hint=type_hint) == expected
+
+
+@pytest.mark.parametrize(
+    ("input_value", "expected"),
+    [
+        ("[x, , y]", ["x", "", "y"]),
+        ("[x, ]", ["x", ""]),
+        ("[x,  , y]", ["x", " ", "y"]),
+        ("[ , x]", [" ", "x"]),
+        ("[a,b, c]", ["a,b", "c"]),
+        ("[x, null]", ["x", None]),
+        ("[{a=1, b=}, {a=, b=2}]", [{"a": "1", "b": ""}, {"a": "", "b": "2"}]),
+    ],
+)
+def test_native_array_items(input_value, expected):
+    """Native arrays are split as Athena joins them, keeping empty items."""
+    assert _to_array(input_value) == expected
+    assert (
+        DefaultTypeConverter().convert("array", input_value, type_hint="array(varchar)") == expected
+    )
+
+
+def test_typed_json_array_starting_with_non_string():
+    """A typed array(json) value is parsed as JSON whatever its first element is."""
+    converter = DefaultTypeConverter()
+    assert converter.convert("array", '[1234567890, "a,b"]', type_hint="array(json)") == [
+        1234567890,
+        "a,b",
+    ]
+    assert converter.convert("array", "[1, 2.5, true]", type_hint="array(json)") == [1, 2.5, True]

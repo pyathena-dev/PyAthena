@@ -1310,6 +1310,42 @@ class TestCursor:
         cursor.execute("SELECT 1 AS col")
         assert cursor.fetchall() == [(1,)]
 
+    @pytest.mark.parametrize(
+        "cursor",
+        [
+            pytest.param({}, id="default"),
+            pytest.param(
+                {"work_group": ENV.managed_work_group, "s3_staging_dir": ""},
+                id="managed",
+                marks=pytest.mark.skipif(
+                    not ENV.managed_work_group,
+                    reason="AWS_ATHENA_MANAGED_WORKGROUP not set",
+                ),
+            ),
+        ],
+        indirect=["cursor"],
+    )
+    def test_fetch_complex_values(self, cursor):
+        """Native arrays keep empty, space-only, and comma items; array(json) keeps JSON."""
+        query = """
+            SELECT
+              ARRAY['x', '', 'y'] AS col_empty
+              ,ARRAY['x', ' ', 'a,b'] AS col_space_comma
+              ,ARRAY[json_parse('1234567890'), json_parse('"a,b"')] AS col_json
+            """
+        cursor.execute(query)
+        expected = (["x", "", "y"], ["x", " ", "a,b"], [1234567890, "a,b"])
+        assert cursor.fetchall() == [expected]
+        cursor.execute(
+            query,
+            result_set_type_hints={
+                "col_empty": "array(varchar)",
+                "col_space_comma": "array(varchar)",
+                "col_json": "array(json)",
+            },
+        )
+        assert cursor.fetchall() == [expected]
+
 
 class TestDictCursor:
     def test_fetchone(self, dict_cursor):
