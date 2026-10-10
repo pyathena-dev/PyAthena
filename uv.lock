@@ -985,7 +985,7 @@ requires-dist = [
     { name = "python-dateutil" },
     { name = "sqlalchemy", marker = "extra == 'sqlalchemy'", specifier = ">=2.0.0" },
     { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'aiosqlalchemy'", specifier = ">=2.0.0" },
-    { name = "tenacity", specifier = ">=4.1.0" },
+    { name = "tenacity", specifier = ">=8.0.1" },
 ]
 provides-extras = ["aiosqlalchemy", "arrow", "pandas", "polars", "sqlalchemy"]
 
