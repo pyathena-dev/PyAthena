@@ -10,6 +10,27 @@ _TYPE_ALIASES: dict[str, str] = {
     "int": "integer",
 }
 
+# Element types whose values never contain a comma, so their array items can be split
+# at every top-level comma, including compact text such as ``[1,2]``.
+_COMMA_FREE_TYPES: frozenset[str] = frozenset(
+    {
+        "boolean",
+        "tinyint",
+        "smallint",
+        "integer",
+        "bigint",
+        "float",
+        "real",
+        "double",
+        "decimal",
+        "date",
+        "time",
+        "time with time zone",
+        "timestamp",
+        "timestamp with time zone",
+    }
+)
+
 
 def _split_array_items(inner: str) -> list[str]:
     """Split array items by comma, respecting brace and bracket groupings.
@@ -370,7 +391,10 @@ class TypedValueConverter:
         if "[" in inner:
             return None  # Nested arrays not supported in native format
 
-        items = _split_native_array_items(inner)
+        if element_type.type_name in _COMMA_FREE_TYPES:
+            items = _split_array_items(inner)
+        else:
+            items = _split_native_array_items(inner)
         result: list[Any] = []
         for item in items:
             if item.startswith("{") and item.endswith("}"):

@@ -1,4 +1,5 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 from dateutil.tz import gettz
@@ -621,6 +622,23 @@ def test_native_array_items(input_value, expected):
     assert (
         DefaultTypeConverter().convert("array", input_value, type_hint="array(varchar)") == expected
     )
+
+
+@pytest.mark.parametrize(
+    ("type_", "input_value", "type_hint", "expected"),
+    [
+        ("array", "[1,2]", "array(integer)", [1, 2]),
+        ("array", "[1.5,2]", "array(double)", [1.5, 2.0]),
+        ("array", "[true,false]", "array(boolean)", [True, False]),
+        ("array", "[1.50,2]", "array(decimal(3,2))", [Decimal("1.50"), Decimal("2")]),
+        ("array", "[2024-01-01,2024-01-02]", "array(date)", [date(2024, 1, 1), date(2024, 1, 2)]),
+        ("array", "[1,null]", "array(integer)", [1, None]),
+        ("map", "{a=[1,2]}", "map(varchar,array(integer))", {"a": [1, 2]}),
+    ],
+)
+def test_typed_compact_array(type_, input_value, type_hint, expected):
+    """Typed arrays of comma-free element types are split at commas without a space."""
+    assert DefaultTypeConverter().convert(type_, input_value, type_hint=type_hint) == expected
 
 
 def test_typed_json_array_starting_with_non_string():
