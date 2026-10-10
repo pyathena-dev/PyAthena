@@ -12,7 +12,7 @@ dependencies = [
     "botocore>=1.43.31",
     "tenacity>=8.0.1",
     "fsspec>=2026.9.0",
-    "python-dateutil",
+    "tzdata; sys_platform == 'win32' or sys_platform == 'emscripten'",
 ]
 requires-python = ">=3.11"
 readme = "README.md"
@@ -106,7 +106,6 @@ dev = [
     "furo",
     "myst-parser",
     "sphinx-design",
-    "types-python-dateutil",
     "cfn-lint>=1",
 ]
 

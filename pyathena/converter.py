@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import binascii
+import functools
 import json
 import logging
 import re
 from abc import ABCMeta, abstractmethod
 from collections.abc import Callable
 from copy import deepcopy
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from decimal import Decimal
 from typing import Any, ClassVar
-
-from dateutil.tz import gettz
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pyathena.parser import (
     TypedValueConverter,
@@ -93,6 +93,29 @@ def _parse_utc_offset(value: str) -> timezone | None:
     return timezone(-offset if sign == "-" else offset)
 
 
+@functools.cache
+def _parse_time_zone(value: str) -> tzinfo | None:
+    """Parse the time zone of an Athena TIMESTAMP WITH TIME ZONE value.
+
+    Results are cached per text, so an unknown zone name logs one warning.
+
+    Args:
+        value: A ``+HH:MM`` or ``-HH:MM`` UTC offset or an IANA time zone name.
+
+    Returns:
+        The fixed-offset time zone or ``ZoneInfo``, or None if the IANA time zone
+        database available to Python has no zone with the name.
+    """
+    offset = _parse_utc_offset(value)
+    if offset is not None:
+        return offset
+    try:
+        return ZoneInfo(value)
+    except (ZoneInfoNotFoundError, ValueError):
+        _logger.warning(f"Unknown time zone {value!r}; returning naive datetimes for it.")
+        return None
+
+
 def _to_datetime_with_tz(varchar_value: str | None) -> datetime | None:
     """Convert an Athena TIMESTAMP WITH TIME ZONE value to an aware datetime.
 
@@ -102,12 +125,12 @@ def _to_datetime_with_tz(varchar_value: str | None) -> datetime | None:
             Arrow CSV reader return for NULL, is None.
 
     Returns:
-        The aware datetime, or None.
+        The aware datetime, a naive datetime if the zone name is unknown, or None.
     """
     if not varchar_value:
         return None
     datetime_, _, tz = varchar_value.rpartition(" ")
-    return _parse_datetime(datetime_).replace(tzinfo=_parse_utc_offset(tz) or gettz(tz))
+    return _parse_datetime(datetime_).replace(tzinfo=_parse_time_zone(tz))
 
 
 def _parse_time(value: str) -> time:
