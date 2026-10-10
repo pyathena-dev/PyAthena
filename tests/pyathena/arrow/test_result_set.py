@@ -91,7 +91,7 @@ class TestAthenaArrowResultSet:
         config.write_text(
             "[default]\naws_access_key_id = DEFAULTKEY\naws_secret_access_key = secret\n"
             "[profile static]\naws_access_key_id = STATICKEY\naws_secret_access_key = secret\n"
-            f"[profile process]\ncredential_process = {sys.executable} {process}\n"
+            f'[profile process]\ncredential_process = "{sys.executable}" "{process}"\n'
         )
         monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
         monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "credentials"))
