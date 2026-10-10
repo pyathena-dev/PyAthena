@@ -8,11 +8,11 @@
 import textwrap
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pyathena import OperationalError
+from pyathena import NotSupportedError, OperationalError
 from pyathena.model import AthenaCalculationExecutionStatus, AthenaSessionStatus
 from pyathena.spark.async_cursor import AsyncSparkCursor
 from tests import ENV
@@ -256,3 +256,59 @@ class TestAsyncSparkCursor:
         cursor.close()
 
         assert cursor._terminate_session.call_count == 2
+
+    @pytest.mark.parametrize("parameters", [{}, [], {"value": 1}])
+    def test_execute_rejects_parameters(self, parameters):
+        """Any parameters other than None raise before a calculation starts (no AWS)."""
+        cursor = AsyncSparkCursor.__new__(AsyncSparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._calculation_id = "previous"
+        cursor._executor = MagicMock()
+
+        with (
+            patch.object(AsyncSparkCursor, "_calculate") as calculate,
+            pytest.raises(NotSupportedError, match="do not support parameters"),
+        ):
+            cursor.execute("code", parameters)
+
+        calculate.assert_not_called()
+        cursor._executor.submit.assert_not_called()
+        assert cursor.calculation_id == "previous"
+
+    def test_execute_rejects_work_group(self):
+        """work_group is not an execute() argument, even when None (no AWS)."""
+        cursor = AsyncSparkCursor.__new__(AsyncSparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._calculation_id = "previous"
+        cursor._executor = MagicMock()
+
+        with (
+            patch.object(AsyncSparkCursor, "_calculate") as calculate,
+            pytest.raises(TypeError, match="unexpected keyword argument 'work_group'"),
+        ):
+            cursor.execute("code", work_group=None)
+
+        calculate.assert_not_called()
+        cursor._executor.submit.assert_not_called()
+        assert cursor.calculation_id == "previous"
+
+    @pytest.mark.parametrize(
+        ("args", "kwargs"), [((), {}), ((None,), {}), ((), {"parameters": None})]
+    )
+    def test_execute_accepts_none_parameters(self, args, kwargs):
+        """Omitted or None parameters start the calculation and its polling (no AWS)."""
+        cursor = AsyncSparkCursor.__new__(AsyncSparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._session_id = "session_id"
+        cursor._executor = MagicMock()
+
+        with patch.object(
+            AsyncSparkCursor, "_calculate", return_value="calculation_id"
+        ) as calculate:
+            query_id, future = cursor.execute("code", *args, **kwargs)
+
+        calculate.assert_called_once_with(
+            session_id="session_id",
+            code_block="code",
+            description=None,
+            client_request_token=None,
+        )
+        assert query_id == "calculation_id"
+        assert future is cursor._executor.submit.return_value

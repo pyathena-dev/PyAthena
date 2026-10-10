@@ -33,6 +33,22 @@ READER_CURSOR_CLASSES = [AioPandasCursor, AioPolarsCursor]
 
 
 @pytest.mark.parametrize("factory", [pyathena.aio_connect, AioConnection.create])
+async def test_empty_work_group_disables_environment_fallback(factory, monkeypatch):
+    monkeypatch.setenv("AWS_ATHENA_WORK_GROUP", "environment-workgroup")
+    conn = await factory(
+        region_name="us-east-1",
+        s3_staging_dir="s3://bucket/path/",
+        work_group="",
+        aws_access_key_id="access_key",
+        aws_secret_access_key="secret_key",
+    )
+    try:
+        assert conn.work_group is None
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("factory", [pyathena.aio_connect, AioConnection.create])
 async def test_connect_keyword_only(factory):
     assert all(
         parameter.kind in (Parameter.KEYWORD_ONLY, Parameter.VAR_KEYWORD)
@@ -73,9 +89,13 @@ def test_cursor_execute_keyword_only(cursor_class):
     ] == ["self", "operation", "parameters"]
     parameters = {"value": 1}
     cursor = object.__new__(cursor_class)
-    bound = execute_signature.bind(cursor, "SELECT %(value)s", parameters, work_group="group")
+    bound = execute_signature.bind(cursor, "SELECT %(value)s", parameters)
     assert bound.arguments["parameters"] is parameters
-    assert bound.arguments["work_group"] == "group"
+    if cursor_class is AioSparkCursor:
+        assert "work_group" not in execute_signature.parameters
+    else:
+        bound = execute_signature.bind(cursor, "SELECT %(value)s", parameters, work_group="group")
+        assert bound.arguments["work_group"] == "group"
     execute_signature.bind(cursor, operation="SELECT 1")
     with pytest.raises(TypeError, match="positional"):
         cursor.execute("SELECT %(value)s", parameters, "group")

@@ -37,7 +37,6 @@ cursor = connection.cursor()
 cursor.execute("SELECT %(value)s", {"value": 1}, work_group="YOUR_WORK_GROUP")
 ```
 
-Existing keyword arguments retain their defaults and behavior.
 The cursor class can still be selected positionally with `connection.cursor(DictCursor)`.
 
 Unknown keyword arguments raise `TypeError` in cursor constructors and in `execute()` instead of being ignored.
@@ -68,6 +67,24 @@ Replace it with `s3_max_workers` in those places.
 Passing `max_workers` to those four constructors raises `TypeError`.
 Passing it to `execute()` raises `TypeError` after the query has run; with `AsyncPandasCursor` and `AsyncPolarsCursor`, the returned future raises it.
 `AsyncPolarsCursor` used its `max_workers` for both the thread pool and the S3 read workers; pass both arguments to keep the former values.
+
+## Environment fallbacks in PyAthena 4.0
+
+For connection settings, `s3_staging_dir` and `work_group` use the same fallback rules:
+
+| Argument | Resolved setting |
+|----------|------------------|
+| Omitted or `None` | Read the corresponding environment variable. |
+| `""` | Use `None` and ignore the corresponding environment variable. |
+| Nonempty string | Use the supplied value. |
+
+The environment variables are `AWS_ATHENA_S3_STAGING_DIR` and `AWS_ATHENA_WORK_GROUP`.
+These rules apply to `connect()`, `aio_connect()`, `Connection`, and `AioConnection`.
+At least one resolved setting must be nonempty; otherwise connection creation raises `ProgrammingError`.
+
+This is a breaking change for `work_group=""`, which previously read `AWS_ATHENA_WORK_GROUP`.
+Omit `work_group` or pass `None` to retain that fallback.
+The behavior of `s3_staging_dir=""` is unchanged, including its use with managed query result storage.
 
 ## Managed query result storage
 
@@ -844,7 +861,7 @@ AWS_ATHENA_S3_STAGING_DIR
 : The S3 location where Athena automatically stores the query results and metadata information. Required if you have not set up workgroups. Not required if a workgroup has been set up. When connecting to a workgroup with [managed query result storage](https://docs.aws.amazon.com/athena/latest/ug/managed-results.html), pass ``s3_staging_dir=""`` to explicitly disable this environment variable fallback (see [Managed query result storage](#managed-query-result-storage)).
 
 AWS_ATHENA_WORK_GROUP
-: The setting of the workgroup to execute the query.
+: The workgroup used to execute queries when the connection's `work_group` argument is omitted or `None`. Pass `work_group=""` to disable this fallback.
 
 ## Credentials
 

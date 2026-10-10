@@ -504,6 +504,52 @@ class TestAioSparkCursor:
         cancel.assert_not_awaited()
         assert cursor.calculation_id is None
 
+    @pytest.mark.parametrize("parameters", [{}, [], {"value": 1}])
+    async def test_execute_rejects_parameters(self, parameters):
+        """Any parameters other than None raise before a calculation starts (no AWS)."""
+        cursor = AioSparkCursor.__new__(AioSparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._calculation_id = "previous"
+        cursor._calculate = AsyncMock()
+
+        with pytest.raises(NotSupportedError, match="do not support parameters"):
+            await cursor.execute("code", parameters)
+
+        cursor._calculate.assert_not_awaited()
+        assert cursor.calculation_id == "previous"
+
+    async def test_execute_rejects_work_group(self):
+        """work_group is not an execute() argument, even when None (no AWS)."""
+        cursor = AioSparkCursor.__new__(AioSparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._calculation_id = "previous"
+        cursor._calculate = AsyncMock()
+
+        with pytest.raises(TypeError, match="unexpected keyword argument 'work_group'"):
+            await cursor.execute("code", work_group=None)
+
+        cursor._calculate.assert_not_awaited()
+        assert cursor.calculation_id == "previous"
+
+    @pytest.mark.parametrize(
+        ("args", "kwargs"), [((), {}), ((None,), {}), ((), {"parameters": None})]
+    )
+    async def test_execute_accepts_none_parameters(self, args, kwargs):
+        """Omitted or None parameters run the calculation (no AWS)."""
+        cursor = AioSparkCursor.__new__(AioSparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._session_id = "session_id"
+        cursor._calculate = AsyncMock(return_value="calculation_id")
+        cursor._poll = AsyncMock(
+            return_value=MagicMock(state=AthenaCalculationExecutionStatus.STATE_COMPLETED)
+        )
+
+        await cursor.execute("code", *args, **kwargs)
+
+        cursor._calculate.assert_awaited_once_with(
+            session_id="session_id",
+            code_block="code",
+            description=None,
+            client_request_token=None,
+        )
+
     async def test_executemany(self, aio_spark_cursor):
         with pytest.raises(NotSupportedError):
             await aio_spark_cursor.executemany("SELECT 1", [])

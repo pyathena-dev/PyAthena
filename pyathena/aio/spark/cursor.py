@@ -341,24 +341,29 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
         session_id: str | None = None,
         description: str | None = None,
         client_request_token: str | None = None,
-        work_group: str | None = None,
         **kwargs,
     ) -> AioSparkCursor:
         """Execute PySpark code asynchronously.
 
         Args:
             operation: PySpark code to execute.
-            parameters: Unused, kept for API compatibility.
+            parameters: Must be None; Spark calculations do not support parameters.
             session_id: Spark session ID override.
             description: Calculation description.
             client_request_token: Idempotency token.
-            work_group: Unused, kept for API compatibility.
             **kwargs: Unknown keyword arguments raise TypeError.
 
         Returns:
             Self reference for method chaining.
+
+        Raises:
+            TypeError: If an unknown keyword argument is given.
+            NotSupportedError: If ``parameters`` is not None.
+            OperationalError: If the calculation does not complete successfully.
         """
         self._validate_execute_kwargs(kwargs)
+        if parameters is not None:
+            raise NotSupportedError("Spark cursors do not support parameters.")
         # A failure below must not leave the previous calculation on the cursor.
         self._calculation_id = None
         self._calculation_execution = None
