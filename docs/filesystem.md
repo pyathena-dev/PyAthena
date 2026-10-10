@@ -126,7 +126,10 @@ written. If an annotation fails to copy, the error is raised and the destination
 kept. A failed part copy aborts the multipart upload. So does an interrupt, or the
 cancellation of an `AioS3FileSystem` copy, unless the upload has already completed. A
 CreateMultipartUpload request and the part copies in flight finish first, and so does
-the CompleteMultipartUpload request of an `AioS3FileSystem` copy.
+the CompleteMultipartUpload request of an `AioS3FileSystem` copy. A further interrupt
+while the CreateMultipartUpload request is waited for is ignored. One while the part
+copies are waited for or the upload is aborted stops the cleanup, and the upload ID is
+logged.
 
 Paths are normalized as in fsspec, which drops a trailing slash, so `info`, `isfile`,
 and `open` treat `s3://YOUR_S3_BUCKET/dir/` as `s3://YOUR_S3_BUCKET/dir`: the object

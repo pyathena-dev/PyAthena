@@ -3748,6 +3748,168 @@ class TestS3FileSystem:
         assert upload.upload_id == "uploadid"
         fs.core.upload_part_copy.assert_not_called()
 
+    def test_copy_object_with_multipart_upload_interrupted_part_scheduling(self):
+        # GH-1120: an interrupt while a part copy is being scheduled, after
+        # its request started, waits for the part and aborts the upload. The
+        # interrupt used to leave the copy without an abort.
+        fs = self._make_fs()
+        events = []
+        started = threading.Event()
+        release = threading.Event()
+
+        def upload_part_copy(**kwargs):
+            started.set()
+            # Copying until the cleanup waits for it.
+            assert release.wait(5)
+            events.append("part stored")
+            return SimpleNamespace(etag='"e"', part_number=kwargs["part_number"])
+
+        fs.core.create_multipart_upload = mock.MagicMock(
+            return_value=S3MultipartUpload(
+                {"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"}
+            )
+        )
+        fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
+        # The HeadObject of the source.
+        fs._call.return_value = {"ContentLength": 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE}
+        fs._abort_multipart_upload = mock.MagicMock(side_effect=lambda *_: events.append("abort"))
+        executor = S3ThreadPoolExecutor(max_workers=2)
+        submit = executor.submit
+        submitted = []
+
+        def submit_and_interrupt(fn, *args, **kwargs):
+            future = submit(fn, *args, **kwargs)
+            submitted.append(future)
+            if len(submitted) == 2:
+                # The first part copy, interrupted once its request started.
+                assert started.wait(5)
+                raise KeyboardInterrupt
+            return future
+
+        executor.submit = submit_and_interrupt  # type: ignore[method-assign]
+        fs._create_executor = mock.MagicMock(return_value=executor)
+
+        def wait_for_parts(futures):
+            if any(not future.done() for future in futures):
+                release.set()
+            return wait(futures)
+
+        try:
+            with (
+                mock.patch("pyathena.filesystem.s3.wait", side_effect=wait_for_parts),
+                pytest.raises(KeyboardInterrupt),
+            ):
+                fs._copy_object_with_multipart_upload(
+                    S3Path("bucket", "src"),
+                    S3Path("bucket", "dst"),
+                    MetadataDirective="REPLACE",
+                    TaggingDirective="REPLACE",
+                    AnnotationDirective="EXCLUDE",
+                )
+        finally:
+            release.set()
+            executor.shutdown()
+
+        assert events == ["part stored", "abort"]
+        fs.core.upload_part_copy.assert_called_once()
+
+    def test_copy_object_with_multipart_upload_repeated_creation_interrupt(self):
+        # GH-1120: another interrupt while the cleanup waits for the creation
+        # is suppressed, so that the created upload is aborted and the first
+        # interrupt is re-raised, as S3File does.
+        fs = self._make_fs()
+        started = threading.Event()
+        release = threading.Event()
+
+        def create_multipart_upload(*args, **kwargs):
+            started.set()
+            assert release.wait(5)
+            return S3MultipartUpload({"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"})
+
+        fs.core.create_multipart_upload = mock.MagicMock(side_effect=create_multipart_upload)
+        fs.core.upload_part_copy = mock.MagicMock()
+        # The HeadObject of the source.
+        fs._call.return_value = {"ContentLength": 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE}
+        fs._abort_multipart_upload = mock.MagicMock()
+        executor = S3ThreadPoolExecutor(max_workers=2)
+        submit_to = executor.submit_to
+
+        def submit_creation(future, fn, *args, **kwargs):
+            submit_to(future, fn, *args, **kwargs)
+            result = future.result
+            waits = []
+
+            def interrupt_result(timeout=None):
+                # Only the first wait for the creation is interrupted; the
+                # cleanup reads the result afterwards.
+                waits.append(timeout)
+                if len(waits) == 1:
+                    assert started.wait(5)
+                    raise KeyboardInterrupt("first interrupt")
+                return result(timeout)
+
+            future.result = interrupt_result  # type: ignore[method-assign]
+
+        executor.submit_to = submit_creation  # type: ignore[method-assign]
+        fs._create_executor = mock.MagicMock(return_value=executor)
+
+        def interrupt_recovery(futures):
+            if not release.is_set():
+                release.set()
+                raise KeyboardInterrupt("second interrupt")
+            return wait(futures)
+
+        try:
+            with (
+                mock.patch("pyathena.filesystem.s3.wait", side_effect=interrupt_recovery),
+                pytest.raises(KeyboardInterrupt, match="first interrupt"),
+            ):
+                fs._copy_object_with_multipart_upload(
+                    S3Path("bucket", "src"),
+                    S3Path("bucket", "dst"),
+                    MetadataDirective="REPLACE",
+                    TaggingDirective="REPLACE",
+                    AnnotationDirective="EXCLUDE",
+                )
+        finally:
+            release.set()
+
+        fs._abort_multipart_upload.assert_called_once()
+        upload, _ = fs._abort_multipart_upload.call_args.args
+        assert upload.upload_id == "uploadid"
+        fs.core.upload_part_copy.assert_not_called()
+
+    def test_copy_object_with_multipart_upload_interrupted_cleanup(self, caplog):
+        # GH-1120: an interrupt while the cleanup waits for the part copies
+        # stops it, and the upload ID is logged for a later abort.
+        fs = self._make_fs()
+        fs.core.create_multipart_upload = mock.MagicMock(
+            return_value=S3MultipartUpload(
+                {"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"}
+            )
+        )
+        fs.core.upload_part_copy = mock.MagicMock(side_effect=RuntimeError("copy failed"))
+        # The HeadObject of the source.
+        fs._call.return_value = {"ContentLength": 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE}
+        fs._abort_multipart_upload = mock.MagicMock()
+
+        with (
+            mock.patch("pyathena.filesystem.s3.wait", side_effect=KeyboardInterrupt),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            fs._copy_object_with_multipart_upload(
+                S3Path("bucket", "src"),
+                S3Path("bucket", "dst"),
+                MetadataDirective="REPLACE",
+                TaggingDirective="REPLACE",
+                AnnotationDirective="EXCLUDE",
+            )
+
+        fs._abort_multipart_upload.assert_not_called()
+        assert "Interrupted the abort of multipart upload uploadid to s3://bucket/dst." in (
+            caplog.text
+        )
+
     @pytest.mark.parametrize(
         "block_size",
         [
@@ -6272,6 +6434,68 @@ class TestS3File:
         file.commit()
         fs.core.put_object.assert_not_called()
 
+    @pytest.mark.parametrize("operation", ["write", "append"])
+    def test_part_scheduling_interrupted(self, operation):
+        # GH-1120: an interrupt while a part is being scheduled, after its
+        # request started, waits for the part before the upload is aborted.
+        # The part was not tracked, so the abort used to come first, and the
+        # part could be stored after it.
+        fs = self._make_append_fs(b"a" * 6 if operation == "append" else b"")
+        events = []
+        started = threading.Event()
+        release = threading.Event()
+        # Appends copy the existing object as the first part.
+        part_request = fs.core.upload_part_copy if operation == "append" else fs.core.upload_part
+        respond = part_request.side_effect
+
+        def store_part(**kwargs):
+            started.set()
+            # Uploading until the cleanup waits for it.
+            assert release.wait(5)
+            events.append("part stored")
+            return respond(**kwargs)
+
+        part_request.side_effect = store_part
+        fs._call.side_effect = lambda *args, **kwargs: events.append("abort")
+        executor = S3ThreadPoolExecutor(max_workers=2)
+        submit = executor.submit
+        submitted = []
+
+        def submit_and_interrupt(fn, *args, **kwargs):
+            future = submit(fn, *args, **kwargs)
+            submitted.append(future)
+            if len(submitted) == 2:
+                # The first part, interrupted once its request started.
+                assert started.wait(5)
+                raise KeyboardInterrupt
+            return future
+
+        executor.submit = submit_and_interrupt  # type: ignore[method-assign]
+        mode = "ab" if operation == "append" else "wb"
+        file = S3File(fs, "s3://bucket/key.txt", mode=mode, block_size=4, executor=executor)
+
+        def wait_for_parts(futures):
+            if any(not future.done() for future in futures):
+                release.set()
+            return wait(futures)
+
+        try:
+            with (
+                mock.patch("pyathena.filesystem.s3.wait", side_effect=wait_for_parts),
+                pytest.raises(KeyboardInterrupt),
+            ):
+                file.write(b"x" * 8)
+        finally:
+            release.set()
+            executor.shutdown()
+
+        assert events == ["part stored", "abort"]
+        assert file.closed
+        assert file.buffer is None
+        assert file.multipart_upload is None
+        file.commit()
+        fs.core.complete_multipart_upload.assert_not_called()
+
     def test_creation_scheduling_interrupted(self):
         # GH-1118: an interrupt while the executor starts the worker that runs
         # the creation waits for it and aborts the upload. The executor did not
@@ -6435,7 +6659,7 @@ class TestS3File:
         file.multipart_upload = S3MultipartUpload(
             {"Bucket": "bucket", "Key": "key.txt", "UploadId": "uploadid"}
         )
-        file._executor = ThreadPoolExecutor(max_workers=1)
+        file._executor = S3ThreadPoolExecutor(max_workers=1)
         file.fs.core.upload_part.side_effect = lambda **kw: SimpleNamespace(
             etag=f'"e{kw["part_number"]}"', part_number=kw["part_number"]
         )
@@ -6631,7 +6855,7 @@ class TestS3File:
         # The submitted parts, some of which the abort may have cancelled.
         assert [
             c.kwargs["part_number"]
-            for c in executor.submit.call_args_list
+            for c in executor.submit_to.call_args_list
             if "part_number" in c.kwargs
         ] == [1, 2, 3]
         executor.shutdown.assert_called()
@@ -6668,7 +6892,7 @@ class TestS3File:
         assert f.closed
         assert [
             c.kwargs["part_number"]
-            for c in executor.submit.call_args_list
+            for c in executor.submit_to.call_args_list
             if "part_number" in c.kwargs
         ] == [1, 2, 3]
         executor.shutdown.assert_called()
