@@ -536,9 +536,7 @@ class AthenaDialect(DefaultDialect):
         returns its wrapper, so this is typed by the interface used here rather
         than by the class requested.
         """
-        return raw_connection.driver_connection.cursor(  # type: ignore[union-attr]
-            Cursor, converter=Cursor.get_default_converter()
-        )
+        return raw_connection.driver_connection._internal_cursor(Cursor)  # type: ignore[union-attr]
 
     def _column(self, name: str | None, type_: str, comment: str | None, partition: bool | None):
         return {

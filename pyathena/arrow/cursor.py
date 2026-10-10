@@ -170,7 +170,8 @@ class ArrowCursor(WithFetch):
             options: Shared execution options as an
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.
-            **kwargs: Additional execution parameters.
+            **kwargs: Result-set overrides: ``block_size``, ``connect_timeout``,
+                and ``request_timeout``. Unknown names raise TypeError.
                 ``block_size`` sets the read block size for this query, and
                 ``connect_timeout`` and ``request_timeout`` override the cursor's values.
 
@@ -181,6 +182,7 @@ class ArrowCursor(WithFetch):
             >>> cursor.execute("SELECT * FROM sales WHERE year = 2023")
             >>> table = cursor.as_arrow()  # Returns Apache Arrow Table
         """
+        self._validate_execute_kwargs(kwargs, ("block_size", "connect_timeout", "request_timeout"))
         self._reset_state()
         options = ExecuteOptions.resolve(
             options,

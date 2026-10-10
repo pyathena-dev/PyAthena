@@ -40,6 +40,12 @@ cursor.execute("SELECT %(value)s", {"value": 1}, work_group="YOUR_WORK_GROUP")
 Existing keyword arguments retain their defaults and behavior.
 The cursor class can still be selected positionally with `connection.cursor(DictCursor)`.
 
+Unknown keyword arguments raise `TypeError` in cursor constructors and in `execute()` instead of being ignored.
+The connection's `cursor_kwargs` are passed to every cursor that it creates, so the requested cursor class must accept them.
+A cursor subclass that receives settings of its own must not pass them on to the base class constructor.
+The pandas and Polars cursors pass the `execute()` keyword arguments that they do not use themselves to the reader, such as `pandas.read_csv()`.
+The reader rejects an unknown name when it reads the query results, which PyAthena raises as `OperationalError`; the name is not checked when there are no results to read.
+
 ## Managed query result storage
 
 When using a workgroup with [managed query result storage](https://docs.aws.amazon.com/athena/latest/ug/managed-results.html) enabled,

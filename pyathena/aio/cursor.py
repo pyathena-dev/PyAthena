@@ -139,11 +139,12 @@ class AioCursor(WithAsyncFetch):
             options: Shared execution options as an
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.
-            **kwargs: Additional execution parameters.
+            **kwargs: Unknown keyword arguments raise TypeError.
 
         Returns:
             Self reference for method chaining.
         """
+        self._validate_execute_kwargs(kwargs)
         self._reset_state()
         options = ExecuteOptions.resolve(
             options,

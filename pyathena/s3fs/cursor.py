@@ -166,9 +166,10 @@ class S3FSCursor(WithFetch):
             options: Shared execution options as an
                 :class:`~pyathena.options.ExecuteOptions` instance. Individual
                 keyword arguments take precedence over ``options`` fields.
-            **kwargs: Additional execution parameters.
+            **kwargs: Supported S3FS result-set overrides. Unknown names raise TypeError.
                 ``block_size`` sets the read block size for this query, and
                 ``csv_reader`` overrides the cursor's value.
+                ``filesystem_class`` overrides the filesystem used to read results.
 
         Returns:
             Self reference for method chaining.
@@ -177,6 +178,7 @@ class S3FSCursor(WithFetch):
             >>> cursor.execute("SELECT * FROM my_table WHERE id = %(id)s", {"id": 123})
             >>> rows = cursor.fetchall()
         """
+        self._validate_execute_kwargs(kwargs, ("block_size", "csv_reader", "filesystem_class"))
         self._reset_state()
         options = ExecuteOptions.resolve(
             options,
