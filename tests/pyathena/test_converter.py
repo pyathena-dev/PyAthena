@@ -570,3 +570,34 @@ def test_to_datetime_with_tz_offsets_and_zone_names(input_value, expected):
     if expected is not None:
         assert result.utcoffset() == expected.utcoffset()
         assert result.tzinfo is not None
+
+
+@pytest.mark.parametrize(
+    ("type_hint", "value", "expected"),
+    [
+        ("array(json)", '[""]', [""]),
+        (
+            "array(json)",
+            '[{"a":1}, "x", 1, true, null, ""]',
+            [{"a": 1}, "x", 1, True, None, ""],
+        ),
+        # JSON string scalars whose text looks like JSON stay strings.
+        (
+            "array(json)",
+            '["{\\"a\\": 1}", "123", "true", "null"]',
+            ['{"a": 1}', "123", "true", "null"],
+        ),
+        (
+            "map(varchar,json)",
+            '{"k": "", "n": 1, "b": true, "z": null}',
+            {"k": "", "n": 1, "b": True, "z": None},
+        ),
+        ("row(a json, b json)", '{"a": "x", "b": {"c": 1}}', {"a": "x", "b": {"c": 1}}),
+        ("row(a json, b json)", '{"a": "", "b": true}', {"a": "", "b": True}),
+        ("array(varchar)", '["a", "123"]', ["a", "123"]),
+    ],
+)
+def test_typed_json_elements(type_hint, value, expected):
+    """JSON elements of typed complex values decode their original JSON text."""
+    type_ = type_hint.split("(", 1)[0]
+    assert DefaultTypeConverter().convert(type_, value, type_hint=type_hint) == expected
