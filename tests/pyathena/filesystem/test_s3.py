@@ -3641,9 +3641,14 @@ class TestS3FileSystem:
         executor.submit = submit_creation  # type: ignore[method-assign]
         fs._create_executor = mock.MagicMock(return_value=executor)
 
+        handled = []
+
         def handle_interrupt(signum, frame):
             # Only the first interrupt is raised; repeated signals are ignored.
-            if not interrupted.is_set():
+            # The list is checked instead of the event, whose set() takes a
+            # lock that a nested call of this handler would wait for forever.
+            if not handled:
+                handled.append(signum)
                 interrupted.set()
                 raise KeyboardInterrupt
 
@@ -3652,7 +3657,7 @@ class TestS3FileSystem:
             # it, which the creation cannot stop doing before the interrupt.
             if started.wait(5) and waiting.wait(5):
                 # A signal that arrives just before the main thread blocks on
-                # the creation does not wake it, so it is repeated until handled.
+                # the creation can miss waking it, so it is repeated until handled.
                 while True:
                     signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
                     if interrupted.wait(0.1):
@@ -6050,16 +6055,21 @@ class TestS3File:
         else:
             perform = functools.partial(file.write, b"x" * 8)
 
+        handled = []
+
         def handle_interrupt(signum, frame):
             # Only the first interrupt is raised; repeated signals are ignored.
-            if not interrupted.is_set():
+            # The list is checked instead of the event, whose set() takes a
+            # lock that a nested call of this handler would wait for forever.
+            if not handled:
+                handled.append(signum)
                 interrupted.set()
                 raise KeyboardInterrupt
 
         def interrupt():
             if started.wait(5) and waiting.wait(5):
                 # A signal that arrives just before the main thread blocks on
-                # the creation does not wake it, so it is repeated until handled.
+                # the creation can miss waking it, so it is repeated until handled.
                 while True:
                     signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
                     if interrupted.wait(0.1):
@@ -6098,7 +6108,9 @@ class TestS3File:
             waiting.set()
             interrupted.set()
             if thread.ident is not None:
-                thread.join(5)
+                # Joined without a timeout, so that no signal is sent after the
+                # previous handler is restored.
+                thread.join()
             signal.signal(signal.SIGINT, previous_handler)
             fs._call.side_effect = None
             file._close_without_commit()
