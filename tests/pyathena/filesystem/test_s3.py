@@ -3642,14 +3642,21 @@ class TestS3FileSystem:
         fs._create_executor = mock.MagicMock(return_value=executor)
 
         def handle_interrupt(signum, frame):
-            interrupted.set()
-            raise KeyboardInterrupt
+            # Only the first interrupt is raised; repeated signals are ignored.
+            if not interrupted.is_set():
+                interrupted.set()
+                raise KeyboardInterrupt
 
         def interrupt():
             # Sent only while the creation is running and the copy waits for
             # it, which the creation cannot stop doing before the interrupt.
             if started.wait(5) and waiting.wait(5):
-                signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+                # A signal that arrives just before the main thread blocks on
+                # the creation does not wake it, so it is repeated until handled.
+                while True:
+                    signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+                    if interrupted.wait(0.1):
+                        break
 
         thread = threading.Thread(target=interrupt, daemon=True)
         previous_handler = signal.signal(signal.SIGINT, handle_interrupt)
@@ -3668,10 +3675,10 @@ class TestS3FileSystem:
             signal.signal(signal.SIGINT, lambda signum, frame: None)
             started.set()
             waiting.set()
+            interrupted.set()
             if thread.ident is not None:
                 thread.join()
             signal.signal(signal.SIGINT, previous_handler)
-            interrupted.set()
 
         fs._abort_multipart_upload.assert_called_once()
         upload, params = fs._abort_multipart_upload.call_args.args
@@ -6044,12 +6051,19 @@ class TestS3File:
             perform = functools.partial(file.write, b"x" * 8)
 
         def handle_interrupt(signum, frame):
-            interrupted.set()
-            raise KeyboardInterrupt
+            # Only the first interrupt is raised; repeated signals are ignored.
+            if not interrupted.is_set():
+                interrupted.set()
+                raise KeyboardInterrupt
 
         def interrupt():
             if started.wait(5) and waiting.wait(5):
-                signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+                # A signal that arrives just before the main thread blocks on
+                # the creation does not wake it, so it is repeated until handled.
+                while True:
+                    signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+                    if interrupted.wait(0.1):
+                        break
 
         thread = threading.Thread(target=interrupt, daemon=True)
         previous_handler = signal.signal(signal.SIGINT, handle_interrupt)
