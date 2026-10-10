@@ -100,6 +100,8 @@ def connect(**kwargs) -> Connection[Any]:
         catalog_name: Athena data catalog name. Defaults to "awsdatacatalog".
         work_group: Athena workgroup name. Can be used instead of s3_staging_dir
             if the workgroup has a result location configured.
+            Pass an empty string to skip the ``AWS_ATHENA_WORK_GROUP``
+            environment variable fallback.
         poll_interval: Time in seconds between polling for query completion.
             Defaults to 1.0.
         encryption_option: S3 encryption option for query results. Can be
