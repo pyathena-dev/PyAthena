@@ -3034,11 +3034,13 @@ class S3File(AbstractBufferedFile):
                     )
                     size = info.get("size", 0)
                 for part_number, range_ in writer.iter_copy_parts(size):
-                    # Tracked before it is scheduled, as the parts below are.
-                    copy: Future[S3MultipartUploadPart] = Future()
-                    self.multipart_upload_parts.append(copy)
+                    # Tracked before it is scheduled, so that an interrupt
+                    # while it is being scheduled still lets the cleanup
+                    # cancel it or wait for it before the abort.
+                    part: Future[S3MultipartUploadPart] = Future()
+                    self.multipart_upload_parts.append(part)
                     self._executor.submit_to(
-                        copy,
+                        part,
                         writer.upload_part_copy,
                         part_number=part_number,
                         source=S3Path(self.bucket, self.key),
