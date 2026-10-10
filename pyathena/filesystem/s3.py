@@ -1658,11 +1658,17 @@ class S3FileSystem(AbstractFileSystem):
             return
         with self._create_executor(max_workers=max_workers) as executor:
             # Created on the executor, so that an interrupt while it is being
-            # created lets the request finish and the upload be aborted.
-            creation = executor.submit(
-                self.core.create_multipart_upload, plan.destination, **plan.create_params
-            )
+            # created lets the request finish and the upload be aborted. The
+            # future is created first, so that an interrupt while the request
+            # is being scheduled still lets it be cancelled or waited for.
+            creation: Future[S3MultipartUpload] = Future()
             try:
+                executor.submit_to(
+                    creation,
+                    self.core.create_multipart_upload,
+                    plan.destination,
+                    **plan.create_params,
+                )
                 multipart_upload = creation.result()
             except BaseException:
                 if not creation.cancel():
@@ -2987,10 +2993,12 @@ class S3File(AbstractBufferedFile):
             return
 
         writer = self._get_multipart_writer()
-        creation: Future[S3MultipartUpload] | None = None
+        # Created first, so that an interrupt while the creation is being
+        # scheduled still lets it be cancelled or waited for.
+        creation: Future[S3MultipartUpload] = Future()
         try:
-            creation = self._executor.submit(
-                writer.initiate, **self._get_request_kwargs("create_multipart_upload")
+            self._executor.submit_to(
+                creation, writer.initiate, **self._get_request_kwargs("create_multipart_upload")
             )
             creation.result()
             if self.append_block:
@@ -3016,11 +3024,7 @@ class S3File(AbstractBufferedFile):
         except BaseException:
             # A submitted creation may still return an ID after the wait is
             # interrupted. The writer records it before resolving the future.
-            try:
-                if creation is None:
-                    self._executor.shutdown()
-            finally:
-                self._close_without_commit(creation=creation)
+            self._close_without_commit(creation=creation)
             raise
 
     def _upload_chunk(self, final: bool = False) -> bool:

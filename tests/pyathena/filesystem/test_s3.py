@@ -41,7 +41,7 @@ from pyathena.filesystem import register_s3_filesystem
 from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
 from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch
 from pyathena.filesystem.s3_errors import S3ClientError
-from pyathena.filesystem.s3_executor import S3AioExecutor, S3ThreadPoolExecutor
+from pyathena.filesystem.s3_executor import S3AioExecutor, S3Executor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import S3MultipartUpload, S3Object, S3ObjectType, S3StorageClass
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_path_pairing import S3PathPairing
@@ -2559,6 +2559,7 @@ class TestS3FileSystem:
             raise RuntimeError("submit failed")
 
         executor.submit.side_effect = submit
+        executor.submit_to.side_effect = functools.partial(S3Executor.submit_to, executor)
         fs._create_executor = mock.MagicMock(return_value=executor)
 
         with pytest.raises(RuntimeError, match="submit failed"):
@@ -3623,33 +3624,43 @@ class TestS3FileSystem:
         fs._call.return_value = {"ContentLength": 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE}
         fs._abort_multipart_upload = mock.MagicMock()
         executor = S3ThreadPoolExecutor(max_workers=2)
-        submit = executor.submit
+        submit_to = executor.submit_to
 
-        def submit_creation(fn, *args, **kwargs):
-            future = submit(fn, *args, **kwargs)
-            if fn is fs.core.create_multipart_upload:
-                result = future.result
+        def submit_creation(future, fn, *args, **kwargs):
+            submit_to(future, fn, *args, **kwargs)
+            result = future.result
 
-                def wait_for_result(timeout=None):
-                    # The interrupt is sent once the copy waits for the creation.
-                    waiting.set()
-                    return result(timeout)
+            def wait_for_result(timeout=None):
+                # The interrupt is sent once the copy waits for the creation.
+                waiting.set()
+                return result(timeout)
 
-                future.result = wait_for_result  # type: ignore[method-assign]
-            return future
+            future.result = wait_for_result  # type: ignore[method-assign]
 
-        executor.submit = submit_creation  # type: ignore[method-assign]
+        executor.submit_to = submit_creation  # type: ignore[method-assign]
         fs._create_executor = mock.MagicMock(return_value=executor)
 
+        handled = []
+
         def handle_interrupt(signum, frame):
-            interrupted.set()
-            raise KeyboardInterrupt
+            # Only the first interrupt is raised; repeated signals are ignored.
+            # The list is checked instead of the event, whose set() takes a
+            # lock that a nested call of this handler would wait for forever.
+            if not handled:
+                handled.append(signum)
+                interrupted.set()
+                raise KeyboardInterrupt
 
         def interrupt():
             # Sent only while the creation is running and the copy waits for
             # it, which the creation cannot stop doing before the interrupt.
             if started.wait(5) and waiting.wait(5):
-                signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+                # A signal that arrives just before the main thread blocks on
+                # the creation can miss waking it, so it is repeated until handled.
+                while True:
+                    signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+                    if interrupted.wait(0.1):
+                        break
 
         thread = threading.Thread(target=interrupt, daemon=True)
         previous_handler = signal.signal(signal.SIGINT, handle_interrupt)
@@ -3668,10 +3679,10 @@ class TestS3FileSystem:
             signal.signal(signal.SIGINT, lambda signum, frame: None)
             started.set()
             waiting.set()
+            interrupted.set()
             if thread.ident is not None:
                 thread.join()
             signal.signal(signal.SIGINT, previous_handler)
-            interrupted.set()
 
         fs._abort_multipart_upload.assert_called_once()
         upload, params = fs._abort_multipart_upload.call_args.args
@@ -3681,6 +3692,60 @@ class TestS3FileSystem:
             "uploadid",
             {},
         )
+        fs.core.upload_part_copy.assert_not_called()
+
+    def test_copy_object_with_multipart_upload_interrupted_scheduling(self):
+        # GH-1118: an interrupt while the executor starts the worker that runs
+        # CreateMultipartUpload waits for it and aborts the upload. The
+        # interrupt used to propagate from submit() without an abort.
+        fs = self._make_fs()
+        started = threading.Event()
+        release = threading.Event()
+
+        def create_multipart_upload(*args, **kw):
+            started.set()
+            # Still running when the interrupt is handled, until the copy
+            # waits for it.
+            assert release.wait(5)
+            return S3MultipartUpload({"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"})
+
+        fs.core.create_multipart_upload = mock.MagicMock(side_effect=create_multipart_upload)
+        fs.core.upload_part_copy = mock.MagicMock()
+        # The HeadObject of the source.
+        fs._call.return_value = {"ContentLength": 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE}
+        fs._abort_multipart_upload = mock.MagicMock()
+        fs._create_executor = mock.MagicMock(return_value=S3ThreadPoolExecutor(max_workers=2))
+        start = threading.Thread.start
+
+        def start_and_interrupt(thread):
+            start(thread)
+            # Interrupted once the started worker runs the creation.
+            assert started.wait(5)
+            raise KeyboardInterrupt
+
+        def wait_for_creation(futures):
+            release.set()
+            return wait(futures)
+
+        try:
+            with (
+                mock.patch.object(threading.Thread, "start", start_and_interrupt),
+                mock.patch("pyathena.filesystem.s3.wait", side_effect=wait_for_creation),
+                pytest.raises(KeyboardInterrupt),
+            ):
+                fs._copy_object_with_multipart_upload(
+                    S3Path("bucket", "src"),
+                    S3Path("bucket", "dst"),
+                    MetadataDirective="REPLACE",
+                    TaggingDirective="REPLACE",
+                    AnnotationDirective="EXCLUDE",
+                )
+        finally:
+            release.set()
+
+        fs._abort_multipart_upload.assert_called_once()
+        upload, _ = fs._abort_multipart_upload.call_args.args
+        assert upload.upload_id == "uploadid"
         fs.core.upload_part_copy.assert_not_called()
 
     @pytest.mark.parametrize(
@@ -6006,10 +6071,10 @@ class TestS3File:
         if abort_fails:
             fs._call.side_effect = PermissionError("abort failed")
         executor = S3ThreadPoolExecutor(max_workers=1)
-        submit = executor.submit
+        submit_to = executor.submit_to
 
-        def submit_creation(fn, *args, **kwargs):
-            future = submit(fn, *args, **kwargs)
+        def submit_creation(future, fn, *args, **kwargs):
+            submit_to(future, fn, *args, **kwargs)
             result = future.result
 
             def wait_for_result(timeout=None):
@@ -6017,9 +6082,8 @@ class TestS3File:
                 return result(timeout)
 
             future.result = wait_for_result  # type: ignore[method-assign]
-            return future
 
-        executor.submit = submit_creation  # type: ignore[method-assign]
+        executor.submit_to = submit_creation  # type: ignore[method-assign]
         mode = {"append": "ab", "exclusive": "xb"}.get(operation, "wb")
         file = S3File(
             fs,
@@ -6043,13 +6107,25 @@ class TestS3File:
         else:
             perform = functools.partial(file.write, b"x" * 8)
 
+        handled = []
+
         def handle_interrupt(signum, frame):
-            interrupted.set()
-            raise KeyboardInterrupt
+            # Only the first interrupt is raised; repeated signals are ignored.
+            # The list is checked instead of the event, whose set() takes a
+            # lock that a nested call of this handler would wait for forever.
+            if not handled:
+                handled.append(signum)
+                interrupted.set()
+                raise KeyboardInterrupt
 
         def interrupt():
             if started.wait(5) and waiting.wait(5):
-                signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+                # A signal that arrives just before the main thread blocks on
+                # the creation can miss waking it, so it is repeated until handled.
+                while True:
+                    signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+                    if interrupted.wait(0.1):
+                        break
 
         thread = threading.Thread(target=interrupt, daemon=True)
         previous_handler = signal.signal(signal.SIGINT, handle_interrupt)
@@ -6084,7 +6160,9 @@ class TestS3File:
             waiting.set()
             interrupted.set()
             if thread.ident is not None:
-                thread.join(5)
+                # Joined without a timeout, so that no signal is sent after the
+                # previous handler is restored.
+                thread.join()
             signal.signal(signal.SIGINT, previous_handler)
             fs._call.side_effect = None
             file._close_without_commit()
@@ -6106,19 +6184,18 @@ class TestS3File:
         if abort_fails:
             fs._call.side_effect = PermissionError("abort failed")
         executor = S3ThreadPoolExecutor(max_workers=1)
-        submit = executor.submit
+        submit_to = executor.submit_to
 
-        def submit_creation(fn, *args, **kwargs):
-            future = submit(fn, *args, **kwargs)
+        def submit_creation(future, fn, *args, **kwargs):
+            submit_to(future, fn, *args, **kwargs)
 
             def interrupt_result(timeout=None):
                 assert started.wait(5)
                 raise KeyboardInterrupt("first interrupt")
 
             future.result = interrupt_result  # type: ignore[method-assign]
-            return future
 
-        executor.submit = submit_creation  # type: ignore[method-assign]
+        executor.submit_to = submit_creation  # type: ignore[method-assign]
         file = S3File(
             fs,
             "s3://bucket/key.txt",
@@ -6172,15 +6249,19 @@ class TestS3File:
 
     def test_creation_cancelled_before_start(self):
         fs = self._make_append_fs(b"")
-        creation = Future()
-        creation.result = mock.MagicMock(side_effect=KeyboardInterrupt)  # type: ignore[method-assign]
         executor = mock.MagicMock()
-        executor.submit.return_value = creation
+
+        def submit_to(future, fn, *args, **kwargs):
+            # The creation is never started, and the wait for it is interrupted.
+            future.result = mock.MagicMock(side_effect=KeyboardInterrupt)
+
+        executor.submit_to.side_effect = submit_to
         file = S3File(fs, "s3://bucket/key.txt", mode="wb", block_size=4, executor=executor)
 
         with pytest.raises(KeyboardInterrupt):
             file.write(b"x" * 8)
 
+        creation = executor.submit_to.call_args.args[0]
         assert creation.cancelled()
         assert file.closed
         assert file.buffer is None
@@ -6189,6 +6270,58 @@ class TestS3File:
         fs.core.create_multipart_upload.assert_not_called()
         fs._call.assert_not_called()
         file.commit()
+        fs.core.put_object.assert_not_called()
+
+    def test_creation_scheduling_interrupted(self):
+        # GH-1118: an interrupt while the executor starts the worker that runs
+        # the creation waits for it and aborts the upload. The executor did not
+        # track that worker, so the upload used to be left without an abort.
+        fs = self._make_append_fs(b"")
+        started = threading.Event()
+        release = threading.Event()
+        upload = fs.core.create_multipart_upload.return_value
+
+        def create(*args, **kwargs):
+            started.set()
+            # Still running when the interrupt is handled, until the file
+            # waits for it.
+            assert release.wait(5)
+            return upload
+
+        fs.core.create_multipart_upload.side_effect = create
+        executor = S3ThreadPoolExecutor(max_workers=1)
+        file = S3File(fs, "s3://bucket/key.txt", mode="wb", block_size=4, executor=executor)
+        start = threading.Thread.start
+
+        def start_and_interrupt(thread):
+            start(thread)
+            # Interrupted once the started worker runs the creation.
+            assert started.wait(5)
+            raise KeyboardInterrupt
+
+        def wait_for_creation(futures):
+            release.set()
+            return wait(futures)
+
+        try:
+            with (
+                mock.patch.object(threading.Thread, "start", start_and_interrupt),
+                mock.patch("pyathena.filesystem.s3.wait", side_effect=wait_for_creation),
+                pytest.raises(KeyboardInterrupt),
+            ):
+                file.write(b"x" * 8)
+        finally:
+            release.set()
+
+        fs._call.assert_called_once_with(
+            S3_CLIENT.abort_multipart_upload, Bucket="bucket", Key="key.txt", UploadId="uploadid"
+        )
+        assert file.closed
+        assert file.buffer is None
+        assert file.multipart_upload is None
+        file.commit()
+        fs.core.upload_part.assert_not_called()
+        fs.core.complete_multipart_upload.assert_not_called()
         fs.core.put_object.assert_not_called()
 
     def test_creation_failure(self):
