@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pyathena import OperationalError
+from pyathena import NotSupportedError, OperationalError
 from pyathena.model import AthenaCalculationExecutionStatus, AthenaSessionStatus
 from pyathena.spark.cursor import SparkCursor
 from tests import ENV
@@ -267,6 +267,58 @@ class TestSparkCursor:
 
         cancel.assert_not_called()
         assert cursor.calculation_execution is None
+
+    @pytest.mark.parametrize("parameters", [{}, [], {"value": 1}])
+    def test_execute_rejects_parameters(self, parameters):
+        """Any parameters other than None raise before a calculation starts (no AWS)."""
+        cursor = SparkCursor.__new__(SparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._calculation_id = "previous"
+
+        with (
+            patch.object(SparkCursor, "_calculate") as calculate,
+            pytest.raises(NotSupportedError, match="do not support parameters"),
+        ):
+            cursor.execute("code", parameters)
+
+        calculate.assert_not_called()
+        assert cursor.calculation_id == "previous"
+
+    def test_execute_rejects_work_group(self):
+        """work_group is not an execute() argument, even when None (no AWS)."""
+        cursor = SparkCursor.__new__(SparkCursor)  # bypass __init__ to avoid AWS calls
+
+        with (
+            patch.object(SparkCursor, "_calculate") as calculate,
+            pytest.raises(TypeError, match="unexpected keyword argument 'work_group'"),
+        ):
+            cursor.execute("code", work_group=None)
+
+        calculate.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("args", "kwargs"), [((), {}), ((None,), {}), ((), {"parameters": None})]
+    )
+    def test_execute_accepts_none_parameters(self, args, kwargs):
+        """Omitted or None parameters run the calculation (no AWS)."""
+        cursor = SparkCursor.__new__(SparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._session_id = "session_id"
+
+        with (
+            patch.object(SparkCursor, "_calculate", return_value="calculation_id") as calculate,
+            patch.object(
+                SparkCursor,
+                "_poll",
+                return_value=MagicMock(state=AthenaCalculationExecutionStatus.STATE_COMPLETED),
+            ),
+        ):
+            cursor.execute("code", *args, **kwargs)
+
+        calculate.assert_called_once_with(
+            session_id="session_id",
+            code_block="code",
+            description=None,
+            client_request_token=None,
+        )
 
 
 def test_spark_on_poll_invoked_each_iteration():

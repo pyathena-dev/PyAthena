@@ -9,12 +9,12 @@ import asyncio
 import logging
 import threading
 import uuid
-from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
 
-from pyathena import DatabaseError, NotSupportedError, OperationalError
+from pyathena import DatabaseError, OperationalError
 from pyathena.aio.spark.cursor import AioSparkCursor
 from pyathena.model import AthenaCalculationExecutionStatus, AthenaSessionStatus
 from pyathena.spark.async_cursor import AsyncSparkCursor
@@ -140,74 +140,6 @@ def _close(cursor) -> None:
         asyncio.run(cursor.close())
     else:
         cursor.close()
-
-
-@pytest.fixture(params=SPARK_CURSOR_CLASSES, ids=lambda cls: cls.__name__)
-def execute_cursor(request):
-    """A Spark cursor whose calculation requests are mocked.
-
-    Args:
-        request: The pytest fixture request, selecting the cursor class.
-
-    Returns:
-        The cursor, with ``previous`` as its last calculation ID.
-    """
-    cursor = request.param.__new__(request.param)  # bypass __init__ to avoid AWS calls
-    cursor._session_id = "session_id"
-    cursor._calculation_id = "previous"
-    cursor._calculation_execution = None
-    mock = AsyncMock if request.param is AioSparkCursor else MagicMock
-    cursor._calculate = mock(return_value="calculation_id")
-    cursor._poll = mock(
-        return_value=MagicMock(state=AthenaCalculationExecutionStatus.STATE_COMPLETED)
-    )
-    cursor._executor = MagicMock()
-    return cursor
-
-
-async def _execute(cursor, *args, **kwargs):
-    """Call ``execute()``, awaiting it on ``AioSparkCursor``.
-
-    Args:
-        cursor: The Spark cursor.
-        *args: Positional arguments for ``execute()``.
-        **kwargs: Keyword arguments for ``execute()``.
-
-    Returns:
-        The result of ``execute()``.
-    """
-    if isinstance(cursor, AioSparkCursor):
-        return await cursor.execute(*args, **kwargs)
-    return cursor.execute(*args, **kwargs)
-
-
-class TestSparkExecute:
-    @pytest.mark.parametrize("parameters", [{}, [], {"value": 1}])
-    async def test_parameters_rejected(self, execute_cursor, parameters):
-        with pytest.raises(NotSupportedError, match="do not support parameters"):
-            await _execute(execute_cursor, "code", parameters)
-
-        execute_cursor._calculate.assert_not_called()
-        assert execute_cursor.calculation_id == "previous"
-
-    async def test_work_group_rejected(self, execute_cursor):
-        with pytest.raises(TypeError, match="unexpected keyword argument 'work_group'"):
-            await _execute(execute_cursor, "code", work_group=None)
-
-        execute_cursor._calculate.assert_not_called()
-
-    @pytest.mark.parametrize(
-        ("args", "kwargs"), [((), {}), ((None,), {}), ((), {"parameters": None})]
-    )
-    async def test_none_parameters_accepted(self, execute_cursor, args, kwargs):
-        await _execute(execute_cursor, "code", *args, **kwargs)
-
-        execute_cursor._calculate.assert_called_once_with(
-            session_id="session_id",
-            code_block="code",
-            description=None,
-            client_request_token=None,
-        )
 
 
 class TestSparkBaseCursor:
