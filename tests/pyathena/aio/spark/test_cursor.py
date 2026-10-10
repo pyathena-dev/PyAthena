@@ -520,12 +520,14 @@ class TestAioSparkCursor:
     async def test_execute_rejects_work_group(self):
         """work_group is not an execute() argument, even when None (no AWS)."""
         cursor = AioSparkCursor.__new__(AioSparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._calculation_id = "previous"
         cursor._calculate = AsyncMock()
 
         with pytest.raises(TypeError, match="unexpected keyword argument 'work_group'"):
             await cursor.execute("code", work_group=None)
 
         cursor._calculate.assert_not_awaited()
+        assert cursor.calculation_id == "previous"
 
     @pytest.mark.parametrize(
         ("args", "kwargs"), [((), {}), ((None,), {}), ((), {"parameters": None})]

@@ -286,6 +286,7 @@ class TestSparkCursor:
     def test_execute_rejects_work_group(self):
         """work_group is not an execute() argument, even when None (no AWS)."""
         cursor = SparkCursor.__new__(SparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._calculation_id = "previous"
 
         with (
             patch.object(SparkCursor, "_calculate") as calculate,
@@ -294,6 +295,7 @@ class TestSparkCursor:
             cursor.execute("code", work_group=None)
 
         calculate.assert_not_called()
+        assert cursor.calculation_id == "previous"
 
     @pytest.mark.parametrize(
         ("args", "kwargs"), [((), {}), ((None,), {}), ((), {"parameters": None})]

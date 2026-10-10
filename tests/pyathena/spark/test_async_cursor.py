@@ -261,6 +261,7 @@ class TestAsyncSparkCursor:
     def test_execute_rejects_parameters(self, parameters):
         """Any parameters other than None raise before a calculation starts (no AWS)."""
         cursor = AsyncSparkCursor.__new__(AsyncSparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._calculation_id = "previous"
         cursor._executor = MagicMock()
 
         with (
@@ -271,10 +272,12 @@ class TestAsyncSparkCursor:
 
         calculate.assert_not_called()
         cursor._executor.submit.assert_not_called()
+        assert cursor.calculation_id == "previous"
 
     def test_execute_rejects_work_group(self):
         """work_group is not an execute() argument, even when None (no AWS)."""
         cursor = AsyncSparkCursor.__new__(AsyncSparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._calculation_id = "previous"
         cursor._executor = MagicMock()
 
         with (
@@ -285,6 +288,7 @@ class TestAsyncSparkCursor:
 
         calculate.assert_not_called()
         cursor._executor.submit.assert_not_called()
+        assert cursor.calculation_id == "previous"
 
     @pytest.mark.parametrize(
         ("args", "kwargs"), [((), {}), ((None,), {}), ((), {"parameters": None})]
