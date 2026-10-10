@@ -244,7 +244,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 ``has_header``, ``schema_overrides``, and ``storage_options``. A given
                 ``storage_options`` replaces PyAthena's S3 settings as a whole: non-chunked
                 CSV results are read through fsspec, and chunked CSV and UNLOAD results
-                through Polars' native object store.
+                through Polars' native object store. Column types for a CSV result are
+                given as ``schema_overrides``; Polars' deprecated alias ``dtypes`` is not
+                supported.
         """
         super().__init__(
             connection=connection,
