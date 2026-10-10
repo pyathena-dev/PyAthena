@@ -1503,6 +1503,17 @@ class TestPandasCursor:
             pd.testing.assert_frame_equal(chunk1, chunk2)
 
     @pytest.mark.parametrize(
+        "pandas_cursor", [{"cursor_kwargs": {"chunksize": 2}}], indirect=["pandas_cursor"]
+    )
+    def test_get_chunk_time(self, pandas_cursor):
+        """get_chunk() converts time columns as iteration does."""
+        pandas_cursor.execute(
+            "SELECT * FROM (VALUES (1, CAST('12:34:56' AS TIME)), (2, NULL)) AS t(i, v) ORDER BY i"
+        )
+        chunk = pandas_cursor.as_pandas().get_chunk()
+        assert chunk["v"].tolist() == [datetime(2017, 1, 1, 12, 34, 56).time(), None]
+
+    @pytest.mark.parametrize(
         "pandas_cursor",
         [
             pytest.param({}, id="default"),
@@ -1518,5 +1529,5 @@ class TestPandasCursor:
         indirect=["pandas_cursor"],
     )
     def test_fetch_all_rows(self, pandas_cursor):
-        pandas_cursor.execute("SELECT 1 AS col")
-        assert pandas_cursor.fetchall() == [(1,)]
+        pandas_cursor.execute("SELECT 1 AS col, CAST('12:34:56' AS TIME) AS col_time")
+        assert pandas_cursor.fetchall() == [(1, datetime(2017, 1, 1, 12, 34, 56).time())]

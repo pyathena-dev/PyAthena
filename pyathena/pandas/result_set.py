@@ -153,14 +153,14 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
             size: Number of rows to retrieve. If None, returns entire chunk.
 
         Returns:
-            DataFrame chunk.
+            DataFrame chunk, with date truncation applied as in iteration.
         """
         from pandas.io.parsers import TextFileReader
 
         try:
             if isinstance(self._reader, TextFileReader):
-                return self._reader.get_chunk(size)
-            return next(self._reader)
+                return self._trunc_date(self._reader.get_chunk(size))
+            return self._trunc_date(next(self._reader))
         except BaseException:
             self.close()
             raise
@@ -339,8 +339,9 @@ class AthenaPandasResultSet(AthenaResultSet):
             trunc_date = _no_trunc_date if self.is_unload else self._trunc_date
             self._df_iter = PandasDataFrameIterator(df, trunc_date, self._csv_stream)
         elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
+            # GetQueryResults values are already converted, so time columns hold times.
             df = self._as_pandas_from_api()
-            self._df_iter = PandasDataFrameIterator(df, self._trunc_date)
+            self._df_iter = PandasDataFrameIterator(df, _no_trunc_date)
         else:
             import pandas as pd
 
@@ -493,7 +494,10 @@ class AthenaPandasResultSet(AthenaResultSet):
 
     def _trunc_date(self, df: DataFrame) -> DataFrame:
         if self._time_columns:
-            truncated = df.loc[:, self._time_columns].apply(lambda r: r.dt.time)
+            # A NULL is None, as with the GetQueryResults fallback and the other types.
+            truncated = df.loc[:, self._time_columns].apply(
+                lambda r: r.dt.time.astype(object).where(r.notna(), None)
+            )
             for time_col in self._time_columns:
                 df.isetitem(df.columns.get_loc(time_col), truncated[time_col])
         return df

@@ -47,6 +47,40 @@ def _split_array_items(inner: str) -> list[str]:
     return items
 
 
+def _split_native_array_items(inner: str) -> list[str]:
+    """Split the items of an array in Athena's native format.
+
+    Athena joins the items with ``", "``, so only a top-level comma followed by a space
+    separates items. Other commas, leading and trailing spaces, and empty items belong
+    to the items. Brace and bracket groupings are respected.
+
+    Args:
+        inner: Interior content of the array without brackets, not stripped.
+
+    Returns:
+        List of item strings.
+    """
+    items: list[str] = []
+    current: list[str] = []
+    depth = 0
+    index = 0
+    while index < len(inner):
+        char = inner[index]
+        if char in "{[":
+            depth += 1
+        elif char in "}]":
+            depth -= 1
+        elif char == "," and depth == 0 and inner.startswith(" ", index + 1):
+            items.append("".join(current))
+            current = []
+            index += 2
+            continue
+        current.append(char)
+        index += 1
+    items.append("".join(current))
+    return items
+
+
 @dataclass
 class TypeNode:
     """Parsed representation of an Athena DDL type signature.
@@ -259,19 +293,21 @@ class TypedValueConverter:
         return converter_fn(value)
 
     @staticmethod
-    def _to_json_str(value: Any) -> str:
+    def _to_json_str(value: Any, type_node: TypeNode) -> str:
         """Convert a JSON-parsed value back to a string for further conversion.
 
-        Uses json.dumps for dict/list to produce valid JSON, and str() for
-        scalar types to produce converter-compatible strings.
+        Uses json.dumps for dict/list values and for every value of a JSON type,
+        so that the JSON converter decodes the original JSON text, and str() for
+        the other scalar types to produce converter-compatible strings.
 
         Args:
             value: A value from json.loads output.
+            type_node: The type of the value.
 
         Returns:
             String representation suitable for type conversion.
         """
-        if isinstance(value, (dict, list)):
+        if isinstance(value, (dict, list)) or type_node.type_name == "json":
             return json.dumps(value)
         return str(value)
 
@@ -306,35 +342,37 @@ class TypedValueConverter:
 
         element_type = type_node.children[0] if type_node.children else TypeNode("varchar")
 
-        # Try JSON first (only if content looks like JSON)
+        # Try JSON first if the elements are JSON, whose values Athena renders as JSON
+        # text, or if the content looks like JSON
         inner_preview = value[1:10] if len(value) > 10 else value[1:-1]
-        if '"' in inner_preview or value.startswith(("[{", "[null", "[[")):
+        if (
+            element_type.type_name == "json"
+            or '"' in inner_preview
+            or value.startswith(("[{", "[null", "[["))
+        ):
             try:
                 parsed = json.loads(value)
                 if isinstance(parsed, list):
                     return [
                         None
                         if elem is None
-                        else self.convert(self._to_json_str(elem), element_type)
+                        else self.convert(self._to_json_str(elem, element_type), element_type)
                         for elem in parsed
                     ]
             except json.JSONDecodeError:
                 pass
 
         # Native format
-        inner = value[1:-1].strip()
+        inner = value[1:-1]
         if not inner:
             return []
 
         if "[" in inner:
             return None  # Nested arrays not supported in native format
 
-        items = _split_array_items(inner)
+        items = _split_native_array_items(inner)
         result: list[Any] = []
         for item in items:
-            item = item.strip()
-            if not item:
-                continue
             if item.startswith("{") and item.endswith("}"):
                 if element_type.type_name in ("row", "struct"):
                     result.append(self._convert_typed_struct(item, element_type))
@@ -370,8 +408,12 @@ class TypedValueConverter:
                 parsed = json.loads(value)
                 if isinstance(parsed, dict):
                     return {
-                        str(self.convert(self._to_json_str(k), key_type) if k is not None else k): (
-                            self.convert(self._to_json_str(v), value_type)
+                        str(
+                            self.convert(self._to_json_str(k, key_type), key_type)
+                            if k is not None
+                            else k
+                        ): (
+                            self.convert(self._to_json_str(v, value_type), value_type)
                             if v is not None
                             else None
                         )
@@ -438,7 +480,7 @@ class TypedValueConverter:
                     for i, (k, v) in enumerate(parsed.items()):
                         ft = self._get_field_type(k, type_node, i)
                         result[k] = (
-                            self.convert(self._to_json_str(v), ft) if v is not None else None
+                            self.convert(self._to_json_str(v, ft), ft) if v is not None else None
                         )
                     return result
             except json.JSONDecodeError:

@@ -251,8 +251,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
         if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
             self._df_iter = self._create_dataframe_iterator()
         elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
+            # GetQueryResults values are already converted.
             df = self._as_polars_from_api()
-            self._df_iter = PolarsDataFrameIterator(df, self.converters, self._get_column_names())
+            self._df_iter = PolarsDataFrameIterator(df, {}, self._get_column_names())
         else:
             import polars as pl
 
@@ -723,5 +724,6 @@ class AthenaPolarsResultSet(AthenaResultSet):
         import polars as pl
 
         super().close()
+        self._df_iter.close()
         self._df_iter = PolarsDataFrameIterator(pl.DataFrame(), {}, [])
         self._iterrows = iter([])

@@ -18,6 +18,7 @@ from pyathena.parser import (
     TypeNode,
     TypeSignatureParser,
     _split_array_items,
+    _split_native_array_items,
 )
 from pyathena.util import strtobool
 
@@ -144,7 +145,7 @@ def _to_array(varchar_value: str | None) -> list[Any] | str | None:
         # If JSON parsing fails, fall back to basic parsing for simple cases
         pass
 
-    inner = varchar_value[1:-1].strip()
+    inner = varchar_value[1:-1]
     if not inner:
         return []
 
@@ -288,13 +289,10 @@ def _parse_array_native(inner: str) -> list[Any] | None:
     """
     result = []
 
-    # Smart split by comma - respect brace groupings
-    items = _split_array_items(inner)
+    # Split as Athena joins the items, respecting brace groupings
+    items = _split_native_array_items(inner)
 
     for item in items:
-        if not item:
-            continue
-
         # Handle struct (ROW) values in format {a, b, c} or {key=value, ...}
         if item.strip().startswith("{") and item.strip().endswith("}"):
             # This is a struct value - parse it as a struct
