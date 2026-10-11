@@ -97,7 +97,7 @@ Measurements depend on the CPU architecture; `environment.json` records it, and 
 Instance size and disk size are parameters, so a later run can deliberately test another memory budget.
 `Purchase=spot` launches Spot Instances of the same instance type instead of On-Demand Instances.
 The Auto Scaling group spreads the hosts over three Availability Zones with the price-capacity-optimized allocation strategy and never mixes instance types, so every host stays identical.
-The template uses the first three zones that `Fn::GetAZs` returns, so deployment fails in an account whose default VPC has default subnets in fewer than three zones.
+The template uses the first three zones that `Fn::GetAZs` returns, so deployment fails when it returns fewer than three, which happens when the account's default VPC has default subnets in only one or two zones.
 The group replaces an interrupted Spot Instance, but the job that ran on it keeps its claim; see the retry procedure in [Running on a fleet](#running-on-a-fleet).
 `environment.json` does not record the instance type or purchase option; a worker started with `--terminate-host` records both under `hosts/` in its queue, and the recovered `instances.json` lists the hosts that still exist.
 The AMI parameter resolves the current AL2023 image at deployment; record the resulting AMI when comparing environments.
