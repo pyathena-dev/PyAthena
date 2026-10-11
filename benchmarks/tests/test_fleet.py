@@ -7,6 +7,7 @@
 
 import io
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,7 +19,9 @@ from pyathena_bench.fleet import (
     Filters,
     Queue,
     expand_jobs,
+    merge_jobs,
     quiesce,
+    retire_host,
     status,
     submit,
     trial_evidence,
@@ -125,6 +128,23 @@ class TestExpandJobs:
         assert [j["id"] for j in jobs if "-a1000" in j["id"]] == [
             "single-xlarge-flat-cursor-sync-csv-rows-a1000"
         ]
+
+    def test_trial_overrides_are_carried_by_unsplit_jobs(self):
+        jobs = expand_jobs(
+            replace(SETTINGS, warmups=0, repetitions=3),
+            ["single"],
+            ["xlarge"],
+            ["flat"],
+            Filters(family=["cursor"], api=["sync"]),
+            split_pages=50000,
+            explicit_trials=True,
+        )
+        whole = [j for j in jobs if "-a1000" in j["id"]]
+        assert whole[0]["args"][-4:] == ["--warmups", "0", "--repetitions", "3"]
+        assert whole[0]["pages"] == 10001 * 3
+        split = [j for j in jobs if "-a100-" in j["id"]]
+        assert [j["id"][-3:] for j in split] == ["-r1", "-r2", "-r3"]
+        assert all(j["args"][-4:] == ["--warmups", "0", "--repetitions", "1"] for j in split)
 
     def test_api_heavy_jobs_come_first(self):
         jobs = expand_jobs(
@@ -241,6 +261,78 @@ class TestQueue:
         assert order == ["light", "heavy"]
 
 
+class TestMergeJobs:
+    def test_merged_lists_follow_the_queue_order(self):
+        heavy = {**job("heavy", heavy=True), "pages": 10}
+        longer = {**job("longer"), "weight": 2}
+        merged = merge_jobs([[job("shorter"), longer], [heavy]])
+        assert [j["id"] for j in merged] == ["heavy", "longer", "shorter"]
+
+    def test_duplicate_ids_across_lists_are_rejected(self):
+        with pytest.raises(ValueError, match="unique"):
+            merge_jobs([[job("a")], [job("a")]])
+
+
+METADATA = {
+    "instance-id": "i-123",
+    "instance-type": "r7g.2xlarge",
+    "placement/availability-zone": "us-west-2b",
+    "instance-life-cycle": "spot",
+}
+
+
+class FakeAutoScaling:
+    """Auto Scaling client that records calls in order."""
+
+    def __init__(self):
+        self.calls = []
+
+    def describe_auto_scaling_instances(self, **kwargs):
+        self.calls.append(("describe", kwargs))
+        return {"AutoScalingInstances": [{"AutoScalingGroupName": "fleet-group"}]}
+
+    def suspend_processes(self, **kwargs):
+        self.calls.append(("suspend", kwargs))
+
+    def terminate_instance_in_auto_scaling_group(self, **kwargs):
+        self.calls.append(("terminate", kwargs))
+
+
+class TestRetireHost:
+    def test_finished_worker_records_its_host_and_terminates_it_after_suspending_rebalance(
+        self, tmp_path
+    ):
+        s3, queue = queue_with([job("a")], tmp_path)
+        autoscaling = FakeAutoScaling()
+        keep = tmp_path / "keep-host"
+        assert retire_host(queue, autoscaling, ["a"], keep=keep, metadata=METADATA.__getitem__)
+        assert autoscaling.calls == [
+            ("describe", {"InstanceIds": ["i-123"]}),
+            (
+                "suspend",
+                {"AutoScalingGroupName": "fleet-group", "ScalingProcesses": ["AZRebalance"]},
+            ),
+            ("terminate", {"InstanceId": "i-123", "ShouldDecrementDesiredCapacity": True}),
+        ]
+        record = json.loads(s3.objects[queue.key("hosts", "i-123.json")])
+        assert record["ran"] == ["a"]
+        assert record["kept"] is False
+        assert (record["instance_type"], record["availability_zone"], record["lifecycle"]) == (
+            "r7g.2xlarge",
+            "us-west-2b",
+            "spot",
+        )
+
+    def test_keep_file_leaves_the_host_and_its_group_unchanged(self, tmp_path):
+        s3, queue = queue_with([job("a")], tmp_path)
+        keep = tmp_path / "keep-host"
+        keep.touch()
+        autoscaling = FakeAutoScaling()
+        assert not retire_host(queue, autoscaling, [], keep=keep, metadata=METADATA.__getitem__)
+        assert autoscaling.calls == []
+        assert json.loads(s3.objects[queue.key("hosts", "i-123.json")])["kept"] is True
+
+
 class TestCommandLine:
     def test_jobs_command_prints_the_expanded_queue(self, tmp_path, capsys):
         config = tmp_path / "config.toml"
@@ -250,6 +342,15 @@ class TestCommandLine:
         jobs = json.loads(capsys.readouterr().out)
         assert len(jobs) == 12
         assert {j["args"][5] for j in jobs} == {"flat", "nested"}
+
+    def test_jobs_command_carries_trial_overrides(self, tmp_path, capsys):
+        config = tmp_path / "config.toml"
+        config.write_text("[scales]\nsmall = 10000\n")
+        argv = ["--config", str(config), "jobs", "--suite", "single", "--scale", "small"]
+        filters = ["--family", "pandas", "--api", "sync", "--transport", "csv"]
+        assert main([*argv, *filters, "--output-kind", "native", "--repetitions", "3"]) == 0
+        jobs = json.loads(capsys.readouterr().out)
+        assert [j["args"][-4:] for j in jobs] == [["--warmups", "1", "--repetitions", "3"]]
 
     def test_plan_honors_arraysize_filter_and_repetition_overrides(self, tmp_path, capsys):
         config = tmp_path / "config.toml"
