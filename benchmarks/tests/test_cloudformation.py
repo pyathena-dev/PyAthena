@@ -103,8 +103,15 @@ def test_hosts_can_terminate_instances_only_in_their_own_stack():
     statements = template["Resources"]["Role"]["Properties"]["Policies"][0]["PolicyDocument"][
         "Statement"
     ]
-    [statement] = [s for s in statements if "autoscaling" in str(s["Action"])]
-    assert statement["Action"] == "autoscaling:TerminateInstanceInAutoScalingGroup"
+    scoped = [s for s in statements if "autoscaling" in str(s["Action"]) and "Condition" in s]
+    unscoped = [s for s in statements if "autoscaling" in str(s["Action"]) and "Condition" not in s]
+    # Only the read-only lookup of the host's group is unconditional.
+    assert [s["Action"] for s in unscoped] == ["autoscaling:DescribeAutoScalingInstances"]
+    [statement] = scoped
+    assert statement["Action"] == [
+        "autoscaling:SuspendProcesses",
+        "autoscaling:TerminateInstanceInAutoScalingGroup",
+    ]
     assert statement["Condition"] == {
         "StringEquals": {
             "autoscaling:ResourceTag/aws:cloudformation:stack-id": {"Ref": "AWS::StackId"}

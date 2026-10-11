@@ -604,14 +604,15 @@ def work(
             time.sleep(poll_seconds)
 
 
-def instance_id(timeout: float = 2.0) -> str:
-    """Return this EC2 instance's ID from the instance metadata service (IMDSv2).
+def instance_metadata(path: str, timeout: float = 2.0) -> str:
+    """Read a value from the EC2 instance metadata service (IMDSv2).
 
     Args:
+        path: Path below ``meta-data/``, such as ``instance-id``.
         timeout: Seconds to wait for each metadata request.
 
     Returns:
-        Instance ID.
+        Metadata value.
     """
     token = urllib.request.Request(
         f"{METADATA_URL}/api/token",
@@ -621,7 +622,7 @@ def instance_id(timeout: float = 2.0) -> str:
     with urllib.request.urlopen(token, timeout=timeout) as response:
         value = response.read().decode()
     request = urllib.request.Request(
-        f"{METADATA_URL}/meta-data/instance-id", headers={"X-aws-ec2-metadata-token": value}
+        f"{METADATA_URL}/meta-data/{path}", headers={"X-aws-ec2-metadata-token": value}
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.read().decode()
@@ -632,35 +633,50 @@ def retire_host(
     autoscaling: Any,
     ran: list[str],
     keep: Path = KEEP_HOST,
-    instance: Callable[[], str] = instance_id,
+    metadata: Callable[[str], str] = instance_metadata,
 ) -> bool:
     """Record a finished worker and terminate its host unless the host is kept.
 
-    The record is written under ``hosts/`` in the queue before termination.
-    Terminating through the Auto Scaling group with a decremented desired
-    capacity keeps the group from launching a replacement.
+    The record under ``hosts/`` in the queue names the host's instance type,
+    Availability Zone, and purchase option. Before terminating, the group's
+    ``AZRebalance`` process is suspended: hosts that retire unevenly across
+    zones would otherwise let the group replace busy hosts in other zones.
+    Terminating with a decremented desired capacity keeps the group from
+    launching a replacement.
 
     Args:
         queue: Queue the worker consumed.
         autoscaling: Auto Scaling client.
         ran: IDs of the jobs the worker ran.
         keep: File whose presence keeps the host running.
-        instance: Function that returns this host's instance ID.
+        metadata: Function that reads an instance metadata path.
 
     Returns:
         True if termination was requested.
     """
-    host = instance()
+    host = metadata("instance-id")
     kept = keep.exists()
     queue.s3.put_object(
         Bucket=queue.bucket,
         Key=queue.key("hosts", f"{host}.json"),
         Body=json.dumps(
-            {"host": socket.gethostname(), "ran": ran, "end": now(), "kept": kept}
+            {
+                "host": socket.gethostname(),
+                "instance_type": metadata("instance-type"),
+                "availability_zone": metadata("placement/availability-zone"),
+                "lifecycle": metadata("instance-life-cycle"),
+                "ran": ran,
+                "end": now(),
+                "kept": kept,
+            }
         ).encode(),
     )
     if kept:
         return False
+    group = autoscaling.describe_auto_scaling_instances(InstanceIds=[host])["AutoScalingInstances"][
+        0
+    ]["AutoScalingGroupName"]
+    autoscaling.suspend_processes(AutoScalingGroupName=group, ScalingProcesses=["AZRebalance"])
     autoscaling.terminate_instance_in_auto_scaling_group(
         InstanceId=host, ShouldDecrementDesiredCapacity=True
     )

@@ -273,26 +273,63 @@ class TestMergeJobs:
             merge_jobs([[job("a")], [job("a")]])
 
 
+METADATA = {
+    "instance-id": "i-123",
+    "instance-type": "r7g.2xlarge",
+    "placement/availability-zone": "us-west-2b",
+    "instance-life-cycle": "spot",
+}
+
+
+class FakeAutoScaling:
+    """Auto Scaling client that records calls in order."""
+
+    def __init__(self):
+        self.calls = []
+
+    def describe_auto_scaling_instances(self, **kwargs):
+        self.calls.append(("describe", kwargs))
+        return {"AutoScalingInstances": [{"AutoScalingGroupName": "fleet-group"}]}
+
+    def suspend_processes(self, **kwargs):
+        self.calls.append(("suspend", kwargs))
+
+    def terminate_instance_in_auto_scaling_group(self, **kwargs):
+        self.calls.append(("terminate", kwargs))
+
+
 class TestRetireHost:
-    def test_finished_worker_records_and_terminates_its_host(self, tmp_path):
+    def test_finished_worker_records_its_host_and_terminates_it_after_suspending_rebalance(
+        self, tmp_path
+    ):
         s3, queue = queue_with([job("a")], tmp_path)
-        calls = []
-        autoscaling = SimpleNamespace(
-            terminate_instance_in_auto_scaling_group=lambda **kwargs: calls.append(kwargs)
-        )
+        autoscaling = FakeAutoScaling()
         keep = tmp_path / "keep-host"
-        assert retire_host(queue, autoscaling, ["a"], keep=keep, instance=lambda: "i-123")
-        assert calls == [{"InstanceId": "i-123", "ShouldDecrementDesiredCapacity": True}]
+        assert retire_host(queue, autoscaling, ["a"], keep=keep, metadata=METADATA.__getitem__)
+        assert autoscaling.calls == [
+            ("describe", {"InstanceIds": ["i-123"]}),
+            (
+                "suspend",
+                {"AutoScalingGroupName": "fleet-group", "ScalingProcesses": ["AZRebalance"]},
+            ),
+            ("terminate", {"InstanceId": "i-123", "ShouldDecrementDesiredCapacity": True}),
+        ]
         record = json.loads(s3.objects[queue.key("hosts", "i-123.json")])
         assert record["ran"] == ["a"]
         assert record["kept"] is False
+        assert (record["instance_type"], record["availability_zone"], record["lifecycle"]) == (
+            "r7g.2xlarge",
+            "us-west-2b",
+            "spot",
+        )
 
-    def test_keep_file_leaves_the_host_running(self, tmp_path):
+    def test_keep_file_leaves_the_host_and_its_group_unchanged(self, tmp_path):
         s3, queue = queue_with([job("a")], tmp_path)
         keep = tmp_path / "keep-host"
         keep.touch()
-        autoscaling = SimpleNamespace(terminate_instance_in_auto_scaling_group=None)
-        assert not retire_host(queue, autoscaling, [], keep=keep, instance=lambda: "i-123")
+        autoscaling = FakeAutoScaling()
+        assert not retire_host(queue, autoscaling, [], keep=keep, metadata=METADATA.__getitem__)
+        assert autoscaling.calls == []
         assert json.loads(s3.objects[queue.key("hosts", "i-123.json")])["kept"] is True
 
 

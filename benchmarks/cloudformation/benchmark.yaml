@@ -211,9 +211,13 @@ Resources:
               - Effect: Allow
                 Action: [cloudformation:DescribeStacks, cloudformation:SignalResource]
                 Resource: !Ref AWS::StackId
-              # A worker that finds no unclaimed job removes its own host from this stack's group.
+              # A worker that finds no unclaimed job removes its own host from this stack's group,
+              # after suspending zone rebalancing so that busy hosts are not replaced.
               - Effect: Allow
-                Action: autoscaling:TerminateInstanceInAutoScalingGroup
+                Action: autoscaling:DescribeAutoScalingInstances
+                Resource: '*'
+              - Effect: Allow
+                Action: [autoscaling:SuspendProcesses, autoscaling:TerminateInstanceInAutoScalingGroup]
                 Resource: '*'
                 Condition:
                   StringEquals:
