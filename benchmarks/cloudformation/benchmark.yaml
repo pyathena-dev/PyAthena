@@ -24,6 +24,11 @@ Parameters:
     Default: x86_64
     AllowedValues: [x86_64, arm64]
     Description: CPU architecture of the benchmark hosts; it must match the instance type.
+  Purchase:
+    Type: String
+    Default: on-demand
+    AllowedValues: [on-demand, spot]
+    Description: Purchase option of the benchmark hosts; every host uses the same instance type either way.
   InstanceType:
     Type: String
     Default: r7i.2xlarge
@@ -84,6 +89,7 @@ Rules:
 
 Conditions:
   IsArm64: !Equals [!Ref Architecture, arm64]
+  IsSpot: !Equals [!Ref Purchase, spot]
 
 Resources:
   Vpc:
@@ -99,11 +105,25 @@ Resources:
     Properties:
       VpcId: !Ref Vpc
       InternetGatewayId: !Ref Gateway
+  # Three Availability Zones give Spot capacity more than one pool.
   Subnet:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref Vpc
       CidrBlock: 10.93.0.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+  Subnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.93.1.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+  Subnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.93.2.0/24
+      AvailabilityZone: !Select [2, !GetAZs '']
   RouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -119,6 +139,16 @@ Resources:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref Subnet
+      RouteTableId: !Ref RouteTable
+  RouteAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Subnet2
+      RouteTableId: !Ref RouteTable
+  RouteAssociation3:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Subnet3
       RouteTableId: !Ref RouteTable
   SecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -181,6 +211,13 @@ Resources:
               - Effect: Allow
                 Action: [cloudformation:DescribeStacks, cloudformation:SignalResource]
                 Resource: !Ref AWS::StackId
+              # A worker that finds no unclaimed job removes its own host from this stack's group.
+              - Effect: Allow
+                Action: autoscaling:TerminateInstanceInAutoScalingGroup
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    autoscaling:ResourceTag/aws:cloudformation:stack-id: !Ref AWS::StackId
               - Effect: Allow
                 Action: [athena:StartQueryExecution, athena:GetQueryExecution, athena:BatchGetQueryExecution, athena:GetQueryResults,
                          athena:StopQueryExecution, athena:ListQueryExecutions, athena:GetWorkGroup]
@@ -237,7 +274,6 @@ Resources:
         NetworkInterfaces:
           - DeviceIndex: 0
             AssociatePublicIpAddress: true
-            SubnetId: !Ref Subnet
             Groups: [!Ref SecurityGroup]
         BlockDeviceMappings:
           - DeviceName: /dev/xvda
@@ -270,20 +306,27 @@ Resources:
             printf '%s\n' 'Setup complete. Run preflight and prepare manually.'
   Fleet:
     Type: AWS::AutoScaling::AutoScalingGroup
-    DependsOn: [Route, RouteAssociation]
+    DependsOn: [Route, RouteAssociation, RouteAssociation2, RouteAssociation3]
     CreationPolicy:
       ResourceSignal:
         Count: !Ref FleetSize
         Timeout: PT30M
     Properties:
-      MinSize: !Ref FleetSize
+      # MinSize 0 lets a finished worker terminate its host and lower the desired capacity.
+      MinSize: 0
       MaxSize: !Ref FleetSize
       DesiredCapacity: !Ref FleetSize
-      VPCZoneIdentifier: [!Ref Subnet]
+      VPCZoneIdentifier: [!Ref Subnet, !Ref Subnet2, !Ref Subnet3]
       HealthCheckType: EC2
-      LaunchTemplate:
-        LaunchTemplateId: !Ref LaunchTemplate
-        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MixedInstancesPolicy:
+        LaunchTemplate:
+          LaunchTemplateSpecification:
+            LaunchTemplateId: !Ref LaunchTemplate
+            Version: !GetAtt LaunchTemplate.LatestVersionNumber
+        InstancesDistribution:
+          OnDemandBaseCapacity: 0
+          OnDemandPercentageAboveBaseCapacity: !If [IsSpot, 0, 100]
+          SpotAllocationStrategy: price-capacity-optimized
 
 Outputs:
   Bucket:

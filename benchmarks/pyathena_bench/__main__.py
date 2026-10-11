@@ -28,7 +28,16 @@ from pyathena_bench.aws import (
 )
 from pyathena_bench.cases import FAMILIES, matrix
 from pyathena_bench.config import Settings, read_json
-from pyathena_bench.fleet import Filters, Queue, expand_jobs, status, submit, work
+from pyathena_bench.fleet import (
+    Filters,
+    Queue,
+    expand_jobs,
+    merge_jobs,
+    retire_host,
+    status,
+    submit,
+    work,
+)
 from pyathena_bench.report import report
 from pyathena_bench.runner import run
 
@@ -63,10 +72,8 @@ def parser() -> argparse.ArgumentParser:
         else:
             command.add_argument("--suite", choices=suites, required=True)
             command.add_argument("--shape", choices=("flat", "nested"), default="flat")
-            command.add_argument("--warmups", type=int, help="Override the configured warmups")
-            command.add_argument(
-                "--repetitions", type=int, help="Override the configured repetitions"
-            )
+        command.add_argument("--warmups", type=int, help="Override the configured warmups")
+        command.add_argument("--repetitions", type=int, help="Override the configured repetitions")
         command.add_argument("--scale", nargs="+", required=True)
         command.add_argument("--family", choices=(*FAMILIES, "wrangler"), nargs="+")
         command.add_argument(
@@ -83,7 +90,9 @@ def parser() -> argparse.ArgumentParser:
     )
     enqueue.add_argument("--stack", required=True)
     enqueue.add_argument("--name", required=True)
-    enqueue.add_argument("--jobs", type=Path, required=True)
+    enqueue.add_argument(
+        "--jobs", type=Path, nargs="+", required=True, help="Job files to merge into one queue"
+    )
     enqueue.add_argument("--manifest", type=Path, required=True)
     consume = commands.add_parser("worker", help="Run queued jobs on this host until none remain")
     consume.add_argument("--stack", required=True)
@@ -95,6 +104,11 @@ def parser() -> argparse.ArgumentParser:
         help="Fleet-wide limit for jobs that page through GetQueryResults",
     )
     consume.add_argument("--workdir", type=Path)
+    consume.add_argument(
+        "--terminate-host",
+        action="store_true",
+        help="Terminate this host through its Auto Scaling group after every job is claimed",
+    )
     progress = commands.add_parser("status", help="Summarize a fleet queue")
     progress.add_argument("--stack", required=True)
     progress.add_argument("--name", required=True)
@@ -161,17 +175,33 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.command == "queue":
             validate_manifest(settings, read_json(args.manifest))
-            submit(queue, read_json(args.jobs), args.config, args.manifest)
+            submit(queue, merge_jobs(read_json(p) for p in args.jobs), args.config, args.manifest)
         elif args.command == "worker":
             if args.api_slots < 1:
                 raise ValueError("--api-slots must be positive")
             ran = work(queue, args.workdir or Path("results/fleet") / args.name, args.api_slots)
             sys.stdout.write(json.dumps({"ran": ran}, indent=2) + "\n")
+            if args.terminate_host:
+                # Only a normal return retires the host; an error keeps it for inspection.
+                retire_host(queue, client(session_, "autoscaling"), ran)
         else:
             sys.stdout.write(json.dumps(status(queue), indent=2) + "\n")
     elif args.command == "jobs":
         filters = Filters(args.family, args.api, args.transport, args.output_kind, args.arraysize)
-        jobs = expand_jobs(settings, args.suite, scales, args.shape, filters, args.split_pages)
+        overrides = {
+            k: v for k in ("warmups", "repetitions") if (v := getattr(args, k)) is not None
+        }
+        if overrides:
+            settings = replace(settings, **overrides)
+        jobs = expand_jobs(
+            settings,
+            args.suite,
+            scales,
+            args.shape,
+            filters,
+            args.split_pages,
+            explicit_trials=bool(overrides),
+        )
         sys.stdout.write(json.dumps(jobs, indent=1) + "\n")
     else:
         overrides = {

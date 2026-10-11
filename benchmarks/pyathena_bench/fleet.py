@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.request
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -29,6 +30,9 @@ from pyathena_bench.config import Settings
 # Row cursors page through GetQueryResults, which has an account-wide request-rate quota.
 API_FAMILIES = {"cursor", "dict"}
 QUEUE_ROOT = "fleet"
+# A host with this file keeps running after its worker exits, for inspection.
+KEEP_HOST = Path("results/keep-host")
+METADATA_URL = "http://169.254.169.254/latest"
 
 
 @dataclass(frozen=True)
@@ -81,6 +85,36 @@ def api_pages(case: Case, rows: int) -> int:
     return -(-(rows + 1) // case.arraysize) * case.concurrency
 
 
+def job_order(job: dict[str, Any]) -> tuple[bool, int, int]:
+    """Return the sort key that puts API-heavy jobs first and longer jobs earlier.
+
+    Args:
+        job: Job dictionary.
+
+    Returns:
+        Key for :func:`sorted`.
+    """
+    return (not job["api_heavy"], -job["pages"], -job["weight"])
+
+
+def merge_jobs(job_lists: Iterable[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Combine job lists from several ``jobs`` invocations into one queue order.
+
+    Args:
+        job_lists: Job lists from :func:`expand_jobs`.
+
+    Returns:
+        All jobs, ordered as :func:`expand_jobs` orders one list.
+
+    Raises:
+        ValueError: If job IDs are not unique.
+    """
+    jobs = [job for jobs in job_lists for job in jobs]
+    if len({j["id"] for j in jobs}) != len(jobs):
+        raise ValueError("Job IDs must be unique")
+    return sorted(jobs, key=job_order)
+
+
 def expand_jobs(
     settings: Settings,
     suites: list[str],
@@ -88,6 +122,7 @@ def expand_jobs(
     shapes: list[str],
     filters: Filters,
     split_pages: int | None = None,
+    explicit_trials: bool = False,
 ) -> list[dict[str, Any]]:
     """Split a selection into independent ``run`` invocations.
 
@@ -105,6 +140,9 @@ def expand_jobs(
         shapes: Result shapes to expand.
         filters: Case filters applied before grouping.
         split_pages: Per-trial page threshold for splitting repetitions.
+        explicit_trials: Whether jobs that are not split carry the warmups and
+            repetitions of ``settings`` as arguments, so a queue can mix trial
+            counts under one stored configuration.
 
     Returns:
         Job dictionaries ordered with API-heavy jobs first and longer jobs earlier.
@@ -152,6 +190,11 @@ def expand_jobs(
                         )
                     else:
                         trials = settings.warmups + settings.repetitions
+                        if explicit_trials:
+                            args += [
+                                "--warmups", str(settings.warmups),
+                                "--repetitions", str(settings.repetitions),
+                            ]  # fmt: skip
                         jobs.append(
                             {
                                 "id": base,
@@ -164,7 +207,7 @@ def expand_jobs(
                         )
     if not jobs:
         raise ValueError("No cases match the selected filters")
-    return sorted(jobs, key=lambda j: (not j["api_heavy"], -j["pages"], -j["weight"]))
+    return sorted(jobs, key=job_order)
 
 
 def now() -> str:
@@ -559,6 +602,69 @@ def work(
                     queue.release(slot)
         if not started:
             time.sleep(poll_seconds)
+
+
+def instance_id(timeout: float = 2.0) -> str:
+    """Return this EC2 instance's ID from the instance metadata service (IMDSv2).
+
+    Args:
+        timeout: Seconds to wait for each metadata request.
+
+    Returns:
+        Instance ID.
+    """
+    token = urllib.request.Request(
+        f"{METADATA_URL}/api/token",
+        method="PUT",
+        headers={"X-aws-ec2-metadata-token-ttl-seconds": "60"},
+    )
+    with urllib.request.urlopen(token, timeout=timeout) as response:
+        value = response.read().decode()
+    request = urllib.request.Request(
+        f"{METADATA_URL}/meta-data/instance-id", headers={"X-aws-ec2-metadata-token": value}
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read().decode()
+
+
+def retire_host(
+    queue: Queue,
+    autoscaling: Any,
+    ran: list[str],
+    keep: Path = KEEP_HOST,
+    instance: Callable[[], str] = instance_id,
+) -> bool:
+    """Record a finished worker and terminate its host unless the host is kept.
+
+    The record is written under ``hosts/`` in the queue before termination.
+    Terminating through the Auto Scaling group with a decremented desired
+    capacity keeps the group from launching a replacement.
+
+    Args:
+        queue: Queue the worker consumed.
+        autoscaling: Auto Scaling client.
+        ran: IDs of the jobs the worker ran.
+        keep: File whose presence keeps the host running.
+        instance: Function that returns this host's instance ID.
+
+    Returns:
+        True if termination was requested.
+    """
+    host = instance()
+    kept = keep.exists()
+    queue.s3.put_object(
+        Bucket=queue.bucket,
+        Key=queue.key("hosts", f"{host}.json"),
+        Body=json.dumps(
+            {"host": socket.gethostname(), "ran": ran, "end": now(), "kept": kept}
+        ).encode(),
+    )
+    if kept:
+        return False
+    autoscaling.terminate_instance_in_auto_scaling_group(
+        InstanceId=host, ShouldDecrementDesiredCapacity=True
+    )
+    return True
 
 
 def status(queue: Queue) -> dict[str, Any]:

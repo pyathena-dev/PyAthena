@@ -95,6 +95,10 @@ The defaults are Amazon Linux 2023 x86_64, `r7i.2xlarge` (8 vCPUs, 64 GiB), and 
 Set `Architecture=arm64` with an `r7g` or `r8g` instance type to run on AWS Graviton; the template rejects an instance type that does not match the architecture.
 Measurements depend on the CPU architecture; `environment.json` records it, and runs on different architectures are not directly comparable.
 Instance size and disk size are parameters, so a later run can deliberately test another memory budget.
+`Purchase=spot` launches Spot Instances of the same instance type instead of On-Demand Instances.
+The Auto Scaling group spreads the hosts over three Availability Zones with the price-capacity-optimized allocation strategy and never mixes instance types, so every host stays identical.
+It replaces an interrupted Spot Instance, but the job that ran on it keeps its claim; see the retry procedure in [Running on a fleet](#running-on-a-fleet).
+`environment.json` records the instance type; record the purchase option with the results.
 The AMI parameter resolves the current AL2023 image at deployment; record the resulting AMI when comparing environments.
 Source bucket access is read-only and restricted to the configured prefix.
 The instances can write only to the scratch bucket and database, and can query the specified existing workgroup.
@@ -286,6 +290,8 @@ While an API-heavy job waits for slots, workers do not start later API-heavy job
 It orders API-heavy jobs first and longer jobs earlier.
 With `--split-pages`, a job whose single trial needs at least that many pages becomes one job per measured repetition without a warmup, so those repetitions run on different hosts.
 `run` accepts the matching `--arraysize`, `--warmups`, and `--repetitions` options.
+`jobs` accepts `--warmups` and `--repetitions` too; with either option, every job that is not split carries both values as arguments, so one queue can combine jobs with different trial counts under one stored configuration.
+`queue --jobs` accepts several job files, rejects duplicate job IDs, and orders the combined jobs as `jobs` orders one selection.
 
 Deploy a new stack with the fleet size under its own name; changing `FleetSize` on an existing stack does not wait for the added hosts to finish bootstrap.
 Then open a session on one of its hosts:
@@ -322,6 +328,42 @@ uv run --no-sync python -m pyathena_bench --config results/fleet.toml queue \
   --stack "$BENCHMARK_STACK_ID" --name large-1 --jobs results/jobs-large.json --manifest results/input-large.json
 ```
 
+Several `jobs` selections can make up one bounded matrix.
+For example, the following selection, with `chunksizes = [10000, 100000, 1000000]`, `concurrency = [1, 10]`, and `timeout_seconds = 5400.0` in `results/fleet.toml`, measures:
+
+- medium in full, with five repetitions;
+- large with arraysize 100 paging limited to Cursor with the synchronous API, concurrent row paging limited to flat Cursor jobs, and initialization limited to the S3FS and DataFrame families, with five repetitions;
+- xlarge with the synchronous API only, without DictCursor and without arraysize 100 for the DataFrame families' row output, with three repetitions.
+
+Every selection runs without warmups because each trial already runs in a fresh process.
+
+```bash
+jobs() { uv run --no-sync python -m pyathena_bench --config results/fleet.toml jobs --warmups 0 "$@"; }
+jobs --suite single concurrent init --scale medium --shape flat nested --repetitions 5 > results/jobs-medium.json
+jobs --suite single --scale large --shape flat nested --arraysize 1000 --repetitions 5 > results/jobs-large-1000.json
+jobs --suite single --scale large --shape flat nested --arraysize 100 --family s3fs pandas arrow polars \
+  --repetitions 5 > results/jobs-large-100.json
+jobs --suite single --scale large --shape flat nested --arraysize 100 --family cursor --api sync \
+  --repetitions 3 --split-pages 5000 > results/jobs-large-cursor-100.json
+jobs --suite concurrent --scale large --shape flat nested --family s3fs pandas arrow polars \
+  --repetitions 5 > results/jobs-large-concurrent.json
+jobs --suite concurrent --scale large --shape flat --family cursor \
+  --repetitions 3 --split-pages 5000 > results/jobs-large-concurrent-cursor.json
+jobs --suite init --scale large --shape flat nested --family s3fs pandas arrow polars \
+  --repetitions 5 > results/jobs-large-init.json
+jobs --suite single --scale xlarge --shape flat nested --api sync --family cursor --arraysize 1000 \
+  --repetitions 3 --split-pages 5000 > results/jobs-xlarge-cursor.json
+jobs --suite single --scale xlarge --shape flat nested --api sync --family s3fs \
+  --repetitions 3 > results/jobs-xlarge-s3fs.json
+jobs --suite single --scale xlarge --shape flat nested --api sync --family pandas arrow polars wrangler \
+  --arraysize 1000 --repetitions 3 > results/jobs-xlarge-dataframes.json
+uv run --no-sync python -m pyathena_bench --config results/fleet.toml queue \
+  --stack "$BENCHMARK_STACK_ID" --name bounded-1 --jobs results/jobs-medium.json results/jobs-large-*.json \
+  results/jobs-xlarge-*.json --manifest results/input-bounded.json
+```
+
+The manifest for this selection must be prepared with `--scale medium large xlarge`.
+
 `queue` reserves the name with a conditional write, stores the configuration, manifest, and jobs under `fleet/<name>/` in the scratch bucket, and writes the `queue.json` marker last.
 Workers refuse a queue without the marker.
 A failed `queue` releases the reservation, so the same name can be published again; a `queue` process killed while publishing leaves `fleet/<name>/reservation.json`, which must be deleted before reusing the name.
@@ -331,7 +373,7 @@ Start a worker on every host from the local machine:
 ```bash
 uv run --env-file ../.env --locked aws ssm send-command --targets "Key=tag:aws:autoscaling:groupName,Values=$BENCHMARK_GROUP" \
   --document-name AWS-RunShellScript \
-  --parameters 'commands=["sudo -iu ec2-user bash -lc \"cd /opt/pyathena/benchmarks && mkdir -p results && (nohup uv run --no-sync python -m pyathena_bench worker --stack $(cat /opt/pyathena/benchmarks/stack-id.txt) --name large-1 > results/worker-large-1.log 2>&1 &)\""]'
+  --parameters 'commands=["sudo -iu ec2-user bash -lc \"cd /opt/pyathena/benchmarks && mkdir -p results && (nohup uv run --no-sync python -m pyathena_bench worker --stack $(cat /opt/pyathena/benchmarks/stack-id.txt) --name large-1 --terminate-host > results/worker-large-1.log 2>&1 &)\""]'
 uv run --env-file ../.env --locked python -m pyathena_bench status \
   --stack "$BENCHMARK_STACK" --name large-1
 ```
@@ -345,6 +387,11 @@ If it cannot confirm that, it records the errors in the `done` marker and exits.
 A worker that dies leaves a claim without a `done` marker, and it can also leave an API slot under `slots/`, which lowers the fleet's API-heavy capacity.
 `status` lists slots in use; delete a slot object only after confirming that the host named in it no longer runs a job.
 Workers exit when every job has been claimed.
+With `--terminate-host`, a worker that returns normally records its jobs under `hosts/<instance-id>.json` and terminates its host through the Auto Scaling group with a lower desired capacity, so no replacement starts and finished hosts stop costing money while others still run.
+This includes a worker that stopped after unconfirmed queries, whose errors are already in the `done` marker.
+A worker that raises an error, for example for a missing queue, keeps its host.
+To keep a host, create `/opt/pyathena/benchmarks/results/keep-host` before its worker finishes; keep the host where the manifests were prepared, so that its local `results/` can be recovered.
+Start a worker on a replacement host for an interrupted Spot Instance by targeting that instance ID instead of the group; a second worker on a host that already runs one would overlap trials.
 To retry jobs, wait until all workers have exited, run `cleanup --trials-only --execute` for the manifest, and publish the selected jobs under a new queue name with the same manifest.
 Download `fleet/<name>/` with `aws s3 sync` before cleanup and stack deletion, as described below.
 
