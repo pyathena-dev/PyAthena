@@ -130,7 +130,7 @@ class S3ThreadPoolExecutor(S3Executor):
         self._executor.shutdown(wait=wait)
 
 
-class S3AioThreadPool:
+class S3AioThreadPool(S3Executor):
     """A thread pool that runs the blocking calls of asyncio code.
 
     Unlike ``asyncio.to_thread()``, which runs a call in the default executor
@@ -149,15 +149,19 @@ class S3AioThreadPool:
         ValueError: If ``max_workers`` is not positive.
     """
 
-    def __init__(self, max_workers: int) -> None:
+    def __init__(self, max_workers: int | None = None) -> None:
         """Initialize the pool without starting any thread.
 
         Args:
-            max_workers: The maximum number of calls that run at once.
+            max_workers: The maximum number of calls that run at once. If
+                None, ``min(32, os.cpu_count() + 4)``, as with
+                ``ThreadPoolExecutor``.
 
         Raises:
             ValueError: If ``max_workers`` is not positive.
         """
+        if max_workers is None:
+            max_workers = min(32, (os.cpu_count() or 1) + 4)
         if max_workers <= 0:
             raise ValueError("max_workers must be greater than 0")
         self.max_workers = max_workers
@@ -166,6 +170,7 @@ class S3AioThreadPool:
         self._pid: int | None = None
         self._shutdown = False
 
+    @override
     def submit(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> Future[T]:
         """Schedule a blocking call in a thread of the pool.
 
@@ -230,6 +235,7 @@ class S3AioThreadPool:
         future.add_done_callback(lambda f: f.cancelled() or f.exception())
         return await asyncio.shield(future)
 
+    @override
     def shutdown(self, wait: bool = True) -> None:
         """Stop accepting calls and release the threads once they are idle.
 
@@ -253,6 +259,10 @@ class S3AioThreadPool:
         Raises:
             RuntimeError: If the pool has been shut down.
         """
+        if self._pid is not None and self._pid != os.getpid():
+            # A forked child: its copy of the lock may be held by a thread
+            # of the parent, which does not exist here.
+            self._lock = threading.Lock()
         with self._lock:
             if self._shutdown:
                 raise RuntimeError("cannot schedule new futures after shutdown")
@@ -308,8 +318,6 @@ class S3AioExecutor(S3Executor):
 
     @override
     def submit(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> Future[T]:
-        if self._shutdown:
-            raise RuntimeError("cannot schedule new futures after shutdown")
         if self._loop is not None and self._loop.is_running():
             # The future of run_coroutine_threadsafe can be cancelled while
             # the function keeps running in its thread, so the returned future
@@ -350,6 +358,8 @@ class S3AioExecutor(S3Executor):
                     future.set_exception(task.exception())
 
             with self._lock:
+                if self._shutdown:
+                    raise RuntimeError("cannot schedule new futures after shutdown")
                 self._pending.add(future)
             future.add_done_callback(self._release)
             task = asyncio.run_coroutine_threadsafe(self._pool.run(run), self._loop)
@@ -377,6 +387,14 @@ class S3AioExecutor(S3Executor):
         with self._lock:
             self._shutdown = True
             pending = list(self._pending)
+        try:
+            on_loop = asyncio.get_running_loop() is self._loop
+        except RuntimeError:
+            on_loop = False
+        # On the thread of the event loop, such as when a file is garbage
+        # collected there, waiting would keep the loop from dispatching the
+        # pending functions, so the pool is shut down after the last one.
+        wait = wait and not on_loop
         if wait:
             # Also the functions that have not reached the pool yet.
             futures.wait(pending)

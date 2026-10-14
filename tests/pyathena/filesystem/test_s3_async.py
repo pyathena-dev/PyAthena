@@ -356,6 +356,17 @@ class TestAioS3FileSystem:
 
         assert info == {"name": "bucket/key"}
 
+    @pytest.mark.asyncio
+    async def test_max_workers_none(self):
+        # None takes the default of ThreadPoolExecutor for the threads of the
+        # filesystem, as for those of S3FileSystem's files.
+        fs = AioS3FileSystem(
+            connection=mock.MagicMock(), max_workers=None, skip_instance_cache=True
+        )
+        fs._sync_fs.info = mock.MagicMock(return_value={"name": "bucket/key"})
+
+        assert await fs._info("s3://bucket/key") == {"name": "bucket/key"}
+
     @pytest.mark.parametrize("cancellations", [1, 2])
     @pytest.mark.asyncio
     async def test_copy_object_with_multipart_upload_cancelled(self, cancellations):
@@ -2805,6 +2816,36 @@ class TestAioS3StreamedFile:
         fs.core.put_object.assert_called_once()
         fs.core.abort_multipart_upload.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_sync_with(self, fs):
+        # A synchronous with block cannot await close(), so it is rejected
+        # instead of leaving the data uncommitted.
+        f = await fs.open_async("s3://bucket/key", "wb")
+        with pytest.raises(TypeError, match="async with"), f:
+            pass
+        await f.close()
+
+    @pytest.mark.asyncio
+    async def test_garbage_collected_unclosed(self, fs):
+        # An unclosed file that is garbage collected warns, and aborts its
+        # multipart upload instead of leaving it incomplete.
+        block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
+        aborted = threading.Event()
+        fs.core.abort_multipart_upload = mock.MagicMock(side_effect=lambda *a, **k: aborted.set())
+
+        async def write_unclosed():
+            # Created directly: the futures of open_async() reference the
+            # file until the garbage collector breaks their cycle.
+            f = AioS3StreamedFile(fs, "bucket/key", "wb", block_size=block_size)
+            await f.write(b"a" * block_size * 2)
+
+        # The file is released when the coroutine returns.
+        with pytest.warns(ResourceWarning, match="was not closed"):
+            await write_unclosed()
+        assert await asyncio.to_thread(aborted.wait, 5)
+
+        fs.core.complete_multipart_upload.assert_not_called()
+
     @pytest.mark.parametrize("cancellations", [1, 2])
     @pytest.mark.asyncio
     async def test_write_cancelled(self, fs, cancellations):
@@ -2948,6 +2989,7 @@ class TestAioS3StreamedFile:
             ("wb", {"max_workers": 0}, ValueError),
             ("wb", {"block_size": 2**10}, ValueError),
             ("wb", {"version_id": "v"}, ValueError),
+            ("wb", {"autocommit": False}, NotImplementedError),
         ],
     )
     @pytest.mark.asyncio

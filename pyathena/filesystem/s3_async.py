@@ -10,9 +10,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import mimetypes
 import os
+import warnings
 from concurrent.futures import Future, wait
 from io import BytesIO
 from multiprocessing import cpu_count
@@ -873,14 +875,16 @@ class AioS3FileSystem(AsyncFileSystem):
             ValueError: If the mode is not binary, compression is requested,
                 or the arguments are invalid, as in ``open()``.
             NotImplementedError: If the mode is not supported, or the file is
-                opened for writing in a transaction, whose commit the file
-                cannot defer.
+                opened for writing in a transaction or with
+                ``autocommit=False``, as the file commits when it is closed.
             FileExistsError: If an object exists at the path in
                 exclusive-create mode.
             FileNotFoundError: If no object exists at the path when reading.
         """
-        if "b" not in mode or kwargs.get("compression"):
+        if "b" not in mode or kwargs.pop("compression", None):
             raise ValueError("open_async() supports only binary modes without compression.")
+        if not kwargs.pop("autocommit", True):
+            raise NotImplementedError("The file of open_async() commits when it is closed.")
         if mode not in {"rb", "wb", "ab", "xb"}:
             raise NotImplementedError("File mode not supported")
         if mode != "rb" and self._intrans:
@@ -1170,7 +1174,8 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
     also if the task that waits for them is cancelled. A file opened for
     writing must be closed with ``await close()`` or an ``async with`` block;
     garbage collection cannot await it, so the data of an unclosed file is
-    never committed.
+    never committed; its multipart upload, if any, is aborted, with a
+    ``ResourceWarning``.
     """
 
     fs: AioS3FileSystem
@@ -1224,9 +1229,9 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         """
         if mode not in {"rb", "wb", "ab", "xb"}:
             raise NotImplementedError("File mode not supported")
-        self.max_workers = max_workers
         # Created first, so that an invalid max_workers raises before the lookups.
         self._pool = S3AioThreadPool(max_workers)
+        self.max_workers = self._pool.max_workers
         target = S3FileTarget.resolve(
             fs._sync_fs,
             path,
@@ -1272,10 +1277,29 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
 
     def __del__(self) -> None:
         # close() is a coroutine, which garbage collection cannot await, so
-        # an unclosed file is not committed; only its threads are released.
+        # an unclosed file is not committed: its multipart upload, if any, is
+        # aborted, and its threads are released.
         pool = getattr(self, "_pool", None)
-        if pool is not None:
-            pool.shutdown(wait=False)
+        if pool is None:
+            return
+        if not getattr(self, "closed", True) and self.mode != "rb":
+            warnings.warn(
+                f"s3://{self.bucket}/{self.key} was not closed, and the written data "
+                "was not committed.",
+                ResourceWarning,
+                stacklevel=2,
+            )
+            with contextlib.suppress(RuntimeError):
+                pool.submit(self._discard)
+        pool.shutdown(wait=False)
+
+    def __enter__(self) -> AioS3StreamedFile:
+        """Reject a synchronous ``with`` block, whose exit cannot close the file.
+
+        Raises:
+            TypeError: Always; use ``async with``.
+        """
+        raise TypeError("AioS3StreamedFile is asynchronous; use 'async with'.")
 
     def _get_request_kwargs(self, method: str) -> dict[str, Any]:
         """Select the parameters of the file that an S3 operation accepts.
@@ -1384,9 +1408,14 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         if not self.append_block and self.tell() < self.blocksize:
             return
         writer = cast(S3MultipartWriter, self._writer)
+        # Tracked before it is scheduled, so that an interrupt while it is
+        # being scheduled still lets the cleanup cancel it or wait for it.
+        self._creation = Future()
         try:
-            self._creation = self._pool.submit(
-                writer.initiate, **self._get_request_kwargs("create_multipart_upload")
+            self._pool.submit_to(
+                self._creation,
+                writer.initiate,
+                **self._get_request_kwargs("create_multipart_upload"),
             )
             await asyncio.wrap_future(self._creation)
             if self.append_block:
@@ -1398,14 +1427,16 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
                     )
                     size = info.get("size", 0)
                 for part_number, range_ in writer.iter_copy_parts(size):
-                    self._parts.append(
-                        self._pool.submit(
-                            writer.upload_part_copy,
-                            part_number=part_number,
-                            source=S3Path(self.bucket, self.key),
-                            range_=None if whole_source else range_,
-                            **self._get_request_kwargs("upload_part_copy"),
-                        )
+                    # Tracked before it is scheduled; see the creation.
+                    copy: Future[S3MultipartUploadPart] = Future()
+                    self._parts.append(copy)
+                    self._pool.submit_to(
+                        copy,
+                        writer.upload_part_copy,
+                        part_number=part_number,
+                        source=S3Path(self.bucket, self.key),
+                        range_=None if whole_source else range_,
+                        **self._get_request_kwargs("upload_part_copy"),
                     )
         except BaseException:
             await self._close_without_commit()
@@ -1454,18 +1485,21 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
                         # A failed part would otherwise keep its data until
                         # the commit while the rest of the data is uploaded.
                         upload.result()
-                part = self._pool.submit(
-                    writer.upload_part,
-                    part_number=part_number,
-                    body=data,
-                    **self._get_request_kwargs("upload_part"),
-                )
+                # Tracked before it is scheduled; see _initiate_upload().
+                part: Future[S3MultipartUploadPart] = Future()
                 self._parts.append(part)
                 waiter = asyncio.wrap_future(part)
                 # The commit reports a failure that no wait found; retrieved
                 # here so that asyncio does not log it as never retrieved.
                 waiter.add_done_callback(lambda w: w.cancelled() or w.exception())
                 self._uploads_in_flight.add(waiter)
+                self._pool.submit_to(
+                    part,
+                    writer.upload_part,
+                    part_number=part_number,
+                    body=data,
+                    **self._get_request_kwargs("upload_part"),
+                )
         except BaseException:
             await self._close_without_commit()
             raise

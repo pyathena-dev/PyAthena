@@ -325,9 +325,11 @@ async with await fs.open_async("s3://my-bucket/data/file.bin", "rb") as f:
 - A commit that has started completes even if the task that closes the file is
   cancelled.
 - A file opened for writing must be closed with `await f.close()` or an `async with`
-  block. A file that is garbage collected without being closed is not committed.
+  block. A file that is garbage collected without being closed is not committed: it
+  emits a `ResourceWarning`, and its multipart upload is aborted. A synchronous `with`
+  block raises `TypeError`.
 - `open_async()` raises `NotImplementedError` for the write modes inside a transaction,
-  because the file commits when it is closed.
+  and for `autocommit=False`, because the file commits when it is closed.
 
 ### Usage with AioS3FSCursor
 

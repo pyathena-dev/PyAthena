@@ -23,6 +23,8 @@ EVENT_TIMEOUT = 5
 
 class TestS3AioThreadPool:
     def test_init(self):
+        # None takes the default of ThreadPoolExecutor.
+        assert S3AioThreadPool(None).max_workers == min(32, (os.cpu_count() or 1) + 4)
         with pytest.raises(ValueError, match="max_workers must be greater than 0"):
             S3AioThreadPool(0)
 
@@ -102,9 +104,11 @@ class TestS3AioThreadPool:
         assert events == ["pending finished"]
 
     def test_fork(self):
-        # A forked child, whose copy of the pool has no threads, creates new ones.
+        # A forked child, whose copy of the pool has no threads, creates new
+        # ones, also if a thread of the parent held the lock of the pool.
         pool = S3AioThreadPool(1)
         parent = pool._get_executor()
+        pool._lock.acquire()
         with mock.patch("pyathena.filesystem.s3_executor.os.getpid", return_value=os.getpid() + 1):
             child = pool._get_executor()
             assert pool.submit(sum, [1, 2]).result(timeout=EVENT_TIMEOUT) == 3
@@ -181,6 +185,19 @@ class TestS3AioExecutor:
             executor.shutdown(wait=False)
             with pytest.raises(RuntimeError, match="after shutdown"):
                 executor.submit(sum, [3, 4])
+            return await asyncio.wrap_future(future)
+
+        assert asyncio.run(main()) == 3
+
+    def test_shutdown_on_loop_thread(self):
+        # Shutting down with wait=True on the thread of the event loop, such
+        # as when a file is garbage collected there, does not wait for the
+        # functions that only the loop dispatches; they still run.
+        async def main():
+            executor = S3AioExecutor(loop=asyncio.get_running_loop())
+            future = executor.submit(sum, [1, 2])
+            executor.shutdown(wait=True)
+            assert not future.done()
             return await asyncio.wrap_future(future)
 
         assert asyncio.run(main()) == 3
