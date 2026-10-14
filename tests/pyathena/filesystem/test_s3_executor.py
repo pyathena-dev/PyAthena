@@ -109,10 +109,14 @@ class TestS3AioThreadPool:
         pool._lock.acquire()
         # As os.register_at_fork() runs it in a forked child.
         S3AioThreadPool._reset_after_fork()
+        # The copied executor is kept, so that its collection does not touch
+        # the locks that the parent's threads may have held.
+        assert parent in S3AioThreadPool._forked_executors
         child = pool._get_executor()
         assert pool.submit(sum, [1, 2]).result(timeout=EVENT_TIMEOUT) == 3
         pool.shutdown()
         assert child is not parent
+        S3AioThreadPool._forked_executors.remove(parent)
         parent.shutdown()
 
 
@@ -247,6 +251,35 @@ class TestS3AioExecutor:
             thread.join()
             # Runs the pending task, which would otherwise be dropped
             # unawaited when the loop is closed.
+            loop.run_until_complete(asyncio.sleep(0))
+            loop.close()
+
+    def test_shutdown_interpreter_finalizing(self):
+        # Shutting down with wait=True while the interpreter exits returns,
+        # although the loop, whose daemon thread no longer runs, still
+        # reports running.
+        loop = asyncio.new_event_loop()
+        busy = threading.Event()
+        release = threading.Event()
+
+        def block():
+            busy.set()
+            release.wait(EVENT_TIMEOUT)
+
+        thread = threading.Thread(target=loop.run_forever)
+        thread.start()
+        try:
+            loop.call_soon_threadsafe(block)
+            assert busy.wait(EVENT_TIMEOUT)
+            executor = S3AioExecutor(loop=loop)
+            with mock.patch("pyathena.filesystem.s3_executor.sys.is_finalizing", return_value=True):
+                started = time.monotonic()
+                executor.shutdown(wait=True)
+            assert time.monotonic() - started < EVENT_TIMEOUT
+        finally:
+            release.set()
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join()
             loop.run_until_complete(asyncio.sleep(0))
             loop.close()
 

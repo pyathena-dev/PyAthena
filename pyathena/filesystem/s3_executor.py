@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import os
+import sys
 import threading
 import weakref
 from abc import ABCMeta, abstractmethod
@@ -152,6 +153,10 @@ class S3AioThreadPool(S3Executor):
 
     # The pools of this process, which a forked child resets.
     _instances: ClassVar[weakref.WeakSet[S3AioThreadPool]] = weakref.WeakSet()
+    # The executors that a forked child copied from its parent. They are
+    # kept, since collecting one would put to a queue whose lock a thread of
+    # the parent may have held.
+    _forked_executors: ClassVar[list[ThreadPoolExecutor]] = []
 
     def __init__(self, max_workers: int | None = None) -> None:
         """Initialize the pool without starting any thread.
@@ -262,6 +267,8 @@ class S3AioThreadPool(S3Executor):
         one of them held stays held, so each pool creates new ones.
         """
         for pool in list(cls._instances):
+            if pool._executor is not None:
+                cls._forked_executors.append(pool._executor)
             pool._lock = threading.Lock()
             pool._executor = None
 
@@ -415,6 +422,9 @@ class S3AioExecutor(S3Executor):
             # runs, and never runs if the loop stops instead; the functions
             # that it has not dispatched then do not reach the pool either.
             while not futures.wait([closing], timeout=0.1).done:
-                if not loop.is_running():
+                # The thread of a loop that runs in a daemon thread, such as
+                # fsspec's, stops when the interpreter exits, while the loop
+                # still reports running.
+                if not loop.is_running() or sys.is_finalizing():
                     break
             self._pool.shutdown(wait=True)

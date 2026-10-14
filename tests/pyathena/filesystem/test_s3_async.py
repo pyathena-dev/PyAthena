@@ -8,7 +8,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from itertools import chain
 from pathlib import Path
@@ -24,7 +24,7 @@ from fsspec import Callback
 from pyathena.filesystem.s3 import S3File, S3FileSystem
 from pyathena.filesystem.s3_async import AioS3File, AioS3FileSystem, AioS3StreamedFile
 from pyathena.filesystem.s3_core import S3Core
-from pyathena.filesystem.s3_executor import S3Executor
+from pyathena.filesystem.s3_executor import S3AioThreadPool, S3Executor
 from pyathena.filesystem.s3_object import (
     S3MultipartUpload,
     S3MultipartUploadPart,
@@ -360,13 +360,20 @@ class TestAioS3FileSystem:
     @pytest.mark.asyncio
     async def test_max_workers_none(self):
         # None takes the default of ThreadPoolExecutor for the threads of the
-        # filesystem, as for those of S3FileSystem's files.
+        # filesystem and as the default max_workers of its files and copies.
+        # The files and copies used to fail with it.
         fs = AioS3FileSystem(
             connection=mock.MagicMock(), max_workers=None, skip_instance_cache=True
         )
         fs._sync_fs.info = mock.MagicMock(return_value={"name": "bucket/key"})
 
         assert await fs._info("s3://bucket/key") == {"name": "bucket/key"}
+        # The files and copies take the same default.
+        assert (
+            fs._sync_fs.max_workers
+            == fs._thread_pool.max_workers
+            == min(32, (os.cpu_count() or 1) + 4)
+        )
 
     @pytest.mark.parametrize("cancellations", [1, 2])
     @pytest.mark.asyncio
@@ -2718,14 +2725,23 @@ class TestAioS3StreamedFile:
         lock = threading.Lock()
         gates: dict[int, threading.Event] = {}
         active: list[int] = []
+        uploads: dict[int, Future[S3MultipartUploadPart]] = {}
         in_flight: list[int] = []
+        submit_to = S3AioThreadPool.submit_to
+
+        def record_upload(pool, future, fn, *args, **kwargs):
+            # The parts submitted and not finished, including those that
+            # wait for a thread with their data.
+            if "body" in kwargs:
+                uploads[kwargs["part_number"]] = future
+                in_flight.append(sum(not upload.done() for upload in uploads.values()))
+            submit_to(pool, future, fn, *args, **kwargs)
 
         def upload_part(**kw):
             part_number = kw["part_number"]
             with lock:
                 gate = gates.setdefault(part_number, threading.Event())
                 active.append(part_number)
-                in_flight.append(len(active))
             if not gate.wait(5):
                 raise TimeoutError(part_number)
             with lock:
@@ -2750,9 +2766,12 @@ class TestAioS3StreamedFile:
 
         releaser = asyncio.ensure_future(release())
         f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size, max_workers=2)
-        await f.write(b"a" * block_size * 4)
-        written.set()
-        await f.close()
+        with mock.patch.object(
+            S3AioThreadPool, "submit_to", autospec=True, side_effect=record_upload
+        ):
+            await f.write(b"a" * block_size * 4)
+            written.set()
+            await f.close()
         await releaser
 
         assert in_flight == [1, 2, 2, 2]

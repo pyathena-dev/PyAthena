@@ -120,7 +120,8 @@ class AioS3FileSystem(AsyncFileSystem):
             default_cache_type: Passed to the internal ``S3FileSystem``.
             max_workers: The number of threads that run the blocking calls of
                 the filesystem, and the default number of parallel requests
-                of its files and copies. Passed to the internal
+                of its files and copies. If None, ``min(32, os.cpu_count() +
+                4)``, as with ``ThreadPoolExecutor``. Passed to the internal
                 ``S3FileSystem``.
             s3_additional_kwargs: Passed to the internal ``S3FileSystem``.
             allow_bucket_creation: Passed to the internal ``S3FileSystem``.
@@ -138,6 +139,11 @@ class AioS3FileSystem(AsyncFileSystem):
             batch_size=batch_size,
             **kwargs,
         )
+        # The blocking calls of the coroutines run in threads of this pool,
+        # not in the default executor of the event loop. Created first, so
+        # that None takes its default for the files and copies too.
+        self._thread_pool = S3AioThreadPool(max_workers)
+        max_workers = self._thread_pool.max_workers
         self._sync_fs = S3FileSystem(
             connection=connection,
             default_block_size=default_block_size,
@@ -153,9 +159,6 @@ class AioS3FileSystem(AsyncFileSystem):
         )
         # Share dircache for cache coherence between async and sync instances
         self.dircache = self._sync_fs.dircache
-        # The blocking calls of the coroutines run in threads of this pool,
-        # not in the default executor of the event loop.
-        self._thread_pool = S3AioThreadPool(max_workers)
 
     @property
     def core(self) -> S3Core:
@@ -1169,11 +1172,12 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
       so that the existing object is left unchanged.
 
     The commit and the abort run to their end in the threads of the file,
-    also if the task that waits for them is cancelled; once the commit has
-    started, nothing else aborts the upload. A file opened for
+    also if the task that waits for them is cancelled, including a commit
+    that still waits for a thread; once the commit has been submitted,
+    nothing else aborts the upload. A file opened for
     writing must be closed with ``await close()`` or an ``async with`` block;
     garbage collection cannot await it, so the data of a file that is
-    collected before it is closed or its commit has started is never
+    collected before it is closed or its commit has been submitted is never
     committed; its multipart upload, if any, is aborted, with a
     ``ResourceWarning``.
     """
@@ -1282,7 +1286,7 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
 
     def __del__(self) -> None:
         # close() is a coroutine, which garbage collection cannot await, so
-        # an unclosed file whose commit has not started is not committed: its
+        # an unclosed file whose commit was not submitted is not committed: its
         # multipart upload, if any, is aborted, and its threads are released.
         pool = getattr(self, "_pool", None)
         if pool is None:
