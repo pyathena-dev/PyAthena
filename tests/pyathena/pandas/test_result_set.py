@@ -140,7 +140,11 @@ class TestPandasDataFrameIterator:
 
         assert df_iter.as_pandas() is df
 
-    @pytest.mark.parametrize("read", ["next", "get_chunk"])
+    @pytest.mark.parametrize(
+        "read",
+        [PandasDataFrameIterator.__next__, PandasDataFrameIterator.get_chunk],
+        ids=["next", "get_chunk"],
+    )
     def test_close_during_read(self, read):
         """A close during a read in another thread is deferred until the read completes."""
         reading, release, released = threading.Event(), threading.Event(), threading.Event()
@@ -159,7 +163,7 @@ class TestPandasDataFrameIterator:
         df_iter = PandasDataFrameIterator(chunks(), _no_trunc_date, csv_stream)
         next(df_iter)
         with ThreadPoolExecutor(1) as executor:
-            future = executor.submit(getattr(df_iter, "__next__" if read == "next" else read))
+            future = executor.submit(read, df_iter)
             assert reading.wait(10)
             df_iter.close()
             assert not released.is_set()
