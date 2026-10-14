@@ -609,6 +609,13 @@ class TestArrowCursor:
         ).as_polars()
         assert df.height == 1
         assert df.width == 16
+        # Polars 2.0 converts an Arrow map to Map; Polars 1.x to a list of key-value structs.
+        if hasattr(pl, "Map"):
+            map_dtype = pl.Map(pl.Int32, pl.Int32)
+            map_value = {1: 2, 3: 4}
+        else:
+            map_dtype = pl.List(pl.Struct([pl.Field("key", pl.Int32), pl.Field("value", pl.Int32)]))
+            map_value = [{"key": 1, "value": 2}, {"key": 3, "value": 4}]
         dtypes = tuple(df.dtypes)
         assert dtypes == (
             pl.Boolean,
@@ -624,7 +631,7 @@ class TestArrowCursor:
             pl.Date,
             pl.Binary,
             pl.List(pl.Int32),
-            pl.List(pl.Struct([pl.Field("key", pl.Int32), pl.Field("value", pl.Int32)])),
+            map_dtype,
             pl.Struct([pl.Field("a", pl.Int32), pl.Field("b", pl.Int32)]),
             pl.Decimal(precision=10, scale=1),
         )
@@ -644,7 +651,7 @@ class TestArrowCursor:
                 "col_date": datetime(2017, 1, 2).date(),
                 "col_binary": b"123",
                 "col_array": [1, 2],
-                "col_map": [{"key": 1, "value": 2}, {"key": 3, "value": 4}],
+                "col_map": map_value,
                 "col_struct": {"a": 1, "b": 2},
                 "col_decimal": Decimal("0.1"),
             }
