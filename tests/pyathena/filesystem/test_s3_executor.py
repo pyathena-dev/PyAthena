@@ -22,7 +22,8 @@ from tests.pyathena.util import EVENT_TIMEOUT, overlapping_calls
 class TestS3AioThreadPool:
     def test_init(self):
         # None takes the default of ThreadPoolExecutor.
-        assert S3AioThreadPool(None).max_workers == min(32, (os.cpu_count() or 1) + 4)
+        cpus = getattr(os, "process_cpu_count", os.cpu_count)()
+        assert S3AioThreadPool(None).max_workers == min(32, (cpus or 1) + 4)
         with pytest.raises(ValueError, match="max_workers must be greater than 0"):
             S3AioThreadPool(0)
 
@@ -264,7 +265,9 @@ class TestS3AioExecutor:
 
         def block():
             busy.set()
-            release.wait(EVENT_TIMEOUT)
+            # Held until the shutdown has returned, so that the loop cannot
+            # run the task that the shutdown waits for.
+            release.wait(6 * EVENT_TIMEOUT)
 
         thread = threading.Thread(target=loop.run_forever)
         thread.start()
@@ -272,10 +275,14 @@ class TestS3AioExecutor:
             loop.call_soon_threadsafe(block)
             assert busy.wait(EVENT_TIMEOUT)
             executor = S3AioExecutor(loop=loop)
+            shut_down = threading.Event()
+            waiter = threading.Thread(
+                target=lambda: (executor.shutdown(wait=True), shut_down.set())
+            )
             with mock.patch("pyathena.filesystem.s3_executor.sys.is_finalizing", return_value=True):
-                started = time.monotonic()
-                executor.shutdown(wait=True)
-            assert time.monotonic() - started < EVENT_TIMEOUT
+                waiter.start()
+                assert shut_down.wait(EVENT_TIMEOUT)
+            waiter.join()
         finally:
             release.set()
             loop.call_soon_threadsafe(loop.stop)

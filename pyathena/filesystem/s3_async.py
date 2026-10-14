@@ -120,8 +120,8 @@ class AioS3FileSystem(AsyncFileSystem):
             default_cache_type: Passed to the internal ``S3FileSystem``.
             max_workers: The number of threads that run the blocking calls of
                 the filesystem, and the default number of parallel requests
-                of its files and copies. If None, ``min(32, os.cpu_count() +
-                4)``, as with ``ThreadPoolExecutor``. Passed to the internal
+                of its files and copies. If None, the default of
+                ``ThreadPoolExecutor``: ``min(32, CPUs + 4)``. Passed to the internal
                 ``S3FileSystem``.
             s3_additional_kwargs: Passed to the internal ``S3FileSystem``.
             allow_bucket_creation: Passed to the internal ``S3FileSystem``.

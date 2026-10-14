@@ -163,14 +163,17 @@ class S3AioThreadPool(S3Executor):
 
         Args:
             max_workers: The maximum number of calls that run at once. If
-                None, ``min(32, os.cpu_count() + 4)``, as with
-                ``ThreadPoolExecutor``.
+                None, the default of ``ThreadPoolExecutor``: ``min(32, CPUs +
+                4)``.
 
         Raises:
             ValueError: If ``max_workers`` is not positive.
         """
         if max_workers is None:
-            max_workers = min(32, (os.cpu_count() or 1) + 4)
+            # As ThreadPoolExecutor, which counts the CPUs that the process
+            # may use since Python 3.13.
+            cpus = getattr(os, "process_cpu_count", os.cpu_count)()
+            max_workers = min(32, (cpus or 1) + 4)
         if max_workers <= 0:
             raise ValueError("max_workers must be greater than 0")
         self.max_workers = max_workers

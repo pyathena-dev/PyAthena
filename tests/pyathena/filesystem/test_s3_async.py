@@ -369,11 +369,8 @@ class TestAioS3FileSystem:
 
         assert await fs._info("s3://bucket/key") == {"name": "bucket/key"}
         # The files and copies take the same default.
-        assert (
-            fs._sync_fs.max_workers
-            == fs._thread_pool.max_workers
-            == min(32, (os.cpu_count() or 1) + 4)
-        )
+        cpus = getattr(os, "process_cpu_count", os.cpu_count)()
+        assert fs._sync_fs.max_workers == fs._thread_pool.max_workers == min(32, (cpus or 1) + 4)
 
     @pytest.mark.parametrize("cancellations", [1, 2])
     @pytest.mark.asyncio
