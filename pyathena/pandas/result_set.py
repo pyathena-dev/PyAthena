@@ -350,7 +350,7 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         """
         with self._lock:
             self._readers += 1
-            reader = self._reader
+            reader = iter(()) if self._close_requested else self._reader
         try:
             yield reader
         finally:
@@ -358,7 +358,10 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
                 self._readers -= 1
                 close = self._close_requested and not self._readers
             if close:
-                self.close()
+                try:
+                    self.close()
+                except Exception:
+                    _logger.exception("Failed to close the chunk reader after a read.")
 
     @override
     def __next__(self) -> DataFrame:
@@ -395,7 +398,8 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         """Close the iterator and release resources.
 
         If another thread is reading a chunk, the read returns that chunk, and the
-        reader and the CSV stream are closed when it completes.
+        reader and the CSV stream are closed when it completes. Reads that start after the
+        close get no chunks, and an error from the deferred close is logged.
         """
         from pandas.io.parsers import TextFileReader
 

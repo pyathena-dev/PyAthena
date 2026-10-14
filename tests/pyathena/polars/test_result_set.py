@@ -630,7 +630,8 @@ class TestPolarsDataFrameIterator:
         df_iter.close()
         assert list(df_iter) == []
 
-    def test_close_during_read(self):
+    @pytest.mark.parametrize("close_error", [None, RuntimeError("close failed")])
+    def test_close_during_read(self, caplog, close_error):
         """A close during a read in another thread is deferred until the read completes."""
         reading, release, released = threading.Event(), threading.Event(), threading.Event()
 
@@ -643,6 +644,8 @@ class TestPolarsDataFrameIterator:
                 yield pl.DataFrame({"a": [3]})
             finally:
                 released.set()
+                if close_error:
+                    raise close_error
 
         df_iter = PolarsDataFrameIterator(chunks(), {}, ["a"])
         next(df_iter)
@@ -650,8 +653,11 @@ class TestPolarsDataFrameIterator:
             future = executor.submit(next, df_iter)
             assert reading.wait(10)
             df_iter.close()
+            with pytest.raises(StopIteration):
+                next(df_iter)
             assert not released.is_set()
             release.set()
             assert future.result(10)["a"].to_list() == [2]
         assert released.is_set()
+        assert ("Failed to close the chunk reader" in caplog.text) == bool(close_error)
         assert list(df_iter) == []

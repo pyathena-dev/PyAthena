@@ -145,7 +145,8 @@ class TestPandasDataFrameIterator:
         [PandasDataFrameIterator.__next__, PandasDataFrameIterator.get_chunk],
         ids=["next", "get_chunk"],
     )
-    def test_close_during_read(self, read):
+    @pytest.mark.parametrize("close_error", [None, RuntimeError("close failed")])
+    def test_close_during_read(self, caplog, read, close_error):
         """A close during a read in another thread is deferred until the read completes."""
         reading, release, released = threading.Event(), threading.Event(), threading.Event()
 
@@ -158,6 +159,8 @@ class TestPandasDataFrameIterator:
                 yield pd.DataFrame({"n": [3]})
             finally:
                 released.set()
+                if close_error:
+                    raise close_error
 
         csv_stream = io.StringIO()
         df_iter = PandasDataFrameIterator(chunks(), _no_trunc_date, csv_stream)
@@ -166,11 +169,14 @@ class TestPandasDataFrameIterator:
             future = executor.submit(read, df_iter)
             assert reading.wait(10)
             df_iter.close()
+            with pytest.raises(StopIteration):
+                next(df_iter)
             assert not released.is_set()
             assert not csv_stream.closed
             release.set()
             assert future.result(10)["n"].tolist() == [2]
         assert released.is_set()
+        assert ("Failed to close the chunk reader" in caplog.text) == bool(close_error)
         assert csv_stream.closed
         assert list(df_iter) == []
 
