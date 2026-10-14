@@ -7251,7 +7251,14 @@ class TestS3File:
         # The part copies are not counted toward max_workers, and the write
         # used to upload the rest of the data.
         fs = self._make_append_fs(b"a" * 6)
-        fs.core.upload_part_copy.side_effect = PermissionError("Access Denied")
+        release = threading.Event()
+
+        def upload_part_copy(**kwargs):
+            # Copying until the first write has returned.
+            assert release.wait(5)
+            raise PermissionError("Access Denied")
+
+        fs.core.upload_part_copy.side_effect = upload_part_copy
         executor = mock.MagicMock(wraps=S3ThreadPoolExecutor(max_workers=max_workers))
         f = S3File(
             fs,
@@ -7261,11 +7268,15 @@ class TestS3File:
             max_workers=max_workers,
             executor=executor,
         )
-        f.write(b"b" * 4)
-        # The part copy has failed before the next write.
-        assert wait(f.multipart_upload_parts[:1], timeout=5).done
-        with pytest.raises(PermissionError, match="Access Denied"):
+        try:
             f.write(b"b" * 4)
+            release.set()
+            # The part copy has failed before the next write.
+            assert wait(f.multipart_upload_parts[:1], timeout=5).done
+            with pytest.raises(PermissionError, match="Access Denied"):
+                f.write(b"b" * 4)
+        finally:
+            release.set()
 
         assert [
             c.kwargs["part_number"] for c in executor.submit_to.call_args_list if "body" in c.kwargs
