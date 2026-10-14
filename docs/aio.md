@@ -249,28 +249,34 @@ See each cursor's documentation page for detailed usage examples.
 ## AioS3FileSystem
 
 `AioS3FileSystem` is a native asyncio filesystem interface for Amazon S3, built on
-fsspec's `AsyncFileSystem`. It provides the same functionality as `S3FileSystem` but
-uses `asyncio.gather` with `asyncio.to_thread` for parallel operations instead of
-`ThreadPoolExecutor`.
-
-### Why AioS3FileSystem?
-
-The synchronous `S3FileSystem` uses `ThreadPoolExecutor` for parallel S3 operations
-(batch deletes, multipart uploads, range reads). When used from within an asyncio
-application via `AioS3FSCursor`, this creates a thread-in-thread pattern:
-the cursor wraps calls in `asyncio.to_thread()`, and inside that thread
-`S3FileSystem` spawns additional threads via `ThreadPoolExecutor`.
-
-`AioS3FileSystem` eliminates this inefficiency by dispatching all parallel
-operations through the asyncio event loop.
+fsspec's `AsyncFileSystem`. It provides the same functionality as `S3FileSystem`, and
+its coroutines run the blocking boto3 calls in threads that PyAthena owns, sized by
+`max_workers`, instead of the default executor of the event loop.
 
 | | S3FileSystem | AioS3FileSystem |
 |---|---|---|
-| **Parallelism** | `ThreadPoolExecutor` | `asyncio.gather` + `asyncio.to_thread` |
-| **File handles** | `S3File` with thread pool | `AioS3File` with `S3AioExecutor` |
+| **Blocking calls** | Caller's thread | Thread pool of the filesystem |
+| **Parallelism** | `ThreadPoolExecutor` | `asyncio.gather` on a thread pool |
+| **File handles** | `S3File` with thread pool | `AioS3File` with `S3AioExecutor`; `AioS3StreamedFile` from `open_async()` |
 | **Bulk delete** | Thread pool per batch | `asyncio.gather` per batch |
-| **Multipart copy** | Thread pool per part | `asyncio.gather` per part |
+| **Multipart copy** | Thread pool per part | Asyncio task per part, on a thread pool of the copy |
 | **Best for** | Synchronous applications | Async frameworks (FastAPI, aiohttp, etc.) |
+
+### Threads
+
+The threads of `AioS3FileSystem` belong to `S3AioThreadPool` instances, not to the
+default executor of the event loop, so `loop.set_default_executor()` neither limits nor
+blocks them:
+
+- The filesystem has a pool of `max_workers` threads for the blocking calls of its
+  coroutines, such as `_info()`, `_cat_file()`, and the requests of `_rm()`.
+- A multipart copy has a pool of its own, sized by the `max_workers` of the call.
+- Each file opened with `open()` or `open_async()` has a pool of its own, sized by the
+  `max_workers` of the call.
+
+The pools create threads as the calls need them, and each call runs with the caller's
+context variables, as with `asyncio.to_thread()`.
+In a forked child process, a pool creates new threads.
 
 ### Executor strategy
 
@@ -278,13 +284,48 @@ operations through the asyncio event loop.
 parallel operations. Two implementations are provided:
 
 - `S3ThreadPoolExecutor` — wraps `ThreadPoolExecutor` (default for sync usage)
-- `S3AioExecutor` — dispatches work via `asyncio.run_coroutine_threadsafe` + `asyncio.to_thread`
+- `S3AioExecutor` — dispatches work via `asyncio.run_coroutine_threadsafe` to an
+  `S3AioThreadPool` of its own
 
-`AioS3FileSystem` automatically uses `S3AioExecutor` for file handles, so multipart
-uploads and parallel range reads are dispatched through the event loop with
-`asyncio.to_thread()` instead of a separate `ThreadPoolExecutor` per file.
-At most `max_workers` of them run at once.
+`AioS3FileSystem` automatically uses `S3AioExecutor` for the file handles of `open()`,
+so multipart uploads and parallel range reads are dispatched through the event loop to
+a pool of `max_workers` threads of each file.
 An instance created with `asynchronous=True` has no event loop of its own, so its file handles use `S3ThreadPoolExecutor`.
+
+### Async file handles
+
+`open_async()` returns an `AioS3StreamedFile`, whose `read()`, `write()`, and `close()`
+are coroutines. It supports the `rb`, `wb`, `ab`, and `xb` modes:
+
+```python
+from pyathena.filesystem.s3_async import AioS3FileSystem
+
+fs = AioS3FileSystem(asynchronous=True)
+
+async with await fs.open_async("s3://my-bucket/data/file.bin", "wb") as f:
+    await f.write(data)
+
+async with await fs.open_async("s3://my-bucket/data/file.bin", "rb") as f:
+    data = await f.read()
+```
+
+- A read splits the requested range into ranges of the block size, and reads them in
+  parallel. The file has no read cache.
+- A write uploads each full block as a part of a multipart upload, with at most
+  `max_workers` parts in flight. A write that would upload another part awaits one of
+  them, so the event loop keeps running. A part found failed by that wait stops the
+  write with its error, and the multipart upload is aborted. A part that fails
+  afterward raises its error when the file is closed.
+- Closing the file commits the written data, as `S3File` does.
+- Leaving an `async with` block with an exception, or cancelling a write, closes the file
+  without committing it, and aborts the multipart upload after the running parts finish.
+  The abort completes even if the task is cancelled again.
+- A commit that has started completes even if the task that closes the file is
+  cancelled.
+- A file opened for writing must be closed with `await f.close()` or an `async with`
+  block. A file that is garbage collected without being closed is not committed.
+- `open_async()` raises `NotImplementedError` for the write modes inside a transaction,
+  because the file commits when it is closed.
 
 ### Usage with AioS3FSCursor
 

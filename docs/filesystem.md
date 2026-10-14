@@ -625,5 +625,6 @@ for source, destination in pairing.copy_pairs(sources):
 ## Async filesystem
 
 `AioS3FileSystem` provides the same functionality on top of fsspec's
-`AsyncFileSystem`, dispatching parallel operations through the asyncio event loop.
+`AsyncFileSystem`, running its blocking calls in thread pools sized by `max_workers`.
+Its `open_async()` returns a file whose reads and writes are coroutines.
 See {ref}`aio-s3-filesystem` for details.

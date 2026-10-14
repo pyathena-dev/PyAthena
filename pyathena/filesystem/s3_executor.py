@@ -10,9 +10,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import os
 import threading
 from abc import ABCMeta, abstractmethod
 from collections.abc import Callable
+from concurrent import futures
 from concurrent.futures import Future
 from concurrent.futures.thread import ThreadPoolExecutor
 from multiprocessing import cpu_count
@@ -127,18 +130,148 @@ class S3ThreadPoolExecutor(S3Executor):
         self._executor.shutdown(wait=wait)
 
 
+class S3AioThreadPool:
+    """A thread pool that runs the blocking calls of asyncio code.
+
+    Unlike ``asyncio.to_thread()``, which runs a call in the default executor
+    of the event loop, this pool runs at most ``max_workers`` calls at once in
+    threads of its own, so that neither the size nor the load of the default
+    executor limits or blocks them. The threads are created as the calls need
+    them, and each call runs with a copy of the caller's context variables,
+    as with ``asyncio.to_thread()``. In a forked child process, whose copy
+    has no threads, the pool creates new ones. The pool can be shared by
+    several event loops and threads.
+
+    Args:
+        max_workers: The maximum number of calls that run at once.
+
+    Raises:
+        ValueError: If ``max_workers`` is not positive.
+    """
+
+    def __init__(self, max_workers: int) -> None:
+        """Initialize the pool without starting any thread.
+
+        Args:
+            max_workers: The maximum number of calls that run at once.
+
+        Raises:
+            ValueError: If ``max_workers`` is not positive.
+        """
+        if max_workers <= 0:
+            raise ValueError("max_workers must be greater than 0")
+        self.max_workers = max_workers
+        self._lock = threading.Lock()
+        self._executor: ThreadPoolExecutor | None = None
+        self._pid: int | None = None
+        self._shutdown = False
+
+    def submit(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> Future[T]:
+        """Schedule a blocking call in a thread of the pool.
+
+        As with ``ThreadPoolExecutor``, the returned future can be cancelled
+        only before the call starts. The calls start in the order they were
+        submitted, so that a call that waits for the calls submitted before it
+        does not wait for a thread that it holds.
+
+        Args:
+            fn: The blocking callable.
+            *args: Positional arguments passed to the callable.
+            **kwargs: Keyword arguments passed to the callable.
+
+        Returns:
+            The future of the call.
+
+        Raises:
+            RuntimeError: If the pool has been shut down.
+        """
+        context = contextvars.copy_context()
+        return self._get_executor().submit(context.run, fn, *args, **kwargs)
+
+    async def run(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+        """Run a blocking call in a thread of the pool and wait for it.
+
+        Cancelling the waiting task cancels a call that has not started; a
+        running call keeps running, as with ``asyncio.to_thread()``.
+
+        Args:
+            fn: The blocking callable.
+            *args: Positional arguments passed to the callable.
+            **kwargs: Keyword arguments passed to the callable.
+
+        Returns:
+            The return value of the call.
+
+        Raises:
+            RuntimeError: If the pool has been shut down.
+        """
+        return await asyncio.wrap_future(self.submit(fn, *args, **kwargs))
+
+    async def run_shielded(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+        """Run a blocking call that a cancellation of the waiting task does not stop.
+
+        The call runs to its end, even if it has not started when the waiting
+        task is cancelled; its outcome is then dropped.
+
+        Args:
+            fn: The blocking callable.
+            *args: Positional arguments passed to the callable.
+            **kwargs: Keyword arguments passed to the callable.
+
+        Returns:
+            The return value of the call.
+
+        Raises:
+            RuntimeError: If the pool has been shut down.
+        """
+        future = asyncio.wrap_future(self.submit(fn, *args, **kwargs))
+        # Retrieved, so that asyncio does not log the failure of a call whose
+        # waiting task was cancelled as never retrieved.
+        future.add_done_callback(lambda f: f.cancelled() or f.exception())
+        return await asyncio.shield(future)
+
+    def shutdown(self, wait: bool = True) -> None:
+        """Stop accepting calls and release the threads once they are idle.
+
+        The calls that were submitted before still run.
+
+        Args:
+            wait: Whether to wait for the submitted calls to finish.
+        """
+        with self._lock:
+            self._shutdown = True
+            executor = self._executor if self._pid == os.getpid() else None
+        if executor is not None:
+            executor.shutdown(wait=wait)
+
+    def _get_executor(self) -> ThreadPoolExecutor:
+        """Return the thread pool of this process, creating it if needed.
+
+        Returns:
+            The thread pool.
+
+        Raises:
+            RuntimeError: If the pool has been shut down.
+        """
+        with self._lock:
+            if self._shutdown:
+                raise RuntimeError("cannot schedule new futures after shutdown")
+            if self._executor is None or self._pid != os.getpid():
+                self._executor = ThreadPoolExecutor(max_workers=self.max_workers)
+                self._pid = os.getpid()
+            return self._executor
+
+
 class S3AioExecutor(S3Executor):
     """Executor that schedules work on an asyncio event loop.
 
-    Uses ``asyncio.run_coroutine_threadsafe(asyncio.to_thread(fn), loop)`` to
-    dispatch blocking functions onto the event loop's thread pool, returning
+    Uses ``asyncio.run_coroutine_threadsafe()`` to dispatch blocking functions
+    through the event loop to an ``S3AioThreadPool`` of its own, returning
     ``concurrent.futures.Future`` objects that are compatible with
     ``as_completed()``, ``wait()`` and ``Future.cancel()``. As with
     ``ThreadPoolExecutor``, a future cannot be cancelled once its function has
-    started. At most ``max_workers`` of the submitted functions run at once.
-
-    This avoids thread-in-thread nesting when ``S3File`` is used from within
-    ``asyncio.to_thread()`` calls (the pattern used by ``AioS3FileSystem``).
+    started. At most ``max_workers`` of the submitted functions run at once,
+    whatever the size of the default executor of the event loop.
 
     Args:
         loop: A running asyncio event loop.
@@ -164,28 +297,19 @@ class S3AioExecutor(S3Executor):
         Raises:
             ValueError: If ``max_workers`` is not positive.
         """
-        if max_workers <= 0:
-            # As ThreadPoolExecutor does; a semaphore of 0 would never run anything.
-            raise ValueError("max_workers must be greater than 0")
         self._loop = loop
-        self._semaphore = asyncio.Semaphore(max_workers)
-
-    async def _run(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
-        """Run the function in a thread once fewer than ``max_workers`` run.
-
-        Args:
-            fn: The blocking function to run.
-            *args: Positional arguments passed to the function.
-            **kwargs: Keyword arguments passed to the function.
-
-        Returns:
-            The return value of the function.
-        """
-        async with self._semaphore:
-            return await asyncio.to_thread(fn, *args, **kwargs)
+        self._pool = S3AioThreadPool(max_workers)
+        self._lock = threading.Lock()
+        # The returned futures that are not done. A function reaches the pool
+        # only when the event loop runs its task, so the pool is shut down
+        # once they are all done.
+        self._pending: set[Future[Any]] = set()
+        self._shutdown = False
 
     @override
     def submit(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> Future[T]:
+        if self._shutdown:
+            raise RuntimeError("cannot schedule new futures after shutdown")
         if self._loop is not None and self._loop.is_running():
             # The future of run_coroutine_threadsafe can be cancelled while
             # the function keeps running in its thread, so the returned future
@@ -225,7 +349,10 @@ class S3AioExecutor(S3Executor):
                 elif future.set_running_or_notify_cancel():
                     future.set_exception(task.exception())
 
-            task = asyncio.run_coroutine_threadsafe(self._run(run), self._loop)
+            with self._lock:
+                self._pending.add(future)
+            future.add_done_callback(self._release)
+            task = asyncio.run_coroutine_threadsafe(self._pool.run(run), self._loop)
             task.add_done_callback(settle)
             return future
         raise RuntimeError(
@@ -233,7 +360,25 @@ class S3AioExecutor(S3Executor):
             "Use S3ThreadPoolExecutor for synchronous usage."
         )
 
+    def _release(self, future: Future[Any]) -> None:
+        """Forget a done future, shutting down the pool after the last one.
+
+        Args:
+            future: The done future.
+        """
+        with self._lock:
+            self._pending.discard(future)
+            last = self._shutdown and not self._pending
+        if last:
+            self._pool.shutdown(wait=False)
+
     @override
     def shutdown(self, wait: bool = True) -> None:
-        # No resources to release — work is dispatched to the event loop.
-        pass
+        with self._lock:
+            self._shutdown = True
+            pending = list(self._pending)
+        if wait:
+            # Also the functions that have not reached the pool yet.
+            futures.wait(pending)
+        if not pending or wait:
+            self._pool.shutdown(wait=wait)
