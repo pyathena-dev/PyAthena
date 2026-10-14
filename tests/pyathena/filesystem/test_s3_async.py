@@ -2855,6 +2855,38 @@ class TestAioS3StreamedFile:
         assert events[4:] == ["abort"]
         fs.core.complete_multipart_upload.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_close_cancelled(self, fs):
+        # A commit that has started completes even if the task that closes
+        # the file is cancelled, and the upload is not aborted.
+        block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
+        started = threading.Event()
+        release = threading.Event()
+        completed = threading.Event()
+
+        def complete_multipart_upload(*args, **kwargs):
+            started.set()
+            # The finally block of the test always releases it.
+            release.wait()
+            completed.set()
+
+        fs.core.complete_multipart_upload = mock.MagicMock(side_effect=complete_multipart_upload)
+        f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size)
+        await f.write(b"a" * block_size * 2)
+        task = asyncio.ensure_future(f.close())
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release.set()
+        assert await asyncio.to_thread(completed.wait, 5)
+
+        assert f.closed
+        fs.core.complete_multipart_upload.assert_called_once()
+        fs.core.abort_multipart_upload.assert_not_called()
+
     @pytest.mark.parametrize("data", [b"", b"abc"])
     @pytest.mark.asyncio
     async def test_close_small(self, fs, data):
