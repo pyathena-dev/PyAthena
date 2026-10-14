@@ -7254,8 +7254,9 @@ class TestS3File:
         release = threading.Event()
 
         def upload_part_copy(**kwargs):
-            # Copying until the first write has returned.
-            assert release.wait(5)
+            # Copying until the first write has returned. The test always
+            # sets the event, so the wait needs no timeout.
+            release.wait()
             raise PermissionError("Access Denied")
 
         fs.core.upload_part_copy.side_effect = upload_part_copy
@@ -7277,6 +7278,7 @@ class TestS3File:
                 f.write(b"b" * 4)
         finally:
             release.set()
+            executor.shutdown()
 
         assert [
             c.kwargs["part_number"] for c in executor.submit_to.call_args_list if "body" in c.kwargs
