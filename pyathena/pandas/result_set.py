@@ -5,8 +5,6 @@ from __future__ import annotations
 import csv
 import importlib
 import logging
-import operator
-import sys
 from collections import abc
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -950,26 +948,11 @@ class AthenaPandasResultSet(AthenaResultSet):
         return row
 
     @override
-    def fetchmany(
-        self, size: int | None = None
-    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
-        if not size or size <= 0:
-            size = self._arraysize
-        # A size that is not an integer raises TypeError, as with the base class, and
-        # islice() takes no size above sys.maxsize.
-        return self._take_rows(min(operator.index(size), sys.maxsize))
-
-    @override
-    def fetchall(
-        self,
-    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
-        return self._take_rows(None)
-
     def _take_rows(self, size: int | None) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         """Take the next rows and count them in ``rownumber``.
 
-        The rows taken before an exception are counted too, as the base class's
-        ``fetchone()`` per row counted them.
+        The rows are taken from the row iterator in bulk. The rows taken before an
+        exception are counted too.
 
         Args:
             size: The maximum number of rows, or None for all remaining rows.
@@ -985,20 +968,6 @@ class AthenaPandasResultSet(AthenaResultSet):
             if rows:
                 self._count_rows(len(rows))
         return rows
-
-    def _count_rows(self, count: int) -> None:
-        """Count the rows that a fetch took in ``rownumber``.
-
-        ``rownumber`` stays None for a result set that another thread closed before
-        the update. It is read once, so that a ``close()`` during the update raises no
-        TypeError, though it may leave the count in place.
-
-        Args:
-            count: The number of rows taken.
-        """
-        rownumber = self._rownumber
-        if rownumber is not None:
-            self._rownumber = rownumber + count
 
     def _read_csv(self) -> TextFileReader | DataFrame:
         """Read the CSV result file, or the GetQueryResults rows as one without it.

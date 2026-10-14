@@ -4,6 +4,8 @@
 # See LICENSE or https://opensource.org/licenses/MIT.
 #
 # SPDX-License-Identifier: MIT
+import collections
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -11,9 +13,10 @@ import pytest
 from pyathena.aio.common import AioBaseCursor, WithAsyncFetch
 from pyathena.common import BaseCursor, CursorIterator
 from pyathena.converter import DefaultTypeConverter
+from pyathena.error import OperationalError
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet, WithFetch, WithResultSet
-from pyathena.util import RetryConfig
+from pyathena.util import RetryConfig, override
 
 
 def _page(values, next_token=None):
@@ -27,7 +30,115 @@ def _row(*values):
     return {"Data": [{} if v is None else {"VarCharValue": v} for v in values]}
 
 
+def _fetching_result_set(*pages):
+    """Create a result set of a succeeded query from stubbed ``GetQueryResults`` pages.
+
+    No AWS calls; the first page is fetched at creation, the others on demand.
+
+    Args:
+        *pages: The values of an integer column ``a``, one tuple per page, or an
+            exception that the request for the page raises.
+
+    Returns:
+        The result set.
+    """
+    responses = []
+    for i, page in enumerate(pages):
+        if isinstance(page, Exception):
+            responses.append(page)
+            continue
+        response = _page(page, f"token{i + 1}" if i + 1 < len(pages) else None)
+        if i == 0:
+            response["ResultSet"]["ResultSetMetadata"] = {
+                "ColumnInfo": [{"Name": "a", "Type": "integer"}]
+            }
+        responses.append(response)
+    connection = MagicMock()
+    connection.client.get_query_results.side_effect = responses
+    return AthenaResultSet(
+        connection=connection,
+        converter=DefaultTypeConverter(),
+        query_execution=MagicMock(state=AthenaQueryExecution.STATE_SUCCEEDED),
+        arraysize=2,
+        retry_config=RetryConfig(),
+    )
+
+
+class _FetchoneResultSet(AthenaResultSet):
+    """A result set whose ``fetchone()`` takes rows from an iterator, not the buffer."""
+
+    def __init__(self, rows):
+        """Initialize the result set with its rows, skipping the base initialization.
+
+        Args:
+            rows: The rows that ``fetchone()`` returns.
+        """
+        self._rows = collections.deque()
+        self._rownumber = 0
+        self._row_iter = iter(rows)
+
+    @override
+    def fetchone(self):
+        row = next(self._row_iter, None)
+        if row is not None:
+            self._rownumber += 1
+        return row
+
+
 class TestAthenaResultSet:
+    def test_fetchmany_across_pages(self):
+        result_set = _fetching_result_set(("1", "2"), ("3", "4"), ("5",))
+        assert result_set.fetchmany(1) == [(1,)]
+        assert result_set.rownumber == 1
+        assert result_set.fetchmany(3) == [(2,), (3,), (4,)]
+        assert result_set.rownumber == 4
+        assert result_set.fetchmany() == [(5,)]
+        assert result_set.fetchmany() == []
+        assert result_set.rownumber == 5
+        assert result_set.connection.client.get_query_results.call_count == 3
+
+    def test_fetchall_across_pages(self):
+        result_set = _fetching_result_set(("1", "2"), ("3", "4"), ("5",))
+        assert result_set.fetchone() == (1,)
+        assert result_set.fetchall() == [(2,), (3,), (4,), (5,)]
+        assert result_set.rownumber == 5
+        assert result_set.fetchall() == []
+        assert result_set.fetchone() is None
+
+    def test_fetchmany_size_above_maxsize(self):
+        result_set = _fetching_result_set(("1", "2"), ("3",))
+        assert result_set.fetchmany(sys.maxsize + 1) == [(1,), (2,), (3,)]
+        assert result_set.rownumber == 3
+
+    def test_fetchmany_size_not_integer(self):
+        """A size that is not an integer raises TypeError without consuming rows."""
+        result_set = _fetching_result_set(("1", "2"))
+        with pytest.raises(TypeError):
+            result_set.fetchmany(1.5)
+        assert result_set.fetchall() == [(1,), (2,)]
+
+    @pytest.mark.parametrize(("method", "args"), [("fetchmany", (3,)), ("fetchall", ())])
+    def test_fetch_counts_rows_taken_before_error(self, method, args):
+        """The rows taken before a failed page request are counted in rownumber."""
+        result_set = _fetching_result_set(("1", "2"), RuntimeError("failed"))
+        with pytest.raises(OperationalError):
+            getattr(result_set, method)(*args)
+        assert result_set.rownumber == 2
+
+    def test_fetch_after_close(self):
+        result_set = _fetching_result_set(("1", "2"), ("3",))
+        result_set.close()
+        assert result_set.fetchmany() == []
+        assert result_set.fetchall() == []
+        assert result_set.rownumber is None
+
+    def test_fetch_with_fetchone_override(self):
+        """A subclass whose fetchone() does not use the buffer has its rows fetched."""
+        result_set = _FetchoneResultSet([(1,), (2,), (3,)])
+        assert result_set.fetchmany(2) == [(1,), (2,)]
+        assert result_set.fetchall() == [(3,)]
+        assert result_set.rownumber == 3
+
     def test_fetch_all_rows_skips_column_labels_only_on_first_page(self):
         """A later page can start with a data row equal to the column labels.
 
