@@ -37,6 +37,7 @@ from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
+    EVENT_TIMEOUT,
     MULTIPART_COPY_BLOCK_SIZE,
     MULTIPART_COPY_KWARGS,
     overlapping_calls,
@@ -2876,11 +2877,22 @@ class TestAioS3StreamedFile:
         )
         info.size = block_size
         fs._sync_fs.info = mock.MagicMock(return_value=info)
-        fs.core.upload_part_copy = mock.MagicMock(side_effect=PermissionError("Access Denied"))
+        release = threading.Event()
+
+        def upload_part_copy(**kwargs):
+            # Held until the first write returns, so that it does not see
+            # the failure.
+            release.wait(EVENT_TIMEOUT)
+            raise PermissionError("Access Denied")
+
+        fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
         f = await fs.open_async("s3://bucket/key", "ab", block_size=block_size)
-        await f.write(b"a" * block_size)
+        try:
+            await f.write(b"a" * block_size)
+        finally:
+            release.set()
         # The copy has failed before the next write submits a part.
-        await asyncio.to_thread(wait, f._parts[:1], 5)
+        await asyncio.to_thread(wait, f._parts[:1], EVENT_TIMEOUT)
 
         with pytest.raises(PermissionError, match="Access Denied"):
             await f.write(b"a" * block_size)

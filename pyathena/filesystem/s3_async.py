@@ -1552,9 +1552,10 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         Creates an empty object if nothing was written, uploads the buffered
         data with PutObject if no part was uploaded, and otherwise completes
         the multipart upload once its parts have ended, aborting it if a
-        part or the completion fails. A failed part is handled as soon as it
-        fails, without waiting for the parts before it. Invalidates the cache
-        of the path afterwards.
+        part or the completion fails. A failed part is found as soon as it
+        fails, without waiting for the parts before it, and the parts that
+        have not started are cancelled; the running ones are waited for
+        before the abort. Invalidates the cache of the path afterwards.
 
         Raises:
             FileExistsError: If an object was created at the path after the

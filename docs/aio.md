@@ -318,8 +318,9 @@ async with await fs.open_async("s3://my-bucket/data/file.bin", "rb") as f:
   them, so the event loop keeps running. A part found failed by that wait, or a part
   copied from the existing object in an append that has failed before the write uploads
   another part, stops the write with its error, and the multipart upload is aborted.
-  A part that fails later raises its error when the file is closed, without waiting for
-  the parts before it.
+  A part that fails later raises its error when the file is closed. The commit cancels
+  the parts that have not started as soon as one fails, and waits for the running ones
+  before it aborts the upload and raises the error.
 - Closing the file commits the written data, as `S3File` does.
 - Leaving an `async with` block with an exception, or cancelling a write, closes the file
   without committing it, and aborts the multipart upload after the running parts finish.
