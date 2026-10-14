@@ -30,6 +30,33 @@ _queries = Environment(
 )
 
 
+def get_query_results_responses(*pages):
+    """Build stubbed ``GetQueryResults`` responses of an integer column ``a``.
+
+    Args:
+        *pages: The values of the column, one sequence per page, or an exception that
+            the request for the page raises.
+
+    Returns:
+        The responses, the first with the result set metadata and each but the last
+        with a ``NextToken``.
+    """
+    responses = []
+    for i, page in enumerate(pages):
+        if isinstance(page, Exception):
+            responses.append(page)
+            continue
+        response = {"ResultSet": {"Rows": [{"Data": [{"VarCharValue": v}]} for v in page]}}
+        if i == 0:
+            response["ResultSet"]["ResultSetMetadata"] = {
+                "ColumnInfo": [{"Name": "a", "Type": "integer"}]
+            }
+        if i + 1 < len(pages):
+            response["NextToken"] = f"token{i + 1}"
+        responses.append(response)
+    return responses
+
+
 def read_query(name, **kwargs):
     template = _queries.get_template(name)
     return [q.strip() for q in template.render(**kwargs).split(";") if q and q.strip()]

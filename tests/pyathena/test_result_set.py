@@ -17,6 +17,7 @@ from pyathena.error import OperationalError
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet, WithFetch, WithResultSet
 from pyathena.util import RetryConfig, override
+from tests.pyathena.util import get_query_results_responses
 
 
 def _page(values, next_token=None):
@@ -42,19 +43,8 @@ def _fetching_result_set(*pages):
     Returns:
         The result set.
     """
-    responses = []
-    for i, page in enumerate(pages):
-        if isinstance(page, Exception):
-            responses.append(page)
-            continue
-        response = _page(page, f"token{i + 1}" if i + 1 < len(pages) else None)
-        if i == 0:
-            response["ResultSet"]["ResultSetMetadata"] = {
-                "ColumnInfo": [{"Name": "a", "Type": "integer"}]
-            }
-        responses.append(response)
     connection = MagicMock()
-    connection.client.get_query_results.side_effect = responses
+    connection.client.get_query_results.side_effect = get_query_results_responses(*pages)
     return AthenaResultSet(
         connection=connection,
         converter=DefaultTypeConverter(),
@@ -86,7 +76,7 @@ class _FetchoneResultSet(AthenaResultSet):
 
 
 class _ClosingDeque(collections.deque):
-    """A buffer that closes its result set when it is first read, as another thread may."""
+    """A buffer that closes its result set when it is read, as another thread may."""
 
     def __init__(self, rows, result_set):
         """Initialize the buffer.
@@ -97,23 +87,16 @@ class _ClosingDeque(collections.deque):
         """
         super().__init__(rows)
         self._result_set = result_set
-        self._closed = False
-
-    def _close_once(self):
-        """Close the result set on the first read."""
-        if not self._closed:
-            self._closed = True
-            self._result_set.close()
 
     @override
     def popleft(self):
         row = super().popleft()
-        self._close_once()
+        self._result_set.close()
         return row
 
     @override
     def __iter__(self):
-        self._close_once()
+        self._result_set.close()
         return super().__iter__()
 
 

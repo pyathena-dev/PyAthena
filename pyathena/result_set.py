@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import collections
-import contextlib
 import logging
 import operator
 import sys
@@ -496,7 +495,10 @@ class AthenaResultSet(CursorIterator):
         if not self._rows:
             return None
         row = self._rows.popleft()
-        self._count_rows(1)
+        # As _count_rows() does, inline on the per-row path.
+        rownumber = self._rownumber
+        if rownumber is not None:
+            self._rownumber = rownumber + 1
         return row
 
     @override
@@ -535,8 +537,8 @@ class AthenaResultSet(CursorIterator):
         """Take the next rows and count them in ``rownumber``.
 
         The buffered rows are taken in bulk. When the buffer is empty, ``fetchone()``
-        takes the next row, so that it fetches the next rows into the buffer as a
-        subclass that overrides it does.
+        takes the next row, so that it fetches the next rows into the buffer as the
+        result set does.
 
         Args:
             size: The maximum number of rows, or None for all remaining rows.
@@ -547,7 +549,7 @@ class AthenaResultSet(CursorIterator):
         rows: list[tuple[Any | None, ...] | dict[Any, Any | None]] = []
         while size is None or len(rows) < size:
             if self._rows:
-                self._take_buffered_rows(rows, None if size is None else size - len(rows))
+                self._take_buffered_rows(rows, size)
             else:
                 row = self.fetchone()
                 if row is None:
@@ -556,23 +558,24 @@ class AthenaResultSet(CursorIterator):
         return rows
 
     def _take_buffered_rows(
-        self, rows: list[tuple[Any | None, ...] | dict[Any, Any | None]], limit: int | None
+        self, rows: list[tuple[Any | None, ...] | dict[Any, Any | None]], size: int | None
     ) -> None:
         """Move the buffered rows to ``rows`` and count them in ``rownumber``.
 
-        A ``close()`` from another thread meanwhile empties the buffer, and the rows
-        moved before it are kept.
-
         Args:
             rows: The list that receives the rows.
-            limit: The maximum number of rows, or None for all buffered rows.
+            size: The maximum length of ``rows``, or None for all buffered rows.
         """
         start = len(rows)
+        limit = None if size is None else size - start
         if limit is not None and limit < len(self._rows):
             # A row is never None, so popleft() runs until the limit or an empty
             # buffer, and extend() keeps the rows that it appended before that.
-            with contextlib.suppress(IndexError):
+            # try costs nothing without an exception, unlike contextlib.suppress().
+            try:  # noqa: SIM105
                 rows.extend(islice(iter(self._rows.popleft, None), limit))
+            except IndexError:
+                pass
         else:
             # The buffer is replaced, not cleared after it is read, so that a close()
             # in between empties only the new buffer.

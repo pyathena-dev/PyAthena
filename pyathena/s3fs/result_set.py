@@ -267,7 +267,10 @@ class AthenaS3FSResultSet(AthenaResultSet):
         if not self._rows:
             return None
         row = self._rows.popleft()
-        self._count_rows(1)
+        # As _count_rows() does, inline on the per-row path.
+        rownumber = self._rownumber
+        if rownumber is not None:
+            self._rownumber = rownumber + 1
         return row
 
     @override

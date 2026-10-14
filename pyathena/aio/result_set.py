@@ -188,7 +188,10 @@ class AthenaAioResultSet(AthenaResultSet):
         if not self._rows:
             return None
         row = self._rows.popleft()
-        self._count_rows(1)
+        # As _count_rows() does, inline on the per-row path.
+        rownumber = self._rownumber
+        if rownumber is not None:
+            self._rownumber = rownumber + 1
         return row
 
     @override
@@ -239,7 +242,7 @@ class AthenaAioResultSet(AthenaResultSet):
         rows: list[tuple[Any | None, ...] | dict[Any, Any | None]] = []
         while size is None or len(rows) < size:
             if self._rows:
-                self._take_buffered_rows(rows, None if size is None else size - len(rows))
+                self._take_buffered_rows(rows, size)
             else:
                 row = await self.fetchone()
                 if row is None:

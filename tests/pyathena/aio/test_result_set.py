@@ -12,6 +12,7 @@ from pyathena.aio.result_set import AthenaAioDictResultSet, AthenaAioResultSet
 from pyathena.converter import DefaultTypeConverter
 from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
+from tests.pyathena.util import get_query_results_responses
 
 
 async def _create_result_set(result_set_class, pages=(("1", "2"),)):
@@ -25,20 +26,8 @@ async def _create_result_set(result_set_class, pages=(("1", "2"),)):
     Returns:
         The result set.
     """
-    responses = []
-    for i, page in enumerate(pages):
-        response = {
-            "ResultSet": {"Rows": [{"Data": [{"VarCharValue": v}]} for v in page]},
-        }
-        if i == 0:
-            response["ResultSet"]["ResultSetMetadata"] = {
-                "ColumnInfo": [{"Name": "a", "Type": "integer"}]
-            }
-        if i + 1 < len(pages):
-            response["NextToken"] = f"token{i + 1}"
-        responses.append(response)
     connection = MagicMock()
-    connection.client.get_query_results.side_effect = responses
+    connection.client.get_query_results.side_effect = get_query_results_responses(*pages)
     query_execution = AthenaQueryExecution(
         {
             "QueryExecution": {
