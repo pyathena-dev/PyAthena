@@ -18,7 +18,7 @@ import urllib.request
 import uuid
 import weakref
 from base64 import b64encode
-from concurrent.futures import Future, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from itertools import chain
 from pathlib import Path
@@ -3552,7 +3552,10 @@ class TestS3FileSystem:
                 )
 
         assert events == ["part 2 stored", "abort"]
-        assert waited.call_args_list[-1] == mock.call([failed, running])
+        assert waited.call_args_list == [
+            mock.call([failed, running, pending], return_when=FIRST_EXCEPTION),
+            mock.call([failed, running]),
+        ]
         assert pending.cancelled()
 
     def test_finish_multipart_upload_stops_at_failed_part(self):
@@ -6713,6 +6716,7 @@ class TestS3File:
         # a part.
         file.max_workers = S3Core.MULTIPART_UPLOAD_MAX_PARTS
         file._uploads_in_flight = set()
+        file._copies_in_flight = set()
         file._executor = mock.MagicMock()
         return file
 
@@ -7072,6 +7076,9 @@ class TestS3File:
         executor.submit_to = record_upload  # type: ignore[method-assign]
 
         def release_newest(futures, **kwargs):
+            if kwargs.get("return_when") != FIRST_COMPLETED:
+                # The wait of commit() for the parts.
+                return wait(futures, **kwargs)
             # Only the newest part in flight finishes, so a write that waits
             # for the oldest one would time out.
             gates[max(n for n, upload in uploads.items() if not upload.done())].set()
@@ -7095,7 +7102,9 @@ class TestS3File:
         assert self._uploaded_object(fs, existing) == existing + b"".join(writes)
         # Each part was submitted once fewer than max_workers were in flight.
         assert in_flight == [min(n, max_workers) for n in range(1, len(uploads) + 1)]
-        assert waited.call_count == len(uploads) - max_workers
+        assert [c.kwargs.get("return_when") for c in waited.call_args_list].count(
+            FIRST_COMPLETED
+        ) == len(uploads) - max_workers
 
     def test_write_interrupted_while_waiting_for_part(self):
         # GH-1158: an interrupt while a write waits for a part closes the file
@@ -7235,19 +7244,26 @@ class TestS3File:
         fs.core.complete_multipart_upload.assert_not_called()
         assert f.multipart_upload is None
 
-    def test_append_failed_part_copy_while_waiting(self):
-        # GH-1178: a failed part copy of an append that a write finds while
-        # it waits for a part stops the write, as a failed uploaded part
-        # does. The part copies are not counted toward max_workers, and the
-        # write used to upload the rest of the data.
+    @pytest.mark.parametrize("max_workers", [1, 4])
+    def test_append_failed_part_copy(self, max_workers):
+        # GH-1178: a failed part copy of an append stops the write before it
+        # uploads another part, whether or not the write waits for a part.
+        # The part copies are not counted toward max_workers, and the write
+        # used to upload the rest of the data.
         fs = self._make_append_fs(b"a" * 6)
         fs.core.upload_part_copy.side_effect = PermissionError("Access Denied")
-        # One thread, so that the part copy finishes before the first part.
-        executor = mock.MagicMock(wraps=S3ThreadPoolExecutor(max_workers=1))
+        executor = mock.MagicMock(wraps=S3ThreadPoolExecutor(max_workers=max_workers))
         f = S3File(
-            fs, "s3://bucket/key.txt", mode="ab", block_size=4, max_workers=1, executor=executor
+            fs,
+            "s3://bucket/key.txt",
+            mode="ab",
+            block_size=4,
+            max_workers=max_workers,
+            executor=executor,
         )
         f.write(b"b" * 4)
+        # The part copy has failed before the next write.
+        assert wait(f.multipart_upload_parts[:1], timeout=5).done
         with pytest.raises(PermissionError, match="Access Denied"):
             f.write(b"b" * 4)
 
@@ -7259,7 +7275,6 @@ class TestS3File:
         )
         fs.core.complete_multipart_upload.assert_not_called()
         assert f.closed
-        assert f.multipart_upload_parts == []
 
     def test_multipart_write_request_parameters(self):
         # GH-946: the parts receive the parameters of the file that they
@@ -7494,6 +7509,50 @@ class TestS3File:
         ] * (2 if abort_fails else 1)
         assert file.multipart_upload is None
         assert file.multipart_upload_parts == []
+
+    def test_commit_stops_at_failed_part(self):
+        # GH-1178: commit() handles a failed part without waiting for the
+        # parts before it, so that the parts queued after it, such as the
+        # part copies of a large append, are cancelled. The parts used to be
+        # collected in part-number order.
+        file = self._make_multipart_write_file(b"x" * 16, autocommit=False)
+        started = threading.Event()
+        release = threading.Event()
+        cleanup = []
+
+        def copy_part():
+            started.set()
+            # Copying until the cleanup waits for it.
+            release.wait(5)
+
+        def wait_parts(futures, **kwargs):
+            if not kwargs:
+                # Whether the earlier part was still copying when the cleanup
+                # started.
+                cleanup.append(running.done())
+                release.set()
+            return wait(futures, **kwargs)
+
+        failed: Future[SimpleNamespace] = Future()
+        failed.set_exception(PermissionError("Access Denied"))
+        with (
+            ThreadPoolExecutor(max_workers=1) as executor,
+            mock.patch("pyathena.filesystem.s3.wait", side_effect=wait_parts),
+        ):
+            running = executor.submit(copy_part)
+            pending = executor.submit(SimpleNamespace)
+            assert started.wait(5)
+            file.multipart_upload_parts = [running, failed, pending]
+            with pytest.raises(PermissionError, match="Access Denied"):
+                file.commit()
+
+        assert cleanup == [False]
+        assert pending.cancelled()
+        file.fs.core.complete_multipart_upload.assert_not_called()
+        file.fs._call.assert_called_once_with(
+            S3_CLIENT.abort_multipart_upload, Bucket="bucket", Key="key.txt", UploadId="uploadid"
+        )
+        assert file.multipart_upload is None
 
     def test_commit_failure_and_interrupted_abort(self):
         # GH-945: if the abort after a failed completion is interrupted, the

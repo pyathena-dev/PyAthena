@@ -8,7 +8,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
-from concurrent.futures import wait
+from concurrent.futures import FIRST_COMPLETED, wait
 from datetime import UTC, datetime
 from itertools import chain
 from pathlib import Path
@@ -2405,6 +2405,9 @@ class TestAioS3File:
             submit_to(executor, future, fn, *args, **kwargs)
 
         def release_newest(futures, **kwargs):
+            if kwargs.get("return_when") != FIRST_COMPLETED:
+                # The wait of commit() for the parts.
+                return wait(futures, **kwargs)
             # Only the newest part in flight finishes, so a write that waits
             # for the oldest one would time out.
             gates[max(n for n, upload in uploads.items() if not upload.done())].set()
