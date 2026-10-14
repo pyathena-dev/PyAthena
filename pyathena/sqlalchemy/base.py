@@ -23,6 +23,7 @@ from sqlalchemy.sql.compiler import (
 )
 
 import pyathena
+from pyathena.cursor import Cursor
 from pyathena.sqlalchemy.compiler import (
     AthenaDDLCompiler,
     AthenaStatementCompiler,
@@ -52,6 +53,7 @@ if TYPE_CHECKING:
         PoolProxiedConnection,
     )
     from sqlalchemy.engine.interfaces import (
+        DBAPIConnection,
         ReflectedForeignKeyConstraint,
         ReflectedIndex,
         ReflectedPrimaryKeyConstraint,
@@ -283,6 +285,14 @@ class AthenaDialect(DefaultDialect):
                 ):
                     raise exc.NoSuchTableError(table_name) from e
                 raise
+
+    def do_ping(self, dbapi_connection: DBAPIConnection) -> bool:
+        # When unload is enabled in the default cursor, SELECT 1 is wrapped in UNLOAD
+        # which Athena rejects with MISSING_COLUMN_NAME because the column is unnamed.
+        # Using the plain cursor here performs the SELECT without the UNLOAD.
+        with dbapi_connection.cursor(Cursor) as cursor:  # type: ignore[attr-defined]
+            cursor.execute(self._dialect_specific_select_one)
+        return True
 
     @reflection.cache
     def _get_tables(self, connection, schema: str | None = None, **kw):

@@ -6,6 +6,7 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import MagicMock
 from urllib.parse import quote_plus
 
 import numpy as np
@@ -20,6 +21,17 @@ from sqlalchemy.sql.schema import Column, MetaData, Table
 from sqlalchemy.sql.selectable import TextualSelect
 from sqlalchemy.util import PluginLoader
 
+from pyathena.aio.connection import AioConnection
+from pyathena.aio.cursor import AioCursor
+from pyathena.aio.pandas.cursor import AioPandasCursor
+from pyathena.aio.sqlalchemy.base import (
+    AsyncAdapt_pyathena_connection,
+    AsyncAdapt_pyathena_cursor,
+    AthenaAioDialect,
+)
+from pyathena.connection import Connection
+from pyathena.cursor import Cursor
+from pyathena.pandas.cursor import PandasCursor
 from pyathena.sqlalchemy.base import AthenaDialect
 from pyathena.sqlalchemy.rest import AthenaRestDialect
 from pyathena.sqlalchemy.types import (
@@ -81,6 +93,48 @@ class TestAthenaDialect:
         }
         assert entry_points
         assert {name: load() for name, load in loader.impls.items()} == entry_points
+
+    @pytest.mark.parametrize(
+        ("dialect_class", "connection_class", "cursor_class", "expected"),
+        [
+            (AthenaDialect, Connection, PandasCursor, Cursor),
+            (AthenaAioDialect, AioConnection, AioPandasCursor, AioCursor),
+        ],
+    )
+    def test_do_ping_uses_api_cursor_without_unload(
+        self, monkeypatch, dialect_class, connection_class, cursor_class, expected
+    ):
+        conn = connection_class(
+            region_name="us-west-2",
+            s3_staging_dir="s3://bucket/path/",
+            aws_access_key_id="access_key",
+            aws_secret_access_key="secret_key",
+            cursor_class=cursor_class,
+            cursor_kwargs={"unload": True},
+        )
+        executed = []
+        closed = []
+        monkeypatch.setattr(expected, "close", lambda self: closed.append(self))
+        if connection_class is AioConnection:
+            dbapi_connection = AsyncAdapt_pyathena_connection(MagicMock(), conn)
+            monkeypatch.setattr(
+                AsyncAdapt_pyathena_cursor,
+                "execute",
+                lambda self, operation: executed.append((self._cursor, operation)),
+            )
+        else:
+            dbapi_connection = conn
+            monkeypatch.setattr(
+                Cursor, "execute", lambda self, operation: executed.append((self, operation))
+            )
+        try:
+            assert dialect_class().do_ping(dbapi_connection) is True
+            [(cursor, operation)] = executed
+            assert type(cursor) is expected
+            assert operation == "SELECT 1"
+            assert closed == [cursor]
+        finally:
+            conn.close()
 
     @pytest.mark.parametrize(
         ("map_type", "struct_type"),
@@ -160,6 +214,23 @@ class TestSQLAlchemyAthena:
                     assert tuple(result) == ([["001", "a,b", "null", ""], [], None], [], None)
             finally:
                 array_engine.dispose()
+
+    @pytest.mark.parametrize(
+        "engine",
+        [{"driver": "pandas", "unload": True}],
+        indirect=True,
+    )
+    def test_ping_with_unload(self, engine):
+        engine, conn = engine
+        assert engine.dialect.do_ping(conn.connection.dbapi_connection) is True
+        ping_engine = sqlalchemy.create_engine(engine.url, pool_pre_ping=True)
+        try:
+            # The second checkout of the pooled connection pings it.
+            for _ in range(2):
+                with ping_engine.connect() as ping_conn:
+                    assert ping_conn.execute(text("SELECT 1 AS one")).scalar() == 1
+        finally:
+            ping_engine.dispose()
 
     @pytest.mark.parametrize(
         "engine",
