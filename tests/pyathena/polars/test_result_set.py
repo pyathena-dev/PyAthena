@@ -162,7 +162,6 @@ class TestAthenaPolarsResultSet:
         requested = threading.Event()
         closed = threading.Event()
 
-        # Not a generator, which close() cannot close while it runs (#1172).
         class Chunks:
             def __init__(self):
                 self._chunks = iter([pl.DataFrame({"n": [0, 1]}), pl.DataFrame({"n": [2, 3]})])
@@ -187,6 +186,27 @@ class TestAthenaPolarsResultSet:
             # The fetch still returns the chunk that it was reading.
             assert future.result(10) == [(0,), (1,), (2,), (3,)]
         assert result_set.rownumber is None
+
+    def test_close_during_fetchall_generator(self):
+        """A close() during a fetch from a generator, such as a chunked UNLOAD, does not raise."""
+        reading, release = threading.Event(), threading.Event()
+
+        def chunks():
+            yield pl.DataFrame({"n": [0, 1]})
+            reading.set()
+            release.wait(10)
+            yield pl.DataFrame({"n": [2, 3]})
+            yield pl.DataFrame({"n": [4]})
+
+        reader = chunks()
+        result_set = _fetching_result_set(reader, ["n"], arraysize=3)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(result_set.fetchall)
+            assert reading.wait(10)
+            result_set.close()
+            release.set()
+            assert future.result(10) == [(0,), (1,), (2,), (3,)]
+        assert inspect.getgeneratorstate(reader) == inspect.GEN_CLOSED
 
     def test_fetchmany_size_above_maxsize(self):
         """A size above sys.maxsize returns the remaining rows."""
