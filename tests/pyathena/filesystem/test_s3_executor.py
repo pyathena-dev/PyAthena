@@ -11,14 +11,11 @@ import os
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
-from unittest import mock
 
 import pytest
 
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3AioThreadPool, S3ThreadPoolExecutor
-from tests.pyathena.util import overlapping_calls
-
-EVENT_TIMEOUT = 5
+from tests.pyathena.util import EVENT_TIMEOUT, overlapping_calls
 
 
 class TestS3AioThreadPool:
@@ -109,10 +106,11 @@ class TestS3AioThreadPool:
         pool = S3AioThreadPool(1)
         parent = pool._get_executor()
         pool._lock.acquire()
-        with mock.patch("pyathena.filesystem.s3_executor.os.getpid", return_value=os.getpid() + 1):
-            child = pool._get_executor()
-            assert pool.submit(sum, [1, 2]).result(timeout=EVENT_TIMEOUT) == 3
-            pool.shutdown()
+        # As os.register_at_fork() runs it in a forked child.
+        S3AioThreadPool._reset_after_fork()
+        child = pool._get_executor()
+        assert pool.submit(sum, [1, 2]).result(timeout=EVENT_TIMEOUT) == 3
+        pool.shutdown()
         assert child is not parent
         parent.shutdown()
 

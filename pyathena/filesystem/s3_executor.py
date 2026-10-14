@@ -10,16 +10,18 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import os
 import threading
+import weakref
 from abc import ABCMeta, abstractmethod
 from collections.abc import Callable
 from concurrent import futures
 from concurrent.futures import Future
 from concurrent.futures.thread import ThreadPoolExecutor
 from multiprocessing import cpu_count
-from typing import Any, TypeVar
+from typing import Any, ClassVar, TypeVar
 
 from pyathena.util import override
 
@@ -149,6 +151,9 @@ class S3AioThreadPool(S3Executor):
         ValueError: If ``max_workers`` is not positive.
     """
 
+    # The pools of this process, which a forked child resets.
+    _instances: ClassVar[weakref.WeakSet[S3AioThreadPool]] = weakref.WeakSet()
+
     def __init__(self, max_workers: int | None = None) -> None:
         """Initialize the pool without starting any thread.
 
@@ -167,8 +172,8 @@ class S3AioThreadPool(S3Executor):
         self.max_workers = max_workers
         self._lock = threading.Lock()
         self._executor: ThreadPoolExecutor | None = None
-        self._pid: int | None = None
         self._shutdown = False
+        S3AioThreadPool._instances.add(self)
 
     @override
     def submit(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> Future[T]:
@@ -246,9 +251,20 @@ class S3AioThreadPool(S3Executor):
         """
         with self._lock:
             self._shutdown = True
-            executor = self._executor if self._pid == os.getpid() else None
+            executor = self._executor
         if executor is not None:
             executor.shutdown(wait=wait)
+
+    @classmethod
+    def _reset_after_fork(cls) -> None:
+        """Drop the threads and locks that a forked child copied from its parent.
+
+        The threads of the parent do not exist in the child, and a lock that
+        one of them held stays held, so each pool creates new ones.
+        """
+        for pool in list(cls._instances):
+            pool._lock = threading.Lock()
+            pool._executor = None
 
     def _get_executor(self) -> ThreadPoolExecutor:
         """Return the thread pool of this process, creating it if needed.
@@ -259,17 +275,19 @@ class S3AioThreadPool(S3Executor):
         Raises:
             RuntimeError: If the pool has been shut down.
         """
-        if self._pid is not None and self._pid != os.getpid():
-            # A forked child: its copy of the lock may be held by a thread
-            # of the parent, which does not exist here.
-            self._lock = threading.Lock()
+        if (executor := self._executor) is not None:
+            # Its submit() raises after the shutdown.
+            return executor
         with self._lock:
             if self._shutdown:
                 raise RuntimeError("cannot schedule new futures after shutdown")
-            if self._executor is None or self._pid != os.getpid():
+            if self._executor is None:
                 self._executor = ThreadPoolExecutor(max_workers=self.max_workers)
-                self._pid = os.getpid()
             return self._executor
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=S3AioThreadPool._reset_after_fork)
 
 
 class S3AioExecutor(S3Executor):
@@ -309,11 +327,8 @@ class S3AioExecutor(S3Executor):
         """
         self._loop = loop
         self._pool = S3AioThreadPool(max_workers)
+        # Orders the dispatches with the shutdown.
         self._lock = threading.Lock()
-        # The returned futures that are not done. A function reaches the pool
-        # only when the event loop runs its task, so the pool is shut down
-        # once they are all done.
-        self._pending: set[Future[Any]] = set()
         self._shutdown = False
 
     @override
@@ -360,9 +375,7 @@ class S3AioExecutor(S3Executor):
             with self._lock:
                 if self._shutdown:
                     raise RuntimeError("cannot schedule new futures after shutdown")
-                self._pending.add(future)
-            future.add_done_callback(self._release)
-            task = asyncio.run_coroutine_threadsafe(self._pool.run(run), self._loop)
+                task = asyncio.run_coroutine_threadsafe(self._pool.run(run), self._loop)
             task.add_done_callback(settle)
             return future
         raise RuntimeError(
@@ -370,33 +383,35 @@ class S3AioExecutor(S3Executor):
             "Use S3ThreadPoolExecutor for synchronous usage."
         )
 
-    def _release(self, future: Future[Any]) -> None:
-        """Forget a done future, shutting down the pool after the last one.
+    async def _shutdown_pool(self) -> None:
+        """Shut down the pool once the functions submitted before have reached it.
 
-        Args:
-            future: The done future.
+        Run as a task of the event loop, which starts its tasks in the order
+        they were scheduled, so the tasks that dispatch the functions
+        submitted before have handed them to the pool.
         """
-        with self._lock:
-            self._pending.discard(future)
-            last = self._shutdown and not self._pending
-        if last:
-            self._pool.shutdown(wait=False)
+        self._pool.shutdown(wait=False)
 
     @override
     def shutdown(self, wait: bool = True) -> None:
         with self._lock:
             self._shutdown = True
-            pending = list(self._pending)
+            closing = None
+            if self._loop is not None and self._loop.is_running():
+                # A function reaches the pool only when the event loop runs
+                # its task, so the pool is shut down after the dispatches.
+                closing = asyncio.run_coroutine_threadsafe(self._shutdown_pool(), self._loop)
+        if closing is None:
+            self._pool.shutdown(wait=wait)
+            return
         try:
             on_loop = asyncio.get_running_loop() is self._loop
         except RuntimeError:
             on_loop = False
         # On the thread of the event loop, such as when a file is garbage
-        # collected there, waiting would keep the loop from dispatching the
-        # pending functions, so the pool is shut down after the last one.
-        wait = wait and not on_loop
-        if wait:
-            # Also the functions that have not reached the pool yet.
-            futures.wait(pending)
-        if not pending or wait:
-            self._pool.shutdown(wait=wait)
+        # collected there, waiting would keep the loop from dispatching.
+        if wait and not on_loop:
+            # Cancelled if the event loop shuts down before it runs.
+            with contextlib.suppress(futures.CancelledError):
+                closing.result()
+            self._pool.shutdown(wait=True)

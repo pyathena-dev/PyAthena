@@ -885,8 +885,6 @@ class AioS3FileSystem(AsyncFileSystem):
             raise ValueError("open_async() supports only binary modes without compression.")
         if not kwargs.pop("autocommit", True):
             raise NotImplementedError("The file of open_async() commits when it is closed.")
-        if mode not in {"rb", "wb", "ab", "xb"}:
-            raise NotImplementedError("File mode not supported")
         if mode != "rb" and self._intrans:
             raise NotImplementedError("open_async() cannot write in a transaction.")
         path = self._strip_protocol(path)
@@ -1256,6 +1254,8 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         )
 
         self.append_block = False
+        # The size of the appended object, as looked up when opening.
+        self._append_size = 0
         self._writer: S3MultipartWriter | None = None
         if mode != "rb":
             self._writer = S3MultipartWriter(
@@ -1273,7 +1273,7 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             else:
                 # Copied with UploadPartCopy as the leading part(s).
                 self.append_block = True
-            self.loc = target.appended.get("size", 0)
+            self._append_size = self.loc = target.appended.get("size", 0)
 
     def __del__(self) -> None:
         # close() is a coroutine, which garbage collection cannot await, so
@@ -1419,13 +1419,10 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             )
             await asyncio.wrap_future(self._creation)
             if self.append_block:
-                whole_source = self.tell() <= self.fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE
-                size = self.tell()
-                if not whole_source:
-                    info = await self.fs._info(
-                        self.path, **self.fs._sync_fs._get_lookup_kwargs(self.s3_additional_kwargs)
-                    )
-                    size = info.get("size", 0)
+                size = self._append_size
+                whole_source = size <= self.fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE
+                source = S3Path(self.bucket, self.key)
+                copy_kwargs = self._get_request_kwargs("upload_part_copy")
                 for part_number, range_ in writer.iter_copy_parts(size):
                     # Tracked before it is scheduled; see the creation.
                     copy: Future[S3MultipartUploadPart] = Future()
@@ -1434,9 +1431,9 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
                         copy,
                         writer.upload_part_copy,
                         part_number=part_number,
-                        source=S3Path(self.bucket, self.key),
+                        source=source,
                         range_=None if whole_source else range_,
-                        **self._get_request_kwargs("upload_part_copy"),
+                        **copy_kwargs,
                     )
         except BaseException:
             await self._close_without_commit()
@@ -1472,6 +1469,7 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             raise RuntimeError("Multipart upload is not initialized.")
         buffer = cast(BytesIO, self.buffer)
         buffer.seek(0)
+        upload_kwargs = self._get_request_kwargs("upload_part")
         try:
             for part_number, data in writer.iter_parts(
                 buffer, first_part_number=len(self._parts) + 1
@@ -1498,7 +1496,7 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
                     writer.upload_part,
                     part_number=part_number,
                     body=data,
-                    **self._get_request_kwargs("upload_part"),
+                    **upload_kwargs,
                 )
         except BaseException:
             await self._close_without_commit()
@@ -1552,31 +1550,24 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         self.fs.invalidate_cache(self.path)
 
     def _discard(self) -> None:
-        """Abort the multipart upload, if any, logging a failure; blocks.
-
-        The failure is logged instead of raised, so that it does not mask
-        the error that the caller is handling, also when no task waits for
-        the abort any more.
-        """
-        try:
-            self._abort_upload()
-        except Exception:
-            _logger.exception(
-                f"Failed to abort the multipart upload to s3://{self.bucket}/{self.key}."
-            )
-
-    def _abort_upload(self) -> None:
         """Abort the multipart upload, if any; blocks, and runs in a thread.
 
         The requests that have not started are cancelled, and the running
         ones are waited for first, since a part that is still uploading when
-        the upload is aborted may be stored after the abort.
+        the upload is aborted may be stored after the abort. A failure is
+        logged instead of raised, so that it does not mask the error that the
+        caller is handling, also when no task waits for the abort any more.
         """
-        if self._creation is not None and not self._creation.cancel():
-            wait([self._creation])
-        if self._writer is not None and self._writer.upload is not None:
-            wait([part for part in self._parts if not part.cancel()])
-            self._writer.abort(**self._get_request_kwargs("abort_multipart_upload"))
+        try:
+            if self._creation is not None and not self._creation.cancel():
+                wait([self._creation])
+            if self._writer is not None and self._writer.upload is not None:
+                wait([part for part in self._parts if not part.cancel()])
+                self._writer.abort(**self._get_request_kwargs("abort_multipart_upload"))
+        except Exception:
+            _logger.exception(
+                f"Failed to abort the multipart upload to s3://{self.bucket}/{self.key}."
+            )
 
     async def _fetch_range(self, start: int, end: int) -> bytes:
         """Read a byte range of the object with parallel range requests.
