@@ -515,7 +515,7 @@ class AthenaResultSet(CursorIterator):
             The rows, fewer than ``size`` when the result is exhausted.
 
         Raises:
-            TypeError: If ``size`` is not an integer.
+            TypeError: If ``size`` is positive and not an integer.
         """
         if not size or size <= 0:
             size = self._arraysize
