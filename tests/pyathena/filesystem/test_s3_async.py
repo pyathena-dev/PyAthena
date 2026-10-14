@@ -297,6 +297,47 @@ class TestAioS3FileSystem:
         sync_fs.core.complete_multipart_upload.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_copy_object_with_multipart_upload_shares_threads(self):
+        # GH-1159: concurrent copies share the threads of the filesystem, so
+        # that a bulk copy of large objects does not start max_workers threads
+        # per object.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), max_workers=2, skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        sync_fs.core.create_multipart_upload = mock.MagicMock(
+            return_value=S3MultipartUpload(
+                {"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"}
+            )
+        )
+        # Waits briefly for a third overlapping call, which only copies
+        # with threads of their own run.
+        call, state = overlapping_calls(3, timeout=0.5)
+
+        def upload_part_copy(**kw):
+            call()
+            return SimpleNamespace(etag='"e"', part_number=kw["part_number"])
+
+        sync_fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
+        sync_fs.core.complete_multipart_upload = mock.MagicMock()
+        size = 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE
+        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
+
+        await asyncio.gather(
+            *[
+                fs._copy_object_with_multipart_upload(
+                    S3Path("bucket", "src"),
+                    S3Path("bucket", f"dst{i}"),
+                    MetadataDirective="REPLACE",
+                    TaggingDirective="REPLACE",
+                    AnnotationDirective="EXCLUDE",
+                )
+                for i in range(2)
+            ]
+        )
+
+        assert sync_fs.core.upload_part_copy.call_count == 4
+        assert state["peak"] == 2
+
+    @pytest.mark.asyncio
     async def test_blocking_calls_bypass_default_executor(self):
         # GH-1159: the blocking calls of the coroutines run in the threads of
         # the filesystem, so that a busy default executor of the event loop
@@ -2746,6 +2787,23 @@ class TestAioS3StreamedFile:
         fs.core.put_object.assert_not_called()
         fs.core.complete_multipart_upload.assert_not_called()
         assert fs.core.abort_multipart_upload.call_count == (1 if blocks else 0)
+
+    @pytest.mark.asyncio
+    async def test_exit_with_exception_after_close(self, fs):
+        # An exception raised after the file was closed propagates unchanged.
+        f = await fs.open_async("s3://bucket/key", "wb")
+
+        async def close_and_fail():
+            async with f:
+                await f.write(b"abc")
+                await f.close()
+                raise KeyError("failed")
+
+        with pytest.raises(KeyError, match="failed"):
+            await close_and_fail()
+
+        fs.core.put_object.assert_called_once()
+        fs.core.abort_multipart_upload.assert_not_called()
 
     @pytest.mark.parametrize("cancellations", [1, 2])
     @pytest.mark.asyncio

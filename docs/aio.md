@@ -259,7 +259,7 @@ its coroutines run the blocking boto3 calls in threads that PyAthena owns, sized
 | **Parallelism** | `ThreadPoolExecutor` | `asyncio.gather` on a thread pool |
 | **File handles** | `S3File` with thread pool | `AioS3File` with `S3AioExecutor`; `AioS3StreamedFile` from `open_async()` |
 | **Bulk delete** | Thread pool per batch | `asyncio.gather` per batch |
-| **Multipart copy** | Thread pool per part | Asyncio task per part, on a thread pool of the copy |
+| **Multipart copy** | Thread pool per part | Asyncio task per part |
 | **Best for** | Synchronous applications | Async frameworks (FastAPI, aiohttp, etc.) |
 
 ### Threads
@@ -269,8 +269,10 @@ default executor of the event loop, so `loop.set_default_executor()` neither lim
 blocks them:
 
 - The filesystem has a pool of `max_workers` threads for the blocking calls of its
-  coroutines, such as `_info()`, `_cat_file()`, and the requests of `_rm()`.
-- A multipart copy has a pool of its own, sized by the `max_workers` of the call.
+  coroutines, such as `_info()`, `_cat_file()`, the requests of `_rm()`, and the part
+  copies of multipart copies. A multipart copy runs at most the `max_workers` of the
+  call of its part copies at once, and the copies together run at most the
+  `max_workers` of the filesystem.
 - Each file opened with `open()` or `open_async()` has a pool of its own, sized by the
   `max_workers` of the call.
 

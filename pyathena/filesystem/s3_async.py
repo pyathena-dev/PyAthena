@@ -572,8 +572,9 @@ class AioS3FileSystem(AsyncFileSystem):
         """Copy an object with a multipart upload of its byte ranges.
 
         See :meth:`S3FileSystem._copy_object_with_multipart_upload`. The part
-        and annotation copies run in parallel as asyncio tasks, in a pool of
-        ``max_workers`` threads of the copy. On a cancellation, the creation of the upload,
+        and annotation copies run in parallel as asyncio tasks, at most
+        ``max_workers`` at once, in the threads of the filesystem, which bound
+        the requests of all its copies together. On a cancellation, the creation of the upload,
         the running part copies and the completion are waited for, the
         upload is aborted if it was created and has not completed, and the
         cancellation is re-raised. A repeated cancellation returns without
@@ -604,9 +605,6 @@ class AioS3FileSystem(AsyncFileSystem):
             return
         multipart_upload: S3MultipartUpload
 
-        # The requests of the copy run in a pool of its own, so that
-        # max_workers of the call bounds them.
-        pool = S3AioThreadPool(max_workers)
         semaphore = asyncio.Semaphore(max_workers)
         failed = False
 
@@ -617,7 +615,7 @@ class AioS3FileSystem(AsyncFileSystem):
                     # The upload is being aborted; do not start more parts.
                     return None
                 try:
-                    return await pool.run(
+                    return await self._thread_pool.run(
                         self.core.upload_part_copy,
                         upload=multipart_upload,
                         part_number=i + 1,
@@ -647,7 +645,7 @@ class AioS3FileSystem(AsyncFileSystem):
                     # The upload completed despite the cancellation, so
                     # there is nothing to abort.
                     return
-            await pool.run(
+            await self._thread_pool.run(
                 self._sync_fs._abort_multipart_upload,
                 creation.result(),
                 plan.abort_params,
@@ -657,7 +655,9 @@ class AioS3FileSystem(AsyncFileSystem):
         # after a cancellation; scheduled right before the try, so that
         # nothing can fail between the two.
         creation = asyncio.ensure_future(
-            pool.run(self.core.create_multipart_upload, plan.destination, **plan.create_params)
+            self._thread_pool.run(
+                self.core.create_multipart_upload, plan.destination, **plan.create_params
+            )
         )
         try:
             # shield keeps a cancellation from cancelling the creation, whose
@@ -674,7 +674,7 @@ class AioS3FileSystem(AsyncFileSystem):
             # The tasks are in part-number order.
             parts = [task.result() for task in tasks]
             completion = asyncio.ensure_future(
-                pool.run(
+                self._thread_pool.run(
                     self.core.complete_multipart_upload,
                     multipart_upload,
                     cast(list[S3MultipartUploadPart], parts),
@@ -693,9 +693,6 @@ class AioS3FileSystem(AsyncFileSystem):
             # the cleanup; the event loop keeps only weak references to tasks.
             _cleanup_tasks.add(cleanup)
             cleanup.add_done_callback(_cleanup_tasks.discard)
-            # The cleanup sends its requests through the pool, so the pool is
-            # shut down when the cleanup ends, also after this task returns.
-            cleanup.add_done_callback(lambda _: pool.shutdown(wait=False))
             await asyncio.shield(cleanup)
             raise
 
@@ -709,7 +706,7 @@ class AioS3FileSystem(AsyncFileSystem):
                     # S3FileSystem does.
                     return
                 try:
-                    await pool.run(
+                    await self._thread_pool.run(
                         self.core.copy_object_annotation,
                         name,
                         plan.source,
@@ -722,12 +719,9 @@ class AioS3FileSystem(AsyncFileSystem):
                     failed = True
                     raise
 
-        try:
-            results = await asyncio.gather(
-                *[_copy_annotation(name) for name in plan.annotations], return_exceptions=True
-            )
-        finally:
-            pool.shutdown(wait=False)
+        results = await asyncio.gather(
+            *[_copy_annotation(name) for name in plan.annotations], return_exceptions=True
+        )
         for result in results:
             if isinstance(result, BaseException):
                 raise result
@@ -1364,6 +1358,8 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             self._pool.shutdown(wait=False)
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        if self.closed:
+            return
         if exc_type is not None and self.mode != "rb":
             await self._close_without_commit()
         else:
@@ -1375,7 +1371,7 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         Drops the buffered data, and aborts the multipart upload, if any,
         once its started requests have ended (see :meth:`_discard`).
         """
-        if self.closed and self.buffer is None:
+        if self.closed:
             return
         self.buffer = None
         self.closed = True
