@@ -9,7 +9,7 @@ import mimetypes
 import os.path
 import time
 from collections.abc import Callable, Mapping
-from concurrent.futures import FIRST_COMPLETED, Future, as_completed, wait
+from concurrent.futures import FIRST_COMPLETED, FIRST_EXCEPTION, Future, as_completed, wait
 from copy import deepcopy
 from datetime import datetime
 from io import BytesIO
@@ -1831,7 +1831,8 @@ class S3FileSystem(AbstractFileSystem):
         interrupted, the parts that have not started are cancelled, the
         running ones are waited for, and the multipart upload is aborted so
         that no incomplete upload or part is left behind, unless ``abort`` is
-        false. The original error is then re-raised.
+        false. The original error is then re-raised. A failed part is
+        handled as soon as it fails, without waiting for the parts before it.
 
         Args:
             upload: The multipart upload returned by creation.
@@ -1847,6 +1848,14 @@ class S3FileSystem(AbstractFileSystem):
         """
         request_kwargs = request_kwargs or {}
         try:
+            _, pending = wait(futures, return_when=FIRST_EXCEPTION)
+            if pending:
+                # A part failed before the others finished. Its error is
+                # raised without waiting for the parts before it, so that the
+                # parts queued after it are cancelled.
+                for future in futures:
+                    if future.done() and not future.cancelled() and future.exception() is not None:
+                        future.result()
             # The futures are in part-number order.
             parts = [future.result() for future in futures]
             return self.core.complete_multipart_upload(
@@ -2898,6 +2907,8 @@ class S3File(AbstractBufferedFile):
         # The parts uploaded from the buffer that may not have finished. The
         # part copies of an append hold no data and are not counted.
         self._uploads_in_flight: set[Future[S3MultipartUploadPart]] = set()
+        # The part copies of an append that may not have finished.
+        self._copies_in_flight: set[Future[S3MultipartUploadPart]] = set()
         if append_info is not None:
             if append_data is not None:
                 self.write(append_data)
@@ -3056,6 +3067,7 @@ class S3File(AbstractBufferedFile):
                     # cancel it or wait for it before the abort.
                     part: Future[S3MultipartUploadPart] = Future()
                     self.multipart_upload_parts.append(part)
+                    self._copies_in_flight.add(part)
                     self._executor.submit_to(
                         part,
                         writer.upload_part_copy,
@@ -3078,10 +3090,11 @@ class S3File(AbstractBufferedFile):
         which uploads it with PutObject. Otherwise, the buffered data is
         uploaded as parts, and a part is submitted only while fewer than
         ``max_workers`` uploaded parts are in flight; the write waits for
-        one of them to finish first. A part found failed by that wait stops
-        the write with its error; one that fails afterwards is reported by
-        :meth:`commit`. If the upload of the chunk fails or is interrupted,
-        the file is closed without committing it.
+        one of them to finish first. A part, or a part copy of an append,
+        found failed by that wait stops the write with its error; one that
+        fails afterwards is reported by :meth:`commit`. If the upload of the
+        chunk fails or is interrupted, the file is closed without committing
+        it.
 
         Args:
             final: Whether this is the last flush of the file, after which
@@ -3092,8 +3105,9 @@ class S3File(AbstractBufferedFile):
             it does for any value other than False.
 
         Raises:
-            BaseException: The error of an uploaded part that the write found
-                failed while it waited for a part in flight.
+            BaseException: The error of an uploaded part, or of a part copy
+                of an append, that the write found failed while it waited for
+                a part in flight.
             RuntimeError: If no multipart upload is initialized.
             ValueError: If the data needs more parts than a multipart upload
                 allows.
@@ -3126,10 +3140,13 @@ class S3File(AbstractBufferedFile):
                     done, self._uploads_in_flight = wait(
                         self._uploads_in_flight, return_when=FIRST_COMPLETED
                     )
-                    for upload in done:
-                        # A failed part would otherwise keep its data until
-                        # commit() while the rest of the data is uploaded.
-                        upload.result()
+                    copied = {copy for copy in self._copies_in_flight if copy.done()}
+                    self._copies_in_flight -= copied
+                    for finished in done | copied:
+                        # Otherwise the rest of the data is uploaded after a
+                        # failed part or part copy, and a failed part keeps
+                        # its data until commit().
+                        finished.result()
                 # Tracked before it is scheduled, so that an interrupt while
                 # it is being scheduled still lets discard() cancel it or wait
                 # for it before the abort.
@@ -3225,6 +3242,7 @@ class S3File(AbstractBufferedFile):
         self.multipart_upload = None
         self.multipart_upload_parts = []
         self._uploads_in_flight = set()
+        self._copies_in_flight = set()
 
     def url(self, expiration: int = 3600, **kwargs) -> str:
         """Generate a presigned HTTP URL to read this file (if it already exists).

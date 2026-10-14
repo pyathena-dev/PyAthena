@@ -3532,9 +3532,11 @@ class TestS3FileSystem:
             release.wait(5)
             events.append("part 2 stored")
 
-        def wait_parts(futures):
-            release.set()
-            return wait(futures)
+        def wait_parts(futures, **kwargs):
+            if not kwargs:
+                # The cleanup waits for the running parts.
+                release.set()
+            return wait(futures, **kwargs)
 
         with (
             ThreadPoolExecutor(max_workers=1) as executor,
@@ -3550,8 +3552,51 @@ class TestS3FileSystem:
                 )
 
         assert events == ["part 2 stored", "abort"]
-        waited.assert_called_once_with([failed, running])
+        assert waited.call_args_list[-1] == mock.call([failed, running])
         assert pending.cancelled()
+
+    def test_finish_multipart_upload_stops_at_failed_part(self):
+        # GH-1178: a failed part is handled without waiting for the parts
+        # before it, so that the parts queued after it are cancelled. The
+        # parts used to be collected in part-number order.
+        fs = self._make_fs()
+        upload = S3MultipartUpload({"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"})
+        fs.core.complete_multipart_upload = mock.MagicMock()
+        started = threading.Event()
+        release = threading.Event()
+        cleanup = []
+
+        def copy_part():
+            started.set()
+            # Copying until the cleanup waits for it.
+            release.wait(5)
+
+        def wait_parts(futures, **kwargs):
+            if not kwargs:
+                # Whether the earlier part was still copying when the cleanup
+                # started.
+                cleanup.append(running.done())
+                release.set()
+            return wait(futures, **kwargs)
+
+        failed: Future[SimpleNamespace] = Future()
+        failed.set_exception(PermissionError("Access Denied"))
+        with (
+            ThreadPoolExecutor(max_workers=1) as executor,
+            mock.patch("pyathena.filesystem.s3.wait", side_effect=wait_parts),
+        ):
+            running = executor.submit(copy_part)
+            pending = executor.submit(SimpleNamespace)
+            assert started.wait(5)
+            with pytest.raises(PermissionError, match="Access Denied"):
+                fs._finish_multipart_upload(upload=upload, futures=[running, failed, pending])
+
+        assert cleanup == [False]
+        assert pending.cancelled()
+        fs.core.complete_multipart_upload.assert_not_called()
+        fs._call.assert_called_once_with(
+            fs._client.abort_multipart_upload, Bucket="bucket", Key="key", UploadId="uploadid"
+        )
 
     def test_finish_multipart_upload_does_not_wait_for_cancelled_parts(self):
         # GH-976: a cancelled part is not waited for, as nothing may
@@ -7189,6 +7234,32 @@ class TestS3File:
         )
         fs.core.complete_multipart_upload.assert_not_called()
         assert f.multipart_upload is None
+
+    def test_append_failed_part_copy_while_waiting(self):
+        # GH-1178: a failed part copy of an append that a write finds while
+        # it waits for a part stops the write, as a failed uploaded part
+        # does. The part copies are not counted toward max_workers, and the
+        # write used to upload the rest of the data.
+        fs = self._make_append_fs(b"a" * 6)
+        fs.core.upload_part_copy.side_effect = PermissionError("Access Denied")
+        # One thread, so that the part copy finishes before the first part.
+        executor = mock.MagicMock(wraps=S3ThreadPoolExecutor(max_workers=1))
+        f = S3File(
+            fs, "s3://bucket/key.txt", mode="ab", block_size=4, max_workers=1, executor=executor
+        )
+        f.write(b"b" * 4)
+        with pytest.raises(PermissionError, match="Access Denied"):
+            f.write(b"b" * 4)
+
+        assert [
+            c.kwargs["part_number"] for c in executor.submit_to.call_args_list if "body" in c.kwargs
+        ] == [2]
+        fs._call.assert_called_once_with(
+            S3_CLIENT.abort_multipart_upload, Bucket="bucket", Key="key.txt", UploadId="uploadid"
+        )
+        fs.core.complete_multipart_upload.assert_not_called()
+        assert f.closed
+        assert f.multipart_upload_parts == []
 
     def test_multipart_write_request_parameters(self):
         # GH-946: the parts receive the parameters of the file that they
