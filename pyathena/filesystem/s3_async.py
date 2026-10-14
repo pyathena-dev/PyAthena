@@ -15,7 +15,7 @@ import logging
 import mimetypes
 import os
 import warnings
-from concurrent.futures import Future, wait
+from concurrent.futures import FIRST_EXCEPTION, Future, wait
 from io import BytesIO
 from multiprocessing import cpu_count
 from typing import TYPE_CHECKING, Any, cast
@@ -1160,7 +1160,9 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
     - A write buffers the data, and uploads each full block as a part of a
       multipart upload, with at most ``max_workers`` parts in flight. A write
       that would submit another part waits for one of them to finish first,
-      and a part found failed by that wait stops the write with its error.
+      and a part found failed by that wait, or a part copy of an append
+      found failed before a part is submitted, stops the write with its
+      error.
       An append copies an existing object with ``UploadPartCopy``, or
       rewrites one smaller than a part from the buffer, as ``S3File`` does.
     - Closing the file commits the written data, as ``S3File.close()`` does:
@@ -1276,6 +1278,8 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         # The parts uploaded from the buffer that may not have finished. The
         # part copies of an append hold no data and are not counted.
         self._uploads_in_flight: set[asyncio.Future[S3MultipartUploadPart]] = set()
+        # The part copies of an append that may not have finished.
+        self._copies_in_flight: set[Future[S3MultipartUploadPart]] = set()
         if target.appended is not None:
             if target.append_data is not None:
                 cast(BytesIO, self.buffer).write(target.append_data)
@@ -1339,7 +1343,8 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             ValueError: If the file is not open for writing, is closed, or
                 has been force-flushed.
             BaseException: The error of a part that the write found failed
-                while it waited for a part in flight.
+                while it waited for a part in flight, or of a part copy of an
+                append found failed before a part is submitted.
         """
         if self.mode not in {"wb", "ab", "xb"}:
             raise ValueError("File not in write mode")
@@ -1444,6 +1449,7 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
                     # Tracked before it is scheduled; see the creation.
                     copy: Future[S3MultipartUploadPart] = Future()
                     self._parts.append(copy)
+                    self._copies_in_flight.add(copy)
                     self._pool.submit_to(
                         copy,
                         writer.upload_part_copy,
@@ -1471,7 +1477,8 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
 
         Raises:
             BaseException: The error of an uploaded part that the write found
-                failed while it waited for a part in flight.
+                failed while it waited for a part in flight, or of a part copy
+                of an append found failed before a part is submitted.
             RuntimeError: If no multipart upload is initialized.
             ValueError: If the data needs more parts than a multipart upload
                 allows.
@@ -1491,6 +1498,13 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             for part_number, data in writer.iter_parts(
                 buffer, first_part_number=len(self._parts) + 1
             ):
+                if self._copies_in_flight:
+                    copied = {copy for copy in self._copies_in_flight if copy.done()}
+                    self._copies_in_flight -= copied
+                    for copy in copied:
+                        # Otherwise the rest of the data is uploaded after a
+                        # failed part copy, as S3File does.
+                        copy.result()
                 if len(self._uploads_in_flight) >= self.max_workers:
                     # Otherwise the parts waiting for a thread pile up in memory.
                     done, self._uploads_in_flight = await asyncio.wait(
@@ -1538,8 +1552,9 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         Creates an empty object if nothing was written, uploads the buffered
         data with PutObject if no part was uploaded, and otherwise completes
         the multipart upload once its parts have ended, aborting it if a
-        part or the completion fails. Invalidates the cache of the path
-        afterwards.
+        part or the completion fails. A failed part is handled as soon as it
+        fails, without waiting for the parts before it. Invalidates the cache
+        of the path afterwards.
 
         Raises:
             FileExistsError: If an object was created at the path after the
@@ -1559,7 +1574,12 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         else:
             try:
                 # The parts were submitted before this call, so they have
-                # all started.
+                # all started. A failed part is raised without waiting for
+                # the parts before it, as S3File does.
+                done, _ = wait(self._parts, return_when=FIRST_EXCEPTION)
+                for part in done:
+                    if not part.cancelled() and part.exception() is not None:
+                        part.result()
                 parts = [part.result() for part in self._parts]
                 writer.complete(parts, **self._get_request_kwargs("complete_multipart_upload"))
             except BaseException:

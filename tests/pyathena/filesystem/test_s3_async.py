@@ -2863,6 +2863,63 @@ class TestAioS3StreamedFile:
 
         fs.core.complete_multipart_upload.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_append_failed_part_copy(self, fs):
+        # A part copy of an append found failed before a part is submitted
+        # stops the write with its error, as with S3File (GH-1178).
+        block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
+        info = S3Object(
+            init={"Key": "key"},
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket="bucket",
+            key="key",
+        )
+        info.size = block_size
+        fs._sync_fs.info = mock.MagicMock(return_value=info)
+        fs.core.upload_part_copy = mock.MagicMock(side_effect=PermissionError("Access Denied"))
+        f = await fs.open_async("s3://bucket/key", "ab", block_size=block_size)
+        await f.write(b"a" * block_size)
+        # The copy has failed before the next write submits a part.
+        await asyncio.to_thread(wait, f._parts[:1], 5)
+
+        with pytest.raises(PermissionError, match="Access Denied"):
+            await f.write(b"a" * block_size)
+
+        assert f.closed
+        assert fs.core.upload_part.call_count == 1
+        fs.core.abort_multipart_upload.assert_called_once()
+        fs.core.complete_multipart_upload.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_commit_failed_part_first(self, fs):
+        # The commit raises a failed part without waiting for the parts
+        # before it, and cancels those that have not started, as S3File does.
+        f = await fs.open_async("s3://bucket/key", "wb")
+        await f.write(b"a")
+        f._writer.upload = S3MultipartUpload(
+            {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
+        )
+        failed: Future[S3MultipartUploadPart] = Future()
+        failed.set_exception(PermissionError("Access Denied"))
+        pending: list[Future[S3MultipartUploadPart]] = [Future(), Future()]
+        f._parts = [pending[0], failed, pending[1]]
+
+        try:
+            with pytest.raises(PermissionError, match="Access Denied"):
+                await asyncio.wait_for(asyncio.to_thread(f._complete_upload), 5)
+        finally:
+            # Releases a commit that waits for the parts in order.
+            for part in pending:
+                if not part.done():
+                    part.set_result(S3MultipartUploadPart(1, {"ETag": '"e"'}))
+
+        assert all(part.cancelled() for part in pending)
+        fs.core.abort_multipart_upload.assert_called_once()
+        fs.core.complete_multipart_upload.assert_not_called()
+        # Closed without committing again.
+        f.closed = True
+        f._pool.shutdown()
+
     @pytest.mark.parametrize("cancellations", [1, 2])
     @pytest.mark.asyncio
     async def test_write_cancelled(self, fs, cancellations):
