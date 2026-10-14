@@ -91,11 +91,12 @@ this section apply to the compressed data.
 A multipart write keeps at most `max_workers` parts of the written data in flight and
 waits for one of them to finish before it uploads another. The parts take about
 `max_workers` × the block size of memory, in addition to the buffered data of the file.
-If one of these parts has failed when the write waits, the write raises its error
-instead of uploading the rest of the data, and aborts the multipart upload after the
-parts being uploaded finish. A part that fails after the last wait raises its error
-when the file is closed, or when the transaction commits, and the multipart upload is
-aborted.
+If one of these parts has failed when the write waits, or a part copied from the
+existing object in an append has failed before the write uploads another part, the
+write raises its error instead of uploading the rest of the data, and aborts the
+multipart upload after the parts being uploaded or copied finish. A part that fails
+later raises its error when the file is closed, or when the transaction commits, and
+the multipart upload is aborted.
 `max_workers` is an argument of `S3FileSystem`, `AioS3FileSystem`, `open`, `put`, and
 `pipe`.
 
