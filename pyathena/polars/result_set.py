@@ -10,6 +10,8 @@ from typing import (
     cast,
 )
 
+import fsspec
+
 from pyathena import OperationalError
 from pyathena.converter import Converter
 from pyathena.error import ProgrammingError
@@ -268,10 +270,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
 
     @property
     def _csv_storage_options(self) -> dict[str, Any]:
-        """Get storage options for Polars CSV reading via fsspec.
+        """Get storage options for reading a CSV result file via fsspec.
 
-        Polars read_csv uses fsspec for cloud storage access, which works
-        with PyAthena's registered S3FileSystem.
+        ``_read_csv()`` opens the file with ``fsspec.open()``, which uses
+        PyAthena's registered S3FileSystem, and passes its contents to Polars.
 
         Returns:
             Dictionary with fsspec-compatible options for S3 access.
@@ -463,12 +465,15 @@ class AthenaPolarsResultSet(AthenaResultSet):
         separator, has_header, new_columns = self._get_csv_params()
 
         try:
+            # Polars 2.0 reads a path with its native object store, which does not take
+            # fsspec options, so the result file is read through fsspec here.
+            with fsspec.open(self.output_location, "rb", **self._csv_storage_options) as file:
+                source = file.read()
             df = pl.read_csv(
-                self.output_location,
+                source,
                 separator=separator,
                 has_header=has_header,
                 schema_overrides=self.dtypes,
-                storage_options=self._csv_storage_options,
                 **self._kwargs,
             )
             if new_columns:
