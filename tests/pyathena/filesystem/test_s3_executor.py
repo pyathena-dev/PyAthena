@@ -200,6 +200,44 @@ class TestS3AioExecutor:
 
         assert asyncio.run(main()) == 3
 
+    def test_shutdown_loop_stopped(self):
+        # Shutting down with wait=True returns when the event loop stops
+        # before it runs the task that shuts the pool down.
+        loop = asyncio.new_event_loop()
+        busy = threading.Event()
+        release = threading.Event()
+
+        def block():
+            busy.set()
+            release.wait(EVENT_TIMEOUT)
+            # The loop exits after this callback, without running the task
+            # that the shutdown schedules meanwhile.
+            loop.stop()
+
+        thread = threading.Thread(target=loop.run_forever)
+        thread.start()
+        try:
+            loop.call_soon_threadsafe(block)
+            assert busy.wait(EVENT_TIMEOUT)
+            executor = S3AioExecutor(loop=loop)
+            shut_down = threading.Event()
+            waiter = threading.Thread(
+                target=lambda: (executor.shutdown(wait=True), shut_down.set())
+            )
+            waiter.start()
+            # The shutdown waits for the task while the loop is busy.
+            assert not shut_down.wait(0.2)
+            release.set()
+            assert shut_down.wait(EVENT_TIMEOUT)
+            waiter.join()
+        finally:
+            release.set()
+            thread.join()
+            # Runs the pending task, which would otherwise be dropped
+            # unawaited when the loop is closed.
+            loop.run_until_complete(asyncio.sleep(0))
+            loop.close()
+
     def test_submit_without_running_loop(self):
         with pytest.raises(RuntimeError, match="requires a running event loop"):
             S3AioExecutor().submit(sum, [1, 2])

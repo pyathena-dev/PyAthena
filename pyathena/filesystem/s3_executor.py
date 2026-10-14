@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import contextvars
 import os
 import threading
@@ -394,24 +393,28 @@ class S3AioExecutor(S3Executor):
 
     @override
     def shutdown(self, wait: bool = True) -> None:
+        loop = self._loop
         with self._lock:
             self._shutdown = True
             closing = None
-            if self._loop is not None and self._loop.is_running():
+            if loop is not None and loop.is_running():
                 # A function reaches the pool only when the event loop runs
                 # its task, so the pool is shut down after the dispatches.
-                closing = asyncio.run_coroutine_threadsafe(self._shutdown_pool(), self._loop)
-        if closing is None:
+                closing = asyncio.run_coroutine_threadsafe(self._shutdown_pool(), loop)
+        if loop is None or closing is None:
             self._pool.shutdown(wait=wait)
             return
         try:
-            on_loop = asyncio.get_running_loop() is self._loop
+            on_loop = asyncio.get_running_loop() is loop
         except RuntimeError:
             on_loop = False
         # On the thread of the event loop, such as when a file is garbage
         # collected there, waiting would keep the loop from dispatching.
         if wait and not on_loop:
-            # Cancelled if the event loop shuts down before it runs.
-            with contextlib.suppress(futures.CancelledError):
-                closing.result()
+            # The task is cancelled if the event loop shuts down before it
+            # runs, and never runs if the loop stops instead; the functions
+            # that it has not dispatched then do not reach the pool either.
+            while not futures.wait([closing], timeout=0.1).done:
+                if not loop.is_running():
+                    break
             self._pool.shutdown(wait=True)

@@ -347,7 +347,8 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
         fs._sync_fs.info = mock.MagicMock(return_value={"name": "bucket/key"})
         release = threading.Event()
-        blocker = loop.run_in_executor(None, release.wait, 5)
+        # Held until it is released, after the lookup has had to finish.
+        blocker = loop.run_in_executor(None, release.wait, 60)
         try:
             info = await asyncio.wait_for(fs._info("s3://bucket/key"), 5)
         finally:
@@ -2923,6 +2924,45 @@ class TestAioS3StreamedFile:
         finally:
             release.set()
         assert await asyncio.to_thread(completed.wait, 5)
+
+        assert f.closed
+        fs.core.complete_multipart_upload.assert_called_once()
+        fs.core.abort_multipart_upload.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_flush_cancelled_then_exit_with_exception(self, fs):
+        # Leaving the block with an exception after a cancelled final flush
+        # does not abort the upload that the running commit completes.
+        block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
+        started = threading.Event()
+        release = threading.Event()
+        completed = threading.Event()
+
+        def complete_multipart_upload(*args, **kwargs):
+            started.set()
+            # The finally block of the test always releases it.
+            release.wait()
+            completed.set()
+
+        fs.core.complete_multipart_upload = mock.MagicMock(side_effect=complete_multipart_upload)
+        f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size)
+
+        async def flush_and_exit():
+            async with f:
+                await f.write(b"a" * block_size * 2)
+                flush = asyncio.ensure_future(f.flush(force=True))
+                assert await asyncio.to_thread(started.wait, 5)
+                flush.cancel()
+                await flush
+
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await flush_and_exit()
+        finally:
+            release.set()
+        assert await asyncio.to_thread(completed.wait, 5)
+        # Lets an abort that was submitted run.
+        await asyncio.sleep(0.1)
 
         assert f.closed
         fs.core.complete_multipart_upload.assert_called_once()

@@ -322,8 +322,9 @@ async with await fs.open_async("s3://my-bucket/data/file.bin", "rb") as f:
 - Leaving an `async with` block with an exception, or cancelling a write, closes the file
   without committing it, and aborts the multipart upload after the running parts finish.
   The abort completes even if the task is cancelled again.
-- A commit that has started completes even if the task that closes the file is
-  cancelled.
+- A commit that has started completes even if the task that closes or flushes the
+  file is cancelled, and leaving an `async with` block with an exception afterward does
+  not abort it.
 - A file opened for writing must be closed with `await f.close()` or an `async with`
   block. A file that is garbage collected without being closed is not committed: it
   emits a `ResourceWarning`, and its multipart upload is aborted. A synchronous `with`

@@ -1169,7 +1169,8 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
       so that the existing object is left unchanged.
 
     The commit and the abort run to their end in the threads of the file,
-    also if the task that waits for them is cancelled. A file opened for
+    also if the task that waits for them is cancelled; once the commit has
+    started, nothing else aborts the upload. A file opened for
     writing must be closed with ``await close()`` or an ``async with`` block;
     garbage collection cannot await it, so the data of an unclosed file is
     never committed; its multipart upload, if any, is aborted, with a
@@ -1262,6 +1263,9 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
                 fs.core, S3Path(self.bucket, self.key), block_size=block_size
             )
         self._creation: Future[S3MultipartUpload] | None = None
+        # Set when the commit is submitted, after which it completes the
+        # upload, or aborts it if it fails, and nothing else aborts it.
+        self._committing = False
         # The futures of the part uploads and copies, in part-number order.
         self._parts: list[Future[S3MultipartUploadPart]] = []
         # The parts uploaded from the buffer that may not have finished. The
@@ -1282,7 +1286,11 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         pool = getattr(self, "_pool", None)
         if pool is None:
             return
-        if not getattr(self, "closed", True) and self.mode != "rb":
+        if (
+            not getattr(self, "closed", True)
+            and self.mode != "rb"
+            and not getattr(self, "_committing", False)
+        ):
             warnings.warn(
                 f"s3://{self.bucket}/{self.key} was not closed, and the written data "
                 "was not committed.",
@@ -1397,8 +1405,12 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         """
         if self.closed:
             return
-        self.buffer = None
         self.closed = True
+        if self._committing:
+            # A cancelled commit runs on; an abort would race its completion.
+            self._pool.shutdown(wait=False)
+            return
+        self.buffer = None
         try:
             await self._pool.run_shielded(self._discard)
         finally:
@@ -1512,6 +1524,7 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         """
         if self.buffer is None:
             return
+        self._committing = True
         await self._pool.run_shielded(self._complete_upload)
 
     def _complete_upload(self) -> None:
