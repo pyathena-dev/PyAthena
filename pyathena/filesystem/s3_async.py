@@ -1172,8 +1172,9 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
     also if the task that waits for them is cancelled; once the commit has
     started, nothing else aborts the upload. A file opened for
     writing must be closed with ``await close()`` or an ``async with`` block;
-    garbage collection cannot await it, so the data of an unclosed file is
-    never committed; its multipart upload, if any, is aborted, with a
+    garbage collection cannot await it, so the data of a file that is
+    collected before it is closed or its commit has started is never
+    committed; its multipart upload, if any, is aborted, with a
     ``ResourceWarning``.
     """
 
@@ -1281,8 +1282,8 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
 
     def __del__(self) -> None:
         # close() is a coroutine, which garbage collection cannot await, so
-        # an unclosed file is not committed: its multipart upload, if any, is
-        # aborted, and its threads are released.
+        # an unclosed file whose commit has not started is not committed: its
+        # multipart upload, if any, is aborted, and its threads are released.
         pool = getattr(self, "_pool", None)
         if pool is None:
             return

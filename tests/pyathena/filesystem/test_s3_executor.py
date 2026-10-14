@@ -11,6 +11,7 @@ import os
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
+from unittest import mock
 
 import pytest
 
@@ -214,6 +215,14 @@ class TestS3AioExecutor:
             # that the shutdown schedules meanwhile.
             loop.stop()
 
+        scheduled = threading.Event()
+        run_coroutine_threadsafe = asyncio.run_coroutine_threadsafe
+
+        def schedule(coro, loop):
+            future = run_coroutine_threadsafe(coro, loop)
+            scheduled.set()
+            return future
+
         thread = threading.Thread(target=loop.run_forever)
         thread.start()
         try:
@@ -224,9 +233,12 @@ class TestS3AioExecutor:
             waiter = threading.Thread(
                 target=lambda: (executor.shutdown(wait=True), shut_down.set())
             )
-            waiter.start()
-            # The shutdown waits for the task while the loop is busy.
-            assert not shut_down.wait(0.2)
+            with mock.patch("asyncio.run_coroutine_threadsafe", side_effect=schedule):
+                waiter.start()
+                # The loop stops only after the task has been scheduled, so
+                # that the shutdown waits for a task that never runs.
+                assert scheduled.wait(EVENT_TIMEOUT)
+            assert not shut_down.is_set()
             release.set()
             assert shut_down.wait(EVENT_TIMEOUT)
             waiter.join()
