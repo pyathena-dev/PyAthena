@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import collections
+import contextlib
 import logging
 import operator
 import sys
 from datetime import datetime
+from itertools import islice
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -493,10 +495,9 @@ class AthenaResultSet(CursorIterator):
             self._fetch()
         if not self._rows:
             return None
-        if self._rownumber is None:
-            self._rownumber = 0
-        self._rownumber += 1
-        return self._rows.popleft()
+        row = self._rows.popleft()
+        self._count_rows(1)
+        return row
 
     @override
     def fetchmany(
@@ -559,19 +560,25 @@ class AthenaResultSet(CursorIterator):
     ) -> None:
         """Move the buffered rows to ``rows`` and count them in ``rownumber``.
 
+        A ``close()`` from another thread meanwhile empties the buffer, and the rows
+        moved before it are kept.
+
         Args:
             rows: The list that receives the rows.
             limit: The maximum number of rows, or None for all buffered rows.
         """
-        count = len(self._rows)
-        if limit is not None and limit < count:
-            count = limit
-            popleft = self._rows.popleft
-            rows.extend([popleft() for _ in range(count)])
+        start = len(rows)
+        if limit is not None and limit < len(self._rows):
+            # A row is never None, so popleft() runs until the limit or an empty
+            # buffer, and extend() keeps the rows that it appended before that.
+            with contextlib.suppress(IndexError):
+                rows.extend(islice(iter(self._rows.popleft, None), limit))
         else:
-            rows.extend(self._rows)
-            self._rows.clear()
-        self._count_rows(count)
+            # The buffer is replaced, not cleared after it is read, so that a close()
+            # in between empties only the new buffer.
+            buffered, self._rows = self._rows, collections.deque()
+            rows.extend(buffered)
+        self._count_rows(len(rows) - start)
 
     def _count_rows(self, count: int) -> None:
         """Count the rows that a fetch took in ``rownumber``.

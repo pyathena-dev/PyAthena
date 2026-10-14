@@ -187,10 +187,9 @@ class AthenaAioResultSet(AthenaResultSet):
             await self._async_fetch()
         if not self._rows:
             return None
-        if self._rownumber is None:
-            self._rownumber = 0
-        self._rownumber += 1
-        return self._rows.popleft()
+        row = self._rows.popleft()
+        self._count_rows(1)
+        return row
 
     @override
     async def fetchmany(  # type: ignore[override]

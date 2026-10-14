@@ -85,6 +85,38 @@ class _FetchoneResultSet(AthenaResultSet):
         return row
 
 
+class _ClosingDeque(collections.deque):
+    """A buffer that closes its result set when it is first read, as another thread may."""
+
+    def __init__(self, rows, result_set):
+        """Initialize the buffer.
+
+        Args:
+            rows: The buffered rows.
+            result_set: The result set to close.
+        """
+        super().__init__(rows)
+        self._result_set = result_set
+        self._closed = False
+
+    def _close_once(self):
+        """Close the result set on the first read."""
+        if not self._closed:
+            self._closed = True
+            self._result_set.close()
+
+    @override
+    def popleft(self):
+        row = super().popleft()
+        self._close_once()
+        return row
+
+    @override
+    def __iter__(self):
+        self._close_once()
+        return super().__iter__()
+
+
 class TestAthenaResultSet:
     def test_fetchmany_across_pages(self):
         result_set = _fetching_result_set(("1", "2"), ("3", "4"), ("5",))
@@ -130,6 +162,17 @@ class TestAthenaResultSet:
         result_set.close()
         assert result_set.fetchmany() == []
         assert result_set.fetchall() == []
+        assert result_set.rownumber is None
+
+    @pytest.mark.parametrize(
+        ("method", "args", "expected"),
+        [("fetchmany", (2,), [(1,)]), ("fetchall", (), [(1,), (2,), (3,)])],
+    )
+    def test_fetch_with_close_during_take(self, method, args, expected):
+        """A close() while the buffered rows are taken keeps the rows taken before it."""
+        result_set = _fetching_result_set(("1", "2", "3"))
+        result_set._rows = _ClosingDeque(result_set._rows, result_set)
+        assert getattr(result_set, method)(*args) == expected
         assert result_set.rownumber is None
 
     def test_fetch_with_fetchone_override(self):

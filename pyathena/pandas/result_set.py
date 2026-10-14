@@ -949,16 +949,9 @@ class AthenaPandasResultSet(AthenaResultSet):
 
     @override
     def _take_rows(self, size: int | None) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
-        """Take the next rows and count them in ``rownumber``.
+        """Take the next rows from the row iterator in bulk.
 
-        The rows are taken from the row iterator in bulk. The rows taken before an
-        exception are counted too.
-
-        Args:
-            size: The maximum number of rows, or None for all remaining rows.
-
-        Returns:
-            The rows, fewer than ``size`` when the result is exhausted.
+        The rows taken before an exception are counted in ``rownumber`` too.
         """
         rows: list[tuple[Any | None, ...] | dict[Any, Any | None]] = []
         try:
