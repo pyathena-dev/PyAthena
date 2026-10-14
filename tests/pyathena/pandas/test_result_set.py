@@ -140,6 +140,36 @@ class TestPandasDataFrameIterator:
 
         assert df_iter.as_pandas() is df
 
+    @pytest.mark.parametrize("read", ["next", "get_chunk"])
+    def test_close_during_read(self, read):
+        """A close during a read in another thread is deferred until the read completes."""
+        reading, release, released = threading.Event(), threading.Event(), threading.Event()
+
+        def chunks():
+            try:
+                yield pd.DataFrame({"n": [1]})
+                reading.set()
+                release.wait(10)
+                yield pd.DataFrame({"n": [2]})
+                yield pd.DataFrame({"n": [3]})
+            finally:
+                released.set()
+
+        csv_stream = io.StringIO()
+        df_iter = PandasDataFrameIterator(chunks(), _no_trunc_date, csv_stream)
+        next(df_iter)
+        with ThreadPoolExecutor(1) as executor:
+            future = executor.submit(getattr(df_iter, "__next__" if read == "next" else read))
+            assert reading.wait(10)
+            df_iter.close()
+            assert not released.is_set()
+            assert not csv_stream.closed
+            release.set()
+            assert future.result(10)["n"].tolist() == [2]
+        assert released.is_set()
+        assert csv_stream.closed
+        assert list(df_iter) == []
+
 
 _FS = sentinel.pyathena_fs
 _USER_FS = sentinel.user_fs

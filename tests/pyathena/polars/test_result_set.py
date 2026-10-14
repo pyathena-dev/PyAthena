@@ -629,3 +629,29 @@ class TestPolarsDataFrameIterator:
         df_iter = PolarsDataFrameIterator(reader, {}, ["a"])
         df_iter.close()
         assert list(df_iter) == []
+
+    def test_close_during_read(self):
+        """A close during a read in another thread is deferred until the read completes."""
+        reading, release, released = threading.Event(), threading.Event(), threading.Event()
+
+        def chunks():
+            try:
+                yield pl.DataFrame({"a": [1]})
+                reading.set()
+                release.wait(10)
+                yield pl.DataFrame({"a": [2]})
+                yield pl.DataFrame({"a": [3]})
+            finally:
+                released.set()
+
+        df_iter = PolarsDataFrameIterator(chunks(), {}, ["a"])
+        next(df_iter)
+        with ThreadPoolExecutor(1) as executor:
+            future = executor.submit(next, df_iter)
+            assert reading.wait(10)
+            df_iter.close()
+            assert not released.is_set()
+            release.set()
+            assert future.result(10)["a"].to_list() == [2]
+        assert released.is_set()
+        assert list(df_iter) == []
