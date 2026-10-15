@@ -10,6 +10,7 @@ import pytest
 
 from pyathena.aio.result_set import AthenaAioDictResultSet, AthenaAioResultSet
 from pyathena.converter import DefaultTypeConverter
+from pyathena.error import OperationalError
 from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
 from tests.pyathena.util import get_query_results_responses
@@ -20,8 +21,9 @@ async def _create_result_set(result_set_class, pages=(("1", "2"),)):
 
     Args:
         result_set_class: The asyncio result set class to create.
-        pages: The values of an integer column ``a``, one tuple per page. The first
-            page is fetched at creation, the others on demand.
+        pages: The values of an integer column ``a``, one tuple per page, or an
+            exception that the request for the page raises. The first page is fetched
+            at creation, the others on demand.
 
     Returns:
         The result set.
@@ -90,3 +92,27 @@ class TestAthenaAioResultSet:
         with pytest.raises(TypeError):
             await result_set.fetchmany(1.5)
         assert await result_set.fetchall() == [(1,), (2,)]
+
+    async def test_fetchone_across_pages(self):
+        result_set = await _create_result_set(AthenaAioResultSet, [("1", "2"), ("3",)])
+        assert [await result_set.fetchone() for _ in range(4)] == [(1,), (2,), (3,), None]
+        assert result_set.rownumber == 3
+        assert result_set.connection.client.get_query_results.call_count == 2
+
+    @pytest.mark.parametrize(("method", "args"), [("fetchmany", (3,)), ("fetchall", ())])
+    async def test_fetch_counts_rows_taken_before_error(self, method, args):
+        """The rows taken before a failed page request are counted in rownumber."""
+        result_set = await _create_result_set(
+            AthenaAioResultSet, [("1", "2"), RuntimeError("failed")]
+        )
+        with pytest.raises(OperationalError):
+            await getattr(result_set, method)(*args)
+        assert result_set.rownumber == 2
+
+    async def test_fetch_after_close(self):
+        result_set = await _create_result_set(AthenaAioResultSet, [("1", "2"), ("3",)])
+        result_set.close()
+        assert await result_set.fetchone() is None
+        assert await result_set.fetchmany() == []
+        assert await result_set.fetchall() == []
+        assert result_set.rownumber is None

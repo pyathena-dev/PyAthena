@@ -143,14 +143,17 @@ class AthenaAioResultSet(AthenaResultSet):
             return cast(dict[str, Any], response)
 
     async def _async_fetch(self) -> None:
-        """Fetch the next page of rows into the result set.
+        """Fetch the next page of rows, if any, into the buffer.
+
+        Nothing is fetched when no page remains, as after ``close()``.
 
         Raises:
-            ProgrammingError: If there is no next page.
+            ProgrammingError: If the next page is requested and the query ID is
+                missing, the query has not succeeded, or the result set is closed.
             OperationalError: If the request fails.
         """
         if not self._next_token:
-            raise ProgrammingError("NextToken is none or empty.")
+            return
         response = await self._async_get_query_results(self._arraysize, self._next_token)
         rows, self._next_token = self._parse_result_rows(response)
         self._process_rows(rows)
@@ -183,10 +186,10 @@ class AthenaAioResultSet(AthenaResultSet):
             The next row (a tuple, or a dict for ``AthenaAioDictResultSet``), or
             None if no more rows.
         """
-        if not self._rows and self._next_token:
-            await self._async_fetch()
         if not self._rows:
-            return None
+            await self._async_fetch()
+            if not self._rows:
+                return None
         row = self._rows.popleft()
         # As _count_rows() does, inline on the per-row path.
         rownumber = self._rownumber
@@ -230,8 +233,8 @@ class AthenaAioResultSet(AthenaResultSet):
     ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         """Take the next rows and count them in ``rownumber``.
 
-        The buffered rows are taken in bulk. When the buffer is empty, ``fetchone()``
-        takes the next row, so that it fetches the next page into the buffer.
+        The buffered rows are taken in bulk, and ``_async_fetch()`` refills the buffer
+        when it is empty.
 
         Args:
             size: The maximum number of rows, or None for all remaining rows.
@@ -241,13 +244,11 @@ class AthenaAioResultSet(AthenaResultSet):
         """
         rows: list[tuple[Any | None, ...] | dict[Any, Any | None]] = []
         while size is None or len(rows) < size:
-            if self._rows:
-                self._take_buffered_rows(rows, size)
-            else:
-                row = await self.fetchone()
-                if row is None:
+            if not self._rows:
+                await self._async_fetch()
+                if not self._rows:
                     break
-                rows.append(row)
+            self._take_buffered_rows(rows, size)
         return rows
 
     @override

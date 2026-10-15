@@ -254,26 +254,6 @@ class AthenaS3FSResultSet(AthenaResultSet):
             rows_fetched += 1
 
     @override
-    def fetchone(
-        self,
-    ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
-        """Fetch the next row of the result set.
-
-        Returns:
-            A tuple representing the next row, or None if no more rows.
-        """
-        if not self._rows:
-            self._fetch()
-        if not self._rows:
-            return None
-        row = self._rows.popleft()
-        # As _count_rows() does, inline on the per-row path.
-        rownumber = self._rownumber
-        if rownumber is not None:
-            self._rownumber = rownumber + 1
-        return row
-
-    @override
     def close(self) -> None:
         """Close the result set and release resources."""
         super().close()

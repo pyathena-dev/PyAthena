@@ -54,27 +54,6 @@ def _fetching_result_set(*pages):
     )
 
 
-class _FetchoneResultSet(AthenaResultSet):
-    """A result set whose ``fetchone()`` takes rows from an iterator, not the buffer."""
-
-    def __init__(self, rows):
-        """Initialize the result set with its rows, skipping the base initialization.
-
-        Args:
-            rows: The rows that ``fetchone()`` returns.
-        """
-        self._rows = collections.deque()
-        self._rownumber = 0
-        self._row_iter = iter(rows)
-
-    @override
-    def fetchone(self):
-        row = next(self._row_iter, None)
-        if row is not None:
-            self._rownumber += 1
-        return row
-
-
 class _ClosingDeque(collections.deque):
     """A buffer that closes its result set when it is read, as another thread may."""
 
@@ -158,12 +137,11 @@ class TestAthenaResultSet:
         assert getattr(result_set, method)(*args) == expected
         assert result_set.rownumber is None
 
-    def test_fetch_with_fetchone_override(self):
-        """A subclass whose fetchone() does not use the buffer has its rows fetched."""
-        result_set = _FetchoneResultSet([(1,), (2,), (3,)])
-        assert result_set.fetchmany(2) == [(1,), (2,)]
-        assert result_set.fetchall() == [(3,)]
+    def test_fetchone_across_pages(self):
+        result_set = _fetching_result_set(("1", "2"), ("3",))
+        assert [result_set.fetchone() for _ in range(4)] == [(1,), (2,), (3,), None]
         assert result_set.rownumber == 3
+        assert result_set.connection.client.get_query_results.call_count == 2
 
     def test_fetch_all_rows_skips_column_labels_only_on_first_page(self):
         """A later page can start with a data row equal to the column labels.

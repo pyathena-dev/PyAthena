@@ -35,6 +35,35 @@ class TestAthenaArrowResultSet:
         assert result_set.fetchmany() == []
         assert result_set.fetchall() == []
 
+    def test_fetch_across_batches(self):
+        """The buffer is refilled one record batch at a time.
+
+        No AWS calls; the first page request and the result table are mocked.
+        """
+        with (
+            patch.object(AthenaArrowResultSet, "_pre_fetch"),
+            patch.object(AthenaArrowResultSet, "_create_s3_file_system"),
+            patch.object(
+                AthenaArrowResultSet, "_as_arrow", return_value=pa.table({"a": [1, 2, 3]})
+            ),
+        ):
+            result_set = AthenaArrowResultSet(
+                connection=MagicMock(),
+                converter=DefaultArrowTypeConverter(),
+                query_execution=MagicMock(
+                    state=AthenaQueryExecution.STATE_SUCCEEDED,
+                    output_location="s3://bucket/query.csv",
+                ),
+                arraysize=1,
+                retry_config=RetryConfig(),
+            )
+        assert result_set.fetchmany(2) == [(1,), (2,)]
+        assert result_set.fetchone() == (3,)
+        assert result_set.fetchmany() == []
+        assert result_set.fetchall() == []
+        assert result_set.fetchone() is None
+        assert result_set.rownumber == 3
+
     def test_read_csv_timestamps_with_the_same_name(self):
         """Timestamp columns are converted by position, also with names that repeat.
 
