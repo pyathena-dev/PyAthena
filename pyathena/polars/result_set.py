@@ -466,17 +466,23 @@ class AthenaPolarsResultSet(AthenaResultSet):
             "skip_instance_cache": True,
         }
 
-    @property
-    def _parquet_storage_options(self) -> dict[str, Any]:
-        """Get storage options for Polars Parquet reading via native object_store.
+    @staticmethod
+    def _get_parquet_storage_options(connection: Connection[Any]) -> dict[str, Any]:
+        """Get storage options for Polars reading via native object_store.
 
-        Polars read_parquet uses Rust's native object_store crate, which requires
-        AWS credentials to be passed directly rather than through fsspec.
+        Polars read_parquet, scan_parquet, and scan_csv use Rust's native object_store
+        crate, which requires AWS credentials to be passed directly rather than through
+        fsspec. The credentials are frozen when the options are created.
+
+        Args:
+            connection: The connection whose session and region the reads use. The
+                chunk readers give the connection that they took when they were
+                created, as ``close()`` releases the result set's connection.
 
         Returns:
             Dictionary with AWS credentials and region for S3 access.
         """
-        credentials = self.connection.session.get_credentials()
+        credentials = connection.session.get_credentials()
         options: dict[str, Any] = {}
         if credentials:
             frozen_credentials = credentials.get_frozen_credentials()
@@ -484,8 +490,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
             options["aws_secret_access_key"] = frozen_credentials.secret_key
             if frozen_credentials.token:
                 options["aws_session_token"] = frozen_credentials.token
-        if self.connection.region_name:
-            options["aws_region"] = self.connection.region_name
+        if connection.region_name:
+            options["aws_region"] = connection.region_name
         return options
 
     @property
@@ -605,6 +611,11 @@ class AthenaPolarsResultSet(AthenaResultSet):
 
         For unload queries, it replaces the metadata with the schema of the Parquet
         files, as ``_as_polars()`` does, before the chunks are read.
+
+        The chunk readers take the state that they need, such as the output location,
+        the column names, and the connection, when they are created, so that a
+        ``close()`` from another thread before their first read does not take it away.
+        The credentials are still frozen at the first read.
 
         Returns:
             PolarsDataFrameIterator that reads each chunk lazily.
@@ -794,7 +805,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         try:
             return pl.read_parquet(
                 self._unload_location,
-                **self._read_kwargs(lambda: self._parquet_storage_options),
+                **self._read_kwargs(lambda: self._get_parquet_storage_options(self.connection)),
             )
         except Exception as e:
             _logger.exception(f"Failed to read {self._unload_location}.")
@@ -811,7 +822,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
             # Use scan_parquet to get schema without reading all data
             lazy_df = pl.scan_parquet(
                 self._unload_location,
-                storage_options=self._storage_options(lambda: self._parquet_storage_options),
+                storage_options=self._storage_options(
+                    lambda: self._get_parquet_storage_options(self.connection)
+                ),
             )
             schema = lazy_df.collect_schema()
             return to_column_info(schema)
@@ -917,10 +930,6 @@ class AthenaPolarsResultSet(AthenaResultSet):
     def _iter_csv_chunks(self) -> Iterator[pl.DataFrame]:
         """Create an iterator that reads the CSV result file in chunks.
 
-        The state that the reads need, such as the output location, the column names,
-        and the storage options, is taken now, so that a ``close()`` before the first
-        read does not take it away.
-
         Returns:
             An iterator of a Polars DataFrame for each chunk, read lazily.
 
@@ -935,27 +944,32 @@ class AthenaPolarsResultSet(AthenaResultSet):
             raise ProgrammingError("output_location is not available.")
 
         separator, has_header, new_columns = self._get_csv_params()
-        # scan_csv uses Rust's native object_store (like scan_parquet),
-        # not fsspec, so we use the same storage options as Parquet
-        read_kwargs = self._read_kwargs(
-            lambda: self._parquet_storage_options,
-            separator=separator,
-            has_header=has_header,
-            schema_overrides=self._csv_dtypes,
+        return self._scan_csv_chunks(
+            self.output_location,
+            self.connection,
+            {
+                "separator": separator,
+                "has_header": has_header,
+                "schema_overrides": self._csv_dtypes,
+            },
+            new_columns,
         )
-        if "schema_overrides" not in self._kwargs:
-            # Renamed after reading, so that Polars matches the types to the header.
-            read_kwargs.pop("new_columns", None)
-        return self._scan_csv_chunks(self.output_location, read_kwargs, new_columns)
 
     def _scan_csv_chunks(
-        self, location: str, read_kwargs: dict[str, Any], new_columns: list[str] | None
+        self,
+        location: str,
+        connection: Connection[Any],
+        defaults: dict[str, Any],
+        new_columns: list[str] | None,
     ) -> Iterator[pl.DataFrame]:
         """Scan a CSV result file in chunks with Polars.
 
         Args:
             location: The output location.
-            read_kwargs: The arguments of ``polars.scan_csv()``.
+            connection: The connection whose credentials the read uses. They are
+                frozen when the first chunk is read.
+            defaults: The arguments of ``polars.scan_csv()`` that the result set
+                chooses; see ``_read_kwargs()``.
             new_columns: The names of the first columns, set after reading; see
                 ``_get_csv_params()``.
 
@@ -968,6 +982,14 @@ class AthenaPolarsResultSet(AthenaResultSet):
         import polars as pl
 
         try:
+            # scan_csv uses Rust's native object_store (like scan_parquet),
+            # not fsspec, so we use the same storage options as Parquet
+            read_kwargs = self._read_kwargs(
+                lambda: self._get_parquet_storage_options(connection), **defaults
+            )
+            if "schema_overrides" not in self._kwargs:
+                # Renamed after reading, so that Polars matches the types to the header.
+                read_kwargs.pop("new_columns", None)
             lazy_df = pl.scan_csv(location, **read_kwargs)
             for batch in lazy_df.collect_batches(chunk_size=self._chunksize):
                 if new_columns:
@@ -988,8 +1010,6 @@ class AthenaPolarsResultSet(AthenaResultSet):
         the unload location with the given options, decoding whole row groups ahead
         of the chunks it returns.
 
-        The filesystem or the storage options that the reads use are taken now, so
-        that a ``close()`` before the first read does not take them away.
         ``_prepare_parquet_location()`` must have found the unload location first.
 
         Returns:
@@ -1002,16 +1022,17 @@ class AthenaPolarsResultSet(AthenaResultSet):
             raise ProgrammingError("unload_location is not available.")
 
         if not self._kwargs and importlib.util.find_spec("pyarrow") is not None:
-            return self._read_parquet_chunks(S3FileSystem(**self._csv_storage_options))
-        return self._scan_parquet_chunks(
-            self._unload_location, self._read_kwargs(lambda: self._parquet_storage_options)
-        )
+            return self._read_parquet_chunks(
+                S3FileSystem(**self._csv_storage_options), self._data_manifest
+            )
+        return self._scan_parquet_chunks(self._unload_location, self.connection)
 
-    def _read_parquet_chunks(self, fs: S3FileSystem) -> Iterator[pl.DataFrame]:
+    def _read_parquet_chunks(self, fs: S3FileSystem, paths: list[str]) -> Iterator[pl.DataFrame]:
         """Read the files of the data manifest in chunks with ``ParquetChunkReader``.
 
         Args:
             fs: The filesystem that reads the files.
+            paths: The files of the data manifest.
 
         Yields:
             Polars DataFrame for each chunk.
@@ -1024,7 +1045,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         try:
             with ParquetChunkReader(
                 fs,
-                self._data_manifest,
+                paths,
                 cast(int, self._chunksize),
                 cache_type=self._cache_type,
             ) as reader:
@@ -1035,13 +1056,14 @@ class AthenaPolarsResultSet(AthenaResultSet):
             raise OperationalError(*e.args) from e
 
     def _scan_parquet_chunks(
-        self, location: str, read_kwargs: dict[str, Any]
+        self, location: str, connection: Connection[Any]
     ) -> Iterator[pl.DataFrame]:
         """Scan the unload location in chunks with Polars and the read options.
 
         Args:
             location: The unload location.
-            read_kwargs: The arguments of ``polars.scan_parquet()``.
+            connection: The connection whose credentials the read uses. They are
+                frozen when the first chunk is read.
 
         Yields:
             Polars DataFrame for each chunk.
@@ -1052,7 +1074,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
         import polars as pl
 
         try:
-            lazy_df = pl.scan_parquet(location, **read_kwargs)
+            lazy_df = pl.scan_parquet(
+                location,
+                **self._read_kwargs(lambda: self._get_parquet_storage_options(connection)),
+            )
             yield from lazy_df.collect_batches(chunk_size=self._chunksize)
         except Exception as e:
             _logger.exception(f"Failed to read {location}.")

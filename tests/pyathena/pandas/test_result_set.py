@@ -5,6 +5,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+import collections
 import csv
 import inspect
 import io
@@ -596,6 +597,25 @@ class TestAthenaPandasResultSet:
         for chunk in chunks:
             assert chunk.dtypes.tolist() == whole.dtypes.tolist()
         assert_frame_equal(pd.concat(chunks), whole, check_exact=True)
+
+    def test_iter_parquet_chunks_after_close(self, tmp_path):
+        """Chunks of an UNLOAD result are read after close(), which resets the data manifest.
+
+        A fetch in another thread, such as one of AioPandasCursor that keeps running
+        after its task is cancelled, can start its first read as close() lands.
+        """
+        result_set, paths = _unload_result_set(tmp_path, [pa.table({"i": [1, 2]})], chunksize=1)
+        with (
+            patch.object(AthenaPandasResultSet, "_read_data_manifest", return_value=paths),
+            patch.object(
+                AthenaPandasResultSet, "is_unload", new_callable=PropertyMock, return_value=True
+            ),
+        ):
+            reader = result_set._as_pandas()
+        result_set._rows = collections.deque()
+        result_set._df_iter = PandasDataFrameIterator(pd.DataFrame(), _no_trunc_date)
+        result_set.close()
+        assert [chunk["i"].tolist() for chunk in reader] == [[1], [2]]
 
     def test_as_pandas_parquet_chunks_engine(self, tmp_path):
         """Chunks of an UNLOAD result need the pyarrow engine, as the whole result does."""
