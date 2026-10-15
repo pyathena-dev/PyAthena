@@ -45,7 +45,7 @@ _DEFAULT_POLARS_CONVERTERS: dict[str, Callable[[str | None], Any | None]] = {
 }
 
 
-def _to_datetimes(frame: _FrameT, dtypes: dict[str, Any]) -> _FrameT:
+def _to_datetimes(frame: _FrameT, dtypes: dict[str, Any], strict: bool = True) -> _FrameT:
     """Convert timestamp text columns to Datetime dtypes, truncating finer fractions.
 
     Athena writes up to 12 fractional digits, which Polars does not parse into a
@@ -56,6 +56,8 @@ def _to_datetimes(frame: _FrameT, dtypes: dict[str, Any]) -> _FrameT:
             as null or as an empty string. A column that it does not have, such as
             one that the read options leave out, is skipped.
         dtypes: The Datetime dtypes keyed by column name.
+        strict: Whether text that is not a timestamp raises an error, rather than
+            becoming null.
 
     Returns:
         The frame with the columns converted.
@@ -71,7 +73,7 @@ def _to_datetimes(frame: _FrameT, dtypes: dict[str, Any]) -> _FrameT:
         exprs.append(
             pl.when(text != "")
             .then(text.str.slice(0, _TIMESTAMP_TEXT_LENGTHS[time_unit]))
-            .str.to_datetime("%Y-%m-%d %H:%M:%S%.f", time_unit=time_unit)
+            .str.to_datetime("%Y-%m-%d %H:%M:%S%.f", time_unit=time_unit, strict=strict)
             .cast(dtype)
         )
     return frame.with_columns(exprs) if exprs else frame

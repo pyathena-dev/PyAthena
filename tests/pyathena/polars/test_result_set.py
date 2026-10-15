@@ -608,6 +608,33 @@ class TestAthenaPolarsResultSet:
         if not expected:
             assert df.columns == ["v"]
 
+    def test_iter_csv_chunks_ignore_errors(self, tmp_path):
+        """With ignore_errors, timestamp text that is not a timestamp becomes null in chunks."""
+        path = tmp_path / "result.csv"
+        path.write_bytes(b'"t"\n"2020-01-02 03:04:05.123456789012"\n"invalid"\n')
+        result_set = _chunked_result_set()
+        result_set._query_execution = None
+        result_set._converter = DefaultPolarsTypeConverter()
+        result_set._kwargs = {"ignore_errors": True}
+        result_set._metadata = (
+            {"Name": "t", "Type": "timestamp", "Precision": 3, "Scale": 0, "Nullable": "UNKNOWN"},
+        )
+        with (
+            patch.object(
+                AthenaPolarsResultSet,
+                "output_location",
+                new_callable=PropertyMock,
+                return_value=str(path),
+            ),
+            patch.object(AthenaPolarsResultSet, "_get_parquet_storage_options", return_value={}),
+            patch.object(AthenaPolarsResultSet, "_is_csv_readable", return_value=True),
+        ):
+            df = _read_all(result_set._iter_csv_chunks())
+        assert df["t"].equals(
+            pl.Series([datetime(2020, 1, 2, 3, 4, 5, 123456), None], dtype=pl.Datetime("us")),
+            check_dtypes=True,
+        )
+
 
 class TestPolarsDataFrameIterator:
     @pytest.mark.parametrize(

@@ -746,7 +746,11 @@ class AthenaPolarsResultSet(AthenaResultSet):
                     raise
                 # The data is read again with the timestamp columns as text.
                 kwargs["schema_overrides"] = schema_overrides
-                df = _to_datetimes(pl.read_csv(source, **kwargs), timestamp_dtypes)
+                df = _to_datetimes(
+                    pl.read_csv(source, **kwargs),
+                    timestamp_dtypes,
+                    strict=not kwargs.get("ignore_errors", False),
+                )
             if new_columns:
                 df.columns = [*new_columns, *df.columns[len(new_columns) :]]
             return df
@@ -964,7 +968,12 @@ class AthenaPolarsResultSet(AthenaResultSet):
             if "schema_overrides" not in self._kwargs:
                 # Renamed after reading, so that Polars matches the types to the header.
                 read_kwargs.pop("new_columns", None)
-            lazy_df = _to_datetimes(pl.scan_csv(location, **read_kwargs), timestamp_dtypes)
+            lazy_df = _to_datetimes(
+                pl.scan_csv(location, **read_kwargs),
+                timestamp_dtypes,
+                # As Polars reads a value it cannot parse as null with ignore_errors.
+                strict=not read_kwargs.get("ignore_errors", False),
+            )
             for batch in lazy_df.collect_batches(chunk_size=self._chunksize):
                 if new_columns:
                     batch.columns = [*new_columns, *batch.columns[len(new_columns) :]]
