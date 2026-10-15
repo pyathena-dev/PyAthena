@@ -638,6 +638,20 @@ class TestPolarsCursor:
             # Should have multiple chunks
             assert len(chunked_dfs) > 1
 
+    def test_iter_chunks_result_file_values(self, polars_cursor):
+        """Chunks of a CSV result file have the types and values of the whole result."""
+        whole = polars_cursor.execute(RESULT_FILE_VALUES_QUERY).as_polars()
+        chunks = list(polars_cursor.execute(RESULT_FILE_VALUES_QUERY, chunksize=1).iter_chunks())
+        assert all(chunk.height <= 1 for chunk in chunks)
+        chunked = pl.concat(chunks)
+        assert chunked.schema == whole.schema
+        assert chunked.equals(whole)
+        # Fractions finer than microseconds are truncated.
+        assert chunked["col_timestamp_12"].to_list() == [
+            datetime(2020, 1, 2, 3, 4, 5, 123456),
+            None,
+        ]
+
     def test_iter_chunks_chunk_sizes(self):
         """Test that chunks have correct sizes."""
         with contextlib.closing(connect(schema_name=ENV.schema)) as conn:

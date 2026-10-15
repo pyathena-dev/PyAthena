@@ -546,8 +546,12 @@ class AthenaPolarsResultSet(AthenaResultSet):
             for name, d in zip(column_names, description, strict=True)
         }
 
-    def _get_timestamp_dtypes(self, has_header: bool) -> dict[str, Any]:
-        """Get the Datetime dtypes of the timestamp columns, which are read as text.
+    def _get_csv_schema_overrides(self, has_header: bool) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Get the Polars data types for reading CSV data, with the timestamp columns as text.
+
+        Athena writes up to 12 fractional digits, which Polars does not parse into a
+        Datetime whose time unit holds fewer, so the timestamp columns are read as text
+        and converted with ``_to_datetimes()``.
 
         Args:
             has_header: Whether the CSV data has a header. Without one, or with
@@ -556,19 +560,22 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 as text.
 
         Returns:
-            The Datetime dtypes keyed by the header of a CSV file.
+            Tuple of (schema_overrides, timestamp_dtypes): the data types to read the
+            columns with, and the Datetime dtypes of the timestamp columns read as text,
+            both keyed by the header of a CSV file.
         """
         import polars as pl
 
-        if not has_header or self._kwargs.keys() & {"schema_overrides", "with_column_names"}:
-            return {}
         dtypes = self._csv_dtypes
-        return {
+        if not has_header or self._kwargs.keys() & {"schema_overrides", "with_column_names"}:
+            return dtypes, {}
+        timestamp_dtypes = {
             name: dtype
             for name, d in zip(self._get_column_names(), self.description or [], strict=True)
             if d[1] == "timestamp"
             and ((dtype := dtypes.get(name)) is pl.Datetime or isinstance(dtype, pl.Datetime))
         }
+        return {**dtypes, **dict.fromkeys(timestamp_dtypes, pl.String)}, timestamp_dtypes
 
     def _get_column_names(self) -> list[str]:
         """Get the names of the result columns in a DataFrame.
@@ -701,11 +708,12 @@ class AthenaPolarsResultSet(AthenaResultSet):
             return pl.DataFrame()
 
         separator, has_header, new_columns = self._get_csv_params()
+        schema_overrides, timestamp_dtypes = self._get_csv_schema_overrides(has_header)
         kwargs = self._read_kwargs(
             lambda: self._csv_storage_options,
             separator=separator,
             has_header=has_header,
-            schema_overrides=self._csv_dtypes,
+            schema_overrides=schema_overrides,
         )
         if "schema_overrides" not in self._kwargs:
             # Renamed after reading, so that Polars matches the types to the header.
@@ -726,20 +734,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             if self.output_location:
                 with fsspec.open(self.output_location, "rb", **(storage_options or {})) as file:
                     source = file.read()
-            try:
-                df = pl.read_csv(source, **kwargs)
-            except pl.exceptions.ComputeError:
-                timestamp_dtypes = self._get_timestamp_dtypes(has_header)
-                if not timestamp_dtypes:
-                    raise
-                # Athena writes up to 12 fractional digits, which Polars does not parse
-                # into a Datetime whose time unit holds fewer, so the data is read again
-                # with the timestamp columns as text.
-                kwargs["schema_overrides"] = {
-                    **self._csv_dtypes,
-                    **dict.fromkeys(timestamp_dtypes, pl.String),
-                }
-                df = _to_datetimes(pl.read_csv(source, **kwargs), timestamp_dtypes)
+            df = _to_datetimes(pl.read_csv(source, **kwargs), timestamp_dtypes)
             if new_columns:
                 df.columns = [*new_columns, *df.columns[len(new_columns) :]]
             return df
@@ -906,14 +901,16 @@ class AthenaPolarsResultSet(AthenaResultSet):
             raise ProgrammingError("output_location is not available.")
 
         separator, has_header, new_columns = self._get_csv_params()
+        schema_overrides, timestamp_dtypes = self._get_csv_schema_overrides(has_header)
         return self._scan_csv_chunks(
             self.output_location,
             self.connection,
             {
                 "separator": separator,
                 "has_header": has_header,
-                "schema_overrides": self._csv_dtypes,
+                "schema_overrides": schema_overrides,
             },
+            timestamp_dtypes,
             new_columns,
         )
 
@@ -922,6 +919,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         location: str,
         connection: Connection[Any],
         defaults: dict[str, Any],
+        timestamp_dtypes: dict[str, Any],
         new_columns: list[str] | None,
     ) -> Iterator[pl.DataFrame]:
         """Scan a CSV result file in chunks with Polars.
@@ -932,6 +930,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 frozen when the first chunk is read.
             defaults: The arguments of ``polars.scan_csv()`` that the result set
                 chooses; see ``_read_kwargs()``.
+            timestamp_dtypes: The Datetime dtypes of the timestamp columns read as
+                text; see ``_get_csv_schema_overrides()``.
             new_columns: The names of the first columns, set after reading; see
                 ``_get_csv_params()``.
 
@@ -954,6 +954,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 read_kwargs.pop("new_columns", None)
             lazy_df = pl.scan_csv(location, **read_kwargs)
             for batch in lazy_df.collect_batches(chunk_size=self._chunksize):
+                batch = _to_datetimes(batch, timestamp_dtypes)
                 if new_columns:
                     batch.columns = [*new_columns, *batch.columns[len(new_columns) :]]
                 yield batch
