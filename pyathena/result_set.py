@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import collections
 import logging
+import operator
+import sys
 from datetime import datetime
+from itertools import islice
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -491,10 +494,12 @@ class AthenaResultSet(CursorIterator):
             self._fetch()
         if not self._rows:
             return None
-        if self._rownumber is None:
-            self._rownumber = 0
-        self._rownumber += 1
-        return self._rows.popleft()
+        row = self._rows.popleft()
+        # As _count_rows() does, inline on the per-row path.
+        rownumber = self._rownumber
+        if rownumber is not None:
+            self._rownumber = rownumber + 1
+        return row
 
     @override
     def fetchmany(
@@ -508,17 +513,14 @@ class AthenaResultSet(CursorIterator):
 
         Returns:
             The rows, fewer than ``size`` when the result is exhausted.
+
+        Raises:
+            TypeError: If ``size`` is not an integer and not replaced with ``arraysize``.
         """
         if not size or size <= 0:
             size = self._arraysize
-        rows = []
-        for _ in range(size):
-            row = self.fetchone()
-            if row:
-                rows.append(row)
-            else:
-                break
-        return rows
+        # islice() in the subclasses' _take_rows() takes no size above sys.maxsize.
+        return self._take_rows(min(operator.index(size), sys.maxsize))
 
     @override
     def fetchall(
@@ -529,14 +531,71 @@ class AthenaResultSet(CursorIterator):
         Returns:
             The remaining rows.
         """
-        rows = []
-        while True:
-            row = self.fetchone()
-            if row:
-                rows.append(row)
+        return self._take_rows(None)
+
+    def _take_rows(self, size: int | None) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
+        """Take the next rows and count them in ``rownumber``.
+
+        The buffered rows are taken in bulk. When the buffer is empty, ``fetchone()``
+        takes the next row, so that it fetches the next rows into the buffer as the
+        result set does.
+
+        Args:
+            size: The maximum number of rows, or None for all remaining rows.
+
+        Returns:
+            The rows, fewer than ``size`` when the result is exhausted.
+        """
+        rows: list[tuple[Any | None, ...] | dict[Any, Any | None]] = []
+        while size is None or len(rows) < size:
+            if self._rows:
+                self._take_buffered_rows(rows, size)
             else:
-                break
+                row = self.fetchone()
+                if row is None:
+                    break
+                rows.append(row)
         return rows
+
+    def _take_buffered_rows(
+        self, rows: list[tuple[Any | None, ...] | dict[Any, Any | None]], size: int | None
+    ) -> None:
+        """Move the buffered rows to ``rows`` and count them in ``rownumber``.
+
+        Args:
+            rows: The list that receives the rows.
+            size: The maximum length of ``rows``, or None for all buffered rows.
+        """
+        start = len(rows)
+        limit = None if size is None else size - start
+        if limit is not None and limit < len(self._rows):
+            # A row is never None, so popleft() runs until the limit or an empty
+            # buffer, and extend() keeps the rows that it appended before that.
+            # try costs nothing without an exception, unlike contextlib.suppress().
+            try:  # noqa: SIM105
+                rows.extend(islice(iter(self._rows.popleft, None), limit))
+            except IndexError:
+                pass
+        else:
+            # The buffer is replaced, not cleared after it is read, so that a close()
+            # in between empties only the new buffer.
+            buffered, self._rows = self._rows, collections.deque()
+            rows.extend(buffered)
+        self._count_rows(len(rows) - start)
+
+    def _count_rows(self, count: int) -> None:
+        """Count the rows that a fetch took in ``rownumber``.
+
+        ``rownumber`` stays None for a result set that another thread closed before
+        the update. It is read once, so that a ``close()`` during the update raises no
+        TypeError, though it may leave the count in place.
+
+        Args:
+            count: The number of rows taken.
+        """
+        rownumber = self._rownumber
+        if rownumber is not None:
+            self._rownumber = rownumber + count
 
     def _process_metadata(self, response: dict[str, Any]) -> None:
         result_set = response.get("ResultSet")

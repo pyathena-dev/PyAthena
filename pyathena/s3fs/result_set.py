@@ -266,10 +266,12 @@ class AthenaS3FSResultSet(AthenaResultSet):
             self._fetch()
         if not self._rows:
             return None
-        if self._rownumber is None:
-            self._rownumber = 0
-        self._rownumber += 1
-        return self._rows.popleft()
+        row = self._rows.popleft()
+        # As _count_rows() does, inline on the per-row path.
+        rownumber = self._rownumber
+        if rownumber is not None:
+            self._rownumber = rownumber + 1
+        return row
 
     @override
     def close(self) -> None:

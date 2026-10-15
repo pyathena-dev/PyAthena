@@ -12,24 +12,22 @@ from pyathena.aio.result_set import AthenaAioDictResultSet, AthenaAioResultSet
 from pyathena.converter import DefaultTypeConverter
 from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
+from tests.pyathena.util import get_query_results_responses
 
 
-async def _create_result_set(result_set_class):
-    """Create a result set of a succeeded query from a stubbed ``GetQueryResults``.
+async def _create_result_set(result_set_class, pages=(("1", "2"),)):
+    """Create a result set of a succeeded query from stubbed ``GetQueryResults`` pages.
 
     Args:
         result_set_class: The asyncio result set class to create.
+        pages: The values of an integer column ``a``, one tuple per page. The first
+            page is fetched at creation, the others on demand.
 
     Returns:
-        The result set, holding the rows 1 and 2 of an integer column ``a``.
+        The result set.
     """
     connection = MagicMock()
-    connection.client.get_query_results.return_value = {
-        "ResultSet": {
-            "ResultSetMetadata": {"ColumnInfo": [{"Name": "a", "Type": "integer"}]},
-            "Rows": [{"Data": [{"VarCharValue": "1"}]}, {"Data": [{"VarCharValue": "2"}]}],
-        }
-    }
+    connection.client.get_query_results.side_effect = get_query_results_responses(*pages)
     query_execution = AthenaQueryExecution(
         {
             "QueryExecution": {
@@ -40,7 +38,7 @@ async def _create_result_set(result_set_class):
         }
     )
     return await result_set_class.create(
-        connection, DefaultTypeConverter(), query_execution, 1000, RetryConfig()
+        connection, DefaultTypeConverter(), query_execution, 2, RetryConfig()
     )
 
 
@@ -61,3 +59,34 @@ class TestAthenaAioResultSet:
     async def test_async_iteration(self, result_set_class, expected):
         result_set = await _create_result_set(result_set_class)
         assert [row async for row in result_set] == expected
+
+    @pytest.mark.parametrize(
+        ("result_set_class", "expected"),
+        [
+            (AthenaAioResultSet, [[(1,)], [(2,), (3,), (4,)], [(5,)]]),
+            (AthenaAioDictResultSet, [[{"a": 1}], [{"a": 2}, {"a": 3}, {"a": 4}], [{"a": 5}]]),
+        ],
+    )
+    async def test_fetchmany_across_pages(self, result_set_class, expected):
+        result_set = await _create_result_set(result_set_class, [("1", "2"), ("3", "4"), ("5",)])
+        assert await result_set.fetchmany(1) == expected[0]
+        assert result_set.rownumber == 1
+        assert await result_set.fetchmany(3) == expected[1]
+        assert result_set.rownumber == 4
+        assert await result_set.fetchmany() == expected[2]
+        assert await result_set.fetchmany() == []
+        assert result_set.rownumber == 5
+
+    async def test_fetchall_across_pages(self):
+        result_set = await _create_result_set(AthenaAioResultSet, [("1", "2"), ("3", "4"), ("5",)])
+        assert await result_set.fetchone() == (1,)
+        assert await result_set.fetchall() == [(2,), (3,), (4,), (5,)]
+        assert result_set.rownumber == 5
+        assert await result_set.fetchall() == []
+
+    async def test_fetchmany_size_not_integer(self):
+        """A size that is not an integer raises TypeError without consuming rows."""
+        result_set = await _create_result_set(AthenaAioResultSet)
+        with pytest.raises(TypeError):
+            await result_set.fetchmany(1.5)
+        assert await result_set.fetchall() == [(1,), (2,)]

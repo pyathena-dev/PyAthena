@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import operator
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -186,10 +187,12 @@ class AthenaAioResultSet(AthenaResultSet):
             await self._async_fetch()
         if not self._rows:
             return None
-        if self._rownumber is None:
-            self._rownumber = 0
-        self._rownumber += 1
-        return self._rows.popleft()
+        row = self._rows.popleft()
+        # As _count_rows() does, inline on the per-row path.
+        rownumber = self._rownumber
+        if rownumber is not None:
+            self._rownumber = rownumber + 1
+        return row
 
     @override
     async def fetchmany(  # type: ignore[override]
@@ -203,17 +206,13 @@ class AthenaAioResultSet(AthenaResultSet):
 
         Returns:
             The rows, fewer than ``size`` when the result is exhausted.
+
+        Raises:
+            TypeError: If ``size`` is not an integer and not replaced with ``arraysize``.
         """
         if not size or size <= 0:
             size = self._arraysize
-        rows = []
-        for _ in range(size):
-            row = await self.fetchone()
-            if row:
-                rows.append(row)
-            else:
-                break
-        return rows
+        return await self._async_take_rows(operator.index(size))
 
     @override
     async def fetchall(  # type: ignore[override]
@@ -224,13 +223,31 @@ class AthenaAioResultSet(AthenaResultSet):
         Returns:
             The remaining rows.
         """
-        rows = []
-        while True:
-            row = await self.fetchone()
-            if row:
-                rows.append(row)
+        return await self._async_take_rows(None)
+
+    async def _async_take_rows(
+        self, size: int | None
+    ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
+        """Take the next rows and count them in ``rownumber``.
+
+        The buffered rows are taken in bulk. When the buffer is empty, ``fetchone()``
+        takes the next row, so that it fetches the next page into the buffer.
+
+        Args:
+            size: The maximum number of rows, or None for all remaining rows.
+
+        Returns:
+            The rows, fewer than ``size`` when the result is exhausted.
+        """
+        rows: list[tuple[Any | None, ...] | dict[Any, Any | None]] = []
+        while size is None or len(rows) < size:
+            if self._rows:
+                self._take_buffered_rows(rows, size)
             else:
-                break
+                row = await self.fetchone()
+                if row is None:
+                    break
+                rows.append(row)
         return rows
 
     @override
