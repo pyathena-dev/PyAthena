@@ -7253,23 +7253,34 @@ class TestS3File:
         # used to keep them in a reference cycle with the future of the
         # request until the garbage collector ran.
         fs = self._make_append_fs(b"a" * 6 if stage == "copy" else b"")
+        release = threading.Event()
 
         def fail(*args, **kwargs):
             raise PermissionError("Access Denied")
 
+        def fail_copy(**kwargs):
+            # Copying until the first write has returned. The test always
+            # sets the event, so the wait needs no timeout.
+            release.wait()
+            fail()
+
         if stage == "creation":
             fs.core.create_multipart_upload.side_effect = fail
         elif stage == "copy":
-            fs.core.upload_part_copy.side_effect = fail
+            fs.core.upload_part_copy.side_effect = fail_copy
         else:
             fs.core.upload_part.side_effect = fail
         mode = "ab" if stage == "copy" else "wb"
         f = S3File(fs, "s3://bucket/key.txt", mode=mode, block_size=4, max_workers=1)
-        if stage in ("copy", "commit"):
-            f.write(b"a" * 4)
-        if stage == "copy":
-            # The part copy has failed before the next write.
-            assert wait(f.multipart_upload_parts[:1], timeout=5).done
+        try:
+            if stage in ("copy", "commit"):
+                f.write(b"a" * 4)
+            release.set()
+            if stage == "copy":
+                # The part copy has failed before the next write.
+                assert wait(f.multipart_upload_parts[:1], timeout=5).done
+        finally:
+            release.set()
         file_ref = weakref.ref(f)
         buffer_ref = weakref.ref(f.buffer)
         # The write submits a part before it waits for the failed one.

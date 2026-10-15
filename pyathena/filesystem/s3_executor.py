@@ -61,11 +61,11 @@ class S3Executor(metaclass=ABCMeta):
         the executor reported.
 
         The error of a failed callable keeps the frames that it was raised
-        from in its traceback, and so do the errors that it was raised from or
-        while handling, without their local variables, so that the arguments,
-        such as the body of a part, are freed when the callable fails, and the
-        future and its error are freed without the garbage collector once
-        they are no longer referenced.
+        from in its traceback, and so do the errors that it was raised from,
+        raised while handling, or groups, without their local variables, so
+        that the arguments, such as the body of a part, are freed when the
+        callable fails, and the future and its error are freed without the
+        garbage collector once they are no longer referenced.
 
         Args:
             future: A pending future that no executor has started.
@@ -84,8 +84,8 @@ class S3Executor(metaclass=ABCMeta):
             except BaseException as e:
                 # The frames below this one hold the arguments, and so may
                 # those of the errors chained to it, such as the ClientError
-                # that S3Core.call() raises an OSError from. clear_frames()
-                # skips this frame, which is still executing.
+                # that S3Core.call() raises an OSError from, or grouped in it.
+                # clear_frames() skips this frame, which is still executing.
                 chained: list[BaseException | None] = [e]
                 seen: set[int] = set()
                 while chained:
@@ -93,6 +93,8 @@ class S3Executor(metaclass=ABCMeta):
                         seen.add(id(error))
                         traceback.clear_frames(error.__traceback__)
                         chained += [error.__cause__, error.__context__]
+                        if isinstance(error, BaseExceptionGroup):
+                            chained += error.exceptions
                 # The traceback also keeps this frame, which would keep the
                 # arguments and form a reference cycle with the future, and so
                 # do the frames of the executor that called run(), and the
@@ -142,9 +144,11 @@ def raise_failure(done: set[Future[Any]] | set[asyncio.Future[Any]]) -> None:
     """Empty a set of finished futures and raise the error of a failed one, if any.
 
     Otherwise, the cancellation of a cancelled future is raised, if any. The
-    set is emptied before the error is raised. The traceback of the error keeps the frames that it
-    is raised through, so a frame that still referenced the future, which
-    keeps the error, would form a reference cycle that only the garbage
+    errors of all the failed futures are retrieved, so that asyncio does not
+    log those that are not raised as never retrieved. The set is emptied
+    before the error is raised: the traceback of the error keeps the frames
+    that it is raised through, so a frame that still referenced the future,
+    which keeps the error, would form a reference cycle that only the garbage
     collector frees, with the local variables of every frame of the
     traceback, such as the data of a write.
 
@@ -155,15 +159,19 @@ def raise_failure(done: set[Future[Any]] | set[asyncio.Future[Any]]) -> None:
         BaseException: The error of a failed future, or the cancellation
             error of a cancelled one.
     """
-    failed = next((f for f in done if not f.cancelled() and f.exception() is not None), None)
-    if failed is None:
-        failed = next((f for f in done if f.cancelled()), None)
+    future: Future[Any] | asyncio.Future[Any] | None = None
+    failed = cancelled = None
+    for future in done:
+        if future.cancelled():
+            cancelled = cancelled or future
+        elif future.exception() is not None:
+            failed = failed or future
     done.clear()
     try:
-        if failed is not None:
-            failed.result()
+        if (raised := failed or cancelled) is not None:
+            raised.result()
     finally:
-        del failed
+        del future, failed, cancelled, raised
 
 
 class S3ThreadPoolExecutor(S3Executor):
