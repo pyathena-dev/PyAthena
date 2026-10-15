@@ -63,6 +63,7 @@ if TYPE_CHECKING:
         PoolProxiedConnection,
     )
     from sqlalchemy.engine.interfaces import (
+        DBAPIConnection,
         ReflectedForeignKeyConstraint,
         ReflectedIndex,
         ReflectedPrimaryKeyConstraint,
@@ -537,6 +538,15 @@ class AthenaDialect(DefaultDialect):
         than by the class requested.
         """
         return raw_connection.driver_connection._internal_cursor(Cursor)  # type: ignore[union-attr]
+
+    @override
+    def do_ping(self, dbapi_connection: DBAPIConnection) -> bool:
+        # When unload is enabled in the default cursor, SELECT 1 is wrapped in UNLOAD
+        # which Athena rejects with MISSING_COLUMN_NAME because the column is unnamed.
+        # Using the plain cursor here performs the SELECT without the UNLOAD.
+        with dbapi_connection._internal_cursor(Cursor) as cursor:  # type: ignore[attr-defined]
+            cursor.execute(self._dialect_specific_select_one)
+        return True
 
     def _column(self, name: str | None, type_: str, comment: str | None, partition: bool | None):
         return {

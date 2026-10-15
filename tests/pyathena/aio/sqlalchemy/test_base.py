@@ -60,6 +60,17 @@ class TestAthenaAioAdaptedCursor:
 class TestAsyncSQLAlchemyAthena:
     @pytest.mark.parametrize(
         "async_engine",
+        [{"driver": "aiopandas", "unload": True}],
+        indirect=True,
+    )
+    async def test_ping_with_unload(self, async_engine):
+        _, conn = async_engine
+        assert await conn.run_sync(
+            lambda sync_conn: sync_conn.dialect.do_ping(sync_conn.connection.dbapi_connection)
+        )
+
+    @pytest.mark.parametrize(
+        "async_engine",
         [
             {"driver": driver}
             for driver in ("aiorest", "aiopandas", "aioarrow", "aiopolars", "aios3fs")
