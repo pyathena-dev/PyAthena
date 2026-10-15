@@ -638,6 +638,28 @@ class TestPolarsCursor:
     @pytest.mark.parametrize(
         "polars_cursor",
         [
+            {"cursor_kwargs": {"unload": True}},
+        ],
+        indirect=["polars_cursor"],
+    )
+    def test_nested_type_description_unload(self, polars_cursor):
+        """UNLOAD results describe nested Parquet columns by their outer type."""
+        polars_cursor.execute(
+            """
+            SELECT
+              ARRAY[1, 2] AS a
+              ,CAST(ROW(ARRAY[1]) AS ROW(x ARRAY(INTEGER))) AS r
+              ,MAP(ARRAY['k'], ARRAY[1]) AS m
+            """
+        )
+        # Polars 1.x reads a Parquet map as a list of key-value structs.
+        map_type = "map" if hasattr(pl, "Map") else "array"
+        description = [d[:2] for d in polars_cursor.description]
+        assert description == [("a", "array"), ("r", "row"), ("m", map_type)]
+
+    @pytest.mark.parametrize(
+        "polars_cursor",
+        [
             {"cursor_kwargs": {"unload": False}},
             {"cursor_kwargs": {"unload": True}},
         ],
