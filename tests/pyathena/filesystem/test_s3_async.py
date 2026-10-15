@@ -647,13 +647,15 @@ class TestAioS3FileSystem:
             ("complete", ["start complete", "end complete"]),
         ],
     )
-    def test_copy_object_with_multipart_upload_loop_shutdown(self, stage, expected):
+    @pytest.mark.parametrize("cancelled", [False, True])
+    def test_copy_object_with_multipart_upload_loop_shutdown(self, stage, expected, cancelled):
         # GH-1186: when the shutdown of the event loop at the end of
-        # asyncio.run() cancels a copy, the cleanup still waits for the
-        # running requests and aborts the upload unless it completed. The
-        # shutdown also cancelled the tasks of the requests, so the cleanup
-        # left an upload created during the cancellation, aborted before
-        # the running parts ended, or aborted during the completion.
+        # asyncio.run() cancels a copy, or a cleanup that a cancellation of
+        # the copy has started, the cleanup still waits for the running
+        # requests and aborts the upload unless it completed. The shutdown
+        # also cancelled the tasks of the requests and of the cleanup, so the
+        # cleanup left an upload created during the cancellation, aborted
+        # before the running parts ended, or aborted during the completion.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
         sync_fs = fs._sync_fs
         events = []
@@ -663,10 +665,11 @@ class TestAioS3FileSystem:
         def request(name):
             with lock:
                 events.append(f"start {name}")
-            # Held until asyncio.run() has cancelled the copy.
+            # Held until asyncio.run() has cancelled the copy, after the
+            # cancellation of the test, if any.
             assert copy is not None
             deadline = time.monotonic() + 5
-            while not copy.cancelling():
+            while copy.cancelling() < (2 if cancelled else 1):
                 assert time.monotonic() < deadline
                 time.sleep(0.01)
             with lock:
@@ -716,8 +719,14 @@ class TestAioS3FileSystem:
             while len(events) < started:
                 assert time.monotonic() < deadline
                 await asyncio.sleep(0.01)
+            if cancelled:
+                copy.cancel()
+                # Lets the copy start its cleanup.
+                await asyncio.sleep(0.1)
 
         asyncio.run(main())
+        # The cleanup may end after asyncio.run() returns.
+        fs._thread_pool.shutdown(wait=True)
 
         assert events == expected
 
