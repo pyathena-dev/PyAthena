@@ -145,7 +145,8 @@ class AthenaAioResultSet(AthenaResultSet):
     async def _async_fetch(self) -> None:
         """Fetch the next page of rows, if any, into the buffer.
 
-        Nothing is fetched when no page remains, as after ``close()``.
+        Nothing is fetched when no page remains, as after ``close()``, and the page
+        is discarded when ``close()`` runs during its request.
 
         Raises:
             ProgrammingError: If the next page is requested and the query ID is
@@ -155,6 +156,8 @@ class AthenaAioResultSet(AthenaResultSet):
         if not self._next_token:
             return
         response = await self._async_get_query_results(self._arraysize, self._next_token)
+        if self.is_closed:
+            return
         rows, self._next_token = self._parse_result_rows(response)
         self._process_rows(rows)
 

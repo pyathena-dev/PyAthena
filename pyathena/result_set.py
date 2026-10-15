@@ -462,7 +462,8 @@ class AthenaResultSet(CursorIterator):
         """Fetch the next rows, if any, into the buffer.
 
         The default result set fetches the next page; it fetches nothing when no
-        page remains, as after ``close()``.
+        page remains, as after ``close()``, and discards the page when ``close()``
+        runs during its request.
 
         Raises:
             ProgrammingError: If the next page is requested and the query ID is
@@ -472,6 +473,8 @@ class AthenaResultSet(CursorIterator):
         if not self._next_token:
             return
         response = self._get_query_results(self._arraysize, self._next_token)
+        if self.is_closed:
+            return
         rows, self._next_token = self._parse_result_rows(response)
         self._process_rows(rows)
 
