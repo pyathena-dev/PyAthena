@@ -657,9 +657,9 @@ class AioS3FileSystem(AsyncFileSystem):
             # for the semaphore do not start any more.
             await asyncio.gather(
                 *[asyncio.wrap_future(c) for c in part_copies if not c.cancel()],
+                *tasks,
                 return_exceptions=True,
             )
-            await asyncio.gather(*tasks, return_exceptions=True)
             if completion is not None:
                 await asyncio.wait([completion])
                 if not completion.cancelled() and completion.exception() is None:
@@ -1530,30 +1530,47 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
                     # A failed part would otherwise keep its data until the
                     # commit while the rest of the data is uploaded.
                     raise_failure(done)
-                # Tracked before it is scheduled; see _initiate_upload().
-                part: Future[S3MultipartUploadPart] = Future()
-                self._parts.append(part)
-                waiter = asyncio.wrap_future(part)
-                # The commit reports a failure that no wait found; retrieved
-                # here so that asyncio does not log it as never retrieved.
-                waiter.add_done_callback(lambda w: w.cancelled() or w.exception())
-                self._uploads_in_flight.add(waiter)
-                self._pool.submit_to(
-                    part,
-                    writer.upload_part,
-                    part_number=part_number,
-                    body=data,
-                    **upload_kwargs,
-                )
-                # Not kept by this frame, which the traceback of the part's
-                # error keeps if a later wait of this call raises it.
-                del part, waiter
+                self._submit_upload(writer, part_number, data, upload_kwargs)
         except BaseException:
             await self._close_without_commit()
             raise
         if final:
             await self._commit()
         return not final
+
+    def _submit_upload(
+        self,
+        writer: S3MultipartWriter,
+        part_number: int,
+        data: bytes,
+        request_kwargs: dict[str, Any],
+    ) -> None:
+        """Submit the upload of a part and track it as in flight.
+
+        See :meth:`S3File._submit_upload`; the file waits for the part
+        through an asyncio future.
+
+        Args:
+            writer: The writer of the multipart upload.
+            part_number: The number of the part, from 1.
+            data: The data of the part.
+            request_kwargs: The UploadPart parameters of the file.
+        """
+        # Tracked before it is scheduled; see _initiate_upload().
+        part: Future[S3MultipartUploadPart] = Future()
+        self._parts.append(part)
+        waiter = asyncio.wrap_future(part)
+        # The commit reports a failure that no wait found; retrieved here so
+        # that asyncio does not log it as never retrieved.
+        waiter.add_done_callback(lambda w: w.cancelled() or w.exception())
+        self._uploads_in_flight.add(waiter)
+        self._pool.submit_to(
+            part,
+            writer.upload_part,
+            part_number=part_number,
+            body=data,
+            **request_kwargs,
+        )
 
     async def _commit(self) -> None:
         """Commit the written data in a thread of the file.

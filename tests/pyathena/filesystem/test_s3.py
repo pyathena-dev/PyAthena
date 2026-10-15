@@ -7244,25 +7244,32 @@ class TestS3File:
         fs.core.complete_multipart_upload.assert_not_called()
         assert f.multipart_upload is None
 
-    @pytest.mark.parametrize("stage", ["creation", "write", "commit"])
+    @pytest.mark.parametrize("stage", ["creation", "write", "copy", "commit"])
     def test_failed_request_freed_by_reference_counting(self, stage):
         # GH-1186: the file and its data are freed as soon as the error of a
         # failed request is no longer referenced, whether the creation of the
-        # upload, a write of several parts, or the commit raised it. The
-        # traceback of the error used to keep them in a reference cycle with
-        # the future of the request until the garbage collector ran.
-        fs = self._make_append_fs(b"")
+        # upload, a write of several parts, a write after a failed part copy
+        # of an append, or the commit raised it. The traceback of the error
+        # used to keep them in a reference cycle with the future of the
+        # request until the garbage collector ran.
+        fs = self._make_append_fs(b"a" * 6 if stage == "copy" else b"")
 
         def fail(*args, **kwargs):
             raise PermissionError("Access Denied")
 
         if stage == "creation":
             fs.core.create_multipart_upload.side_effect = fail
+        elif stage == "copy":
+            fs.core.upload_part_copy.side_effect = fail
         else:
             fs.core.upload_part.side_effect = fail
-        f = S3File(fs, "s3://bucket/key.txt", mode="wb", block_size=4, max_workers=1)
-        if stage == "commit":
+        mode = "ab" if stage == "copy" else "wb"
+        f = S3File(fs, "s3://bucket/key.txt", mode=mode, block_size=4, max_workers=1)
+        if stage in ("copy", "commit"):
             f.write(b"a" * 4)
+        if stage == "copy":
+            # The part copy has failed before the next write.
+            assert wait(f.multipart_upload_parts[:1], timeout=5).done
         file_ref = weakref.ref(f)
         buffer_ref = weakref.ref(f.buffer)
         # The write submits a part before it waits for the failed one.

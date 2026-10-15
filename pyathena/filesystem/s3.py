@@ -1850,11 +1850,9 @@ class S3FileSystem(AbstractFileSystem):
         request_kwargs = request_kwargs or {}
         try:
             done, _ = wait(futures, return_when=FIRST_EXCEPTION)
-            for future in done:
-                if not future.cancelled() and future.exception() is not None:
-                    # Raised without waiting for the parts before it, so that
-                    # the parts queued after it are cancelled.
-                    future.result()
+            # Raised without waiting for the parts before it, so that the
+            # parts queued after it are cancelled.
+            raise_failure(done)
             # The futures are in part-number order.
             parts = [future.result() for future in futures]
             return self.core.complete_multipart_upload(
@@ -3249,22 +3247,7 @@ class S3File(AbstractBufferedFile):
                     # A failed part would otherwise keep its data until
                     # commit() while the rest of the data is uploaded.
                     raise_failure(done)
-                # Tracked before it is scheduled, so that an interrupt while
-                # it is being scheduled still lets discard() cancel it or wait
-                # for it before the abort.
-                part: Future[S3MultipartUploadPart] = Future()
-                self.multipart_upload_parts.append(part)
-                self._uploads_in_flight.add(part)
-                self._executor.submit_to(
-                    part,
-                    writer.upload_part,
-                    part_number=part_number,
-                    body=data,
-                    **self._get_request_kwargs("upload_part"),
-                )
-                # Not kept by this frame, which the traceback of the part's
-                # error keeps if a later wait of this call raises it.
-                del part
+                self._submit_upload(writer, part_number, data)
         except BaseException:
             self._close_without_commit()
             raise
@@ -3272,6 +3255,31 @@ class S3File(AbstractBufferedFile):
         if self.autocommit and final:
             self.commit()
         return not final
+
+    def _submit_upload(self, writer: S3MultipartWriter, part_number: int, data: bytes) -> None:
+        """Submit the upload of a part and track it as in flight.
+
+        The part is tracked before it is scheduled, so that an interrupt while
+        it is being scheduled still lets :meth:`discard` cancel it or wait for
+        it before the abort. Its future is not left in the frame of
+        :meth:`_upload_chunk`, which the traceback of the part's error keeps
+        if a later wait of the same call raises it.
+
+        Args:
+            writer: The writer of the multipart upload.
+            part_number: The number of the part, from 1.
+            data: The data of the part.
+        """
+        part: Future[S3MultipartUploadPart] = Future()
+        self.multipart_upload_parts.append(part)
+        self._uploads_in_flight.add(part)
+        self._executor.submit_to(
+            part,
+            writer.upload_part,
+            part_number=part_number,
+            body=data,
+            **self._get_request_kwargs("upload_part"),
+        )
 
     def commit(self) -> None:
         """Complete the upload of the written data.

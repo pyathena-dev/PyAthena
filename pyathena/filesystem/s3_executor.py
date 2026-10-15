@@ -22,8 +22,7 @@ from concurrent import futures
 from concurrent.futures import Future
 from concurrent.futures.thread import ThreadPoolExecutor
 from multiprocessing import cpu_count
-from types import TracebackType
-from typing import Any, ClassVar, TypeVar, cast
+from typing import Any, ClassVar, TypeVar
 
 from pyathena.util import override
 
@@ -85,9 +84,10 @@ class S3Executor(metaclass=ABCMeta):
             except BaseException as e:
                 # The frames below this one hold the arguments, and so may
                 # those of the errors chained to it, such as the ClientError
-                # that S3Core.call() raises an OSError from.
-                traceback.clear_frames(cast(TracebackType, e.__traceback__).tb_next)
-                chained, seen = [e.__cause__, e.__context__], {id(e)}
+                # that S3Core.call() raises an OSError from. clear_frames()
+                # skips this frame, which is still executing.
+                chained: list[BaseException | None] = [e]
+                seen: set[int] = set()
                 while chained:
                     if (error := chained.pop()) is not None and id(error) not in seen:
                         seen.add(id(error))
@@ -139,10 +139,10 @@ class S3Executor(metaclass=ABCMeta):
 
 
 def raise_failure(done: set[Future[Any]] | set[asyncio.Future[Any]]) -> None:
-    """Raise the error of a failed future among finished ones, if any.
+    """Empty a set of finished futures and raise the error of a failed one, if any.
 
     Otherwise, the cancellation of a cancelled future is raised, if any. The
-    set is emptied first. The traceback of the error keeps the frames that it
+    set is emptied before the error is raised. The traceback of the error keeps the frames that it
     is raised through, so a frame that still referenced the future, which
     keeps the error, would form a reference cycle that only the garbage
     collector frees, with the local variables of every frame of the
