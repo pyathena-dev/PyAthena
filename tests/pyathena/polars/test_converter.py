@@ -20,6 +20,7 @@ class TestDefaultPolarsUnloadTypeConverter:
         assert converter.convert("varchar", "hello") == "hello"
 
 
+@pytest.mark.parametrize("lazy", [False, True], ids=["dataframe", "lazyframe"])
 @pytest.mark.parametrize(
     ("dtype", "microseconds"),
     [
@@ -28,11 +29,12 @@ class TestDefaultPolarsUnloadTypeConverter:
         (pl.Datetime("us"), [0, 123000, 123456, 123456, 123456]),
     ],
 )
-def test_to_datetimes(dtype, microseconds):
+def test_to_datetimes(dtype, microseconds, lazy):
     """Timestamp text with up to 12 fractional digits is truncated to the time unit.
 
     NULL can be null or an empty string, depending on the read options. A column that
-    the DataFrame does not have, such as one not selected, is skipped.
+    the frame does not have, such as one not selected, is skipped. A LazyFrame is
+    converted in its query plan.
     """
     df = pl.DataFrame(
         {
@@ -48,7 +50,10 @@ def test_to_datetimes(dtype, microseconds):
             ]
         }
     )
-    result = _to_datetimes(df, {"t": dtype, "missing": dtype})
+    result = _to_datetimes(df.lazy() if lazy else df, {"t": dtype, "missing": dtype})
+    if lazy:
+        assert isinstance(result, pl.LazyFrame)
+        result = result.collect()
     assert result.schema["t"] == dtype
     assert result["t"].to_list() == [
         *(datetime(2020, 1, 2, 3, 4, 5, us) for us in microseconds),

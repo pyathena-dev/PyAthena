@@ -566,6 +566,8 @@ class TestAthenaPolarsResultSet:
     def test_read_csv_truncates_timestamps(self, tmp_path, reader, kwargs, expected):
         """Timestamps are read as text and truncated to the time unit.
 
+        A whole read does so when parsing them fails; a chunked read always does.
+
         With ``with_column_names`` given to execute(), Polars renames the columns as it
         reads them, so they are not read as text, and the read fails. With ``schema``,
         the columns have the types it gives. ``scan_csv()`` does not take ``columns``.
