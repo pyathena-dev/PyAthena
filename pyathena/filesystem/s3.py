@@ -34,7 +34,7 @@ import pyathena
 from pyathena.connection import Connection
 from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch, S3DeleteResult
 from pyathena.filesystem.s3_errors import S3ClientError
-from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPoolExecutor
+from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPoolExecutor, raise_failure
 from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
     S3Metadata,
@@ -3236,19 +3236,17 @@ class S3File(AbstractBufferedFile):
                 if self._copies_in_flight:
                     copied = {copy for copy in self._copies_in_flight if copy.done()}
                     self._copies_in_flight -= copied
-                    for copy in copied:
-                        # Otherwise the rest of the data is uploaded after a
-                        # failed part copy.
-                        copy.result()
+                    # Otherwise the rest of the data is uploaded after a
+                    # failed part copy.
+                    raise_failure(copied)
                 if len(self._uploads_in_flight) >= self.max_workers:
                     # Otherwise the parts waiting for a worker pile up in memory.
                     done, self._uploads_in_flight = wait(
                         self._uploads_in_flight, return_when=FIRST_COMPLETED
                     )
-                    for upload in done:
-                        # A failed part would otherwise keep its data until
-                        # commit() while the rest of the data is uploaded.
-                        upload.result()
+                    # A failed part would otherwise keep its data until
+                    # commit() while the rest of the data is uploaded.
+                    raise_failure(done)
                 # Tracked before it is scheduled, so that an interrupt while
                 # it is being scheduled still lets discard() cancel it or wait
                 # for it before the abort.
@@ -3310,11 +3308,9 @@ class S3File(AbstractBufferedFile):
             upload_id = cast(str, self.multipart_upload.upload_id)
             try:
                 done, _ = wait(self.multipart_upload_parts, return_when=FIRST_EXCEPTION)
-                for future in done:
-                    if not future.cancelled() and future.exception() is not None:
-                        # Raised without waiting for the parts before it, so
-                        # that the parts queued after it are cancelled.
-                        future.result()
+                # Raised without waiting for the parts before it, so that the
+                # parts queued after it are cancelled.
+                raise_failure(done)
                 parts = [future.result() for future in self.multipart_upload_parts]
                 self._get_multipart_writer().complete(
                     parts, **self._get_request_kwargs("complete_multipart_upload")

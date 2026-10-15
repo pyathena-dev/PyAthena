@@ -14,6 +14,7 @@ import contextvars
 import os
 import sys
 import threading
+import traceback
 import weakref
 from abc import ABCMeta, abstractmethod
 from collections.abc import Callable
@@ -21,7 +22,8 @@ from concurrent import futures
 from concurrent.futures import Future
 from concurrent.futures.thread import ThreadPoolExecutor
 from multiprocessing import cpu_count
-from typing import Any, ClassVar, TypeVar
+from types import TracebackType
+from typing import Any, ClassVar, TypeVar, cast
 
 from pyathena.util import override
 
@@ -59,6 +61,12 @@ class S3Executor(metaclass=ABCMeta):
         event loop shuts down, the future is cancelled or gets the error that
         the executor reported.
 
+        The error of a failed callable keeps the frames that it was raised
+        from in its traceback, without their local variables, so that the
+        arguments, such as the body of a part, are freed when the callable
+        fails, and the future and its error are freed without the garbage
+        collector once they are no longer referenced.
+
         Args:
             future: A pending future that no executor has started.
             fn: The callable to run.
@@ -68,14 +76,24 @@ class S3Executor(metaclass=ABCMeta):
 
         def run() -> None:
             """Run the callable and resolve the future unless it was cancelled."""
+            nonlocal future, fn, args, kwargs
             if not future.set_running_or_notify_cancel():
                 return
             try:
                 result = fn(*args, **kwargs)
             except BaseException as e:
-                future.set_exception(e)
-            else:
-                future.set_result(result)
+                # The frames below this one hold the arguments.
+                traceback.clear_frames(cast(TracebackType, e.__traceback__).tb_next)
+                # The traceback also keeps this frame, which would keep the
+                # arguments and form a reference cycle with the future. Once
+                # run() has resolved the future, settle() does not use it.
+                resolved = future
+                del future, fn, args, kwargs
+                resolved.set_exception(e)
+                del resolved
+                return
+            # Deleted only on the failure path, which returns.
+            future.set_result(result)  # noqa: F821
 
         def settle(submitted: Future[None]) -> None:
             """Resolve the future if the executor dropped the callable before it ran.
@@ -106,6 +124,34 @@ class S3Executor(metaclass=ABCMeta):
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         self.shutdown(wait=True)
+
+
+def raise_failure(done: set[Future[Any]] | set[asyncio.Future[Any]]) -> None:
+    """Raise the error of a failed future among finished ones, if any.
+
+    Otherwise, the cancellation of a cancelled future is raised, if any. The
+    set is emptied first. The traceback of the error keeps the frames that it
+    is raised through, so a frame that still referenced the future, which
+    keeps the error, would form a reference cycle that only the garbage
+    collector frees, with the local variables of every frame of the
+    traceback, such as the data of a write.
+
+    Args:
+        done: Finished futures that the caller no longer needs.
+
+    Raises:
+        BaseException: The error of a failed future, or the cancellation
+            error of a cancelled one.
+    """
+    failed = next((f for f in done if not f.cancelled() and f.exception() is not None), None)
+    if failed is None:
+        failed = next((f for f in done if f.cancelled()), None)
+    done.clear()
+    try:
+        if failed is not None:
+            failed.result()
+    finally:
+        del failed
 
 
 class S3ThreadPoolExecutor(S3Executor):
@@ -245,7 +291,12 @@ class S3AioThreadPool(S3Executor):
         # Retrieved, so that asyncio does not log the failure of a call whose
         # waiting task was cancelled as never retrieved.
         future.add_done_callback(lambda f: f.cancelled() or f.exception())
-        return await asyncio.shield(future)
+        try:
+            return await asyncio.shield(future)
+        finally:
+            # The traceback of an error keeps this frame, which would form a
+            # reference cycle with the future of the error.
+            del future
 
     @override
     def shutdown(self, wait: bool = True) -> None:

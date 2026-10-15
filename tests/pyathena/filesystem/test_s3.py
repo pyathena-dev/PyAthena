@@ -7244,6 +7244,34 @@ class TestS3File:
         fs.core.complete_multipart_upload.assert_not_called()
         assert f.multipart_upload is None
 
+    @pytest.mark.parametrize("stage", ["write", "commit"])
+    def test_failed_part_freed_by_reference_counting(self, stage):
+        # GH-1186: the file and its data are freed as soon as the error of a
+        # failed part is no longer referenced, whether a write or the commit
+        # raised it. The traceback of the error used to keep them in a
+        # reference cycle with the future of the part until the garbage
+        # collector ran.
+        fs = self._make_append_fs(b"")
+
+        def upload_part(**kwargs):
+            raise PermissionError("Access Denied")
+
+        fs.core.upload_part.side_effect = upload_part
+        f = S3File(fs, "s3://bucket/key.txt", mode="wb", block_size=4, max_workers=1)
+        f.write(b"a" * 4)
+        file_ref = weakref.ref(f)
+        buffer_ref = weakref.ref(f.buffer)
+        fail = functools.partial(f.write, b"a" * 4) if stage == "write" else f.close
+        gc.disable()
+        try:
+            with pytest.raises(PermissionError, match="Access Denied"):
+                fail()
+            del f, fail
+            assert file_ref() is None
+            assert buffer_ref() is None
+        finally:
+            gc.enable()
+
     @pytest.mark.parametrize("max_workers", [1, 4])
     def test_append_failed_part_copy(self, max_workers):
         # GH-1178: a failed part copy of an append stops the write before it

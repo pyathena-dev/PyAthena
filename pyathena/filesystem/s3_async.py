@@ -33,6 +33,7 @@ from pyathena.filesystem.s3_executor import (
     S3AioThreadPool,
     S3Executor,
     S3ThreadPoolExecutor,
+    raise_failure,
 )
 from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
@@ -579,11 +580,13 @@ class AioS3FileSystem(AsyncFileSystem):
         See :meth:`S3FileSystem._copy_object_with_multipart_upload`. The part
         and annotation copies run in parallel as asyncio tasks, at most
         ``max_workers`` at once, in the threads of the filesystem, which bound
-        the requests of all its copies together. On a cancellation, the creation of the upload,
-        the running part copies and the completion are waited for, the
-        upload is aborted if it was created and has not completed, and the
-        cancellation is re-raised. A repeated cancellation returns without
-        stopping this cleanup.
+        the requests of all its copies together. On a cancellation, the
+        creation of the upload, the running part copies and the completion
+        are waited for, the upload is aborted if it was created and has not
+        completed, and the cancellation is re-raised. This also holds when
+        the shutdown of the event loop, such as at the end of
+        ``asyncio.run()``, cancels the tasks of the copy. A repeated
+        cancellation returns without stopping this cleanup.
 
         Args:
             source: Source S3 path, with the version ID to copy, if any.
@@ -612,6 +615,9 @@ class AioS3FileSystem(AsyncFileSystem):
 
         semaphore = asyncio.Semaphore(max_workers)
         failed = False
+        # The requests of the parts, which keep running when their tasks are
+        # cancelled, such as by the shutdown of the event loop.
+        part_copies: list[Future[S3MultipartUploadPart]] = []
 
         async def _upload_part(i: int, range_: tuple[int, int]) -> S3MultipartUploadPart | None:
             nonlocal failed
@@ -620,7 +626,7 @@ class AioS3FileSystem(AsyncFileSystem):
                     # The upload is being aborted; do not start more parts.
                     return None
                 try:
-                    return await self._thread_pool.run(
+                    part_copy = self._thread_pool.submit(
                         self.core.upload_part_copy,
                         upload=multipart_upload,
                         part_number=i + 1,
@@ -628,6 +634,9 @@ class AioS3FileSystem(AsyncFileSystem):
                         range_=range_,
                         **plan.part_params,
                     )
+                    part_copies.append(part_copy)
+                    copied = asyncio.wrap_future(part_copy)
+                    return await copied
                 except Exception:
                     # Set before the semaphore lets a waiting part start.
                     failed = True
@@ -642,8 +651,13 @@ class AioS3FileSystem(AsyncFileSystem):
                 # No upload was created.
                 return
             # A part that is still copying when the upload is aborted may be
-            # stored after the abort, so wait for the running parts first.
+            # stored after the abort, so wait for the running parts first,
+            # including those whose tasks were cancelled.
             await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(
+                *[asyncio.wrap_future(c) for c in part_copies if not c.cancel()],
+                return_exceptions=True,
+            )
             if completion is not None:
                 await asyncio.wait([completion])
                 if not completion.cancelled() and completion.exception() is None:
@@ -656,11 +670,12 @@ class AioS3FileSystem(AsyncFileSystem):
                 plan.abort_params,
             )
 
-        # A task, so that _abort() can wait for an upload that is created
-        # after a cancellation; scheduled right before the try, so that
-        # nothing can fail between the two.
-        creation = asyncio.ensure_future(
-            self._thread_pool.run(
+        # Not a task, which the shutdown of the event loop would cancel while
+        # its request keeps running, so that _abort() can wait for an upload
+        # that is created after a cancellation; scheduled right before the
+        # try, so that nothing can fail between the two.
+        creation = asyncio.wrap_future(
+            self._thread_pool.submit(
                 self.core.create_multipart_upload, plan.destination, **plan.create_params
             )
         )
@@ -678,8 +693,9 @@ class AioS3FileSystem(AsyncFileSystem):
                     raise error
             # The tasks are in part-number order.
             parts = [task.result() for task in tasks]
-            completion = asyncio.ensure_future(
-                self._thread_pool.run(
+            # Not a task either; see the creation.
+            completion = asyncio.wrap_future(
+                self._thread_pool.submit(
                     self.core.complete_multipart_upload,
                     multipart_upload,
                     cast(list[S3MultipartUploadPart], parts),
@@ -1501,19 +1517,17 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
                 if self._copies_in_flight:
                     copied = {copy for copy in self._copies_in_flight if copy.done()}
                     self._copies_in_flight -= copied
-                    for copy in copied:
-                        # Otherwise the rest of the data is uploaded after a
-                        # failed part copy, as S3File does.
-                        copy.result()
+                    # Otherwise the rest of the data is uploaded after a
+                    # failed part copy, as S3File does.
+                    raise_failure(copied)
                 if len(self._uploads_in_flight) >= self.max_workers:
                     # Otherwise the parts waiting for a thread pile up in memory.
                     done, self._uploads_in_flight = await asyncio.wait(
                         self._uploads_in_flight, return_when=asyncio.FIRST_COMPLETED
                     )
-                    for upload in done:
-                        # A failed part would otherwise keep its data until
-                        # the commit while the rest of the data is uploaded.
-                        upload.result()
+                    # A failed part would otherwise keep its data until the
+                    # commit while the rest of the data is uploaded.
+                    raise_failure(done)
                 # Tracked before it is scheduled; see _initiate_upload().
                 part: Future[S3MultipartUploadPart] = Future()
                 self._parts.append(part)
@@ -1578,9 +1592,7 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
                 # all started. A failed part is raised without waiting for
                 # the parts before it, as S3File does.
                 done, _ = wait(self._parts, return_when=FIRST_EXCEPTION)
-                for part in done:
-                    if not part.cancelled() and part.exception() is not None:
-                        part.result()
+                raise_failure(done)
                 parts = [part.result() for part in self._parts]
                 writer.complete(parts, **self._get_request_kwargs("complete_multipart_upload"))
             except BaseException:
@@ -1607,6 +1619,11 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             _logger.exception(
                 f"Failed to abort the multipart upload to s3://{self.bucket}/{self.key}."
             )
+        # Dropped as S3File.discard() drops them, so that the file does not
+        # keep the errors of failed parts, whose tracebacks may keep the file.
+        self._parts = []
+        self._uploads_in_flight = set()
+        self._copies_in_flight = set()
 
     async def _fetch_range(self, start: int, end: int) -> bytes:
         """Read a byte range of the object with parallel range requests.
