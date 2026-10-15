@@ -442,9 +442,9 @@ class AthenaResultSet(CursorIterator):
                 succeeded, or the result set is closed.
             OperationalError: If the request fails.
         """
-        request = self._build_get_query_results_request(max_results, next_token)
         if self.is_closed:
             raise ProgrammingError("AthenaResultSet is closed.")
+        request = self._build_get_query_results_request(max_results, next_token)
         try:
             response = retry_api_call(
                 self.connection.client.get_query_results,
@@ -473,10 +473,13 @@ class AthenaResultSet(CursorIterator):
         if not self._next_token:
             return
         response = self._get_query_results(self._arraysize, self._next_token)
-        if self.is_closed:
-            return
         rows, self._next_token = self._parse_result_rows(response)
         self._process_rows(rows)
+        # close() clears the connection before the rest, so checking after the
+        # assignments catches a close() during the request or this method.
+        if self.is_closed:
+            self._next_token = None
+            self._rows.clear()
 
     def _pre_fetch(self) -> None:
         """Fetch the first page of rows along with the result metadata.

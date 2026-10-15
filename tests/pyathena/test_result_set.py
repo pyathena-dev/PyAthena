@@ -13,7 +13,7 @@ import pytest
 from pyathena.aio.common import AioBaseCursor, WithAsyncFetch
 from pyathena.common import BaseCursor, CursorIterator
 from pyathena.converter import DefaultTypeConverter
-from pyathena.error import OperationalError
+from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet, WithFetch, WithResultSet
 from pyathena.util import RetryConfig, override
@@ -138,20 +138,25 @@ class TestAthenaResultSet:
         assert result_set.rownumber is None
 
     @pytest.mark.parametrize(
-        ("method", "args", "expected"),
-        [("fetchone", (), None), ("fetchmany", (), []), ("fetchall", (), [])],
+        ("method", "expected"), [("fetchone", None), ("fetchmany", []), ("fetchall", [])]
     )
-    def test_fetch_with_close_during_request(self, method, args, expected):
+    def test_fetch_with_close_during_request(self, method, expected):
         """A close() during a page request discards the page and fetches nothing more."""
         result_set = _fetching_result_set(("1", "2"), ("3", "4"), ("5",))
         assert result_set.fetchmany(2) == [(1,), (2,)]
         get_query_results = close_during_next_request(result_set)
-        assert getattr(result_set, method)(*args) == expected
+        assert getattr(result_set, method)() == expected
         assert result_set.fetchone() is None
         assert result_set.fetchmany() == []
         assert result_set.fetchall() == []
         assert result_set.rownumber is None
         assert get_query_results.call_count == 2
+
+    def test_get_query_results_after_close(self):
+        result_set = _fetching_result_set(("1", "2"), ("3",))
+        result_set.close()
+        with pytest.raises(ProgrammingError, match=r"AthenaResultSet is closed\."):
+            result_set._get_query_results(2, "token1")
 
     def test_fetchone_across_pages(self):
         result_set = _fetching_result_set(("1", "2"), ("3",))

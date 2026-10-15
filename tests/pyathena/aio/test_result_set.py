@@ -10,7 +10,7 @@ import pytest
 
 from pyathena.aio.result_set import AthenaAioDictResultSet, AthenaAioResultSet
 from pyathena.converter import DefaultTypeConverter
-from pyathena.error import OperationalError
+from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
 from tests.pyathena.util import close_during_next_request, get_query_results_responses
@@ -117,16 +117,21 @@ class TestAthenaAioResultSet:
         assert await result_set.fetchall() == []
         assert result_set.rownumber is None
 
+    async def test_get_query_results_after_close(self):
+        result_set = await _create_result_set(AthenaAioResultSet, [("1", "2"), ("3",)])
+        result_set.close()
+        with pytest.raises(ProgrammingError, match=r"AthenaAioResultSet is closed\."):
+            await result_set._async_get_query_results(2, "token1")
+
     @pytest.mark.parametrize(
-        ("method", "args", "expected"),
-        [("fetchone", (), None), ("fetchmany", (), []), ("fetchall", (), [])],
+        ("method", "expected"), [("fetchone", None), ("fetchmany", []), ("fetchall", [])]
     )
-    async def test_fetch_with_close_during_request(self, method, args, expected):
+    async def test_fetch_with_close_during_request(self, method, expected):
         """A close() during a page request discards the page and fetches nothing more."""
         result_set = await _create_result_set(AthenaAioResultSet, [("1", "2"), ("3", "4"), ("5",)])
         assert await result_set.fetchmany(2) == [(1,), (2,)]
         get_query_results = close_during_next_request(result_set)
-        assert await getattr(result_set, method)(*args) == expected
+        assert await getattr(result_set, method)() == expected
         assert await result_set.fetchone() is None
         assert await result_set.fetchmany() == []
         assert await result_set.fetchall() == []

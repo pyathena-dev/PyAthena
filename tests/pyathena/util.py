@@ -63,7 +63,7 @@ def close_during_next_request(result_set):
 
     Args:
         result_set: A result set whose ``GetQueryResults`` responses are stubbed with
-            the pages of :func:`get_query_results_responses`.
+            the pages of :func:`get_query_results_responses`, none of them an exception.
 
     Returns:
         The stubbed ``GetQueryResults`` mock.
