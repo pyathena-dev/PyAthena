@@ -10,6 +10,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
+from io import BytesIO
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import polars as pl
@@ -37,6 +38,7 @@ def _chunked_result_set() -> AthenaPolarsResultSet:
     result_set._cache_type = None
     result_set._kwargs = {}
     result_set._metadata = None
+    result_set._connection = MagicMock()
     return result_set
 
 
@@ -208,6 +210,82 @@ class TestAthenaPolarsResultSet:
             assert future.result(10) == [(0,), (1,), (2,), (3,)]
         assert inspect.getgeneratorstate(reader) == inspect.GEN_CLOSED
 
+    @pytest.mark.parametrize(
+        ("unload", "kwargs", "credentials"),
+        [(False, {}, (0, 1)), (True, {}, (1, 1)), (True, {"low_memory": True}, (1, 2))],
+        ids=["csv", "parquet-chunk-reader", "scan-parquet"],
+    )
+    def test_close_during_first_read(self, tmp_path, unload, kwargs, credentials):
+        """A close() as a fetch starts its first read leaves the fetch its chunk.
+
+        A fetch in another thread, such as one of AioPolarsCursor that keeps running
+        after its task is cancelled, can start its first read as close() lands. The
+        credentials of the Polars scans are frozen at the first read, so ``credentials``
+        counts them after the result set is created and after the read; the schema of
+        an UNLOAD result is read when it is created.
+        """
+        if unload:
+            pl.DataFrame({"a": [1, 2, 3]}).write_parquet(tmp_path / "0.parquet")
+            manifest = str(tmp_path / "0.parquet")
+            output_location = "s3://bucket/result.csv"
+        else:
+            (tmp_path / "result.csv").write_text('"a"\n"1"\n"2"\n"3"\n')
+            manifest = ""
+            output_location = str(tmp_path / "result.csv")
+        connection = MagicMock(region_name=None)
+        connection.session.get_credentials.return_value = None
+        connection.s3_client.get_object.side_effect = lambda **_: {
+            "Body": BytesIO(manifest.encode())
+        }
+        query_execution = MagicMock(
+            state=AthenaQueryExecution.STATE_SUCCEEDED,
+            output_location=output_location,
+            data_manifest_location="s3://bucket/manifest.csv",
+            query="UNLOAD (SELECT a FROM t) TO 's3://bucket/unload/' WITH (format = 'PARQUET')"
+            if unload
+            else "SELECT a FROM t",
+        )
+        metadata = (
+            {"Name": "a", "Type": "integer", "Precision": 10, "Scale": 0, "Nullable": "UNKNOWN"},
+        )
+        with (
+            patch.object(
+                AthenaPolarsResultSet,
+                "_pre_fetch",
+                autospec=True,
+                side_effect=lambda rs: setattr(rs, "_metadata", metadata),
+            ),
+            patch.object(AthenaPolarsResultSet, "_get_content_length", return_value=16),
+            patch("pyathena.polars.result_set.S3FileSystem", lambda **_: LocalFileSystem()),
+        ):
+            result_set = AthenaPolarsResultSet(
+                connection=connection,
+                converter=DefaultPolarsTypeConverter(),
+                query_execution=query_execution,
+                arraysize=3,
+                retry_config=RetryConfig(),
+                unload=unload,
+                chunksize=2,
+                **kwargs,
+            )
+        assert connection.session.get_credentials.call_count == credentials[0]
+        reading, release = threading.Event(), threading.Event()
+        reader = result_set._df_iter._reader
+
+        def blocked():
+            reading.set()
+            assert release.wait(10)
+            yield from reader
+
+        result_set._df_iter._reader = blocked()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(result_set.fetchall)
+            assert reading.wait(10)
+            result_set.close()
+            release.set()
+            assert future.result(10) == [(1,), (2,)]
+        assert connection.session.get_credentials.call_count == credentials[1]
+
     def test_fetchmany_size_above_maxsize(self):
         """A size above sys.maxsize returns the remaining rows."""
         result_set = _fetching_result_set([pl.DataFrame({"n": [1, 2]})], ["n"], arraysize=3)
@@ -250,12 +328,7 @@ class TestAthenaPolarsResultSet:
                 new_callable=PropertyMock,
                 return_value={"a": pl.Int64},
             ),
-            patch.object(
-                AthenaPolarsResultSet,
-                "_parquet_storage_options",
-                new_callable=PropertyMock,
-                return_value={},
-            ),
+            patch.object(AthenaPolarsResultSet, "_get_parquet_storage_options", return_value={}),
             patch.object(AthenaPolarsResultSet, "_is_csv_readable", return_value=True),
             pytest.raises(OperationalError, match="not-a-number"),
         ):
@@ -284,12 +357,7 @@ class TestAthenaPolarsResultSet:
         result_set._data_manifest = [str(tmp_path / "0.parquet"), str(tmp_path / "1.parquet")]
         chunks: list[pl.DataFrame] = []
         with (
-            patch.object(
-                AthenaPolarsResultSet,
-                "_parquet_storage_options",
-                new_callable=PropertyMock,
-                return_value={},
-            ),
+            patch.object(AthenaPolarsResultSet, "_get_parquet_storage_options", return_value={}),
             patch.object(
                 AthenaPolarsResultSet,
                 "_csv_storage_options",
@@ -340,12 +408,7 @@ class TestAthenaPolarsResultSet:
                 new_callable=PropertyMock,
                 return_value={},
             ),
-            patch.object(
-                AthenaPolarsResultSet,
-                "_parquet_storage_options",
-                new_callable=PropertyMock,
-                return_value={},
-            ),
+            patch.object(AthenaPolarsResultSet, "_get_parquet_storage_options", return_value={}),
             patch.object(AthenaPolarsResultSet, "_is_csv_readable", return_value=True),
         ):
             result = getattr(result_set, reader)()
@@ -377,12 +440,7 @@ class TestAthenaPolarsResultSet:
                 new_callable=PropertyMock,
                 return_value={},
             ),
-            patch.object(
-                AthenaPolarsResultSet,
-                "_parquet_storage_options",
-                new_callable=PropertyMock,
-                return_value={},
-            ),
+            patch.object(AthenaPolarsResultSet, "_get_parquet_storage_options", return_value={}),
             patch.object(AthenaPolarsResultSet, "_is_csv_readable", return_value=True),
         ):
             result = getattr(result_set, reader)()
@@ -421,8 +479,7 @@ class TestAthenaPolarsResultSet:
             ),
             patch.object(
                 AthenaPolarsResultSet,
-                "_parquet_storage_options",
-                new_callable=PropertyMock,
+                "_get_parquet_storage_options",
                 side_effect=AssertionError("replaced storage options were computed"),
             ),
             patch.object(AthenaPolarsResultSet, "_is_csv_readable", return_value=True),
