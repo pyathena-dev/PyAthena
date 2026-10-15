@@ -11,6 +11,7 @@ import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import FIRST_COMPLETED, FIRST_EXCEPTION, Future, as_completed, wait
 from copy import deepcopy
+from dataclasses import dataclass, field
 from datetime import datetime
 from io import BytesIO
 from multiprocessing import cpu_count
@@ -2721,6 +2722,178 @@ class S3FileSystem(AbstractFileSystem):
         return self._core.call(method, **kwargs)
 
 
+@dataclass
+class S3FileTarget:
+    """The object that a file reads or writes, resolved when it is opened.
+
+    In read mode, the object is looked up, and the reads are made conditional
+    on its ETag (``IfMatch``). In append mode, an existing object is looked
+    up; one smaller than ``S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE`` is also
+    read, so that the file rewrites it from its buffer, and a larger one is
+    copied by the file as the first parts of a multipart upload. In
+    exclusive-create mode, the object must not exist, and the upload is
+    committed with ``IfNoneMatch="*"``.
+
+    Attributes:
+        path: The path of the file. A version that is read is carried in the
+            path as a ``?versionId=`` suffix, so that a reopened file reads
+            the same version.
+        bucket: The bucket of the object.
+        key: The key of the object.
+        version_id: The version that is read, if any.
+        request_kwargs: The parameters of the S3 requests of the file, with
+            the conditions above and, in append mode, the metadata of the
+            existing object, which the rewritten object keeps.
+        details: The object that is read or appended, or an empty dictionary.
+        size: The size of the object that is read, if known.
+        appended: The existing object in append mode, if any.
+        append_data: The data of an appended object that the file rewrites
+            from its buffer, if any.
+    """
+
+    path: str
+    bucket: str
+    key: str
+    version_id: str | None
+    request_kwargs: dict[str, Any]
+    details: S3Object | dict[str, Any] = field(default_factory=dict)
+    size: int | None = None
+    appended: S3Object | None = None
+    append_data: bytes | None = None
+
+    @classmethod
+    def resolve(
+        cls,
+        fs: S3FileSystem,
+        path: str,
+        mode: str,
+        *,
+        block_size: int,
+        version_id: str | None = None,
+        size: int | None = None,
+        request_kwargs: Mapping[str, Any] | None = None,
+    ) -> S3FileTarget:
+        """Validate the arguments of a file and look up its object.
+
+        Sends the lookup requests of the mode, which block.
+
+        Args:
+            fs: The filesystem that the file belongs to.
+            path: S3 path (s3://bucket/key) of the file.
+            mode: The file mode: ``rb``, ``wb``, ``ab``, or ``xb``.
+            block_size: The block size of the file.
+            version_id: The version ID to read. Must match the version ID in
+                the path if both are given. A version cannot be given, in
+                either form, for writing or appending.
+            size: The size of the object to read, if known.
+            request_kwargs: The parameters of the S3 requests of the file. A
+                copy is kept.
+
+        Returns:
+            The resolved target.
+
+        Raises:
+            FileExistsError: If an object exists at the path in
+                exclusive-create mode.
+            FileNotFoundError: If no object exists at the path when reading,
+                including when the path is a prefix.
+            ValueError: If the path has no key, the version IDs do not match,
+                a version is given for writing, or the block size is not
+                between ``S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE`` and
+                ``S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE`` for writing.
+        """
+        # A new dictionary, so that the caller's is not modified.
+        kwargs: dict[str, Any] = dict(request_kwargs or {})
+        s3_path = S3Path.parse(path)
+        path_version_id = s3_path.version_id
+        if not s3_path.key:
+            raise ValueError("The path does not contain a key.")
+        if version_id and path_version_id:
+            if version_id != path_version_id:
+                raise ValueError(
+                    f"The version_id: {version_id} specified in the argument and "
+                    f"the version_id: {path_version_id} specified in the path do not match."
+                )
+        elif path_version_id:
+            version_id = path_version_id
+        if version_id and "r" not in mode:
+            raise ValueError("Cannot write to the file with the version specified.")
+        if version_id and not path_version_id:
+            # Carry the version in the path, as with the ?versionId= suffix,
+            # so that a reopened (e.g., unpickled) file reads the same version.
+            path = f"{path}?versionId={version_id}"
+        if "r" not in mode and not (
+            fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE
+            <= block_size
+            <= fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE
+        ):
+            # When writing, every full block is uploaded as a part of a
+            # multipart upload.
+            raise ValueError(
+                "Block size for writing must be between "
+                f"5 MiB ({fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE} bytes) and "
+                f"5 GiB ({fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE} bytes), inclusive: {block_size}."
+            )
+
+        details: S3Object | dict[str, Any] = {}
+        appended: S3Object | None = None
+        append_data: bytes | None = None
+        # The lookups need the parameters of the file on which their
+        # authorization depends, such as the customer-provided key.
+        lookup_kwargs = fs._get_lookup_kwargs(kwargs)
+        if "r" in mode:
+            # Looked up here; the base class initializer of a file would
+            # otherwise take the size from the latest version of the object.
+            info = fs.info(path, version_id=version_id, **lookup_kwargs)
+            if info.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
+                # A prefix has no object to read.
+                raise FileNotFoundError(path)
+            if fs.version_aware and not version_id:
+                # Pin the version observed at open time so that reads are
+                # consistent even if the object is overwritten. info() heads
+                # the object when the cached entry carries no version.
+                version_id = info.get("version_id")
+                if version_id:
+                    # Carried in the path as an explicit version is, so that
+                    # the methods of the file use it too.
+                    path = f"{path}?versionId={version_id}"
+            if etag := info.get("etag"):
+                kwargs.update({"IfMatch": etag})
+            details = info
+            if size is None:
+                size = info.get("size")
+        elif "a" in mode:
+            # The rewritten object keeps the metadata of the existing one,
+            # which a cached listing entry lacks, so look up the object.
+            with contextlib.suppress(FileNotFoundError):
+                appended = fs.info(path, refresh=True, **lookup_kwargs)
+            if appended is not None:
+                if appended.get("size", 0) < fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE:
+                    # Too small to be a part of a multipart upload: rewritten
+                    # from the buffer. Only the lookup parameters are sent, so
+                    # that the whole object is read.
+                    append_data = fs.cat_file(path, **lookup_kwargs)
+                kwargs.update(appended.to_api_repr())
+                details = appended
+        elif "x" in mode:
+            # Checked up front so that no data is uploaded for an existing
+            # object, and on commit with IfNoneMatch for one created since.
+            if fs.exists(path, **lookup_kwargs):
+                raise FileExistsError(path)
+            kwargs.update({"IfNoneMatch": "*"})
+        return cls(
+            path=path,
+            bucket=s3_path.bucket,
+            key=s3_path.key,
+            version_id=version_id,
+            request_kwargs=kwargs,
+            details=details,
+            size=size,
+            appended=appended,
+            append_data=append_data,
+        )
+
+
 class S3File(AbstractBufferedFile):
     """A buffered file object for reading and writing an S3 object.
 
@@ -2798,105 +2971,34 @@ class S3File(AbstractBufferedFile):
                 ``S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE`` for writing.
         """
         self.max_workers = max_workers
-        # A new dictionary, so that the caller's is not modified.
-        self.s3_additional_kwargs: dict[str, Any] = {**(s3_additional_kwargs or {}), **kwargs}
-
         # The arguments are validated, and the objects looked up, before the
         # base class initializer: a file that fails here is never opened, so
         # its garbage collection does not close (flush and commit) it.
-        s3_path = S3Path.parse(path)
-        path_version_id = s3_path.version_id
-        self.bucket = s3_path.bucket
-        if not s3_path.key:
-            raise ValueError("The path does not contain a key.")
-        self.key = s3_path.key
-        if version_id and path_version_id:
-            if version_id != path_version_id:
-                raise ValueError(
-                    f"The version_id: {version_id} specified in the argument and "
-                    f"the version_id: {path_version_id} specified in the path do not match."
-                )
-            self.version_id: str | None = version_id
-        elif path_version_id:
-            self.version_id = path_version_id
-        else:
-            self.version_id = version_id
-        if self.version_id and "r" not in mode:
-            raise ValueError("Cannot write to the file with the version specified.")
-        if self.version_id and not path_version_id:
-            # Carry the version in the path, as with the ?versionId= suffix,
-            # so that a reopened (e.g., unpickled) file reads the same version.
-            path = f"{path}?versionId={self.version_id}"
-        if "r" not in mode and not (
-            fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE
-            <= block_size
-            <= fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE
-        ):
-            # When writing, every full block is uploaded as a part of a
-            # multipart upload.
-            raise ValueError(
-                "Block size for writing must be between "
-                f"5 MiB ({fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE} bytes) and "
-                f"5 GiB ({fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE} bytes), inclusive: {block_size}."
-            )
-
-        self._details: S3Object | dict[str, Any] = {}
-        append_info: S3Object | None = None
-        append_data: bytes | None = None
-        # The lookups need the parameters of the file on which their
-        # authorization depends, such as the customer-provided key.
-        lookup_kwargs = fs._get_lookup_kwargs(self.s3_additional_kwargs)
-        if "r" in mode:
-            # Looked up before the base class initializer, which would
-            # otherwise take the size from the latest version of the object.
-            info = fs.info(path, version_id=self.version_id, **lookup_kwargs)
-            if info.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
-                # A prefix has no object to read.
-                raise FileNotFoundError(path)
-            if fs.version_aware and not self.version_id:
-                # Pin the version observed at open time so that reads are
-                # consistent even if the object is overwritten. info() heads
-                # the object when the cached entry carries no version.
-                self.version_id = info.get("version_id")
-                if self.version_id:
-                    # Carried in the path as an explicit version is, so that
-                    # the methods of the file use it too.
-                    path = f"{path}?versionId={self.version_id}"
-            if etag := info.get("etag"):
-                self.s3_additional_kwargs.update({"IfMatch": etag})
-            self._details = info
-            if size is None:
-                size = info.get("size")
-        elif "a" in mode:
-            # The rewritten object keeps the metadata of the existing one,
-            # which a cached listing entry lacks, so look up the object.
-            with contextlib.suppress(FileNotFoundError):
-                append_info = fs.info(path, refresh=True, **lookup_kwargs)
-            if (
-                append_info is not None
-                and append_info.get("size", 0) < fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE
-            ):
-                # Too small to be a part of a multipart upload: rewritten
-                # from the buffer. Only the lookup parameters are sent, so
-                # that the whole object is read.
-                append_data = fs.cat_file(path, **lookup_kwargs)
-        elif "x" in mode:
-            # Checked up front so that no data is uploaded for an existing
-            # object, and on commit with IfNoneMatch for one created since.
-            if fs.exists(path, **lookup_kwargs):
-                raise FileExistsError(path)
-            self.s3_additional_kwargs.update({"IfNoneMatch": "*"})
+        target = S3FileTarget.resolve(
+            fs,
+            path,
+            mode,
+            block_size=block_size,
+            version_id=version_id,
+            size=size,
+            request_kwargs={**(s3_additional_kwargs or {}), **kwargs},
+        )
+        self.bucket = target.bucket
+        self.key = target.key
+        self.version_id: str | None = target.version_id
+        self.s3_additional_kwargs: dict[str, Any] = target.request_kwargs
+        self._details: S3Object | dict[str, Any] = target.details
 
         self._executor: S3Executor = executor or S3ThreadPoolExecutor(max_workers=max_workers)
         super().__init__(
             fs=fs,
-            path=path,
+            path=target.path,
             mode=mode,
             block_size=block_size,
             autocommit=autocommit,
             cache_type=cache_type,
             cache_options=cache_options,
-            size=size,
+            size=target.size,
         )
 
         self.append_block = False
@@ -2907,15 +3009,13 @@ class S3File(AbstractBufferedFile):
         self._uploads_in_flight: set[Future[S3MultipartUploadPart]] = set()
         # The part copies of an append that may not have finished.
         self._copies_in_flight: set[Future[S3MultipartUploadPart]] = set()
-        if append_info is not None:
-            if append_data is not None:
-                self.write(append_data)
+        if target.appended is not None:
+            if target.append_data is not None:
+                self.write(target.append_data)
             else:
                 # Copied with UploadPartCopy as the leading part(s).
                 self.append_block = True
-            self.loc = append_info.get("size", 0)
-            self.s3_additional_kwargs.update(append_info.to_api_repr())
-            self._details = append_info
+            self.loc = target.appended.get("size", 0)
 
     def _get_request_kwargs(self, method: str) -> dict[str, Any]:
         """Select the parameters of the file that an S3 operation accepts.

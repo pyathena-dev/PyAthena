@@ -10,21 +10,30 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import mimetypes
 import os
+import warnings
+from concurrent.futures import FIRST_EXCEPTION, Future, wait
+from io import BytesIO
 from multiprocessing import cpu_count
 from typing import TYPE_CHECKING, Any, cast
 
-from fsspec.asyn import AsyncFileSystem, sync
+from fsspec.asyn import AbstractAsyncStreamedFile, AsyncFileSystem, sync
 from fsspec.callbacks import _DEFAULT_CALLBACK
 from fsspec.core import get_compression
 from fsspec.implementations.local import LocalFileSystem, make_path_posix
 from fsspec.utils import check_contained
 
-from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
+from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem, S3FileTarget
 from pyathena.filesystem.s3_core import S3Core
-from pyathena.filesystem.s3_executor import S3AioExecutor, S3Executor, S3ThreadPoolExecutor
+from pyathena.filesystem.s3_executor import (
+    S3AioExecutor,
+    S3AioThreadPool,
+    S3Executor,
+    S3ThreadPoolExecutor,
+)
 from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
     S3Metadata,
@@ -36,6 +45,7 @@ from pyathena.filesystem.s3_object import (
 )
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_path_pairing import S3PathPairing
+from pyathena.filesystem.s3_writer import S3MultipartWriter
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -50,19 +60,22 @@ _cleanup_tasks: set[asyncio.Future[None]] = set()
 class AioS3FileSystem(AsyncFileSystem):
     """An async filesystem interface for Amazon S3 using fsspec's AsyncFileSystem.
 
-    This class wraps ``S3FileSystem`` to provide native asyncio support. Instead of
-    using ``ThreadPoolExecutor`` for parallel operations, it uses ``asyncio.gather``
-    with ``asyncio.to_thread`` for natural integration with the asyncio event loop.
+    This class wraps ``S3FileSystem`` to provide native asyncio support. Its
+    coroutines run the blocking boto3 calls in an ``S3AioThreadPool`` with
+    ``max_workers`` threads that the filesystem owns, instead of the default
+    executor of the event loop, and run parallel requests with
+    ``asyncio.gather``.
 
     The implementation uses composition: an internal ``S3FileSystem`` instance handles
-    all boto3 calls, while this class delegates to it via ``asyncio.to_thread()``.
+    all boto3 calls, while this class delegates to it in the threads of its pool.
     This avoids diamond inheritance issues and keeps all boto3 logic in one place.
 
     File handles created by ``_open`` use ``S3AioExecutor`` so that parallel
     operations (range reads, multipart uploads) are dispatched through the event
-    loop with ``asyncio.to_thread`` instead of a ``ThreadPoolExecutor`` per file.
-    An instance created with ``asynchronous=True`` has no event loop of its own,
-    so its file handles use a ``ThreadPoolExecutor``.
+    loop to a pool of ``max_workers`` threads of each file. An instance created
+    with ``asynchronous=True`` has no event loop of its own, so its file handles
+    use a ``ThreadPoolExecutor``. :meth:`open_async` returns an
+    ``AioS3StreamedFile``, whose reads and writes are coroutines.
 
     Attributes:
         _sync_fs: The internal synchronous S3FileSystem instance.
@@ -105,7 +118,11 @@ class AioS3FileSystem(AsyncFileSystem):
             connection: Passed to the internal ``S3FileSystem``.
             default_block_size: Passed to the internal ``S3FileSystem``.
             default_cache_type: Passed to the internal ``S3FileSystem``.
-            max_workers: Passed to the internal ``S3FileSystem``.
+            max_workers: The number of threads that run the blocking calls of
+                the filesystem, and the default number of parallel requests
+                of its files and copies. If None, the default of
+                ``ThreadPoolExecutor``: ``min(32, CPUs + 4)``. Passed to the internal
+                ``S3FileSystem``.
             s3_additional_kwargs: Passed to the internal ``S3FileSystem``.
             allow_bucket_creation: Passed to the internal ``S3FileSystem``.
             allow_bucket_deletion: Passed to the internal ``S3FileSystem``.
@@ -122,6 +139,11 @@ class AioS3FileSystem(AsyncFileSystem):
             batch_size=batch_size,
             **kwargs,
         )
+        # The blocking calls of the coroutines run in threads of this pool,
+        # not in the default executor of the event loop. Created first, so
+        # that None takes its default for the files and copies too.
+        self._thread_pool = S3AioThreadPool(max_workers)
+        max_workers = self._thread_pool.max_workers
         self._sync_fs = S3FileSystem(
             connection=connection,
             default_block_size=default_block_size,
@@ -144,21 +166,23 @@ class AioS3FileSystem(AsyncFileSystem):
         return self._sync_fs.core
 
     async def _info(self, path: str, **kwargs) -> S3Object:
-        return await asyncio.to_thread(self._sync_fs.info, path, **kwargs)
+        return await self._thread_pool.run(self._sync_fs.info, path, **kwargs)
 
     async def _ls(self, path: str, detail: bool = False, **kwargs) -> list[S3Object] | list[str]:
-        return await asyncio.to_thread(self._sync_fs.ls, path, detail=detail, **kwargs)
+        return await self._thread_pool.run(self._sync_fs.ls, path, detail=detail, **kwargs)
 
     async def _cat_file(
         self, path: str, start: int | None = None, end: int | None = None, **kwargs
     ) -> bytes:
-        return await asyncio.to_thread(self._sync_fs.cat_file, path, start=start, end=end, **kwargs)
+        return await self._thread_pool.run(
+            self._sync_fs.cat_file, path, start=start, end=end, **kwargs
+        )
 
     async def _exists(self, path: str, **kwargs) -> bool:
-        return await asyncio.to_thread(self._sync_fs.exists, path, **kwargs)
+        return await self._thread_pool.run(self._sync_fs.exists, path, **kwargs)
 
     async def _rm_file(self, path: str, **kwargs) -> None:
-        await asyncio.to_thread(self._sync_fs.rm_file, path, **kwargs)
+        await self._thread_pool.run(self._sync_fs.rm_file, path, **kwargs)
 
     async def _pipe_file(
         self, path: str, value: bytes | bytearray | memoryview, mode: str = "overwrite", **kwargs
@@ -166,9 +190,9 @@ class AioS3FileSystem(AsyncFileSystem):
         if self._intrans:
             # The transaction belongs to this filesystem, not to the internal
             # S3FileSystem, so write through open() to defer the commit to it.
-            await asyncio.to_thread(self._pipe_file_in_transaction, path, value, mode, **kwargs)
+            await self._thread_pool.run(self._pipe_file_in_transaction, path, value, mode, **kwargs)
             return
-        await asyncio.to_thread(self._sync_fs.pipe_file, path, value, mode=mode, **kwargs)
+        await self._thread_pool.run(self._sync_fs.pipe_file, path, value, mode=mode, **kwargs)
 
     def _pipe_file_in_transaction(
         self, path: str, value: bytes | bytearray | memoryview, mode: str, **kwargs
@@ -211,11 +235,11 @@ class AioS3FileSystem(AsyncFileSystem):
     ) -> None:
         if self._intrans:
             # See _pipe_file.
-            await asyncio.to_thread(
+            await self._thread_pool.run(
                 self._put_file_in_transaction, lpath, rpath, callback, mode, **kwargs
             )
             return
-        await asyncio.to_thread(
+        await self._thread_pool.run(
             self._sync_fs.put_file, lpath, rpath, callback=callback, mode=mode, **kwargs
         )
 
@@ -274,13 +298,17 @@ class AioS3FileSystem(AsyncFileSystem):
         self.invalidate_cache(rpath)
 
     async def _get_file(self, rpath: str, lpath: str, callback=_DEFAULT_CALLBACK, **kwargs) -> None:
-        await asyncio.to_thread(self._sync_fs.get_file, rpath, lpath, callback=callback, **kwargs)
+        await self._thread_pool.run(
+            self._sync_fs.get_file, rpath, lpath, callback=callback, **kwargs
+        )
 
     async def _mkdir(self, path: str, create_parents: bool = True, **kwargs) -> None:
-        await asyncio.to_thread(self._sync_fs.mkdir, path, create_parents=create_parents, **kwargs)
+        await self._thread_pool.run(
+            self._sync_fs.mkdir, path, create_parents=create_parents, **kwargs
+        )
 
     async def _makedirs(self, path: str, exist_ok: bool = False) -> None:
-        await asyncio.to_thread(self._sync_fs.makedirs, path, exist_ok=exist_ok)
+        await self._thread_pool.run(self._sync_fs.makedirs, path, exist_ok=exist_ok)
 
     async def _rm(
         self,
@@ -293,7 +321,7 @@ class AioS3FileSystem(AsyncFileSystem):
         """Delete objects with DeleteObjects requests.
 
         See :meth:`S3FileSystem.rm`. The requests run in parallel with
-        ``asyncio.gather`` and ``asyncio.to_thread``.
+        ``asyncio.gather`` in the threads of the filesystem.
 
         Args:
             path: S3 path (s3://bucket/key) or list of paths to delete.
@@ -307,7 +335,7 @@ class AioS3FileSystem(AsyncFileSystem):
             ValueError: If a path is a bucket.
             OSError: If S3 could not delete some of the objects.
         """
-        paths = await asyncio.to_thread(
+        paths = await self._thread_pool.run(
             self._sync_fs._delete_paths, path, recursive=recursive, maxdepth=maxdepth
         )
         await self._delete_objects(paths, **kwargs)
@@ -328,7 +356,10 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         batches, params = self._sync_fs._delete_batches(paths, **kwargs)
         results = await asyncio.gather(
-            *[asyncio.to_thread(self._sync_fs._delete_batch, batch, **params) for batch in batches],
+            *[
+                self._thread_pool.run(self._sync_fs._delete_batch, batch, **params)
+                for batch in batches
+            ],
             return_exceptions=True,
         )
         self._sync_fs._raise_delete_errors(results)
@@ -356,7 +387,7 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         if path1 == path2:
             return
-        pairs = await asyncio.to_thread(
+        pairs = await self._thread_pool.run(
             self._sync_fs._move_pairs, path1, path2, recursive=recursive, maxdepth=maxdepth
         )
         # Every copy finishes before a failure is raised, as in fsspec's
@@ -418,7 +449,7 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         sources = [path1] if isinstance(path1, (str, os.PathLike)) else path1
         if isinstance(path2, str) and any(S3Path.has_version_id(p) for p in sources):
-            pairs = await asyncio.to_thread(
+            pairs = await self._thread_pool.run(
                 self._sync_fs._copy_pairs,
                 S3PathPairing(path1, path2, recursive=recursive, maxdepth=maxdepth),
             )
@@ -459,7 +490,7 @@ class AioS3FileSystem(AsyncFileSystem):
         sources = [rpath] if isinstance(rpath, (str, os.PathLike)) else rpath
         if isinstance(lpath, (str, os.PathLike)) and any(S3Path.has_version_id(p) for p in sources):
             root = make_path_posix(lpath)
-            pairs = await asyncio.to_thread(
+            pairs = await self._thread_pool.run(
                 self._sync_fs._copy_pairs,
                 S3PathPairing(rpath, root, recursive=recursive, maxdepth=maxdepth),
                 isdir=LocalFileSystem().isdir,
@@ -521,7 +552,7 @@ class AioS3FileSystem(AsyncFileSystem):
         size1 = info1.get("size", 0)
         try:
             if size1 <= self.core.MULTIPART_UPLOAD_MAX_PART_SIZE:
-                await asyncio.to_thread(self.core.copy_object, source, destination, **kwargs)
+                await self._thread_pool.run(self.core.copy_object, source, destination, **kwargs)
             else:
                 await self._copy_object_with_multipart_upload(
                     source,
@@ -546,8 +577,9 @@ class AioS3FileSystem(AsyncFileSystem):
         """Copy an object with a multipart upload of its byte ranges.
 
         See :meth:`S3FileSystem._copy_object_with_multipart_upload`. The part
-        and annotation copies run in parallel as asyncio tasks with
-        ``asyncio.to_thread``. On a cancellation, the creation of the upload,
+        and annotation copies run in parallel as asyncio tasks, at most
+        ``max_workers`` at once, in the threads of the filesystem, which bound
+        the requests of all its copies together. On a cancellation, the creation of the upload,
         the running part copies and the completion are waited for, the
         upload is aborted if it was created and has not completed, and the
         cancellation is re-raised. A repeated cancellation returns without
@@ -567,12 +599,14 @@ class AioS3FileSystem(AsyncFileSystem):
                 size.
         """
         max_workers = max_workers if max_workers else self._sync_fs.max_workers
-        plan = await asyncio.to_thread(
+        plan = await self._thread_pool.run(
             self.core.plan_multipart_copy, source, destination, block_size, **kwargs
         )
         if plan.fits_single_request:
             # See S3FileSystem._copy_object_with_multipart_upload.
-            await asyncio.to_thread(self.core.copy_object, plan.source, plan.destination, **kwargs)
+            await self._thread_pool.run(
+                self.core.copy_object, plan.source, plan.destination, **kwargs
+            )
             return
         multipart_upload: S3MultipartUpload
 
@@ -586,7 +620,7 @@ class AioS3FileSystem(AsyncFileSystem):
                     # The upload is being aborted; do not start more parts.
                     return None
                 try:
-                    return await asyncio.to_thread(
+                    return await self._thread_pool.run(
                         self.core.upload_part_copy,
                         upload=multipart_upload,
                         part_number=i + 1,
@@ -600,7 +634,7 @@ class AioS3FileSystem(AsyncFileSystem):
                     raise
 
         tasks: list[asyncio.Future[S3MultipartUploadPart | None]] = []
-        completion: asyncio.Task[S3CompleteMultipartUpload] | None = None
+        completion: asyncio.Future[S3CompleteMultipartUpload] | None = None
 
         async def _abort() -> None:
             await asyncio.wait([creation])
@@ -616,7 +650,7 @@ class AioS3FileSystem(AsyncFileSystem):
                     # The upload completed despite the cancellation, so
                     # there is nothing to abort.
                     return
-            await asyncio.to_thread(
+            await self._thread_pool.run(
                 self._sync_fs._abort_multipart_upload,
                 creation.result(),
                 plan.abort_params,
@@ -626,7 +660,7 @@ class AioS3FileSystem(AsyncFileSystem):
         # after a cancellation; scheduled right before the try, so that
         # nothing can fail between the two.
         creation = asyncio.ensure_future(
-            asyncio.to_thread(
+            self._thread_pool.run(
                 self.core.create_multipart_upload, plan.destination, **plan.create_params
             )
         )
@@ -645,7 +679,7 @@ class AioS3FileSystem(AsyncFileSystem):
             # The tasks are in part-number order.
             parts = [task.result() for task in tasks]
             completion = asyncio.ensure_future(
-                asyncio.to_thread(
+                self._thread_pool.run(
                     self.core.complete_multipart_upload,
                     multipart_upload,
                     cast(list[S3MultipartUploadPart], parts),
@@ -677,7 +711,7 @@ class AioS3FileSystem(AsyncFileSystem):
                     # S3FileSystem does.
                     return
                 try:
-                    await asyncio.to_thread(
+                    await self._thread_pool.run(
                         self.core.copy_object_annotation,
                         name,
                         plan.source,
@@ -705,7 +739,7 @@ class AioS3FileSystem(AsyncFileSystem):
         **kwargs,
     ) -> dict[str, S3Object] | list[str]:
         detail = kwargs.pop("detail", False)
-        files = await asyncio.to_thread(
+        files = await self._thread_pool.run(
             self._sync_fs._find, path, maxdepth=maxdepth, withdirs=withdirs, **kwargs
         )
         if detail:
@@ -807,8 +841,78 @@ class AioS3FileSystem(AsyncFileSystem):
             **kwargs,
         )
 
+    async def open_async(
+        self,
+        path: str,
+        mode: str = "rb",
+        block_size: int | None = None,
+        max_workers: int | None = None,
+        version_id: str | None = None,
+        s3_additional_kwargs: dict[str, Any] | None = None,
+        **kwargs,
+    ) -> AioS3StreamedFile:
+        """Open a file whose reads and writes are coroutines.
+
+        The lookups of the mode, as in ``open()``, run in the threads of the
+        filesystem. See :class:`AioS3StreamedFile` for how the file reads,
+        writes, and commits.
+
+        Args:
+            path: S3 path (s3://bucket/key) of the file.
+            mode: The file mode: ``rb``, ``wb``, ``ab``, or ``xb``.
+            block_size: The block size for reads and writes. Defaults to the
+                default block size of the filesystem.
+            max_workers: The number of threads of the file, which bounds its
+                parallel requests. Defaults to the ``max_workers`` of the
+                filesystem.
+            version_id: The version ID to read.
+            s3_additional_kwargs: Additional parameters for the S3 requests of
+                the file, which take precedence over those of the filesystem.
+            **kwargs: Additional parameters for the S3 requests of the file,
+                which take precedence over ``s3_additional_kwargs``.
+
+        Returns:
+            The opened file.
+
+        Raises:
+            ValueError: If the mode is not binary, compression is requested,
+                or the arguments are invalid, as in ``open()``.
+            NotImplementedError: If the mode is not supported, or the file is
+                opened for writing in a transaction or with
+                ``autocommit=False``, as the file commits when it is closed.
+            FileExistsError: If an object exists at the path in
+                exclusive-create mode.
+            FileNotFoundError: If no object exists at the path when reading.
+        """
+        if "b" not in mode or kwargs.pop("compression", None):
+            raise ValueError("open_async() supports only binary modes without compression.")
+        if not kwargs.pop("autocommit", True):
+            raise NotImplementedError("The file of open_async() commits when it is closed.")
+        if mode != "rb" and self._intrans:
+            raise NotImplementedError("open_async() cannot write in a transaction.")
+        path = self._strip_protocol(path)
+        if block_size is None:
+            block_size = self._sync_fs.default_block_size
+        if max_workers is None:
+            max_workers = self._sync_fs.max_workers
+        s3_additional_kwargs = {
+            **self._sync_fs.s3_additional_kwargs,
+            **(s3_additional_kwargs or {}),
+        }
+        return await self._thread_pool.run(
+            AioS3StreamedFile,
+            self,
+            path,
+            mode,
+            version_id=version_id,
+            max_workers=max_workers,
+            block_size=block_size,
+            s3_additional_kwargs=s3_additional_kwargs,
+            **kwargs,
+        )
+
     async def _rmdir(self, path: str) -> None:
-        await asyncio.to_thread(self._sync_fs.rmdir, path)
+        await self._thread_pool.run(self._sync_fs.rmdir, path)
 
     def rmdir(self, path: str) -> None:
         """Remove an S3 bucket, which must be empty.
@@ -1008,7 +1112,7 @@ class AioS3FileSystem(AsyncFileSystem):
         self._sync_fs.invalidate_cache(path)
 
     async def _touch(self, path: str, truncate: bool = True, **kwargs) -> dict[str, Any]:
-        return await asyncio.to_thread(self._sync_fs.touch, path, truncate=truncate, **kwargs)
+        return await self._thread_pool.run(self._sync_fs.touch, path, truncate=truncate, **kwargs)
 
     def touch(self, path: str, truncate: bool = True, **kwargs) -> dict[str, Any]:
         """Create an empty object with PutObject.
@@ -1034,8 +1138,498 @@ class AioS3File(S3File):
     ``isinstance`` checks and to document the async execution model.
     All parallel operations (range reads, multipart uploads) are dispatched
     through the ``S3Executor`` interface — the ``S3AioExecutor``
-    provided by ``AioS3FileSystem`` dispatches them through the event loop with
-    ``asyncio.to_thread`` instead of a ``ThreadPoolExecutor`` per file.
+    provided by ``AioS3FileSystem`` dispatches them through the event loop to
+    a pool of ``max_workers`` threads of the file.
     For an ``AioS3FileSystem`` created with ``asynchronous=True``, it is an
-    ``S3ThreadPoolExecutor``.
+    ``S3ThreadPoolExecutor``. For reads and writes that are coroutines, see
+    ``AioS3StreamedFile``.
     """
+
+
+class AioS3StreamedFile(AbstractAsyncStreamedFile):
+    """An S3 file whose reads and writes are coroutines.
+
+    Returned by :meth:`AioS3FileSystem.open_async`. The requests of the file
+    run in an ``S3AioThreadPool`` of ``max_workers`` threads of its own, and
+    the coroutines wait for them without blocking the event loop:
+
+    - A read splits the requested range into ranges of the block size, read
+      in parallel. Nothing is cached. As with ``S3File``, the reads are
+      conditional on the ETag of the object, and on its version when the
+      filesystem is version-aware.
+    - A write buffers the data, and uploads each full block as a part of a
+      multipart upload, with at most ``max_workers`` parts in flight. A write
+      that would submit another part waits for one of them to finish first,
+      and a part found failed by that wait, or a part copy of an append
+      found failed before a part is submitted, stops the write with its
+      error.
+      An append copies an existing object with ``UploadPartCopy``, or
+      rewrites one smaller than a part from the buffer, as ``S3File`` does.
+    - Closing the file commits the written data, as ``S3File.close()`` does:
+      with PutObject if no part was uploaded, otherwise by completing the
+      multipart upload, which is aborted if the completion fails.
+    - Leaving an ``async with`` block with an exception, a failed write, and
+      a cancelled write close the file without committing it: the requests
+      that have started are waited for and the multipart upload is aborted,
+      so that the existing object is left unchanged.
+
+    The commit and the abort run to their end in the threads of the file,
+    also if the task that waits for them is cancelled, including a commit
+    that still waits for a thread; once the commit has been submitted,
+    nothing else aborts the upload. A file opened for
+    writing must be closed with ``await close()`` or an ``async with`` block;
+    garbage collection cannot await it, so the data of a file that is
+    collected before it is closed or its commit has been submitted is never
+    committed; its multipart upload, if any, is aborted, with a
+    ``ResourceWarning``.
+    """
+
+    fs: AioS3FileSystem
+    buffer: BytesIO | None
+    closed: bool
+    forced: bool
+    offset: int | None
+
+    def __init__(
+        self,
+        fs: AioS3FileSystem,
+        path: str,
+        mode: str = "rb",
+        version_id: str | None = None,
+        max_workers: int = (cpu_count() or 1) * 5,
+        block_size: int = S3FileSystem.DEFAULT_BLOCK_SIZE,
+        size: int | None = None,
+        s3_additional_kwargs: dict[str, Any] | None = None,
+        **kwargs,
+    ) -> None:
+        """Initialize the file for the path and mode.
+
+        Sends the lookup requests of the mode (see :class:`S3FileTarget`),
+        which block; :meth:`AioS3FileSystem.open_async` runs this in a thread.
+
+        Args:
+            fs: The filesystem that the file belongs to.
+            path: S3 path (s3://bucket/key) of the file.
+            mode: The file mode: ``rb``, ``wb``, ``ab``, or ``xb``.
+            version_id: The version ID to read.
+            max_workers: The number of threads of the file, which bounds its
+                parallel requests.
+            block_size: The block size for reads and writes. Must be between
+                ``S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE`` and
+                ``S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE``, inclusive, unless
+                reading.
+            size: The size of the object to read, if known.
+            s3_additional_kwargs: Additional parameters for the S3 requests of
+                the file. Each request receives those that its operation
+                accepts.
+            **kwargs: Additional parameters for the S3 requests of the file,
+                which take precedence over ``s3_additional_kwargs``.
+
+        Raises:
+            FileExistsError: If an object exists at the path in
+                exclusive-create mode.
+            FileNotFoundError: If no object exists at the path when reading.
+            NotImplementedError: If the mode is not supported.
+            ValueError: If ``max_workers`` is not positive, or the arguments
+                are invalid as for ``S3FileTarget.resolve()``.
+        """
+        if mode not in {"rb", "wb", "ab", "xb"}:
+            raise NotImplementedError("File mode not supported")
+        # Created first, so that an invalid max_workers raises before the lookups.
+        self._pool = S3AioThreadPool(max_workers)
+        self.max_workers = self._pool.max_workers
+        target = S3FileTarget.resolve(
+            fs._sync_fs,
+            path,
+            mode,
+            block_size=block_size,
+            version_id=version_id,
+            size=size,
+            request_kwargs={**(s3_additional_kwargs or {}), **kwargs},
+        )
+        self.bucket = target.bucket
+        self.key = target.key
+        self.version_id = target.version_id
+        self.s3_additional_kwargs: dict[str, Any] = target.request_kwargs
+        self._details: S3Object | dict[str, Any] = target.details
+        super().__init__(
+            fs=fs,
+            path=target.path,
+            mode=mode,
+            block_size=block_size,
+            cache_type="none",
+            size=target.size,
+        )
+
+        self.append_block = False
+        # The size of the appended object, as looked up when opening.
+        self._append_size = 0
+        self._writer: S3MultipartWriter | None = None
+        if mode != "rb":
+            self._writer = S3MultipartWriter(
+                fs.core, S3Path(self.bucket, self.key), block_size=block_size
+            )
+        self._creation: Future[S3MultipartUpload] | None = None
+        # Set when the commit is submitted, after which it completes the
+        # upload, or aborts it if it fails, and nothing else aborts it.
+        self._committing = False
+        # The futures of the part uploads and copies, in part-number order.
+        self._parts: list[Future[S3MultipartUploadPart]] = []
+        # The parts uploaded from the buffer that may not have finished. The
+        # part copies of an append hold no data and are not counted.
+        self._uploads_in_flight: set[asyncio.Future[S3MultipartUploadPart]] = set()
+        # The part copies of an append that may not have finished.
+        self._copies_in_flight: set[Future[S3MultipartUploadPart]] = set()
+        if target.appended is not None:
+            if target.append_data is not None:
+                cast(BytesIO, self.buffer).write(target.append_data)
+            else:
+                # Copied with UploadPartCopy as the leading part(s).
+                self.append_block = True
+            self._append_size = self.loc = target.appended.get("size", 0)
+
+    def __del__(self) -> None:
+        # close() is a coroutine, which garbage collection cannot await, so
+        # an unclosed file whose commit was not submitted is not committed: its
+        # multipart upload, if any, is aborted, and its threads are released.
+        pool = getattr(self, "_pool", None)
+        if pool is None:
+            return
+        if (
+            not getattr(self, "closed", True)
+            and self.mode != "rb"
+            and not getattr(self, "_committing", False)
+        ):
+            warnings.warn(
+                f"s3://{self.bucket}/{self.key} was not closed, and the written data "
+                "was not committed.",
+                ResourceWarning,
+                stacklevel=2,
+            )
+            with contextlib.suppress(RuntimeError):
+                pool.submit(self._discard)
+        pool.shutdown(wait=False)
+
+    def __enter__(self) -> AioS3StreamedFile:
+        """Reject a synchronous ``with`` block, whose exit cannot close the file.
+
+        Raises:
+            TypeError: Always; use ``async with``.
+        """
+        raise TypeError("AioS3StreamedFile is asynchronous; use 'async with'.")
+
+    def _get_request_kwargs(self, method: str) -> dict[str, Any]:
+        """Select the parameters of the file that an S3 operation accepts.
+
+        Args:
+            method: The name of the client method, such as ``upload_part``.
+
+        Returns:
+            The parameters in ``s3_additional_kwargs`` that the operation
+            accepts.
+        """
+        return self.fs.core.operation_params(method, self.s3_additional_kwargs)
+
+    async def write(self, data: bytes) -> int:
+        """Write data to the buffer, uploading each full block as a part.
+
+        Args:
+            data: The bytes to write.
+
+        Returns:
+            The number of bytes written.
+
+        Raises:
+            ValueError: If the file is not open for writing, is closed, or
+                has been force-flushed.
+            BaseException: The error of a part that the write found failed
+                while it waited for a part in flight, or of a part copy of an
+                append found failed before a part is submitted.
+        """
+        if self.mode not in {"wb", "ab", "xb"}:
+            raise ValueError("File not in write mode")
+        if self.closed:
+            raise ValueError("I/O operation on closed file.")
+        if self.forced:
+            raise ValueError("This file has been force-flushed, can only close")
+        buffer = cast(BytesIO, self.buffer)
+        out = buffer.write(data)
+        self.loc += out
+        if buffer.tell() >= self.blocksize:
+            await self.flush()
+        return out
+
+    async def flush(self, force: bool = False) -> None:
+        """Upload the buffered data if it fills a block, or all of it if forced.
+
+        Args:
+            force: Whether this is the final flush of the file, after which
+                the written data is committed.
+
+        Raises:
+            ValueError: If the file is closed, or force-flushed twice.
+        """
+        if self.closed:
+            raise ValueError("Flush on closed file")
+        if force and self.forced:
+            raise ValueError("Force flush cannot be called more than once")
+        if force:
+            self.forced = True
+        if self.mode not in {"wb", "ab", "xb"}:
+            return
+        buffer = cast(BytesIO, self.buffer)
+        if not force and buffer.tell() < self.blocksize:
+            return
+        if self.offset is None:
+            self.offset = 0
+            await self._initiate_upload()
+        if await self._upload_chunk(final=force) is not False:
+            self.offset += cast(BytesIO, self.buffer).seek(0, 2)
+            self.buffer = BytesIO()
+
+    async def close(self) -> None:
+        """Close the file, committing the written data."""
+        if self.closed:
+            return
+        try:
+            if self.mode != "rb" and not self.forced:
+                await self.flush(force=True)
+        finally:
+            self.closed = True
+            # A commit that is still running keeps its thread.
+            self._pool.shutdown(wait=False)
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        if self.closed:
+            return
+        if exc_type is not None and self.mode != "rb":
+            await self._close_without_commit()
+        else:
+            await self.close()
+
+    async def _close_without_commit(self) -> None:
+        """Close the file without uploading the written data.
+
+        Drops the buffered data, and aborts the multipart upload, if any,
+        once its started requests have ended (see :meth:`_discard`).
+        """
+        if self.closed:
+            return
+        self.closed = True
+        if self._committing:
+            # A cancelled commit runs on; an abort would race its completion.
+            self._pool.shutdown(wait=False)
+            return
+        self.buffer = None
+        try:
+            await self._pool.run_shielded(self._discard)
+        finally:
+            self._pool.shutdown(wait=False)
+
+    async def _initiate_upload(self) -> None:
+        if not self.append_block and self.tell() < self.blocksize:
+            return
+        writer = cast(S3MultipartWriter, self._writer)
+        # Tracked before it is scheduled, so that an interrupt while it is
+        # being scheduled still lets the cleanup cancel it or wait for it.
+        self._creation = Future()
+        try:
+            self._pool.submit_to(
+                self._creation,
+                writer.initiate,
+                **self._get_request_kwargs("create_multipart_upload"),
+            )
+            await asyncio.wrap_future(self._creation)
+            if self.append_block:
+                size = self._append_size
+                whole_source = size <= self.fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE
+                source = S3Path(self.bucket, self.key)
+                copy_kwargs = self._get_request_kwargs("upload_part_copy")
+                for part_number, range_ in writer.iter_copy_parts(size):
+                    # Tracked before it is scheduled; see the creation.
+                    copy: Future[S3MultipartUploadPart] = Future()
+                    self._parts.append(copy)
+                    self._copies_in_flight.add(copy)
+                    self._pool.submit_to(
+                        copy,
+                        writer.upload_part_copy,
+                        part_number=part_number,
+                        source=source,
+                        range_=None if whole_source else range_,
+                        **copy_kwargs,
+                    )
+        except BaseException:
+            await self._close_without_commit()
+            raise
+
+    async def _upload_chunk(self, final: bool = False) -> bool:
+        """Upload the buffered data as parts of the multipart upload.
+
+        See :meth:`S3File._upload_chunk`; a write waits for a part in flight
+        without blocking the event loop.
+
+        Args:
+            final: Whether this is the last flush of the file, after which
+                the upload is committed.
+
+        Returns:
+            Whether the buffer is reset afterwards.
+
+        Raises:
+            BaseException: The error of an uploaded part that the write found
+                failed while it waited for a part in flight, or of a part copy
+                of an append found failed before a part is submitted.
+            RuntimeError: If no multipart upload is initialized.
+            ValueError: If the data needs more parts than a multipart upload
+                allows.
+        """
+        if not self.append_block and self.tell() < self.blocksize:
+            # Smaller than a block: uploaded with PutObject by the commit.
+            if final:
+                await self._commit()
+            return not final
+        writer = cast(S3MultipartWriter, self._writer)
+        if writer.upload is None:
+            raise RuntimeError("Multipart upload is not initialized.")
+        buffer = cast(BytesIO, self.buffer)
+        buffer.seek(0)
+        upload_kwargs = self._get_request_kwargs("upload_part")
+        try:
+            for part_number, data in writer.iter_parts(
+                buffer, first_part_number=len(self._parts) + 1
+            ):
+                if self._copies_in_flight:
+                    copied = {copy for copy in self._copies_in_flight if copy.done()}
+                    self._copies_in_flight -= copied
+                    for copy in copied:
+                        # Otherwise the rest of the data is uploaded after a
+                        # failed part copy, as S3File does.
+                        copy.result()
+                if len(self._uploads_in_flight) >= self.max_workers:
+                    # Otherwise the parts waiting for a thread pile up in memory.
+                    done, self._uploads_in_flight = await asyncio.wait(
+                        self._uploads_in_flight, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    for upload in done:
+                        # A failed part would otherwise keep its data until
+                        # the commit while the rest of the data is uploaded.
+                        upload.result()
+                # Tracked before it is scheduled; see _initiate_upload().
+                part: Future[S3MultipartUploadPart] = Future()
+                self._parts.append(part)
+                waiter = asyncio.wrap_future(part)
+                # The commit reports a failure that no wait found; retrieved
+                # here so that asyncio does not log it as never retrieved.
+                waiter.add_done_callback(lambda w: w.cancelled() or w.exception())
+                self._uploads_in_flight.add(waiter)
+                self._pool.submit_to(
+                    part,
+                    writer.upload_part,
+                    part_number=part_number,
+                    body=data,
+                    **upload_kwargs,
+                )
+        except BaseException:
+            await self._close_without_commit()
+            raise
+        if final:
+            await self._commit()
+        return not final
+
+    async def _commit(self) -> None:
+        """Commit the written data in a thread of the file.
+
+        See :meth:`_complete_upload`.
+        """
+        if self.buffer is None:
+            return
+        self._committing = True
+        await self._pool.run_shielded(self._complete_upload)
+
+    def _complete_upload(self) -> None:
+        """Upload or complete the written data; blocks, and runs in a thread.
+
+        Creates an empty object if nothing was written, uploads the buffered
+        data with PutObject if no part was uploaded, and otherwise completes
+        the multipart upload once its parts have ended, aborting it if a
+        part or the completion fails. A failed part is found as soon as it
+        fails, without waiting for the parts before it, and the parts that
+        have not started are cancelled; the running ones are waited for
+        before the abort. Invalidates the cache of the path afterwards.
+
+        Raises:
+            FileExistsError: If an object was created at the path after the
+                file was opened in exclusive-create mode.
+        """
+        buffer = cast(BytesIO, self.buffer)
+        writer = cast(S3MultipartWriter, self._writer)
+        if self.tell() == 0:
+            self.fs._sync_fs.touch(self.path, **self._get_request_kwargs("put_object"))
+        elif not self._parts:
+            buffer.seek(0)
+            self.fs.core.put_object(
+                S3Path(self.bucket, self.key),
+                buffer.read(),
+                **self._get_request_kwargs("put_object"),
+            )
+        else:
+            try:
+                # The parts were submitted before this call, so they have
+                # all started. A failed part is raised without waiting for
+                # the parts before it, as S3File does.
+                done, _ = wait(self._parts, return_when=FIRST_EXCEPTION)
+                for part in done:
+                    if not part.cancelled() and part.exception() is not None:
+                        part.result()
+                parts = [part.result() for part in self._parts]
+                writer.complete(parts, **self._get_request_kwargs("complete_multipart_upload"))
+            except BaseException:
+                self._discard()
+                raise
+        self.fs.invalidate_cache(self.path)
+
+    def _discard(self) -> None:
+        """Abort the multipart upload, if any; blocks, and runs in a thread.
+
+        The requests that have not started are cancelled, and the running
+        ones are waited for first, since a part that is still uploading when
+        the upload is aborted may be stored after the abort. A failure is
+        logged instead of raised, so that it does not mask the error that the
+        caller is handling, also when no task waits for the abort any more.
+        """
+        try:
+            if self._creation is not None and not self._creation.cancel():
+                wait([self._creation])
+            if self._writer is not None and self._writer.upload is not None:
+                wait([part for part in self._parts if not part.cancel()])
+                self._writer.abort(**self._get_request_kwargs("abort_multipart_upload"))
+        except Exception:
+            _logger.exception(
+                f"Failed to abort the multipart upload to s3://{self.bucket}/{self.key}."
+            )
+
+    async def _fetch_range(self, start: int, end: int) -> bytes:
+        """Read a byte range of the object with parallel range requests.
+
+        The range is clamped to the size of the object, and split into ranges
+        of the block size, read in the threads of the file.
+
+        Args:
+            start: The offset of the first byte to read.
+            end: The offset to stop reading at (exclusive).
+
+        Returns:
+            The bytes read, empty if the clamped range is empty.
+        """
+        end = min(end, self.size)
+        if start >= end:
+            return b""
+        ranges = S3File._get_ranges(
+            start, end, max_workers=self.max_workers, worker_block_size=self.blocksize
+        )
+        path = S3Path(self.bucket, self.key, self.version_id)
+        request_kwargs = self._get_request_kwargs("get_object")
+        results = await asyncio.gather(
+            *[self._pool.run(self.fs.core.get_object, path, r, **request_kwargs) for r in ranges]
+        )
+        return b"".join(results)

@@ -12,8 +12,10 @@ from __future__ import annotations
 import csv
 import importlib.util
 import logging
+import threading
 from collections import abc
 from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from io import BytesIO, StringIO
 from itertools import islice, repeat
 from multiprocessing import cpu_count
@@ -96,6 +98,31 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
             self._reader = reader
         self._converters = converters
         self._column_names = column_names
+        self._lock = threading.Lock()
+        self._readers = 0
+        self._close_requested = False
+
+    @contextmanager
+    def _read(self) -> Iterator[Iterator[pl.DataFrame]]:
+        """Track a chunk read and run a close that was requested during it.
+
+        Yields:
+            The reader to read the chunk from.
+        """
+        with self._lock:
+            self._readers += 1
+            reader = iter(()) if self._close_requested else self._reader
+        try:
+            yield reader
+        finally:
+            with self._lock:
+                self._readers -= 1
+                close = self._close_requested and not self._readers
+            if close:
+                try:
+                    self.close()
+                except Exception:
+                    _logger.exception("Failed to close the chunk reader after a read.")
 
     @override
     def __next__(self) -> pl.DataFrame:
@@ -108,7 +135,8 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
             StopIteration: When no more chunks are available.
         """
         try:
-            return next(self._reader)
+            with self._read() as reader:
+                return next(reader)
         except StopIteration:
             self.close()
             raise
@@ -127,9 +155,18 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         self.close()
 
     def close(self) -> None:
-        """Close the iterator and release resources."""
-        reader = self._reader
-        self._reader = iter(())
+        """Close the iterator and release resources.
+
+        If another thread is reading a chunk, the read returns that chunk, and the
+        reader is closed when it completes. Reads that start after the
+        close get no chunks, and an error from the deferred close is logged.
+        """
+        with self._lock:
+            if self._readers:
+                self._close_requested = True
+                return
+            self._close_requested = False
+            reader, self._reader = self._reader, iter(())
         if isinstance(reader, GeneratorType):
             reader.close()
 

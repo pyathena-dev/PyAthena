@@ -5,6 +5,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+import inspect
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, time, timedelta
@@ -161,7 +162,6 @@ class TestAthenaPolarsResultSet:
         requested = threading.Event()
         closed = threading.Event()
 
-        # Not a generator, which close() cannot close while it runs (#1172).
         class Chunks:
             def __init__(self):
                 self._chunks = iter([pl.DataFrame({"n": [0, 1]}), pl.DataFrame({"n": [2, 3]})])
@@ -186,6 +186,27 @@ class TestAthenaPolarsResultSet:
             # The fetch still returns the chunk that it was reading.
             assert future.result(10) == [(0,), (1,), (2,), (3,)]
         assert result_set.rownumber is None
+
+    def test_close_during_fetchall_generator(self):
+        """A close() during a fetch from a generator, such as a chunked UNLOAD, does not raise."""
+        reading, release = threading.Event(), threading.Event()
+
+        def chunks():
+            yield pl.DataFrame({"n": [0, 1]})
+            reading.set()
+            release.wait(10)
+            yield pl.DataFrame({"n": [2, 3]})
+            yield pl.DataFrame({"n": [4]})
+
+        reader = chunks()
+        result_set = _fetching_result_set(reader, ["n"], arraysize=3)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(result_set.fetchall)
+            assert reading.wait(10)
+            result_set.close()
+            release.set()
+            assert future.result(10) == [(0,), (1,), (2,), (3,)]
+        assert inspect.getgeneratorstate(reader) == inspect.GEN_CLOSED
 
     def test_fetchmany_size_above_maxsize(self):
         """A size above sys.maxsize returns the remaining rows."""
@@ -628,4 +649,36 @@ class TestPolarsDataFrameIterator:
         )
         df_iter = PolarsDataFrameIterator(reader, {}, ["a"])
         df_iter.close()
+        assert list(df_iter) == []
+
+    @pytest.mark.parametrize("close_error", [None, RuntimeError("close failed")])
+    def test_close_during_read(self, caplog, close_error):
+        """A close during a read in another thread is deferred until the read completes."""
+        reading, release = threading.Event(), threading.Event()
+
+        def chunks():
+            try:
+                yield pl.DataFrame({"a": [1]})
+                reading.set()
+                release.wait(10)
+                yield pl.DataFrame({"a": [2]})
+                yield pl.DataFrame({"a": [3]})
+            finally:
+                if close_error:
+                    raise close_error
+
+        reader = chunks()
+        df_iter = PolarsDataFrameIterator(reader, {}, ["a"])
+        next(df_iter)
+        with ThreadPoolExecutor(1) as executor:
+            future = executor.submit(next, df_iter)
+            assert reading.wait(10)
+            df_iter.close()
+            with pytest.raises(StopIteration):
+                next(df_iter)
+            assert inspect.getgeneratorstate(reader) == inspect.GEN_RUNNING
+            release.set()
+            assert future.result(10)["a"].to_list() == [2]
+        assert inspect.getgeneratorstate(reader) == inspect.GEN_CLOSED
+        assert ("Failed to close the chunk reader" in caplog.text) == bool(close_error)
         assert list(df_iter) == []

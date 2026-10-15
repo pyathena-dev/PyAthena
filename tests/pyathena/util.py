@@ -6,6 +6,7 @@
 # SPDX-License-Identifier: MIT
 
 import io
+import threading
 import time
 from concurrent.futures import Future, wait
 from datetime import UTC, datetime, timedelta, timezone
@@ -55,6 +56,34 @@ def get_query_results_responses(*pages):
             response["NextToken"] = f"token{i + 1}"
         responses.append(response)
     return responses
+
+
+def overlapping_calls(calls, timeout=5):
+    """Return a callable that records the peak number of its overlapping calls.
+
+    Each call waits until ``calls`` calls overlap, or until the timeout.
+
+    Args:
+        calls: The number of calls to wait for.
+        timeout: The longest wait of a call, in seconds.
+
+    Returns:
+        The callable, which accepts and ignores any arguments, and a
+        dictionary whose ``peak`` item is the peak number.
+    """
+    condition = threading.Condition()
+    state = {"active": 0, "peak": 0}
+
+    def call(*args, **kwargs):
+        with condition:
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+            condition.notify_all()
+            condition.wait_for(lambda: state["active"] >= calls, timeout=timeout)
+        with condition:
+            state["active"] -= 1
+
+    return call, state
 
 
 def read_query(name, **kwargs):
