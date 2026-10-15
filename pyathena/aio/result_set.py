@@ -148,8 +148,8 @@ class AthenaAioResultSet(AthenaResultSet):
         Nothing is fetched when no page remains, as after ``close()``.
 
         Raises:
-            ProgrammingError: If the query ID is missing, the query has not
-                succeeded, or the result set is closed.
+            ProgrammingError: If the next page is requested and the query ID is
+                missing, the query has not succeeded, or the result set is closed.
             OperationalError: If the request fails.
         """
         if not self._next_token:
