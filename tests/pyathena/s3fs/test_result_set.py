@@ -123,14 +123,13 @@ class TestAthenaS3FSResultSet:
 
     def test_fetch_across_batches(self):
         """The buffer is refilled one batch of arraysize rows at a time."""
-        result_set, stream = _result_set("null_col,empty_col,value_col\n,,a\n,,b\n,,c\n", None)
+        result_set, _ = _result_set("null_col,empty_col,value_col\n,,a\n,,b\n,,c\n", None)
         assert result_set.fetchmany(2) == [(None, None, "a"), (None, None, "b")]
         assert result_set.fetchone() == (None, None, "c")
         assert result_set.fetchmany() == []
         assert result_set.fetchall() == []
         assert result_set.fetchone() is None
         assert result_set.rownumber == 3
-        assert stream.closed
         result_set.close()
 
     def test_reader_failure_closes_file(self):

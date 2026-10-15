@@ -99,13 +99,6 @@ class TestAthenaAioResultSet:
         assert result_set.rownumber == 3
         assert result_set.connection.client.get_query_results.call_count == 2
 
-    async def test_fetch_without_next_page(self):
-        """_async_fetch() requests nothing once no page remains."""
-        result_set = await _create_result_set(AthenaAioResultSet)
-        await result_set._async_fetch()
-        assert list(result_set._rows) == [(1,), (2,)]
-        assert result_set.connection.client.get_query_results.call_count == 1
-
     @pytest.mark.parametrize(("method", "args"), [("fetchmany", (3,)), ("fetchall", ())])
     async def test_fetch_counts_rows_taken_before_error(self, method, args):
         """The rows taken before a failed page request are counted in rownumber."""

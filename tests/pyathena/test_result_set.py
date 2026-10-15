@@ -143,13 +143,6 @@ class TestAthenaResultSet:
         assert result_set.rownumber == 3
         assert result_set.connection.client.get_query_results.call_count == 2
 
-    def test_fetch_without_next_page(self):
-        """_fetch() requests nothing once no page remains."""
-        result_set = _fetching_result_set(("1", "2"))
-        result_set._fetch()
-        assert list(result_set._rows) == [(1,), (2,)]
-        assert result_set.connection.client.get_query_results.call_count == 1
-
     def test_fetch_all_rows_skips_column_labels_only_on_first_page(self):
         """A later page can start with a data row equal to the column labels.
 

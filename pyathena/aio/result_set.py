@@ -145,11 +145,11 @@ class AthenaAioResultSet(AthenaResultSet):
     async def _async_fetch(self) -> None:
         """Fetch the next page of rows, if any, into the buffer.
 
-        Nothing is fetched when no page remains or the result set is closed.
+        Nothing is fetched when no page remains, as after ``close()``.
 
         Raises:
             ProgrammingError: If the query ID is missing, the query has not
-                succeeded, or another thread closes the result set.
+                succeeded, or the result set is closed.
             OperationalError: If the request fails.
         """
         if not self._next_token:
