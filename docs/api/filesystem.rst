@@ -22,6 +22,9 @@ S3 FileSystem
 .. autoclass:: pyathena.filesystem.s3.S3File
    :members:
 
+.. autoclass:: pyathena.filesystem.s3.S3FileTarget
+   :members:
+
 Async S3 FileSystem
 -------------------
 
@@ -29,6 +32,9 @@ Async S3 FileSystem
    :members:
 
 .. autoclass:: pyathena.filesystem.s3_async.AioS3File
+   :members:
+
+.. autoclass:: pyathena.filesystem.s3_async.AioS3StreamedFile
    :members:
 
 Read-ahead Stream
@@ -47,6 +53,9 @@ S3 Executor
    :members:
 
 .. autoclass:: pyathena.filesystem.s3_executor.S3AioExecutor
+   :members:
+
+.. autoclass:: pyathena.filesystem.s3_executor.S3AioThreadPool
    :members:
 
 S3 Paths

@@ -218,9 +218,10 @@ The `[filesystem]` section of `config.toml` sets the swept values, 8 and 40 work
 The suite's scales are the object sizes in bytes in `[filesystem] sizes`, not the row counts in `[scales]`: 64 MiB (small), 256 MiB (medium), 1 GiB (large), and 6 GiB (xlarge) by default.
 
 The `sync` API calls the filesystem on the trial's thread, and a file's parallel requests run in an `S3ThreadPoolExecutor`.
-The `aio` API runs a read or write in `asyncio.to_thread()`, as `AioS3FSCursor` reads result files, and a file's parallel requests run through `S3AioExecutor` in `asyncio.to_thread()` on the filesystem's event loop, fsspec's IO thread.
-Its copy is a coroutine awaited on the trial's event loop, whose part copies run in `asyncio.to_thread()`.
-Both event loops keep Python's default executor, whose `min(32, os.cpu_count() + 4)` threads bound the parallel requests of the `aio` API.
+The `aio` API runs a read or write in `asyncio.to_thread()`, as `AioS3FSCursor` reads result files, and a file's parallel requests run through `S3AioExecutor`, dispatched on the filesystem's event loop, fsspec's IO thread, to a pool of `max_workers` threads of the file.
+Its copy is a coroutine awaited on the trial's event loop, whose part copies run in the filesystem's pool of `max_workers` threads.
+Both event loops keep Python's default executor, which runs only the trial's `asyncio.to_thread()` call.
+Before #1159, the parallel requests of the `aio` API ran in the default executors, whose `min(32, os.cpu_count() + 4)` threads bound them.
 
 The source objects, of zero bytes, are uploaded with boto3 below the run's scratch prefix and recorded under `objects` in the manifest.
 `prepare --filesystem-scale` uploads them with the manifest, so that every fleet host reads the same objects.
