@@ -651,13 +651,15 @@ class AioS3FileSystem(AsyncFileSystem):
                 # No upload was created.
                 return
             # A part that is still copying when the upload is aborted may be
-            # stored after the abort, so wait for the running parts first,
-            # including those whose tasks were cancelled.
-            await asyncio.gather(*tasks, return_exceptions=True)
+            # stored after the abort, so the part copies that have not started
+            # are cancelled, and the running ones are waited for first,
+            # including those whose tasks were cancelled. The parts that wait
+            # for the semaphore do not start any more.
             await asyncio.gather(
                 *[asyncio.wrap_future(c) for c in part_copies if not c.cancel()],
                 return_exceptions=True,
             )
+            await asyncio.gather(*tasks, return_exceptions=True)
             if completion is not None:
                 await asyncio.wait([completion])
                 if not completion.cancelled() and completion.exception() is None:
@@ -1543,6 +1545,9 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
                     body=data,
                     **upload_kwargs,
                 )
+                # Not kept by this frame, which the traceback of the part's
+                # error keeps if a later wait of this call raises it.
+                del part, waiter
         except BaseException:
             await self._close_without_commit()
             raise
@@ -1619,8 +1624,10 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             _logger.exception(
                 f"Failed to abort the multipart upload to s3://{self.bucket}/{self.key}."
             )
-        # Dropped as S3File.discard() drops them, so that the file does not
-        # keep the errors of failed parts, whose tracebacks may keep the file.
+        # Dropped as S3File.discard() drops the parts, so that the file does
+        # not keep the errors of failed requests, whose tracebacks may keep
+        # the file.
+        self._creation = None
         self._parts = []
         self._uploads_in_flight = set()
         self._copies_in_flight = set()

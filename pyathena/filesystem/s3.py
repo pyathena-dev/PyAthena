@@ -3178,6 +3178,8 @@ class S3File(AbstractBufferedFile):
             # A submitted creation may still return an ID after the wait is
             # interrupted. The writer records it before resolving the future.
             self._close_without_commit(creation=creation)
+            # Not kept by this frame, which the traceback of its error keeps.
+            del creation
             raise
 
     def _upload_chunk(self, final: bool = False) -> bool:
@@ -3260,6 +3262,9 @@ class S3File(AbstractBufferedFile):
                     body=data,
                     **self._get_request_kwargs("upload_part"),
                 )
+                # Not kept by this frame, which the traceback of the part's
+                # error keeps if a later wait of this call raises it.
+                del part
         except BaseException:
             self._close_without_commit()
             raise

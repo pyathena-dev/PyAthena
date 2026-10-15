@@ -7244,29 +7244,34 @@ class TestS3File:
         fs.core.complete_multipart_upload.assert_not_called()
         assert f.multipart_upload is None
 
-    @pytest.mark.parametrize("stage", ["write", "commit"])
-    def test_failed_part_freed_by_reference_counting(self, stage):
+    @pytest.mark.parametrize("stage", ["creation", "write", "commit"])
+    def test_failed_request_freed_by_reference_counting(self, stage):
         # GH-1186: the file and its data are freed as soon as the error of a
-        # failed part is no longer referenced, whether a write or the commit
-        # raised it. The traceback of the error used to keep them in a
-        # reference cycle with the future of the part until the garbage
-        # collector ran.
+        # failed request is no longer referenced, whether the creation of the
+        # upload, a write of several parts, or the commit raised it. The
+        # traceback of the error used to keep them in a reference cycle with
+        # the future of the request until the garbage collector ran.
         fs = self._make_append_fs(b"")
 
-        def upload_part(**kwargs):
+        def fail(*args, **kwargs):
             raise PermissionError("Access Denied")
 
-        fs.core.upload_part.side_effect = upload_part
+        if stage == "creation":
+            fs.core.create_multipart_upload.side_effect = fail
+        else:
+            fs.core.upload_part.side_effect = fail
         f = S3File(fs, "s3://bucket/key.txt", mode="wb", block_size=4, max_workers=1)
-        f.write(b"a" * 4)
+        if stage == "commit":
+            f.write(b"a" * 4)
         file_ref = weakref.ref(f)
         buffer_ref = weakref.ref(f.buffer)
-        fail = functools.partial(f.write, b"a" * 4) if stage == "write" else f.close
+        # The write submits a part before it waits for the failed one.
+        operation = f.close if stage == "commit" else functools.partial(f.write, b"a" * 12)
         gc.disable()
         try:
             with pytest.raises(PermissionError, match="Access Denied"):
-                fail()
-            del f, fail
+                operation()
+            del f, operation
             assert file_ref() is None
             assert buffer_ref() is None
         finally:

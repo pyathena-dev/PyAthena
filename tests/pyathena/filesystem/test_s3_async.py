@@ -579,6 +579,66 @@ class TestAioS3FileSystem:
         assert events == (["create"] if creation_fails else ["create", ("abort", "uploadid")])
         sync_fs.core.upload_part_copy.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_copy_object_with_multipart_upload_cancelled_queued_parts(self):
+        # GH-1186: a cancellation cancels the part copies that wait for a
+        # thread of the filesystem, whose threads bound all its copies, before
+        # it waits for the running ones and aborts the upload. The queued
+        # part copies used to run before the abort.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), max_workers=1, skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        sync_fs.core.create_multipart_upload = mock.MagicMock(
+            return_value=S3MultipartUpload(
+                {"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"}
+            )
+        )
+        events = []
+        started = threading.Event()
+        release = threading.Event()
+
+        def upload_part_copy(**kw):
+            events.append(f"start {kw['part_number']}")
+            started.set()
+            # The finally block of the test always releases it.
+            release.wait()
+            events.append(f"end {kw['part_number']}")
+            return SimpleNamespace(etag='"e"', part_number=kw["part_number"])
+
+        sync_fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
+        sync_fs.core.complete_multipart_upload = mock.MagicMock()
+        # The HeadObject of the source, with 2 parts of the default block size.
+        size = 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE
+        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
+        sync_fs._abort_multipart_upload = mock.MagicMock(
+            side_effect=lambda upload, params: events.append("abort")
+        )
+
+        task = asyncio.ensure_future(
+            fs._copy_object_with_multipart_upload(
+                S3Path("bucket", "src"),
+                S3Path("bucket", "dst"),
+                max_workers=2,
+                MetadataDirective="REPLACE",
+                TaggingDirective="REPLACE",
+                AnnotationDirective="EXCLUDE",
+            )
+        )
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            # Gives the cleanup time to cancel the queued part copy.
+            await asyncio.sleep(0.1)
+        except BaseException:
+            task.cancel()
+            raise
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert events == ["start 1", "end 1", "abort"]
+        sync_fs.core.complete_multipart_upload.assert_not_called()
+
     @pytest.mark.parametrize(
         ("stage", "expected"),
         [
@@ -2881,28 +2941,34 @@ class TestAioS3StreamedFile:
         fs.core.abort_multipart_upload.assert_called_once()
         fs.core.complete_multipart_upload.assert_not_called()
 
-    @pytest.mark.parametrize("stage", ["write", "commit"])
+    @pytest.mark.parametrize("stage", ["creation", "write", "commit"])
     @pytest.mark.asyncio
-    async def test_failed_part_freed_by_reference_counting(self, fs, stage):
+    async def test_failed_request_freed_by_reference_counting(self, fs, stage):
         # GH-1186: the file and its data are freed as soon as the error of a
-        # failed part is no longer referenced, whether a write or the commit
-        # raised it, as with S3File.
+        # failed request is no longer referenced, as with S3File.
         block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
 
-        def upload_part(**kwargs):
+        def fail(*args, **kwargs):
             raise PermissionError("Access Denied")
 
-        fs.core.upload_part = mock.MagicMock(side_effect=upload_part)
+        if stage == "creation":
+            fs.core.create_multipart_upload = mock.MagicMock(side_effect=fail)
+        else:
+            fs.core.upload_part = mock.MagicMock(side_effect=fail)
         f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size, max_workers=1)
-        await f.write(b"a" * block_size)
+        if stage == "commit":
+            await f.write(b"a" * block_size)
         file_ref = weakref.ref(f)
         buffer_ref = weakref.ref(f.buffer)
-        fail = functools.partial(f.write, b"a" * block_size) if stage == "write" else f.close
+        # The write submits a part before it waits for the failed one.
+        operation = (
+            f.close if stage == "commit" else functools.partial(f.write, b"a" * block_size * 3)
+        )
         gc.disable()
         try:
             with pytest.raises(PermissionError, match="Access Denied"):
-                await fail()
-            del f, fail
+                await operation()
+            del f, operation
             # Lets the event loop run the callbacks that hold the futures.
             await asyncio.sleep(0)
             assert file_ref() is None

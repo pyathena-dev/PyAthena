@@ -403,13 +403,16 @@ class TestS3Executor:
         with pytest.raises(ValueError, match="invalid literal"):
             failed.result()
 
+    @pytest.mark.parametrize("chained", [False, True])
     @pytest.mark.parametrize("executor_class", [S3ThreadPoolExecutor, S3AioThreadPool])
-    def test_submit_to_failure_frees_arguments(self, executor_class):
+    def test_submit_to_failure_frees_arguments(self, executor_class, chained):
         # GH-1186: the arguments of a failed callable, such as the body of a
         # part, are freed when it fails, while the error keeps the frames of
-        # its traceback, and the error is freed by reference counting. The
-        # traceback used to keep them in a reference cycle with the future
-        # until the garbage collector ran.
+        # its traceback, also when the frames of the error that it was raised
+        # from hold them, as S3Core.call() raises an OSError from a
+        # ClientError. The error is freed by reference counting. The traceback
+        # used to keep them in a reference cycle with the future until the
+        # garbage collector ran.
         class Body:
             pass
 
@@ -417,8 +420,16 @@ class TestS3Executor:
             # Unlike PermissionError, it can be weakly referenced.
             pass
 
+        def send(body):
+            raise RuntimeError("AccessDenied")
+
         def upload(body):
-            raise DeniedError("Access Denied")
+            if not chained:
+                raise DeniedError("Access Denied")
+            try:
+                send(body)
+            except RuntimeError as e:
+                raise DeniedError("Access Denied") from e
 
         body = Body()
         body_ref = weakref.ref(body)
@@ -432,6 +443,8 @@ class TestS3Executor:
             assert body_ref() is None
             assert isinstance(error, DeniedError)
             assert traceback.extract_tb(error.__traceback__)[-1].name == "upload"
+            if chained:
+                assert traceback.extract_tb(error.__cause__.__traceback__)[-1].name == "send"
             error_ref = weakref.ref(error)
             del error, future
             assert error_ref() is None

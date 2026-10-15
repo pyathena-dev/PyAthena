@@ -62,10 +62,11 @@ class S3Executor(metaclass=ABCMeta):
         the executor reported.
 
         The error of a failed callable keeps the frames that it was raised
-        from in its traceback, without their local variables, so that the
-        arguments, such as the body of a part, are freed when the callable
-        fails, and the future and its error are freed without the garbage
-        collector once they are no longer referenced.
+        from in its traceback, and so do the errors that it was raised from or
+        while handling, without their local variables, so that the arguments,
+        such as the body of a part, are freed when the callable fails, and the
+        future and its error are freed without the garbage collector once
+        they are no longer referenced.
 
         Args:
             future: A pending future that no executor has started.
@@ -82,18 +83,29 @@ class S3Executor(metaclass=ABCMeta):
             try:
                 result = fn(*args, **kwargs)
             except BaseException as e:
-                # The frames below this one hold the arguments.
+                # The frames below this one hold the arguments, and so may
+                # those of the errors chained to it, such as the ClientError
+                # that S3Core.call() raises an OSError from.
                 traceback.clear_frames(cast(TracebackType, e.__traceback__).tb_next)
+                chained, seen = [e.__cause__, e.__context__], {id(e)}
+                while chained:
+                    if (error := chained.pop()) is not None and id(error) not in seen:
+                        seen.add(id(error))
+                        traceback.clear_frames(error.__traceback__)
+                        chained += [error.__cause__, error.__context__]
                 # The traceback also keeps this frame, which would keep the
-                # arguments and form a reference cycle with the future. Once
-                # run() has resolved the future, settle() does not use it.
+                # arguments and form a reference cycle with the future, and so
+                # do the frames of the executor that called run(), and the
+                # done callback of the submission. The variables are cleared
+                # in the closure that they share; settle() reads the future
+                # only when run() did not run.
                 resolved = future
-                del future, fn, args, kwargs
+                del future, fn, args, kwargs, chained, error
                 resolved.set_exception(e)
                 del resolved
-                return
-            # Deleted only on the failure path, which returns.
-            future.set_result(result)  # noqa: F821
+            else:
+                # Deleted only on the failure path.
+                future.set_result(result)  # noqa: F821
 
         def settle(submitted: Future[None]) -> None:
             """Resolve the future if the executor dropped the callable before it ran.
