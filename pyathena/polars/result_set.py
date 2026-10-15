@@ -556,8 +556,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
         Args:
             has_header: Whether the CSV data has a header. Without one, or with
                 ``schema_overrides`` or ``with_column_names`` given to ``execute()``,
-                Polars does not name the columns by the header, and they are not read
-                as text.
+                Polars does not name the columns by the header, and with ``schema``,
+                Polars ignores ``schema_overrides``, so the columns are not read as text.
 
         Returns:
             Tuple of (schema_overrides, timestamp_dtypes): the data types to read the
@@ -567,7 +567,11 @@ class AthenaPolarsResultSet(AthenaResultSet):
         import polars as pl
 
         dtypes = self._csv_dtypes
-        if not has_header or self._kwargs.keys() & {"schema_overrides", "with_column_names"}:
+        if not has_header or self._kwargs.keys() & {
+            "schema",
+            "schema_overrides",
+            "with_column_names",
+        }:
             return dtypes, {}
         timestamp_dtypes = {
             name: dtype

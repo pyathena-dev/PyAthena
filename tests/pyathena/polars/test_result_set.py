@@ -26,6 +26,12 @@ from pyathena.polars.result_set import AthenaPolarsResultSet, PolarsDataFrameIte
 from pyathena.util import RetryConfig
 
 _ROWS_BEFORE_FAILURE = 300_000
+# A timestamp column of a CSV result file with 12 fractional digits and NULL, as text and
+# as read into a Datetime column with the default time unit.
+_TIMESTAMP_TEXTS = pl.Series(["2020-01-02 03:04:05.123456789012", None], dtype=pl.String)
+_TRUNCATED_TIMESTAMPS = pl.Series(
+    [datetime(2020, 1, 2, 3, 4, 5, 123456), None], dtype=pl.Datetime("us")
+)
 
 
 def _chunked_result_set() -> AthenaPolarsResultSet:
@@ -534,18 +540,16 @@ class TestAthenaPolarsResultSet:
     @pytest.mark.parametrize(
         ("reader", "kwargs", "expected"),
         [
-            ("_read_csv", {}, {"t": [datetime(2020, 1, 2, 3, 4, 5, 123456), None]}),
-            ("_iter_csv_chunks", {}, {"t": [datetime(2020, 1, 2, 3, 4, 5, 123456), None]}),
+            ("_read_csv", {}, {"t": _TRUNCATED_TIMESTAMPS}),
+            ("_iter_csv_chunks", {}, {"t": _TRUNCATED_TIMESTAMPS}),
             ("_read_csv", {"columns": ["v"]}, {}),
-            (
-                "_read_csv",
-                {"new_columns": ["t2", "v2"]},
-                {"t2": [datetime(2020, 1, 2, 3, 4, 5, 123456), None]},
-            ),
+            ("_read_csv", {"new_columns": ["t2", "v2"]}, {"t2": _TRUNCATED_TIMESTAMPS}),
+            ("_iter_csv_chunks", {"new_columns": ["t2", "v2"]}, {"t2": _TRUNCATED_TIMESTAMPS}),
+            ("_read_csv", {"schema": {"t": pl.String, "v": pl.String}}, {"t": _TIMESTAMP_TEXTS}),
             (
                 "_iter_csv_chunks",
-                {"new_columns": ["t2", "v2"]},
-                {"t2": [datetime(2020, 1, 2, 3, 4, 5, 123456), None]},
+                {"schema": {"t": pl.String, "v": pl.String}},
+                {"t": _TIMESTAMP_TEXTS},
             ),
             (
                 "_read_csv",
@@ -563,8 +567,8 @@ class TestAthenaPolarsResultSet:
         """Timestamps are read as text and truncated to the time unit.
 
         With ``with_column_names`` given to execute(), Polars renames the columns as it
-        reads them, so they are not read as text, and the read fails. ``scan_csv()``
-        does not take ``columns``.
+        reads them, so they are not read as text, and the read fails. With ``schema``,
+        the columns have the types it gives. ``scan_csv()`` does not take ``columns``.
         """
         path = tmp_path / "result.csv"
         path.write_bytes(b'"t","v"\n"2020-01-02 03:04:05.123456789012","x"\n,"y"\n')
@@ -598,8 +602,7 @@ class TestAthenaPolarsResultSet:
                 return
             df = _read_all(getattr(result_set, reader)())
         for name, values in expected.items():
-            assert df.schema[name] == pl.Datetime("us")
-            assert df[name].to_list() == values
+            assert df[name].equals(values, check_dtypes=True)
         if not expected:
             assert df.columns == ["v"]
 
