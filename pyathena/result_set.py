@@ -459,14 +459,18 @@ class AthenaResultSet(CursorIterator):
             return cast(dict[str, Any], response)
 
     def _fetch(self) -> None:
-        """Fetch the next page of rows into the result set.
+        """Fetch the next rows, if any, into the buffer.
+
+        The default result set fetches the next page; it fetches nothing when no
+        page remains or the result set is closed.
 
         Raises:
-            ProgrammingError: If there is no next page.
+            ProgrammingError: If the query ID is missing, the query has not
+                succeeded, or another thread closes the result set.
             OperationalError: If the request fails.
         """
         if not self._next_token:
-            raise ProgrammingError("NextToken is none or empty.")
+            return
         response = self._get_query_results(self._arraysize, self._next_token)
         rows, self._next_token = self._parse_result_rows(response)
         self._process_rows(rows)
@@ -490,10 +494,10 @@ class AthenaResultSet(CursorIterator):
     def fetchone(
         self,
     ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
-        if not self._rows and self._next_token:
-            self._fetch()
         if not self._rows:
-            return None
+            self._fetch()
+            if not self._rows:
+                return None
         row = self._rows.popleft()
         # As _count_rows() does, inline on the per-row path.
         rownumber = self._rownumber
@@ -536,9 +540,9 @@ class AthenaResultSet(CursorIterator):
     def _take_rows(self, size: int | None) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         """Take the next rows and count them in ``rownumber``.
 
-        The buffered rows are taken in bulk. When the buffer is empty, ``fetchone()``
-        takes the next row, so that it fetches the next rows into the buffer as the
-        result set does.
+        The buffered rows are taken in bulk, and ``_fetch()`` refills the buffer when
+        it is empty. A subclass whose ``fetchone()`` does not use the buffer overrides
+        this method too.
 
         Args:
             size: The maximum number of rows, or None for all remaining rows.
@@ -548,13 +552,11 @@ class AthenaResultSet(CursorIterator):
         """
         rows: list[tuple[Any | None, ...] | dict[Any, Any | None]] = []
         while size is None or len(rows) < size:
-            if self._rows:
-                self._take_buffered_rows(rows, size)
-            else:
-                row = self.fetchone()
-                if row is None:
+            if not self._rows:
+                self._fetch()
+                if not self._rows:
                     break
-                rows.append(row)
+            self._take_buffered_rows(rows, size)
         return rows
 
     def _take_buffered_rows(

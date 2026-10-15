@@ -216,21 +216,6 @@ class AthenaArrowResultSet(AthenaResultSet):
                 processed_rows = list(zip(*columns, strict=False))
             self._rows.extend(processed_rows)
 
-    @override
-    def fetchone(
-        self,
-    ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
-        if not self._rows:
-            self._fetch()
-        if not self._rows:
-            return None
-        row = self._rows.popleft()
-        # As _count_rows() does, inline on the per-row path.
-        rownumber = self._rownumber
-        if rownumber is not None:
-            self._rownumber = rownumber + 1
-        return row
-
     def _open_csv(self, location: str) -> Any:
         """Open the CSV result file for ``pyarrow.csv.read_csv()``.
 
