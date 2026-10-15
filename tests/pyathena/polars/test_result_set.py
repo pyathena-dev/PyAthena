@@ -10,6 +10,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
+from io import BytesIO
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import polars as pl
@@ -207,6 +208,65 @@ class TestAthenaPolarsResultSet:
             release.set()
             assert future.result(10) == [(0,), (1,), (2,), (3,)]
         assert inspect.getgeneratorstate(reader) == inspect.GEN_CLOSED
+
+    @pytest.mark.parametrize(
+        ("unload", "kwargs"),
+        [(False, {}), (True, {}), (True, {"low_memory": True})],
+        ids=["csv", "parquet-chunk-reader", "scan-parquet"],
+    )
+    def test_chunks_read_after_close(self, tmp_path, unload, kwargs):
+        """A chunk reader created before close() reads its chunks after it.
+
+        A fetch in another thread, such as one of AioPolarsCursor that keeps running
+        after its task is cancelled, can start its first read as close() lands.
+        """
+        if unload:
+            pl.DataFrame({"a": [1, 2, 3]}).write_parquet(tmp_path / "0.parquet")
+            manifest = str(tmp_path / "0.parquet")
+            output_location = "s3://bucket/result.csv"
+        else:
+            (tmp_path / "result.csv").write_text('"a"\n"1"\n"2"\n"3"\n')
+            manifest = ""
+            output_location = str(tmp_path / "result.csv")
+        connection = MagicMock(region_name=None)
+        connection.session.get_credentials.return_value = None
+        connection.s3_client.get_object.side_effect = lambda **_: {
+            "Body": BytesIO(manifest.encode())
+        }
+        query_execution = MagicMock(
+            state=AthenaQueryExecution.STATE_SUCCEEDED,
+            output_location=output_location,
+            data_manifest_location="s3://bucket/manifest.csv",
+            query="UNLOAD (SELECT a FROM t) TO 's3://bucket/unload/' WITH (format = 'PARQUET')"
+            if unload
+            else "SELECT a FROM t",
+        )
+        metadata = (
+            {"Name": "a", "Type": "integer", "Precision": 10, "Scale": 0, "Nullable": "UNKNOWN"},
+        )
+        with (
+            patch.object(
+                AthenaPolarsResultSet,
+                "_pre_fetch",
+                autospec=True,
+                side_effect=lambda rs: setattr(rs, "_metadata", metadata),
+            ),
+            patch.object(AthenaPolarsResultSet, "_get_content_length", return_value=16),
+            patch("pyathena.polars.result_set.S3FileSystem", lambda **_: LocalFileSystem()),
+        ):
+            result_set = AthenaPolarsResultSet(
+                connection=connection,
+                converter=DefaultPolarsTypeConverter(),
+                query_execution=query_execution,
+                arraysize=3,
+                retry_config=RetryConfig(),
+                unload=unload,
+                chunksize=2,
+                **kwargs,
+            )
+            df_iter = result_set._create_dataframe_iterator()
+        result_set.close()
+        assert list(df_iter.itertuples()) == [(1,), (2,), (3,)]
 
     def test_fetchmany_size_above_maxsize(self):
         """A size above sys.maxsize returns the remaining rows."""

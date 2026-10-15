@@ -915,19 +915,21 @@ class AthenaPolarsResultSet(AthenaResultSet):
         return separator, has_header, new_columns
 
     def _iter_csv_chunks(self) -> Iterator[pl.DataFrame]:
-        """Iterate over CSV data in chunks using lazy evaluation.
+        """Create an iterator that reads the CSV result file in chunks.
 
-        Yields:
-            Polars DataFrame for each chunk.
+        The state that the reads need, such as the output location, the column names,
+        and the storage options, is taken now, so that a ``close()`` before the first
+        read does not take it away.
+
+        Returns:
+            An iterator of a Polars DataFrame for each chunk, read lazily.
 
         Raises:
             ProgrammingError: If output location is not set.
-            OperationalError: If reading the CSV file fails.
+            OperationalError: If checking the size of the CSV file fails.
         """
-        import polars as pl
-
         if not self._is_csv_readable():
-            return
+            return iter(())
 
         if self.output_location is None:
             raise ProgrammingError("output_location is not available.")
@@ -944,19 +946,39 @@ class AthenaPolarsResultSet(AthenaResultSet):
         if "schema_overrides" not in self._kwargs:
             # Renamed after reading, so that Polars matches the types to the header.
             read_kwargs.pop("new_columns", None)
+        return self._scan_csv_chunks(self.output_location, read_kwargs, new_columns)
+
+    def _scan_csv_chunks(
+        self, location: str, read_kwargs: dict[str, Any], new_columns: list[str] | None
+    ) -> Iterator[pl.DataFrame]:
+        """Scan a CSV result file in chunks with Polars.
+
+        Args:
+            location: The output location.
+            read_kwargs: The arguments of ``polars.scan_csv()``.
+            new_columns: The names of the first columns, set after reading; see
+                ``_get_csv_params()``.
+
+        Yields:
+            Polars DataFrame for each chunk.
+
+        Raises:
+            OperationalError: If reading the CSV file fails.
+        """
+        import polars as pl
 
         try:
-            lazy_df = pl.scan_csv(self.output_location, **read_kwargs)
+            lazy_df = pl.scan_csv(location, **read_kwargs)
             for batch in lazy_df.collect_batches(chunk_size=self._chunksize):
                 if new_columns:
                     batch.columns = [*new_columns, *batch.columns[len(new_columns) :]]
                 yield batch
         except Exception as e:
-            _logger.exception(f"Failed to read {self.output_location}.")
+            _logger.exception(f"Failed to read {location}.")
             raise OperationalError(*e.args) from e
 
     def _iter_parquet_chunks(self) -> Iterator[pl.DataFrame]:
-        """Iterate over Parquet data in chunks.
+        """Create an iterator that reads the Parquet files in chunks.
 
         Without read options given to ``execute()``, and with pyarrow installed, the
         files of the data manifest are read one at a time through PyAthena's
@@ -966,60 +988,75 @@ class AthenaPolarsResultSet(AthenaResultSet):
         the unload location with the given options, decoding whole row groups ahead
         of the chunks it returns.
 
+        The filesystem or the storage options that the reads use are taken now, so
+        that a ``close()`` before the first read does not take them away.
         ``_prepare_parquet_location()`` must have found the unload location first.
+
+        Returns:
+            An iterator of a Polars DataFrame for each chunk, read lazily.
+
+        Raises:
+            ProgrammingError: If the unload location is not set.
+        """
+        if self._unload_location is None:
+            raise ProgrammingError("unload_location is not available.")
+
+        if not self._kwargs and importlib.util.find_spec("pyarrow") is not None:
+            return self._read_parquet_chunks(S3FileSystem(**self._csv_storage_options))
+        return self._scan_parquet_chunks(
+            self._unload_location, self._read_kwargs(lambda: self._parquet_storage_options)
+        )
+
+    def _read_parquet_chunks(self, fs: S3FileSystem) -> Iterator[pl.DataFrame]:
+        """Read the files of the data manifest in chunks with ``ParquetChunkReader``.
+
+        Args:
+            fs: The filesystem that reads the files.
 
         Yields:
             Polars DataFrame for each chunk.
 
         Raises:
-            ProgrammingError: If the unload location is not set.
             OperationalError: If reading the Parquet files fails.
         """
-        if self._unload_location is None:
-            raise ProgrammingError("unload_location is not available.")
+        import polars as pl
 
         try:
-            if not self._kwargs and importlib.util.find_spec("pyarrow") is not None:
-                yield from self._read_parquet_chunks()
-            else:
-                yield from self._scan_parquet_chunks(self._unload_location)
+            with ParquetChunkReader(
+                fs,
+                self._data_manifest,
+                cast(int, self._chunksize),
+                cache_type=self._cache_type,
+            ) as reader:
+                for table in reader:
+                    yield cast("pl.DataFrame", pl.from_arrow(table, rechunk=False))
         except Exception as e:
             _logger.exception(f"Failed to read {self._unload_location}.")
             raise OperationalError(*e.args) from e
 
-    def _read_parquet_chunks(self) -> Iterator[pl.DataFrame]:
-        """Read the files of the data manifest in chunks with ``ParquetChunkReader``.
-
-        Yields:
-            Polars DataFrame for each chunk.
-        """
-        import polars as pl
-
-        with ParquetChunkReader(
-            S3FileSystem(**self._csv_storage_options),
-            self._data_manifest,
-            cast(int, self._chunksize),
-            cache_type=self._cache_type,
-        ) as reader:
-            for table in reader:
-                yield cast("pl.DataFrame", pl.from_arrow(table, rechunk=False))
-
-    def _scan_parquet_chunks(self, location: str) -> Iterator[pl.DataFrame]:
+    def _scan_parquet_chunks(
+        self, location: str, read_kwargs: dict[str, Any]
+    ) -> Iterator[pl.DataFrame]:
         """Scan the unload location in chunks with Polars and the read options.
 
         Args:
             location: The unload location.
+            read_kwargs: The arguments of ``polars.scan_parquet()``.
 
         Yields:
             Polars DataFrame for each chunk.
+
+        Raises:
+            OperationalError: If reading the Parquet files fails.
         """
         import polars as pl
 
-        lazy_df = pl.scan_parquet(
-            location,
-            **self._read_kwargs(lambda: self._parquet_storage_options),
-        )
-        yield from lazy_df.collect_batches(chunk_size=self._chunksize)
+        try:
+            lazy_df = pl.scan_parquet(location, **read_kwargs)
+            yield from lazy_df.collect_batches(chunk_size=self._chunksize)
+        except Exception as e:
+            _logger.exception(f"Failed to read {location}.")
+            raise OperationalError(*e.args) from e
 
     def iter_chunks(self) -> PolarsDataFrameIterator:
         """Iterate over result chunks as Polars DataFrames.
