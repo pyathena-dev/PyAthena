@@ -58,6 +58,8 @@ S3 Executor
 .. autoclass:: pyathena.filesystem.s3_executor.S3AioThreadPool
    :members:
 
+.. autofunction:: pyathena.filesystem.s3_executor.raise_failure
+
 S3 Paths
 --------
 
