@@ -6,6 +6,7 @@
 # SPDX-License-Identifier: MIT
 
 import csv
+import inspect
 import io
 import threading
 from collections import defaultdict
@@ -139,6 +140,46 @@ class TestPandasDataFrameIterator:
         df_iter = PandasDataFrameIterator(df, _no_trunc_date)
 
         assert df_iter.as_pandas() is df
+
+    @pytest.mark.parametrize(
+        "read",
+        [PandasDataFrameIterator.__next__, PandasDataFrameIterator.get_chunk],
+        ids=["next", "get_chunk"],
+    )
+    @pytest.mark.parametrize("close_error", [None, RuntimeError("close failed")])
+    def test_close_during_read(self, caplog, read, close_error):
+        """A close during a read in another thread is deferred until the read completes."""
+        reading, release = threading.Event(), threading.Event()
+
+        def chunks():
+            try:
+                yield pd.DataFrame({"n": [1]})
+                reading.set()
+                release.wait(10)
+                yield pd.DataFrame({"n": [2]})
+                yield pd.DataFrame({"n": [3]})
+            finally:
+                if close_error:
+                    raise close_error
+
+        csv_stream = io.StringIO()
+        reader = chunks()
+        df_iter = PandasDataFrameIterator(reader, _no_trunc_date, csv_stream)
+        next(df_iter)
+        with ThreadPoolExecutor(1) as executor:
+            future = executor.submit(read, df_iter)
+            assert reading.wait(10)
+            df_iter.close()
+            with pytest.raises(StopIteration):
+                next(df_iter)
+            assert inspect.getgeneratorstate(reader) == inspect.GEN_RUNNING
+            assert not csv_stream.closed
+            release.set()
+            assert future.result(10)["n"].tolist() == [2]
+        assert inspect.getgeneratorstate(reader) == inspect.GEN_CLOSED
+        assert ("Failed to close the chunk reader" in caplog.text) == bool(close_error)
+        assert csv_stream.closed
+        assert list(df_iter) == []
 
 
 _FS = sentinel.pyathena_fs
@@ -280,6 +321,27 @@ class TestAthenaPandasResultSet:
             # The fetch still returns the chunk that it was reading.
             assert future.result(10) == [(0,), (1,), (2,), (3,)]
         assert result_set.rownumber is None
+
+    def test_close_during_fetchall_generator(self):
+        """A close() during a fetch from a generator, such as a chunked UNLOAD, does not raise."""
+        reading, release = threading.Event(), threading.Event()
+
+        def chunks():
+            yield pd.DataFrame({"n": [0, 1]})
+            reading.set()
+            release.wait(10)
+            yield pd.DataFrame({"n": [2, 3]}, index=[2, 3])
+            yield pd.DataFrame({"n": [4]}, index=[4])
+
+        reader = chunks()
+        result_set = _fetching_result_set(reader, arraysize=3)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(result_set.fetchall)
+            assert reading.wait(10)
+            result_set.close()
+            release.set()
+            assert future.result(10) == [(0,), (1,), (2,), (3,)]
+        assert inspect.getgeneratorstate(reader) == inspect.GEN_CLOSED
 
     def test_fetchmany_size_above_maxsize(self):
         result_set = _fetching_result_set(pd.DataFrame({"n": [1, 2]}), arraysize=3)

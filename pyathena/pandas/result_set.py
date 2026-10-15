@@ -7,10 +7,11 @@ import importlib
 import logging
 import operator
 import sys
+import threading
 from collections import abc
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from functools import partial
 from io import BufferedReader, BytesIO, IOBase, StringIO, TextIOWrapper
 from itertools import chain, islice
@@ -336,6 +337,31 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
             self._reader = reader
         self._trunc_date = trunc_date
         self._csv_stream = csv_stream
+        self._lock = threading.Lock()
+        self._readers = 0
+        self._close_requested = False
+
+    @contextmanager
+    def _read(self) -> Iterator[TextFileReader | Iterator[DataFrame]]:
+        """Track a chunk read and run a close that was requested during it.
+
+        Yields:
+            The reader to read the chunk from.
+        """
+        with self._lock:
+            self._readers += 1
+            reader = iter(()) if self._close_requested else self._reader
+        try:
+            yield reader
+        finally:
+            with self._lock:
+                self._readers -= 1
+                close = self._close_requested and not self._readers
+            if close:
+                try:
+                    self.close()
+                except Exception:
+                    _logger.exception("Failed to close the chunk reader after a read.")
 
     @override
     def __next__(self) -> DataFrame:
@@ -348,7 +374,8 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
             StopIteration: When no more chunks are available.
         """
         try:
-            df = next(self._reader)
+            with self._read() as reader:
+                df = next(reader)
             return self._trunc_date(df)
         except BaseException:
             self.close()
@@ -368,17 +395,27 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         self.close()
 
     def close(self) -> None:
-        """Close the iterator and release resources."""
+        """Close the iterator and release resources.
+
+        If another thread is reading a chunk, the read returns that chunk, and the
+        reader and the CSV stream are closed when it completes. Reads that start after the
+        close get no chunks, and an error from the deferred close is logged.
+        """
         from pandas.io.parsers import TextFileReader
 
-        reader = self._reader
-        self._reader = iter(())
+        with self._lock:
+            if self._readers:
+                self._close_requested = True
+                return
+            self._close_requested = False
+            reader, self._reader = self._reader, iter(())
+            csv_stream, self._csv_stream = self._csv_stream, None
         try:
             if isinstance(reader, (TextFileReader, GeneratorType)):
                 reader.close()
         finally:
-            if self._csv_stream is not None:
-                self._csv_stream.close()
+            if csv_stream is not None:
+                csv_stream.close()
 
     def iterrows(self) -> Iterator[tuple[int, dict[str, Any]]]:
         """Iterate over rows as (index, row_dict) tuples.
@@ -465,9 +502,9 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         from pandas.io.parsers import TextFileReader
 
         try:
-            if isinstance(self._reader, TextFileReader):
-                return self._trunc_date(self._reader.get_chunk(size))
-            return self._trunc_date(next(self._reader))
+            with self._read() as reader:
+                df = reader.get_chunk(size) if isinstance(reader, TextFileReader) else next(reader)
+            return self._trunc_date(df)
         except BaseException:
             self.close()
             raise
