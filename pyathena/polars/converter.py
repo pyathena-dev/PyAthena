@@ -15,7 +15,6 @@ from copy import deepcopy
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from pyathena.converter import (
-    _TIMESTAMP_TEXT_LENGTHS,
     Converter,
     _to_binary,
     _to_date,
@@ -48,8 +47,10 @@ _DEFAULT_POLARS_CONVERTERS: dict[str, Callable[[str | None], Any | None]] = {
 def _to_datetimes(frame: _FrameT, dtypes: dict[str, Any], strict: bool = True) -> _FrameT:
     """Convert timestamp text columns to Datetime dtypes, truncating finer fractions.
 
-    Athena writes up to 12 fractional digits, which Polars does not parse into a
-    Datetime whose time unit holds fewer.
+    Athena writes up to 12 fractional digits, which the Polars CSV reader does not
+    parse into a Datetime whose time unit holds fewer. ``str.to_datetime()`` with an
+    explicit format parses them, truncating the digits that the time unit does not
+    hold, and a year that Athena writes with a sign or with more than four digits.
 
     Args:
         frame: The DataFrame or LazyFrame with the timestamp text columns, with NULL
@@ -72,7 +73,7 @@ def _to_datetimes(frame: _FrameT, dtypes: dict[str, Any], strict: bool = True) -
         text = cs.by_name(name, require_all=False).as_expr()
         exprs.append(
             pl.when(text != "")
-            .then(text.str.slice(0, _TIMESTAMP_TEXT_LENGTHS[time_unit]))
+            .then(text)
             .str.to_datetime("%Y-%m-%d %H:%M:%S%.f", time_unit=time_unit, strict=strict)
             .cast(dtype)
         )

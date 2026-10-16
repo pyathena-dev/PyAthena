@@ -652,6 +652,22 @@ class TestPolarsCursor:
             None,
         ]
 
+    @pytest.mark.parametrize("chunksize", [None, 1])
+    def test_timestamp_years_outside_four_digits(self, polars_cursor, chunksize):
+        """Fractions are truncated to the time unit for years Athena writes with a sign."""
+        df = polars_cursor.execute(
+            """
+            SELECT
+              date_add('year', 9000, CAST('2020-01-02 03:04:05.123' AS TIMESTAMP(3))) AS y5,
+              date_add(
+                'year', -2021, CAST('2020-01-02 03:04:05.123456789012' AS TIMESTAMP(12))
+              ) AS yneg
+            """,
+            chunksize=chunksize,
+        ).as_polars()
+        assert [df[c].dt.year()[0] for c in df.columns] == [11020, -1]
+        assert [df[c].dt.nanosecond()[0] for c in df.columns] == [123000000, 123456000]
+
     def test_iter_chunks_chunk_sizes(self):
         """Test that chunks have correct sizes."""
         with contextlib.closing(connect(schema_name=ENV.schema)) as conn:

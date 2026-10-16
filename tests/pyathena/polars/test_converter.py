@@ -70,3 +70,31 @@ def test_to_datetimes_not_strict():
         _to_datetimes(df, {"t": pl.Datetime})
     result = _to_datetimes(df, {"t": pl.Datetime}, strict=False)
     assert result["t"].to_list() == [datetime(2020, 1, 2, 3, 4, 5, 123456), None]
+
+
+@pytest.mark.parametrize(
+    ("dtype", "nanoseconds"),
+    [
+        (pl.Datetime("ms"), [123000000, 123000000, 999000000]),
+        (pl.Datetime("us"), [123000000, 123456000, 999999000]),
+    ],
+)
+def test_to_datetimes_years_outside_four_digits(dtype, nanoseconds):
+    """The fraction is truncated to the time unit whatever the width of the year.
+
+    Athena writes a year after 9999 with a sign and five or more digits, and a year
+    before 0001 with a sign.
+    """
+    df = pl.DataFrame(
+        {
+            "t": [
+                "+11020-01-02 03:04:05.123",
+                "+11020-01-02 03:04:05.123456789012",
+                "-0001-01-02 03:04:05.999999999999",
+            ]
+        }
+    )
+    result = _to_datetimes(df, {"t": dtype})
+    assert result.schema["t"] == dtype
+    assert result["t"].dt.year().to_list() == [11020, 11020, -1]
+    assert result["t"].dt.nanosecond().to_list() == nanoseconds
