@@ -58,6 +58,27 @@ def get_query_results_responses(*pages):
     return responses
 
 
+def close_during_next_request(result_set):
+    """Close the result set during its next ``GetQueryResults`` request, as another thread may.
+
+    Args:
+        result_set: A result set whose ``GetQueryResults`` responses are stubbed with
+            the pages of :func:`get_query_results_responses`, none of them an exception.
+
+    Returns:
+        The stubbed ``GetQueryResults`` mock.
+    """
+    get_query_results = result_set.connection.client.get_query_results
+    responses = get_query_results.side_effect
+
+    def close_and_respond(**kwargs):
+        result_set.close()
+        return next(responses)
+
+    get_query_results.side_effect = close_and_respond
+    return get_query_results
+
+
 def overlapping_calls(calls, timeout=5):
     """Return a callable that records the peak number of its overlapping calls.
 

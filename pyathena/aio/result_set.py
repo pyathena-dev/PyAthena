@@ -126,9 +126,9 @@ class AthenaAioResultSet(AthenaResultSet):
                 succeeded, or the result set is closed.
             OperationalError: If the request fails.
         """
-        request = self._build_get_query_results_request(max_results, next_token)
         if self.is_closed:
             raise ProgrammingError("AthenaAioResultSet is closed.")
+        request = self._build_get_query_results_request(max_results, next_token)
         try:
             response = await async_retry_api_call(
                 self.connection.client.get_query_results,
@@ -145,7 +145,8 @@ class AthenaAioResultSet(AthenaResultSet):
     async def _async_fetch(self) -> None:
         """Fetch the next page of rows, if any, into the buffer.
 
-        Nothing is fetched when no page remains, as after ``close()``.
+        Nothing is fetched when no page remains, as after ``close()``, and the page
+        is discarded when ``close()`` runs during its request.
 
         Raises:
             ProgrammingError: If the next page is requested and the query ID is
@@ -157,6 +158,11 @@ class AthenaAioResultSet(AthenaResultSet):
         response = await self._async_get_query_results(self._arraysize, self._next_token)
         rows, self._next_token = self._parse_result_rows(response)
         self._process_rows(rows)
+        # close() clears the connection before the rest, so checking after the
+        # assignments catches a close() during the request or this method.
+        if self.is_closed:
+            self._next_token = None
+            self._rows.clear()
 
     async def _async_pre_fetch(self) -> None:
         """Fetch the first page of rows along with the result metadata.
