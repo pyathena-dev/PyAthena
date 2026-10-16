@@ -8,14 +8,40 @@ import asyncio
 import contextvars
 import gc
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from botocore.exceptions import ClientError
 
-from pyathena.aio.util import create_in_thread
-from tests.pyathena.util import EVENT_TIMEOUT
+from pyathena.aio.util import async_retry_api_call, create_in_thread, run_in_thread
+from pyathena.util import RetryConfig, retry_api_call
+from tests.pyathena.util import EVENT_TIMEOUT, ThrottledOperation
 
 _VALUE: contextvars.ContextVar[str] = contextvars.ContextVar("_VALUE", default="unset")
+
+
+async def _cancel_once_started(task, operation, stop_in):
+    """Cancel a task once its operation has made its first attempt.
+
+    Args:
+        task: The task that runs the operation in a thread.
+        operation: The blocking ``ThrottledOperation`` of the task.
+        stop_in: "request" to cancel during the first attempt, "backoff" to
+            cancel during the backoff wait after it.
+    """
+    # Polled, since the default executor may have no free thread.
+    deadline = time.monotonic() + EVENT_TIMEOUT
+    while not operation.started.is_set():
+        assert time.monotonic() < deadline
+        await asyncio.sleep(0.01)
+    if stop_in == "backoff":
+        # Lets the first attempt fail and the backoff wait begin.
+        await asyncio.sleep(0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    operation.release.set()
 
 
 class _Resource:
@@ -180,3 +206,107 @@ async def test_create_in_thread_cleanup_after_executor_shutdown():
         finally:
             release.set()
             executor.shutdown(wait=True)
+
+
+async def test_run_in_thread():
+    """The function runs in another thread with the caller's context."""
+    _VALUE.set("caller")
+    thread, value = await run_in_thread(lambda: (threading.get_ident(), _VALUE.get()))
+    assert thread != threading.get_ident()
+    assert value == "caller"
+
+
+@pytest.mark.parametrize("stop_in", ["request", "backoff"])
+async def test_async_retry_api_call_cancelled(stop_in):
+    """GH-1202: cancelling the caller makes no further attempt and ends the backoff wait.
+
+    Without the stop, the thread would wait at least EVENT_TIMEOUT seconds before
+    the next attempt, holding the only thread of the default executor.
+    """
+    loop = asyncio.get_running_loop()
+    executor = ThreadPoolExecutor(max_workers=1)
+    loop.set_default_executor(executor)
+    operation = ThrottledOperation(block=stop_in == "request")
+    try:
+        task = asyncio.create_task(
+            async_retry_api_call(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
+        )
+        await _cancel_once_started(task, operation, stop_in)
+        started = time.monotonic()
+        # Runs once the thread of the cancelled call is free.
+        await loop.run_in_executor(None, lambda: None)
+        assert time.monotonic() - started < EVENT_TIMEOUT
+        assert operation.calls == 1
+    finally:
+        operation.release.set()
+        executor.shutdown(wait=True)
+
+
+async def test_async_retry_api_call_stop_when():
+    """``stop_when`` is passed to ``retry_api_call()``."""
+    operation = ThrottledOperation()
+    with pytest.raises(ClientError):
+        await async_retry_api_call(
+            operation, RetryConfig(attempt=3, multiplier=0), stop_when=lambda: True
+        )
+    assert operation.calls == 1
+
+
+async def test_async_retry_api_call_retries():
+    """Without a cancellation, the retries continue."""
+    operation = ThrottledOperation(failures=2)
+    assert await async_retry_api_call(operation, RetryConfig(attempt=3, multiplier=0)) == "success"
+    assert operation.calls == 3
+
+
+@pytest.mark.parametrize("stop_in", ["request", "backoff"])
+async def test_create_in_thread_cancelled_stops_retries(stop_in):
+    """GH-1202: cancelling the caller stops the retries of a running construction."""
+    operation = ThrottledOperation(block=stop_in == "request")
+    finished = threading.Event()
+
+    def factory():
+        try:
+            retry_api_call(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
+        finally:
+            finished.set()
+
+    task = asyncio.create_task(create_in_thread(factory))
+    try:
+        await _cancel_once_started(task, operation, stop_in)
+        started = time.monotonic()
+        assert await asyncio.to_thread(finished.wait, EVENT_TIMEOUT)
+        assert time.monotonic() - started < EVENT_TIMEOUT
+        assert operation.calls == 1
+    finally:
+        operation.release.set()
+
+
+async def test_create_in_thread_cleanup_not_stopped():
+    """The close of an object constructed after a cancellation retries as usual."""
+    started = threading.Event()
+    release = threading.Event()
+    close_operation = ThrottledOperation(failures=2)
+    closed = threading.Event()
+
+    class _ClosedWithRequest(_Resource):
+        def close(self):
+            retry_api_call(close_operation, RetryConfig(attempt=3, multiplier=0))
+            closed.set()
+
+    def factory():
+        started.set()
+        assert release.wait(EVENT_TIMEOUT)
+        return _ClosedWithRequest()
+
+    task = asyncio.create_task(create_in_thread(factory))
+    try:
+        assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        assert await asyncio.to_thread(closed.wait, EVENT_TIMEOUT)
+        assert close_operation.calls == 3
+    finally:
+        release.set()

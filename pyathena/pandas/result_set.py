@@ -10,9 +10,10 @@ from collections import abc
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
+from contextvars import Context, copy_context
 from functools import partial
 from io import BufferedReader, BytesIO, IOBase, StringIO, TextIOWrapper
-from itertools import chain, islice
+from itertools import chain, islice, repeat
 from multiprocessing import cpu_count
 from types import GeneratorType
 from typing import (
@@ -1625,11 +1626,21 @@ class AthenaPandasResultSet(AthenaResultSet):
             self.connection.s3_client.meta.config.max_pool_connections,
             len(self._data_manifest),
         )
+        # Each read runs with a copy of this context, so that a stop of the retries in
+        # this thread (see stop_retries_on()) stops those of the reads too.
+        contexts = [copy_context() for _ in self._data_manifest]
         try:
             # When the failure of a read reaches map()'s iterator, it cancels the reads
             # that have not started.
             with ThreadPoolExecutor(max_workers=workers) as executor:
-                footers = list(executor.map(self._read_parquet_footer, self._data_manifest))
+                footers = list(
+                    executor.map(
+                        Context.run,
+                        contexts,
+                        repeat(self._read_parquet_footer),
+                        self._data_manifest,
+                    )
+                )
         except Exception as e:
             _logger.exception(f"Failed to read {self._unload_location}.")
             raise OperationalError(*e.args) from e

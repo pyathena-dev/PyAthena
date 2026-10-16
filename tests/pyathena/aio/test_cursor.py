@@ -20,6 +20,7 @@ from tests import ENV
 from tests.pyathena.aio.conftest import _aio_connect
 from tests.pyathena.util import (
     EVENT_TIMEOUT,
+    ThrottledOperation,
     succeeded_query_execution,
     throttle_metadata_api,
 )
@@ -368,6 +369,37 @@ class TestAioCursor:
         ]
         assert cursor.query_id == "query_id"
         assert cursor.result_set is None
+
+    async def test_execute_cancelled_while_start_is_retried(self):
+        """GH-1202: a cancellation does not stop the retries of the shielded start (no AWS).
+
+        The query that the retried request starts is then cancelled.
+        """
+        cursor, cancel, _, _ = _starting_cursor()
+        operation = ThrottledOperation(block=True, failures=1, operation_name="StartQueryExecution")
+
+        def start_query_execution(**kwargs):
+            operation(**kwargs)
+            return {"QueryExecutionId": "query_id"}
+
+        cursor._connection.client.start_query_execution.side_effect = start_query_execution
+        task = asyncio.create_task(cursor.execute("SELECT 1"))
+        try:
+            assert await asyncio.to_thread(operation.started.wait, EVENT_TIMEOUT)
+            task.cancel()
+            # Let the task handle the cancellation before the first attempt fails.
+            for _ in range(5):
+                await asyncio.sleep(0)
+            assert not task.done()
+        finally:
+            operation.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert task.cancelled()
+        assert operation.calls == 2
+        cancel.assert_awaited_once_with("query_id")
+        assert cursor.query_id == "query_id"
 
     async def test_execute_cancelled_before_request_is_sent(self):
         """Cancellation before the start task begins sends no request (no AWS)."""
