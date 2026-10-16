@@ -4,6 +4,7 @@
 # See LICENSE or https://opensource.org/licenses/MIT.
 #
 # SPDX-License-Identifier: MIT
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -13,7 +14,12 @@ from pyathena.converter import DefaultTypeConverter
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
-from tests.pyathena.util import close_during_next_request, get_query_results_responses
+from tests.pyathena.util import (
+    EVENT_TIMEOUT,
+    close_during_next_request,
+    close_during_next_retries,
+    get_query_results_responses,
+)
 
 
 async def _create_result_set(result_set_class, pages=(("1", "2"),)):
@@ -116,6 +122,23 @@ class TestAthenaAioResultSet:
         assert await result_set.fetchmany() == []
         assert await result_set.fetchall() == []
         assert result_set.rownumber is None
+
+    @pytest.mark.parametrize("close_in", ["request", "backoff"])
+    @pytest.mark.parametrize(
+        ("method", "expected"), [("fetchone", None), ("fetchmany", []), ("fetchall", [])]
+    )
+    async def test_fetch_with_close_during_retries(self, close_in, method, expected):
+        """GH-1202: a close() during the retries of a page request stops them."""
+        result_set = await _create_result_set(AthenaAioResultSet, [("1", "2"), ("3",)])
+        assert await result_set.fetchmany(2) == [(1,), (2,)]
+        get_query_results, closer = close_during_next_retries(result_set, close_in)
+        started = time.monotonic()
+        assert await getattr(result_set, method)() == expected
+        assert time.monotonic() - started < EVENT_TIMEOUT
+        if close_in == "backoff":
+            closer.join()
+        assert await result_set.fetchone() is None
+        assert get_query_results.call_count == 2
 
     async def test_get_query_results_after_close(self):
         result_set = await _create_result_set(AthenaAioResultSet, [("1", "2"), ("3",)])

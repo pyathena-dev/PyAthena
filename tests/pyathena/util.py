@@ -25,6 +25,7 @@ from pyathena.filesystem.s3_async import AioS3FileSystem
 from pyathena.filesystem.s3_core import S3Core
 from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaCalculationExecutionStatus, AthenaQueryExecution
+from pyathena.util import RetryConfig
 
 _queries = Environment(
     loader=FileSystemLoader(Path(__file__).parents[1].resolve() / "resources" / "queries")
@@ -77,6 +78,85 @@ def close_during_next_request(result_set):
 
     get_query_results.side_effect = close_and_respond
     return get_query_results
+
+
+def throttling_error(operation_name="GetQueryResults"):
+    """Build the ``ThrottlingException`` error of an AWS API operation.
+
+    Args:
+        operation_name: The name of the operation.
+
+    Returns:
+        The error.
+    """
+    return ClientError(
+        {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}}, operation_name
+    )
+
+
+class ThrottledOperation:
+    """A stubbed AWS API operation that throttles, signalling its first attempt.
+
+    The first attempt waits for ``release`` if ``block`` is set, so that a test
+    can stop the retries during the request.
+    """
+
+    def __init__(self, block=False, failures=None, operation_name="GetQueryResults"):
+        """Initialize the operation.
+
+        Args:
+            block: Whether the first attempt waits for ``release``.
+            failures: The number of attempts that throttle before one succeeds;
+                all of them if None.
+            operation_name: The name of the operation in its error.
+        """
+        self.block = block
+        self.failures = failures
+        self.operation_name = operation_name
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.calls = 0
+
+    def __call__(self, *args, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            self.started.set()
+            if self.block:
+                assert self.release.wait(EVENT_TIMEOUT)
+        if self.failures is None or self.calls <= self.failures:
+            raise throttling_error(self.operation_name)
+        return "success"
+
+
+def close_during_next_retries(result_set, close_in):
+    """Throttle the next ``GetQueryResults`` request and close the result set during its retries.
+
+    The retry policy of the result set is replaced with one whose first backoff
+    wait takes at least ``EVENT_TIMEOUT`` seconds, so that a test can tell
+    whether the close ended it.
+
+    Args:
+        result_set: A result set whose ``GetQueryResults`` responses are stubbed.
+        close_in: "request" to close during the request, "backoff" to close from
+            another thread during the backoff wait after it.
+
+    Returns:
+        The stubbed ``GetQueryResults`` mock, and the thread that closes the
+        result set during the backoff wait, if any, which the caller joins.
+    """
+    result_set._retry_config = RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT)
+    get_query_results = result_set.connection.client.get_query_results
+    closer = threading.Timer(0.1, result_set.close)
+
+    def throttle(**kwargs):
+        if close_in == "request":
+            result_set.close()
+        else:
+            closer.start()
+        raise throttling_error()
+
+    get_query_results.side_effect = throttle
+    return get_query_results, closer
 
 
 def overlapping_calls(calls, timeout=5):

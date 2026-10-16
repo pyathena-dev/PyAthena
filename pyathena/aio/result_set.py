@@ -123,7 +123,8 @@ class AthenaAioResultSet(AthenaResultSet):
 
         Raises:
             ProgrammingError: If the query ID is missing, the query has not
-                succeeded, or the result set is closed.
+                succeeded, or the result set is closed, also during the
+                request, which then makes no further attempt.
             OperationalError: If the request fails.
         """
         if self.is_closed:
@@ -134,9 +135,13 @@ class AthenaAioResultSet(AthenaResultSet):
                 self.connection.client.get_query_results,
                 config=self._retry_config,
                 logger=_logger,
+                stop_when=lambda: self.is_closed,
                 **request,
             )
         except Exception as e:
+            if self.is_closed:
+                # close() during the request stopped its retries.
+                raise ProgrammingError("AthenaAioResultSet is closed.") from e
             _logger.exception("Failed to fetch result set.")
             raise OperationalError(*e.args) from e
         else:
@@ -145,19 +150,26 @@ class AthenaAioResultSet(AthenaResultSet):
     async def _async_fetch(self) -> None:
         """Fetch the next page of rows, if any, into the buffer.
 
-        Nothing is fetched when no page remains, as after ``close()``, and the page
-        is discarded when ``close()`` runs during its request.
+        Nothing is fetched when no page remains or the result set is closed. A
+        ``close()`` during the request stops its retries, and the page is
+        discarded.
 
         Raises:
             ProgrammingError: If the next page is requested and the query ID is
-                missing, the query has not succeeded, or the result set is closed.
+                missing or the query has not succeeded.
             OperationalError: If the request fails.
         """
         if not self._next_token:
             return
-        response = await self._async_get_query_results(self._arraysize, self._next_token)
-        rows, self._next_token = self._parse_result_rows(response)
-        self._process_rows(rows)
+        try:
+            response = await self._async_get_query_results(self._arraysize, self._next_token)
+        except ProgrammingError:
+            # Raised for a close() before the request or during its retries.
+            if not self.is_closed:
+                raise
+        else:
+            rows, self._next_token = self._parse_result_rows(response)
+            self._process_rows(rows)
         # close() clears the connection before the rest, so checking after the
         # assignments catches a close() during the request or this method.
         if self.is_closed:
