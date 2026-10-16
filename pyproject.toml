@@ -75,6 +75,10 @@ dev = [
     "pyarrow>=10.0.0; python_version<'3.14'",
     "pyarrow>=22.0.0; python_version>='3.14'",
     "polars>=1.0.0",
+    # Pull requests test the newest Python with Polars 2, and the older Pythons keep
+    # the newest Polars 1.x release.
+    "polars>=2.0.0; python_version >= '3.14'",
+    "polars<2.0.0; python_version < '3.14'",
     "Jinja2>=3.1.0",
     "mypy>=0.900",
     "pytest>=3.5",

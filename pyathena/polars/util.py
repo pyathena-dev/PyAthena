@@ -97,12 +97,18 @@ def get_athena_type(dtype: Any) -> tuple[str, int, int]:
         if base_dtype == polars_type or dtype == polars_type:
             return athena_info
 
+    # Nested types are matched by their outer type, not by the types they contain.
+    if base_dtype == pl.List:
+        return ("array", 0, 0)
+    if base_dtype == pl.Struct:
+        return ("row", 0, 0)
+    # Polars 2.0 reads a Parquet map as Map; Polars 1.x reads it as a list of structs.
+    map_dtype = getattr(pl, "Map", None)
+    if map_dtype is not None and base_dtype == map_dtype:
+        return ("map", 0, 0)
+
     # Handle parameterized types that didn't match above
     dtype_str = str(dtype).lower()
-    if "list" in dtype_str:
-        return ("array", 0, 0)
-    if "struct" in dtype_str:
-        return ("row", 0, 0)
     if "decimal" in dtype_str:
         # Extract precision and scale from Decimal type if available
         if hasattr(dtype, "precision") and hasattr(dtype, "scale"):
