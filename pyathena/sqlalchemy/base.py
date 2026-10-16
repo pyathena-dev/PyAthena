@@ -7,7 +7,6 @@ import logging
 import re
 from collections.abc import Mapping, MutableMapping
 from re import Pattern
-from types import SimpleNamespace
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -98,6 +97,33 @@ ischema_names: dict[str, type[Any]] = {
     "row": AthenaStruct,
     "json": types.JSON,
 }
+
+
+class _PingConnection:
+    """A DBAPI connection whose ``cursor()`` opens an API cursor.
+
+    ``AthenaDialect.do_ping()`` passes it to ``DefaultDialect.do_ping()``, so the ping
+    does not run through the connection's default cursor class. Other attributes are
+    those of the pinged connection, which ``is_disconnect()`` receives before
+    SQLAlchemy 2.0.5.
+
+    Args:
+        connection: The pinged DBAPI connection, or the async adapter around one.
+    """
+
+    def __init__(self, connection: Any) -> None:
+        self._connection = connection
+
+    def cursor(self) -> Any:
+        """Open an API cursor on the pinged connection.
+
+        Returns:
+            The cursor, wrapped by the async adapter for an async connection.
+        """
+        return self._connection._internal_cursor(Cursor)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._connection, name)
 
 
 class AthenaDialect(DefaultDialect):
@@ -547,10 +573,7 @@ class AthenaDialect(DefaultDialect):
         # Using the plain cursor here performs the SELECT without the UNLOAD.
         # The ping still runs in DefaultDialect.do_ping(), which before SQLAlchemy 2.0.5
         # is also where a failed ping is checked for a disconnect.
-        api_connection = SimpleNamespace(
-            cursor=lambda: dbapi_connection._internal_cursor(Cursor)  # type: ignore[attr-defined]
-        )
-        return super().do_ping(cast("DBAPIConnection", api_connection))
+        return super().do_ping(cast("DBAPIConnection", _PingConnection(dbapi_connection)))
 
     def _column(self, name: str | None, type_: str, comment: str | None, partition: bool | None):
         return {

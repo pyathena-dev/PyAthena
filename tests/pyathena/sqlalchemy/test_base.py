@@ -281,32 +281,54 @@ class TestAthenaDialect:
     ):
         """DefaultDialect.do_ping() runs the ping with the API cursor and decides its result.
 
-        Before SQLAlchemy 2.0.5, it returns False when a failed ping is a disconnect, so
-        that the pool reconnects; the stand-in here returns False the same way.
+        The stand-in checks a failed ping as SQLAlchemy before 2.0.5 does: it asks
+        is_disconnect() with the pinged connection and the cursor, and returns False for
+        a disconnect so that the pool reconnects.
         """
         conn = connection_class(
             region_name="us-west-2",
             s3_staging_dir="s3://bucket/path/",
             aws_access_key_id="access_key",
             aws_secret_access_key="secret_key",
+            schema_name="pinged_schema",
             cursor_class=cursor_class,
             cursor_kwargs={"unload": True},
         )
-        cursors = []
+        error = OperationalError("ExpiredTokenException")
+        checked = []
+
+        def execute(self, operation):
+            raise error
+
+        def is_disconnect(self, e, connection, cursor):
+            checked.append((e, connection.schema_name, cursor))
+            return True
 
         def do_ping(self, dbapi_connection):
-            cursors.append(dbapi_connection.cursor())
-            return False
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute(self._dialect_specific_select_one)
+            except OperationalError as e:
+                if self.is_disconnect(e, dbapi_connection, cursor):
+                    return False
+                raise
+            finally:
+                cursor.close()
+            return True
 
+        if connection_class is AioConnection:
+            dbapi_connection = AthenaAioAdaptedConnection(MagicMock(), conn)
+            monkeypatch.setattr(AthenaAioAdaptedCursor, "execute", execute)
+        else:
+            dbapi_connection = conn
+            monkeypatch.setattr(Cursor, "execute", execute)
         monkeypatch.setattr(DefaultDialect, "do_ping", do_ping)
-        dbapi_connection = (
-            AthenaAioAdaptedConnection(MagicMock(), conn)
-            if connection_class is AioConnection
-            else conn
-        )
+        monkeypatch.setattr(dialect_class, "is_disconnect", is_disconnect)
         try:
             assert dialect_class().do_ping(dbapi_connection) is False
-            [cursor] = cursors
+            [(e, schema_name, cursor)] = checked
+            assert e is error
+            assert schema_name == "pinged_schema"
             if connection_class is AioConnection:
                 cursor = cursor._cursor
             assert type(cursor) is expected
