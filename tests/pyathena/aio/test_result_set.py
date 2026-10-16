@@ -100,13 +100,16 @@ class TestAthenaAioResultSet:
         assert result_set.connection.client.get_query_results.call_count == 2
 
     @pytest.mark.parametrize(("method", "args"), [("fetchmany", (3,)), ("fetchall", ())])
-    async def test_fetch_counts_rows_taken_before_error(self, method, args):
-        """The rows taken before a failed page request are counted in rownumber."""
+    async def test_fetch_returns_rows_taken_before_error(self, method, args):
+        """The rows taken before a failed page request are returned to the buffer."""
+        # GH-1186: they used to be dropped while counted in rownumber.
         result_set = await _create_result_set(
             AthenaAioResultSet, [("1", "2"), RuntimeError("failed")]
         )
         with pytest.raises(OperationalError):
             await getattr(result_set, method)(*args)
+        assert result_set.rownumber == 0
+        assert await result_set.fetchmany(2) == [(1,), (2,)]
         assert result_set.rownumber == 2
 
     async def test_fetch_after_close(self):
