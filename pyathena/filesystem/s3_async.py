@@ -1652,17 +1652,18 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         try:
             done = (await asyncio.wait(reads, return_when=asyncio.FIRST_EXCEPTION))[0]
         except BaseException:
-            # The reads are cancelled with the read of the range.
+            # The reads are cancelled with the read of the range. Cancelling a
+            # failed one also keeps asyncio from logging its error.
             while reads:
                 reads.pop().cancel()
             raise
-        # The errors are all retrieved, so that asyncio does not log those that
-        # are not raised as never retrieved.
+        # A comprehension, whose variable does not keep a read in this frame.
         failures = [read for read in done if not read.cancelled() and read.exception() is not None]
         if failures:
             # The reads that have not finished are cancelled, and the tasks of
             # the others are dropped, so that this frame, which the traceback
-            # of the error keeps, does not keep their data.
+            # of the error keeps, does not keep their data. Cancelling a failed
+            # read also keeps asyncio from logging its error.
             while reads:
                 reads.pop().cancel()
             done.clear()

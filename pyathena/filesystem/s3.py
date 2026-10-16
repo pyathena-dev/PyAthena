@@ -3308,7 +3308,6 @@ class S3File(AbstractBufferedFile):
             if not self.multipart_upload:
                 raise RuntimeError("Multipart upload is not initialized.")
 
-            upload_id = cast(str, self.multipart_upload.upload_id)
             try:
                 done, _ = wait(self.multipart_upload_parts, return_when=FIRST_EXCEPTION)
                 for future in done:
@@ -3321,24 +3320,13 @@ class S3File(AbstractBufferedFile):
                     parts, **self._get_request_kwargs("complete_multipart_upload")
                 )
             except BaseException:
-                # The buffer holds only the data of the last part, which a
-                # later commit() would otherwise upload alone with PutObject,
-                # so the file is closed without it, as _close_without_commit()
-                # closes it.
-                self.buffer = None
-                self.closed = True
-                self._executor.shutdown(wait=False)
-                # discard() keeps the upload if the abort fails or is
-                # interrupted, so that a later discard(), such as a
-                # transaction rollback, retries the abort. An abort failure
+                # Closed without the buffer, which holds only the data of the
+                # last part that a later commit() would otherwise upload alone
+                # with PutObject. discard() keeps the upload if the abort
+                # fails or is interrupted, so that a later discard(), such as
+                # a transaction rollback, retries the abort. An abort failure
                 # is logged so that it does not mask the original error.
-                try:
-                    self.discard()
-                except Exception:
-                    _logger.exception(
-                        f"Failed to abort multipart upload {upload_id} "
-                        f"to s3://{self.bucket}/{self.key}."
-                    )
+                self._close_without_commit()
                 raise
 
         self.fs.invalidate_cache(self.path)
@@ -3446,7 +3434,13 @@ class S3File(AbstractBufferedFile):
                 self._executor.submit(self.fs.core.get_object, path, r, **request_kwargs)
                 for r in ranges
             ]
-            done = wait(futures, return_when=FIRST_EXCEPTION).done
+            try:
+                done = wait(futures, return_when=FIRST_EXCEPTION).done
+            except BaseException:
+                # The reads are cancelled with the read of the range, as below.
+                while futures:
+                    futures.pop().cancel()
+                raise
             failed = next(
                 (f for f in done if not f.cancelled() and f.exception() is not None), None
             )
