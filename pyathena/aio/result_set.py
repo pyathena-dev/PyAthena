@@ -241,6 +241,7 @@ class AthenaAioResultSet(AthenaResultSet):
 
         The buffered rows are taken in bulk, and ``_async_fetch()`` refills the buffer
         when it is empty.
+        If a refill fails, the rows taken are returned to the buffer.
 
         Args:
             size: The maximum number of rows, or None for all remaining rows.
@@ -249,12 +250,17 @@ class AthenaAioResultSet(AthenaResultSet):
             The rows, fewer than ``size`` when the result is exhausted.
         """
         rows: list[tuple[Any | None, ...] | dict[Any, Any | None]] = []
-        while size is None or len(rows) < size:
-            if not self._rows:
-                await self._async_fetch()
+        try:
+            while size is None or len(rows) < size:
                 if not self._rows:
-                    break
-            self._take_buffered_rows(rows, size)
+                    await self._async_fetch()
+                    if not self._rows:
+                        break
+                self._take_buffered_rows(rows, size)
+        except BaseException:
+            # Also on cancellation, which a later fetch can continue from.
+            self._return_rows(rows)
+            raise
         return rows
 
     @override
