@@ -170,14 +170,13 @@ class TestAthenaResultSet:
         """
         result_set = _fetching_result_set(("1", "2"), ("3",))
         assert result_set.fetchmany(2) == [(1,), (2,)]
-        get_query_results, closer = close_during_next_retries(result_set, close_in)
+        operation = close_during_next_retries(result_set, close_in)
         started = time.monotonic()
         assert getattr(result_set, method)() == expected
         assert time.monotonic() - started < EVENT_TIMEOUT
-        if close_in == "backoff":
-            closer.join()
+        operation.join()
         assert result_set.fetchone() is None
-        assert get_query_results.call_count == 2
+        assert operation.calls == 1
 
     @pytest.mark.parametrize("close_in", ["request", "backoff"])
     def test_fetch_all_rows_with_close_during_retries(self, close_in):
@@ -186,14 +185,13 @@ class TestAthenaResultSet:
         ``_fetch_all_rows_as_csv()`` requests the pages in the same way.
         """
         result_set = _fetching_result_set(("1", "2"), ("3",))
-        get_query_results, closer = close_during_next_retries(result_set, close_in)
+        operation = close_during_next_retries(result_set, close_in)
         started = time.monotonic()
         with pytest.raises(ProgrammingError, match=r"AthenaResultSet is closed\."):
             result_set._fetch_all_rows()
         assert time.monotonic() - started < EVENT_TIMEOUT
-        if close_in == "backoff":
-            closer.join()
-        assert get_query_results.call_count == 2
+        operation.join()
+        assert operation.calls == 1
 
     def test_get_query_results_after_close(self):
         result_set = _fetching_result_set(("1", "2"), ("3",))

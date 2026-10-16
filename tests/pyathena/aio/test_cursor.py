@@ -23,6 +23,7 @@ from tests.pyathena.util import (
     ThrottledOperation,
     succeeded_query_execution,
     throttle_metadata_api,
+    wait_until,
 )
 
 
@@ -418,10 +419,7 @@ class TestAioCursor:
                 await task
         finally:
             operation.release.set()
-        deadline = asyncio.get_running_loop().time() + EVENT_TIMEOUT
-        while operation.calls < 3:
-            assert asyncio.get_running_loop().time() < deadline
-            await asyncio.sleep(0.01)
+        await wait_until(lambda: operation.calls == 3)
 
     async def test_execute_cancelled_before_request_is_sent(self):
         """Cancellation before the start task begins sends no request (no AWS)."""

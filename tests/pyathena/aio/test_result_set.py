@@ -131,14 +131,13 @@ class TestAthenaAioResultSet:
         """GH-1202: a close() during the retries of a page request stops them."""
         result_set = await _create_result_set(AthenaAioResultSet, [("1", "2"), ("3",)])
         assert await result_set.fetchmany(2) == [(1,), (2,)]
-        get_query_results, closer = close_during_next_retries(result_set, close_in)
+        operation = close_during_next_retries(result_set, close_in)
         started = time.monotonic()
         assert await getattr(result_set, method)() == expected
         assert time.monotonic() - started < EVENT_TIMEOUT
-        if close_in == "backoff":
-            closer.join()
+        operation.join()
         assert await result_set.fetchone() is None
-        assert get_query_results.call_count == 2
+        assert operation.calls == 1
 
     async def test_get_query_results_after_close(self):
         result_set = await _create_result_set(AthenaAioResultSet, [("1", "2"), ("3",)])

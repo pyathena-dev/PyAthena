@@ -378,44 +378,46 @@ def retry_api_call(
         """Whether an event of the enclosing scopes is set or ``stop_when`` holds."""
         return any(event.is_set() for event in events) or (stop_when is not None and stop_when())
 
-    # Without a stop, tenacity's own sleep is kept.
-    stop_kwargs: dict[str, Any] = {}
     # The error of the attempt before a backoff wait, raised if the wait is stopped.
     failures: list[BaseException] = []
-    if events or stop_when is not None:
+    # A single event can be waited for; anything else is polled.
+    wait_for_event = len(events) == 1 and stop_when is None
 
-        def record_failure(retry_state: RetryCallState) -> None:
-            """Keep the error of the failed attempt, which a stopped wait raises.
+    def record_failure(retry_state: RetryCallState) -> None:
+        """Keep the error of the failed attempt, which a stopped wait raises.
 
-            Args:
-                retry_state: The state of the call before the backoff wait.
-            """
-            outcome = retry_state.outcome
-            if outcome is not None and (error := outcome.exception()) is not None:
-                failures[:] = [error]
+        Args:
+            retry_state: The state of the call before the backoff wait.
+        """
+        outcome = retry_state.outcome
+        if outcome is not None and (error := outcome.exception()) is not None:
+            failures[:] = [error]
 
-        def sleep(seconds: float) -> None:
-            """Wait before the next attempt, ending the wait once the retries are stopped.
+    def sleep(seconds: float) -> None:
+        """Wait before the next attempt, ending the wait once the retries are stopped.
 
-            Args:
-                seconds: The backoff time.
+        Args:
+            seconds: The backoff time.
 
-            Raises:
-                BaseException: The error of the last attempt, instead of
-                    making the next one, if the retries are stopped.
-            """
-            deadline = time.monotonic() + seconds
-            while not stopped():
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return
-                if len(events) == 1 and stop_when is None:
-                    events[0].wait(remaining)
-                else:
-                    time.sleep(min(remaining, _STOP_POLL_INTERVAL))
-            raise failures[0]
+        Raises:
+            BaseException: The error of the last attempt, instead of
+                making the next one, if the retries are stopped.
+        """
+        deadline = time.monotonic() + seconds
+        while not stopped():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            if wait_for_event:
+                events[0].wait(remaining)
+            else:
+                time.sleep(min(remaining, _STOP_POLL_INTERVAL))
+        raise failures[0]
 
-        stop_kwargs = {"before_sleep": record_failure, "sleep": sleep}
+    # Without a stop, tenacity's own sleep is kept.
+    stop_kwargs: dict[str, Any] = (
+        {"before_sleep": record_failure, "sleep": sleep} if events or stop_when is not None else {}
+    )
 
     retry = tenacity.Retrying(
         retry=retry_if_exception(

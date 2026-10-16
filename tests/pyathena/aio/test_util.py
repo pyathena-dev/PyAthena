@@ -15,8 +15,8 @@ import pytest
 from botocore.exceptions import ClientError
 
 from pyathena.aio.util import async_retry_api_call, create_in_thread, run_in_thread
-from pyathena.util import RetryConfig, retry_api_call
-from tests.pyathena.util import EVENT_TIMEOUT, ThrottledOperation
+from pyathena.util import RetryConfig, retry_api_call, stop_retries_on
+from tests.pyathena.util import EVENT_TIMEOUT, ThrottledOperation, wait_until
 
 _VALUE: contextvars.ContextVar[str] = contextvars.ContextVar("_VALUE", default="unset")
 
@@ -31,10 +31,7 @@ async def _cancel_once_started(task, operation, stop_in):
             cancel during the backoff wait after it.
     """
     # Polled, since the default executor may have no free thread.
-    deadline = time.monotonic() + EVENT_TIMEOUT
-    while not operation.started.is_set():
-        assert time.monotonic() < deadline
-        await asyncio.sleep(0.01)
+    await wait_until(operation.started.is_set)
     if stop_in == "backoff":
         # Lets the first attempt fail and the backoff wait begin.
         await asyncio.sleep(0.1)
@@ -260,12 +257,22 @@ async def test_async_retry_api_call_not_stoppable():
     )
     try:
         await _cancel_once_started(task, operation, "request")
-        deadline = time.monotonic() + EVENT_TIMEOUT
-        while operation.calls < 3:
-            assert time.monotonic() < deadline
-            await asyncio.sleep(0.01)
+        await wait_until(lambda: operation.calls == 3)
     finally:
         operation.release.set()
+
+
+async def test_async_retry_api_call_not_stoppable_in_stopped_scope():
+    """A request that is not stoppable ignores the stop scopes of its caller."""
+    stop = threading.Event()
+    stop.set()
+    operation = ThrottledOperation(failures=2)
+    with stop_retries_on(stop):
+        result = await async_retry_api_call(
+            operation, RetryConfig(attempt=3, multiplier=0), stoppable=False
+        )
+    assert result == "success"
+    assert operation.calls == 3
 
 
 async def test_async_retry_api_call_retries():

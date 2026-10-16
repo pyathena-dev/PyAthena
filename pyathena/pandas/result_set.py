@@ -10,10 +10,10 @@ from collections import abc
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
-from contextvars import Context, copy_context
+from contextvars import copy_context
 from functools import partial
 from io import BufferedReader, BytesIO, IOBase, StringIO, TextIOWrapper
-from itertools import chain, islice, repeat
+from itertools import chain, islice
 from multiprocessing import cpu_count
 from types import GeneratorType
 from typing import (
@@ -1635,9 +1635,8 @@ class AthenaPandasResultSet(AthenaResultSet):
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 footers = list(
                     executor.map(
-                        Context.run,
+                        lambda context, path: context.run(self._read_parquet_footer, path),
                         contexts,
-                        repeat(self._read_parquet_footer),
                         self._data_manifest,
                     )
                 )

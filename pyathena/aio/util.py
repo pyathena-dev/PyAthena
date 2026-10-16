@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import logging
 import threading
@@ -87,24 +88,23 @@ async def async_retry_api_call(
         stop_when: Passed to ``retry_api_call``.
         stoppable: Whether a cancellation of the caller stops the retries. A
             request that cleans up, such as one that stops a query or
-            terminates a session, passes False: its retries then run to their
-            end in the thread, as with ``asyncio.to_thread()``.
+            terminates a session, passes False: its retries then ignore the
+            stop scopes (see :func:`~pyathena.util.shield_retries`) and run to
+            their end in the thread, as with ``asyncio.to_thread()``.
         **kwargs: Keyword arguments to pass to the function.
 
     Returns:
         The result of the successful function call.
     """
-    run = run_in_thread if stoppable else asyncio.to_thread
-    return await run(
-        retry_api_call,
-        func,
-        config,
-        logger,
-        *args,
-        stop_on=stop_on,
-        stop_when=stop_when,
-        **kwargs,
-    )
+
+    def call() -> Any:
+        """Make the call, ignoring the stop scopes unless it is stoppable."""
+        with contextlib.nullcontext() if stoppable else shield_retries():
+            return retry_api_call(
+                func, config, logger, *args, stop_on=stop_on, stop_when=stop_when, **kwargs
+            )
+
+    return await (run_in_thread(call) if stoppable else asyncio.to_thread(call))
 
 
 async def close_in_thread(close: Callable[[], Any]) -> None:

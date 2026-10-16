@@ -5,6 +5,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+import asyncio
 import io
 import threading
 import time
@@ -30,6 +31,10 @@ from pyathena.util import RetryConfig
 _queries = Environment(
     loader=FileSystemLoader(Path(__file__).parents[1].resolve() / "resources" / "queries")
 )
+
+
+# Seconds a test waits for an event from a helper thread before failing.
+EVENT_TIMEOUT = 10
 
 
 def get_query_results_responses(*pages):
@@ -128,6 +133,43 @@ class ThrottledOperation:
         return "success"
 
 
+class StoppingOperation:
+    """A stubbed AWS API operation that always throttles and stops its retries.
+
+    The retries are stopped during the first request, or from another thread
+    during the backoff wait after it.
+    """
+
+    def __init__(self, stop, stop_in, operation_name="GetQueryResults"):
+        """Initialize the operation.
+
+        Args:
+            stop: Stops the retries; called once.
+            stop_in: "request" to stop during the first request, "backoff" to
+                stop from another thread 0.1 seconds into the backoff wait.
+            operation_name: The name of the operation in its error.
+        """
+        self.stop = stop
+        self.stop_in = stop_in
+        self.error = throttling_error(operation_name)
+        self.calls = 0
+        self._stopper = threading.Timer(0.1, stop)
+
+    def __call__(self, *args, **kwargs):
+        if self.calls == 0:
+            if self.stop_in == "request":
+                self.stop()
+            else:
+                self._stopper.start()
+        self.calls += 1
+        raise self.error
+
+    def join(self):
+        """Wait for the thread that stops the retries during the backoff wait, if any."""
+        if self._stopper.ident is not None:
+            self._stopper.join()
+
+
 def close_during_next_retries(result_set, close_in):
     """Throttle the next ``GetQueryResults`` request and close the result set during its retries.
 
@@ -137,26 +179,29 @@ def close_during_next_retries(result_set, close_in):
 
     Args:
         result_set: A result set whose ``GetQueryResults`` responses are stubbed.
-        close_in: "request" to close during the request, "backoff" to close from
-            another thread during the backoff wait after it.
+        close_in: "request" or "backoff"; see :class:`StoppingOperation`.
 
     Returns:
-        The stubbed ``GetQueryResults`` mock, and the thread that closes the
-        result set during the backoff wait, if any, which the caller joins.
+        The stubbed ``GetQueryResults`` operation, whose ``join()`` the caller
+        calls before the end of the test.
     """
     result_set._retry_config = RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT)
-    get_query_results = result_set.connection.client.get_query_results
-    closer = threading.Timer(0.1, result_set.close)
+    operation = StoppingOperation(result_set.close, close_in)
+    result_set.connection.client.get_query_results.side_effect = operation
+    return operation
 
-    def throttle(**kwargs):
-        if close_in == "request":
-            result_set.close()
-        else:
-            closer.start()
-        raise throttling_error()
 
-    get_query_results.side_effect = throttle
-    return get_query_results, closer
+async def wait_until(predicate, timeout=EVENT_TIMEOUT):
+    """Wait, without blocking the event loop, until a condition holds.
+
+    Args:
+        predicate: The condition.
+        timeout: The longest wait, in seconds.
+    """
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline
+        await asyncio.sleep(0.01)
 
 
 def overlapping_calls(calls, timeout=5):
@@ -386,10 +431,6 @@ def wait_for_spark_session_state(client, session_id, state, timeout=120):
             return
         time.sleep(1)
     raise AssertionError(f"Session {session_id} did not become {state} in {timeout} seconds.")
-
-
-# Seconds a test waits for an event from a helper thread before failing.
-EVENT_TIMEOUT = 10
 
 
 class ImmediateExecutor:
