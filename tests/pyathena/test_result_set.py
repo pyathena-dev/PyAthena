@@ -115,6 +115,17 @@ class TestAthenaResultSet:
         assert result_set.fetchmany(2) == [(1,), (2,)]
         assert result_set.rownumber == 2
 
+    @pytest.mark.parametrize(("method", "args"), [("fetchone", ()), ("fetchall", ())])
+    def test_fetch_after_failed_conversion(self, method, args):
+        """A page whose rows fail to convert is requested again by a later fetch."""
+        # GH-1186: the token of the next page used to be advanced first, so the
+        # page was skipped.
+        result_set = _fetching_result_set(("1",), ("x",), ("2",))
+        assert result_set.fetchone() == (1,)
+        with pytest.raises(ValueError, match="x"):
+            getattr(result_set, method)(*args)
+        assert result_set._next_token == "token1"
+
     def test_fetch_after_close(self):
         result_set = _fetching_result_set(("1", "2"), ("3",))
         result_set.close()

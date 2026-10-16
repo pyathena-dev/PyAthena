@@ -112,6 +112,16 @@ class TestAthenaAioResultSet:
         assert await result_set.fetchmany(2) == [(1,), (2,)]
         assert result_set.rownumber == 2
 
+    async def test_fetch_after_failed_conversion(self):
+        """A page whose rows fail to convert is requested again by a later fetch."""
+        # GH-1186: the token of the next page used to be advanced first, so the
+        # page was skipped.
+        result_set = await _create_result_set(AthenaAioResultSet, [("1",), ("x",), ("2",)])
+        assert await result_set.fetchone() == (1,)
+        with pytest.raises(ValueError, match="x"):
+            await result_set.fetchall()
+        assert result_set._next_token == "token1"
+
     async def test_fetch_after_close(self):
         result_set = await _create_result_set(AthenaAioResultSet, [("1", "2"), ("3",)])
         result_set.close()
