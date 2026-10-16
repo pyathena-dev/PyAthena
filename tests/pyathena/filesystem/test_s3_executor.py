@@ -116,6 +116,9 @@ class TestS3AioThreadPool:
             running = pool.submit(work)
             waiting = asyncio.ensure_future(pool.wait_shielded(running))
             await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+            # Lets the task start waiting before it is cancelled.
+            while not running._done_callbacks:
+                await asyncio.sleep(0)
             waiting.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await waiting
