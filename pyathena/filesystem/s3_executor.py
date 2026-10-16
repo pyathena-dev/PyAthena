@@ -328,9 +328,9 @@ class S3AioThreadPool(S3Executor):
         waiter = asyncio.wrap_future(future)
         waiter.add_done_callback(lambda f: f.cancelled() or f.exception())
         try:
-            # Unlike shield(), which also logs the failure of a future that
-            # ends after a cancellation since Python 3.15, wait() leaves the
-            # future alone when the waiting task is cancelled.
+            # Unlike shield(), which on Python 3.14 and later also logs the
+            # failure of a future that ends after a cancellation, wait()
+            # leaves the future alone when the waiting task is cancelled.
             await asyncio.wait([waiter])
             return waiter.result()
         finally:
