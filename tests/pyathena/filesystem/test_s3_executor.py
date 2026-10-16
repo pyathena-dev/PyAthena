@@ -120,16 +120,19 @@ class TestS3AioThreadPool:
             with pytest.raises(asyncio.CancelledError):
                 await waiting
             release.set()
+            # The worker has run the callbacks of the call once it is shut
+            # down, and the event loop runs theirs on the next iterations.
+            await asyncio.to_thread(pool.shutdown, True)
             with pytest.raises(PermissionError, match="Access Denied"):
-                await asyncio.wrap_future(running)
-            del waiting
+                running.result()
+            # The callbacks of the future of the call keep its waiter.
+            del waiting, running
             gc.collect()
-            # Lets the event loop run the callbacks of the failure.
-            await asyncio.sleep(0)
+            for _ in range(3):
+                await asyncio.sleep(0)
             return logged
 
         assert asyncio.run(main()) == []
-        pool.shutdown()
 
     def test_shutdown(self):
         # The calls submitted before the shutdown still run.

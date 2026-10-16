@@ -522,8 +522,12 @@ class TestAioS3FileSystem:
             release.set()
         with pytest.raises(asyncio.CancelledError):
             await task
+        # The threads have run the callbacks of the requests once they are
+        # shut down, and the event loop runs theirs on the next iterations.
+        await asyncio.to_thread(fs._thread_pool.shutdown, True)
         gc.collect()
-        await asyncio.sleep(0)
+        for _ in range(3):
+            await asyncio.sleep(0)
 
         assert events == (["complete", "abort"] if completion_fails else ["complete"])
         # GH-1186: a completion that fails after the cancellation is not
@@ -588,8 +592,12 @@ class TestAioS3FileSystem:
             release.set()
         with pytest.raises(asyncio.CancelledError):
             await task
+        # The threads have run the callbacks of the requests once they are
+        # shut down, and the event loop runs theirs on the next iterations.
+        await asyncio.to_thread(fs._thread_pool.shutdown, True)
         gc.collect()
-        await asyncio.sleep(0)
+        for _ in range(3):
+            await asyncio.sleep(0)
 
         assert events == (["create"] if creation_fails else ["create", ("abort", "uploadid")])
         # GH-1186: a creation that fails after the cancellation is not logged
