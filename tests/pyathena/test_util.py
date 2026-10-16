@@ -1,3 +1,5 @@
+import threading
+import time
 from typing import Any
 
 import pytest
@@ -12,8 +14,11 @@ from pyathena.util import (
     is_retryable_error,
     parse_output_location,
     retry_api_call,
+    shield_retries,
+    stop_retries_on,
     strtobool,
 )
+from tests.pyathena.util import EVENT_TIMEOUT
 
 
 def test_parse_output_location():
@@ -372,3 +377,141 @@ def test_retry_api_call_stops_on_predicate(code, expected_calls):
 
     assert caught.value is error
     assert calls == expected_calls
+
+
+class _ThrottledCall:
+    """A call that always throttles and stops its retries at a given point."""
+
+    def __init__(self, stop, stop_in):
+        """Initialize the call.
+
+        Args:
+            stop: Stops the retries; called once.
+            stop_in: "request" to stop during the first attempt, "backoff" to
+                stop from another thread during the backoff wait after it.
+        """
+        self.stop = stop
+        self.stop_in = stop_in
+        self.error = _throttling_error()
+        self.calls = 0
+        self.timer = None
+
+    def __call__(self):
+        if self.calls == 0:
+            if self.stop_in == "request":
+                self.stop()
+            else:
+                self.timer = threading.Timer(0.1, self.stop)
+                self.timer.start()
+        self.calls += 1
+        raise self.error
+
+    def join(self):
+        """Wait for the thread that stops the backoff wait, if any."""
+        if self.timer is not None:
+            self.timer.join()
+
+
+@pytest.mark.parametrize("stop_in", ["request", "backoff"])
+def test_retry_api_call_stopped_by_event(stop_in):
+    """GH-1202: the event of a stop scope ends the retries and their backoff wait.
+
+    Without the stop, the backoff wait would take at least EVENT_TIMEOUT seconds.
+    """
+    event = threading.Event()
+    call = _ThrottledCall(event.set, stop_in)
+    started = time.monotonic()
+    with stop_retries_on(event), pytest.raises(ClientError) as caught:
+        retry_api_call(call, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
+    call.join()
+    assert time.monotonic() - started < EVENT_TIMEOUT
+    assert caught.value is call.error
+    assert call.calls == 1
+
+
+@pytest.mark.parametrize("stop_in", ["request", "backoff"])
+def test_retry_api_call_stopped_by_stop_when(stop_in):
+    """GH-1202: ``stop_when`` ends the retries and their backoff wait."""
+    stopped = threading.Event()
+    call = _ThrottledCall(stopped.set, stop_in)
+    started = time.monotonic()
+    with pytest.raises(ClientError) as caught:
+        retry_api_call(
+            call, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT), stop_when=stopped.is_set
+        )
+    call.join()
+    assert time.monotonic() - started < EVENT_TIMEOUT
+    assert caught.value is call.error
+    assert call.calls == 1
+
+
+def test_retry_api_call_stopped_before_call():
+    """A call in a stopped scope makes its first attempt, but no retry."""
+    event = threading.Event()
+    event.set()
+    call = _ThrottledCall(event.set, "request")
+    with stop_retries_on(event), pytest.raises(ClientError):
+        retry_api_call(call, RetryConfig(multiplier=0))
+    assert call.calls == 1
+
+
+def test_retry_api_call_stopped_by_enclosing_scope():
+    """The event of any enclosing scope stops the retries."""
+    outer = threading.Event()
+    call = _ThrottledCall(outer.set, "backoff")
+    with (
+        stop_retries_on(outer),
+        stop_retries_on(threading.Event()),
+        pytest.raises(ClientError),
+    ):
+        retry_api_call(call, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
+    call.join()
+    assert call.calls == 1
+
+
+def test_retry_api_call_shielded():
+    """Retries in a shielded block ignore the events of the enclosing scopes."""
+    event = threading.Event()
+    event.set()
+    error = _throttling_error()
+    calls = 0
+
+    def call():
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise error
+        return "success"
+
+    with stop_retries_on(event), shield_retries():
+        assert retry_api_call(call, RetryConfig(multiplier=0)) == "success"
+    assert calls == 3
+    # A scope opened in the shielded block stops the retries again.
+    calls = 0
+    with (
+        stop_retries_on(event),
+        shield_retries(),
+        stop_retries_on(event),
+        pytest.raises(ClientError),
+    ):
+        retry_api_call(call, RetryConfig(multiplier=0))
+    assert calls == 1
+
+
+def test_retry_api_call_scope_ends_with_block():
+    """The event of a scope does not stop the retries after its block."""
+    event = threading.Event()
+    with stop_retries_on(event):
+        event.set()
+    error = _throttling_error()
+    calls = 0
+
+    def call():
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise error
+        return "success"
+
+    assert retry_api_call(call, RetryConfig(multiplier=0)) == "success"
+    assert calls == 3

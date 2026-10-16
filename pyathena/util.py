@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Iterable
+import threading
+import time
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from re import Pattern
 from typing import TYPE_CHECKING, Any
 
 import tenacity
 from tenacity import (
+    RetryCallState,
     after_log,
     retry_if_exception,
     stop_after_attempt,
@@ -265,12 +270,65 @@ def is_retryable_error(ex: BaseException, config: RetryConfig) -> bool:
     )
 
 
+# The events of the enclosing stop scopes of retry_api_call(); see stop_retries_on().
+_RETRY_STOP_EVENTS: ContextVar[tuple[threading.Event, ...]] = ContextVar(
+    "pyathena_retry_stop_events", default=()
+)
+# The longest that a backoff wait sleeps before it checks again whether the
+# retries are stopped, unless it can wait for the single event of a scope.
+_STOP_POLL_INTERVAL = 0.1
+
+
+@contextmanager
+def stop_retries_on(event: threading.Event) -> Iterator[None]:
+    """Stop the retries of AWS API calls in this context once an event is set.
+
+    A call of :func:`retry_api_call` in the block makes no further attempt
+    once the event is set, ends its backoff wait, and raises the error of its
+    last attempt. That includes the calls in threads that run a copy of this
+    context, as ``asyncio.to_thread()`` runs its function. The scopes nest: a
+    call stops when the event of any enclosing scope is set. The stop is
+    cooperative: a request that has been sent, and the retries of botocore
+    itself, still run to their end.
+
+    Args:
+        event: The event that stops the retries.
+
+    Yields:
+        None.
+    """
+    token = _RETRY_STOP_EVENTS.set((*_RETRY_STOP_EVENTS.get(), event))
+    try:
+        yield
+    finally:
+        _RETRY_STOP_EVENTS.reset(token)
+
+
+@contextmanager
+def shield_retries() -> Iterator[None]:
+    """Keep the events of the enclosing stop scopes from stopping retries in this block.
+
+    For cleanup that has to run to its end even when the work that it cleans
+    up was stopped, such as the abort of a multipart upload. A scope that
+    :func:`stop_retries_on` opens in the block stops the retries again.
+
+    Yields:
+        None.
+    """
+    token = _RETRY_STOP_EVENTS.set(())
+    try:
+        yield
+    finally:
+        _RETRY_STOP_EVENTS.reset(token)
+
+
 def retry_api_call(
     func: Callable[..., Any],
     config: RetryConfig,
     logger: logging.Logger | None = None,
     *args,
     stop_on: Callable[[BaseException], bool] | None = None,
+    stop_when: Callable[[], bool] | None = None,
     **kwargs,
 ) -> Any:
     """Execute a function with automatic retry logic for AWS API calls.
@@ -286,13 +344,18 @@ def retry_api_call(
         *args: Positional arguments to pass to the function.
         stop_on: Optional predicate; an exception it accepts is raised at once
             instead of being retried.
+        stop_when: Optional condition, checked from the thread of the call,
+            that stops the retries once it holds, as the event of
+            :func:`stop_retries_on` does. The backoff wait checks it at least
+            every 0.1 seconds.
         **kwargs: Keyword arguments to pass to the function.
 
     Returns:
         The result of the successful function call.
 
     Raises:
-        The original exception if all retry attempts are exhausted.
+        The original exception if all retry attempts are exhausted, or the
+        error of the last attempt if the retries are stopped.
 
     Example:
         >>> from pyathena.util import RetryConfig, retry_api_call
@@ -309,9 +372,56 @@ def retry_api_call(
         This includes recognized Glue error codes wrapped in MetadataException.
         Other errors are propagated without retrying.
     """
+    events = _RETRY_STOP_EVENTS.get()
+
+    def stopped() -> bool:
+        """Whether an event of the enclosing scopes is set or ``stop_when`` holds."""
+        return any(event.is_set() for event in events) or (stop_when is not None and stop_when())
+
+    # Without a stop, tenacity's own sleep is kept.
+    stop_kwargs: dict[str, Any] = {}
+    # The error of the attempt before a backoff wait, raised if the wait is stopped.
+    failures: list[BaseException] = []
+    if events or stop_when is not None:
+
+        def record_failure(retry_state: RetryCallState) -> None:
+            """Keep the error of the failed attempt, which a stopped wait raises.
+
+            Args:
+                retry_state: The state of the call before the backoff wait.
+            """
+            outcome = retry_state.outcome
+            if outcome is not None and (error := outcome.exception()) is not None:
+                failures[:] = [error]
+
+        def sleep(seconds: float) -> None:
+            """Wait before the next attempt, ending the wait once the retries are stopped.
+
+            Args:
+                seconds: The backoff time.
+
+            Raises:
+                BaseException: The error of the last attempt, instead of
+                    making the next one, if the retries are stopped.
+            """
+            deadline = time.monotonic() + seconds
+            while not stopped():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                if len(events) == 1 and stop_when is None:
+                    events[0].wait(remaining)
+                else:
+                    time.sleep(min(remaining, _STOP_POLL_INTERVAL))
+            raise failures[0]
+
+        stop_kwargs = {"before_sleep": record_failure, "sleep": sleep}
+
     retry = tenacity.Retrying(
         retry=retry_if_exception(
-            lambda ex: is_retryable_error(ex, config) and not (stop_on and stop_on(ex))
+            lambda ex: (
+                is_retryable_error(ex, config) and not (stop_on and stop_on(ex)) and not stopped()
+            )
         ),
         stop=stop_after_attempt(config.attempt),
         # Uniform jitter of up to one multiplier keeps concurrent clients from
@@ -324,5 +434,11 @@ def retry_api_call(
         + wait_random(0, config.multiplier),
         after=after_log(logger, logger.getEffectiveLevel()) if logger else None,  # type: ignore[arg-type]
         reraise=True,
+        **stop_kwargs,
     )
-    return retry(func, *args, **kwargs)
+    try:
+        return retry(func, *args, **kwargs)
+    finally:
+        # The traceback of a raised error keeps this frame, which would keep
+        # the error in a reference cycle through the list.
+        failures.clear()
