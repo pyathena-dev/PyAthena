@@ -472,11 +472,8 @@ class AthenaResultSet(CursorIterator):
         if not self._next_token:
             return
         response = self._get_query_results(self._arraysize, self._next_token)
-        rows, next_token = self._parse_result_rows(response)
+        rows, self._next_token = self._parse_result_rows(response)
         self._process_rows(rows)
-        # Advanced once the rows are converted, so that a fetch after a failed
-        # conversion requests the page again instead of skipping it.
-        self._next_token = next_token
         # close() clears the connection before the rest, so checking after the
         # assignments catches a close() during the request or this method.
         if self.is_closed:
