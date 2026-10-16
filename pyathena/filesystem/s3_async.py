@@ -580,9 +580,9 @@ class AioS3FileSystem(AsyncFileSystem):
         the requests of all its copies together. On a cancellation, the
         requests that have not started are cancelled, the running ones are
         waited for in a thread of the filesystem, the upload is aborted if it
-        was created and has not completed, and the cancellation is re-raised. This also holds
-        when the shutdown of the event loop, such as at the end of
-        ``asyncio.run()``, cancels the copy, also after its cleanup has
+        was created and has not completed, and the cancellation is re-raised.
+        This also holds when the shutdown of the event loop, such as at the
+        end of ``asyncio.run()``, cancels the copy, also after its cleanup has
         started. A repeated cancellation returns without stopping this
         cleanup.
 
@@ -671,8 +671,8 @@ class AioS3FileSystem(AsyncFileSystem):
             self.core.create_multipart_upload, plan.destination, **plan.create_params
         )
         try:
-            # A cancellation does not cancel the creation, so that _abort()
-            # can wait for an upload that it creates.
+            # A cancellation of this task leaves the creation to the cleanup,
+            # which waits for an upload that a started creation creates.
             multipart_upload = await self._thread_pool.wait_shielded(creation)
             tasks = [asyncio.ensure_future(_upload_part(i, r)) for i, r in enumerate(plan.ranges)]
             for task in tasks:
@@ -694,8 +694,8 @@ class AioS3FileSystem(AsyncFileSystem):
                 cast(list[S3MultipartUploadPart], parts),
                 **plan.complete_params,
             )
-            # A cancellation does not cancel the completion, so that _abort()
-            # can wait for it.
+            # A cancellation of this task leaves the completion to the
+            # cleanup, which waits for a started completion.
             completed = await self._thread_pool.wait_shielded(completion)
         except BaseException:
             # Also on cancellation, as S3FileSystem._finish_multipart_upload
