@@ -309,7 +309,8 @@ def shield_retries() -> Iterator[None]:
     """Keep the events of the enclosing stop scopes from stopping retries in this block.
 
     For cleanup that has to run to its end even when the work that it cleans
-    up was stopped, such as the abort of a multipart upload. A scope that
+    up was stopped, such as the close of an object whose construction was
+    cancelled, or a request that stops a query. A scope that
     :func:`stop_retries_on` opens in the block stops the retries again.
 
     Yields:
