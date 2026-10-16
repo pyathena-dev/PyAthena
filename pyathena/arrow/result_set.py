@@ -197,27 +197,24 @@ class AthenaArrowResultSet(AthenaResultSet):
 
     @override
     def _fetch(self) -> None:
-        """Buffer the rows of the next record batch that has any.
-
-        A table can hold empty record batches between others, such as one of
-        an empty result file, which would otherwise end the fetches early.
-        """
-        rows = next((batch for batch in self._batches if batch.num_rows), None)
-        if rows is None:
+        try:
+            rows = next(self._batches)
+        except StopIteration:
             return
-        # Read the columns and their converters by position; to_pydict() and the
-        # converters property keep one column per name.
-        columns = [column.to_pylist() for column in rows.columns]
-        description = self.description if self.description else []
-        converters = [self._converter.get(d[1]) for d in description]
-        if any(convert is not _to_default for convert in converters):
-            processed_rows = [
-                tuple(convert(v) for convert, v in zip(converters, row, strict=False))
-                for row in zip(*columns, strict=False)
-            ]
         else:
-            processed_rows = list(zip(*columns, strict=False))
-        self._rows.extend(processed_rows)
+            # Read the columns and their converters by position; to_pydict() and the
+            # converters property keep one column per name.
+            columns = [column.to_pylist() for column in rows.columns]
+            description = self.description if self.description else []
+            converters = [self._converter.get(d[1]) for d in description]
+            if any(convert is not _to_default for convert in converters):
+                processed_rows = [
+                    tuple(convert(v) for convert, v in zip(converters, row, strict=False))
+                    for row in zip(*columns, strict=False)
+                ]
+            else:
+                processed_rows = list(zip(*columns, strict=False))
+            self._rows.extend(processed_rows)
 
     def _open_csv(self, location: str) -> Any:
         """Open the CSV result file for ``pyarrow.csv.read_csv()``.

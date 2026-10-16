@@ -139,7 +139,8 @@ kept. A failed part copy aborts the multipart upload. So does an interrupt, or t
 cancellation of an `AioS3FileSystem` copy, including one by the shutdown of the event
 loop at the end of `asyncio.run()`, unless the upload has already completed. A
 CreateMultipartUpload request and the part copies in flight finish first, and so does
-the CompleteMultipartUpload request of an `AioS3FileSystem` copy. A further interrupt
+the CompleteMultipartUpload request of an `AioS3FileSystem` copy; the requests of an
+`AioS3FileSystem` copy that have not started are cancelled. A further interrupt
 while the CreateMultipartUpload request is waited for is ignored. One while the part
 copies are waited for or the upload is aborted stops the cleanup, and the upload ID is
 logged.
@@ -541,7 +542,7 @@ It drops the buffer and closes the file before waiting, so a later close or defe
 It suppresses Ctrl-C during the blocking recovery wait and re-raises the original error when cleanup finishes.
 An additional interruption outside that wait can stop cleanup; once the upload identity is known, `discard()` can retry the abort.
 An abort failure retains the upload identity for `discard()` to retry.
-A failed multipart `commit()` also drops the buffered data, so a later `commit()` neither completes that upload nor uploads the last part alone with PutObject.
+A failed multipart `commit()` also closes the file without its buffered data, so a later `commit()` neither completes that upload nor uploads the last part alone with PutObject.
 Cancelling an async buffered write through `asyncio.to_thread` still allows its writer thread to finish.
 
 ### Multipart requests

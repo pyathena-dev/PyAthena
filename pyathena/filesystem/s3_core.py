@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import math
+import traceback
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -631,14 +632,24 @@ class S3Core:
         Raises:
             OSError: The translation of an S3 error response (see
                 :class:`~pyathena.filesystem.s3_errors.S3ClientError`).
+
+        Note:
+            The frames of a raised error below this method, those of the
+            retries and of botocore, have no local variables, so that they
+            keep neither the request, such as the body of a part, nor the
+            retry state, which keeps the error in a reference cycle.
         """
         func = getattr(self._client, method) if isinstance(method, str) else method
         if self._request_kwargs:
             request = {**self.operation_params(func.__name__, self._request_kwargs), **request}
         try:
             response = retry_api_call(func, config=self._retry_config, logger=_logger, **request)
-        except botocore.exceptions.ClientError as e:
-            raise S3ClientError(e).os_error from e
+        except BaseException as e:
+            # clear_frames() skips this frame, which is still executing.
+            traceback.clear_frames(e.__traceback__)
+            if isinstance(e, botocore.exceptions.ClientError):
+                raise S3ClientError(e).os_error from e
+            raise
         return cast(dict[str, Any], response)
 
     def head_object(self, path: S3Path, **params) -> S3Metadata:

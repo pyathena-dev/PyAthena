@@ -33,7 +33,6 @@ from pyathena.filesystem.s3_executor import (
     S3AioThreadPool,
     S3Executor,
     S3ThreadPoolExecutor,
-    raise_failure,
 )
 from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
@@ -579,10 +578,9 @@ class AioS3FileSystem(AsyncFileSystem):
         and annotation copies run in parallel as asyncio tasks, at most
         ``max_workers`` at once, in the threads of the filesystem, which bound
         the requests of all its copies together. On a cancellation, the
-        creation of the upload and the part copies that have not started are
-        cancelled, the running ones and the completion are waited for in a
-        thread of the filesystem, the upload is aborted if it was created and
-        has not completed, and the cancellation is re-raised. This also holds
+        requests that have not started are cancelled, the running ones are
+        waited for in a thread of the filesystem, the upload is aborted if it
+        was created and has not completed, and the cancellation is re-raised. This also holds
         when the shutdown of the event loop, such as at the end of
         ``asyncio.run()``, cancels the copy, also after its cleanup has
         started. A repeated cancellation returns without stopping this
@@ -708,6 +706,8 @@ class AioS3FileSystem(AsyncFileSystem):
             creation.cancel()
             for part_copy in part_copies:
                 part_copy.cancel()
+            if completion is not None:
+                completion.cancel()
             # A repeated cancellation of this task returns without stopping
             # the cleanup.
             await self._thread_pool.run_shielded(_abort)
@@ -1408,10 +1408,6 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
                 await self.flush(force=True)
         finally:
             self.closed = True
-            if self.mode == "rb":
-                # Dropped as fsspec's close() drops it, since the cache keeps
-                # a method of the file and so a reference cycle with it.
-                self.cache = None
             # A commit that is still running keeps its thread.
             self._pool.shutdown(wait=False)
 
@@ -1517,58 +1513,40 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
                 if self._copies_in_flight:
                     copied = {copy for copy in self._copies_in_flight if copy.done()}
                     self._copies_in_flight -= copied
-                    # Otherwise the rest of the data is uploaded after a
-                    # failed part copy, as S3File does.
-                    raise_failure(copied)
+                    for copy in copied:
+                        # Otherwise the rest of the data is uploaded after a
+                        # failed part copy, as S3File does.
+                        copy.result()
                 if len(self._uploads_in_flight) >= self.max_workers:
                     # Otherwise the parts waiting for a thread pile up in memory.
                     done, self._uploads_in_flight = await asyncio.wait(
                         self._uploads_in_flight, return_when=asyncio.FIRST_COMPLETED
                     )
-                    # A failed part would otherwise keep its data until the
-                    # commit while the rest of the data is uploaded.
-                    raise_failure(done)
-                self._submit_upload(writer, part_number, data, upload_kwargs)
+                    for upload in done:
+                        # A failed part would otherwise keep its data until
+                        # the commit while the rest of the data is uploaded.
+                        upload.result()
+                # Tracked before it is scheduled; see _initiate_upload().
+                part: Future[S3MultipartUploadPart] = Future()
+                self._parts.append(part)
+                waiter = asyncio.wrap_future(part)
+                # The commit reports a failure that no wait found; retrieved
+                # here so that asyncio does not log it as never retrieved.
+                waiter.add_done_callback(lambda w: w.cancelled() or w.exception())
+                self._uploads_in_flight.add(waiter)
+                self._pool.submit_to(
+                    part,
+                    writer.upload_part,
+                    part_number=part_number,
+                    body=data,
+                    **upload_kwargs,
+                )
         except BaseException:
             await self._close_without_commit()
             raise
         if final:
             await self._commit()
         return not final
-
-    def _submit_upload(
-        self,
-        writer: S3MultipartWriter,
-        part_number: int,
-        data: bytes,
-        request_kwargs: dict[str, Any],
-    ) -> None:
-        """Submit the upload of a part and track it as in flight.
-
-        See :meth:`S3File._submit_upload`; the file waits for the part
-        through an asyncio future.
-
-        Args:
-            writer: The writer of the multipart upload.
-            part_number: The number of the part, from 1.
-            data: The data of the part.
-            request_kwargs: The UploadPart parameters of the file.
-        """
-        # Tracked before it is scheduled; see _initiate_upload().
-        part: Future[S3MultipartUploadPart] = Future()
-        self._parts.append(part)
-        waiter = asyncio.wrap_future(part)
-        # The commit reports a failure that no wait found; retrieved here so
-        # that asyncio does not log it as never retrieved.
-        waiter.add_done_callback(lambda w: w.cancelled() or w.exception())
-        self._uploads_in_flight.add(waiter)
-        self._pool.submit_to(
-            part,
-            writer.upload_part,
-            part_number=part_number,
-            body=data,
-            **request_kwargs,
-        )
 
     async def _commit(self) -> None:
         """Commit the written data in a thread of the file.
@@ -1612,7 +1590,9 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
                 # all started. A failed part is raised without waiting for
                 # the parts before it, as S3File does.
                 done, _ = wait(self._parts, return_when=FIRST_EXCEPTION)
-                raise_failure(done)
+                for part in done:
+                    if not part.cancelled() and part.exception() is not None:
+                        part.result()
                 parts = [part.result() for part in self._parts]
                 writer.complete(parts, **self._get_request_kwargs("complete_multipart_upload"))
             except BaseException:
@@ -1639,13 +1619,6 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             _logger.exception(
                 f"Failed to abort the multipart upload to s3://{self.bucket}/{self.key}."
             )
-        # Dropped as S3File.discard() drops the parts, so that the file does
-        # not keep the errors of failed requests, whose tracebacks may keep
-        # the file.
-        self._creation = None
-        self._parts = []
-        self._uploads_in_flight = set()
-        self._copies_in_flight = set()
 
     async def _fetch_range(self, start: int, end: int) -> bytes:
         """Read a byte range of the object with parallel range requests.
@@ -1683,11 +1656,15 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             while reads:
                 reads.pop().cancel()
             raise
-        if any(not read.cancelled() and read.exception() is not None for read in done):
+        # The errors are all retrieved, so that asyncio does not log those that
+        # are not raised as never retrieved.
+        failures = [read for read in done if not read.cancelled() and read.exception() is not None]
+        if failures:
             # The reads that have not finished are cancelled, and the tasks of
-            # the others are dropped, so that the traceback of the error, which
-            # keeps this frame, does not keep their data.
+            # the others are dropped, so that this frame, which the traceback
+            # of the error keeps, does not keep their data.
             while reads:
                 reads.pop().cancel()
-            raise_failure(done)
+            done.clear()
+            failures[0].result()
         return b"".join(read.result() for read in reads)

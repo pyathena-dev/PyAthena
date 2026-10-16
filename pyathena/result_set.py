@@ -5,6 +5,7 @@ from __future__ import annotations
 import collections
 import logging
 import operator
+import sys
 from datetime import datetime
 from itertools import islice
 from typing import (
@@ -528,7 +529,8 @@ class AthenaResultSet(CursorIterator):
         """
         if not size or size <= 0:
             size = self._arraysize
-        return self._take_rows(operator.index(size))
+        # islice() in the subclasses' _take_rows() takes no size above sys.maxsize.
+        return self._take_rows(min(operator.index(size), sys.maxsize))
 
     @override
     def fetchall(
@@ -547,7 +549,6 @@ class AthenaResultSet(CursorIterator):
         The buffered rows are taken in bulk, and ``_fetch()`` refills the buffer when
         it is empty. A subclass whose ``fetchone()`` does not use the buffer overrides
         this method too.
-        If a refill fails, the rows taken are returned to the buffer.
 
         Args:
             size: The maximum number of rows, or None for all remaining rows.
@@ -556,16 +557,12 @@ class AthenaResultSet(CursorIterator):
             The rows, fewer than ``size`` when the result is exhausted.
         """
         rows: list[tuple[Any | None, ...] | dict[Any, Any | None]] = []
-        try:
-            while size is None or len(rows) < size:
+        while size is None or len(rows) < size:
+            if not self._rows:
+                self._fetch()
                 if not self._rows:
-                    self._fetch()
-                    if not self._rows:
-                        break
-                self._take_buffered_rows(rows, size)
-        except BaseException:
-            self._return_rows(rows)
-            raise
+                    break
+            self._take_buffered_rows(rows, size)
         return rows
 
     def _take_buffered_rows(
@@ -593,23 +590,6 @@ class AthenaResultSet(CursorIterator):
             buffered, self._rows = self._rows, collections.deque()
             rows.extend(buffered)
         self._count_rows(len(rows) - start)
-
-    def _return_rows(self, rows: list[tuple[Any | None, ...] | dict[Any, Any | None]]) -> None:
-        """Return the rows that a failed fetch took to the front of the buffer.
-
-        The rows are no longer counted in ``rownumber``, so that a later fetch
-        returns them, as ``fetchone()`` leaves the rows after a failed page
-        request in the buffer. A result set that is closed keeps its empty
-        buffer.
-
-        Args:
-            rows: The rows that the fetch took, in their order.
-        """
-        rownumber = self._rownumber
-        if rownumber is None or not rows:
-            return
-        self._rows.extendleft(reversed(rows))
-        self._rownumber = rownumber - len(rows)
 
     def _count_rows(self, count: int) -> None:
         """Count the rows that a fetch took in ``rownumber``.

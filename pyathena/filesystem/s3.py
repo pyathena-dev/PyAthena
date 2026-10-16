@@ -34,7 +34,7 @@ import pyathena
 from pyathena.connection import Connection
 from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch, S3DeleteResult
 from pyathena.filesystem.s3_errors import S3ClientError
-from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPoolExecutor, raise_failure
+from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
     S3Metadata,
@@ -1850,9 +1850,11 @@ class S3FileSystem(AbstractFileSystem):
         request_kwargs = request_kwargs or {}
         try:
             done, _ = wait(futures, return_when=FIRST_EXCEPTION)
-            # Raised without waiting for the parts before it, so that the
-            # parts queued after it are cancelled.
-            raise_failure(done)
+            for future in done:
+                if not future.cancelled() and future.exception() is not None:
+                    # Raised without waiting for the parts before it, so that
+                    # the parts queued after it are cancelled.
+                    future.result()
             # The futures are in part-number order.
             parts = [future.result() for future in futures]
             return self.core.complete_multipart_upload(
@@ -3176,8 +3178,6 @@ class S3File(AbstractBufferedFile):
             # A submitted creation may still return an ID after the wait is
             # interrupted. The writer records it before resolving the future.
             self._close_without_commit(creation=creation)
-            # Not kept by this frame, which the traceback of its error keeps.
-            del creation
             raise
 
     def _upload_chunk(self, final: bool = False) -> bool:
@@ -3236,18 +3236,32 @@ class S3File(AbstractBufferedFile):
                 if self._copies_in_flight:
                     copied = {copy for copy in self._copies_in_flight if copy.done()}
                     self._copies_in_flight -= copied
-                    # Otherwise the rest of the data is uploaded after a
-                    # failed part copy.
-                    raise_failure(copied)
+                    for copy in copied:
+                        # Otherwise the rest of the data is uploaded after a
+                        # failed part copy.
+                        copy.result()
                 if len(self._uploads_in_flight) >= self.max_workers:
                     # Otherwise the parts waiting for a worker pile up in memory.
                     done, self._uploads_in_flight = wait(
                         self._uploads_in_flight, return_when=FIRST_COMPLETED
                     )
-                    # A failed part would otherwise keep its data until
-                    # commit() while the rest of the data is uploaded.
-                    raise_failure(done)
-                self._submit_upload(writer, part_number, data)
+                    for upload in done:
+                        # A failed part would otherwise keep its data until
+                        # commit() while the rest of the data is uploaded.
+                        upload.result()
+                # Tracked before it is scheduled, so that an interrupt while
+                # it is being scheduled still lets discard() cancel it or wait
+                # for it before the abort.
+                part: Future[S3MultipartUploadPart] = Future()
+                self.multipart_upload_parts.append(part)
+                self._uploads_in_flight.add(part)
+                self._executor.submit_to(
+                    part,
+                    writer.upload_part,
+                    part_number=part_number,
+                    body=data,
+                    **self._get_request_kwargs("upload_part"),
+                )
         except BaseException:
             self._close_without_commit()
             raise
@@ -3255,31 +3269,6 @@ class S3File(AbstractBufferedFile):
         if self.autocommit and final:
             self.commit()
         return not final
-
-    def _submit_upload(self, writer: S3MultipartWriter, part_number: int, data: bytes) -> None:
-        """Submit the upload of a part and track it as in flight.
-
-        The part is tracked before it is scheduled, so that an interrupt while
-        it is being scheduled still lets :meth:`discard` cancel it or wait for
-        it before the abort. Its future is not left in the frame of
-        :meth:`_upload_chunk`, which the traceback of the part's error keeps
-        if a later wait of the same call raises it.
-
-        Args:
-            writer: The writer of the multipart upload.
-            part_number: The number of the part, from 1.
-            data: The data of the part.
-        """
-        part: Future[S3MultipartUploadPart] = Future()
-        self.multipart_upload_parts.append(part)
-        self._uploads_in_flight.add(part)
-        self._executor.submit_to(
-            part,
-            writer.upload_part,
-            part_number=part_number,
-            body=data,
-            **self._get_request_kwargs("upload_part"),
-        )
 
     def commit(self) -> None:
         """Complete the upload of the written data.
@@ -3292,7 +3281,7 @@ class S3File(AbstractBufferedFile):
         abort also fails, the upload is kept so that :meth:`discard` can
         abort it. Invalidates the cache of the path afterwards. Does nothing
         for a file whose failed write or multipart commit dropped the written
-        data, or whose upload :meth:`discard` kept after a failed abort.
+        data.
 
         Raises:
             FileExistsError: If an object was created at the path after the
@@ -3304,10 +3293,6 @@ class S3File(AbstractBufferedFile):
             # _close_without_commit() or a failed commit dropped the written
             # data. A multipart upload that they failed to abort is kept for
             # discard(), not completed.
-            return
-        if self.multipart_upload is not None and not self.multipart_upload_parts:
-            # discard() dropped the parts of an upload that it failed to
-            # abort, which is kept for discard(), not completed.
             return
         if self.tell() == 0:
             self.discard()
@@ -3326,18 +3311,23 @@ class S3File(AbstractBufferedFile):
             upload_id = cast(str, self.multipart_upload.upload_id)
             try:
                 done, _ = wait(self.multipart_upload_parts, return_when=FIRST_EXCEPTION)
-                # Raised without waiting for the parts before it, so that the
-                # parts queued after it are cancelled.
-                raise_failure(done)
+                for future in done:
+                    if not future.cancelled() and future.exception() is not None:
+                        # Raised without waiting for the parts before it, so
+                        # that the parts queued after it are cancelled.
+                        future.result()
                 parts = [future.result() for future in self.multipart_upload_parts]
                 self._get_multipart_writer().complete(
                     parts, **self._get_request_kwargs("complete_multipart_upload")
                 )
             except BaseException:
                 # The buffer holds only the data of the last part, which a
-                # later commit() would otherwise upload alone with PutObject;
-                # dropped as _close_without_commit() drops it.
+                # later commit() would otherwise upload alone with PutObject,
+                # so the file is closed without it, as _close_without_commit()
+                # closes it.
                 self.buffer = None
+                self.closed = True
+                self._executor.shutdown(wait=False)
                 # discard() keeps the upload if the abort fails or is
                 # interrupted, so that a later discard(), such as a
                 # transaction rollback, retries the abort. An abort failure
@@ -3357,21 +3347,13 @@ class S3File(AbstractBufferedFile):
         """Abort the multipart upload, if any.
 
         The part uploads that have not started are cancelled, and the
-        running ones are waited for before the abort. The parts are dropped
-        then, so that :meth:`commit` does not complete an upload that this
-        method failed to abort, which is kept so that a later call retries
-        the abort.
+        running ones are waited for before the abort.
         """
         if self.multipart_upload:
             # A part that is still uploading when the upload is aborted may
             # be stored after the abort, so wait for the parts that could not
             # be cancelled first.
             wait([f for f in self.multipart_upload_parts if not f.cancel()])
-            # Also dropped if the abort fails, so that the file does not keep
-            # the errors of failed parts, whose tracebacks may keep the file.
-            self.multipart_upload_parts = []
-            self._uploads_in_flight = set()
-            self._copies_in_flight = set()
             self._get_multipart_writer().abort(**self._get_request_kwargs("abort_multipart_upload"))
 
         self.multipart_upload = None
@@ -3465,13 +3447,17 @@ class S3File(AbstractBufferedFile):
                 for r in ranges
             ]
             done = wait(futures, return_when=FIRST_EXCEPTION).done
-            if any(not f.cancelled() and f.exception() is not None for f in done):
+            failed = next(
+                (f for f in done if not f.cancelled() and f.exception() is not None), None
+            )
+            if failed is not None:
                 # The reads that have not started are cancelled, and the
-                # futures of the others are dropped, so that the traceback of
-                # the error, which keeps this frame, does not keep their data.
+                # futures of the others are dropped, so that this frame, which
+                # the traceback of the error keeps, does not keep their data.
                 while futures:
                     futures.pop().cancel()
-                raise_failure(done)
+                done.clear()
+                failed.result()
             return b"".join(f.result() for f in futures)
         return self.fs.core.get_object(path, ranges[0], **request_kwargs)
 

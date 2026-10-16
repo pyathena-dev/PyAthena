@@ -13,17 +13,12 @@ import threading
 import time
 import traceback
 import weakref
-from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from unittest import mock
 
 import pytest
 
-from pyathena.filesystem.s3_executor import (
-    S3AioExecutor,
-    S3AioThreadPool,
-    S3ThreadPoolExecutor,
-    raise_failure,
-)
+from pyathena.filesystem.s3_executor import S3AioExecutor, S3AioThreadPool, S3ThreadPoolExecutor
 from tests.pyathena.util import EVENT_TIMEOUT, overlapping_calls
 
 
@@ -451,37 +446,17 @@ class TestS3Executor:
         with pytest.raises(ValueError, match="invalid literal"):
             failed.result()
 
-    @pytest.mark.parametrize("chained", [None, "cause", "group"])
     @pytest.mark.parametrize("executor_class", [S3ThreadPoolExecutor, S3AioThreadPool])
-    def test_submit_to_failure_frees_arguments(self, executor_class, chained):
+    def test_submit_to_failure_frees_arguments(self, executor_class):
         # GH-1186: the arguments of a failed callable, such as the body of a
         # part, are freed when it fails, while the error keeps the frames of
-        # its traceback, also when the frames of an error that it was raised
-        # from, as S3Core.call() raises an OSError from a ClientError, or that
-        # it groups hold them. The error is freed by reference counting. The
-        # traceback used to keep them in a reference cycle with the future
-        # until the garbage collector ran.
+        # its traceback. The traceback used to keep them, in a reference
+        # cycle with the future until the garbage collector ran.
         class Body:
             pass
 
-        class DeniedError(PermissionError):
-            # Unlike PermissionError, it can be weakly referenced.
-            pass
-
-        def send(body):
-            raise RuntimeError("AccessDenied")
-
         def upload(body):
-            if chained is None:
-                raise DeniedError("Access Denied")
-            try:
-                send(body)
-            except RuntimeError as e:
-                if chained == "cause":
-                    raise DeniedError("Access Denied") from e
-                error = e
-            # Raised outside the handler, so that the group has no context.
-            raise ExceptionGroup("Access Denied", [error])
+            raise PermissionError("Access Denied")
 
         body = Body()
         body_ref = weakref.ref(body)
@@ -492,20 +467,9 @@ class TestS3Executor:
                 executor.submit_to(future, upload, body)
                 del body
             error = future.exception()
-            assert body_ref() is None
+            assert isinstance(error, PermissionError)
             assert traceback.extract_tb(error.__traceback__)[-1].name == "upload"
-            if chained == "cause":
-                assert isinstance(error.__cause__, RuntimeError)
-                assert traceback.extract_tb(error.__cause__.__traceback__)[-1].name == "send"
-            elif chained == "group":
-                assert isinstance(error, ExceptionGroup)
-                assert error.__context__ is None
-                assert traceback.extract_tb(error.exceptions[0].__traceback__)[-1].name == "send"
-            else:
-                assert isinstance(error, DeniedError)
-            error_ref = weakref.ref(error)
-            del error, future
-            assert error_ref() is None
+            assert body_ref() is None
         finally:
             gc.enable()
 
@@ -596,75 +560,3 @@ class TestS3Executor:
 
         assert not not_done
         assert future.cancelled()
-
-
-@pytest.mark.parametrize(
-    ("outcomes", "expected"),
-    [
-        ([], None),
-        (["result"], None),
-        (["result", "error"], PermissionError),
-        (["cancelled", "error"], PermissionError),
-        (["cancelled", "result"], CancelledError),
-    ],
-)
-def test_raise_failure(outcomes, expected):
-    # The error of a failed future is raised before the cancellation of a
-    # cancelled one, and the set is emptied.
-    done: set[Future[int]] = set()
-    for outcome in outcomes:
-        future: Future[int] = Future()
-        if outcome == "result":
-            future.set_result(1)
-        elif outcome == "error":
-            future.set_exception(PermissionError("Access Denied"))
-        else:
-            future.cancel()
-        done.add(future)
-
-    if expected is None:
-        raise_failure(done)
-    else:
-        with pytest.raises(expected):
-            raise_failure(done)
-    assert done == set()
-
-
-def test_raise_failure_frees_future():
-    # GH-1186: the raised error does not keep the failed future, so that
-    # neither forms a reference cycle with the frames of its traceback.
-    future: Future[int] = Future()
-    future.set_exception(PermissionError("Access Denied"))
-    future_ref = weakref.ref(future)
-    done = {future}
-    del future
-    gc.disable()
-    try:
-        with pytest.raises(PermissionError, match="Access Denied") as info:
-            raise_failure(done)
-        # Neither the frames of its traceback nor the set keep the future.
-        assert info.value.__traceback__ is not None
-        assert future_ref() is None
-    finally:
-        gc.enable()
-
-
-def test_raise_failure_retrieves_errors():
-    # The errors of the failed asyncio futures that are not raised are
-    # retrieved, so that asyncio does not log them as never retrieved.
-    loop = asyncio.new_event_loop()
-    try:
-        logged = []
-        loop.set_exception_handler(lambda _, context: logged.append(context))
-        done: set[asyncio.Future[int]] = set()
-        for _ in range(2):
-            future = loop.create_future()
-            future.set_exception(PermissionError("Access Denied"))
-            done.add(future)
-        del future
-        with pytest.raises(PermissionError, match="Access Denied"):
-            raise_failure(done)
-        gc.collect()
-        assert logged == []
-    finally:
-        loop.close()

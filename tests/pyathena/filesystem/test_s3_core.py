@@ -6,10 +6,14 @@
 # SPDX-License-Identifier: MIT
 
 import copy
+import gc
 import io
 import re
+import weakref
+from concurrent.futures import Future
 from datetime import UTC, datetime
 from itertools import pairwise
+from typing import Any
 from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
@@ -33,6 +37,7 @@ from pyathena.filesystem.s3_core import (
     S3MultipartCopyPlan,
     S3ObjectSummary,
 )
+from pyathena.filesystem.s3_executor import S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import S3Metadata, S3MultipartUpload, S3MultipartUploadPart
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.util import RetryConfig
@@ -122,6 +127,70 @@ class TestS3Core:
         stubber.add_client_error("head_object", service_error_code=code, http_status_code=status)
         with stubber, pytest.raises(error):
             core.head_object(S3Path("bucket", "key"))
+
+    @pytest.mark.parametrize("translated", [True, False])
+    def test_call_failure_frees_request(self, translated):
+        # GH-1186: the frames of the retries and of botocore below call() in
+        # the traceback of a raised error, also of the ClientError that the
+        # error is translated from, have no local variables. tenacity's retry
+        # state in them used to keep the error, and so the request, such as
+        # the body of a part, in a reference cycle until the garbage collector
+        # ran.
+        class Body:
+            pass
+
+        def send(**params):
+            if translated:
+                raise botocore.exceptions.ClientError(
+                    {
+                        "Error": {"Code": "AccessDenied"},
+                        "ResponseMetadata": {"HTTPStatusCode": 403},
+                    },
+                    "PutObject",
+                )
+            raise ConnectionError("Connection lost")
+
+        core, _ = _make_core()
+        body = Body()
+        body_ref = weakref.ref(body)
+        gc.disable()
+        try:
+            with pytest.raises(PermissionError if translated else ConnectionError) as info:
+                core.call(send, Body=body)
+            del body
+            if translated:
+                assert isinstance(info.value.__cause__, botocore.exceptions.ClientError)
+            del info
+            assert body_ref() is None
+        finally:
+            gc.enable()
+
+    def test_call_failure_through_executor_frees_request(self):
+        # GH-1186: through S3Executor.submit_to(), which clears the frames
+        # below it, the request of a failed call is freed while its error is
+        # still held.
+        class Body:
+            pass
+
+        def send(**params):
+            raise botocore.exceptions.ClientError(
+                {"Error": {"Code": "AccessDenied"}, "ResponseMetadata": {"HTTPStatusCode": 403}},
+                "UploadPart",
+            )
+
+        core, _ = _make_core()
+        body = Body()
+        body_ref = weakref.ref(body)
+        future: Future[dict[str, Any]] = Future()
+        gc.disable()
+        try:
+            with S3ThreadPoolExecutor(max_workers=1) as executor:
+                executor.submit_to(future, core.call, send, Body=body)
+                del body
+            assert isinstance(future.exception(), PermissionError)
+            assert body_ref() is None
+        finally:
+            gc.enable()
 
     def test_head_object(self):
         core, stubber = _make_core()

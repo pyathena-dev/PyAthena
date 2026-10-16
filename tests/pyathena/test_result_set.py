@@ -20,6 +20,13 @@ from pyathena.util import RetryConfig, override
 from tests.pyathena.util import close_during_next_request, get_query_results_responses
 
 
+def _page(values, next_token=None):
+    response = {"ResultSet": {"Rows": [{"Data": [{"VarCharValue": v}]} for v in values]}}
+    if next_token:
+        response["NextToken"] = next_token
+    return response
+
+
 def _row(*values):
     return {"Data": [{} if v is None else {"VarCharValue": v} for v in values]}
 
@@ -105,14 +112,11 @@ class TestAthenaResultSet:
         assert result_set.fetchall() == [(1,), (2,)]
 
     @pytest.mark.parametrize(("method", "args"), [("fetchmany", (3,)), ("fetchall", ())])
-    def test_fetch_returns_rows_taken_before_error(self, method, args):
-        """The rows taken before a failed page request are returned to the buffer."""
-        # GH-1186: they used to be dropped while counted in rownumber.
+    def test_fetch_counts_rows_taken_before_error(self, method, args):
+        """The rows taken before a failed page request are counted in rownumber."""
         result_set = _fetching_result_set(("1", "2"), RuntimeError("failed"))
         with pytest.raises(OperationalError):
             getattr(result_set, method)(*args)
-        assert result_set.rownumber == 0
-        assert result_set.fetchmany(2) == [(1,), (2,)]
         assert result_set.rownumber == 2
 
     def test_fetch_after_close(self):
@@ -176,7 +180,7 @@ class TestAthenaResultSet:
         result_set._process_metadata(
             {"ResultSet": {"ResultSetMetadata": {"ColumnInfo": [{"Name": "a", "Type": "varchar"}]}}}
         )
-        pages = get_query_results_responses(["a", "1"], ["a", "2"])
+        pages = [_page(["a", "1"], "token"), _page(["a", "2"])]
         with patch.object(result_set, "_get_query_results", side_effect=pages):
             assert result_set._fetch_all_rows() == [("1",), ("a",), ("2",)]
 

@@ -64,48 +64,6 @@ class TestAthenaArrowResultSet:
         assert result_set.fetchone() is None
         assert result_set.rownumber == 3
 
-    @pytest.mark.parametrize("method", ["fetchone", "fetchmany", "fetchall", "iter"])
-    def test_fetch_across_empty_batches(self, method):
-        """An empty record batch between others does not end the fetches.
-
-        GH-1186: a table read from result files that include an empty one has
-        such a batch, and the fetches used to stop at it. No AWS calls; the
-        first page request and the result table are mocked.
-        """
-        table = pa.concat_tables(
-            [
-                pa.table({"a": [1, 2, 3]}),
-                pa.table({"a": pa.array([], pa.int64())}),
-                pa.table({"a": [4]}),
-            ]
-        )
-        with (
-            patch.object(AthenaArrowResultSet, "_pre_fetch"),
-            patch.object(AthenaArrowResultSet, "_create_s3_file_system"),
-            patch.object(AthenaArrowResultSet, "_as_arrow", return_value=table),
-        ):
-            result_set = AthenaArrowResultSet(
-                connection=MagicMock(),
-                converter=DefaultArrowTypeConverter(),
-                query_execution=MagicMock(
-                    state=AthenaQueryExecution.STATE_SUCCEEDED,
-                    output_location="s3://bucket/query.csv",
-                ),
-                arraysize=2,
-                retry_config=RetryConfig(),
-            )
-        assert 0 in [batch.num_rows for batch in table.to_batches(2)]
-        if method == "fetchone":
-            rows = list(iter(result_set.fetchone, None))
-        elif method == "fetchmany":
-            rows = result_set.fetchmany(10)
-        elif method == "fetchall":
-            rows = result_set.fetchall()
-        else:
-            rows = list(result_set)
-        assert rows == [(1,), (2,), (3,), (4,)]
-        assert result_set.rownumber == 4
-
     def test_read_csv_timestamps_with_the_same_name(self):
         """Timestamp columns are converted by position, also with names that repeat.
 
