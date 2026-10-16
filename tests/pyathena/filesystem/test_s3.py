@@ -3476,15 +3476,23 @@ class TestS3FileSystem:
             return data
 
         fs.core.get_object = get_object
+
+        def interrupted_wait(futures, **kwargs):
+            # As the wait of concurrent.futures, whose frame keeps the futures
+            # in a set, interrupted once the reads have finished.
+            futures = set(futures)
+            wait(futures)
+            raise KeyboardInterrupt
+
         f = fs.open("s3://bucket/key", "rb", cache_type="none", block_size=16, max_workers=4)
         with (
-            mock.patch("pyathena.filesystem.s3.wait", side_effect=KeyboardInterrupt),
+            mock.patch("pyathena.filesystem.s3.wait", side_effect=interrupted_wait),
             pytest.raises(KeyboardInterrupt) as info,
         ):
             f.read()
-        # Waits for the reads that had started.
         f.close()
-        assert [ref() for ref in read] == [None] * len(read)
+        assert len(read) == 4
+        assert [ref() for ref in read] == [None] * 4
         assert info.value.__traceback__ is not None
 
     @pytest.mark.parametrize("cache_type", ["bytes", "all", "first"])

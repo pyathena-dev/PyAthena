@@ -148,7 +148,10 @@ class S3Executor(metaclass=ABCMeta):
 
         The arguments of a failed callable, such as the body of a part, are
         freed when it fails: its error keeps the frames that it was raised
-        from, without their local variables.
+        from, without their local variables. The errors that it was raised
+        from keep theirs; :meth:`S3Core.call()
+        <pyathena.filesystem.s3_core.S3Core.call>` clears those of the
+        ``ClientError`` of a request.
 
         Args:
             future: A pending future that no executor has started.

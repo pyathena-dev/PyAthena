@@ -14,6 +14,7 @@ import contextlib
 import logging
 import mimetypes
 import os
+import traceback
 import warnings
 from concurrent.futures import FIRST_EXCEPTION, Future, wait
 from io import BytesIO
@@ -1651,9 +1652,12 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         ]
         try:
             done = (await asyncio.wait(reads, return_when=asyncio.FIRST_EXCEPTION))[0]
-        except BaseException:
-            # The reads are cancelled with the read of the range. Cancelling a
-            # failed one also keeps asyncio from logging its error.
+        except BaseException as e:
+            # The reads are cancelled with the read of the range, and the
+            # frames of the wait, which keep their tasks, are cleared;
+            # clear_frames() skips this frame, which is executing. Cancelling a
+            # failed read also keeps asyncio from logging its error.
+            traceback.clear_frames(e.__traceback__)
             while reads:
                 reads.pop().cancel()
             raise

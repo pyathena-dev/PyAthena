@@ -642,6 +642,16 @@ class TestAioS3FileSystem:
             side_effect=lambda upload, params: events.append("abort")
         )
 
+        submit = fs._thread_pool.submit
+        completion_queued = threading.Event()
+
+        def record_completion(fn, *args, **kwargs):
+            future = submit(fn, *args, **kwargs)
+            if fn is sync_fs.core.complete_multipart_upload:
+                completion_queued.set()
+            return future
+
+        fs._thread_pool.submit = record_completion
         task = asyncio.ensure_future(
             fs._copy_object_with_multipart_upload(
                 S3Path("bucket", "src"),
@@ -653,11 +663,8 @@ class TestAioS3FileSystem:
             )
         )
         try:
-            # Until the completion waits for the thread.
-            deadline = time.monotonic() + 5
-            while not fs._thread_pool._get_executor()._work_queue.qsize():
-                assert time.monotonic() < deadline
-                await asyncio.sleep(0.01)
+            # The completion waits for the thread, which block() holds.
+            assert await asyncio.to_thread(completion_queued.wait, 5)
             task.cancel()
             # Lets the copy cancel the completion and schedule its cleanup.
             await asyncio.sleep(0.1)
@@ -3393,8 +3400,59 @@ class TestAioS3StreamedFile:
         with pytest.raises(PermissionError, match="Access Denied") as info_:
             await f.read()
         await f.close()
+        # The threads have set the results once the pool of the file is shut
+        # down, and the event loop runs their callbacks on the next iterations.
+        await asyncio.to_thread(f._pool.shutdown, True)
+        for _ in range(3):
+            await asyncio.sleep(0)
         assert len(read) == 3
         assert [ref() for ref in read] == [None] * 3
+        assert info_.value.__traceback__ is not None
+
+    @pytest.mark.asyncio
+    async def test_cancelled_read_frees_ranges(self, fs):
+        # GH-1186: a cancelled parallel read cancels the reads that have not
+        # finished and frees the data of the others, also while the
+        # cancellation is held, as a failed read does.
+        block_size = 2**10
+        read = []
+
+        def get_object(path, range_, **kwargs):
+            # Unlike bytes, an array can be weakly referenced.
+            data = array.array("B", bytes(range_[1] - range_[0]))
+            read.append(weakref.ref(data))
+            return data
+
+        fs.core.get_object = mock.MagicMock(side_effect=get_object)
+        info = S3Object(
+            init={"Key": "key", "ETag": '"etag"'},
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket="bucket",
+            key="key",
+        )
+        info.size = block_size * 4
+        fs._sync_fs.info = mock.MagicMock(return_value=info)
+        wait_reads = asyncio.wait
+
+        async def cancelled_wait(reads, **kwargs):
+            # As asyncio.wait(), whose frame keeps the tasks in a set,
+            # cancelled once the reads have finished.
+            reads = set(reads)
+            await wait_reads(reads)
+            raise asyncio.CancelledError
+
+        f = await fs.open_async("s3://bucket/key", "rb", block_size=block_size, max_workers=4)
+        with (
+            mock.patch.object(asyncio, "wait", side_effect=cancelled_wait),
+            pytest.raises(asyncio.CancelledError) as info_,
+        ):
+            await f.read()
+        await f.close()
+        await asyncio.to_thread(f._pool.shutdown, True)
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert len(read) == 4
+        assert [ref() for ref in read] == [None] * 4
         assert info_.value.__traceback__ is not None
 
     @pytest.mark.asyncio

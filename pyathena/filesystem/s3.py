@@ -8,6 +8,7 @@ import logging
 import mimetypes
 import os.path
 import time
+import traceback
 from collections.abc import Callable, Mapping
 from concurrent.futures import FIRST_COMPLETED, FIRST_EXCEPTION, Future, as_completed, wait
 from copy import deepcopy
@@ -3436,8 +3437,11 @@ class S3File(AbstractBufferedFile):
             ]
             try:
                 done = wait(futures, return_when=FIRST_EXCEPTION).done
-            except BaseException:
-                # The reads are cancelled with the read of the range, as below.
+            except BaseException as e:
+                # The reads are cancelled with the read of the range, as below,
+                # and the frames of the wait, which keep their futures, are
+                # cleared; clear_frames() skips this frame, which is executing.
+                traceback.clear_frames(e.__traceback__)
                 while futures:
                     futures.pop().cancel()
                 raise
