@@ -727,7 +727,6 @@ def test_to_datetime_with_tz_offsets_and_zone_names(input_value, expected):
 @pytest.mark.parametrize("zone_name", ["Foo/Bar", "../etc"])
 def test_to_datetime_with_tz_unknown_zone_name(zone_name):
     """An unknown zone name raises DataError instead of giving a naive datetime."""
-    _parse_time_zone.cache_clear()
     with pytest.raises(DataError, match=f"Unknown time zone '{re.escape(zone_name)}'"):
         _to_datetime_with_tz(f"2024-02-29 23:59:58.123 {zone_name}")
 

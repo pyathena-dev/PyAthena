@@ -123,9 +123,9 @@ def _parse_time_zone(value: str) -> tzinfo:
 def _to_datetime_with_tz(varchar_value: str | None) -> datetime | None:
     """Convert an Athena TIMESTAMP WITH TIME ZONE value to an aware datetime.
 
-    Athena writes a value with a zone name as the local time in that zone. The
-    local time of a DST transition does not identify one instant, so it is not
-    converted.
+    Athena writes a value with a zone name as the local time in that zone. A local
+    time that a change of the zone's UTC offset, such as DST, repeats or skips does
+    not identify one instant, so it is not converted.
 
     Args:
         varchar_value: The value as text with a trailing zone name or ``+HH:MM`` /
