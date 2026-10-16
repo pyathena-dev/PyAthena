@@ -1,11 +1,12 @@
-import logging
-from datetime import date, datetime, time, timedelta, timezone
+import re
+from datetime import UTC, date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import pytest
 
+from pyathena import DataError
 from pyathena.converter import (
     DefaultTypeConverter,
     _parse_time_zone,
@@ -724,34 +725,85 @@ def test_to_datetime_with_tz_offsets_and_zone_names(input_value, expected):
 
 
 @pytest.mark.parametrize("zone_name", ["Foo/Bar", "../etc"])
-def test_to_datetime_with_tz_unknown_zone_name(caplog, zone_name):
-    """An unknown zone name gives a naive datetime and one warning per name."""
+def test_to_datetime_with_tz_unknown_zone_name(zone_name):
+    """An unknown zone name raises DataError instead of giving a naive datetime."""
     _parse_time_zone.cache_clear()
-    with caplog.at_level(logging.WARNING, logger="pyathena.converter"):
-        results = [
-            _to_datetime_with_tz(f"2024-02-29 23:59:58.123 {zone_name}"),
-            _to_datetime_with_tz(f"2024-02-29 23:59:59 {zone_name}"),
-        ]
-    assert results == [
-        datetime(2024, 2, 29, 23, 59, 58, 123000),
-        datetime(2024, 2, 29, 23, 59, 59),
-    ]
-    assert [record.getMessage() for record in caplog.records] == [
-        f"Unknown time zone {zone_name!r}; returning naive datetimes for it."
-    ]
+    with pytest.raises(DataError, match=f"Unknown time zone '{re.escape(zone_name)}'"):
+        _to_datetime_with_tz(f"2024-02-29 23:59:58.123 {zone_name}")
 
 
 def test_to_datetime_with_tz_unreadable_zone_name():
-    """A zone name the database cannot load gives a naive datetime.
+    """A zone name the database cannot load raises DataError.
 
     With only the tzdata package, ``ZoneInfo("America")`` opens a directory and
     raises ``IsADirectoryError``.
     """
     _parse_time_zone.cache_clear()
-    with patch("pyathena.converter.ZoneInfo", side_effect=IsADirectoryError("America")):
-        result = _to_datetime_with_tz("2024-02-29 23:59:58 America")
+    with (
+        patch("pyathena.converter.ZoneInfo", side_effect=IsADirectoryError("America")),
+        pytest.raises(DataError, match="Unknown time zone 'America'"),
+    ):
+        _to_datetime_with_tz("2024-02-29 23:59:58 America")
     _parse_time_zone.cache_clear()
-    assert result == datetime(2024, 2, 29, 23, 59, 58)
+
+
+@pytest.mark.parametrize(
+    "input_value",
+    [
+        # Athena writes 05:30 and 06:30 UTC both as this text.
+        "2020-11-01 01:30:00.000 America/New_York",
+        "2020-11-01 01:00:00.000 America/New_York",
+        "2020-11-01 01:59:59.999999 America/New_York",
+        "2020-10-25 01:30:00.000 Europe/London",
+        # A 30-minute DST.
+        "2020-04-05 01:45:00.000 Australia/Lord_Howe",
+    ],
+)
+def test_to_datetime_with_tz_ambiguous_local_time(input_value):
+    """A local time that occurs twice in its zone raises DataError."""
+    with pytest.raises(DataError, match="is ambiguous"):
+        _to_datetime_with_tz(input_value)
+
+
+def test_typed_datetime_with_tz_elements_ambiguous_local_time():
+    """An ambiguous element of a type-hinted array raises DataError."""
+    with pytest.raises(DataError, match="is ambiguous"):
+        DefaultTypeConverter().convert(
+            "array",
+            "[2020-11-01 01:30:00.000 America/New_York, null]",
+            type_hint="array(timestamp(3) with time zone)",
+        )
+
+
+@pytest.mark.parametrize(
+    "input_value",
+    [
+        "2020-03-08 02:30:00.000 America/New_York",
+        "2020-03-08 02:00:00.000 America/New_York",
+        "2020-03-29 01:30:00.000 Europe/London",
+    ],
+)
+def test_to_datetime_with_tz_nonexistent_local_time(input_value):
+    """A local time that a DST transition skips raises DataError."""
+    with pytest.raises(DataError, match="does not exist"):
+        _to_datetime_with_tz(input_value)
+
+
+@pytest.mark.parametrize(
+    ("input_value", "expected_utc"),
+    [
+        ("2020-11-01 00:59:59.999999 America/New_York", datetime(2020, 11, 1, 4, 59, 59, 999999)),
+        ("2020-11-01 02:00:00.000 America/New_York", datetime(2020, 11, 1, 7)),
+        ("2020-03-08 01:59:59.999999 America/New_York", datetime(2020, 3, 8, 6, 59, 59, 999999)),
+        ("2020-03-08 03:00:00.000 America/New_York", datetime(2020, 3, 8, 7)),
+        ("2020-11-01 01:30:00.000 UTC", datetime(2020, 11, 1, 1, 30)),
+        ("2020-11-01 01:30:00.000 -04:00", datetime(2020, 11, 1, 5, 30)),
+    ],
+)
+def test_to_datetime_with_tz_around_dst_transitions(input_value, expected_utc):
+    """Local times next to a DST transition, and offsets, convert to one instant."""
+    result = _to_datetime_with_tz(input_value)
+    assert result.astimezone(UTC) == expected_utc.replace(tzinfo=UTC)
 
 
 @pytest.mark.parametrize(

@@ -33,7 +33,13 @@ from pyathena import (
 from pyathena.async_cursor import AsyncCursor
 from pyathena.converter import _to_array, _to_map, _to_struct
 from pyathena.cursor import Cursor, DictCursor
-from pyathena.error import DatabaseError, NotSupportedError, OperationalError, ProgrammingError
+from pyathena.error import (
+    DatabaseError,
+    DataError,
+    NotSupportedError,
+    OperationalError,
+    ProgrammingError,
+)
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaDictResultSet
 from pyathena.util import RetryConfig
@@ -41,6 +47,7 @@ from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.tables import TABLES, VIEWS
 from tests.pyathena.util import (
+    AMBIGUOUS_TIME_ZONE_QUERY,
     CONVERTED_VALUES_QUERY,
     CONVERTED_VALUES_ROW,
     EVENT_TIMEOUT,
@@ -1686,6 +1693,29 @@ class TestCursor:
     def test_fetch_all_rows(self, cursor):
         cursor.execute(CONVERTED_VALUES_QUERY)
         assert cursor.fetchall() == [CONVERTED_VALUES_ROW]
+
+    @pytest.mark.parametrize(
+        "cursor",
+        [
+            pytest.param({}, id="default"),
+            pytest.param(
+                {"work_group": ENV.managed_work_group, "s3_staging_dir": ""},
+                id="managed",
+                marks=pytest.mark.skipif(
+                    not ENV.managed_work_group,
+                    reason="AWS_ATHENA_MANAGED_WORKGROUP not set",
+                ),
+            ),
+        ],
+        indirect=["cursor"],
+    )
+    def test_ambiguous_time_zone_value(self, cursor):
+        """A local time that its zone repeats raises DataError instead of choosing one.
+
+        The first page of rows is converted by execute().
+        """
+        with pytest.raises(DataError, match="is ambiguous"):
+            cursor.execute(AMBIGUOUS_TIME_ZONE_QUERY)
 
     @pytest.mark.parametrize(
         "cursor",
