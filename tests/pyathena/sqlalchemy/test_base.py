@@ -14,6 +14,7 @@ import pandas as pd
 import pytest
 import sqlalchemy
 from sqlalchemy import create_engine, func, literal_column, select, text, types
+from sqlalchemy.engine.default import DefaultDialect
 from sqlalchemy.exc import NoSuchTableError
 from sqlalchemy.sql import expression, type_coerce
 from sqlalchemy.sql.ddl import CreateTable
@@ -133,6 +134,50 @@ class TestAthenaDialect:
             assert type(cursor) is expected
             assert operation == "SELECT 1"
             assert closed == [cursor]
+        finally:
+            conn.close()
+
+    @pytest.mark.parametrize(
+        ("dialect_class", "connection_class", "cursor_class", "expected"),
+        [
+            (AthenaDialect, Connection, PandasCursor, Cursor),
+            (AthenaAioDialect, AioConnection, AioPandasCursor, AioCursor),
+        ],
+    )
+    def test_do_ping_keeps_default_dialect_ping(
+        self, monkeypatch, dialect_class, connection_class, cursor_class, expected
+    ):
+        """DefaultDialect.do_ping() runs the ping with the API cursor and decides its result.
+
+        Before SQLAlchemy 2.0.5, it returns False when a failed ping is a disconnect, so
+        that the pool reconnects; the stand-in here returns False the same way.
+        """
+        conn = connection_class(
+            region_name="us-west-2",
+            s3_staging_dir="s3://bucket/path/",
+            aws_access_key_id="access_key",
+            aws_secret_access_key="secret_key",
+            cursor_class=cursor_class,
+            cursor_kwargs={"unload": True},
+        )
+        cursors = []
+
+        def do_ping(self, dbapi_connection):
+            cursors.append(dbapi_connection.cursor())
+            return False
+
+        monkeypatch.setattr(DefaultDialect, "do_ping", do_ping)
+        dbapi_connection = (
+            AsyncAdapt_pyathena_connection(MagicMock(), conn)
+            if connection_class is AioConnection
+            else conn
+        )
+        try:
+            assert dialect_class().do_ping(dbapi_connection) is False
+            [cursor] = cursors
+            if connection_class is AioConnection:
+                cursor = cursor._cursor
+            assert type(cursor) is expected
         finally:
             conn.close()
 

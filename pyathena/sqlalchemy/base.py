@@ -4,6 +4,7 @@ import contextlib
 import re
 from collections.abc import Mapping, MutableMapping
 from re import Pattern
+from types import SimpleNamespace
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -290,9 +291,12 @@ class AthenaDialect(DefaultDialect):
         # When unload is enabled in the default cursor, SELECT 1 is wrapped in UNLOAD
         # which Athena rejects with MISSING_COLUMN_NAME because the column is unnamed.
         # Using the plain cursor here performs the SELECT without the UNLOAD.
-        with dbapi_connection.cursor(Cursor) as cursor:  # type: ignore[attr-defined]
-            cursor.execute(self._dialect_specific_select_one)
-        return True
+        # The ping still runs in DefaultDialect.do_ping(), which before SQLAlchemy 2.0.5
+        # is also where a failed ping is checked for a disconnect.
+        api_connection = SimpleNamespace(
+            cursor=lambda: dbapi_connection.cursor(Cursor)  # type: ignore[call-arg]
+        )
+        return super().do_ping(cast("DBAPIConnection", api_connection))
 
     @reflection.cache
     def _get_tables(self, connection, schema: str | None = None, **kw):
