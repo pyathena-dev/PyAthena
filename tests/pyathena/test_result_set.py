@@ -193,6 +193,15 @@ class TestAthenaResultSet:
         operation.join()
         assert operation.calls == 1
 
+    @pytest.mark.parametrize("method", ["_fetch_all_rows", "_iter_all_row_pages"])
+    def test_fetch_all_rows_with_close_during_request(self, method):
+        """A whole read does not return the page of a request that close() interrupts."""
+        result_set = _fetching_result_set(("1", "2"), ("3",))
+        get_query_results = close_during_next_request(result_set)
+        with pytest.raises(ProgrammingError, match=r"AthenaResultSet is closed\."):
+            list(getattr(result_set, method)())
+        assert get_query_results.call_count == 2
+
     def test_get_query_results_after_close(self):
         result_set = _fetching_result_set(("1", "2"), ("3",))
         result_set.close()

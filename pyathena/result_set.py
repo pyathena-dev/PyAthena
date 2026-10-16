@@ -779,6 +779,9 @@ class AthenaResultSet(CursorIterator):
         first_page = True
         while True:
             response = self._get_query_results(self.DEFAULT_FETCH_SIZE, next_token)
+            if self.is_closed:
+                # close() ran during the request; its page is not returned.
+                raise ProgrammingError("AthenaResultSet is closed.")
             rows, next_token = self._parse_result_rows(response)
             # Only the first page starts with the column labels.
             offset = 1 if first_page and rows and self._is_first_row_column_labels(rows) else 0

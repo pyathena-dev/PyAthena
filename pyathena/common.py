@@ -35,6 +35,7 @@ from pyathena.util import (
     _get_error_code,
     _is_throttling_error,
     retry_api_call,
+    shield_retries,
 )
 
 if TYPE_CHECKING:
@@ -1407,6 +1408,9 @@ class BaseCursor(metaclass=ABCMeta):
     def _cancel(self, query_id: str) -> None:
         """Stop a query execution with ``StopQueryExecution``.
 
+        The request cleans up, so a stop scope does not stop its retries (see
+        :func:`~pyathena.util.shield_retries`).
+
         Args:
             query_id: The query execution ID.
 
@@ -1415,12 +1419,13 @@ class BaseCursor(metaclass=ABCMeta):
         """
         request: dict[str, Any] = {"QueryExecutionId": query_id}
         try:
-            retry_api_call(
-                self._connection.client.stop_query_execution,
-                config=self._retry_config,
-                logger=_logger,
-                **request,
-            )
+            with shield_retries():
+                retry_api_call(
+                    self._connection.client.stop_query_execution,
+                    config=self._retry_config,
+                    logger=_logger,
+                    **request,
+                )
         except Exception as e:
             _logger.exception("Failed to cancel query.")
             raise OperationalError(*e.args) from e
