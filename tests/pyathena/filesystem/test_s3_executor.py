@@ -105,7 +105,8 @@ class TestS3AioThreadPool:
 
         def work():
             started.set()
-            release.wait(EVENT_TIMEOUT)
+            # The finally block of the test always releases it.
+            release.wait()
             raise PermissionError("Access Denied")
 
         async def main():
@@ -114,18 +115,23 @@ class TestS3AioThreadPool:
                 lambda _, context: logged.append(context["message"])
             )
             running = pool.submit(work)
-            waiting = asyncio.ensure_future(pool.wait_shielded(running))
-            await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
-            # Lets the task start waiting before it is cancelled.
-            while not running._done_callbacks:
-                await asyncio.sleep(0)
-            waiting.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await waiting
-            release.set()
-            # The worker has run the callbacks of the call once it is shut
-            # down, and the event loop runs theirs on the next iterations.
-            await asyncio.to_thread(pool.shutdown, True)
+            try:
+                waiting = asyncio.ensure_future(pool.wait_shielded(running))
+                await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+                # Lets the task start waiting before it is cancelled.
+                deadline = time.monotonic() + EVENT_TIMEOUT
+                while not running._done_callbacks:
+                    assert time.monotonic() < deadline
+                    await asyncio.sleep(0)
+                waiting.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await waiting
+            finally:
+                release.set()
+                # The worker has run the callbacks of the call once it is
+                # shut down, and the event loop runs theirs on the next
+                # iterations.
+                await asyncio.to_thread(pool.shutdown, True)
             with pytest.raises(PermissionError, match="Access Denied"):
                 running.result()
             # The callbacks of the future of the call keep its waiter.
