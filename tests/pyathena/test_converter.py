@@ -6,10 +6,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from pyathena import DataError
 from pyathena.converter import (
     DefaultTypeConverter,
-    _parse_time_zone,
     _to_array,
     _to_datetime,
     _to_datetime_with_tz,
@@ -19,6 +17,7 @@ from pyathena.converter import (
     _to_time,
     _to_time_with_tz,
 )
+from pyathena.error import DataError
 
 
 @pytest.mark.parametrize(
@@ -737,30 +736,31 @@ def test_to_datetime_with_tz_unreadable_zone_name():
     With only the tzdata package, ``ZoneInfo("America")`` opens a directory and
     raises ``IsADirectoryError``.
     """
-    _parse_time_zone.cache_clear()
     with (
         patch("pyathena.converter.ZoneInfo", side_effect=IsADirectoryError("America")),
         pytest.raises(DataError, match="Unknown time zone 'America'"),
     ):
         _to_datetime_with_tz("2024-02-29 23:59:58 America")
-    _parse_time_zone.cache_clear()
 
 
 @pytest.mark.parametrize(
-    "input_value",
+    ("input_value", "match"),
     [
         # Athena writes 05:30 and 06:30 UTC both as this text.
-        "2020-11-01 01:30:00.000 America/New_York",
-        "2020-11-01 01:00:00.000 America/New_York",
-        "2020-11-01 01:59:59.999999 America/New_York",
-        "2020-10-25 01:30:00.000 Europe/London",
+        ("2020-11-01 01:30:00.000 America/New_York", "is ambiguous"),
+        ("2020-11-01 01:00:00.000 America/New_York", "is ambiguous"),
+        ("2020-11-01 01:59:59.999999 America/New_York", "is ambiguous"),
+        ("2020-10-25 01:30:00.000 Europe/London", "is ambiguous"),
         # A 30-minute DST.
-        "2020-04-05 01:45:00.000 Australia/Lord_Howe",
+        ("2020-04-05 01:45:00.000 Australia/Lord_Howe", "is ambiguous"),
+        ("2020-03-08 02:30:00.000 America/New_York", "does not exist"),
+        ("2020-03-08 02:00:00.000 America/New_York", "does not exist"),
+        ("2020-03-29 01:30:00.000 Europe/London", "does not exist"),
     ],
 )
-def test_to_datetime_with_tz_ambiguous_local_time(input_value):
-    """A local time that occurs twice in its zone raises DataError."""
-    with pytest.raises(DataError, match="is ambiguous"):
+def test_to_datetime_with_tz_repeated_or_skipped_local_time(input_value, match):
+    """A local time that a DST transition repeats or skips raises DataError."""
+    with pytest.raises(DataError, match=match):
         _to_datetime_with_tz(input_value)
 
 
@@ -775,20 +775,6 @@ def test_typed_datetime_with_tz_elements_ambiguous_local_time():
 
 
 @pytest.mark.parametrize(
-    "input_value",
-    [
-        "2020-03-08 02:30:00.000 America/New_York",
-        "2020-03-08 02:00:00.000 America/New_York",
-        "2020-03-29 01:30:00.000 Europe/London",
-    ],
-)
-def test_to_datetime_with_tz_nonexistent_local_time(input_value):
-    """A local time that a DST transition skips raises DataError."""
-    with pytest.raises(DataError, match="does not exist"):
-        _to_datetime_with_tz(input_value)
-
-
-@pytest.mark.parametrize(
     ("input_value", "expected_utc"),
     [
         ("2020-11-01 00:59:59.999999 America/New_York", datetime(2020, 11, 1, 4, 59, 59, 999999)),
@@ -800,7 +786,10 @@ def test_to_datetime_with_tz_nonexistent_local_time(input_value):
     ],
 )
 def test_to_datetime_with_tz_around_dst_transitions(input_value, expected_utc):
-    """Local times next to a DST transition, and offsets, convert to one instant."""
+    """Local times next to a DST transition convert to one instant.
+
+    So does the repeated local time with a zone or offset that has no transition.
+    """
     result = _to_datetime_with_tz(input_value)
     assert result.astimezone(UTC) == expected_utc.replace(tzinfo=UTC)
 

@@ -142,11 +142,15 @@ def _to_datetime_with_tz(varchar_value: str | None) -> datetime | None:
     if not varchar_value:
         return None
     datetime_, _, tz = varchar_value.rpartition(" ")
-    value = _parse_datetime(datetime_).replace(tzinfo=_parse_time_zone(tz))
+    zone = _parse_time_zone(tz)
+    value = _parse_datetime(datetime_).replace(tzinfo=zone)
+    if isinstance(zone, timezone):
+        return value
     # PEP 495: fold=0 and fold=1 give different offsets only at a transition. At a
     # repeated local time, fold=0 is the earlier instant; at a skipped one, the later.
-    if value.utcoffset() != value.replace(fold=1).utcoffset():
-        if value.timestamp() < value.replace(fold=1).timestamp():
+    folded = value.replace(fold=1)
+    if value.utcoffset() != folded.utcoffset():
+        if value.timestamp() < folded.timestamp():
             reason = "is ambiguous: the local time occurs twice"
         else:
             reason = "does not exist: the local time is skipped"
