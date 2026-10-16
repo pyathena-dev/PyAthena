@@ -494,6 +494,10 @@ class TestAioS3FileSystem:
             side_effect=lambda *args: events.append("abort")
         )
 
+        logged = []
+        asyncio.get_running_loop().set_exception_handler(
+            lambda _, context: logged.append(context["message"])
+        )
         task = asyncio.ensure_future(
             fs._copy_object_with_multipart_upload(
                 S3Path("bucket", "src"),
@@ -518,8 +522,13 @@ class TestAioS3FileSystem:
             release.set()
         with pytest.raises(asyncio.CancelledError):
             await task
+        gc.collect()
+        await asyncio.sleep(0)
 
         assert events == (["complete", "abort"] if completion_fails else ["complete"])
+        # GH-1186: a completion that fails after the cancellation is not
+        # logged as never retrieved.
+        assert logged == []
 
     @pytest.mark.parametrize("creation_fails", [False, True])
     @pytest.mark.asyncio
@@ -551,6 +560,10 @@ class TestAioS3FileSystem:
             side_effect=lambda upload, params: events.append(("abort", upload.upload_id))
         )
 
+        logged = []
+        asyncio.get_running_loop().set_exception_handler(
+            lambda _, context: logged.append(context["message"])
+        )
         task = asyncio.ensure_future(
             fs._copy_object_with_multipart_upload(
                 S3Path("bucket", "src"),
@@ -575,8 +588,13 @@ class TestAioS3FileSystem:
             release.set()
         with pytest.raises(asyncio.CancelledError):
             await task
+        gc.collect()
+        await asyncio.sleep(0)
 
         assert events == (["create"] if creation_fails else ["create", ("abort", "uploadid")])
+        # GH-1186: a creation that fails after the cancellation is not logged
+        # as never retrieved.
+        assert logged == []
         sync_fs.core.upload_part_copy.assert_not_called()
 
     @pytest.mark.asyncio

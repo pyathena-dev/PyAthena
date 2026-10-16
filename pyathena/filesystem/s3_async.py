@@ -673,9 +673,9 @@ class AioS3FileSystem(AsyncFileSystem):
             self.core.create_multipart_upload, plan.destination, **plan.create_params
         )
         try:
-            # shield keeps a cancellation from cancelling the creation, so
-            # that _abort() can wait for an upload that it creates.
-            multipart_upload = await asyncio.shield(asyncio.wrap_future(creation))
+            # A cancellation does not cancel the creation, so that _abort()
+            # can wait for an upload that it creates.
+            multipart_upload = await self._thread_pool.wait_shielded(creation)
             tasks = [asyncio.ensure_future(_upload_part(i, r)) for i, r in enumerate(plan.ranges)]
             for task in tasks:
                 # Retrieved, so that asyncio does not log the failure of a
@@ -696,9 +696,9 @@ class AioS3FileSystem(AsyncFileSystem):
                 cast(list[S3MultipartUploadPart], parts),
                 **plan.complete_params,
             )
-            # shield keeps a cancellation from cancelling the completion, so
-            # that _abort() can wait for it.
-            completed = await asyncio.shield(asyncio.wrap_future(completion))
+            # A cancellation does not cancel the completion, so that _abort()
+            # can wait for it.
+            completed = await self._thread_pool.wait_shielded(completion)
         except BaseException:
             # Also on cancellation, as S3FileSystem._finish_multipart_upload
             # does on an interrupt.

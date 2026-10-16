@@ -294,7 +294,8 @@ class S3AioThreadPool(S3Executor):
         """Run a blocking call that a cancellation of the waiting task does not stop.
 
         The call runs to its end, even if it has not started when the waiting
-        task is cancelled; its outcome is then dropped.
+        task is cancelled; its outcome is then dropped. See
+        :meth:`wait_shielded`.
 
         Args:
             fn: The blocking callable.
@@ -307,16 +308,35 @@ class S3AioThreadPool(S3Executor):
         Raises:
             RuntimeError: If the pool has been shut down.
         """
-        future = asyncio.wrap_future(self.submit(fn, *args, **kwargs))
-        # Retrieved, so that asyncio does not log the failure of a call whose
-        # waiting task was cancelled as never retrieved.
-        future.add_done_callback(lambda f: f.cancelled() or f.exception())
+        return await self.wait_shielded(self.submit(fn, *args, **kwargs))
+
+    async def wait_shielded(self, future: Future[T]) -> T:
+        """Wait for a submitted call that a cancellation of the waiting task does not cancel.
+
+        Unlike awaiting ``asyncio.wrap_future(future)``, a cancellation of
+        the waiting task leaves the future to the caller, which can still
+        wait for it or cancel it, and its outcome is retrieved, so that
+        asyncio does not log a failure that ends after the cancellation as
+        never retrieved.
+
+        Args:
+            future: The future of a call submitted to this pool.
+
+        Returns:
+            The return value of the call.
+        """
+        waiter = asyncio.wrap_future(future)
+        waiter.add_done_callback(lambda f: f.cancelled() or f.exception())
         try:
-            return await asyncio.shield(future)
+            # Unlike shield(), which also logs the failure of a future that
+            # ends after a cancellation since Python 3.15, wait() leaves the
+            # future alone when the waiting task is cancelled.
+            await asyncio.wait([waiter])
+            return waiter.result()
         finally:
             # The traceback of an error keeps this frame, which would form a
-            # reference cycle with the future of the error.
-            del future
+            # reference cycle with the futures of the error.
+            del future, waiter
 
     @override
     def shutdown(self, wait: bool = True) -> None:

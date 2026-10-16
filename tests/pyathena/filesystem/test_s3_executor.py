@@ -95,6 +95,42 @@ class TestS3AioThreadPool:
 
         assert events == (["pending finished"] if shielded else [])
 
+    def test_wait_shielded_cancelled(self):
+        # GH-1186: cancelling the waiting task neither cancels the call nor
+        # lets asyncio log its failure, which ends after the cancellation;
+        # the caller can still wait for its future.
+        started = threading.Event()
+        release = threading.Event()
+        pool = S3AioThreadPool(1)
+
+        def work():
+            started.set()
+            release.wait(EVENT_TIMEOUT)
+            raise PermissionError("Access Denied")
+
+        async def main():
+            logged = []
+            asyncio.get_running_loop().set_exception_handler(
+                lambda _, context: logged.append(context["message"])
+            )
+            running = pool.submit(work)
+            waiting = asyncio.ensure_future(pool.wait_shielded(running))
+            await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+            waiting.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiting
+            release.set()
+            with pytest.raises(PermissionError, match="Access Denied"):
+                await asyncio.wrap_future(running)
+            del waiting
+            gc.collect()
+            # Lets the event loop run the callbacks of the failure.
+            await asyncio.sleep(0)
+            return logged
+
+        assert asyncio.run(main()) == []
+        pool.shutdown()
+
     def test_shutdown(self):
         # The calls submitted before the shutdown still run.
         events = []
