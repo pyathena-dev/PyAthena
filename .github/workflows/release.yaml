@@ -48,3 +48,5 @@ jobs:
             dist/*.whl
             dist/*.tar.gz
           generate_release_notes: true
+          # A release of this maintenance line does not replace the latest release of master.
+          make_latest: false
