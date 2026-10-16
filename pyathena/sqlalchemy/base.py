@@ -106,12 +106,14 @@ class _PingConnection:
     does not run through the connection's default cursor class. Other attributes are
     those of the pinged connection, which ``is_disconnect()`` receives before
     SQLAlchemy 2.0.5.
-
-    Args:
-        connection: The pinged DBAPI connection, or the async adapter around one.
     """
 
     def __init__(self, connection: Any) -> None:
+        """Wrap the pinged connection.
+
+        Args:
+            connection: The pinged DBAPI connection, or the async adapter around one.
+        """
         self._connection = connection
 
     def cursor(self) -> Any:
