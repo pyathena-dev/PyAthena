@@ -14,6 +14,7 @@ import contextvars
 import os
 import sys
 import threading
+import traceback
 import weakref
 from abc import ABCMeta, abstractmethod
 from collections.abc import Callable
@@ -21,11 +22,97 @@ from concurrent import futures
 from concurrent.futures import Future
 from concurrent.futures.thread import ThreadPoolExecutor
 from multiprocessing import cpu_count
-from typing import Any, ClassVar, TypeVar
+from typing import Any, ClassVar, Generic, TypeVar, cast
 
 from pyathena.util import override
 
 T = TypeVar("T")
+
+
+class _S3WorkItem(Generic[T]):
+    """A submitted callable and the future of the caller that its outcome resolves.
+
+    The executor calls :meth:`run`, and :meth:`settle` is the done callback of
+    the submission, which resolves the future if the executor drops the
+    callable before it runs. Whichever comes first claims the future, so that
+    it is started or settled once, and drops the references of the item to
+    the future, the callable, and its arguments, which the frames and
+    callbacks of the executor may keep after the call. The arguments of a
+    failed callable, such as the body of a part, are therefore freed when it
+    fails, and the traceback of its error, which keeps the frame of
+    :meth:`run`, forms no reference cycle with the future.
+    """
+
+    def __init__(
+        self,
+        future: Future[T],
+        fn: Callable[..., T],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> None:
+        """Initialize the work item.
+
+        Args:
+            future: A pending future that no executor has started.
+            fn: The callable to run.
+            args: Positional arguments passed to the callable.
+            kwargs: Keyword arguments passed to the callable.
+        """
+        self._future: Future[T] | None = future
+        self._fn: Callable[..., T] | None = fn
+        self._args = args
+        self._kwargs = kwargs
+        self._claim = threading.Lock()
+
+    def run(self) -> None:
+        """Run the callable and resolve the future unless it was cancelled."""
+        if not self._claim.acquire(blocking=False):
+            return
+        if not cast(Future[T], self._future).set_running_or_notify_cancel():
+            self._take()
+            return
+        try:
+            result = cast(Callable[..., T], self._fn)(*self._args, **self._kwargs)
+        except BaseException as e:
+            # The frames below this one hold the arguments. clear_frames()
+            # skips this frame, which is still executing.
+            traceback.clear_frames(e.__traceback__)
+            self._take().set_exception(e)
+        else:
+            self._take().set_result(result)
+
+    def settle(self, submitted: Future[Any]) -> None:
+        """Resolve the future if the executor dropped the callable before it ran.
+
+        This happens, for example, when the event loop of an
+        :class:`S3AioExecutor` shuts down.
+
+        Args:
+            submitted: The finished future of the submitted :meth:`run`.
+        """
+        if not self._claim.acquire(blocking=False):
+            # run() has claimed the future and resolves it.
+            return
+        future = self._take()
+        if submitted.cancelled():
+            future.cancel()
+        # A cancelled future is only marked as notified, as an executor does
+        # when it drops a cancelled callable, so that wait() counts it as done.
+        if future.set_running_or_notify_cancel():
+            future.set_exception(
+                submitted.exception() or RuntimeError("The executor did not run the call.")
+            )
+
+    def _take(self) -> Future[T]:
+        """Drop the references of the item and return its future.
+
+        Returns:
+            The future of the caller.
+        """
+        future = cast(Future[T], self._future)
+        self._future = self._fn = None
+        self._args, self._kwargs = (), {}
+        return future
 
 
 class S3Executor(metaclass=ABCMeta):
@@ -59,47 +146,21 @@ class S3Executor(metaclass=ABCMeta):
         event loop shuts down, the future is cancelled or gets the error that
         the executor reported.
 
+        The arguments of a failed callable, such as the body of a part, are
+        freed when it fails: its error keeps the frames that it was raised
+        from, without their local variables. The errors that it was raised
+        from keep theirs; :meth:`S3Core.call()
+        <pyathena.filesystem.s3_core.S3Core.call>` clears those of the
+        ``ClientError`` of a request.
+
         Args:
             future: A pending future that no executor has started.
             fn: The callable to run.
             *args: Positional arguments passed to the callable.
             **kwargs: Keyword arguments passed to the callable.
         """
-
-        def run() -> None:
-            """Run the callable and resolve the future unless it was cancelled."""
-            if not future.set_running_or_notify_cancel():
-                return
-            try:
-                result = fn(*args, **kwargs)
-            except BaseException as e:
-                future.set_exception(e)
-            else:
-                future.set_result(result)
-
-        def settle(submitted: Future[None]) -> None:
-            """Resolve the future if the executor dropped the callable before it ran.
-
-            run() raises nothing for a future that no executor has started,
-            so a cancelled or failed submission means that it did not run,
-            and the future is still pending or cancelled by the caller.
-
-            Args:
-                submitted: The finished future of the submitted run().
-            """
-            error: BaseException | None = None
-            if submitted.cancelled():
-                future.cancel()
-            elif (error := submitted.exception()) is None:
-                # run() resolved the future.
-                return
-            # A future cancelled here or by the caller is only marked as
-            # notified, which an executor does when it drops a cancelled
-            # callable, so that wait() counts it as done.
-            if future.set_running_or_notify_cancel():
-                future.set_exception(error)
-
-        self.submit(run).add_done_callback(settle)
+        item = _S3WorkItem(future, fn, args, kwargs)
+        self.submit(item.run).add_done_callback(item.settle)
 
     def __enter__(self) -> S3Executor:
         return self
@@ -228,7 +289,8 @@ class S3AioThreadPool(S3Executor):
         """Run a blocking call that a cancellation of the waiting task does not stop.
 
         The call runs to its end, even if it has not started when the waiting
-        task is cancelled; its outcome is then dropped.
+        task is cancelled; its outcome is then dropped. See
+        :meth:`wait_shielded`.
 
         Args:
             fn: The blocking callable.
@@ -241,11 +303,30 @@ class S3AioThreadPool(S3Executor):
         Raises:
             RuntimeError: If the pool has been shut down.
         """
-        future = asyncio.wrap_future(self.submit(fn, *args, **kwargs))
-        # Retrieved, so that asyncio does not log the failure of a call whose
-        # waiting task was cancelled as never retrieved.
-        future.add_done_callback(lambda f: f.cancelled() or f.exception())
-        return await asyncio.shield(future)
+        return await self.wait_shielded(self.submit(fn, *args, **kwargs))
+
+    async def wait_shielded(self, future: Future[T]) -> T:
+        """Wait for a submitted call that a cancellation of the waiting task does not cancel.
+
+        Unlike awaiting ``asyncio.wrap_future(future)``, a cancellation of
+        the waiting task leaves the future to the caller, which can still
+        wait for it or cancel it, and its outcome is retrieved, so that
+        asyncio does not log a failure that ends after the cancellation as
+        never retrieved.
+
+        Args:
+            future: The future of a call submitted to this pool.
+
+        Returns:
+            The return value of the call.
+        """
+        waiter = asyncio.wrap_future(future)
+        waiter.add_done_callback(lambda f: f.cancelled() or f.exception())
+        # Unlike shield(), which on Python 3.14 and later also logs the failure
+        # of a future that ends after a cancellation, wait() leaves the future
+        # alone when the waiting task is cancelled.
+        await asyncio.wait([waiter])
+        return waiter.result()
 
     @override
     def shutdown(self, wait: bool = True) -> None:
@@ -347,45 +428,12 @@ class S3AioExecutor(S3Executor):
             # the function keeps running in its thread, so the returned future
             # is started and resolved by the function's thread instead.
             future: Future[T] = Future()
-            # Acquired once, by run() or by settle(), whichever comes first,
-            # so that the future is started or settled exactly once.
-            claim = threading.Lock()
-
-            def run() -> None:
-                """Run the function and resolve the future unless it was cancelled."""
-                if not claim.acquire(blocking=False) or not future.set_running_or_notify_cancel():
-                    return
-                try:
-                    result = fn(*args, **kwargs)
-                except BaseException as e:
-                    future.set_exception(e)
-                else:
-                    future.set_result(result)
-
-            def settle(task: Future[None]) -> None:
-                """Resolve the future if the task ended before the function started.
-
-                This happens, for example, when the event loop shuts down.
-
-                Args:
-                    task: The finished future of the task that runs the function.
-                """
-                if not claim.acquire(blocking=False):
-                    # run() has claimed the future and resolves it.
-                    return
-                if task.cancelled():
-                    future.cancel()
-                    # Notify the waiters of the cancellation, as an executor
-                    # does when it drops a cancelled function.
-                    future.set_running_or_notify_cancel()
-                elif future.set_running_or_notify_cancel():
-                    future.set_exception(task.exception())
-
+            item = _S3WorkItem(future, fn, args, kwargs)
             with self._lock:
                 if self._shutdown:
                     raise RuntimeError("cannot schedule new futures after shutdown")
-                task = asyncio.run_coroutine_threadsafe(self._pool.run(run), self._loop)
-            task.add_done_callback(settle)
+                task = asyncio.run_coroutine_threadsafe(self._pool.run(item.run), self._loop)
+            task.add_done_callback(item.settle)
             return future
         raise RuntimeError(
             "S3AioExecutor requires a running event loop. "

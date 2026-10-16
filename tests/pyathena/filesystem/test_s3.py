@@ -1,3 +1,4 @@
+import array
 import asyncio
 import bz2
 import contextlib
@@ -3427,6 +3428,72 @@ class TestS3FileSystem:
         with fs.open("s3://bucket/key", "rb", cache_type="none", block_size=16, max_workers=4) as f:
             assert f.read() == data
         assert sorted(ranges) == ["bytes=0-15", "bytes=16-31", "bytes=32-47", "bytes=48-63"]
+
+    def test_failed_read_frees_other_ranges(self):
+        # GH-1186: a parallel read that fails frees the data of the other
+        # ranges, also while its error is held. Their futures stayed in the
+        # frame of the read, which the traceback of the error keeps.
+        fs = self._make_fs()
+        fs.info = mock.MagicMock(return_value=self._file_object("key"))
+        fs.info.return_value.size = 64
+        read = []
+        others_read = threading.Semaphore(0)
+
+        def get_object(path, range_, **kwargs):
+            if range_[0] == 0:
+                for _ in range(3):
+                    assert others_read.acquire(timeout=5)
+                raise PermissionError("Access Denied")
+            # Unlike bytes, an array can be weakly referenced.
+            data = array.array("B", bytes(range_[1] - range_[0]))
+            read.append(weakref.ref(data))
+            others_read.release()
+            return data
+
+        fs.core.get_object = get_object
+        f = fs.open("s3://bucket/key", "rb", cache_type="none", block_size=16, max_workers=4)
+        with pytest.raises(PermissionError, match="Access Denied") as info:
+            f.read()
+        # Waits for the reads, whose threads may still set the results.
+        f.close()
+        assert len(read) == 3
+        assert [ref() for ref in read] == [None] * 3
+        assert info.value.__traceback__ is not None
+
+    def test_interrupted_read_frees_ranges(self):
+        # GH-1186: an interrupted parallel read cancels the reads that have
+        # not started and frees the data of the others, also while the
+        # interrupt is held, as a failed read does.
+        fs = self._make_fs()
+        fs.info = mock.MagicMock(return_value=self._file_object("key"))
+        fs.info.return_value.size = 64
+        read = []
+
+        def get_object(path, range_, **kwargs):
+            # Unlike bytes, an array can be weakly referenced.
+            data = array.array("B", bytes(range_[1] - range_[0]))
+            read.append(weakref.ref(data))
+            return data
+
+        fs.core.get_object = get_object
+
+        def interrupted_wait(futures, **kwargs):
+            # As the wait of concurrent.futures, whose frame keeps the futures
+            # in a set, interrupted once the reads have finished.
+            futures = set(futures)
+            wait(futures)
+            raise KeyboardInterrupt
+
+        f = fs.open("s3://bucket/key", "rb", cache_type="none", block_size=16, max_workers=4)
+        with (
+            mock.patch("pyathena.filesystem.s3.wait", side_effect=interrupted_wait),
+            pytest.raises(KeyboardInterrupt) as info,
+        ):
+            f.read()
+        f.close()
+        assert len(read) == 4
+        assert [ref() for ref in read] == [None] * 4
+        assert info.value.__traceback__ is not None
 
     @pytest.mark.parametrize("cache_type", ["bytes", "all", "first"])
     def test_open_directory(self, cache_type):
@@ -7510,6 +7577,14 @@ class TestS3File:
         assert (
             "Failed to abort multipart upload uploadid to s3://bucket/key.txt." in caplog.text
         ) is abort_fails
+        # GH-1186: the file is closed without the buffer, which holds only the
+        # data of the last part, so a later commit() neither completes the
+        # upload nor uploads that data alone with PutObject.
+        assert file.closed
+        assert file.buffer is None
+        file.commit()
+        file.fs.core.complete_multipart_upload.assert_called_once()
+        file.fs.core.put_object.assert_not_called()
         file.discard()
 
         assert file.fs._call.call_args_list == [

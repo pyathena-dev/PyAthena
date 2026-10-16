@@ -8,6 +8,7 @@ import logging
 import mimetypes
 import os.path
 import time
+import traceback
 from collections.abc import Callable, Mapping
 from concurrent.futures import FIRST_COMPLETED, FIRST_EXCEPTION, Future, as_completed, wait
 from copy import deepcopy
@@ -3280,7 +3281,8 @@ class S3File(AbstractBufferedFile):
         as soon as it fails, without waiting for the parts before it. If the
         abort also fails, the upload is kept so that :meth:`discard` can
         abort it. Invalidates the cache of the path afterwards. Does nothing
-        for a file whose failed write dropped the written data.
+        for a file whose failed write or multipart commit dropped the written
+        data.
 
         Raises:
             FileExistsError: If an object was created at the path after the
@@ -3289,9 +3291,9 @@ class S3File(AbstractBufferedFile):
                 initialized.
         """
         if self.buffer is None:
-            # _close_without_commit() dropped the written data. A multipart
-            # upload that it failed to abort is kept for discard(), not
-            # completed.
+            # _close_without_commit() or a failed commit dropped the written
+            # data. A multipart upload that they failed to abort is kept for
+            # discard(), not completed.
             return
         if self.tell() == 0:
             self.discard()
@@ -3307,7 +3309,6 @@ class S3File(AbstractBufferedFile):
             if not self.multipart_upload:
                 raise RuntimeError("Multipart upload is not initialized.")
 
-            upload_id = cast(str, self.multipart_upload.upload_id)
             try:
                 done, _ = wait(self.multipart_upload_parts, return_when=FIRST_EXCEPTION)
                 for future in done:
@@ -3320,17 +3321,13 @@ class S3File(AbstractBufferedFile):
                     parts, **self._get_request_kwargs("complete_multipart_upload")
                 )
             except BaseException:
-                # discard() keeps the upload if the abort fails or is
-                # interrupted, so that a later discard(), such as a
-                # transaction rollback, retries the abort. An abort failure
+                # Closed without the buffer, which holds only the data of the
+                # last part that a later commit() would otherwise upload alone
+                # with PutObject. discard() keeps the upload if the abort
+                # fails or is interrupted, so that a later discard(), such as
+                # a transaction rollback, retries the abort. An abort failure
                 # is logged so that it does not mask the original error.
-                try:
-                    self.discard()
-                except Exception:
-                    _logger.exception(
-                        f"Failed to abort multipart upload {upload_id} "
-                        f"to s3://{self.bucket}/{self.key}."
-                    )
+                self._close_without_commit()
                 raise
 
         self.fs.invalidate_cache(self.path)
@@ -3414,7 +3411,9 @@ class S3File(AbstractBufferedFile):
         The range is clamped to the size of the object, since fsspec caches
         may request a range that is empty or reaches past the end of the
         object. S3 would answer the former with the whole object and a range
-        starting past the end with an ``InvalidRange`` error.
+        starting past the end with an ``InvalidRange`` error. A range larger
+        than the block size is read with parallel requests; when one fails,
+        those that have not started are cancelled and its error is raised.
 
         Args:
             start: The offset of the first byte to read.
@@ -3436,9 +3435,27 @@ class S3File(AbstractBufferedFile):
                 self._executor.submit(self.fs.core.get_object, path, r, **request_kwargs)
                 for r in ranges
             ]
-            for future in as_completed(futures):
-                # The failure of the first read to finish is raised.
-                future.result()
+            try:
+                done = wait(futures, return_when=FIRST_EXCEPTION).done
+            except BaseException as e:
+                # The reads are cancelled with the read of the range, as below,
+                # and the frames of the wait, which keep their futures, are
+                # cleared; clear_frames() skips this frame, which is executing.
+                traceback.clear_frames(e.__traceback__)
+                while futures:
+                    futures.pop().cancel()
+                raise
+            failed = next(
+                (f for f in done if not f.cancelled() and f.exception() is not None), None
+            )
+            if failed is not None:
+                # The reads that have not started are cancelled, and the
+                # futures of the others are dropped, so that this frame, which
+                # the traceback of the error keeps, does not keep their data.
+                while futures:
+                    futures.pop().cancel()
+                done.clear()
+                failed.result()
             return b"".join(f.result() for f in futures)
         return self.fs.core.get_object(path, ranges[0], **request_kwargs)
 

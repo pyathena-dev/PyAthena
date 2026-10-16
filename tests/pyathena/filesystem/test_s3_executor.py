@@ -7,9 +7,12 @@
 
 import asyncio
 import contextvars
+import gc
 import os
 import threading
 import time
+import traceback
+import weakref
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from unittest import mock
 
@@ -86,6 +89,54 @@ class TestS3AioThreadPool:
         pool.shutdown()
 
         assert events == (["pending finished"] if shielded else [])
+
+    def test_wait_shielded_cancelled(self):
+        # GH-1186: cancelling the waiting task neither cancels the call nor
+        # lets asyncio log its failure, which ends after the cancellation;
+        # the caller can still wait for its future.
+        started = threading.Event()
+        release = threading.Event()
+        pool = S3AioThreadPool(1)
+
+        def work():
+            started.set()
+            # The finally block of the test always releases it.
+            release.wait()
+            raise PermissionError("Access Denied")
+
+        async def main():
+            logged = []
+            asyncio.get_running_loop().set_exception_handler(
+                lambda _, context: logged.append(context["message"])
+            )
+            running = pool.submit(work)
+            try:
+                waiting = asyncio.ensure_future(pool.wait_shielded(running))
+                await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+                # Lets the task start waiting before it is cancelled.
+                deadline = time.monotonic() + EVENT_TIMEOUT
+                while not running._done_callbacks:
+                    assert time.monotonic() < deadline
+                    await asyncio.sleep(0)
+                waiting.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await waiting
+            finally:
+                release.set()
+                # The worker has run the callbacks of the call once it is
+                # shut down, and the event loop runs theirs on the next
+                # iterations.
+                await asyncio.to_thread(pool.shutdown, True)
+            with pytest.raises(PermissionError, match="Access Denied"):
+                running.result()
+            # The callbacks of the future of the call keep its waiter.
+            del waiting, running
+            gc.collect()
+            for _ in range(3):
+                await asyncio.sleep(0)
+            return logged
+
+        assert asyncio.run(main()) == []
 
     def test_shutdown(self):
         # The calls submitted before the shutdown still run.
@@ -394,6 +445,33 @@ class TestS3Executor:
         assert succeeded.result() == 3
         with pytest.raises(ValueError, match="invalid literal"):
             failed.result()
+
+    @pytest.mark.parametrize("executor_class", [S3ThreadPoolExecutor, S3AioThreadPool])
+    def test_submit_to_failure_frees_arguments(self, executor_class):
+        # GH-1186: the arguments of a failed callable, such as the body of a
+        # part, are freed when it fails, while the error keeps the frames of
+        # its traceback. The traceback used to keep them, in a reference
+        # cycle with the future until the garbage collector ran.
+        class Body:
+            pass
+
+        def upload(body):
+            raise PermissionError("Access Denied")
+
+        body = Body()
+        body_ref = weakref.ref(body)
+        future: Future[None] = Future()
+        gc.disable()
+        try:
+            with executor_class(max_workers=1) as executor:
+                executor.submit_to(future, upload, body)
+                del body
+            error = future.exception()
+            assert isinstance(error, PermissionError)
+            assert traceback.extract_tb(error.__traceback__)[-1].name == "upload"
+            assert body_ref() is None
+        finally:
+            gc.enable()
 
     def test_submit_to_cancelled_before_start(self):
         # Cancelling the future keeps a callable that has not started from running.
