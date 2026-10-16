@@ -241,6 +241,7 @@ class TestAthenaResultSet:
         them is data. No AWS calls; GetQueryResults is mocked.
         """
         result_set = AthenaResultSet.__new__(AthenaResultSet)  # bypass __init__
+        result_set._connection = MagicMock()
         result_set._query_execution = None
         result_set._metadata = tuple(
             {"Name": name, "Type": "varchar", "Precision": 0, "Scale": 0, "Nullable": "UNKNOWN"}
