@@ -69,13 +69,14 @@ async def async_retry_api_call(
     *args: Any,
     stop_on: Callable[[BaseException], bool] | None = None,
     stop_when: Callable[[], bool] | None = None,
+    stoppable: bool = True,
     **kwargs: Any,
 ) -> Any:
     """Execute a function with retry logic in a thread to avoid blocking the event loop.
 
     Runs ``retry_api_call`` with :func:`run_in_thread` so that blocking boto3
     calls do not block the asyncio event loop. Cancelling the caller makes no
-    further attempt and ends the backoff wait.
+    further attempt and ends the backoff wait, unless ``stoppable`` is false.
 
     Args:
         func: The AWS API function to call.
@@ -84,12 +85,17 @@ async def async_retry_api_call(
         *args: Positional arguments to pass to ``retry_api_call``.
         stop_on: Passed to ``retry_api_call``.
         stop_when: Passed to ``retry_api_call``.
+        stoppable: Whether a cancellation of the caller stops the retries. A
+            request that cleans up, such as one that stops a query or
+            terminates a session, passes False: its retries then run to their
+            end in the thread, as with ``asyncio.to_thread()``.
         **kwargs: Keyword arguments to pass to the function.
 
     Returns:
         The result of the successful function call.
     """
-    return await run_in_thread(
+    run = run_in_thread if stoppable else asyncio.to_thread
+    return await run(
         retry_api_call,
         func,
         config,
@@ -143,6 +149,12 @@ async def create_in_thread(
     constructed: list[_ClosableT] = []
 
     def construct() -> _ClosableT | None:
+        """Construct the object in a scope that the cancellation stops.
+
+        Returns:
+            The object, or None if the caller was cancelled, after which an
+            object constructed here is closed here.
+        """
         if cancelled.is_set():
             return None
         with stop_retries_on(cancelled):

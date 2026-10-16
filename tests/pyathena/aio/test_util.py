@@ -252,6 +252,22 @@ async def test_async_retry_api_call_stop_when():
     assert operation.calls == 1
 
 
+async def test_async_retry_api_call_not_stoppable():
+    """GH-1202: a cleanup request that is not stoppable keeps its retries after a cancellation."""
+    operation = ThrottledOperation(block=True, failures=2)
+    task = asyncio.create_task(
+        async_retry_api_call(operation, RetryConfig(attempt=3, multiplier=0), stoppable=False)
+    )
+    try:
+        await _cancel_once_started(task, operation, "request")
+        deadline = time.monotonic() + EVENT_TIMEOUT
+        while operation.calls < 3:
+            assert time.monotonic() < deadline
+            await asyncio.sleep(0.01)
+    finally:
+        operation.release.set()
+
+
 async def test_async_retry_api_call_retries():
     """Without a cancellation, the retries continue."""
     operation = ThrottledOperation(failures=2)

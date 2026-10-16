@@ -401,6 +401,28 @@ class TestAioCursor:
         cancel.assert_awaited_once_with("query_id")
         assert cursor.query_id == "query_id"
 
+    async def test_cancel_cancelled_while_retrying(self):
+        """GH-1202: a cancellation does not stop the retries of StopQueryExecution (no AWS)."""
+        cursor, _, _ = _offline_cursor(
+            kill_on_interrupt=True, final_state=AthenaQueryExecution.STATE_CANCELLED
+        )
+        del cursor._cancel  # use the real _cancel()
+        cursor._retry_config = RetryConfig(attempt=3, multiplier=0)
+        operation = ThrottledOperation(block=True, failures=2, operation_name="StopQueryExecution")
+        cursor._connection.client.stop_query_execution.side_effect = operation
+        task = asyncio.create_task(cursor._cancel("query_id"))
+        try:
+            assert await asyncio.to_thread(operation.started.wait, EVENT_TIMEOUT)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            operation.release.set()
+        deadline = asyncio.get_running_loop().time() + EVENT_TIMEOUT
+        while operation.calls < 3:
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0.01)
+
     async def test_execute_cancelled_before_request_is_sent(self):
         """Cancellation before the start task begins sends no request (no AWS)."""
         cursor, cancel, started, release = _starting_cursor()

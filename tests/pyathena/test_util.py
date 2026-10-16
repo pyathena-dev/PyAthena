@@ -18,7 +18,7 @@ from pyathena.util import (
     stop_retries_on,
     strtobool,
 )
-from tests.pyathena.util import EVENT_TIMEOUT
+from tests.pyathena.util import EVENT_TIMEOUT, throttling_error
 
 
 def test_parse_output_location():
@@ -207,13 +207,6 @@ def test_retry_api_call_with_reusable_exception_policy(wrapped, policy_type):
         assert calls == 3
 
 
-def _throttling_error() -> ClientError:
-    return ClientError(
-        {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
-        "GetTableMetadata",
-    )
-
-
 class TestRetryConfig:
     def test_default_attempts(self):
         assert RetryConfig().attempt == 8
@@ -240,7 +233,7 @@ class TestRetryConfig:
 def test_retry_api_call_waits_with_jitter(monkeypatch, multiplier, max_delay, expected_bases):
     sleeps = []
     monkeypatch.setattr(tenacity.nap.time, "sleep", sleeps.append)
-    error = _throttling_error()
+    error = throttling_error("GetTableMetadata")
     calls = 0
 
     def call():
@@ -260,7 +253,7 @@ def test_retry_api_call_waits_with_jitter(monkeypatch, multiplier, max_delay, ex
 def test_retry_api_call_jitter_varies(monkeypatch):
     sleeps = []
     monkeypatch.setattr(tenacity.nap.time, "sleep", sleeps.append)
-    error = _throttling_error()
+    error = throttling_error("GetTableMetadata")
 
     def call():
         raise error
@@ -392,7 +385,7 @@ class _ThrottledCall:
         """
         self.stop = stop
         self.stop_in = stop_in
-        self.error = _throttling_error()
+        self.error = throttling_error("GetTableMetadata")
         self.calls = 0
         self.timer = None
 
@@ -473,7 +466,7 @@ def test_retry_api_call_shielded():
     """Retries in a shielded block ignore the events of the enclosing scopes."""
     event = threading.Event()
     event.set()
-    error = _throttling_error()
+    error = throttling_error("GetTableMetadata")
     calls = 0
 
     def call():
@@ -503,7 +496,7 @@ def test_retry_api_call_scope_ends_with_block():
     event = threading.Event()
     with stop_retries_on(event):
         event.set()
-    error = _throttling_error()
+    error = throttling_error("GetTableMetadata")
     calls = 0
 
     def call():

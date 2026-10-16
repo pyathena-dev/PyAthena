@@ -166,10 +166,11 @@ async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
             print(f"Query timed out: {cursor.query_id}")
 ```
 
-Cancelling a task also stops the retries of the Athena API requests that PyAthena runs in a thread for it, such as the requests of a fetch or of the status polling.
+Cancelling a task also stops the retries of the Athena API requests that the asyncio cursors make in a thread for it, such as the status polling of `execute()` and the page requests of `AioCursor`.
 No further attempt is made, and the wait before the next attempt ends.
 A request that has already been sent still runs to its end in its thread.
-The start request of `execute()` with `kill_on_interrupt` enabled keeps its retries, so that the query that it starts can be cancelled as described above.
+The start request of `execute()` with `kill_on_interrupt` enabled, the requests that stop a query or a calculation, and the request that terminates a Spark session keep their retries.
+The fetch methods of `AioPandasCursor`, `AioArrowCursor`, `AioPolarsCursor`, and `AioS3FSCursor` run to their end in their thread.
 
 (aio-dict-cursor)=
 

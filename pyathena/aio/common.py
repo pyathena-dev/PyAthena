@@ -9,7 +9,7 @@ from typing import Any, NoReturn, TypeVar, cast
 
 from botocore.exceptions import BotoCoreError, ClientError
 
-from pyathena.aio.util import async_retry_api_call, close_in_thread, run_in_thread
+from pyathena.aio.util import async_retry_api_call, close_in_thread
 from pyathena.common import BaseCursor, CursorIterator
 from pyathena.error import DatabaseError, OperationalError, ProgrammingError
 from pyathena.glue import GlueMetadataClient
@@ -267,6 +267,7 @@ class AioBaseCursor(BaseCursor):
                 self._connection.client.stop_query_execution,
                 config=self._retry_config,
                 logger=_logger,
+                stoppable=False,
                 **request,
             )
         except Exception as e:
@@ -708,7 +709,7 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
     Combines ``WithResultSet`` with ``AioBaseCursor`` and ``CursorIterator``,
     and provides async fetch, ``executemany``, and ``cancel``, async
     iteration, and the async context manager protocol. The fetch methods run
-    the result set's synchronous fetch with ``run_in_thread()``; a subclass
+    the result set's synchronous fetch with ``asyncio.to_thread``; a subclass
     whose result set fetches asynchronously overrides them. Closing the
     previous result set when a query is executed, and closing the cursor at
     the end of an ``async with`` block, also run in a thread, because closing
@@ -792,9 +793,8 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
     ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
         """Fetch the next row of the result set.
 
-        Runs the synchronous fetch with
-        :func:`~pyathena.aio.util.run_in_thread` to avoid blocking the event
-        loop; cancelling the caller stops the retries of its requests.
+        Wraps the synchronous fetch in ``asyncio.to_thread`` to avoid
+        blocking the event loop.
 
         Returns:
             A tuple representing the next row, or None if no more rows.
@@ -805,7 +805,7 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaResultSet, self.result_set)
-        return await run_in_thread(result_set.fetchone)
+        return await asyncio.to_thread(result_set.fetchone)
 
     @override
     async def fetchmany(
@@ -813,9 +813,8 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
     ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         """Fetch multiple rows from the result set.
 
-        Runs the synchronous fetch with
-        :func:`~pyathena.aio.util.run_in_thread` to avoid blocking the event
-        loop; cancelling the caller stops the retries of its requests.
+        Wraps the synchronous fetch in ``asyncio.to_thread`` to avoid
+        blocking the event loop.
 
         Args:
             size: Maximum number of rows to fetch. If None or not positive,
@@ -830,7 +829,7 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaResultSet, self.result_set)
-        return await run_in_thread(result_set.fetchmany, size)
+        return await asyncio.to_thread(result_set.fetchmany, size)
 
     @override
     async def fetchall(
@@ -838,9 +837,8 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
     ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         """Fetch all remaining rows from the result set.
 
-        Runs the synchronous fetch with
-        :func:`~pyathena.aio.util.run_in_thread` to avoid blocking the event
-        loop; cancelling the caller stops the retries of its requests.
+        Wraps the synchronous fetch in ``asyncio.to_thread`` to avoid
+        blocking the event loop.
 
         Returns:
             List of tuples representing all remaining rows.
@@ -851,7 +849,7 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaResultSet, self.result_set)
-        return await run_in_thread(result_set.fetchall)
+        return await asyncio.to_thread(result_set.fetchall)
 
     @override
     def __iter__(self) -> NoReturn:

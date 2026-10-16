@@ -33,7 +33,7 @@ class AioS3FSCursor(WithAsyncFetch):
     Uses ``AioS3FileSystem`` for S3 operations, which replaces
     ``ThreadPoolExecutor`` parallelism with ``asyncio.gather`` +
     ``asyncio.to_thread``. Fetch operations are wrapped in
-    ``run_in_thread()`` because CSV reading is blocking I/O.
+    ``asyncio.to_thread()`` because CSV reading is blocking I/O.
 
     Example:
         >>> async with await pyathena.aio_connect(...) as conn:
