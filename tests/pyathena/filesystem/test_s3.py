@@ -7272,14 +7272,15 @@ class TestS3File:
         fs.core.complete_multipart_upload.assert_not_called()
         assert f.multipart_upload is None
 
-    @pytest.mark.parametrize("stage", ["creation", "write", "copy", "commit"])
+    @pytest.mark.parametrize("stage", ["creation", "write", "copy", "commit", "abort"])
     def test_failed_request_freed_by_reference_counting(self, stage):
         # GH-1186: the file and its data are freed as soon as the error of a
         # failed request is no longer referenced, whether the creation of the
         # upload, a write of several parts, a write after a failed part copy
-        # of an append, or the commit raised it. The traceback of the error
-        # used to keep them in a reference cycle with the future of the
-        # request until the garbage collector ran.
+        # of an append, or the commit raised it, also when the abort of the
+        # upload fails. The traceback of the error used to keep them in a
+        # reference cycle with the future of the request until the garbage
+        # collector ran.
         fs = self._make_append_fs(b"a" * 6 if stage == "copy" else b"")
         release = threading.Event()
 
@@ -7298,10 +7299,13 @@ class TestS3File:
             fs.core.upload_part_copy.side_effect = fail_copy
         else:
             fs.core.upload_part.side_effect = fail
+        if stage == "abort":
+            # A new error each time, which the mock does not keep.
+            fs._call.side_effect = fail
         mode = "ab" if stage == "copy" else "wb"
         f = S3File(fs, "s3://bucket/key.txt", mode=mode, block_size=4, max_workers=1)
         try:
-            if stage in ("copy", "commit"):
+            if stage in ("copy", "commit", "abort"):
                 f.write(b"a" * 4)
             release.set()
             if stage == "copy":
@@ -7312,10 +7316,17 @@ class TestS3File:
         file_ref = weakref.ref(f)
         buffer_ref = weakref.ref(f.buffer)
         # The write submits a part before it waits for the failed one.
-        operation = f.close if stage == "commit" else functools.partial(f.write, b"a" * 12)
+        operation = (
+            f.close if stage in ("commit", "abort") else functools.partial(f.write, b"a" * 12)
+        )
         gc.disable()
         try:
-            with pytest.raises(PermissionError, match="Access Denied"):
+            # The log capture of pytest would keep the logged abort failure,
+            # and so the frames of its traceback.
+            with (
+                mock.patch("pyathena.filesystem.s3._logger"),
+                pytest.raises(PermissionError, match="Access Denied"),
+            ):
                 operation()
             del f, operation
             assert file_ref() is None
@@ -7585,10 +7596,17 @@ class TestS3File:
         with pytest.raises(error, match="complete failed"):
             file.commit()
         assert (file.multipart_upload is not None) is abort_fails
-        assert bool(file.multipart_upload_parts) is abort_fails
+        # GH-1186: the parts are dropped also when the abort fails; they used
+        # to keep the errors of failed parts, and so the file, in a cycle.
+        assert file.multipart_upload_parts == []
         assert (
             "Failed to abort multipart upload uploadid to s3://bucket/key.txt." in caplog.text
         ) is abort_fails
+        # A commit does not complete the upload that is kept for discard(),
+        # nor upload the buffered data with PutObject.
+        file.commit()
+        file.fs.core.complete_multipart_upload.assert_called_once()
+        file.fs.core.put_object.assert_not_called()
         file.discard()
 
         assert file.fs._call.call_args_list == [
@@ -7658,7 +7676,8 @@ class TestS3File:
         with pytest.raises(KeyboardInterrupt):
             file.commit()
         assert file.multipart_upload is not None
-        assert file.multipart_upload_parts
+        # GH-1186: the parts, which have ended, are dropped before the abort.
+        assert file.multipart_upload_parts == []
         file.discard()
 
         assert file.fs._call.call_count == 2

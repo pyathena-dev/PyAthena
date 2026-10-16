@@ -3291,7 +3291,8 @@ class S3File(AbstractBufferedFile):
         as soon as it fails, without waiting for the parts before it. If the
         abort also fails, the upload is kept so that :meth:`discard` can
         abort it. Invalidates the cache of the path afterwards. Does nothing
-        for a file whose failed write dropped the written data.
+        for a file whose failed write or multipart commit dropped the written
+        data, or whose upload :meth:`discard` kept after a failed abort.
 
         Raises:
             FileExistsError: If an object was created at the path after the
@@ -3300,9 +3301,13 @@ class S3File(AbstractBufferedFile):
                 initialized.
         """
         if self.buffer is None:
-            # _close_without_commit() dropped the written data. A multipart
-            # upload that it failed to abort is kept for discard(), not
-            # completed.
+            # _close_without_commit() or a failed commit dropped the written
+            # data. A multipart upload that they failed to abort is kept for
+            # discard(), not completed.
+            return
+        if self.multipart_upload is not None and not self.multipart_upload_parts:
+            # discard() dropped the parts of an upload that it failed to
+            # abort, which is kept for discard(), not completed.
             return
         if self.tell() == 0:
             self.discard()
@@ -3329,6 +3334,10 @@ class S3File(AbstractBufferedFile):
                     parts, **self._get_request_kwargs("complete_multipart_upload")
                 )
             except BaseException:
+                # The buffer holds only the data of the last part, which a
+                # later commit() would otherwise upload alone with PutObject;
+                # dropped as _close_without_commit() drops it.
+                self.buffer = None
                 # discard() keeps the upload if the abort fails or is
                 # interrupted, so that a later discard(), such as a
                 # transaction rollback, retries the abort. An abort failure
@@ -3348,13 +3357,21 @@ class S3File(AbstractBufferedFile):
         """Abort the multipart upload, if any.
 
         The part uploads that have not started are cancelled, and the
-        running ones are waited for before the abort.
+        running ones are waited for before the abort. The parts are dropped
+        then, so that :meth:`commit` does not complete an upload that this
+        method failed to abort, which is kept so that a later call retries
+        the abort.
         """
         if self.multipart_upload:
             # A part that is still uploading when the upload is aborted may
             # be stored after the abort, so wait for the parts that could not
             # be cancelled first.
             wait([f for f in self.multipart_upload_parts if not f.cancel()])
+            # Also dropped if the abort fails, so that the file does not keep
+            # the errors of failed parts, whose tracebacks may keep the file.
+            self.multipart_upload_parts = []
+            self._uploads_in_flight = set()
+            self._copies_in_flight = set()
             self._get_multipart_writer().abort(**self._get_request_kwargs("abort_multipart_upload"))
 
         self.multipart_upload = None
