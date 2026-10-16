@@ -3428,6 +3428,34 @@ class TestS3FileSystem:
             assert f.read() == data
         assert sorted(ranges) == ["bytes=0-15", "bytes=16-31", "bytes=32-47", "bytes=48-63"]
 
+    def test_failed_read_freed_by_reference_counting(self):
+        # GH-1186: a parallel read raises the error of a failed range, and
+        # the file is freed by reference counting once it is closed and the
+        # error is no longer referenced. The traceback of the error used to
+        # keep the file, and the data of the other ranges, in a reference
+        # cycle with the futures of the reads.
+        data = bytes(range(64))
+        fs, _ = self._make_object_fs(data)
+        get_object = fs._client.get_object.side_effect
+
+        def fail_first_range(**request):
+            if request["Range"].startswith("bytes=0-"):
+                raise PermissionError("Access Denied")
+            return get_object(**request)
+
+        fs._client.get_object.side_effect = fail_first_range
+        f = fs.open("s3://bucket/key", "rb", cache_type="none", block_size=16, max_workers=4)
+        file_ref = weakref.ref(f)
+        gc.disable()
+        try:
+            with pytest.raises(PermissionError, match="Access Denied"):
+                f.read()
+            f.close()
+            del f
+            assert file_ref() is None
+        finally:
+            gc.enable()
+
     @pytest.mark.parametrize("cache_type", ["bytes", "all", "first"])
     def test_open_directory(self, cache_type):
         fs = self._make_fs()

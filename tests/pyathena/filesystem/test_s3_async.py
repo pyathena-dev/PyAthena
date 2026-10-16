@@ -2630,6 +2630,47 @@ class TestAioS3File:
             assert isinstance(f, AioS3File)
             assert f.max_workers == (max_workers or fs._sync_fs.max_workers)
 
+    @pytest.mark.asyncio
+    async def test_failed_read_freed_by_reference_counting(self):
+        # GH-1186: a parallel read raises the error of a failed range, and
+        # the file is freed by reference counting once it is closed and the
+        # error is no longer referenced. The executor of the file kept the
+        # future of the failed read in a reference cycle with its error.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        block_size = 2**10
+
+        def get_object(path, range_, **kwargs):
+            if range_[0] == 0:
+                raise PermissionError("Access Denied")
+            return b"a" * (range_[1] - range_[0])
+
+        fs.core.get_object = mock.MagicMock(side_effect=get_object)
+        info = S3Object(
+            init={"Key": "key", "ETag": '"etag"'},
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket="bucket",
+            key="key",
+        )
+        info.size = block_size * 4
+        fs._sync_fs.info = mock.MagicMock(return_value=info)
+        # The executor of the file dispatches through the event loop, which
+        # the blocking calls must not hold.
+        f = await asyncio.to_thread(
+            fs.open, "s3://bucket/key", "rb", block_size=block_size, cache_type="none"
+        )
+        file_ref = weakref.ref(f)
+        gc.disable()
+        try:
+            with pytest.raises(PermissionError, match="Access Denied"):
+                await asyncio.to_thread(f.read)
+            await asyncio.to_thread(f.close)
+            del f
+            # Lets the event loop run the callbacks that hold the futures.
+            await asyncio.sleep(0)
+            assert file_ref() is None
+        finally:
+            gc.enable()
+
     @pytest.mark.parametrize("asynchronous", [False, True])
     @pytest.mark.asyncio
     async def test_open_parallel_requests(self, asynchronous):
@@ -3286,6 +3327,43 @@ class TestAioS3StreamedFile:
             fs._sync_fs.touch.assert_called_once_with("bucket/key", ContentType="text/plain")
             fs.core.put_object.assert_not_called()
         fs.core.create_multipart_upload.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_failed_read_freed_by_reference_counting(self, fs):
+        # GH-1186: a parallel read raises the error of a failed range, and
+        # the file is freed by reference counting once it is closed and the
+        # error is no longer referenced. The reads of the other ranges kept
+        # their data while the error was held, and a closed file kept itself
+        # in a reference cycle with its cache.
+        block_size = 2**10
+
+        def get_object(path, range_, **kwargs):
+            if range_[0] == 0:
+                raise PermissionError("Access Denied")
+            return b"a" * (range_[1] - range_[0])
+
+        fs.core.get_object = mock.MagicMock(side_effect=get_object)
+        info = S3Object(
+            init={"Key": "key", "ETag": '"etag"'},
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket="bucket",
+            key="key",
+        )
+        info.size = block_size * 4
+        fs._sync_fs.info = mock.MagicMock(return_value=info)
+        f = await fs.open_async("s3://bucket/key", "rb", block_size=block_size)
+        file_ref = weakref.ref(f)
+        gc.disable()
+        try:
+            with pytest.raises(PermissionError, match="Access Denied"):
+                await f.read()
+            await f.close()
+            del f
+            # Lets the event loop run the callbacks that hold the futures.
+            await asyncio.sleep(0)
+            assert file_ref() is None
+        finally:
+            gc.enable()
 
     @pytest.mark.asyncio
     async def test_read_parallel(self, fs):

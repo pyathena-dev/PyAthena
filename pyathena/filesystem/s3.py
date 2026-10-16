@@ -3423,7 +3423,9 @@ class S3File(AbstractBufferedFile):
         The range is clamped to the size of the object, since fsspec caches
         may request a range that is empty or reaches past the end of the
         object. S3 would answer the former with the whole object and a range
-        starting past the end with an ``InvalidRange`` error.
+        starting past the end with an ``InvalidRange`` error. A range larger
+        than the block size is read with parallel requests; when one fails,
+        those that have not started are cancelled and its error is raised.
 
         Args:
             start: The offset of the first byte to read.
@@ -3445,9 +3447,14 @@ class S3File(AbstractBufferedFile):
                 self._executor.submit(self.fs.core.get_object, path, r, **request_kwargs)
                 for r in ranges
             ]
-            for future in as_completed(futures):
-                # The failure of the first read to finish is raised.
-                future.result()
+            done = wait(futures, return_when=FIRST_EXCEPTION).done
+            if any(not f.cancelled() and f.exception() is not None for f in done):
+                # The reads that have not started are cancelled, and the
+                # futures of the others are dropped, so that the traceback of
+                # the error, which keeps this frame, does not keep their data.
+                while futures:
+                    futures.pop().cancel()
+                raise_failure(done)
             return b"".join(f.result() for f in futures)
         return self.fs.core.get_object(path, ranges[0], **request_kwargs)
 

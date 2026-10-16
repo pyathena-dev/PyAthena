@@ -307,7 +307,9 @@ def retry_api_call(
     Note:
         Only retries on AWS exceptions listed in the RetryConfig.exceptions.
         This includes recognized Glue error codes wrapped in MetadataException.
-        Other errors are propagated without retrying.
+        Other errors are propagated without retrying. The frames of tenacity
+        in the traceback of a raised error have no local variables, so that
+        the error is freed by reference counting.
     """
     retry = tenacity.Retrying(
         retry=retry_if_exception(
@@ -325,4 +327,15 @@ def retry_api_call(
         after=after_log(logger, logger.getEffectiveLevel()) if logger else None,  # type: ignore[arg-type]
         reraise=True,
     )
-    return retry(func, *args, **kwargs)
+    try:
+        return retry(func, *args, **kwargs)
+    except BaseException as e:
+        # The frames of tenacity in the traceback keep its retry state, which
+        # keeps the error, so they would form a reference cycle that keeps
+        # every frame of the traceback until the garbage collector runs.
+        tb = e.__traceback__
+        while tb is not None:
+            if tb.tb_frame.f_globals.get("__name__", "").startswith("tenacity"):
+                tb.tb_frame.clear()
+            tb = tb.tb_next
+        raise

@@ -1,3 +1,5 @@
+import gc
+import weakref
 from typing import Any
 
 import pytest
@@ -98,6 +100,30 @@ def _test_retry(ex: Exception) -> None:
 
 def test_retry_api_call():
     _test_retry(_WithCodeError(500))
+
+
+def test_retry_api_call_error_freed_by_reference_counting():
+    # GH-1186: the error of a failed call is freed by reference counting, as
+    # are the frames of its traceback, such as those of a file that read with
+    # the call. The frames of tenacity kept its retry state, and so the error,
+    # in a reference cycle until the garbage collector ran.
+    class DeniedError(Exception):
+        # Unlike Exception, it can be weakly referenced.
+        pass
+
+    def call():
+        raise DeniedError("Access Denied")
+
+    gc.disable()
+    try:
+        with pytest.raises(DeniedError) as info:
+            retry_api_call(call, config=RetryConfig(attempt=2))
+        assert [entry.name for entry in info.traceback][-1] == "call"
+        error_ref = weakref.ref(info.value)
+        del info
+        assert error_ref() is None
+    finally:
+        gc.enable()
 
 
 def test_retry_api_call_with_none_error():

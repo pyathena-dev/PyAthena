@@ -1408,6 +1408,10 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
                 await self.flush(force=True)
         finally:
             self.closed = True
+            if self.mode == "rb":
+                # Dropped as fsspec's close() drops it, since the cache keeps
+                # a method of the file and so a reference cycle with it.
+                self.cache = None
             # A commit that is still running keeps its thread.
             self._pool.shutdown(wait=False)
 
@@ -1647,7 +1651,9 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         """Read a byte range of the object with parallel range requests.
 
         The range is clamped to the size of the object, and split into ranges
-        of the block size, read in the threads of the file.
+        of the block size, read in the threads of the file. When a read fails,
+        the reads that have not finished are cancelled and its error is
+        raised, as :meth:`S3File._fetch_range` does.
 
         Args:
             start: The offset of the first byte to read.
@@ -1664,7 +1670,24 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         )
         path = S3Path(self.bucket, self.key, self.version_id)
         request_kwargs = self._get_request_kwargs("get_object")
-        results = await asyncio.gather(
-            *[self._pool.run(self.fs.core.get_object, path, r, **request_kwargs) for r in ranges]
-        )
-        return b"".join(results)
+        reads = [
+            asyncio.ensure_future(
+                self._pool.run(self.fs.core.get_object, path, r, **request_kwargs)
+            )
+            for r in ranges
+        ]
+        try:
+            done = (await asyncio.wait(reads, return_when=asyncio.FIRST_EXCEPTION))[0]
+        except BaseException:
+            # The reads are cancelled with the read of the range.
+            while reads:
+                reads.pop().cancel()
+            raise
+        if any(not read.cancelled() and read.exception() is not None for read in done):
+            # The reads that have not finished are cancelled, and the tasks of
+            # the others are dropped, so that the traceback of the error, which
+            # keeps this frame, does not keep their data.
+            while reads:
+                reads.pop().cancel()
+            raise_failure(done)
+        return b"".join(read.result() for read in reads)

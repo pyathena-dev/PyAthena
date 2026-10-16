@@ -27,6 +27,8 @@ from typing import Any, ClassVar, TypeVar
 from pyathena.util import override
 
 T = TypeVar("T")
+# A future of an executor or of asyncio.
+F = TypeVar("F", bound="Future[Any] | asyncio.Future[Any]")
 
 
 class S3Executor(metaclass=ABCMeta):
@@ -140,7 +142,7 @@ class S3Executor(metaclass=ABCMeta):
         self.shutdown(wait=True)
 
 
-def raise_failure(done: set[Future[Any]] | set[asyncio.Future[Any]]) -> None:
+def raise_failure(done: set[F]) -> None:
     """Empty a set of finished futures and raise the error of a failed one, if any.
 
     Otherwise, the cancellation of a cancelled future is raised, if any. The
@@ -159,7 +161,7 @@ def raise_failure(done: set[Future[Any]] | set[asyncio.Future[Any]]) -> None:
         BaseException: The error of a failed future, or the cancellation
             error of a cancelled one.
     """
-    future: Future[Any] | asyncio.Future[Any] | None = None
+    future: F | None = None
     failed = cancelled = None
     for future in done:
         if future.cancelled():
@@ -444,12 +446,21 @@ class S3AioExecutor(S3Executor):
 
             def run() -> None:
                 """Run the function and resolve the future unless it was cancelled."""
+                nonlocal future, fn, args, kwargs
                 if not claim.acquire(blocking=False) or not future.set_running_or_notify_cancel():
                     return
                 try:
                     result = fn(*args, **kwargs)
                 except BaseException as e:
-                    future.set_exception(e)
+                    # The traceback keeps this frame, which would form a
+                    # reference cycle with the future, as with the _WorkItem
+                    # of ThreadPoolExecutor. The variables are cleared in the
+                    # closure that settle() shares, which reads the future
+                    # only when run() has not claimed it.
+                    resolved = future
+                    del future, fn, args, kwargs
+                    resolved.set_exception(e)
+                    del resolved
                 else:
                     future.set_result(result)
 
@@ -472,12 +483,15 @@ class S3AioExecutor(S3Executor):
                 elif future.set_running_or_notify_cancel():
                     future.set_exception(task.exception())
 
+            # Returned through a variable that the closures do not share,
+            # since run() may clear theirs before this method returns.
+            submitted = future
             with self._lock:
                 if self._shutdown:
                     raise RuntimeError("cannot schedule new futures after shutdown")
                 task = asyncio.run_coroutine_threadsafe(self._pool.run(run), self._loop)
             task.add_done_callback(settle)
-            return future
+            return submitted
         raise RuntimeError(
             "S3AioExecutor requires a running event loop. "
             "Use S3ThreadPoolExecutor for synchronous usage."
