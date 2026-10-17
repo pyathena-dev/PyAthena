@@ -86,6 +86,30 @@ class TestArrowCursor:
         assert arrow_cursor.as_arrow().num_rows == len(expected)
         assert arrow_cursor.fetchall() == expected
 
+    def test_temporal_text_null_with_binary(self, arrow_cursor):
+        # With a varbinary column, the other text columns read NULL as null and then
+        # fill it with an empty string, except the temporal ones.
+        table = arrow_cursor.execute(
+            """
+            SELECT
+              CAST(NULL AS TIME(3)) AS time_null
+              ,CAST(NULL AS TIME(3) WITH TIME ZONE) AS time_tz_null
+              ,CAST(NULL AS TIMESTAMP(3) WITH TIME ZONE) AS tstz_null
+              ,CAST(NULL AS VARCHAR) AS varchar_null
+              ,CAST(NULL AS VARBINARY) AS varbinary_null
+            """
+        ).as_arrow()
+        assert table.to_pylist() == [
+            {
+                "time_null": None,
+                "time_tz_null": None,
+                "tstz_null": None,
+                "varchar_null": "",
+                "varbinary_null": None,
+            }
+        ]
+        assert arrow_cursor.fetchall() == [(None, None, None, "", None)]
+
     @pytest.mark.parametrize(
         "arrow_cursor",
         [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
@@ -154,11 +178,7 @@ class TestArrowCursor:
     @pytest.mark.parametrize(
         ("arrow_cursor", "unload"),
         [
-            pytest.param(
-                {"cursor_kwargs": {"unload": False}},
-                False,
-                marks=pytest.mark.xfail(strict=True, reason="#1216"),
-            ),
+            pytest.param({"cursor_kwargs": {"unload": False}}, False),
             pytest.param(
                 {"cursor_kwargs": {"unload": True}},
                 True,
@@ -416,7 +436,7 @@ class TestArrowCursor:
                 pa.field("col_varchar", pa.string()),
                 pa.field("col_timestamp", pa.timestamp("us")),
                 pa.field("col_time", pa.string()),
-                pa.field("col_date", pa.timestamp("ms")),
+                pa.field("col_date", pa.date32()),
                 pa.field("col_binary", pa.string()),
                 pa.field("col_array", pa.string()),
                 pa.field("col_array_json", pa.string()),
@@ -439,7 +459,7 @@ class TestArrowCursor:
                 "varchar",
                 datetime(2017, 1, 1, 0, 0, 0),
                 "00:00:00.000",
-                datetime(2017, 1, 2, 0, 0, 0),
+                datetime(2017, 1, 2).date(),
                 "31 32 33",
                 "[1, 2]",
                 "[1,2]",
@@ -593,7 +613,7 @@ class TestArrowCursor:
             pl.String,
             pl.Datetime("us"),
             pl.String,
-            pl.Datetime("ms"),
+            pl.Date,
             pl.String,
             pl.String,
             pl.String,
@@ -616,7 +636,7 @@ class TestArrowCursor:
                 "col_varchar": "varchar",
                 "col_timestamp": datetime(2017, 1, 1, 0, 0, 0),
                 "col_time": "00:00:00.000",
-                "col_date": datetime(2017, 1, 2, 0, 0, 0),
+                "col_date": datetime(2017, 1, 2).date(),
                 "col_binary": "31 32 33",
                 "col_array": "[1, 2]",
                 "col_array_json": "[1,2]",
