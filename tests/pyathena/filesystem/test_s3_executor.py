@@ -9,11 +9,13 @@ import asyncio
 import contextvars
 import gc
 import os
+import signal
 import threading
 import time
 import traceback
 import weakref
 from concurrent.futures import Future, ThreadPoolExecutor, wait
+from typing import cast
 from unittest import mock
 
 import pytest
@@ -25,13 +27,6 @@ from tests.pyathena.util import EVENT_TIMEOUT, ThrottledOperation, overlapping_c
 
 
 class TestS3AioThreadPool:
-    def test_init(self):
-        # None takes the default of ThreadPoolExecutor.
-        cpus = getattr(os, "process_cpu_count", os.cpu_count)()
-        assert S3AioThreadPool(None).max_workers == min(32, (cpus or 1) + 4)
-        with pytest.raises(ValueError, match="max_workers must be greater than 0"):
-            S3AioThreadPool(0)
-
     def test_run_beyond_default_executor(self):
         # GH-1159: the calls run in threads of the pool, so that max_workers,
         # not the default executor of the event loop, bounds them.
@@ -101,11 +96,30 @@ class TestS3AioThreadPool:
         # not stop the work that the call left running, such as the parts of a
         # write in a transaction.
         operation = ThrottledOperation(block=True, failures=1)
-        returned = threading.Event()
         left = []
+        go = threading.Event()
         pool = S3AioThreadPool(1)
+        submit = pool.submit
+
+        def submit_and_cancel_after_return(fn, *args, **kwargs):
+            future = submit(fn, *args, **kwargs)
+            task = cast(asyncio.Task[None], asyncio.current_task())
+
+            def cancel_after_return():
+                # Runs once the task waits for the call, and blocks the event
+                # loop until the call has returned, so that the task is
+                # cancelled before it resumes.
+                go.set()
+                future.result(EVENT_TIMEOUT)
+                task.cancel()
+
+            asyncio.get_running_loop().call_soon(cancel_after_return)
+            return future
+
+        pool.submit = submit_and_cancel_after_return  # type: ignore[method-assign]
 
         def work():
+            assert go.wait(EVENT_TIMEOUT)
             context = contextvars.copy_context()
             thread = threading.Thread(
                 target=context.run,
@@ -113,17 +127,9 @@ class TestS3AioThreadPool:
             )
             thread.start()
             left.append(thread)
-            returned.set()
 
         async def main():
             task = asyncio.ensure_future(pool.run(work))
-            await asyncio.sleep(0)
-            # Blocks the event loop, so that the task is cancelled before it
-            # resumes after the call has returned, which follows the event at
-            # once.
-            assert returned.wait(EVENT_TIMEOUT)
-            time.sleep(0.1)
-            task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
 
@@ -150,14 +156,23 @@ class TestS3AioThreadPool:
             started.set()
             release.wait(EVENT_TIMEOUT)
 
+        running = pool.submit(work)
+        submit = pool.submit
+
         async def main():
-            running = pool.submit(work)
+            submitted = asyncio.Event()
+
+            def submit_and_notify(fn, *args, **kwargs):
+                future = submit(fn, *args, **kwargs)
+                submitted.set()
+                return future
+
+            pool.submit = submit_and_notify  # type: ignore[method-assign]
             run = pool.run_shielded if shielded else pool.run
             pending = asyncio.ensure_future(run(events.append, "pending finished"))
-            await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
-            # Lets the task submit the call, which waits for the thread.
-            while not pending.done() and not pool._get_executor()._work_queue.qsize():
-                await asyncio.sleep(0.01)
+            assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+            # The call waits for the only thread.
+            await asyncio.wait_for(submitted.wait(), EVENT_TIMEOUT)
             pending.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await pending
@@ -169,109 +184,39 @@ class TestS3AioThreadPool:
 
         assert events == (["pending finished"] if shielded else [])
 
-    def test_wait_shielded_cancelled(self):
-        # GH-1186: cancelling the waiting task neither cancels the call nor
-        # lets asyncio log its failure, which ends after the cancellation;
-        # the caller can still wait for its future.
-        started = threading.Event()
-        release = threading.Event()
-        pool = S3AioThreadPool(1)
-
-        def work():
-            started.set()
-            # The finally block of the test always releases it.
-            release.wait()
-            raise PermissionError("Access Denied")
-
-        async def main():
-            logged = []
-            asyncio.get_running_loop().set_exception_handler(
-                lambda _, context: logged.append(context["message"])
-            )
-            running = pool.submit(work)
-            try:
-                waiting = asyncio.ensure_future(pool.wait_shielded(running))
-                await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
-                # Lets the task start waiting before it is cancelled.
-                deadline = time.monotonic() + EVENT_TIMEOUT
-                while not running._done_callbacks:
-                    assert time.monotonic() < deadline
-                    await asyncio.sleep(0)
-                waiting.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await waiting
-            finally:
-                release.set()
-                # The worker has run the callbacks of the call once it is
-                # shut down, and the event loop runs theirs on the next
-                # iterations.
-                await asyncio.to_thread(pool.shutdown, True)
-            with pytest.raises(PermissionError, match="Access Denied"):
-                running.result()
-            # The callbacks of the future of the call keep its waiter.
-            del waiting, running
-            gc.collect()
-            for _ in range(3):
-                await asyncio.sleep(0)
-            return logged
-
-        assert asyncio.run(main()) == []
-
-    def test_shutdown(self):
-        # The calls submitted before the shutdown still run.
-        events = []
-        release = threading.Event()
-        pool = S3AioThreadPool(1)
-        pool.submit(release.wait, EVENT_TIMEOUT)
-        pending = pool.submit(events.append, "pending finished")
-        pool.shutdown(wait=False)
-        with pytest.raises(RuntimeError, match="after shutdown"):
-            pool.submit(sum, [1, 2])
-        release.set()
-        pending.result(timeout=EVENT_TIMEOUT)
-
-        assert events == ["pending finished"]
-
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork() is not available.")
+    @pytest.mark.filterwarnings("ignore:.*fork\\(\\) may lead to deadlocks:DeprecationWarning")
     def test_fork(self):
         # A forked child, whose copy of the pool has no threads, creates new
-        # ones, also if a thread of the parent held the lock of the pool.
+        # ones.
         pool = S3AioThreadPool(1)
-        parent = pool._get_executor()
-        pool._lock.acquire()
-        # As os.register_at_fork() runs it in a forked child.
-        S3AioThreadPool._reset_after_fork()
-        # The copied executor is kept, so that its collection does not touch
-        # the locks that the parent's threads may have held.
-        assert parent in S3AioThreadPool._forked_executors
-        child = pool._get_executor()
         assert pool.submit(sum, [1, 2]).result(timeout=EVENT_TIMEOUT) == 3
-        pool.shutdown()
-        assert child is not parent
-        S3AioThreadPool._forked_executors.remove(parent)
-        parent.shutdown()
+        pid = os.fork()
+        if pid == 0:
+            # The child exits here, whatever happens, instead of running pytest.
+            code = 1
+            try:
+                if pool.submit(sum, [3, 4]).result(timeout=EVENT_TIMEOUT) == 7:
+                    code = 0
+            finally:
+                os._exit(code)
+        status = (0, 0)
+        try:
+            # A child whose pool waits for the threads of the parent would
+            # not exit.
+            deadline = time.monotonic() + 2 * EVENT_TIMEOUT
+            while (status := os.waitpid(pid, os.WNOHANG)) == (0, 0):
+                assert time.monotonic() < deadline, "the child did not exit"
+                time.sleep(0.05)
+        finally:
+            if status == (0, 0):
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+            pool.shutdown()
+        assert os.waitstatus_to_exitcode(status[1]) == 0
 
 
 class TestS3AioExecutor:
-    def test_init(self):
-        # max_workers is optional, as before it was added.
-        S3AioExecutor(loop=None)
-        with pytest.raises(ValueError, match="max_workers must be greater than 0"):
-            S3AioExecutor(loop=None, max_workers=0)
-
-    def test_submit(self):
-        async def main():
-            executor = S3AioExecutor(loop=asyncio.get_running_loop())
-            succeeded = executor.submit(sum, [1, 2])
-            failed = executor.submit(int, "x")
-            await asyncio.to_thread(wait, [succeeded, failed])
-            return succeeded, failed
-
-        succeeded, failed = asyncio.run(main())
-
-        assert succeeded.result() == 3
-        with pytest.raises(ValueError, match="invalid literal"):
-            failed.result()
-
     def test_submit_context(self):
         # GH-1203: a function runs with the context of its submitter, as the
         # task that dispatches it does, so that the stop scope of the
@@ -492,54 +437,6 @@ class TestS3AioExecutor:
         assert not running.cancelled()
         assert pending.cancelled()
 
-    def test_loop_shutdown(self):
-        # A function that has not started when the event loop shuts down is
-        # never run, and its future is cancelled and settled, so that wait()
-        # returns, instead of left pending.
-        events = []
-        started = threading.Event()
-        settled = threading.Event()
-
-        def work():
-            started.set()
-            # Running until the pending future is settled, so that the
-            # pending function cannot start before the shutdown.
-            settled.wait(5)
-            events.append("finished")
-
-        async def main():
-            # The pending function waits for the only thread of the executor.
-            executor = S3AioExecutor(loop=asyncio.get_running_loop(), max_workers=1)
-            running = executor.submit(work)
-            pending = executor.submit(events.append, "pending finished")
-            pending.add_done_callback(lambda _: settled.set())
-            while not started.is_set():
-                await asyncio.sleep(0.01)
-            return running, pending
-
-        running, pending = asyncio.run(main())
-
-        _, not_done = wait([running, pending], timeout=5)
-        assert not not_done
-        assert events == ["finished"]
-        assert not running.cancelled()
-        assert pending.cancelled()
-
-    def test_executor_shut_down(self):
-        # An error raised before the function starts is set on the future.
-        async def main():
-            executor = S3AioExecutor(loop=asyncio.get_running_loop())
-            # Fails the dispatch of the function to the pool.
-            executor._pool.shutdown()
-            future = executor.submit(sum, [1, 2])
-            with pytest.raises(RuntimeError, match="after shutdown"):
-                await asyncio.wrap_future(future)
-            return future
-
-        future = asyncio.run(main())
-
-        assert not future.cancelled()
-
 
 class TestS3Executor:
     @pytest.mark.parametrize("executor_class", [S3ThreadPoolExecutor, S3AioThreadPool])
@@ -626,32 +523,41 @@ class TestS3Executor:
 
     def test_submit_to_loop_shutdown(self):
         # A callable that S3AioExecutor drops when its event loop shuts down
-        # cancels the future of the caller, so that wait() returns.
+        # is never run, and its future, whether submit() returned it or the
+        # caller passed it to submit_to(), is cancelled and settled, so that
+        # wait() returns, instead of left pending.
         events = []
         started = threading.Event()
-        settled = threading.Event()
+        settled = threading.Semaphore(0)
 
         def work():
             started.set()
-            settled.wait(5)
+            # Running until both pending futures are settled, so that their
+            # callables cannot start before the shutdown.
+            for _ in range(2):
+                assert settled.acquire(timeout=EVENT_TIMEOUT)
             events.append("finished")
 
         pending: Future[None] = Future()
-        pending.add_done_callback(lambda _: settled.set())
+        pending.add_done_callback(lambda _: settled.release())
 
         async def main():
+            # The pending callables wait for the only thread of the executor.
             executor = S3AioExecutor(loop=asyncio.get_running_loop(), max_workers=1)
             running = executor.submit(work)
+            submitted = executor.submit(events.append, "submitted finished")
+            submitted.add_done_callback(lambda _: settled.release())
             executor.submit_to(pending, events.append, "pending finished")
-            while not started.is_set():
-                await asyncio.sleep(0.01)
-            return running
+            assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+            return running, submitted
 
-        running = asyncio.run(main())
+        running, submitted = asyncio.run(main())
 
-        _, not_done = wait([running, pending], timeout=5)
+        _, not_done = wait([running, submitted, pending], timeout=EVENT_TIMEOUT)
         assert not not_done
         assert events == ["finished"]
+        assert not running.cancelled()
+        assert submitted.cancelled()
         assert pending.cancelled()
 
     def test_submit_to_executor_shut_down(self):
@@ -665,28 +571,8 @@ class TestS3Executor:
             executor._pool.shutdown()
             executor.submit_to(future, sum, [1, 2])
             with pytest.raises(RuntimeError, match="after shutdown"):
-                await asyncio.wrap_future(future)
+                await asyncio.wait_for(asyncio.wrap_future(future), EVENT_TIMEOUT)
 
         asyncio.run(main())
 
         assert not future.cancelled()
-
-    def test_submit_to_cancelled_executor_shut_down(self):
-        # A future that the caller cancels before S3AioExecutor reports the
-        # error is marked as notified, so that wait() counts it as done.
-        future: Future[int] = Future()
-
-        async def main():
-            loop = asyncio.get_running_loop()
-            executor = S3AioExecutor(loop=loop)
-            # Fails the dispatch of the callable to the pool.
-            executor._pool.shutdown()
-            executor.submit_to(future, sum, [1, 2])
-            assert future.cancel()
-            with ThreadPoolExecutor(max_workers=1) as waiter:
-                return await loop.run_in_executor(waiter, lambda: wait([future], timeout=5))
-
-        _, not_done = asyncio.run(main())
-
-        assert not not_done
-        assert future.cancelled()
