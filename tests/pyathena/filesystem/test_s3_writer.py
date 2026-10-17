@@ -9,7 +9,7 @@ import gc
 import io
 import threading
 import weakref
-from concurrent.futures import CancelledError
+from concurrent.futures import CancelledError, wait
 from types import SimpleNamespace
 from unittest import mock
 
@@ -378,11 +378,14 @@ class TestS3WriteSession:
             session.submit_part(1, b"abcd")
             waiters = [session.ready(), session.ready()]
             # A waiter cancelled by its caller, such as by
-            # asyncio.wrap_future(), does not affect the others.
+            # asyncio.wrap_future(), does not affect the others, and is
+            # marked as notified when it is dropped, so that wait() returns.
             assert waiters[0].cancel()
             assert not waiters[1].done()
             part.set()
             assert waiters[1].result(5) is None
+            session.ready()
+            assert wait([waiters[0]], timeout=5).done == {waiters[0]}
             assert session.complete() == "completed"
 
     def test_part_failure_is_raised_once(self):

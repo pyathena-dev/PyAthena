@@ -13,7 +13,7 @@ import contextlib
 import enum
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from concurrent.futures import CancelledError, Future, InvalidStateError, wait
+from concurrent.futures import CancelledError, Future, wait
 from typing import Any, BinaryIO, TypeVar, cast
 
 from pyathena.filesystem.s3_core import S3Core
@@ -503,7 +503,7 @@ class _S3WriteSession:
         waiter: Future[None] = Future()
         with self._update():
             self._consume_finished()
-            self._waiters = [waiter for waiter in self._waiters if not waiter.done()]
+            self._drop_cancelled_waiters()
             if not self._is_ready():
                 self._waiters.append(waiter)
                 return waiter
@@ -978,18 +978,30 @@ class _S3WriteSession:
         return True
 
     def _take_waiters(self) -> list[Future[None]]:
-        """Select the waiters to resolve; called with the lock held.
+        """Remove the waiters to resolve; called with the lock held.
 
         Returns:
-            The unresolved waiters, if the session is ready, else an empty
-            list.
+            The waiters, if the session is ready, else an empty list.
         """
         if not self._is_ready():
             return []
-        # Kept until they are resolved, so that a resolution stopped by an
-        # interrupt is repeated by the next change.
-        self._waiters = [waiter for waiter in self._waiters if not waiter.done()]
-        return list(self._waiters)
+        # Taken, so that each waiter is resolved by one thread only.
+        waiters, self._waiters = self._waiters, []
+        return waiters
+
+    def _drop_cancelled_waiters(self) -> None:
+        """Remove the waiters that their callers cancelled; called with the lock held.
+
+        They are marked as notified, as an executor does with a cancelled
+        future, so that ``concurrent.futures.wait()`` counts them as done.
+        """
+        waiters = []
+        for waiter in self._waiters:
+            if waiter.cancelled():
+                waiter.set_running_or_notify_cancel()
+            else:
+                waiters.append(waiter)
+        self._waiters = waiters
 
     @staticmethod
     def _notify(waiters: list[Future[None]]) -> None:
@@ -999,9 +1011,5 @@ class _S3WriteSession:
             waiters: The waiters taken by :meth:`_take_waiters`.
         """
         for waiter in waiters:
-            try:
-                if waiter.set_running_or_notify_cancel():
-                    waiter.set_result(None)
-            except (RuntimeError, InvalidStateError):
-                # Resolved or cancelled by another thread meanwhile.
-                continue
+            if waiter.set_running_or_notify_cancel():
+                waiter.set_result(None)
