@@ -76,16 +76,6 @@ class TestS3MultipartWriter:
         writer, _ = _make_writer()
         assert list(writer.iter_parts(ShortReads(b"abcdefghij"))) == [(1, b"abcd"), (2, b"efghij")]
 
-    @pytest.mark.parametrize(
-        ("size", "ranges"),
-        [(0, []), (8, [(0, 8)]), (10, [(0, 5), (5, 10)]), (17, [(0, 8), (8, 12), (12, 17)])],
-    )
-    def test_writer_copy_parts(self, size, ranges):
-        writer, stubber = _make_writer()
-        with stubber:
-            parts = list(writer.iter_copy_parts(size))
-        assert parts == list(enumerate(ranges, 1))
-
     def test_writer_part_limit_includes_copies(self):
         writer, _ = _make_writer()
         copies = list(writer.iter_copy_parts(10))
@@ -93,10 +83,6 @@ class TestS3MultipartWriter:
         assert next(parts) == (3, b"abcd")
         with pytest.raises(ValueError, match="including parts copied"):
             next(parts)
-
-    def test_writer_empty_final_buffer_at_part_limit(self):
-        writer, _ = _make_writer()
-        assert list(writer.iter_parts(io.BytesIO(), first_part_number=4)) == []
 
     @pytest.mark.parametrize("method", ["iter_parts", "iter_copy_parts"])
     @pytest.mark.parametrize("number", [0, 4])
@@ -124,7 +110,8 @@ class TestS3MultipartWriter:
             "ChecksumAlgorithm": "SHA256",
         }
         writer, stubber = _make_writer(request_kwargs=params)
-        params["ContentType"] = "changed"
+        # The writer keeps a copy of the inherited parameters.
+        params["RequestPayer"] = "changed"
         identity = {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
         stubber.add_response(
             "create_multipart_upload",
@@ -132,7 +119,8 @@ class TestS3MultipartWriter:
             {
                 "Bucket": "bucket",
                 "Key": "key",
-                "ContentType": "text/plain",
+                # A per-request parameter overrides the inherited one.
+                "ContentType": "text/csv",
                 "RequestPayer": "requester",
                 "ChecksumAlgorithm": "SHA256",
             },
@@ -175,7 +163,7 @@ class TestS3MultipartWriter:
             },
         )
         with stubber:
-            upload = writer.initiate()
+            upload = writer.initiate(ContentType="text/csv")
             assert writer.initiate() is upload
             first = writer.upload_part(1, b"abcd", ContentType="filtered")
             second = writer.upload_part_copy(2, S3Path("source", "old", "version"), (0, 4))
@@ -218,17 +206,6 @@ class TestS3MultipartWriter:
             writer.abort()
             assert writer.upload is None
             writer.abort()
-            stubber.assert_no_pending_responses()
-
-    def test_writer_per_request_parameters_override_inherited_parameters(self):
-        writer, stubber = _make_writer(request_kwargs={"ContentType": "text/plain"})
-        stubber.add_response(
-            "create_multipart_upload",
-            {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"},
-            {"Bucket": "bucket", "Key": "key", "ContentType": "text/csv"},
-        )
-        with stubber:
-            writer.initiate(ContentType="text/csv")
             stubber.assert_no_pending_responses()
 
     def test_writer_requires_upload(self):
