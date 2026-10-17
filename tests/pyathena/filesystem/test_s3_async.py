@@ -3097,7 +3097,14 @@ class TestAioS3File:
                 {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
             )
         )
-        sync_fs.core.upload_part = mock.MagicMock(side_effect=PermissionError("Access Denied"))
+        release = threading.Event()
+
+        def upload_part(**kwargs):
+            # Failing once max_workers parts are in flight.
+            assert release.wait(5)
+            raise PermissionError("Access Denied")
+
+        sync_fs.core.upload_part = mock.MagicMock(side_effect=upload_part)
         sync_fs.core.abort_multipart_upload = mock.MagicMock()
         sync_fs.core.complete_multipart_upload = mock.MagicMock()
         submit_to = S3Executor.submit_to
@@ -3107,6 +3114,8 @@ class TestAioS3File:
             if "body" in kwargs:
                 submitted.append(kwargs["part_number"])
             submit_to(executor, future, fn, *args, **kwargs)
+            if len(submitted) == 2:
+                release.set()
 
         def write():
             with fs.open("s3://bucket/key", "wb", block_size=block_size, max_workers=2) as f:

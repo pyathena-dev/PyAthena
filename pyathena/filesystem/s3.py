@@ -3035,7 +3035,8 @@ class S3File(AbstractBufferedFile):
                 self._executor,
                 block_size=block_size,
                 max_workers=max_workers,
-                # Read at each request, as the attribute may be changed.
+                # The mapping itself, which the requests read when they are
+                # sent, as before; a mapping assigned later is not read.
                 request_kwargs=self.s3_additional_kwargs,
             )
         super().__init__(

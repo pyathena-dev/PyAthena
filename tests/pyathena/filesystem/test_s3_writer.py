@@ -586,6 +586,21 @@ class TestS3WriteSession:
                 session.submit_part(2, b"abcd")
             session.abort()
 
+    def test_submit_requires_capacity(self):
+        # ready() is a hint; the submission itself refuses a request beyond
+        # max_workers.
+        session, requests, executor = _make_session(max_workers=1)
+        release = requests.gate("part", 1)
+        with executor:
+            _start(session)
+            session.submit_part(1, b"abcd")
+            with pytest.raises(RuntimeError, match="wait for ready"):
+                session.submit_part(2, b"abcd")
+            release.set()
+            assert session.ready().result(5) is None
+            session.submit_part(2, b"abcd")
+            assert session.complete() == "completed"
+
     def test_scheduling_failure(self):
         # A request that the executor refuses fails the write with the error
         # of the executor, and is no longer tracked, so the abort does not
