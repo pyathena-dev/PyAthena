@@ -178,6 +178,22 @@ class TestPolarsCursor:
         assert row == temporal.fetched_row(unload)
         assert temporal.zones(row) == temporal.zones(temporal.fetched_row(unload))
 
+    @pytest.mark.parametrize("polars_cursor", [{"cursor_kwargs": {"chunksize": 1}}], indirect=True)
+    def test_temporal_types_chunked(self, polars_cursor):
+        """Chunks of a CSV result have the temporal types and values of a whole read (#1191).
+
+        Timestamps with up to 12 fractional digits are truncated to microseconds.
+        """
+        types = {"timestamp": pl.Datetime("us"), "date": pl.Date()}
+        columns = temporal.columns()
+        chunks = list(polars_cursor.execute(temporal.query()).iter_chunks())
+        assert len(chunks) == 1
+        df = chunks[0]
+        assert dict(df.schema) == {c.name: types.get(c.athena_type, pl.String()) for c in columns}
+        assert [df[c.name][0] for c in columns] == [
+            c.value if c.athena_type in types else c.text for c in columns
+        ]
+
     def test_complex(self, polars_cursor):
         polars_cursor.execute(
             """

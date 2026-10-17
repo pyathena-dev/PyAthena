@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from pyathena.converter import (
     _TIMESTAMP_TEXT_LENGTHS,
@@ -32,6 +32,8 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
+_FrameT = TypeVar("_FrameT", "pl.DataFrame", "pl.LazyFrame")
+
 
 _DEFAULT_POLARS_CONVERTERS: dict[str, Callable[[str | None], Any | None]] = {
     "date": _to_date,
@@ -43,36 +45,38 @@ _DEFAULT_POLARS_CONVERTERS: dict[str, Callable[[str | None], Any | None]] = {
 }
 
 
-def _to_datetimes(df: pl.DataFrame, dtypes: dict[str, Any]) -> pl.DataFrame:
+def _to_datetimes(frame: _FrameT, dtypes: dict[str, Any], strict: bool = True) -> _FrameT:
     """Convert timestamp text columns to Datetime dtypes, truncating finer fractions.
 
-    Athena writes up to 12 fractional digits, which Polars does not parse into a
-    Datetime whose time unit holds fewer.
+    Athena writes up to 12 fractional digits, and Polars does not parse more than
+    nine into a Datetime, so the text is cut to the digits that the time unit holds.
 
     Args:
-        df: The DataFrame with the timestamp text columns, with NULL as null or as
-            an empty string.
+        frame: The DataFrame or LazyFrame with the timestamp text columns, with NULL
+            as null or as an empty string. A column that it does not have, such as
+            one that the read options leave out, is skipped.
         dtypes: The Datetime dtypes keyed by column name.
+        strict: Whether text that is not a timestamp raises an error, rather than
+            becoming null.
 
     Returns:
-        The DataFrame with the columns converted.
+        The frame with the columns converted.
     """
     import polars as pl
+    import polars.selectors as cs
 
     exprs = []
     for name, dtype in dtypes.items():
-        if name not in df.columns:
-            # Not read, such as a column that the read options leave out.
-            continue
         time_unit = (dtype() if isinstance(dtype, type) else dtype).time_unit
-        text = pl.col(name)
+        # A selector, not pl.col(), so that a LazyFrame need not resolve its schema.
+        text = cs.by_name(name, require_all=False).as_expr()
         exprs.append(
             pl.when(text != "")
             .then(text.str.slice(0, _TIMESTAMP_TEXT_LENGTHS[time_unit]))
-            .str.to_datetime("%Y-%m-%d %H:%M:%S%.f", time_unit=time_unit)
+            .str.to_datetime("%Y-%m-%d %H:%M:%S%.f", time_unit=time_unit, strict=strict)
             .cast(dtype)
         )
-    return df.with_columns(exprs) if exprs else df
+    return frame.with_columns(exprs) if exprs else frame
 
 
 class DefaultPolarsTypeConverter(Converter):
