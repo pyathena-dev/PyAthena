@@ -13,7 +13,7 @@ import contextlib
 import enum
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from concurrent.futures import CancelledError, Future, wait
+from concurrent.futures import CancelledError, Future, InvalidStateError, wait
 from typing import Any, BinaryIO, TypeVar, cast
 
 from pyathena.filesystem.s3_core import S3Core
@@ -503,7 +503,7 @@ class _S3WriteSession:
         waiter: Future[None] = Future()
         with self._update():
             self._consume_finished()
-            self._waiters = [waiter for waiter in self._waiters if not waiter.cancelled()]
+            self._waiters = [waiter for waiter in self._waiters if not waiter.done()]
             if not self._is_ready():
                 self._waiters.append(waiter)
                 return waiter
@@ -759,14 +759,15 @@ class _S3WriteSession:
                 reserved = True
                 self._state = _S3WriteState.COMPLETING
             result = send()
+            with self._update():
+                # The result first, as the state publishes it.
+                self._result = cast(S3PutObject | S3CompleteMultipartUpload, result)
+                self._state = _S3WriteState.COMPLETED
         except BaseException as e:
-            if reserved:
+            if reserved and self._state is not _S3WriteState.COMPLETED:
                 with self._update():
                     self._fail(e, raised=True)
             raise
-        with self._update():
-            self._state = _S3WriteState.COMPLETED
-            self._result = cast(S3PutObject | S3CompleteMultipartUpload, result)
         return result
 
     def _complete_parts(self) -> S3CompleteMultipartUpload:
@@ -885,9 +886,10 @@ class _S3WriteSession:
                 its description is kept.
         """
         if self._failure_summary is None:
-            self._failure_summary = f"{type(error).__name__}: {error}"
+            # The error first, as the summary marks the failure as recorded.
             if not raised:
                 self._failure = error
+            self._failure_summary = f"{type(error).__name__}: {error}"
         if self._state in _WRITABLE_STATES or (raised and self._state is _S3WriteState.COMPLETING):
             self._state = _S3WriteState.FAILED
 
@@ -976,15 +978,18 @@ class _S3WriteSession:
         return True
 
     def _take_waiters(self) -> list[Future[None]]:
-        """Remove the waiters to resolve; called with the lock held.
+        """Select the waiters to resolve; called with the lock held.
 
         Returns:
-            The waiters, if the session is ready, else an empty list.
+            The unresolved waiters, if the session is ready, else an empty
+            list.
         """
         if not self._is_ready():
             return []
-        waiters, self._waiters = self._waiters, []
-        return waiters
+        # Kept until they are resolved, so that a resolution stopped by an
+        # interrupt is repeated by the next change.
+        self._waiters = [waiter for waiter in self._waiters if not waiter.done()]
+        return list(self._waiters)
 
     @staticmethod
     def _notify(waiters: list[Future[None]]) -> None:
@@ -994,5 +999,9 @@ class _S3WriteSession:
             waiters: The waiters taken by :meth:`_take_waiters`.
         """
         for waiter in waiters:
-            if waiter.set_running_or_notify_cancel():
-                waiter.set_result(None)
+            try:
+                if waiter.set_running_or_notify_cancel():
+                    waiter.set_result(None)
+            except (RuntimeError, InvalidStateError):
+                # Resolved or cancelled by another thread meanwhile.
+                continue

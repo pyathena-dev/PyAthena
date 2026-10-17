@@ -672,6 +672,28 @@ class TestS3WriteSession:
             assert session.complete() == "completed"
         assert requests.calls == [("create",), ("complete", ())]
 
+    def test_interrupted_creation_consumption(self):
+        # An interrupt that stops the consumption of the creation before it
+        # records the outcome leaves the creation for the next consumption,
+        # so a wait does not stay pending forever.
+        session, requests, executor = _make_session()
+        requests.errors[("create",)] = PermissionError("create failed")
+        with executor, mock.patch.object(session, "_on_created", return_value=None):
+            session.start()
+            creation = session._creation
+            assert creation is not None
+            assert creation.exception(5) is not None
+            with (
+                mock.patch.object(session, "_fail", side_effect=KeyboardInterrupt),
+                session._lock,
+                pytest.raises(KeyboardInterrupt),
+            ):
+                session._consume_creation(creation)
+            assert session.ready().result(5) is None
+            with pytest.raises(PermissionError, match="create failed"):
+                session.check()
+            session.abort()
+
     def test_slow_callbacks(self):
         # A future is done before its done callbacks run, so a completion
         # that finds every request done still records their outcomes first.
