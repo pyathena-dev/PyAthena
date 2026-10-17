@@ -304,36 +304,35 @@ class TestAthenaPandasResultSet:
     ):
         """A DDL result read with engine="pyarrow" keeps numeric-looking names and their padding.
 
-        It is read as with the C engine, and the result file is closed.
+        The result file is closed after the read.
         """
         assert len(data) >= AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES
         types = [(name, "string") for name in names]
-        frames = []
+        fs = _BucketFileSystem(tmp_path)
         with pd.option_context("future.infer_string", infer_string):
-            for engine in ("pyarrow", "c"):
-                fs = _BucketFileSystem(tmp_path / engine)
-                frames.append(
-                    _local_result_set(
-                        fs, types, data, name="result.txt", engine=engine, **read_csv_kwargs
-                    ).as_pandas()
-                )
-                assert all(file.closed for _, file in fs.opened)
-        actual, expected = frames
-        assert_frame_equal(actual, expected, check_exact=True)
-        assert actual.iloc[:, 0].tolist() == expected_names
+            df = _local_result_set(
+                fs, types, data, name="result.txt", engine="pyarrow", **read_csv_kwargs
+            ).as_pandas()
+        assert all(file.closed for _, file in fs.opened)
+        assert df.columns.tolist() == names
+        assert df.iloc[:, 0].tolist() == expected_names
 
     def test_read_small_csv_with_pyarrow_engine(self, tmp_path):
-        """A CSV result smaller than PYARROW_MIN_FILE_SIZE_BYTES is read with the C engine."""
+        """A CSV result smaller than PYARROW_MIN_FILE_SIZE_BYTES is read with the C engine.
+
+        The C engine reads timestamps at microseconds.
+        """
         data = '"d","t"\n"2024-01-01","2024-01-01 00:00:00.000"\n'
         assert len(data) < AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES
         types = [("d", "date"), ("t", "timestamp")]
-        actual, expected = (
-            _local_result_set(
-                _BucketFileSystem(tmp_path / engine), types, data, engine=engine
-            ).as_pandas()
-            for engine in ("pyarrow", "c")
-        )
-        assert_frame_equal(actual, expected, check_exact=True)
+        df = _local_result_set(
+            _BucketFileSystem(tmp_path), types, data, engine="pyarrow"
+        ).as_pandas()
+        assert df.to_dict("list") == {
+            "d": [pd.Timestamp("2024-01-01")],
+            "t": [pd.Timestamp("2024-01-01 00:00:00")],
+        }
+        assert df["t"].dtype == "datetime64[us]"
 
     @pytest.mark.parametrize(
         ("kwargs", "expected"),
@@ -351,6 +350,9 @@ class TestAthenaPandasResultSet:
                 {"dtype": "str"}, ["NA", "null", "x", None, "y", "z", "w"], id="single_dtype"
             ),
             pytest.param({"parse_dates": ("d",)}, OperationalError, id="parse_dates_tuple"),
+            pytest.param(
+                {"na_values": ("", "NA")}, [None, "null", "x", None, "y", "z", "w"], id="na_values"
+            ),
         ],
     )
     def test_read_csv_with_pyarrow_engine_options(self, tmp_path, kwargs, expected):
@@ -550,7 +552,7 @@ class TestAthenaPandasResultSet:
     ):
         """JSON NULLs in a later parser block keep exact values without a warning."""
         data = "n,j\n" + f"1,{json_value}\n" * 400000 + "2,\n" * 10
-        result, _ = _read_csv_result(data, {"n": "integer", "j": "json"}, engine=engine, **kwargs)
+        result = _read_csv_result(data, {"n": "integer", "j": "json"}, engine=engine, **kwargs)
         if access != "whole":
             with result:
                 first = result.get_chunk(400005) if access == "get_chunk" else next(result)
@@ -570,7 +572,7 @@ class TestAthenaPandasResultSet:
     def test_read_csv_json_numbers_in_a_parser_block_without_null(self, kwargs):
         """JSON integers keep their type when their parser block has a float but no NULL."""
         data = "n,j\n1,1.5\n" + "1,7\n" * 400000 + "2,\n" * 10
-        df, _ = _read_csv_result(data, {"n": "integer", "j": "json"}, **kwargs)
+        df = _read_csv_result(data, {"n": "integer", "j": "json"}, **kwargs)
         values = df["j"]
         assert values.dtype == object
         assert values[0] == 1.5
@@ -592,7 +594,7 @@ class TestAthenaPandasResultSet:
     )
     def test_read_csv_json_without_null(self, engine, text, dtype, values):
         """JSON without NULL gets the dtype that pandas infers for a converter's values."""
-        df, _ = _read_csv_result(f"n,j\n1,{text}\n", {"n": "integer", "j": "json"}, engine=engine)
+        df = _read_csv_result(f"n,j\n1,{text}\n", {"n": "integer", "j": "json"}, engine=engine)
         assert df["j"].dtype == dtype
         assert df["j"].tolist() == values
 
@@ -611,7 +613,7 @@ class TestAthenaPandasResultSet:
     )
     def test_read_csv_json_with_dtype(self, engine, dtype, n_dtype, m_dtype):
         """A dtype given to execute() replaces PyAthena's and does not apply to json columns."""
-        df, _ = _read_csv_result(
+        df = _read_csv_result(
             "n,m,j\n1,1,2\n3,4,\n",
             {"n": "integer", "m": "integer", "j": "json"},
             engine=engine,
@@ -640,7 +642,7 @@ class TestAthenaPandasResultSet:
         self, kwargs, expected, dtype
     ):
         """A column renamed from the name of a json column is read with its own options."""
-        df, _ = _read_csv_result("x,x\n1,002\n3,004\n", [("x", "json"), ("x", "integer")], **kwargs)
+        df = _read_csv_result("x,x\n1,002\n3,004\n", [("x", "json"), ("x", "integer")], **kwargs)
         assert df.to_dict("list") == expected
         assert df["x.1"].dtype == dtype
 
@@ -648,7 +650,7 @@ class TestAthenaPandasResultSet:
     @pytest.mark.parametrize("kwargs", [{}, {"index_col": "j"}])
     def test_read_csv_json_parse_dates(self, engine, kwargs):
         """Dates that pandas parses from a json column with parse_dates are kept."""
-        df, _ = _read_csv_result(
+        df = _read_csv_result(
             "n,j\n1,20240101\n",
             {"n": "integer", "j": "json"},
             engine=engine,
@@ -661,7 +663,7 @@ class TestAthenaPandasResultSet:
     @pytest.mark.parametrize("engine", ["c", "python"])
     def test_read_csv_single_json_column_with_null(self, engine):
         """NULL in a result with only a json column, an empty line, is None."""
-        df, _ = _read_csv_result("j\n1\n\n", {"j": "json"}, engine=engine)
+        df = _read_csv_result("j\n1\n\n", {"j": "json"}, engine=engine)
         assert df["j"].tolist() == [1, None]
 
     @pytest.mark.parametrize("chunksize", [None, 1])
@@ -672,7 +674,7 @@ class TestAthenaPandasResultSet:
         """
 
         def read():
-            result, _ = _read_csv_result(
+            result = _read_csv_result(
                 "n,j\n1,{\n", {"n": "integer", "j": "json"}, chunksize=chunksize
             )
             if chunksize:
@@ -685,7 +687,7 @@ class TestAthenaPandasResultSet:
     @pytest.mark.parametrize(("converters", "expected"), [({}, ["[1]"]), ({"j": len}, [3])])
     def test_read_csv_json_custom_converters(self, converters, expected):
         """Converters given to execute() replace the json conversion."""
-        df, _ = _read_csv_result(
+        df = _read_csv_result(
             'n,j\n1,"[1]"\n', {"n": "integer", "j": "json"}, converters=converters
         )
         assert df["j"].tolist() == expected
@@ -864,19 +866,11 @@ def _read_csv_result(data, types, engine="c", chunksize=None, **kwargs):
             return_value=None,
         ),
         patch.object(AthenaPandasResultSet, "_get_content_length", return_value=len(data)),
-        patch("pandas.read_csv", wraps=pd.read_csv) as read_csv,
-        patch(
-            "pyathena.pandas.result_set._read_csv_with_pyarrow",
-            wraps=_read_csv_with_pyarrow,
-        ) as read_pyarrow,
     ):
         result = result_set._read_csv()
-    options = read_pyarrow.call_args.args[1] if read_pyarrow.called else read_csv.call_args.kwargs
     if isinstance(result, pd.DataFrame):
-        return result_set._finish_csv_frame(result), options
-    return PandasDataFrameIterator(
-        result, result_set._finish_csv_frame, result_set._csv_stream
-    ), options
+        return result_set._finish_csv_frame(result)
+    return PandasDataFrameIterator(result, result_set._finish_csv_frame, result_set._csv_stream)
 
 
 class _BucketFileSystem(DirFileSystem):

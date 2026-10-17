@@ -227,6 +227,25 @@ class TestPandasCursor:
                 assert cursor.fetchone() is None
 
     @pytest.mark.parametrize("engine", ["c", "python"])
+    @pytest.mark.parametrize("fails", [False, True], ids=["read", "failed-read"])
+    def test_binary_csv_stream_close_after_whole_read(self, tmp_path, engine, fails):
+        """The binary CSV stream of a whole read is closed once the read ends or fails.
+
+        No AWS calls; the result file is a local file larger than pandas' read buffer.
+        """
+        with _offline_cursor(
+            tmp_path, [("value", "varbinary"), ("padding", "varchar")], [("00", "x" * 4096)] * 100
+        ) as (cursor, fs):
+            if fails:
+                with pytest.raises(OperationalError):
+                    cursor.execute("SELECT 1", engine=engine, dtype={"padding": "int64"})
+            else:
+                cursor.execute("SELECT 1", engine=engine)
+                assert cursor.fetchone() == (b"\x00", "x" * 4096)
+            assert fs.opened
+            assert all(file.closed for file in fs.opened)
+
+    @pytest.mark.parametrize("engine", ["c", "python"])
     @pytest.mark.parametrize("read_method", ["next", "get_chunk"])
     def test_binary_csv_stream_close_on_read_error(self, tmp_path, engine, read_method):
         """A failed chunk read closes the binary CSV stream (GH-1225).
@@ -264,11 +283,15 @@ class TestPandasCursor:
         assert pandas_cursor.fetchone() == ("00 ff",)
 
     @pytest.mark.parametrize(
-        ("engine", "removed", "second_name"),
-        [("c", None, "padding"), ("pyarrow", None, "padding"), ("c", "varbinary", "value")],
+        ("engine", "removed", "second_column", "second_value"),
+        [
+            ("c", None, "%(padding)s AS padding", "x" * 200),
+            ("pyarrow", None, "%(padding)s AS padding", "x" * 200),
+            ("c", "varbinary", "true AS value", True),
+        ],
         ids=["c", "pyarrow", "duplicate_name"],
     )
-    def test_binary_without_converter(self, engine, removed, second_name):
+    def test_binary_without_converter(self, engine, removed, second_column, second_value):
         """Without a varbinary converter, binary values are the hex text of the result.
 
         The PyArrow engine reads the result only without converters; a column with the
@@ -282,11 +305,11 @@ class TestPandasCursor:
             conn.cursor() as cursor,
         ):
             cursor.execute(
-                f"SELECT X'00ff' AS value, %(padding)s AS {second_name}",
+                f"SELECT X'00ff' AS value, {second_column}",
                 {"padding": "x" * 200},
                 engine=engine,
             )
-            assert cursor.fetchone() == ("00 ff", "x" * 200)
+            assert cursor.fetchone() == ("00 ff", second_value)
 
     @pytest.mark.parametrize("engine", ["c", "python"])
     @pytest.mark.parametrize(
