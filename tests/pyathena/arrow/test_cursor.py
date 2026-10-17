@@ -182,7 +182,7 @@ class TestArrowCursor:
         assert [table.column(c.name)[0].as_py() for c in columns] == [
             c.value if c.athena_type in types else c.text for c in columns
         ]
-        row = arrow_cursor.execute(temporal.query(unload)).fetchone()
+        row = arrow_cursor.fetchone()
         assert row == temporal.fetched_row(unload)
         assert temporal.zones(row) == temporal.zones(temporal.fetched_row(unload))
 

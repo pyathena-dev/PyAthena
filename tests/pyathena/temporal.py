@@ -117,6 +117,20 @@ COLUMNS = [
         "2020-01-02 03:04:05.123456789012 UTC",
     ),
     Column(
+        "tstz_min",
+        "CAST('0001-01-01 00:00:00.000 UTC' AS TIMESTAMP(3) WITH TIME ZONE)",
+        "timestamp with time zone",
+        datetime(1, 1, 1, tzinfo=_UTC),
+        "0001-01-01 00:00:00.000 UTC",
+    ),
+    Column(
+        "tstz_max",
+        "CAST('9999-12-31 23:59:59.999 UTC' AS TIMESTAMP(3) WITH TIME ZONE)",
+        "timestamp with time zone",
+        datetime(9999, 12, 31, 23, 59, 59, 999000, tzinfo=_UTC),
+        "9999-12-31 23:59:59.999 UTC",
+    ),
+    Column(
         "tstz_null", "CAST(NULL AS TIMESTAMP(3) WITH TIME ZONE)", "timestamp with time zone", None
     ),
     Column("time_p3", "TIME '03:04:05.123'", "time", time(3, 4, 5, 123000), "03:04:05.123"),
@@ -134,6 +148,13 @@ COLUMNS = [
         "time with time zone",
         time(3, 4, 5, 123000, tzinfo=_PLUS_0530),
         "03:04:05.123+05:30",
+    ),
+    Column(
+        "time_tz_p12",
+        "CAST('03:04:05.123456789012 +05:30' AS TIME(12) WITH TIME ZONE)",
+        "time with time zone",
+        time(3, 4, 5, 123456, tzinfo=_PLUS_0530),
+        "03:04:05.123456789012+05:30",
     ),
     Column("time_tz_null", "CAST(NULL AS TIME(3) WITH TIME ZONE)", "time with time zone", None),
 ]

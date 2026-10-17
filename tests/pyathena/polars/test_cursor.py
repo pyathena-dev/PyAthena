@@ -174,7 +174,7 @@ class TestPolarsCursor:
         assert [df[c.name][0] for c in columns] == [
             c.value if c.athena_type in types else c.text for c in columns
         ]
-        row = polars_cursor.execute(temporal.query(unload)).fetchone()
+        row = polars_cursor.fetchone()
         assert row == temporal.fetched_row(unload)
         assert temporal.zones(row) == temporal.zones(temporal.fetched_row(unload))
 

@@ -558,8 +558,8 @@ class TestPandasCursor:
         assert [None if pd.isna(v) else v for v in df.iloc[0]] == [
             _pandas_value(c) for c in columns
         ]
-        # The fetch methods read the DataFrame, whose aware values are in UTC.
-        row = pandas_cursor.execute(temporal.query(unload)).fetchone()
+        # The fetch methods read the same DataFrame, whose aware values are in UTC.
+        row = pandas_cursor.fetchone()
         assert row == temporal.fetched_row(unload)
 
     @pytest.mark.parametrize(
