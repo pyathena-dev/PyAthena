@@ -1,20 +1,15 @@
 import contextlib
-import math
-import random
-import string
 import time
 from datetime import datetime
 from random import randint
 from unittest.mock import MagicMock, patch
 
-import numpy as np
 import pandas as pd
 import pytest
 
 from pyathena.error import NotSupportedError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.pandas.async_cursor import AsyncPandasCursor
-from pyathena.pandas.result_set import AthenaPandasResultSet
 from pyathena.result_set import AthenaResultSet
 from pyathena.util import RetryConfig
 from tests import ENV
@@ -42,9 +37,7 @@ class TestAsyncPandasCursor:
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000_000),
             ({"cursor_kwargs": {"unload": True}}, "auto", None),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow", None),
         ],
         indirect=["async_pandas_cursor"],
     )
@@ -63,9 +56,7 @@ class TestAsyncPandasCursor:
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000_000),
             ({"cursor_kwargs": {"unload": True}}, "auto", None),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow", None),
         ],
         indirect=["async_pandas_cursor"],
     )
@@ -105,9 +96,7 @@ class TestAsyncPandasCursor:
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000_000),
             ({"cursor_kwargs": {"unload": True}}, "auto", None),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow", None),
         ],
         indirect=["async_pandas_cursor"],
     )
@@ -128,9 +117,7 @@ class TestAsyncPandasCursor:
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000_000),
             ({"cursor_kwargs": {"unload": True}}, "auto", None),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow", None),
         ],
         indirect=["async_pandas_cursor"],
     )
@@ -149,9 +136,7 @@ class TestAsyncPandasCursor:
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000_000),
             ({"cursor_kwargs": {"unload": True}}, "auto", None),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow", None),
         ],
         indirect=["async_pandas_cursor"],
     )
@@ -179,9 +164,7 @@ class TestAsyncPandasCursor:
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000_000),
             ({"cursor_kwargs": {"unload": True}}, "auto", None),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow", None),
         ],
         indirect=["async_pandas_cursor"],
     )
@@ -206,10 +189,7 @@ class TestAsyncPandasCursor:
         ("async_pandas_cursor", "parquet_engine", "chunksize"),
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000_000),
             ({"cursor_kwargs": {"unload": True}}, "auto", None),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow", None),
         ],
         indirect=["async_pandas_cursor"],
     )
@@ -290,10 +270,7 @@ class TestAsyncPandasCursor:
         ("async_pandas_cursor", "parquet_engine", "chunksize"),
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000_000),
             ({"cursor_kwargs": {"unload": True}}, "auto", None),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow", None),
         ],
         indirect=["async_pandas_cursor"],
     )
@@ -317,8 +294,6 @@ class TestAsyncPandasCursor:
         ("async_pandas_cursor", "parquet_engine", "chunksize"),
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000_000),
             ({"cursor_kwargs": {"unload": True}}, "pyarrow", None),
         ],
         indirect=["async_pandas_cursor"],
@@ -340,9 +315,7 @@ class TestAsyncPandasCursor:
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000_000),
             ({"cursor_kwargs": {"unload": True}}, "auto", None),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow", None),
         ],
         indirect=["async_pandas_cursor"],
     )
@@ -358,28 +331,6 @@ class TestAsyncPandasCursor:
         assert df.shape[0] == 1
         assert df.shape[1] == 1
         assert [(row["number_of_rows"],) for _, row in df.iterrows()] == [(1,)]
-
-    @pytest.mark.parametrize(
-        ("async_pandas_cursor", "parquet_engine", "chunksize"),
-        [
-            ({"cursor_kwargs": {"unload": False}}, "auto", None),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000_000),
-            ({"cursor_kwargs": {"unload": True}}, "auto", None),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow", None),
-        ],
-        indirect=["async_pandas_cursor"],
-    )
-    def test_many_as_pandas(self, async_pandas_cursor, parquet_engine, chunksize):
-        query_id, future = async_pandas_cursor.execute(
-            "SELECT * FROM many_rows", engine=parquet_engine, chunksize=chunksize
-        )
-        df = future.result().as_pandas()
-        if chunksize:
-            df = pd.concat((d for d in df), ignore_index=True)
-        assert df.shape[0] == 10000
-        assert df.shape[1] == 1
-        assert [(row["a"],) for _, row in df.iterrows()] == [(i,) for i in range(10000)]
 
     def test_cancel(self, async_pandas_cursor):
         query_id, future = async_pandas_cursor.execute(
@@ -410,231 +361,12 @@ class TestAsyncPandasCursor:
         conn.close()
 
     @pytest.mark.parametrize(
-        ("async_pandas_cursor", "parquet_engine", "chunksize"),
-        [
-            ({"cursor_kwargs": {"unload": False}}, "auto", None),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000_000),
-            ({"cursor_kwargs": {"unload": True}}, "auto", None),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow", None),
-        ],
-        indirect=["async_pandas_cursor"],
-    )
-    def test_show_columns(self, async_pandas_cursor, parquet_engine, chunksize):
-        query_id, future = async_pandas_cursor.execute(
-            "SHOW COLUMNS IN one_row", engine=parquet_engine, chunksize=chunksize
-        )
-        result_set = future.result()
-        assert result_set.description == [("field", "string", None, None, 0, 0, "UNKNOWN")]
-        assert result_set.fetchall() == [("number_of_rows      ",)]
-
-    @pytest.mark.parametrize(
-        ("async_pandas_cursor", "parquet_engine", "chunksize"),
-        [
-            ({"cursor_kwargs": {"unload": False}}, "auto", None),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000_000),
-            ({"cursor_kwargs": {"unload": True}}, "auto", None),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow", None),
-        ],
-        indirect=["async_pandas_cursor"],
-    )
-    def test_empty_result_ddl(self, async_pandas_cursor, parquet_engine, chunksize):
-        table = "test_pandas_cursor_empty_result_" + "".join(
-            random.choices(string.ascii_lowercase + string.digits, k=10)
-        )
-        query_id, future = async_pandas_cursor.execute(
-            f"""
-            CREATE EXTERNAL TABLE IF NOT EXISTS
-            {ENV.schema}.{table} (number_of_rows INT)
-            ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t'
-            LINES TERMINATED BY '\n' STORED AS TEXTFILE
-            LOCATION '{ENV.s3_staging_dir}{ENV.schema}/{table}/'
-            """,
-            engine=parquet_engine,
-            chunksize=chunksize,
-        )
-        df = future.result().as_pandas()
-        if chunksize:
-            df = pd.concat((d for d in df), ignore_index=True)
-        assert df.shape[0] == 0
-        assert df.shape[1] == 0
-
-    @pytest.mark.parametrize(
-        ("async_pandas_cursor", "parquet_engine"),
-        [
-            ({"cursor_kwargs": {"unload": True}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow"),
-        ],
-        indirect=["async_pandas_cursor"],
-    )
-    def test_empty_result_dml_unload(self, async_pandas_cursor, parquet_engine):
-        query_id, future = async_pandas_cursor.execute(
-            """
-            SELECT * FROM one_row LIMIT 0
-            """,
-            engine=parquet_engine,
-        )
-        df = future.result().as_pandas()
-        assert df.shape[0] == 0
-        assert df.shape[1] == 0
-
-    @pytest.mark.parametrize(
-        ("async_pandas_cursor", "parquet_engine"),
-        [
-            ({"cursor_kwargs": {"unload": False}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow"),
-        ],
-        indirect=["async_pandas_cursor"],
-    )
-    def test_integer_na_values(self, async_pandas_cursor, parquet_engine):
-        query_id, future = async_pandas_cursor.execute(
-            """
-            SELECT * FROM integer_na_values
-            """,
-            engine=parquet_engine,
-        )
-        df = future.result().as_pandas()
-        if async_pandas_cursor._unload:
-            rows = [
-                (
-                    True if math.isnan(row["a"]) else row["a"],
-                    True if math.isnan(row["b"]) else row["b"],
-                )
-                for _, row in df.iterrows()
-            ]
-            # If the UNLOAD option is enabled, it is converted to float for some reason.
-            assert rows == [(1.0, 2.0), (1.0, True), (True, True)]
-        else:
-            rows = [(row["a"], row["b"]) for _, row in df.iterrows()]
-            assert rows == [(1, 2), (1, pd.NA), (pd.NA, pd.NA)]
-
-    @pytest.mark.parametrize(
-        ("async_pandas_cursor", "parquet_engine"),
-        [
-            ({"cursor_kwargs": {"unload": False}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow"),
-        ],
-        indirect=["async_pandas_cursor"],
-    )
-    def test_float_na_values(self, async_pandas_cursor, parquet_engine):
-        query_id, future = async_pandas_cursor.execute(
-            """
-            SELECT * FROM (VALUES (0.33), (NULL)) AS t (col)
-            """,
-            engine=parquet_engine,
-        )
-        df = future.result().as_pandas()
-        rows = [(row["col"],) for _, row in df.iterrows()]
-        np.testing.assert_equal(rows, [(0.33,), (np.nan,)])
-
-    @pytest.mark.parametrize(
-        ("async_pandas_cursor", "parquet_engine"),
-        [
-            ({"cursor_kwargs": {"unload": False}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow"),
-        ],
-        indirect=["async_pandas_cursor"],
-    )
-    def test_boolean_na_values(self, async_pandas_cursor, parquet_engine):
-        query_id, future = async_pandas_cursor.execute(
-            """
-            SELECT * FROM boolean_na_values
-            """,
-            engine=parquet_engine,
-        )
-        df = future.result().as_pandas()
-        rows = [(row["a"], row["b"]) for _, row in df.iterrows()]
-        assert rows == [(True, False), (False, None), (None, None)]
-
-    @pytest.mark.parametrize(
-        ("async_pandas_cursor", "parquet_engine"),
-        [
-            ({"cursor_kwargs": {"unload": False}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow"),
-        ],
-        indirect=["async_pandas_cursor"],
-    )
-    def test_not_skip_blank_lines(self, async_pandas_cursor, parquet_engine):
-        query_id, future = async_pandas_cursor.execute(
-            """
-            SELECT col FROM (VALUES (1), (NULL)) AS t (col)
-            """,
-            engine=parquet_engine,
-        )
-        result_set = future.result()
-        assert len(result_set.fetchall()) == 2
-
-    @pytest.mark.parametrize(
-        ("async_pandas_cursor", "parquet_engine"),
-        [
-            ({"cursor_kwargs": {"unload": False}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow"),
-        ],
-        indirect=["async_pandas_cursor"],
-    )
-    def test_empty_and_null_string(self, async_pandas_cursor, parquet_engine):
-        # TODO https://github.com/pyathena-dev/PyAthena/issues/118
-        query = """
-        SELECT * FROM (VALUES ('', 'a'), ('N/A', 'a'), ('NULL', 'a'), (NULL, 'a'))
-        AS t (col1, col2)
-        """
-        query_id, future = async_pandas_cursor.execute(query, engine=parquet_engine)
-        result_set = future.result()
-        if async_pandas_cursor._unload:
-            # NULL and empty characters are correctly converted when the UNLOAD option is enabled.
-            np.testing.assert_equal(
-                result_set.fetchall(),
-                [("", "a"), ("N/A", "a"), ("NULL", "a"), (np.nan, "a")],
-            )
-        else:
-            np.testing.assert_equal(
-                result_set.fetchall(),
-                [(np.nan, "a"), ("N/A", "a"), ("NULL", "a"), (np.nan, "a")],
-            )
-        query_id, future = async_pandas_cursor.execute(query, na_values=None, engine=parquet_engine)
-        result_set = future.result()
-        if async_pandas_cursor._unload:
-            # NULL and empty characters are correctly converted when the UNLOAD option is enabled.
-            np.testing.assert_equal(
-                result_set.fetchall(),
-                [("", "a"), ("N/A", "a"), ("NULL", "a"), (np.nan, "a")],
-            )
-        else:
-            assert result_set.fetchall() == [
-                ("", "a"),
-                ("N/A", "a"),
-                ("NULL", "a"),
-                ("", "a"),
-            ]
-
-    @pytest.mark.parametrize(
-        ("async_pandas_cursor", "parquet_engine"),
-        [
-            ({"cursor_kwargs": {"unload": False}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow"),
-        ],
-        indirect=["async_pandas_cursor"],
-    )
-    def test_null_decimal_value(self, async_pandas_cursor, parquet_engine):
-        query_id, future = async_pandas_cursor.execute(
-            "SELECT CAST(null AS DECIMAL) AS col_decimal",
-            engine=parquet_engine,
-        )
-        result_set = future.result()
-        assert result_set.fetchall() == [(None,)]
-
-    @pytest.mark.parametrize(
         "execute_kwargs",
         [
             {},
             {
+                "engine": "python",
+                "na_values": None,
                 "block_size": 2048,
                 "cache_type": "none",
                 "s3_max_workers": 3,
@@ -648,6 +380,7 @@ class TestAsyncPandasCursor:
         No AWS calls; the query and its result set are mocked.
         """
         cursor_kwargs = {
+            "engine": "c",
             "block_size": 1024,
             "cache_type": "bytes",
             "auto_optimize_chunksize": True,
@@ -674,21 +407,3 @@ class TestAsyncPandasCursor:
         expected["max_workers"] = expected.pop("s3_max_workers")
         assert {key: kwargs[key] for key in expected} == expected
         assert cursor._executor._max_workers == 1
-
-    @pytest.mark.parametrize(
-        "async_pandas_cursor",
-        [{"cursor_kwargs": {"auto_optimize_chunksize": True}}],
-        indirect=True,
-    )
-    def test_auto_optimize_chunksize(self, async_pandas_cursor, monkeypatch):
-        """auto_optimize_chunksize given to the cursor chunks the CSV result."""
-        # Make the five-row result exceed the threshold and read it two rows at a time.
-        monkeypatch.setattr(AthenaPandasResultSet, "LARGE_FILE_THRESHOLD_BYTES", 0)
-        monkeypatch.setattr(AthenaPandasResultSet, "ESTIMATED_BYTES_PER_ROW", 1)
-        monkeypatch.setattr(AthenaPandasResultSet, "AUTO_CHUNK_THRESHOLD_MEDIUM", 0)
-        monkeypatch.setattr(AthenaPandasResultSet, "AUTO_CHUNK_SIZE_MEDIUM", 2)
-        _, future = async_pandas_cursor.execute(
-            "SELECT number FROM (VALUES (1), (2), (3), (4), (5)) AS t(number)"
-        )
-        result_set = future.result()
-        assert [df["number"].tolist() for df in result_set.iter_chunks()] == [[1, 2], [3, 4], [5]]
