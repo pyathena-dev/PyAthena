@@ -15,7 +15,12 @@ from fsspec.implementations.local import LocalFileSystem
 from fsspec.spec import AbstractBufferedFile
 
 from pyathena.arrow.reader import ParquetChunkReader
-from tests.pyathena.util import INT96_UNLOAD_FILE, INT96_VALUES, ImmediateExecutor
+from tests.pyathena.util import (
+    INT96_ARROW_TYPES,
+    INT96_UNLOAD_FILE,
+    INT96_VALUES,
+    ImmediateExecutor,
+)
 
 
 class _RecordingFile(AbstractBufferedFile):
@@ -212,13 +217,7 @@ class TestParquetChunkReader:
         """INT96 timestamps that Athena writes are read at microseconds at any level."""
         with ParquetChunkReader(LocalFileSystem(), [str(INT96_UNLOAD_FILE)], 3) as reader:
             table = pa.concat_tables(reader)
-        timestamp = pa.timestamp("us")
-        assert table.schema.types[1:] == [
-            timestamp,
-            pa.list_(timestamp),
-            pa.struct([("t", timestamp)]),
-            pa.map_(pa.string(), timestamp),
-        ]
+        assert table.schema.types[1:] == INT96_ARROW_TYPES
         assert table.column("ts").to_pylist() == INT96_VALUES
         assert table.column("mp").to_pylist() == [[("k", v)] for v in INT96_VALUES]
 

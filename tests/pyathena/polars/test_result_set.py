@@ -117,14 +117,21 @@ def _fetching_result_set(chunks, names, arraysize, converters=None) -> AthenaPol
         )
 
 
-def _read_unload_result(tmp_path, chunksize, kwargs, file=INT96_UNLOAD_FILE):
+def _read_unload_result(tmp_path, chunksize, kwargs, table=None):
     """Read a Parquet file of an UNLOAD result through the result set, without AWS.
+
+    Args:
+        table: The table to write as Athena writes it, with INT96 timestamps and no
+            Arrow schema, or None for the file that Athena wrote, ``INT96_UNLOAD_FILE``.
 
     Returns:
         The DataFrames that were read: the whole result, or its chunks.
     """
     path = tmp_path / "0.parquet"
-    shutil.copy(file, path)
+    if table is None:
+        shutil.copy(INT96_UNLOAD_FILE, path)
+    else:
+        pq.write_table(table, path, use_deprecated_int96_timestamps=True, store_schema=False)
     result_set = _chunked_result_set()
     result_set._chunksize = chunksize
     result_set._kwargs = dict(kwargs)
@@ -756,15 +763,7 @@ class TestAthenaPolarsResultSet:
         They are cast to microseconds, and a warning is logged if the read has any.
         """
         timestamp = datetime(2020, 1, 2, 3, 4, 5, 123000)
-        file = tmp_path / "source.parquet"
-        pq.write_table(
-            pa.table({"id": [1], "ts": pa.array([timestamp], pa.timestamp("us"))}),
-            file,
-            use_deprecated_int96_timestamps=True,
-            store_schema=False,
-        )
-        unload = tmp_path / "unload"
-        unload.mkdir()
+        table = pa.table({"id": [1], "ts": pa.array([timestamp], pa.timestamp("us"))})
         with (
             patch(
                 "pyathena.polars.result_set.importlib.util.find_spec",
@@ -772,7 +771,7 @@ class TestAthenaPolarsResultSet:
             ),
             caplog.at_level(logging.WARNING, logger="pyathena.polars.result_set"),
         ):
-            df = pl.concat(_read_unload_result(unload, chunksize, kwargs, file=file))
+            df = pl.concat(_read_unload_result(tmp_path, chunksize, kwargs, table=table))
         if warned:
             assert df.schema["ts"] == pl.Datetime("us")
             assert df["ts"].to_list() == [timestamp]
@@ -786,17 +785,13 @@ class TestAthenaPolarsResultSet:
     def test_read_parquet_int96_map_named_like_a_selector(self, tmp_path, chunksize, kwargs):
         """A Map is restored by its name, which Polars would read as a selector in pl.col()."""
         timestamp = datetime(1600, 1, 2, 3, 4, 5, 123000)
-        file = tmp_path / "source.parquet"
         table = pa.table(
             {
                 "id": [1],
                 "*": pa.array([[("k", timestamp)]], pa.map_(pa.string(), pa.timestamp("us"))),
             }
         )
-        pq.write_table(table, file, use_deprecated_int96_timestamps=True, store_schema=False)
-        unload = tmp_path / "unload"
-        unload.mkdir()
-        df = pl.concat(_read_unload_result(unload, chunksize, kwargs, file=file))
+        df = pl.concat(_read_unload_result(tmp_path, chunksize, kwargs, table=table))
         assert df.schema == pl.Schema({"id": pl.Int64, "*": _MAP})
         assert df.row(0) == (1, {"k": timestamp})
 
@@ -830,12 +825,9 @@ class TestAthenaPolarsResultSet:
 
     def test_read_parquet_without_timestamps(self, tmp_path, caplog):
         """A result without timestamps is read by Polars with read options and no warning."""
-        file = tmp_path / "source.parquet"
-        pl.DataFrame({"i": [1, None]}).write_parquet(file)
-        unload = tmp_path / "unload"
-        unload.mkdir()
+        table = pa.table({"i": [1, None]})
         with caplog.at_level(logging.WARNING, logger="pyathena.polars.result_set"):
-            (df,) = _read_unload_result(unload, None, {"low_memory": True}, file=file)
+            (df,) = _read_unload_result(tmp_path, None, {"low_memory": True}, table=table)
         assert df["i"].to_list() == [1, None]
         assert not caplog.text
 

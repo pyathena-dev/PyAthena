@@ -49,6 +49,13 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
+# The consequence of a Polars 1.x read of UNLOAD timestamps at nanoseconds.
+_NANOSECOND_READ_CONSEQUENCE = (
+    "so those outside 1677-09-21 to 2262-04-11 are wrong. Upgrade to Polars 2.0 or "
+    "later, or install pyarrow and give no read options to execute(), to read them "
+    "correctly."
+)
+
 
 class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
     """Iterator for chunked DataFrame results from Athena queries.
@@ -768,10 +775,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """Read query results from Parquet files in S3.
 
         Timestamps are read at microseconds; see ``_int96_read_options()``. Polars 1.x
-        reads them so only with ``use_pyarrow=True``. Without read options given to
-        ``execute()``, and with pyarrow installed, a result with timestamps is
-        therefore read with pyarrow instead; otherwise Polars 1.x reads them at
-        nanoseconds, and ``_output_casts()`` casts them to microseconds.
+        reads them so only with ``use_pyarrow=True``. When ``_reads_with_pyarrow()``,
+        a result with timestamps is therefore read with pyarrow instead; otherwise
+        Polars 1.x reads them at nanoseconds, and they are cast to microseconds.
 
         ``_prepare_parquet_location()`` must have found the unload location first.
 
@@ -790,11 +796,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
             raise ProgrammingError("unload_location is not available.")
 
         options = self._int96_read_options(schema)
-        if options is None and not self._kwargs and importlib.util.find_spec("pyarrow"):
-            _logger.warning(
-                f"Polars {pl.__version__} reads the Parquet timestamps of UNLOAD at "
-                "nanoseconds, so they are read with pyarrow instead. Upgrade to "
-                "Polars 2.0 or later to read them with Polars."
+        if options is None and self._reads_with_pyarrow():
+            self._warn_nanosecond_read(
+                "so they are read with pyarrow instead. Upgrade to Polars 2.0 or later "
+                "to read them with Polars."
             )
             return self._read_parquet_with_pyarrow()
         kwargs = self._read_kwargs(
@@ -803,16 +808,14 @@ class AthenaPolarsResultSet(AthenaResultSet):
         if options and "pyarrow_options" in options:
             # The options given to execute() are in it.
             kwargs["pyarrow_options"] = options["pyarrow_options"]
+        dtypes = self._output_dtypes(schema, options)
         try:
-            df = pl.read_parquet(self._unload_location, **kwargs)
-            casts = self._output_casts(df, schema, options)
-            if casts:
-                df = df.with_columns(casts)
+            df = self._cast(pl.read_parquet(self._unload_location, **kwargs), dtypes)
         except Exception as e:
             _logger.exception(f"Failed to read {self._unload_location}.")
             raise OperationalError(*e.args) from e
-        if casts and options is None:
-            self._warn_nanosecond_read()
+        if options is None and dtypes.keys() & set(df.columns):
+            self._warn_nanosecond_read(_NANOSECOND_READ_CONSEQUENCE)
         return df
 
     def _read_parquet_with_pyarrow(self) -> pl.DataFrame:
@@ -875,16 +878,17 @@ class AthenaPolarsResultSet(AthenaResultSet):
         pyarrow reads it at microseconds unless ``pyarrow_options`` sets
         ``coerce_int96_timestamp_unit``. Polars 2.0 and later read INT96 at the time
         unit of the read schema, except in a Map, which the read schema therefore
-        makes a List of Structs; ``_output_casts()`` restores it. Polars 1.x reads
+        makes a List of Structs; ``_output_dtypes()`` restores it. Polars 1.x reads
         INT96 at nanoseconds whatever the schema.
 
         Args:
             schema: The schema of the Parquet files.
 
         Returns:
-            No arguments if the files hold no nanosecond timestamps, ``pyarrow_options``
-            with ``use_pyarrow=True``, the ``schema`` argument with Polars 2.0 and
-            later, or None with Polars 1.x, which cannot read them.
+            No arguments if the files hold no nanosecond timestamps or ``execute()``
+            was given a ``schema``, ``pyarrow_options`` with ``use_pyarrow=True``, the
+            ``schema`` argument with Polars 2.0 and later, or None with Polars 1.x,
+            which cannot read them.
         """
         import polars as pl
 
@@ -897,54 +901,80 @@ class AthenaPolarsResultSet(AthenaResultSet):
                     **(self._kwargs.get("pyarrow_options") or {}),
                 }
             }
+        if "schema" in self._kwargs:
+            return {}
         if int(pl.__version__.split(".")[0]) < 2:
             return None
         return {
             "schema": {name: to_microseconds(dtype, maps=False) for name, dtype in schema.items()}
         }
 
-    def _output_casts(
-        self, df: pl.DataFrame, schema: pl.Schema, options: dict[str, Any] | None
-    ) -> list[pl.Series]:
-        """Get the columns of a read that need casting to their output dtypes.
+    @staticmethod
+    def _output_dtypes(schema: pl.Schema, options: dict[str, Any] | None) -> dict[str, Any]:
+        """Get the output dtypes of the columns that a read gives other dtypes.
 
-        Polars 1.x reads timestamps at nanoseconds, which are cast to microseconds.
-        The Maps that the read schema of ``_int96_read_options()`` replaced are
-        restored. Nothing is cast if ``execute()`` was given its own ``schema``.
+        Polars 1.x reads timestamps at nanoseconds, which are cast to microseconds,
+        and the read schema of ``_int96_read_options()`` makes Maps Lists of Structs,
+        which are restored.
 
         Args:
-            df: The DataFrame that was read.
             schema: The schema of the Parquet files.
             options: The read arguments from ``_int96_read_options()``.
 
         Returns:
-            The cast columns, keeping their names.
+            The output dtypes by column name.
         """
-        if "schema" in self._kwargs:
-            return []
         if options is None:
-            dtypes = {name: to_microseconds(dtype) for name, dtype in df.schema.items()}
+            read_dtypes = dict(schema)
         elif "schema" in options:
-            dtypes = {name: to_microseconds(schema[name]) for name in df.columns if name in schema}
+            read_dtypes = options["schema"]
         else:
-            return []
-        # Series, not pl.col(), so that a name such as "*" is not a selector.
-        return [
-            df.get_column(name).cast(dtype)
-            for name, dtype in dtypes.items()
-            if dtype != df.schema[name]
-        ]
+            return {}
+        return {
+            name: dtype
+            for name, read_dtype in read_dtypes.items()
+            if (dtype := to_microseconds(schema[name])) != read_dtype
+        }
 
     @staticmethod
-    def _warn_nanosecond_read() -> None:
-        """Warn that Polars 1.x read timestamps at nanoseconds."""
+    def _cast(df: pl.DataFrame, dtypes: dict[str, Any]) -> pl.DataFrame:
+        """Cast the columns of a DataFrame that are in ``dtypes`` to their dtypes.
+
+        Args:
+            df: The DataFrame.
+            dtypes: The dtypes by column name, from ``_output_dtypes()``.
+
+        Returns:
+            The DataFrame with the cast columns.
+        """
+        # Series, not pl.col(), so that a name such as "*" is not a selector.
+        casts = [df.get_column(name).cast(dtype) for name, dtype in dtypes.items() if name in df]
+        return df.with_columns(casts) if casts else df
+
+    def _reads_with_pyarrow(self) -> bool:
+        """Whether the Parquet files are read with pyarrow through PyAthena's filesystem.
+
+        They are without read options given to ``execute()``, and with pyarrow
+        installed: always in chunks, and with Polars 1.x when the files hold
+        timestamps.
+
+        Returns:
+            True if they are read with pyarrow when pyarrow is chosen for them.
+        """
+        return not self._kwargs and importlib.util.find_spec("pyarrow") is not None
+
+    @staticmethod
+    def _warn_nanosecond_read(consequence: str) -> None:
+        """Warn that Polars 1.x reads the timestamps of UNLOAD at nanoseconds.
+
+        Args:
+            consequence: The rest of the message, after "nanoseconds, ".
+        """
         import polars as pl
 
         _logger.warning(
             f"Polars {pl.__version__} reads the Parquet timestamps of UNLOAD at "
-            "nanoseconds, so those outside 1677-09-21 to 2262-04-11 are wrong. Upgrade "
-            "to Polars 2.0 or later, or install pyarrow and give no read options to "
-            "execute(), to read them correctly."
+            f"nanoseconds, {consequence}"
         )
 
     def _as_polars(self) -> pl.DataFrame:
@@ -1152,7 +1182,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         if self._unload_location is None:
             raise ProgrammingError("unload_location is not available.")
 
-        if not self._kwargs and importlib.util.find_spec("pyarrow") is not None:
+        if self._reads_with_pyarrow():
             return self._read_parquet_chunks(
                 S3FileSystem(**self._csv_storage_options), self._data_manifest
             )
@@ -1212,7 +1242,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """
         import polars as pl
 
-        warned = False
+        dtypes = self._output_dtypes(schema, options)
+        if options is None and dtypes:
+            self._warn_nanosecond_read(_NANOSECOND_READ_CONSEQUENCE)
         try:
             lazy_df = pl.scan_parquet(
                 location,
@@ -1222,11 +1254,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 ),
             )
             for batch in lazy_df.collect_batches(chunk_size=self._chunksize):
-                casts = self._output_casts(batch, schema, options)
-                if casts and options is None and not warned:
-                    self._warn_nanosecond_read()
-                    warned = True
-                yield batch.with_columns(casts) if casts else batch
+                yield self._cast(batch, dtypes)
         except Exception as e:
             _logger.exception(f"Failed to read {location}.")
             raise OperationalError(*e.args) from e

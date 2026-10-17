@@ -19,7 +19,7 @@ from pyathena.arrow.result_set import AthenaArrowResultSet
 from pyathena.connection import Connection
 from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
-from tests.pyathena.util import INT96_UNLOAD_FILE, INT96_VALUES
+from tests.pyathena.util import INT96_ARROW_TYPES, INT96_UNLOAD_FILE, INT96_VALUES
 
 
 def _read_unload_result(tmp_path):
@@ -222,13 +222,7 @@ class TestAthenaArrowResultSet:
     def test_read_parquet_int96(self, tmp_path):
         """INT96 timestamps that Athena writes are read at microseconds at any level."""
         table = _read_unload_result(tmp_path).sort_by("id")
-        timestamp = pa.timestamp("us")
-        assert table.schema.types[1:] == [
-            timestamp,
-            pa.list_(timestamp),
-            pa.struct([("t", timestamp)]),
-            pa.map_(pa.string(), timestamp),
-        ]
+        assert table.schema.types[1:] == INT96_ARROW_TYPES
         assert table.drop_columns("id").to_pydict() == {
             "ts": INT96_VALUES,
             "arr": [[v] for v in INT96_VALUES],
