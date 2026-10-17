@@ -51,6 +51,7 @@ from tests.pyathena.util import (
     EVENT_TIMEOUT,
     QueryExecutionHistory,
     ThrottledOperation,
+    cache_search_cursor,
     interrupt_start_waits,
     succeeded_query_execution,
     succeeded_query_execution_data,
@@ -89,24 +90,6 @@ def _offline_cursor(kill_on_interrupt, cursor_class=Cursor):
     cursor._result_set_class = MagicMock()
     cancel = cursor._cancel = MagicMock()
     return cursor, cancel
-
-
-def _cache_search_cursor(client):
-    """A cursor whose result cache search sends its requests to a client stand-in.
-
-    Args:
-        client: The Athena client stand-in, such as ``QueryExecutionHistory``.
-
-    Returns:
-        The cursor, for the schema ``this_schema``.
-    """
-    cursor = Cursor.__new__(Cursor)  # bypass __init__ to avoid AWS calls
-    cursor._connection = MagicMock(_client=client)
-    cursor._retry_config = RetryConfig(attempt=1)
-    cursor._work_group = None
-    cursor._schema_name = "this_schema"
-    cursor._catalog_name = None
-    return cursor
 
 
 def _types(value):
@@ -440,7 +423,7 @@ class TestCursor:
             succeeded_query_execution_data("next_page", query, now),
         ]
         history = QueryExecutionHistory(executions)
-        cursor = _cache_search_cursor(history)
+        cursor = cache_search_cursor(Cursor, history)
 
         # Without cache_size, cache_expiration_time alone bounds the search.
         assert cursor._find_previous_query_id(query, None, cache_expiration_time=3600) is None
@@ -465,7 +448,7 @@ class TestCursor:
         ]
         executions[position] = succeeded_query_execution_data("match", query, now)
         history = QueryExecutionHistory(executions)
-        cursor = _cache_search_cursor(history)
+        cursor = cache_search_cursor(Cursor, history)
 
         assert cursor._find_previous_query_id(query, "wg", cache_size=60) == expected
         assert [request["WorkGroup"] for request in history.list_requests] == ["wg", "wg"]

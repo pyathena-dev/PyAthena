@@ -94,10 +94,7 @@ class TestWithAsyncFetch:
         assert len(threads) == 3
         assert threading.get_ident() not in threads
 
-    @pytest.mark.parametrize(
-        "cursor_class",
-        [AioArrowCursor, AioPandasCursor, AioPolarsCursor, AioS3FSCursor],
-    )
+    @pytest.mark.parametrize("cursor_class", _ALL_CURSOR_CLASSES)
     async def test_fetch_without_result_set(self, cursor_class):
         cursor = cursor_class(
             connection=MagicMock(), converter=None, formatter=None, retry_config=None
@@ -105,6 +102,19 @@ class TestWithAsyncFetch:
         for fetch in (cursor.fetchone, cursor.fetchmany, cursor.fetchall):
             with pytest.raises(ProgrammingError, match=r"No result set\."):
                 await fetch()
+        # The Arrow and Polars cursors also convert the whole result.
+        for name in ("as_arrow", "as_polars"):
+            if hasattr(cursor, name):
+                with pytest.raises(ProgrammingError):
+                    getattr(cursor, name)()
+
+    @pytest.mark.parametrize("cursor_class", _ALL_CURSOR_CLASSES)
+    async def test_cancel_without_query(self, cursor_class):
+        cursor = cursor_class(
+            connection=MagicMock(), converter=None, formatter=None, retry_config=None
+        )
+        with pytest.raises(ProgrammingError):
+            await cursor.cancel()
 
     @pytest.mark.parametrize(
         ("method", "args"), [("fetchone", ()), ("fetchmany", (2,)), ("fetchall", ())]
@@ -278,6 +288,7 @@ class TestWithAsyncFetch:
         result_set.rowcount = 1
 
         async def execute(operation, parameters, **kwargs):
+            cursor.query_id = "query_id"
             cursor.result_set = result_set
 
         def parameters():
@@ -290,3 +301,6 @@ class TestWithAsyncFetch:
 
         assert closes == [True]
         assert cursor.result_set is None
+        assert cursor.rowcount == -1
+        # The query ID of the last execution is kept.
+        assert cursor.query_id == "query_id"

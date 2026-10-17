@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -26,6 +26,7 @@ from fsspec.implementations.local import LocalFileSystem
 from jinja2 import Environment, FileSystemLoader
 from sqlalchemy import cast, create_engine, engine_from_config, literal, types
 
+from pyathena.connection import Connection
 from pyathena.error import ProgrammingError
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.filesystem.s3_async import AioS3FileSystem
@@ -33,7 +34,8 @@ from pyathena.filesystem.s3_core import S3Core
 from pyathena.formatter import DefaultParameterFormatter
 from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaCalculationExecutionStatus, AthenaQueryExecution
-from pyathena.util import override, retry_api_call
+from pyathena.spark.common import SparkBaseCursor
+from pyathena.util import RetryConfig, override, retry_api_call
 
 _queries = Environment(
     loader=FileSystemLoader(Path(__file__).parents[1].resolve() / "resources" / "queries")
@@ -316,8 +318,29 @@ def succeeded_query_execution(query_id, query, completion_date_time, schema="thi
     )
 
 
-# Athena's answers to a query or calculation that fails at its first status request.
+def cache_search_cursor(cursor_class, client):
+    """Build a cursor whose result cache search sends its requests to a client stand-in.
+
+    Args:
+        cursor_class: The cursor class, such as ``Cursor`` or ``AioCursor``.
+        client: The Athena client stand-in, such as ``QueryExecutionHistory``.
+
+    Returns:
+        The cursor, for the schema ``this_schema``.
+    """
+    cursor = cursor_class.__new__(cursor_class)  # bypass __init__ to avoid AWS calls
+    cursor._connection = MagicMock(_client=client)
+    cursor._retry_config = RetryConfig(attempt=1)
+    cursor._work_group = None
+    cursor._schema_name = "this_schema"
+    cursor._catalog_name = None
+    return cursor
+
+
+# Athena's answers to a query or calculation that fails at its first status request,
+# after a search that finds no earlier executions.
 FAILED_EXECUTION_RESPONSES = {
+    "ListQueryExecutions": {"QueryExecutionIds": []},
     "StartQueryExecution": {"QueryExecutionId": "query-id"},
     "GetQueryExecution": {
         "QueryExecution": {
@@ -340,6 +363,45 @@ FAILED_EXECUTION_RESPONSES = {
         "Result": {},
     },
 }
+
+
+# Athena's answers to a calculation that completes at its first status request.
+COMPLETED_CALCULATION_RESPONSES = {
+    **FAILED_EXECUTION_RESPONSES,
+    "GetCalculationExecutionStatus": {
+        "Status": {"State": "COMPLETED"},
+        "Statistics": {"DpuExecutionInMillis": 0},
+    },
+    "GetCalculationExecution": {
+        "CalculationExecutionId": "calculation-id",
+        "SessionId": "session",
+        "Status": {"State": "COMPLETED"},
+        "Statistics": {"DpuExecutionInMillis": 0},
+        "Result": {},
+    },
+}
+
+
+def offline_spark_cursor(cursor_class):
+    """Build a Spark cursor on a connection that sends no request to AWS on its own.
+
+    The cursor reports a started session, ``session``, which closing it leaves
+    alone.
+
+    Args:
+        cursor_class: The Spark cursor class.
+
+    Returns:
+        The cursor.
+    """
+    conn = Connection(
+        region_name="us-east-1",
+        s3_staging_dir="s3://bucket/path/",
+        aws_access_key_id="access_key",
+        aws_secret_access_key="secret_key",
+    )
+    with patch.object(SparkBaseCursor, "_start_session", return_value="session"):
+        return conn.cursor(cursor_class, terminate_session_on_close=False)
 
 
 @contextmanager

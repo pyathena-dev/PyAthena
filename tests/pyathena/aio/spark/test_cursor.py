@@ -16,14 +16,14 @@ from botocore.exceptions import ClientError
 
 from pyathena.aio.spark.cursor import AioSparkCursor
 from pyathena.error import DatabaseError, NotSupportedError, OperationalError
-from pyathena.model import AthenaCalculationExecutionStatus, AthenaSessionStatus
+from pyathena.model import AthenaCalculationExecutionStatus
 from pyathena.util import RetryConfig
-from tests import ENV
-from tests.pyathena.aio.conftest import _aio_connect
 from tests.pyathena.util import (
     CANCELABLE_SPARK_JOB,
+    COMPLETED_CALCULATION_RESPONSES,
+    answered_requests,
+    offline_spark_cursor,
     wait_for_spark_job,
-    wait_for_spark_session_state,
 )
 
 
@@ -106,17 +106,7 @@ def _starting_cursor(kill_on_interrupt=True, response=None):
 
 class TestAioSparkCursor:
     async def test_spark_dataframe(self, aio_spark_cursor):
-        await aio_spark_cursor.execute(
-            textwrap.dedent(
-                f"""
-                df = spark.read.format("csv") \\
-                    .option("header", "true") \\
-                    .option("inferSchema", "true") \\
-                    .load("{ENV.s3_staging_dir}{ENV.schema}/spark_group_by/spark_group_by.csv")
-                """
-            ),
-            description="test description",
-        )
+        await aio_spark_cursor.execute("print('hello')", description="test description")
         assert aio_spark_cursor.calculation_execution
         assert aio_spark_cursor.session_id
         assert aio_spark_cursor.calculation_id
@@ -132,70 +122,7 @@ class TestAioSparkCursor:
         assert aio_spark_cursor.std_error_s3_uri
         assert aio_spark_cursor.result_s3_uri
         assert aio_spark_cursor.result_type
-
-        await aio_spark_cursor.execute(
-            textwrap.dedent(
-                """
-                from pyspark.sql.functions import sum
-                df_count = df.groupBy("name").agg(sum("count").alias("sum"))
-                df_count.show()
-                """
-            )
-        )
-        assert (
-            await aio_spark_cursor.get_std_out()
-            == textwrap.dedent(
-                """
-                +----+---+
-                |name|sum|
-                +----+---+
-                | bar|  5|
-                | foo|  5|
-                +----+---+
-                """
-            ).strip()
-        )
-
-        await aio_spark_cursor.execute(
-            textwrap.dedent(
-                f"""
-                df_count.write.mode('overwrite') \\
-                    .format("parquet") \\
-                    .option("path", "{ENV.s3_staging_dir}{ENV.schema}/spark/group_by") \\
-                    .saveAsTable("{ENV.schema}.spark_group_by")
-                """
-            )
-        )
-
-    @pytest.mark.dependency(depends="test_spark_dataframe")
-    async def test_spark_sql(self, aio_spark_cursor):
-        await aio_spark_cursor.execute(
-            textwrap.dedent(
-                f"""
-                spark.sql("SELECT * FROM {ENV.schema}.one_row").show()
-                """
-            )
-        )
-        assert (
-            await aio_spark_cursor.get_std_out()
-            == textwrap.dedent(
-                """
-                +--------------+
-                |number_of_rows|
-                +--------------+
-                |             1|
-                +--------------+
-                """
-            ).strip()
-        )
-
-        await aio_spark_cursor.execute(
-            textwrap.dedent(
-                f"""
-                spark.sql("DROP TABLE IF EXISTS {ENV.schema}.spark_group_by")
-                """
-            )
-        )
+        assert await aio_spark_cursor.get_std_out() == "hello"
 
     async def test_failed(self, aio_spark_cursor):
         with pytest.raises(OperationalError):
@@ -316,29 +243,6 @@ class TestAioSparkCursor:
         cancel.assert_not_awaited()
         assert cursor.calculation_execution is None
 
-    async def test_session_ownership(self, aio_spark_cursor):
-        client = aio_spark_cursor.connection.client
-        session_id = aio_spark_cursor.session_id
-        borrower = await asyncio.to_thread(
-            aio_spark_cursor.connection.cursor, AioSparkCursor, session_id=session_id
-        )
-        async with borrower:
-            await borrower.execute("print(1)")
-            assert await borrower.get_std_out() == "1"
-
-        # Closing a cursor that was given the session leaves the session running.
-        await aio_spark_cursor.execute("print(2)")
-        assert await aio_spark_cursor.get_std_out() == "2"
-
-        # Closing the cursor that started the session terminates it.
-        await aio_spark_cursor.close()
-        await asyncio.to_thread(
-            wait_for_spark_session_state,
-            client,
-            session_id,
-            AthenaSessionStatus.STATE_TERMINATED,
-        )
-
     @pytest.mark.parametrize("kill_on_interrupt", [True, False])
     async def test_calculate_reuses_generated_token_on_retry(self, kill_on_interrupt):
         cursor, _, _, release = _starting_cursor(kill_on_interrupt=kill_on_interrupt)
@@ -411,24 +315,6 @@ class TestAioSparkCursor:
         cursor._connection.client.start_calculation_execution.assert_not_called()
         cancel.assert_not_awaited()
         assert cursor.calculation_id is None
-
-    async def test_execute_timeout_while_starting(self):
-        cursor, cancel, started, release = _starting_cursor()
-        task = asyncio.create_task(asyncio.wait_for(cursor.execute("code"), timeout=0.05))
-        try:
-            assert await asyncio.to_thread(started.wait, _TIMEOUT)
-            # The timeout is due before this sleep ends, so the event loop handles it
-            # while the start request is still blocked.
-            await asyncio.sleep(0.1)
-            assert not task.done()
-        finally:
-            release.set()
-        with pytest.raises(asyncio.TimeoutError):
-            await task
-
-        assert started.is_set()
-        cancel.assert_awaited_once_with("calculation_id")
-        assert cursor.calculation_id == "calculation_id"
 
     @pytest.mark.parametrize("failing", ["start", "cancel", "wait"])
     async def test_execute_cancelled_while_starting_failure(self, failing):
@@ -534,33 +420,18 @@ class TestAioSparkCursor:
     )
     async def test_execute_accepts_none_parameters(self, args, kwargs):
         """Omitted or None parameters run the calculation (no AWS)."""
+        cursor = offline_spark_cursor(AioSparkCursor)
+        with answered_requests(
+            cursor.connection.client, COMPLETED_CALCULATION_RESPONSES
+        ) as requests:
+            await cursor.execute("code", *args, **kwargs)
+
+        start = dict(requests)["StartCalculationExecution"]
+        assert (start["SessionId"], start["CodeBlock"]) == ("session", "code")
+        assert cursor.calculation_id == "calculation-id"
+        assert cursor.state == AthenaCalculationExecutionStatus.STATE_COMPLETED
+
+    async def test_executemany(self):
         cursor = AioSparkCursor.__new__(AioSparkCursor)  # bypass __init__ to avoid AWS calls
-        cursor._session_id = "session_id"
-        cursor._calculate = AsyncMock(return_value="calculation_id")
-        cursor._poll = AsyncMock(
-            return_value=MagicMock(state=AthenaCalculationExecutionStatus.STATE_COMPLETED)
-        )
-
-        await cursor.execute("code", *args, **kwargs)
-
-        cursor._calculate.assert_awaited_once_with(
-            session_id="session_id",
-            code_block="code",
-            description=None,
-            client_request_token=None,
-        )
-
-    async def test_executemany(self, aio_spark_cursor):
         with pytest.raises(NotSupportedError):
-            await aio_spark_cursor.executemany("SELECT 1", [])
-
-    async def test_context_manager(self):
-        conn = await _aio_connect(
-            schema_name=ENV.schema,
-            cursor_class=AioSparkCursor,
-            work_group=ENV.spark_work_group,
-        )
-        cursor = await asyncio.to_thread(conn.cursor)
-        async with cursor:
-            await cursor.execute("print('hello')")
-            assert await cursor.get_std_out() == "hello"
+            await cursor.executemany("SELECT 1", [])

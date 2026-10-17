@@ -20,7 +20,10 @@ from pyathena.util import RetryConfig, stop_retries_on
 from tests import ENV
 from tests.pyathena.util import (
     CANCELABLE_SPARK_JOB,
+    COMPLETED_CALCULATION_RESPONSES,
     ThrottledOperation,
+    answered_requests,
+    offline_spark_cursor,
     wait_for_spark_job,
     wait_for_spark_session_state,
 )
@@ -325,25 +328,16 @@ class TestSparkCursor:
     )
     def test_execute_accepts_none_parameters(self, args, kwargs):
         """Omitted or None parameters run the calculation (no AWS)."""
-        cursor = SparkCursor.__new__(SparkCursor)  # bypass __init__ to avoid AWS calls
-        cursor._session_id = "session_id"
-
-        with (
-            patch.object(SparkCursor, "_calculate", return_value="calculation_id") as calculate,
-            patch.object(
-                SparkCursor,
-                "_poll",
-                return_value=MagicMock(state=AthenaCalculationExecutionStatus.STATE_COMPLETED),
-            ),
-        ):
+        cursor = offline_spark_cursor(SparkCursor)
+        with answered_requests(
+            cursor.connection.client, COMPLETED_CALCULATION_RESPONSES
+        ) as requests:
             cursor.execute("code", *args, **kwargs)
 
-        calculate.assert_called_once_with(
-            session_id="session_id",
-            code_block="code",
-            description=None,
-            client_request_token=None,
-        )
+        start = dict(requests)["StartCalculationExecution"]
+        assert (start["SessionId"], start["CodeBlock"]) == ("session", "code")
+        assert cursor.calculation_id == "calculation-id"
+        assert cursor.state == AthenaCalculationExecutionStatus.STATE_COMPLETED
 
 
 def test_spark_on_poll_invoked_each_iteration():
