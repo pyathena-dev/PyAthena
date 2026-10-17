@@ -3185,7 +3185,7 @@ class S3File(AbstractBufferedFile):
         session = cast(_S3WriteSession, self._session)
         try:
             session.start()
-            session.ready().result()
+            session.wait_ready()
             # Raises the failure of the creation.
             session.check()
             if self.append_block:
@@ -3201,7 +3201,7 @@ class S3File(AbstractBufferedFile):
                 source = S3Path(self.bucket, self.key)
                 for part_number, range_ in session.iter_copy_parts(size):
                     # The part copies count toward max_workers, as the parts do.
-                    session.ready().result()
+                    session.wait_ready()
                     session.submit_copy(part_number, source, None if whole_source else range_)
         except BaseException:
             # A creation that has started may still create an upload, which
@@ -3256,7 +3256,7 @@ class S3File(AbstractBufferedFile):
         try:
             for part_number, data in session.iter_parts(buffer):
                 # Otherwise the parts waiting for a worker pile up in memory.
-                session.ready().result()
+                session.wait_ready()
                 session.submit_part(part_number, data)
         except BaseException:
             self._close_without_commit()

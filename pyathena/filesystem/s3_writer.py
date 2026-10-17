@@ -325,8 +325,9 @@ class _S3WriteState(enum.Enum):
     ABORT_FAILED = "failed to abort its multipart upload"
 
 
-#: The seconds after which a wait for the part requests checks them again,
-#: in case the done callback of one was stopped before it notified the wait.
+#: The seconds after which a wait of the session checks the requests again,
+#: in case the done callback of one was stopped, such as by an interrupt,
+#: before it recorded the outcome and notified the wait.
 _RECHECK_INTERVAL = 1.0
 
 #: The states in which the caller may still write data.
@@ -500,13 +501,28 @@ class _S3WriteSession:
             A future whose result is None.
         """
         waiter: Future[None] = Future()
-        with self._lock:
+        with self._update():
+            self._consume_finished()
             self._waiters = [waiter for waiter in self._waiters if not waiter.cancelled()]
             if not self._is_ready():
                 self._waiters.append(waiter)
                 return waiter
         waiter.set_result(None)
         return waiter
+
+    def wait_ready(self) -> None:
+        """Block until another part may be submitted; see :meth:`ready`.
+
+        The requests are checked again every second, in case the done callback
+        of one was stopped before it resolved the wait.
+        """
+        while True:
+            waiter = self.ready()
+            try:
+                waiter.result(_RECHECK_INTERVAL)
+                return
+            except TimeoutError:
+                waiter.cancel()
 
     def check(self) -> None:
         """Raise the error that keeps the write from continuing, if any.
@@ -652,8 +668,10 @@ class _S3WriteSession:
             self._settle_creation()
             self._cancel_requests()
             with self._lock:
-                while self._in_flight():
+                self._consume_finished()
+                while self._requests:
                     self._changed.wait(_RECHECK_INTERVAL)
+                    self._consume_finished()
             self._writer.abort(**self._params("abort_multipart_upload"))
             with self._update():
                 self._state = _S3WriteState.ABORTED
@@ -691,8 +709,9 @@ class _S3WriteSession:
         # stops tracking it.
         request.add_done_callback(self._on_part_done)
         with self._lock:
+            self._consume_finished()
             self._refuse_unless(_S3WriteState.ACTIVE, operation="upload a part")
-            if self._in_flight() >= self._max_workers:
+            if len(self._requests) >= self._max_workers:
                 raise RuntimeError(
                     f"{self._max_workers} part requests are in flight; wait for ready() first."
                 )
@@ -762,59 +781,94 @@ class _S3WriteSession:
             RuntimeError: If the outcome of a part was not recorded.
         """
         with self._lock:
-            while self._in_flight() and self._failure_summary is None:
+            self._consume_finished()
+            while self._requests and self._failure_summary is None:
                 self._changed.wait(_RECHECK_INTERVAL)
+                self._consume_finished()
             self._refuse_unless(_S3WriteState.COMPLETING, operation="commit")
             parts = [self._parts[number] for number in sorted(self._parts)]
         if len(parts) != self._next_part_number - 1:
-            # A part whose outcome was not recorded, such as when an interrupt
-            # stopped its done callback, is not completed without its data.
+            # Every finished request has been consumed, so this guards the
+            # invariant that no part is completed without its data.
             missing = sorted(set(range(1, self._next_part_number)) - set(self._parts))
             raise RuntimeError(f"The parts {missing} of {self._path.uri} have not been uploaded.")
         return self._writer.complete(parts, **self._params("complete_multipart_upload"))
 
     def _on_created(self, creation: Future[S3MultipartUpload]) -> None:
-        """Record the outcome of the creation; the done callback of its future.
+        """Consume the finished creation; the done callback of its future.
 
         Args:
             creation: The finished future of the creation.
         """
-        if creation.cancelled():
-            # Such as by the shutdown of the event loop of an S3AioExecutor.
-            error: BaseException | None = CancelledError(
-                "The creation of the multipart upload was cancelled."
-            )
-        else:
-            error = creation.exception()
         with self._update():
-            self._creation = None
-            if self._state is _S3WriteState.CREATING:
-                if error is None:
-                    self._state = _S3WriteState.ACTIVE
-                else:
-                    self._fail(error)
+            self._consume_creation(creation)
 
     def _on_part_done(self, request: Future[S3MultipartUploadPart]) -> None:
-        """Consume a settled part request; the done callback of its future.
+        """Consume a finished part request; the done callback of its future.
 
         Args:
             request: The finished future of the part request.
         """
+        with self._update():
+            self._consume(request)
+
+    def _consume_finished(self) -> None:
+        """Consume the requests that have finished; called with the lock held.
+
+        A future is done before its done callbacks run, and an interrupt may
+        stop a callback, so the operations that depend on the outcomes
+        consume them here too. Whichever comes first records an outcome.
+        """
+        if self._creation is not None and self._creation.done():
+            self._consume_creation(self._creation)
+        for request in [request for request in self._requests if request.done()]:
+            self._consume(request)
+
+    def _consume_creation(self, creation: Future[S3MultipartUpload]) -> None:
+        """Record the outcome of the creation once; called with the lock held.
+
+        Args:
+            creation: The finished future of the creation.
+        """
+        if self._creation is not creation:
+            return
+        self._creation = None
+        if self._state is not _S3WriteState.CREATING:
+            return
+        if creation.cancelled():
+            # Such as by the shutdown of the event loop of an S3AioExecutor.
+            self._fail(CancelledError("The creation of the multipart upload was cancelled."))
+        elif (error := creation.exception()) is not None:
+            self._fail(error)
+        else:
+            self._state = _S3WriteState.ACTIVE
+
+    def _consume(self, request: Future[S3MultipartUploadPart]) -> None:
+        """Record the outcome of a part request once and stop tracking it.
+
+        Called with the lock held. The outcome is recorded before the request
+        is untracked, so that nothing completes the upload without it. A
+        request finished during or after an abort records no failure.
+
+        Args:
+            request: The finished future of the part request.
+        """
+        if request not in self._requests:
+            return
         if request.cancelled():
-            # Not by abort(), which ignores it, but such as by the shutdown of
-            # the event loop of an S3AioExecutor, so the upload lacks the part.
+            # Not by abort(), but such as by the shutdown of the event loop of
+            # an S3AioExecutor, the upload lacks the part.
             error: BaseException | None = CancelledError(
                 "A part request was cancelled before it ran."
             )
         else:
             error = request.exception()
-        with self._update():
-            if error is None:
-                part = request.result()
-                self._parts[part.part_number] = part
-            elif self._state not in (_S3WriteState.ABORTING, _S3WriteState.ABORT_FAILED):
-                self._fail(error)
-            self._requests.discard(request)
+        if error is None:
+            part = request.result()
+            self._parts[part.part_number] = part
+        elif self._state not in (_S3WriteState.ABORTING, _S3WriteState.ABORT_FAILED):
+            self._fail(error)
+        self._requests.discard(request)
 
     def _fail(self, error: BaseException, *, raised: bool = False) -> None:
         """Record a failure; called with the lock held.
@@ -908,18 +962,6 @@ class _S3WriteSession:
         for request in requests:
             request.cancel()
 
-    def _in_flight(self) -> int:
-        """Count the part requests that have not finished; called with the lock held.
-
-        A finished request whose done callback was stopped, such as by an
-        interrupt on the thread that cancelled it, is not counted, so that
-        nothing waits for it forever.
-
-        Returns:
-            The number of unfinished part requests.
-        """
-        return sum(not request.done() for request in self._requests)
-
     def _is_ready(self) -> bool:
         """Whether another part may be submitted; called with the lock held.
 
@@ -929,7 +971,7 @@ class _S3WriteSession:
         if self._state is _S3WriteState.CREATING:
             return False
         if self._state is _S3WriteState.ACTIVE and self._failure_summary is None:
-            return self._in_flight() < self._max_workers
+            return len(self._requests) < self._max_workers
         return True
 
     def _take_waiters(self) -> list[Future[None]]:

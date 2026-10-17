@@ -646,18 +646,60 @@ class TestS3WriteSession:
         assert requests.calls == []
         assert session.state is _S3WriteState.ABORTED
 
-    def test_unrecorded_part_is_not_completed(self):
-        # A part request whose done callback was stopped, such as by an
-        # interrupt on the thread that cancelled it, is neither waited for
-        # forever nor completed without its data.
-        session, requests, executor = _make_session()
+    def test_outcomes_without_callbacks(self):
+        # The waits consume a finished request whose done callback has not
+        # run or was stopped, such as by an interrupt on the thread that
+        # cancelled it, so nothing waits for it forever and its part is
+        # completed.
+        session, requests, executor = _make_session(max_workers=1)
         with executor:
             _start(session)
             with mock.patch.object(session, "_on_part_done", return_value=None):
                 session.submit_part(1, b"abcd")
-            session.submit_part(2, b"efgh")
-            with pytest.raises(RuntimeError, match=r"The parts \[1\] .* have not been uploaded"):
-                session.complete()
-            session.abort()
-        assert ("complete", (2,)) not in requests.calls
-        assert requests.calls[-1] == ("abort",)
+                session.wait_ready()
+                session.submit_part(2, b"efgh")
+                assert session.complete() == "completed"
+        assert requests.calls[-1] == ("complete", (1, 2))
+
+    def test_slow_callbacks(self):
+        # A future is done before its done callbacks run, so a completion
+        # that finds every request done still records their outcomes first.
+        session, requests, executor = _make_session(max_workers=4)
+        on_part_done = session._on_part_done
+        callbacks = []
+
+        def defer(request):
+            callbacks.append(request)
+
+        with executor:
+            _start(session)
+            with mock.patch.object(session, "_on_part_done", side_effect=defer):
+                for number in (1, 2, 3):
+                    session.submit_part(number, b"abcd")
+                assert session.complete() == "completed"
+            # The deferred callbacks change nothing afterwards.
+            for request in callbacks:
+                on_part_done(request)
+        assert requests.calls[-1] == ("complete", (1, 2, 3))
+        assert [part.part_number for part in session.completed_parts] == [1, 2, 3]
+
+    def test_late_callback_after_abort(self):
+        # A callback that runs after the abort has consumed its request does
+        # not restore the part or record its failure.
+        session, requests, executor = _make_session()
+        requests.errors[("part", 2)] = PermissionError("Access Denied")
+        on_part_done = session._on_part_done
+        callbacks = []
+
+        with executor:
+            _start(session)
+            with mock.patch.object(session, "_on_part_done", side_effect=callbacks.append):
+                session.submit_part(1, b"abcd")
+                session.submit_part(2, b"efgh")
+                session.abort()
+            for request in callbacks:
+                on_part_done(request)
+        assert session.state is _S3WriteState.ABORTED
+        assert session.completed_parts == ()
+        with pytest.raises(S3MultipartStateError, match="has been discarded"):
+            session.complete()
