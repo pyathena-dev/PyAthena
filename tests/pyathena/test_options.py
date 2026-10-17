@@ -30,6 +30,12 @@ class TestExecuteOptions:
         with pytest.raises(dataclasses.FrozenInstanceError):
             options.work_group = "primary"  # type: ignore[misc]
 
+    def test_merge_does_not_mutate_original(self):
+        options = ExecuteOptions(work_group="primary")
+        merged = options.merge(work_group="adhoc")
+        assert options.work_group == "primary"
+        assert merged is not options
+
     def test_merge_ignores_none_overrides(self):
         options = ExecuteOptions(work_group="primary", cache_size=100)
         merged = options.merge(work_group=None, cache_size=None, s3_staging_dir=None)

@@ -95,8 +95,15 @@ class TestGlueMetadataClient:
             created = []
             session_client = conn.session.client
 
+            second_build = threading.Event()
+
             def contended_client(*args, **kwargs):
                 created.append(args)
+                # Without the lock, another thread would build a client meanwhile.
+                if len(created) == 1:
+                    second_build.wait(1)
+                else:
+                    second_build.set()
                 return session_client(*args, **kwargs)
 
             conn.session.client = contended_client

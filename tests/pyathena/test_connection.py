@@ -35,7 +35,7 @@ from pyathena.spark.async_cursor import AsyncSparkCursor
 from pyathena.spark.common import SparkBaseCursor
 from pyathena.spark.cursor import SparkCursor
 from pyathena.util import RetryConfig
-from tests.pyathena.util import EVENT_TIMEOUT
+from tests.pyathena.util import EVENT_TIMEOUT, answered_requests
 
 # Cursors whose arraysize is the GetQueryResults page size, capped at 1000.
 PAGED_CURSORS = [Cursor, DictCursor, AsyncCursor, AsyncDictCursor]
@@ -95,7 +95,7 @@ def test_empty_settings_disable_both_environment_fallbacks(monkeypatch):
 @pytest.mark.parametrize("factory", [pyathena.connect, Connection])
 def test_connect_keyword_only(factory):
     with pytest.raises(TypeError):
-        factory("s3://bucket/path/", "us-east-1")
+        factory("s3://bucket/path/")
 
 
 class RecordingCursor(Cursor):
@@ -178,32 +178,6 @@ def test_cursor_unknown_constructor_keyword(offline_connection, cursor_class):
         offline_connection.cursor(cursor_class)
 
 
-# Athena's answers to a query or calculation that fails at its first status request.
-FAILED_EXECUTION_RESPONSES = {
-    "StartQueryExecution": {"QueryExecutionId": "query-id"},
-    "GetQueryExecution": {
-        "QueryExecution": {
-            "QueryExecutionId": "query-id",
-            "Query": "SELECT 1",
-            "StatementType": "DML",
-            "Status": {"State": "FAILED", "StateChangeReason": "failed"},
-        }
-    },
-    "StartCalculationExecution": {"CalculationExecutionId": "calculation-id", "State": "CREATING"},
-    "GetCalculationExecutionStatus": {
-        "Status": {"State": "FAILED"},
-        "Statistics": {"DpuExecutionInMillis": 0},
-    },
-    "GetCalculationExecution": {
-        "CalculationExecutionId": "calculation-id",
-        "SessionId": "session",
-        "Status": {"State": "FAILED", "StateChangeReason": "failed"},
-        "Statistics": {"DpuExecutionInMillis": 0},
-        "Result": {},
-    },
-}
-
-
 @pytest.mark.parametrize("cursor_class", CURSOR_CLASSES)
 def test_cursor_accepts_connection_callbacks(offline_connection, cursor_class):
     started, polled = [], []
@@ -211,11 +185,7 @@ def test_cursor_accepts_connection_callbacks(offline_connection, cursor_class):
     offline_connection.on_poll = polled.append
 
     with (
-        patch.object(
-            offline_connection.client,
-            "_make_api_call",
-            side_effect=lambda operation, _: FAILED_EXECUTION_RESPONSES[operation],
-        ),
+        answered_requests(offline_connection.client),
         _open_cursor(offline_connection, cursor_class) as cursor,
     ):
         try:
@@ -350,8 +320,15 @@ class TestConnection:
         created = []
         session_client = conn.session.client
 
+        second_build = threading.Event()
+
         def contended_client(*args, **kwargs):
             created.append(args)
+            # Without the lock, another thread would build a client meanwhile.
+            if len(created) == 1:
+                second_build.wait(1)
+            else:
+                second_build.set()
             return session_client(*args, **kwargs)
 
         conn.session.client = contended_client

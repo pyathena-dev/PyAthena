@@ -109,6 +109,22 @@ def _cache_search_cursor(client):
     return cursor
 
 
+def _types(value):
+    """The type of a value and of each value it contains, for comparing them.
+
+    Args:
+        value: A fetched value, such as a row of lists and dictionaries.
+
+    Returns:
+        The types, in the shape of the value.
+    """
+    if isinstance(value, dict):
+        return {k: _types(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_types(v) for v in value]
+    return type(value)
+
+
 def _block_start(cursor, response=None):
     """Make the cursor's StartQueryExecution request block until released.
 
@@ -925,8 +941,10 @@ class TestCursor:
                 {"pos": {"x": 3, "y": 4}, "vel": {"x": 1.5}},
             ],
         )
-        # Unlike ==, the reprs also tell 123 from 123.0.
-        assert repr(cursor.fetchone()) == repr(expected)
+        row = cursor.fetchone()
+        assert row == expected
+        # == does not tell 123 from 123.0.
+        assert _types(row) == _types(expected)
 
     def test_cancel(self, cursor):
         def cancel(c):
@@ -1630,9 +1648,18 @@ class TestCursor:
               ARRAY['x', '', 'y'] AS col_empty
               ,ARRAY['x', ' ', 'a,b'] AS col_space_comma
               ,ARRAY[json_parse('1234567890'), json_parse('"a,b"')] AS col_json
+              ,ARRAY[DATE '2023-01-01', DATE '2023-12-31'] AS col_date
+              ,ARRAY[CAST('2023-01-01 12:00:00.123' AS TIMESTAMP(3))] AS col_timestamp
             """
         cursor.execute(query)
-        expected = (["x", "", "y"], ["x", " ", "a,b"], [1234567890, "a,b"])
+        # Without a hint, the dates and timestamps in an array stay strings.
+        expected = (
+            ["x", "", "y"],
+            ["x", " ", "a,b"],
+            [1234567890, "a,b"],
+            ["2023-01-01", "2023-12-31"],
+            ["2023-01-01 12:00:00.123"],
+        )
         assert cursor.fetchall() == [expected]
         cursor.execute(
             query,
@@ -1882,3 +1909,38 @@ class TestDictCursor:
             cursor.execute("SELECT * FROM one_row")
             assert isinstance(cursor.result_set, CustomResultSet)
             assert type(cursor.fetchone()) is OrderedDict
+
+    def test_null_vs_empty_string(self, dict_cursor):
+        """
+        DictCursor should properly distinguish NULL from empty string.
+        See docs/null_handling.rst for details.
+        """
+        query = """
+        SELECT * FROM (
+            VALUES
+                (1, '', 'empty_string'),
+                (2, CAST(NULL AS VARCHAR), 'null_value'),
+                (3, 'hello', 'normal_string'),
+                (4, 'N/A', 'na_string'),
+                (5, 'NULL', 'null_string_literal')
+        ) AS t(id, value, description)
+        ORDER BY id
+        """
+        dict_cursor.execute(query)
+        rows = dict_cursor.fetchall()
+
+        # Row 1: Empty string is preserved as empty string, not None
+        assert rows[0]["value"] == ""
+        assert rows[0]["value"] is not None
+
+        # Row 2: NULL is properly returned as None
+        assert rows[1]["value"] is None
+
+        # Row 3: Normal string
+        assert rows[2]["value"] == "hello"
+
+        # Row 4: "N/A" string should be preserved as-is
+        assert rows[3]["value"] == "N/A"
+
+        # Row 5: "NULL" string literal should be preserved as-is
+        assert rows[4]["value"] == "NULL"
