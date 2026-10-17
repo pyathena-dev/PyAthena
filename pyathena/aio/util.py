@@ -17,7 +17,7 @@ import threading
 from collections.abc import Callable
 from typing import Any, Protocol, TypeVar, cast
 
-from pyathena.util import RetryConfig, retry_api_call, shield_retries, stop_retries_on
+from pyathena.util import RetryConfig, retry_api_call, stop_retries_on, unstoppable_retries
 
 T = TypeVar("T")
 
@@ -88,9 +88,9 @@ async def async_retry_api_call(
         stop_when: Passed to ``retry_api_call``.
         stoppable: Whether a cancellation of the caller stops the retries. A
             request that cleans up, such as one that stops a query or
-            terminates a session, passes False: its retries then ignore the
-            stop scopes (see :func:`~pyathena.util.shield_retries`) and run to
-            their end in the thread, as with ``asyncio.to_thread()``.
+            terminates a session, passes False: its retries then run to their
+            end in the thread (see :func:`~pyathena.util.unstoppable_retries`),
+            as with ``asyncio.to_thread()``.
         **kwargs: Keyword arguments to pass to the function.
 
     Returns:
@@ -99,7 +99,7 @@ async def async_retry_api_call(
 
     def call() -> Any:
         """Make the call, ignoring the stop scopes unless it is stoppable."""
-        with contextlib.nullcontext() if stoppable else shield_retries():
+        with contextlib.nullcontext() if stoppable else unstoppable_retries():
             return retry_api_call(
                 func, config, logger, *args, stop_on=stop_on, stop_when=stop_when, **kwargs
             )
@@ -163,7 +163,7 @@ async def create_in_thread(
             if not cancelled.is_set():
                 constructed.append(obj)
                 return obj
-        with shield_retries():
+        with unstoppable_retries():
             obj.close()
         return None
 

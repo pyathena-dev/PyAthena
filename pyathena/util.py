@@ -305,13 +305,16 @@ def stop_retries_on(event: threading.Event) -> Iterator[None]:
 
 
 @contextmanager
-def shield_retries() -> Iterator[None]:
-    """Keep the events of the enclosing stop scopes from stopping retries in this block.
+def unstoppable_retries() -> Iterator[None]:
+    """Run the retries of AWS API calls in this block to their end.
 
-    For cleanup that has to run to its end even when the work that it cleans
-    up was stopped, such as the close of an object whose construction was
-    cancelled, or a request that stops a query. A scope that
-    :func:`stop_retries_on` opens in the block stops the retries again.
+    The events of the enclosing :func:`stop_retries_on` scopes do not stop
+    the calls of :func:`retry_api_call` in the block, which retry by their
+    policy. For cleanup that has to run to its end even when the work that it
+    cleans up was stopped, such as the close of an object whose construction
+    was cancelled, or a request that stops a query. A scope that
+    :func:`stop_retries_on` opens in the block stops the retries again, and so
+    does the ``stop_when`` condition of a call.
 
     Yields:
         None.

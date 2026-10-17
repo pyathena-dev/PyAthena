@@ -14,9 +14,9 @@ from pyathena.util import (
     is_retryable_error,
     parse_output_location,
     retry_api_call,
-    shield_retries,
     stop_retries_on,
     strtobool,
+    unstoppable_retries,
 )
 from tests.pyathena.util import (
     EVENT_TIMEOUT,
@@ -434,19 +434,19 @@ def test_retry_api_call_stopped_by_enclosing_scope():
     assert call.calls == 1
 
 
-def test_retry_api_call_shielded():
-    """Retries in a shielded block ignore the events of the enclosing scopes."""
+def test_retry_api_call_unstoppable():
+    """Retries in an unstoppable block ignore the events of the enclosing scopes."""
     event = threading.Event()
     event.set()
     operation = ThrottledOperation(failures=2)
-    with stop_retries_on(event), shield_retries():
+    with stop_retries_on(event), unstoppable_retries():
         assert retry_api_call(operation, RetryConfig(multiplier=0)) == "success"
     assert operation.calls == 3
-    # A scope opened in the shielded block stops the retries again.
+    # A scope opened in the unstoppable block stops the retries again.
     operation = ThrottledOperation(failures=2)
     with (
         stop_retries_on(event),
-        shield_retries(),
+        unstoppable_retries(),
         stop_retries_on(event),
         pytest.raises(ClientError),
     ):

@@ -26,7 +26,7 @@ Utility Functions
 
 .. autofunction:: pyathena.util.stop_retries_on
 
-.. autofunction:: pyathena.util.shield_retries
+.. autofunction:: pyathena.util.unstoppable_retries
 
 .. autofunction:: pyathena.util.is_retryable_error
 

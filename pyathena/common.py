@@ -35,7 +35,7 @@ from pyathena.util import (
     _get_error_code,
     _is_throttling_error,
     retry_api_call,
-    shield_retries,
+    unstoppable_retries,
 )
 
 if TYPE_CHECKING:
@@ -1409,7 +1409,7 @@ class BaseCursor(metaclass=ABCMeta):
         """Stop a query execution with ``StopQueryExecution``.
 
         The request cleans up, so a stop scope does not stop its retries (see
-        :func:`~pyathena.util.shield_retries`).
+        :func:`~pyathena.util.unstoppable_retries`).
 
         Args:
             query_id: The query execution ID.
@@ -1419,7 +1419,7 @@ class BaseCursor(metaclass=ABCMeta):
         """
         request: dict[str, Any] = {"QueryExecutionId": query_id}
         try:
-            with shield_retries():
+            with unstoppable_retries():
                 retry_api_call(
                     self._connection.client.stop_query_execution,
                     config=self._retry_config,

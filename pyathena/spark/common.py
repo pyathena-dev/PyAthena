@@ -27,7 +27,7 @@ from pyathena.model import (
     AthenaQueryExecution,
     AthenaSessionStatus,
 )
-from pyathena.util import override, parse_output_location, retry_api_call, shield_retries
+from pyathena.util import override, parse_output_location, retry_api_call, unstoppable_retries
 
 _logger = logging.getLogger(__name__)
 
@@ -289,7 +289,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         including those that override ``_terminate_session`` with a coroutine,
         so subclasses must not override this method with a coroutine. The
         request cleans up, so a stop scope does not stop its retries (see
-        :func:`~pyathena.util.shield_retries`).
+        :func:`~pyathena.util.unstoppable_retries`).
 
         Args:
             session_id: The session ID.
@@ -299,7 +299,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         """
         request: dict[str, Any] = {"SessionId": session_id}
         try:
-            with shield_retries():
+            with unstoppable_retries():
                 retry_api_call(
                     self._connection.client.terminate_session,
                     config=self._retry_config,
@@ -434,7 +434,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         """Stop a calculation execution with ``StopCalculationExecution``.
 
         The request cleans up, so a stop scope does not stop its retries (see
-        :func:`~pyathena.util.shield_retries`).
+        :func:`~pyathena.util.unstoppable_retries`).
 
         Args:
             query_id: The calculation execution ID.
@@ -444,7 +444,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         """
         request: dict[str, Any] = {"CalculationExecutionId": query_id}
         try:
-            with shield_retries():
+            with unstoppable_retries():
                 retry_api_call(
                     self._connection.client.stop_calculation_execution,
                     config=self._retry_config,
