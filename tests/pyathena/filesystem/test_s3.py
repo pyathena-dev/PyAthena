@@ -6776,7 +6776,6 @@ class TestS3File:
         events = []
         # Appends copy the existing object as the first part.
         part_request = fs.core.upload_part_copy if operation == "append" else fs.core.upload_part
-        running, part_request.side_effect = self._retrying_part(events)
         fs._call.side_effect = lambda *args, **kwargs: events.append("abort")
         executor = S3ThreadPoolExecutor(max_workers=2)
         submit = executor.submit
@@ -6787,13 +6786,14 @@ class TestS3File:
             submitted.append(future)
             if len(submitted) == 2:
                 # The first part, interrupted once its request started.
-                assert running.started.wait(EVENT_TIMEOUT)
+                assert started.wait(EVENT_TIMEOUT)
                 raise KeyboardInterrupt
             return future
 
         executor.submit = submit_and_interrupt  # type: ignore[method-assign]
         mode = "ab" if operation == "append" else "wb"
         file = S3File(fs, "s3://bucket/key.txt", mode=mode, block_size=4, executor=executor)
+        started, part_request.side_effect = self._part_held_until_waited_for(file, events)
 
         try:
             with pytest.raises(KeyboardInterrupt):
@@ -6992,12 +6992,38 @@ class TestS3File:
         return file
 
     @staticmethod
+    def _part_held_until_waited_for(file, events):
+        # A part request that runs until the session waits for its requests,
+        # such as the abort for the running parts, so that an abort that does
+        # not wait for it comes first. It records when it ends.
+        waiting = threading.Event()
+
+        class SignallingCondition(threading.Condition):
+            def wait(self, timeout=None):
+                waiting.set()
+                return super().wait(timeout)
+
+        # The wait of the session; no public seam observes it.
+        file._session._changed = SignallingCondition(file._session._lock)
+        started = threading.Event()
+
+        def request(**kwargs):
+            started.set()
+            try:
+                waiting.wait(5)
+            finally:
+                events.append(f"part {kwargs['part_number']} ended")
+            return SimpleNamespace(etag='"e"', part_number=kwargs["part_number"])
+
+        return started, request
+
+    @staticmethod
     def _retrying_part(events):
-        # A part request that throttles and then waits an hour to retry, so
-        # that it ends only when the abort stops its retries (GH-1203). It
-        # records when it ends, so that a test can order it with the abort.
+        # A part request that throttles and then waits a minute to retry,
+        # unless the abort stops its retries first (GH-1203). It records when
+        # it ends.
         operation = ThrottledOperation(operation_name="UploadPart")
-        throttled = retried(operation, RetryConfig(attempt=2, multiplier=3600, max_delay=3600))
+        throttled = retried(operation, RetryConfig(attempt=2, multiplier=60, max_delay=60))
 
         def request(**kwargs):
             try:
@@ -7716,12 +7742,14 @@ class TestS3File:
         file = self._make_multipart_write_file(b"x" * 8, autocommit=False)
         events = []
         file.fs._call.side_effect = lambda *args, **kwargs: events.append("abort")
-        running, file.fs.core.upload_part.side_effect = self._retrying_part(events)
+        started, file.fs.core.upload_part.side_effect = self._part_held_until_waited_for(
+            file, events
+        )
         try:
             # The executor of the file has one thread, so the second part
             # waits for the first one.
             assert file._upload_chunk(final=True) is False
-            assert running.started.wait(EVENT_TIMEOUT)
+            assert started.wait(EVENT_TIMEOUT)
             file.discard()
         finally:
             file._executor.shutdown()
