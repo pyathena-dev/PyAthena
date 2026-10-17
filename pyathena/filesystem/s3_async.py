@@ -48,7 +48,7 @@ from pyathena.filesystem.s3_object import (
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_path_pairing import S3PathPairing
 from pyathena.filesystem.s3_writer import S3MultipartWriter
-from pyathena.util import stop_retries_on, unstoppable_retries
+from pyathena.util import stop_retries_on
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -620,8 +620,8 @@ class AioS3FileSystem(AsyncFileSystem):
         # The requests of the parts, which keep running when their tasks are
         # cancelled, such as by the shutdown of the event loop.
         part_copies: list[Future[S3MultipartUploadPart]] = []
-        # Set when the upload is aborted, so that the running part copies make
-        # no further attempt before the abort.
+        # Set on a failure or cancellation, so that the creation and the
+        # running part and annotation copies make no further attempt.
         stop = threading.Event()
 
         async def _upload_part(i: int, range_: tuple[int, int]) -> S3MultipartUploadPart | None:
@@ -675,9 +675,10 @@ class AioS3FileSystem(AsyncFileSystem):
         # which the shutdown of the event loop would cancel while the
         # requests keep running; scheduled right before the try, so that
         # nothing can fail between the two.
-        creation = self._thread_pool.submit(
-            self.core.create_multipart_upload, plan.destination, **plan.create_params
-        )
+        with stop_retries_on(stop):
+            creation = self._thread_pool.submit(
+                self.core.create_multipart_upload, plan.destination, **plan.create_params
+            )
         try:
             # A cancellation of this task leaves the creation to the cleanup,
             # which waits for an upload that a started creation creates.
@@ -724,6 +725,22 @@ class AioS3FileSystem(AsyncFileSystem):
 
         failed = False
 
+        def _copy_annotation_in_thread(name: str) -> None:
+            """Copy an annotation in a scope that a failed copy stops.
+
+            Args:
+                name: The name of the annotation.
+            """
+            with stop_retries_on(stop):
+                self.core.copy_object_annotation(
+                    name,
+                    plan.source,
+                    plan.destination,
+                    completed.version_id,
+                    completed.etag,
+                    **kwargs,
+                )
+
         async def _copy_annotation(name: str) -> None:
             nonlocal failed
             async with semaphore:
@@ -732,17 +749,11 @@ class AioS3FileSystem(AsyncFileSystem):
                     # S3FileSystem does.
                     return
                 try:
-                    await self._thread_pool.run(
-                        self.core.copy_object_annotation,
-                        name,
-                        plan.source,
-                        plan.destination,
-                        completed.version_id,
-                        completed.etag,
-                        **kwargs,
-                    )
+                    await self._thread_pool.run(_copy_annotation_in_thread, name)
                 except Exception:
+                    # The running copies make no further attempt.
                     failed = True
+                    stop.set()
                     raise
 
         results = await asyncio.gather(
@@ -1296,8 +1307,8 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         self._committing = False
         # The futures of the part uploads and copies, in part-number order.
         self._parts: list[Future[S3MultipartUploadPart]] = []
-        # Set by _discard(), so that the running part uploads and copies make
-        # no further attempt before the abort.
+        # Set by _discard(), so that the creation and the running part uploads
+        # and copies make no further attempt before the abort.
         self._parts_stop = threading.Event()
         # The parts uploaded from the buffer that may not have finished. The
         # part copies of an append hold no data and are not counted.
@@ -1458,11 +1469,12 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         # being scheduled still lets the cleanup cancel it or wait for it.
         self._creation = Future()
         try:
-            self._pool.submit_to(
-                self._creation,
-                writer.initiate,
-                **self._get_request_kwargs("create_multipart_upload"),
-            )
+            with stop_retries_on(self._parts_stop):
+                self._pool.submit_to(
+                    self._creation,
+                    writer.initiate,
+                    **self._get_request_kwargs("create_multipart_upload"),
+                )
             await asyncio.wrap_future(self._creation)
             if self.append_block:
                 size = self._append_size
@@ -1624,14 +1636,14 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         logged instead of raised, so that it does not mask the error that the
         caller is handling, also when no task waits for the abort any more.
         """
+        # The creation and the running parts make no further attempt.
+        self._parts_stop.set()
         try:
             if self._creation is not None and not self._creation.cancel():
                 wait([self._creation])
             if self._writer is not None and self._writer.upload is not None:
-                self._parts_stop.set()
                 wait([part for part in self._parts if not part.cancel()])
-                with unstoppable_retries():
-                    self._writer.abort(**self._get_request_kwargs("abort_multipart_upload"))
+                self._writer.abort(**self._get_request_kwargs("abort_multipart_upload"))
         except Exception:
             _logger.exception(
                 f"Failed to abort the multipart upload to s3://{self.bucket}/{self.key}."

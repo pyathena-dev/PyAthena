@@ -50,7 +50,7 @@ from pyathena.filesystem.s3_object import (
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_path_pairing import S3PathPairing
 from pyathena.filesystem.s3_writer import S3MultipartWriter
-from pyathena.util import RetryConfig, override, stop_retries_on, unstoppable_retries
+from pyathena.util import RetryConfig, override, stop_retries_on
 
 _logger = logging.getLogger(__name__)
 
@@ -1678,16 +1678,17 @@ class S3FileSystem(AbstractFileSystem):
             # for.
             creation: Future[S3MultipartUpload] = Future()
             futures: list[Future[S3MultipartUploadPart]] = []
-            # Set on failure, so that the running part copies make no further
-            # attempt before the abort.
+            # Set on failure, so that the creation and the running part copies
+            # make no further attempt before the abort.
             stop = threading.Event()
             try:
-                executor.submit_to(
-                    creation,
-                    self.core.create_multipart_upload,
-                    plan.destination,
-                    **plan.create_params,
-                )
+                with stop_retries_on(stop):
+                    executor.submit_to(
+                        creation,
+                        self.core.create_multipart_upload,
+                        plan.destination,
+                        **plan.create_params,
+                    )
                 multipart_upload = creation.result()
                 for i, range_ in enumerate(plan.ranges):
                     future: Future[S3MultipartUploadPart] = Future()
@@ -1894,12 +1895,10 @@ class S3FileSystem(AbstractFileSystem):
                 those that it accepts.
         """
         try:
-            # Cleanup of stopped work, which a stop does not interrupt.
-            with unstoppable_retries():
-                self.core.abort_multipart_upload(
-                    upload,
-                    **self.core.operation_params("abort_multipart_upload", request_kwargs),
-                )
+            self.core.abort_multipart_upload(
+                upload,
+                **self.core.operation_params("abort_multipart_upload", request_kwargs),
+            )
         except Exception:
             _logger.exception(
                 f"Failed to abort multipart upload {upload.upload_id} "
@@ -3027,8 +3026,9 @@ class S3File(AbstractBufferedFile):
         self.append_block = False
         self._multipart_writer: S3MultipartWriter | None = None
         self.multipart_upload_parts: list[Future[S3MultipartUploadPart]] = []
-        # Set by discard(), so that the running part uploads and copies make
-        # no further attempt before the abort.
+        # Set when the upload is discarded, so that its creation and the
+        # running part uploads and copies make no further attempt before the
+        # abort.
         self._parts_stop = threading.Event()
         # The parts uploaded from the buffer that may not have finished. The
         # part copies of an append hold no data and are not counted.
@@ -3084,6 +3084,8 @@ class S3File(AbstractBufferedFile):
             return
         self.buffer = None
         self.closed = True
+        # The creation and the running parts make no further attempt.
+        self._parts_stop.set()
         try:
             if creation is not None and not creation.cancel():
                 while not creation.done():
@@ -3171,9 +3173,10 @@ class S3File(AbstractBufferedFile):
         # scheduled still lets it be cancelled or waited for.
         creation: Future[S3MultipartUpload] = Future()
         try:
-            self._executor.submit_to(
-                creation, writer.initiate, **self._get_request_kwargs("create_multipart_upload")
-            )
+            with stop_retries_on(self._parts_stop):
+                self._executor.submit_to(
+                    creation, writer.initiate, **self._get_request_kwargs("create_multipart_upload")
+                )
             creation.result()
             if self.append_block:
                 whole_source = self.tell() <= self.fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE
@@ -3364,8 +3367,7 @@ class S3File(AbstractBufferedFile):
 
         The part uploads that have not started are cancelled, and the
         running ones make no further attempt and are waited for before the
-        abort. The abort's own retries are not stopped (see
-        :func:`~pyathena.util.unstoppable_retries`).
+        abort, whose own retries are not stopped.
         """
         if self.multipart_upload:
             self._parts_stop.set()
@@ -3373,10 +3375,7 @@ class S3File(AbstractBufferedFile):
             # be stored after the abort, so wait for the parts that could not
             # be cancelled first.
             wait([f for f in self.multipart_upload_parts if not f.cancel()])
-            with unstoppable_retries():
-                self._get_multipart_writer().abort(
-                    **self._get_request_kwargs("abort_multipart_upload")
-                )
+            self._get_multipart_writer().abort(**self._get_request_kwargs("abort_multipart_upload"))
 
         self.multipart_upload = None
         self.multipart_upload_parts = []

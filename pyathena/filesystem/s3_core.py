@@ -32,7 +32,7 @@ from pyathena.filesystem.s3_object import (
     S3PutObject,
 )
 from pyathena.filesystem.s3_path import S3Path
-from pyathena.util import RetryConfig, override, retry_api_call
+from pyathena.util import RetryConfig, override, retry_api_call, unstoppable_retries
 
 _logger = logging.getLogger(__name__)
 
@@ -1073,6 +1073,9 @@ class S3Core:
     def abort_multipart_upload(self, upload: S3MultipartUpload, **params) -> None:
         """Abort a multipart upload with AbortMultipartUpload.
 
+        An abort cleans up, so the stop scopes of the caller do not stop its
+        retries (see :func:`~pyathena.util.unstoppable_retries`).
+
         Args:
             upload: The multipart upload returned by creation or listing.
             **params: Additional request parameters. The fields that the
@@ -1085,7 +1088,8 @@ class S3Core:
                 because it was completed or aborted.
         """
         request = self._multipart_upload_request(upload)
-        self.call(self._client.abort_multipart_upload, **{**params, **request})
+        with unstoppable_retries():
+            self.call(self._client.abort_multipart_upload, **{**params, **request})
 
     def part_ranges(self, size: int, block_size: int) -> list[tuple[int, int]]:
         """Split an object into the source ranges of the parts that copy it.

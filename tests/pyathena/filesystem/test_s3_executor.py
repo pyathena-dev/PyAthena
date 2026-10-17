@@ -96,6 +96,45 @@ class TestS3AioThreadPool:
 
         assert operation.calls == (3 if shielded else 1)
 
+    def test_run_cancelled_after_return(self):
+        # GH-1203: a cancellation that arrives after the call has returned does
+        # not stop the work that the call left running, such as the parts of a
+        # write in a transaction.
+        operation = ThrottledOperation(block=True, failures=1)
+        returned = threading.Event()
+        left = []
+        pool = S3AioThreadPool(1)
+
+        def work():
+            context = contextvars.copy_context()
+            thread = threading.Thread(
+                target=context.run,
+                args=(retry_api_call, operation, RetryConfig(attempt=2, multiplier=0)),
+            )
+            thread.start()
+            left.append(thread)
+            returned.set()
+
+        async def main():
+            task = asyncio.ensure_future(pool.run(work))
+            await asyncio.sleep(0)
+            # Blocks the event loop, so that the task is cancelled before it
+            # resumes after the call has returned.
+            assert returned.wait(EVENT_TIMEOUT)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        try:
+            asyncio.run(main())
+            operation.release.set()
+            left[0].join(EVENT_TIMEOUT)
+        finally:
+            operation.release.set()
+            pool.shutdown()
+
+        assert operation.calls == 2
+
     @pytest.mark.parametrize("shielded", [False, True])
     def test_run_cancelled_before_start(self, shielded):
         # Cancelling the waiting task drops a call that has not started,

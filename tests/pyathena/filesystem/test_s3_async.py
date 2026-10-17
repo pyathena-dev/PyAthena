@@ -742,6 +742,82 @@ class TestAioS3FileSystem:
         sync_fs._abort_multipart_upload.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_copy_object_with_multipart_upload_cancelled_creation_stops_retries(self):
+        # GH-1203: cancelling a copy stops the retries of the creation of its
+        # upload, which the cleanup waits for; their backoff wait would take at
+        # least EVENT_TIMEOUT seconds.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        plan = S3MultipartCopyPlan(
+            source=S3Path("bucket", "src"),
+            destination=S3Path("bucket", "dst"),
+            size=2,
+            ranges=((0, 1), (1, 2)),
+        )
+        sync_fs.core.plan_multipart_copy = mock.MagicMock(return_value=plan)
+        operation = ThrottledOperation(block=True, operation_name="CreateMultipartUpload")
+        sync_fs.core.create_multipart_upload = retried(
+            operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT)
+        )
+        sync_fs._abort_multipart_upload = mock.MagicMock()
+        task = asyncio.ensure_future(
+            fs._copy_object_with_multipart_upload(plan.source, plan.destination)
+        )
+        try:
+            assert await asyncio.to_thread(operation.started.wait, EVENT_TIMEOUT)
+            task.cancel()
+        finally:
+            operation.release.set()
+        started = time.monotonic()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert time.monotonic() - started < EVENT_TIMEOUT
+        assert operation.calls == 1
+        # No upload was created.
+        sync_fs._abort_multipart_upload.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_copy_object_with_multipart_upload_failed_annotation_stops_running_copies(
+        self,
+    ):
+        # GH-1203: a failed annotation copy stops the retries of the running
+        # ones, whose backoff wait would take at least EVENT_TIMEOUT seconds.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        plan = S3MultipartCopyPlan(
+            source=S3Path("bucket", "src"),
+            destination=S3Path("bucket", "dst"),
+            size=1,
+            ranges=((0, 1),),
+            annotations=("a1", "a2"),
+        )
+        sync_fs.core.plan_multipart_copy = mock.MagicMock(return_value=plan)
+        sync_fs.core.create_multipart_upload = mock.MagicMock(
+            return_value=S3MultipartUpload({"Bucket": "bucket", "Key": "dst", "UploadId": "id"})
+        )
+        sync_fs.core.upload_part_copy = mock.MagicMock(
+            side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
+        )
+        sync_fs.core.complete_multipart_upload = mock.MagicMock(
+            return_value=SimpleNamespace(version_id=None, etag='"e"')
+        )
+        operation = ThrottledOperation(operation_name="PutObjectAnnotation")
+        throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
+
+        def copy_object_annotation(name, *args, **kwargs):
+            if name == "a1":
+                assert operation.started.wait(EVENT_TIMEOUT)
+                raise PermissionError("Access Denied")
+            return throttled()
+
+        sync_fs.core.copy_object_annotation = mock.MagicMock(side_effect=copy_object_annotation)
+        started = time.monotonic()
+        with pytest.raises(PermissionError, match="Access Denied"):
+            await fs._copy_object_with_multipart_upload(plan.source, plan.destination)
+        assert time.monotonic() - started < EVENT_TIMEOUT
+        assert operation.calls == 1
+
+    @pytest.mark.asyncio
     async def test_copy_object_with_multipart_upload_cancelled_queued_parts(self):
         # GH-1186: a cancellation cancels the part copies that wait for a
         # thread of the filesystem, whose threads bound all its copies, before
@@ -3531,15 +3607,41 @@ class TestAioS3StreamedFile:
         fs.core.abort_multipart_upload.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_cancelled_creation_stops_retries(self, fs):
+        # GH-1203: cancelling a write stops the retries of the creation of its
+        # multipart upload, which the cleanup waits for; their backoff wait
+        # would take at least EVENT_TIMEOUT seconds.
+        operation = ThrottledOperation(block=True, operation_name="CreateMultipartUpload")
+        fs.core.create_multipart_upload = retried(
+            operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT)
+        )
+        block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
+        f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size)
+        task = asyncio.ensure_future(f.write(b"x" * block_size))
+        try:
+            assert await asyncio.to_thread(operation.started.wait, EVENT_TIMEOUT)
+            task.cancel()
+        finally:
+            operation.release.set()
+        started = time.monotonic()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert time.monotonic() - started < EVENT_TIMEOUT
+        assert operation.calls == 1
+        assert f.closed
+
+    @pytest.mark.asyncio
     async def test_discard_in_stopped_scope(self, fs):
         # GH-1203: a stop scope does not stop the retries of the abort of
         # _discard().
-        operation = ThrottledOperation(failures=1, operation_name="AbortMultipartUpload")
-        fs.core.abort_multipart_upload = retried(operation, RetryConfig(attempt=3, multiplier=0))
         block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
         f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size)
         await f.write(b"x" * block_size)
         await f.flush()
+        # The abort of the core, whose request is stubbed.
+        del fs.core.abort_multipart_upload
+        operation = ThrottledOperation(failures=1, operation_name="AbortMultipartUpload")
+        fs.core.call = retried(operation, RetryConfig(attempt=3, multiplier=0))
         stop = threading.Event()
         stop.set()
 

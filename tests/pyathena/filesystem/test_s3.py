@@ -2176,7 +2176,7 @@ class TestS3FileSystem:
         # AioS3FileSystem call, does not stop the retries of an abort.
         fs = self._make_fs()
         operation = ThrottledOperation(failures=1, operation_name="AbortMultipartUpload")
-        fs.core.abort_multipart_upload = retried(operation, RetryConfig(attempt=3, multiplier=0))
+        fs.core.call = retried(operation, RetryConfig(attempt=3, multiplier=0))
         stop = threading.Event()
         stop.set()
         upload = S3MultipartUpload({"Bucket": "bucket", "Key": "dst", "UploadId": "id"})
@@ -7790,6 +7790,38 @@ class TestS3File:
         assert operation.calls == 1
         fs.core.abort_multipart_upload.assert_called_once()
 
+    def test_interrupted_creation_stops_retries(self):
+        # GH-1203: an interrupted write stops the retries of the creation of
+        # its multipart upload, which the cleanup waits for; their backoff
+        # wait would take at least EVENT_TIMEOUT seconds.
+        fs = TestS3FileSystem._make_fs()
+        operation = ThrottledOperation(operation_name="CreateMultipartUpload")
+        fs.core.create_multipart_upload = retried(
+            operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT)
+        )
+        executor = S3ThreadPoolExecutor(max_workers=1)
+        submit_to = executor.submit_to
+
+        def submit_creation(future, fn, *args, **kwargs):
+            submit_to(future, fn, *args, **kwargs)
+
+            def interrupted(timeout=None):
+                # As SIGINT interrupts the writer's wait.
+                assert operation.started.wait(EVENT_TIMEOUT)
+                raise KeyboardInterrupt
+
+            future.result = interrupted  # type: ignore[method-assign]
+
+        executor.submit_to = submit_creation  # type: ignore[method-assign]
+        block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
+        file = S3File(fs, "s3://bucket/key", mode="wb", block_size=block_size, executor=executor)
+        started = time.monotonic()
+        with pytest.raises(KeyboardInterrupt):
+            file.write(b"x" * block_size)
+        assert time.monotonic() - started < EVENT_TIMEOUT
+        assert operation.calls == 1
+        assert file.closed
+
     def test_discard_in_stopped_scope(self):
         # GH-1203: a stop scope of the caller does not stop the retries of the
         # abort of discard().
@@ -7798,9 +7830,7 @@ class TestS3File:
             {"Bucket": "bucket", "Key": "key.txt", "UploadId": "uploadid"}
         )
         operation = ThrottledOperation(failures=1, operation_name="AbortMultipartUpload")
-        file.fs.core.abort_multipart_upload = retried(
-            operation, RetryConfig(attempt=3, multiplier=0)
-        )
+        file.fs.core.call = retried(operation, RetryConfig(attempt=3, multiplier=0))
         stop = threading.Event()
         stop.set()
         with stop_retries_on(stop):

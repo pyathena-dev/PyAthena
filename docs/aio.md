@@ -291,7 +291,9 @@ Cancelling a coroutine of the filesystem also stops the retries of the S3 reques
 its call makes in these threads, including the part uploads and range reads that the
 call runs in parallel: no further attempt is made, and the wait before the next attempt
 ends. A request that has already been sent still runs to its end in its thread. The
-aborts of multipart uploads keep their retries.
+requests that run to their end after a cancellation keep their retries: the commit of a
+file, the CompleteMultipartUpload request of a multipart copy, and the aborts of
+multipart uploads.
 
 ### Executor strategy
 

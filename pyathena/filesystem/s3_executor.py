@@ -129,7 +129,12 @@ class S3Executor(metaclass=ABCMeta):
 
     @abstractmethod
     def submit(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> Future[T]:
-        """Submit a callable for execution and return a Future."""
+        """Submit a callable for execution and return a Future.
+
+        An implementation runs the callable in a copy of the submitter's
+        context, such as with ``contextvars.copy_context().run``, so that the
+        stop scopes of the submitter reach it.
+        """
         ...
 
     @abstractmethod
@@ -296,10 +301,14 @@ class S3AioThreadPool(S3Executor):
             with stop_retries_on(stop):
                 return fn(*args, **kwargs)
 
+        future = self.submit(call)
         try:
-            return await asyncio.wrap_future(self.submit(call))
+            return await asyncio.wrap_future(future)
         except asyncio.CancelledError:
-            stop.set()
+            # Work that the call left running, such as the parts of a write
+            # in a transaction, is not stopped once the call has returned.
+            if not future.done():
+                stop.set()
             raise
 
     async def run_shielded(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
@@ -452,13 +461,25 @@ class S3AioExecutor(S3Executor):
                 # The task runs in a copy of the submitter's context, which
                 # call_soon_threadsafe() schedules it with, and so does the
                 # function in the thread of the pool.
-                task = asyncio.run_coroutine_threadsafe(self._pool.run(item.run), self._loop)
+                task = asyncio.run_coroutine_threadsafe(self._dispatch(item.run), self._loop)
             task.add_done_callback(item.settle)
             return future
         raise RuntimeError(
             "S3AioExecutor requires a running event loop. "
             "Use S3ThreadPoolExecutor for synchronous usage."
         )
+
+    async def _dispatch(self, run: Callable[[], None]) -> None:
+        """Hand a submitted function to the pool and wait for it.
+
+        Unlike :meth:`S3AioThreadPool.run`, a cancellation of this task, such
+        as by the shutdown of the event loop, does not stop the retries of a
+        function that has started, which the caller still waits for.
+
+        Args:
+            run: The function of the work item.
+        """
+        await asyncio.wrap_future(self._pool.submit(run))
 
     async def _shutdown_pool(self) -> None:
         """Shut down the pool once the functions submitted before have reached it.
