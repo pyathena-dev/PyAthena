@@ -199,7 +199,7 @@ ArrowCursor supports the unload option. When this option is enabled,
 queries that start with SELECT or WITH are automatically converted to unload statements and executed to Athena,
 and the results are output in Parquet format (Snappy compressed) under `{s3_staging_dir}unload/<date>/<uuid>/`.
 This option requires `s3_staging_dir`; without it, `execute()` raises `ProgrammingError`.
-The cursor reads the output Parquet file directly.
+The cursor reads the output Parquet file directly, with timestamps at microseconds, as `timestamp[us]`.
 
 The output of query results with the unload statement is faster than normal query execution.
 In addition, the output Parquet file is split and can be read faster than a CSV file.

@@ -388,7 +388,7 @@ class TestAthenaPolarsResultSet:
             pytest.raises(OperationalError) as error,
         ):
             # extend() keeps the chunks read before the failure.
-            chunks.extend(result_set._iter_parquet_chunks())
+            chunks.extend(result_set._iter_parquet_chunks(pl.Schema({"a": pl.Int64})))
         # The error comes from the corrupt file, after the valid one was read.
         assert not isinstance(error.value.__cause__, AttributeError)
         assert scan_parquet.called is bool(read_options)
@@ -504,7 +504,9 @@ class TestAthenaPolarsResultSet:
             patch(f"polars.{function}") as read,
             patch("pyathena.polars.result_set.to_column_info"),
         ):
-            result = getattr(result_set, reader)()
+            # The Parquet readers take the schema of the files.
+            args = (pl.Schema(),) if reader in ("_read_parquet", "_iter_parquet_chunks") else ()
+            result = getattr(result_set, reader)(*args)
             if not isinstance(result, (pl.DataFrame, tuple)):
                 list(result)
         assert read.call_args.kwargs["storage_options"] == {"anon": True}

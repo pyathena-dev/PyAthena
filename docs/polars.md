@@ -11,10 +11,11 @@ This cursor downloads the CSV file after executing the query and loads it into a
 Performance is better than fetching data with Cursor.
 
 PolarsCursor uses [Polars](https://pola.rs/) native reading capabilities (`pl.read_csv`, `pl.read_parquet`) and
-does not require PyArrow as a dependency. CSV results read without the chunksize option, and
-UNLOAD results read with it when pyarrow is installed and `execute()` is given no Polars read
-options, use PyAthena's own S3FileSystem (fsspec compatible), and other reads use Polars' native
-S3 access, so s3fs is also not required.
+does not require PyArrow as a dependency; for UNLOAD results with timestamps read with Polars 1.x, see {ref}`polars-unload-options`.
+CSV results read without the chunksize option, UNLOAD results read with it when pyarrow is
+installed and `execute()` is given no Polars read options, and UNLOAD results with timestamps read
+without it with Polars 1.x use PyAthena's own S3FileSystem (fsspec compatible), and other reads use
+Polars' native S3 access, so s3fs is also not required.
 
 Options passed to `execute()`, other than PolarsCursor's own options such as `chunksize`, are passed to the Polars read function.
 Column types for a CSV result are given as `schema_overrides`, which replaces PyAthena's column types.
@@ -214,11 +215,21 @@ cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 If the unload option is enabled, the Parquet file itself has a schema, so the conversion is done to the dtypes according to that schema,
 and the `types` setting of the Converter class is not used.
 
+(polars-unload-options)=
+
 ### Unload Options
 
 PolarsCursor supports the unload option, as does {ref}`arrow-cursor`.
 
 See {ref}`arrow-unload-options` for more information.
+
+Timestamps of UNLOAD results are read at microseconds, as `Datetime("us")`.
+Polars 2.0 and later read them with Polars.
+Polars 1.x reads them correctly only through pyarrow:
+
+- Without the chunksize option and without Polars read options given to `execute()`, a result with timestamps is read with pyarrow when it is installed, through PyAthena's S3FileSystem, and a warning is logged.
+- With the chunksize option and without Polars read options, the chunks are read with pyarrow when it is installed.
+- Otherwise Polars 1.x reads the timestamps at nanoseconds, which gives wrong values outside 1677-09-21 to 2262-04-11; they are cast to microseconds, and a warning is logged.
 
 The unload option can be enabled by specifying it in the `cursor_kwargs` argument of the connect method or as an argument to the cursor method.
 An argument to the cursor method takes precedence over the same key in `cursor_kwargs`.
@@ -394,7 +405,7 @@ cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 df = cursor.execute("SELECT * FROM many_rows").as_polars()
 ```
 
-They apply to the reads through PyAthena's filesystem: CSV results read without the chunksize option, which use `"bytes"` and 5 MiB blocks by default, and the Parquet files of UNLOAD results read with the chunksize option when pyarrow is installed and `execute()` is given no Polars read options.
+They apply to the reads through PyAthena's filesystem: CSV results read without the chunksize option and, with Polars 1.x, the Parquet files of UNLOAD results with timestamps read without it, which use `"bytes"` and 5 MiB blocks by default, and the Parquet files of UNLOAD results read with the chunksize option when pyarrow is installed and `execute()` is given no Polars read options.
 Of the latter, a file of up to 32 MiB is read at once, and a larger one is read with the given `cache_type`, or without it with the `"none"` cache, which requests only the ranges that pyarrow reads.
 With `storage_options` given to `execute()`, the given options replace PyAthena's S3 settings, and `block_size` and `cache_type` do not apply.
 For a CSV result read without the chunksize option, the options are passed to `fsspec.open()`, which uses PyAthena's S3FileSystem; for the other reads, they are passed to the Polars read function, which uses its native S3 access by default and fsspec with `use_pyarrow=True`.

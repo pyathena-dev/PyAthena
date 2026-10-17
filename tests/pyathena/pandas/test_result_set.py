@@ -554,6 +554,7 @@ class TestAthenaPandasResultSet:
         assert read_parquet.call_args.kwargs == {
             "engine": "pyarrow",
             "use_threads": True,
+            "coerce_int96_timestamp_unit": "us",
             **execute_kwargs,
             **filesystem_kwargs,
         }

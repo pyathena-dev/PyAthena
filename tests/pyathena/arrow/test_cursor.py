@@ -179,11 +179,7 @@ class TestArrowCursor:
         ("arrow_cursor", "unload"),
         [
             pytest.param({"cursor_kwargs": {"unload": False}}, False),
-            pytest.param(
-                {"cursor_kwargs": {"unload": True}},
-                True,
-                marks=pytest.mark.xfail(strict=True, reason="#1214"),
-            ),
+            ({"cursor_kwargs": {"unload": True}}, True),
         ],
         indirect=["arrow_cursor"],
         ids=["csv", "unload"],
@@ -205,6 +201,26 @@ class TestArrowCursor:
         row = arrow_cursor.fetchone()
         assert row == temporal.fetched_row(unload)
         assert temporal.zones(row) == temporal.zones(temporal.fetched_row(unload))
+
+    @pytest.mark.parametrize(
+        "arrow_cursor", [{"cursor_kwargs": {"unload": True}}], indirect=["arrow_cursor"]
+    )
+    def test_unload_nested_timestamps(self, arrow_cursor):
+        """UNLOAD timestamps, alone and inside arrays, rows, and maps, are microseconds."""
+        table = arrow_cursor.execute(temporal.nested_query()).as_arrow().sort_by("id")
+        us = pa.timestamp("us")
+        assert table.column("ts").type == us
+        assert table.column("arr").type.value_type == us
+        assert table.column("st").type.field("t").type == us
+        assert table.column("*").type.item_type == us
+        assert table.column("deep").type.value_type.field("m").type.item_type == us
+        assert table.drop_columns("id").to_pydict() == {
+            "ts": temporal.NESTED_VALUES,
+            "arr": [[v] for v in temporal.NESTED_VALUES],
+            "st": [{"t": v} for v in temporal.NESTED_VALUES],
+            "*": [[("k", v)] for v in temporal.NESTED_VALUES],
+            "deep": [[{"m": [("k", v)]}] for v in temporal.NESTED_VALUES],
+        }
 
     def test_complex(self, arrow_cursor):
         arrow_cursor.execute(
@@ -517,7 +533,7 @@ class TestArrowCursor:
                 pa.field("col_double", pa.float64()),
                 pa.field("col_string", pa.string()),
                 pa.field("col_varchar", pa.string()),
-                pa.field("col_timestamp", pa.timestamp("ns")),
+                pa.field("col_timestamp", pa.timestamp("us")),
                 pa.field("col_date", pa.date32()),
                 pa.field("col_binary", pa.binary()),
                 pa.field("col_array", pa.list_(pa.field("array_element", pa.int32()))),
@@ -701,7 +717,7 @@ class TestArrowCursor:
             pl.Float64,
             pl.String,
             pl.String,
-            pl.Datetime("ns"),
+            pl.Datetime("us"),
             pl.Date,
             pl.Binary,
             pl.List(pl.Int32),
