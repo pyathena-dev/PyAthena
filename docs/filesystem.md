@@ -138,7 +138,8 @@ written. If an annotation fails to copy, the error is raised and the destination
 kept. A failed part copy aborts the multipart upload. So does an interrupt, or the
 cancellation of an `AioS3FileSystem` copy, including one by the shutdown of the event
 loop at the end of `asyncio.run()`, unless the upload has already completed. A
-CreateMultipartUpload request and the part copies in flight finish first, and so does
+CreateMultipartUpload request and the part copies in flight finish first, the part
+copies without a further attempt, and so does
 the CompleteMultipartUpload request of an `AioS3FileSystem` copy; the requests of an
 `AioS3FileSystem` copy that have not started are cancelled. A further interrupt
 while the CreateMultipartUpload request is waited for is ignored. One while the part
@@ -261,6 +262,10 @@ fs.get_tags("s3://YOUR_S3_BUCKET/path/to/object")
 fs.chmod("s3://YOUR_S3_BUCKET/path/to/object", "bucket-owner-full-control")
 fs.chmod("s3://YOUR_S3_BUCKET/path/to/", "private", recursive=True)
 ```
+
+A recursive `chmod` updates the keys in parallel. Once an update fails, the updates
+that have not started are cancelled, the running ones make no further attempt, and the
+error is raised.
 
 Note that `setxattr` rewrites the object by copying it onto itself (S3 does not allow
 updating the metadata of an existing object in place), which updates its last-modified

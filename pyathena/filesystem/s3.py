@@ -7,6 +7,7 @@ import hashlib
 import logging
 import mimetypes
 import os.path
+import threading
 import time
 import traceback
 from collections.abc import Callable, Mapping
@@ -49,7 +50,7 @@ from pyathena.filesystem.s3_object import (
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_path_pairing import S3PathPairing
 from pyathena.filesystem.s3_writer import S3MultipartWriter
-from pyathena.util import RetryConfig, override
+from pyathena.util import RetryConfig, override, stop_retries_on, unstoppable_retries
 
 _logger = logging.getLogger(__name__)
 
@@ -1640,12 +1641,13 @@ class S3FileSystem(AbstractFileSystem):
         annotations are copied onto the destination after the upload
         completes. A failed part or completion aborts the upload, and so does
         an interrupt, after the creation of the upload and the running part
-        copies have finished. Further interrupts while the creation is waited
-        for are suppressed; one while the part copies are waited for or the
-        upload is aborted stops the cleanup, and the upload ID is logged. A
-        failed annotation copy is raised and leaves the destination in place.
-        If HeadObject reports a size that fits in a single CopyObject request,
-        the reported version is copied with CopyObject instead.
+        copies, which then make no further attempt, have finished. Further
+        interrupts while the creation is waited for are suppressed; one while
+        the part copies are waited for or the upload is aborted stops the
+        cleanup, and the upload ID is logged. A failed annotation copy is
+        raised and leaves the destination in place. If HeadObject reports a
+        size that fits in a single CopyObject request, the reported version is
+        copied with CopyObject instead.
 
         Args:
             source: Source S3 path, with the version ID to copy, if any.
@@ -1676,6 +1678,9 @@ class S3FileSystem(AbstractFileSystem):
             # for.
             creation: Future[S3MultipartUpload] = Future()
             futures: list[Future[S3MultipartUploadPart]] = []
+            # Set on failure, so that the running part copies make no further
+            # attempt before the abort.
+            stop = threading.Event()
             try:
                 executor.submit_to(
                     creation,
@@ -1687,15 +1692,16 @@ class S3FileSystem(AbstractFileSystem):
                 for i, range_ in enumerate(plan.ranges):
                     future: Future[S3MultipartUploadPart] = Future()
                     futures.append(future)
-                    executor.submit_to(
-                        future,
-                        self.core.upload_part_copy,
-                        upload=multipart_upload,
-                        part_number=i + 1,
-                        source=plan.source,
-                        range_=range_,
-                        **plan.part_params,
-                    )
+                    with stop_retries_on(stop):
+                        executor.submit_to(
+                            future,
+                            self.core.upload_part_copy,
+                            upload=multipart_upload,
+                            part_number=i + 1,
+                            source=plan.source,
+                            range_=range_,
+                            **plan.part_params,
+                        )
                 completed = self._finish_multipart_upload(
                     upload=multipart_upload,
                     futures=futures,
@@ -1707,6 +1713,7 @@ class S3FileSystem(AbstractFileSystem):
                     abort=False,
                 )
             except BaseException:
+                stop.set()
                 if not creation.cancel():
                     while not creation.done():
                         try:
@@ -1887,10 +1894,12 @@ class S3FileSystem(AbstractFileSystem):
                 those that it accepts.
         """
         try:
-            self.core.abort_multipart_upload(
-                upload,
-                **self.core.operation_params("abort_multipart_upload", request_kwargs),
-            )
+            # Cleanup of stopped work, which a stop does not interrupt.
+            with unstoppable_retries():
+                self.core.abort_multipart_upload(
+                    upload,
+                    **self.core.operation_params("abort_multipart_upload", request_kwargs),
+                )
         except Exception:
             _logger.exception(
                 f"Failed to abort multipart upload {upload.upload_id} "
@@ -2284,7 +2293,9 @@ class S3FileSystem(AbstractFileSystem):
             path: S3 path (s3://bucket or s3://bucket/key) to set the ACL on.
             acl: The value of the canned ACL to apply.
             recursive: Whether to apply the ACL to all keys below the given
-                path too.
+                path too. The keys are updated in parallel; once one fails, the
+                updates that have not started are cancelled, and the running
+                ones make no further attempt.
             **kwargs: Additional parameters passed to the PutObjectAcl or
                 PutBucketAcl API.
         """
@@ -2296,13 +2307,24 @@ class S3FileSystem(AbstractFileSystem):
         if s3_path.key and acl not in self.core.OBJECT_ACLS:
             raise ValueError(f"ACL not in {self.core.OBJECT_ACLS}.")
         if recursive:
+            paths = self.find(path, withdirs=False)
+            # Set on failure, so that the running requests make no further attempt.
+            stop = threading.Event()
             with self._create_executor(max_workers=self.max_workers) as executor:
-                futures = [
-                    executor.submit(self.chmod, p, acl, recursive=False, **kwargs)
-                    for p in self.find(path, withdirs=False)
-                ]
-                for future in as_completed(futures):
-                    future.result()
+                with stop_retries_on(stop):
+                    futures = [
+                        executor.submit(self.chmod, p, acl, recursive=False, **kwargs)
+                        for p in paths
+                    ]
+                try:
+                    for future in as_completed(futures):
+                        future.result()
+                except BaseException:
+                    # No more ACL is applied after one failed.
+                    stop.set()
+                    for future in futures:
+                        future.cancel()
+                    raise
             if s3_path.key:
                 # A key prefix is not an object itself; only the objects
                 # below it have ACLs.
@@ -3005,6 +3027,9 @@ class S3File(AbstractBufferedFile):
         self.append_block = False
         self._multipart_writer: S3MultipartWriter | None = None
         self.multipart_upload_parts: list[Future[S3MultipartUploadPart]] = []
+        # Set by discard(), so that the running part uploads and copies make
+        # no further attempt before the abort.
+        self._parts_stop = threading.Event()
         # The parts uploaded from the buffer that may not have finished. The
         # part copies of an append hold no data and are not counted.
         self._uploads_in_flight: set[Future[S3MultipartUploadPart]] = set()
@@ -3167,14 +3192,15 @@ class S3File(AbstractBufferedFile):
                     part: Future[S3MultipartUploadPart] = Future()
                     self.multipart_upload_parts.append(part)
                     self._copies_in_flight.add(part)
-                    self._executor.submit_to(
-                        part,
-                        writer.upload_part_copy,
-                        part_number=part_number,
-                        source=S3Path(self.bucket, self.key),
-                        range_=None if whole_source else range_,
-                        **self._get_request_kwargs("upload_part_copy"),
-                    )
+                    with stop_retries_on(self._parts_stop):
+                        self._executor.submit_to(
+                            part,
+                            writer.upload_part_copy,
+                            part_number=part_number,
+                            source=S3Path(self.bucket, self.key),
+                            range_=None if whole_source else range_,
+                            **self._get_request_kwargs("upload_part_copy"),
+                        )
         except BaseException:
             # A submitted creation may still return an ID after the wait is
             # interrupted. The writer records it before resolving the future.
@@ -3256,13 +3282,14 @@ class S3File(AbstractBufferedFile):
                 part: Future[S3MultipartUploadPart] = Future()
                 self.multipart_upload_parts.append(part)
                 self._uploads_in_flight.add(part)
-                self._executor.submit_to(
-                    part,
-                    writer.upload_part,
-                    part_number=part_number,
-                    body=data,
-                    **self._get_request_kwargs("upload_part"),
-                )
+                with stop_retries_on(self._parts_stop):
+                    self._executor.submit_to(
+                        part,
+                        writer.upload_part,
+                        part_number=part_number,
+                        body=data,
+                        **self._get_request_kwargs("upload_part"),
+                    )
         except BaseException:
             self._close_without_commit()
             raise
@@ -3336,14 +3363,20 @@ class S3File(AbstractBufferedFile):
         """Abort the multipart upload, if any.
 
         The part uploads that have not started are cancelled, and the
-        running ones are waited for before the abort.
+        running ones make no further attempt and are waited for before the
+        abort. The abort's own retries are not stopped (see
+        :func:`~pyathena.util.unstoppable_retries`).
         """
         if self.multipart_upload:
+            self._parts_stop.set()
             # A part that is still uploading when the upload is aborted may
             # be stored after the abort, so wait for the parts that could not
             # be cancelled first.
             wait([f for f in self.multipart_upload_parts if not f.cancel()])
-            self._get_multipart_writer().abort(**self._get_request_kwargs("abort_multipart_upload"))
+            with unstoppable_retries():
+                self._get_multipart_writer().abort(
+                    **self._get_request_kwargs("abort_multipart_upload")
+                )
 
         self.multipart_upload = None
         self.multipart_upload_parts = []
@@ -3413,7 +3446,8 @@ class S3File(AbstractBufferedFile):
         object. S3 would answer the former with the whole object and a range
         starting past the end with an ``InvalidRange`` error. A range larger
         than the block size is read with parallel requests; when one fails,
-        those that have not started are cancelled and its error is raised.
+        those that have not started are cancelled, the running ones make no
+        further attempt, and its error is raised.
 
         Args:
             start: The offset of the first byte to read.
@@ -3431,10 +3465,13 @@ class S3File(AbstractBufferedFile):
         path = S3Path(self.bucket, self.key, self.version_id)
         request_kwargs = self._get_request_kwargs("get_object")
         if len(ranges) > 1:
-            futures = [
-                self._executor.submit(self.fs.core.get_object, path, r, **request_kwargs)
-                for r in ranges
-            ]
+            # Set on failure, so that the running reads make no further attempt.
+            stop = threading.Event()
+            with stop_retries_on(stop):
+                futures = [
+                    self._executor.submit(self.fs.core.get_object, path, r, **request_kwargs)
+                    for r in ranges
+                ]
             try:
                 done = wait(futures, return_when=FIRST_EXCEPTION).done
             except BaseException as e:
@@ -3442,6 +3479,7 @@ class S3File(AbstractBufferedFile):
                 # and the frames of the wait, which keep their futures, are
                 # cleared; clear_frames() skips this frame, which is executing.
                 traceback.clear_frames(e.__traceback__)
+                stop.set()
                 while futures:
                     futures.pop().cancel()
                 raise
@@ -3452,6 +3490,7 @@ class S3File(AbstractBufferedFile):
                 # The reads that have not started are cancelled, and the
                 # futures of the others are dropped, so that this frame, which
                 # the traceback of the error keeps, does not keep their data.
+                stop.set()
                 while futures:
                     futures.pop().cancel()
                 done.clear()

@@ -40,19 +40,22 @@ from fsspec.implementations.memory import MemoryFileSystem
 import pyathena
 from pyathena.filesystem import register_s3_filesystem
 from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
-from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch
+from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch, S3MultipartCopyPlan
 from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3Executor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import S3MultipartUpload, S3Object, S3ObjectType, S3StorageClass
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_path_pairing import S3PathPairing
-from pyathena.util import RetryConfig
+from pyathena.util import RetryConfig, stop_retries_on
 from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
+    EVENT_TIMEOUT,
     MULTIPART_COPY_BLOCK_SIZE,
     MULTIPART_COPY_KWARGS,
     MULTIPART_COPY_SIZE,
+    ThrottledOperation,
+    retried,
     stub_multipart_copy,
 )
 
@@ -2133,6 +2136,54 @@ class TestS3FileSystem:
                 self._multipart_copy(fs, **MULTIPART_COPY_KWARGS)
             stubber.assert_no_pending_responses()
 
+    def test_copy_object_with_multipart_upload_failed_part_stops_running_parts(self):
+        # GH-1203: a failed part copy stops the retries of the running ones
+        # before the upload is aborted; their backoff wait would take at least
+        # EVENT_TIMEOUT seconds.
+        fs = self._make_fs()
+        plan = S3MultipartCopyPlan(
+            source=S3Path("bucket", "src"),
+            destination=S3Path("bucket", "dst"),
+            size=3,
+            ranges=((0, 1), (1, 2), (2, 3)),
+        )
+        fs.core.plan_multipart_copy = mock.MagicMock(return_value=plan)
+        fs.core.create_multipart_upload = mock.MagicMock(
+            return_value=S3MultipartUpload({"Bucket": "bucket", "Key": "dst", "UploadId": "id"})
+        )
+        fs.core.abort_multipart_upload = mock.MagicMock()
+        operation = ThrottledOperation(operation_name="UploadPartCopy")
+        throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
+
+        def upload_part_copy(part_number, **kwargs):
+            if part_number == 1:
+                assert operation.started.wait(EVENT_TIMEOUT)
+                raise PermissionError("Access Denied")
+            if part_number == 2:
+                return throttled()
+            return SimpleNamespace(etag='"e"', part_number=part_number)
+
+        fs.core.upload_part_copy = upload_part_copy
+        started = time.monotonic()
+        with pytest.raises(PermissionError, match="Access Denied"):
+            fs._copy_object_with_multipart_upload(plan.source, plan.destination, max_workers=2)
+        assert time.monotonic() - started < EVENT_TIMEOUT
+        assert operation.calls == 1
+        fs.core.abort_multipart_upload.assert_called_once()
+
+    def test_abort_multipart_upload_in_stopped_scope(self):
+        # GH-1203: a stop scope of the caller, such as that of a cancelled
+        # AioS3FileSystem call, does not stop the retries of an abort.
+        fs = self._make_fs()
+        operation = ThrottledOperation(failures=1, operation_name="AbortMultipartUpload")
+        fs.core.abort_multipart_upload = retried(operation, RetryConfig(attempt=3, multiplier=0))
+        stop = threading.Event()
+        stop.set()
+        upload = S3MultipartUpload({"Bucket": "bucket", "Key": "dst", "UploadId": "id"})
+        with stop_retries_on(stop):
+            fs._abort_multipart_upload(upload, {})
+        assert operation.calls == 2
+
     def test_copy_object_with_multipart_upload_failed_annotation(self):
         # GH-973: a failed annotation copy is raised; the completed
         # destination is neither aborted nor deleted.
@@ -3460,6 +3511,31 @@ class TestS3FileSystem:
         assert [ref() for ref in read] == [None] * 3
         assert info.value.__traceback__ is not None
 
+    def test_failed_read_stops_running_reads(self):
+        # GH-1203: a failed parallel read stops the retries of the running
+        # reads, whose backoff wait would take at least EVENT_TIMEOUT seconds.
+        fs = self._make_fs()
+        fs.info = mock.MagicMock(return_value=self._file_object("key"))
+        fs.info.return_value.size = 32
+        operation = ThrottledOperation()
+        throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
+
+        def get_object(path, range_, **kwargs):
+            if range_[0] == 0:
+                assert operation.started.wait(EVENT_TIMEOUT)
+                raise PermissionError("Access Denied")
+            return throttled()
+
+        fs.core.get_object = get_object
+        f = fs.open("s3://bucket/key", "rb", cache_type="none", block_size=16, max_workers=2)
+        started = time.monotonic()
+        with pytest.raises(PermissionError, match="Access Denied"):
+            f.read()
+        # Waits for the running read.
+        f.close()
+        assert time.monotonic() - started < EVENT_TIMEOUT
+        assert operation.calls == 1
+
     def test_interrupted_read_frees_ranges(self):
         # GH-1186: an interrupted parallel read cancels the reads that have
         # not started and frees the data of the others, also while the
@@ -4460,6 +4536,27 @@ class TestS3FileSystem:
         fs._call.assert_any_call(
             fs._client.put_object_acl, Bucket="bucket", Key="key2", ACL="private"
         )
+
+    def test_chmod_recursive_failure_stops_running_requests(self):
+        # GH-1203: a failed ACL update stops the retries of the running ones,
+        # whose backoff wait would take at least EVENT_TIMEOUT seconds.
+        fs = self._make_fs()
+        fs.find = mock.MagicMock(return_value=["bucket/key1", "bucket/key2"])
+        operation = ThrottledOperation(operation_name="PutObjectAcl")
+        throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
+
+        def put_object_acl(path, acl, **kwargs):
+            if path.key == "key1":
+                assert operation.started.wait(EVENT_TIMEOUT)
+                raise PermissionError("Access Denied")
+            return throttled()
+
+        fs.core.put_object_acl = put_object_acl
+        started = time.monotonic()
+        with pytest.raises(PermissionError, match="Access Denied"):
+            fs.chmod("s3://bucket/path", "private", recursive=True)
+        assert time.monotonic() - started < EVENT_TIMEOUT
+        assert operation.calls == 1
 
     def test_put_tags_merge(self):
         fs = self._make_fs()
@@ -6777,6 +6874,7 @@ class TestS3File:
         file._multipart_writer = None
         file.multipart_upload = None
         file.multipart_upload_parts = []
+        file._parts_stop = threading.Event()
         file.buffer = io.BytesIO(data)
         file.loc = len(data)  # tell() returns self.loc
         # Not reached by these files, as the mocked executor never finishes
@@ -7660,6 +7758,55 @@ class TestS3File:
         assert file.fs._call.call_count == 2
         assert file.multipart_upload is None
         assert file.multipart_upload_parts == []
+
+    def test_discard_stops_running_parts(self):
+        # GH-1203: a failed part stops the retries of the running parts before
+        # the upload is aborted; their backoff wait would take at least
+        # EVENT_TIMEOUT seconds.
+        fs = TestS3FileSystem._make_fs()
+        fs.core.create_multipart_upload = mock.MagicMock(
+            return_value=S3MultipartUpload({"Bucket": "bucket", "Key": "key", "UploadId": "id"})
+        )
+        fs.core.abort_multipart_upload = mock.MagicMock()
+        operation = ThrottledOperation(operation_name="UploadPart")
+        throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
+
+        def upload_part(part_number, **kwargs):
+            if part_number == 1:
+                assert operation.started.wait(EVENT_TIMEOUT)
+                raise PermissionError("Access Denied")
+            return throttled()
+
+        fs.core.upload_part = upload_part
+        block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
+        f = fs.open(
+            "s3://bucket/key", "wb", block_size=block_size, cache_type="none", max_workers=2
+        )
+        f.write(b"x" * (2 * block_size))
+        started = time.monotonic()
+        with pytest.raises(PermissionError, match="Access Denied"):
+            f.close()
+        assert time.monotonic() - started < EVENT_TIMEOUT
+        assert operation.calls == 1
+        fs.core.abort_multipart_upload.assert_called_once()
+
+    def test_discard_in_stopped_scope(self):
+        # GH-1203: a stop scope of the caller does not stop the retries of the
+        # abort of discard().
+        file = self._make_write_file(b"", autocommit=False)
+        file.multipart_upload = S3MultipartUpload(
+            {"Bucket": "bucket", "Key": "key.txt", "UploadId": "uploadid"}
+        )
+        operation = ThrottledOperation(failures=1, operation_name="AbortMultipartUpload")
+        file.fs.core.abort_multipart_upload = retried(
+            operation, RetryConfig(attempt=3, multiplier=0)
+        )
+        stop = threading.Event()
+        stop.set()
+        with stop_retries_on(stop):
+            file.discard()
+        assert operation.calls == 2
+        assert file.multipart_upload is None
 
     def test_discard_on_event_loop_thread(self):
         # GH-976: the parts that have not started are cancelled and not

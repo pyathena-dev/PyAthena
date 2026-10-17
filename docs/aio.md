@@ -287,6 +287,12 @@ The pools create threads as the calls need them, and each call runs with the cal
 context variables, as with `asyncio.to_thread()`.
 In a forked child process, a pool creates new threads.
 
+Cancelling a coroutine of the filesystem also stops the retries of the S3 requests that
+its call makes in these threads, including the part uploads and range reads that the
+call runs in parallel: no further attempt is made, and the wait before the next attempt
+ends. A request that has already been sent still runs to its end in its thread. The
+aborts of multipart uploads keep their retries.
+
 ### Executor strategy
 
 `S3FileSystem` and `S3File` use a pluggable executor abstraction (`S3Executor`) for
@@ -319,18 +325,20 @@ async with await fs.open_async("s3://my-bucket/data/file.bin", "rb") as f:
 ```
 
 - A read splits the requested range into ranges of the block size, and reads them in
-  parallel. The file has no read cache.
+  parallel. When a range fails, the reads that have not finished are cancelled, and the
+  running ones make no further attempt. The file has no read cache.
 - A write uploads each full block as a part of a multipart upload, with at most
   `max_workers` parts in flight. A write that would upload another part awaits one of
   them, so the event loop keeps running. A part found failed by that wait, or a part
   copied from the existing object in an append that has failed before the write uploads
   another part, stops the write with its error, and the multipart upload is aborted.
   A part that fails later raises its error when the file is closed. The commit cancels
-  the parts that have not started as soon as one fails, and waits for the running ones
-  before it aborts the upload and raises the error.
+  the parts that have not started as soon as one fails, and waits for the running ones,
+  which make no further attempt, before it aborts the upload and raises the error.
 - Closing the file commits the written data, as `S3File` does.
 - Leaving an `async with` block with an exception, or cancelling a write, closes the file
-  without committing it, and aborts the multipart upload after the running parts finish.
+  without committing it, and aborts the multipart upload after the running parts, which
+  make no further attempt, finish.
   The abort completes even if the task is cancelled again.
 - Once closing or the final flush has begun the commit, the commit completes even if
   the task that closes or flushes the file is cancelled, and leaving an `async with`

@@ -26,7 +26,7 @@ from pyathena.filesystem.s3_async import AioS3FileSystem
 from pyathena.filesystem.s3_core import S3Core
 from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaCalculationExecutionStatus, AthenaQueryExecution
-from pyathena.util import RetryConfig
+from pyathena.util import RetryConfig, retry_api_call
 
 _queries = Environment(
     loader=FileSystemLoader(Path(__file__).parents[1].resolve() / "resources" / "queries")
@@ -131,6 +131,28 @@ class ThrottledOperation:
         if self.failures is None or self.calls <= self.failures:
             raise throttling_error(self.operation_name)
         return "success"
+
+
+def retried(operation, config):
+    """Return a stub of an ``S3Core`` request method that retries an operation.
+
+    The stub sends the operation with :func:`~pyathena.util.retry_api_call`
+    in the thread that calls it, as ``S3Core.call()`` does, so that the stop
+    scopes of that thread reach its retries.
+
+    Args:
+        operation: The stubbed AWS API operation, such as a
+            :class:`ThrottledOperation`.
+        config: The retry policy.
+
+    Returns:
+        The stub, which accepts and ignores any arguments.
+    """
+
+    def request(*args, **kwargs):
+        return retry_api_call(operation, config)
+
+    return request
 
 
 class StoppingOperation:
