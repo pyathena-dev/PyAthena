@@ -357,7 +357,13 @@ class TestPandasCursor:
 
     @pytest.mark.parametrize(
         ("query", "expected"),
-        [("SELECT * FROM one_row", [(1,)]), ("SELECT X'01' AS value", [(b"\x01",)])],
+        [
+            ("SELECT * FROM one_row", [(1,)]),
+            (
+                "SELECT X'01' AS value, CAST(NULL AS VARBINARY) AS null_value, X'' AS empty_value",
+                [(b"\x01", None, b"")],
+            ),
+        ],
         ids=["plain", "binary"],
     )
     def test_csv_storage_options(self, pandas_cursor, query, expected):

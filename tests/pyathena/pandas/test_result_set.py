@@ -382,6 +382,24 @@ class TestAthenaPandasResultSet:
         assert [len(chunk) for chunk in chunks] == sizes
         assert [tuple(row) for chunk in chunks for row in chunk.itertuples(index=False)] == expected
 
+    def test_read_csv_with_pyarrow_engine_values(self, tmp_path):
+        """engine="pyarrow" keeps the text of varchar values, numeric-looking and multiline."""
+        values = ["007", "1e3", "nan", "line1\nline2", None, _PADDING]
+        data = '"v","n"\n' + "".join(
+            f'{"" if v is None else chr(34) + v + chr(34)},"{i}"\n' for i, v in enumerate(values)
+        )
+        assert len(data) >= AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES
+        result_set = _local_result_set(
+            LocalBucketFileSystem(tmp_path),
+            [("v", "varchar"), ("n", "integer")],
+            data,
+            engine="pyarrow",
+        )
+        rows = result_set.fetchall()
+        assert [(None if pd.isna(v) else v, n) for v, n in rows] == [
+            (v, i) for i, v in enumerate(values)
+        ]
+
     def test_read_small_csv_with_pyarrow_engine(self, tmp_path):
         """A CSV result smaller than PYARROW_MIN_FILE_SIZE_BYTES is read with the C engine.
 
@@ -511,6 +529,7 @@ class TestAthenaPandasResultSet:
             pytest.param({}, [1, 1, 1], ["a", "s"], id="default"),
             pytest.param({"columns": ["a"]}, [1, 1, 1], ["a"], id="columns"),
             pytest.param({"dtype_backend": "pyarrow"}, [1, 1, 1], ["a", "s"], id="dtype_backend"),
+            pytest.param({"columns": []}, [3], [], id="no_columns"),
             # Other options read the result whole, where pandas applies or rejects them.
             pytest.param({"filters": [("a", "=", 1)]}, [1], ["a", "s"], id="filters"),
             pytest.param({"columns": ["s.x"]}, [3], ["x"], id="nested_column"),
@@ -532,6 +551,22 @@ class TestAthenaPandasResultSet:
         chunks = list(_local_result_set(fs, tables=tables, chunksize=1, **kwargs).iter_chunks())
         assert [len(chunk) for chunk in chunks] == sizes
         assert [chunk.columns.tolist() for chunk in chunks] == [columns] * len(sizes)
+        # The chunks have the dtypes of the backend.
+        backend = kwargs.get("dtype_backend")
+        assert all(
+            isinstance(dtype, pd.ArrowDtype) is (backend == "pyarrow")
+            for chunk in chunks
+            for dtype in chunk.dtypes
+        )
+
+    def test_unload_repeated_columns(self, tmp_path):
+        """Rows of an UNLOAD result read with a column repeated have the column twice."""
+        result_set = _local_result_set(
+            LocalBucketFileSystem(tmp_path),
+            tables=[pa.table({"a": [1, 2], "b": ["x", "y"]})],
+            columns=["a", "a"],
+        )
+        assert result_set.fetchall() == [(1, 1), (2, 2)]
 
     def test_unload_user_filesystem(self, tmp_path):
         """A filesystem given to execute() reads the UNLOAD result instead of PyAthena's."""
@@ -580,9 +615,10 @@ class TestAthenaPandasResultSet:
         ],
     )
     def test_csv_open_options(self, tmp_path, data, types, chunksize, kwargs, prefetch):
-        """A CSV result is read in CSV_BLOCK_SIZE blocks with the background cache.
+        """A CSV result is read in 32 MiB blocks with the background cache, keeping two blocks.
 
-        With block_size or cache_type, the file is opened with the filesystem's settings.
+        With block_size or cache_type, the file is opened with the filesystem's settings,
+        which are created with them.
         """
         fs = LocalBucketFileSystem(tmp_path)
         result_set = _local_result_set(fs, types, data, chunksize=chunksize, **kwargs)
@@ -590,10 +626,13 @@ class TestAthenaPandasResultSet:
         [(options, _)] = fs.opened
         if prefetch:
             assert options["cache_type"] == "background"
-            assert options["block_size"] == AthenaPandasResultSet.CSV_BLOCK_SIZE
+            assert options["block_size"] == 32 * 2**20
+            assert options["cache_options"] == {"maxblocks": 2}
         else:
             assert "cache_type" not in options
             assert "block_size" not in options
+            assert fs.created_with["default_block_size"] == kwargs.get("block_size")
+            assert fs.created_with["default_cache_type"] == kwargs.get("cache_type")
 
     @pytest.mark.filterwarnings("error::pandas.errors.DtypeWarning")
     @pytest.mark.parametrize(
@@ -990,8 +1029,8 @@ def _local_result_set(fs, types=(), data=None, tables=None, name="result.csv", *
     connection.s3_client.meta.config.max_pool_connections = 2
     connection.s3_client.head_object.return_value = {"ContentLength": length}
     connection.client.get_query_results.return_value = query_results_response(types)
-    with patch("pyathena.pandas.result_set.S3FileSystem", return_value=fs):
-        return AthenaPandasResultSet(
+    with patch("pyathena.pandas.result_set.S3FileSystem", return_value=fs) as file_system:
+        result_set = AthenaPandasResultSet(
             connection=connection,
             converter=DefaultPandasTypeConverter(),
             query_execution=query_execution,
@@ -1000,6 +1039,9 @@ def _local_result_set(fs, types=(), data=None, tables=None, name="result.csv", *
             unload=unload,
             **kwargs,
         )
+    # The options that PyAthena's filesystem was created with.
+    fs.created_with = file_system.call_args.kwargs
+    return result_set
 
 
 def _string_series(values, infer_string):
