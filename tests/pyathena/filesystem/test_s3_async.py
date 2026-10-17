@@ -41,6 +41,7 @@ from tests.pyathena.util import (
     overlapping_calls,
     retried,
     stub_multipart_copy,
+    wait_until,
 )
 
 
@@ -2585,8 +2586,9 @@ class TestAioS3StreamedFile:
                     if t.get_coro().__qualname__ == "S3AioThreadPool.run" and not t.done()
                 ]
 
-            while len(running_reads()) > 1:
-                await asyncio.sleep(0)
+            # At least the held read is found.
+            assert running_reads()
+            await wait_until(lambda: len(running_reads()) <= 1)
 
         def get_object(path, range_, **kwargs):
             # Unlike bytes, an array can be weakly referenced.
