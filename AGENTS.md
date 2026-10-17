@@ -81,6 +81,7 @@ uv run --env-file .env pytest -n 1 tests/pyathena/test_cursor.py -v
 
 #### Test Conventions
 
+- **Choose what to test** as described in [the testing guide](docs/testing.md#choose-what-to-test): each test protects a caller-observable contract that no other test checks with the same kind of evidence, and fails when that behavior is removed. Do not add trivial, coverage-only, duplicate, or implementation-detail tests.
 - **Class-based tests** for integration tests that use fixtures (cursors, engines): `class TestCursor:` with methods like `def test_fetchone(self, cursor):`
 - **Standalone functions** are the default for stateless helpers: `def test_to_struct_json_formats(input_value, expected):`. Unit tests may use a class when it groups the behavior of one object or meaningful common setup, such as `TestTypeSignatureParser`.
 - Function-oriented utility tests may remain standalone even when they use AWS fixtures, as in `tests/pyathena/pandas/test_util.py`. Fixture use alone does not determine the grouping.
