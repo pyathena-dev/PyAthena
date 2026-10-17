@@ -11,7 +11,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import weakref
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from itertools import chain
 from pathlib import Path
@@ -36,6 +36,7 @@ from pyathena.filesystem.s3_object import (
     S3StorageClass,
 )
 from pyathena.filesystem.s3_path import S3Path
+from pyathena.filesystem.s3_writer import S3MultipartStateError, _S3WriteSession
 from pyathena.util import RetryConfig, stop_retries_on
 from tests import ENV
 from tests.pyathena.conftest import connect
@@ -1129,16 +1130,25 @@ class TestAioS3FileSystem:
     def test_transaction_pipe_file_write(self):
         # GH-997: in a transaction, a non-contiguous memoryview is written,
         # and a failed write does not replace the object with an empty one
-        # when the transaction commits.
+        # when the transaction commits. GH-1211: the commit of the failed
+        # write raises, and fsspec discards the rest of the transaction.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
         put_object = fs._sync_fs.core.put_object = mock.MagicMock()
 
+        def write_in_transaction():
+            with fs.transaction:
+                with (
+                    mock.patch.object(AioS3File, "write", side_effect=RuntimeError("write failed")),
+                    pytest.raises(RuntimeError, match="write failed"),
+                ):
+                    fs.pipe_file("s3://bucket/k1", b"data")
+                fs.pipe_file("s3://bucket/k2", b"data")
+
+        with pytest.raises(S3MultipartStateError):
+            write_in_transaction()
+        put_object.assert_not_called()
+
         with fs.transaction:
-            with (
-                mock.patch.object(AioS3File, "write", side_effect=RuntimeError("write failed")),
-                pytest.raises(RuntimeError, match="write failed"),
-            ):
-                fs.pipe_file("s3://bucket/k1", b"data")
             fs.pipe_file("s3://bucket/k2", memoryview(b"ab" * 4)[::2])
 
         assert [(c.args[0].key, c.args[1]) for c in put_object.call_args_list] == [("k2", b"aaaa")]
@@ -1148,6 +1158,9 @@ class TestAioS3FileSystem:
         # GH-1014: in a transaction, a failed write or a local file that
         # cannot be read does not replace the object with the data written
         # so far, or with an empty one, when the transaction commits.
+        # GH-1211: the commit of the failed write raises, and fsspec discards
+        # the rest of the transaction. A local file that cannot be read opens
+        # no remote file.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
         put_object = fs._sync_fs.core.put_object = mock.MagicMock()
         local = tmp_path / "local"
@@ -1159,17 +1172,24 @@ class TestAioS3FileSystem:
                 pytest.skip("root can read a file without read permission.")
             failing.chmod(0)
 
-        with fs.transaction:
-            with (
-                mock.patch.object(AioS3File, "write", side_effect=RuntimeError("write failed"))
-                if error is RuntimeError
-                else contextlib.nullcontext(),
-                pytest.raises(error),
-            ):
-                fs.put_file(str(failing), "s3://bucket/k1")
-            fs.put_file(str(local), "s3://bucket/k2")
+        def write_in_transaction():
+            with fs.transaction:
+                with (
+                    mock.patch.object(AioS3File, "write", side_effect=RuntimeError("write failed"))
+                    if error is RuntimeError
+                    else contextlib.nullcontext(),
+                    pytest.raises(error),
+                ):
+                    fs.put_file(str(failing), "s3://bucket/k1")
+                fs.put_file(str(local), "s3://bucket/k2")
 
-        assert [(c.args[0].key, c.args[1]) for c in put_object.call_args_list] == [("k2", b"a")]
+        if error is PermissionError:
+            write_in_transaction()
+            assert [(c.args[0].key, c.args[1]) for c in put_object.call_args_list] == [("k2", b"a")]
+        else:
+            with pytest.raises(S3MultipartStateError):
+                write_in_transaction()
+            put_object.assert_not_called()
 
     @pytest.mark.parametrize("kwargs", [{"block_size": 4}, {}])
     def test_transaction_pipe_put_file_exceeding_max_parts(self, tmp_path, kwargs):
@@ -2999,8 +3019,8 @@ class TestAioS3File:
     @pytest.mark.parametrize("asynchronous", [False, True])
     @pytest.mark.asyncio
     async def test_open_parts_in_flight(self, asynchronous):
-        # GH-1158: a write keeps at most max_workers uploaded parts in flight
-        # with the executor of either kind. The parts waiting for a worker
+        # GH-1158: a write keeps at most max_workers parts in flight with the
+        # executor of either kind. The parts waiting for a worker
         # used to be queued with their data.
         fs = AioS3FileSystem(
             connection=mock.MagicMock(), asynchronous=asynchronous, skip_instance_cache=True
@@ -3032,14 +3052,18 @@ class TestAioS3File:
                 in_flight.append(sum(not upload.done() for upload in uploads.values()))
             submit_to(executor, future, fn, *args, **kwargs)
 
-        def release_newest(futures, **kwargs):
-            if kwargs.get("return_when") != FIRST_COMPLETED:
-                # The wait of commit() for the parts.
-                return wait(futures, **kwargs)
-            # Only the newest part in flight finishes, so a write that waits
-            # for the oldest one would time out.
-            gates[max(n for n, upload in uploads.items() if not upload.done())].set()
-            return wait(futures, timeout=5, **kwargs)
+        ready = _S3WriteSession.ready
+
+        def release_newest(session):
+            waiter = ready(session)
+            uploading = [n for n, upload in uploads.items() if not upload.done()]
+            if not waiter.done() and len(uploading) >= 2:
+                # Only the newest part in flight finishes, so a write that
+                # waits for the oldest one would time out.
+                gates[max(uploading)].set()
+                result = waiter.result
+                waiter.result = lambda timeout=None: result(5)  # type: ignore[method-assign]
+            return waiter
 
         def write():
             with fs.open("s3://bucket/key", "wb", block_size=block_size, max_workers=2) as f:
@@ -3049,7 +3073,7 @@ class TestAioS3File:
 
         with (
             mock.patch.object(S3Executor, "submit_to", autospec=True, side_effect=record_upload),
-            mock.patch("pyathena.filesystem.s3.wait", side_effect=release_newest),
+            mock.patch.object(_S3WriteSession, "ready", release_newest),
         ):
             await asyncio.to_thread(write)
 
