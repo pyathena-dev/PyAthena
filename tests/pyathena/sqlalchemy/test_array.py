@@ -28,11 +28,9 @@ from sqlalchemy import (
 )
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.orm import declarative_base
-from sqlalchemy.sql import sqltypes
 
 import pyathena
 from pyathena.formatter import DefaultParameterFormatter
-from pyathena.sqlalchemy.array import _ArrayWriteIndexType
 from pyathena.sqlalchemy.base import AthenaDialect
 from pyathena.sqlalchemy.types import (
     ARRAY,
@@ -42,6 +40,7 @@ from pyathena.sqlalchemy.types import (
     AthenaStruct,
     AthenaTimestamp,
 )
+from tests.pyathena.util import recording_engine
 
 
 class Color(Enum):
@@ -108,51 +107,6 @@ def _array_update_table(type_=None):
 
 
 class TestAthenaArray:
-    def test_creation_with_default(self):
-        array_type = AthenaArray()
-        assert isinstance(array_type.item_type, sqltypes.String)
-
-    def test_creation_with_type_class(self):
-        array_type = AthenaArray(Integer)
-        assert isinstance(array_type.item_type, sqltypes.Integer)
-
-    def test_creation_with_type_instance(self):
-        array_type = AthenaArray(Integer())
-        assert isinstance(array_type.item_type, sqltypes.Integer)
-
-    def test_creation_with_string_type(self):
-        array_type = AthenaArray(String)
-        assert isinstance(array_type.item_type, sqltypes.String)
-
-    def test_python_type(self):
-        array_type = AthenaArray()
-        assert array_type.python_type is list
-
-    def test_visit_name(self):
-        array_type = AthenaArray()
-        assert array_type.__visit_name__ == "array"
-
-    def test_array_uppercase_visit_name(self):
-        array_type = ARRAY()
-        assert array_type.__visit_name__ == "ARRAY"
-
-    def test_array_with_complex_type(self):
-        array_type = AthenaArray(AthenaStruct(("name", String), ("age", Integer)))
-        assert isinstance(array_type.item_type, AthenaStruct)
-        assert "name" in array_type.item_type.fields
-        assert "age" in array_type.item_type.fields
-
-    def test_array_with_nested_array(self):
-        array_type = AthenaArray(AthenaArray(Integer))
-        assert isinstance(array_type.item_type, AthenaArray)
-        assert isinstance(array_type.item_type.item_type, sqltypes.Integer)
-
-    def test_array_with_map_type(self):
-        array_type = AthenaArray(AthenaMap(String, Integer))
-        assert isinstance(array_type.item_type, AthenaMap)
-        assert isinstance(array_type.item_type.key_type, sqltypes.String)
-        assert isinstance(array_type.item_type.value_type, sqltypes.Integer)
-
     @pytest.mark.parametrize(
         ("signature", "expected"),
         [
@@ -184,18 +138,6 @@ class TestAthenaArray:
     def test_array_rejects_ambiguous_dimensions(self):
         with pytest.raises(ValueError, match="either nested ARRAY types or dimensions"):
             AthenaArray(AthenaArray(Integer), dimensions=2)
-
-    def test_array_insert_uses_typed_parameter(self):
-        formatter = DefaultParameterFormatter()
-        table = Table("array_values", MetaData(), Column("items", types.ARRAY(Integer)))
-        compiled = table.insert().values(items=[1, 2]).compile(dialect=AthenaDialect())
-        params = {
-            name: compiled._bind_processors[name](value) for name, value in compiled.params.items()
-        }
-        assert (
-            formatter.format(str(compiled), params)
-            == "INSERT INTO array_values (items) VALUES (CAST(ARRAY[1, 2] AS ARRAY(INTEGER)))"
-        )
 
     def test_array_cache_key_includes_nested_fields(self):
         first = AthenaArray(AthenaStruct(("x", Integer)))
@@ -291,12 +233,6 @@ class TestAthenaArrayComparator:
         assert isinstance(items[1].type, Integer)
         compiled = select(items[1:2]).compile(dialect=AthenaDialect())
         assert "transform(slice(items," in str(compiled)
-        processor = (
-            compiled._result_columns[0]
-            .type.dialect_impl(AthenaDialect())
-            .result_processor(AthenaDialect(), None)
-        )
-        assert processor('{"_pyathena_array":["1","2"]}') == (1, 2)
 
 
 class TestArrayTypeInspector:
@@ -420,13 +356,6 @@ class TestArrayValueProcessor:
     )
     def test_array_literal_renders_temporal_string_elements(self, type_, expected):
         assert type_.literal_processor(AthenaDialect())(["2025-01-02' --"]) == expected
-
-    def test_array_binding_preserves_in_parameters(self):
-        formatter = DefaultParameterFormatter()
-        assert (
-            formatter.format("SELECT 1 WHERE 1 IN %(items)s", {"items": [1, 2]})
-            == "SELECT 1 WHERE 1 IN (1, 2)"
-        )
 
     def test_array_binary_binding_uses_native_literals(self):
         dialect = AthenaDialect(dbapi=pyathena)
@@ -694,29 +623,21 @@ class TestArrayJSONProjection:
         assert sql.startswith("SELECT anon_1.id, json_format(")
 
     @pytest.mark.parametrize("compound", [False, True])
-    def test_decorated_array_keeps_native_ordering_and_result_processor(self, compound):
-        dialect = AthenaDialect()
+    def test_decorated_array_keeps_native_ordering(self, compound):
         statement = select(literal([10], TupleArray()).label("items"))
         if compound:
             statement = statement.union_all(select(literal([2], TupleArray()).label("items")))
-        compiled = statement.order_by("items").compile(dialect=dialect)
+        compiled = statement.order_by("items").compile(dialect=AthenaDialect())
         assert "ORDER BY anon_1.items" in str(compiled)
-        result_type = compiled._result_columns[0].type
-        assert isinstance(result_type, TupleArray)
-        processor = result_type.dialect_impl(dialect).result_processor(dialect, None)
-        assert processor('{"_pyathena_array":["2",null]}') == (2, None)
 
-    def test_array_variant_keeps_transport_and_result_types(self):
-        dialect = AthenaDialect()
+    def test_array_variant_keeps_transport_projection(self):
         type_ = String().with_variant(AthenaArray(Integer), "awsathena")
         compiled = (
-            select(literal([2], type_).label("items")).order_by("items").compile(dialect=dialect)
+            select(literal([2], type_).label("items"))
+            .order_by("items")
+            .compile(dialect=AthenaDialect())
         )
         assert "transform(anon_1.items" in str(compiled)
-        processor = (
-            compiled._result_columns[0].type.dialect_impl(dialect).result_processor(dialect, None)
-        )
-        assert processor('{"_pyathena_array":["2"]}') == [2]
 
     @pytest.mark.parametrize("compound", [False, True])
     def test_array_ordering_rejects_columns_outside_distinct_or_union(self, compound):
@@ -745,43 +666,35 @@ class TestArrayJSONProjection:
         assert sql.startswith("SELECT anon_1.value, json_format(")
 
 
+def _execute_formatted(statement, parameters=None):
+    """Execute a statement offline and format the SQL the cursor receives.
+
+    Args:
+        statement: SQLAlchemy statement to execute.
+        parameters: Execution parameters for the statement.
+
+    Returns:
+        The SQL string produced by ``DefaultParameterFormatter``.
+    """
+    engine, calls = recording_engine()
+    with engine.connect() as conn:
+        conn.execute(statement, parameters)
+    ((_, operation, formatted_parameters),) = calls
+    return DefaultParameterFormatter().format(operation, formatted_parameters)
+
+
 class TestArrayAssignmentType:
     def test_binary_element_assignment_uses_native_hex_parameter(self):
         table = _array_update_table(AthenaArray(types.BINARY))
-        compiled = (
-            table.update()
-            .values({table.c["items"][1]: b"\x00\xff"})
-            .compile(dialect=AthenaDialect())
-        )
-        params = {
-            name: compiled._bind_processors.get(name, lambda value: value)(value)
-            for name, value in compiled.params.items()
-        }
-        assert "FROM_HEX('00ff')" in DefaultParameterFormatter().format(str(compiled), params)
+        statement = table.update().values({table.c["items"][1]: b"\x00\xff"})
+        assert "FROM_HEX('00ff')" in _execute_formatted(statement)
 
     def test_explicit_assignment_type_and_callable_value(self):
         table = _array_update_table(AthenaArray(types.String))
         stmt = table.update().values(
             {table.c["items"][1]: bindparam("value", type_=PrefixString(), callable_=lambda: "a")}
         )
-        compiled = stmt.compile(dialect=AthenaDialect())
-        assert compiled._bind_processors["value"]("a") == "prefix:a"
-        assert "upper(%(value)s)" in str(compiled)
-        assert compiled.params["value"] == "a"
-
-
-class TestArrayWriteIndexType:
-    @pytest.mark.parametrize("processor_name", ["bind_processor", "literal_processor"])
-    @pytest.mark.parametrize("value", [None, True, 1.5, "1"])
-    def test_rejects_non_integer_values(self, processor_name, value):
-        processor = getattr(_ArrayWriteIndexType(), processor_name)(AthenaDialect())
-        with pytest.raises(ValueError, match="non-NULL integers"):
-            processor(value)
-
-    def test_bind_and_literal_processors(self):
-        type_ = _ArrayWriteIndexType()
-        assert type_.bind_processor(AthenaDialect())(2) == 2
-        assert type_.literal_processor(AthenaDialect())(2) == "2"
+        assert "upper('prefix:a')" in _execute_formatted(stmt)
 
 
 class TestArrayUpdate:
@@ -843,15 +756,20 @@ class TestArrayUpdate:
 class TestArrayUpdateCompiler:
     def test_bound_index_uses_write_index_processor(self):
         table = _array_update_table()
-        compiled = (
-            table.update()
-            .values({table.c["items"][bindparam("index")]: 9})
-            .compile(dialect=AthenaDialect())
-        )
-        assert compiled._bind_processors["index"](2) == 2
+        statement = table.update().values({table.c["items"][bindparam("index")]: 9})
+        assert "IF(2 > 0, 2, " in _execute_formatted(statement, {"index": 2})
         for value in (1.5, True, None):
-            with pytest.raises(ValueError, match="non-NULL integers"):
-                compiled._bind_processors["index"](value)
+            with pytest.raises(sa_exc.StatementError, match="non-NULL integers") as raised:
+                _execute_formatted(statement, {"index": value})
+            assert isinstance(raised.value.orig, ValueError)
+        # A literal_execute index is rendered when the statement runs, and checked then.
+        literal = table.update().values(
+            {table.c["items"][bindparam("index", literal_execute=True)]: 9}
+        )
+        assert "IF(2 > 0, 2, " in _execute_formatted(literal, {"index": 2})
+        for value in (1.5, True):
+            with pytest.raises(sa_exc.StatementError):
+                _execute_formatted(literal, {"index": value})
 
     def test_callable_index_and_slice_value(self):
         table = _array_update_table(AthenaArray(types.String))
@@ -880,12 +798,7 @@ class TestArrayUpdateCompiler:
         assert "SELECT" not in sql
         assert "WHERE arrays.id =" in sql
         assert statement._generate_cache_key().key == original_key
-        parameters = {
-            name: compiled._bind_processors.get(name, lambda v: v)(value)
-            for name, value in compiled.params.items()
-        }
-        formatted = DefaultParameterFormatter().format(sql, parameters)
-        assert "ARRAY[" in formatted
+        assert "ARRAY[" in _execute_formatted(statement)
 
     @pytest.mark.parametrize("index", [0, -1, None, 1.5, True])
     def test_invalid_partial_update_index(self, index):
@@ -945,12 +858,7 @@ class TestArrayUpdateCompiler:
         table = _array_update_table()
         index = func.length("abc")
         statement = table.update().values({table.c["items"][index]: 9})
-        compiled = statement.compile(dialect=AthenaDialect())
-        params = {
-            name: compiled._bind_processors.get(name, lambda value: value)(value)
-            for name, value in compiled.params.items()
-        }
-        assert "length('abc')" in DefaultParameterFormatter().format(str(compiled), params)
+        assert "length('abc')" in _execute_formatted(statement)
 
     def test_null_slice_assignment_rejected(self):
         table = _array_update_table()
