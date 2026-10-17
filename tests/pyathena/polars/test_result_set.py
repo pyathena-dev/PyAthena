@@ -160,6 +160,16 @@ class TestAthenaPolarsResultSet:
             getattr(result_set, method)()
         assert_fetches_fail(result_set)
 
+    def test_fetchone_interrupted_while_counting(self):
+        """GH-1225: an interrupt after fetchone() took its row breaks the result set."""
+        result_set = _fetching_result_set([pl.DataFrame({"n": [0, 1]})], ["n"], arraysize=3)
+        with (
+            patch.object(result_set, "_count_rows", side_effect=KeyboardInterrupt),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            result_set.fetchone()
+        assert_fetches_fail(result_set)
+
     def test_fetch_after_failed_chunk_read(self):
         """GH-1225: after iter_chunks() fails to read a chunk, the fetch methods raise."""
 

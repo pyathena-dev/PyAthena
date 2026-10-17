@@ -247,28 +247,35 @@ async def test_run_in_thread_or_close_cancelled_during_function():
 
 async def test_run_in_thread_or_close_cancelled_after_function():
     """GH-1206: an object whose function ended before the cancellation is closed in a new thread."""
+    loop = asyncio.get_running_loop()
+    # With one worker, a later job starts only after the function's call has returned.
+    executor = ThreadPoolExecutor(max_workers=1)
+    loop.set_default_executor(executor)
     resource = _Resource()
     threads = []
-    started, release, returned = threading.Event(), threading.Event(), threading.Event()
+    started, release = threading.Event(), threading.Event()
 
     def func():
         threads.append(threading.get_ident())
         started.set()
         assert release.wait(EVENT_TIMEOUT)
-        returned.set()
 
-    task = asyncio.create_task(run_in_thread_or_close(resource, func))
-    assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
-    # Blocking the event loop keeps the task from resuming after the function ends.
-    release.set()
-    assert returned.wait(EVENT_TIMEOUT)
-    time.sleep(0.1)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    assert await asyncio.to_thread(resource.closed.wait, EVENT_TIMEOUT)
-    assert resource.closed_in not in (None, threads[0], threading.get_ident())
+    try:
+        task = asyncio.create_task(run_in_thread_or_close(resource, func))
+        await asyncio.sleep(0)
+        # From here, blocking the event loop keeps the task from resuming after the
+        # call returns, which the next job of the single worker waits for.
+        assert started.wait(EVENT_TIMEOUT)
+        release.set()
+        assert executor.submit(lambda: None).result(EVENT_TIMEOUT) is None
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert resource.closed.wait(EVENT_TIMEOUT)
+        assert resource.closed_in not in (None, threads[0], threading.get_ident())
+    finally:
+        release.set()
+        executor.shutdown(wait=True)
 
 
 async def test_run_in_thread_or_close_cancelled_before_function():

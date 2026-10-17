@@ -978,11 +978,11 @@ class AthenaPandasResultSet(AthenaResultSet):
             raise ProgrammingError(_FETCH_FAILED_MESSAGE)
         try:
             row = next(self._row_iter, None)
+            if row is not None:
+                self._count_rows(1)
         except BaseException:
             self._fetch_failed = True
             raise
-        if row is not None:
-            self._count_rows(1)
         return row
 
     @override
