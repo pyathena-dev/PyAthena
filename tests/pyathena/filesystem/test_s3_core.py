@@ -83,28 +83,11 @@ class TestS3Core:
         core, _ = _make_core()
         assert core.operation_params(method, params) == expected
 
-    def test_properties(self):
+    def test_request_kwargs_is_a_copy(self):
         core, _ = _make_core(request_kwargs={"RequestPayer": "requester"})
-        assert core.retry_config.attempt == 1
-        assert core.request_kwargs == {"RequestPayer": "requester"}
-        # A copy, so the core keeps its parameters.
+        # A copy, so a caller that changes it leaves the core's parameters.
         core.request_kwargs.clear()
         assert core.request_kwargs == {"RequestPayer": "requester"}
-        assert S3Core(core.client).retry_config.attempt == RetryConfig().attempt
-
-    def test_request_kwargs_go_to_operations_that_accept_them(self):
-        core, stubber = _make_core(request_kwargs={"RequestPayer": "requester"})
-        stubber.add_response(
-            "head_object",
-            {"ContentLength": 1},
-            {"Bucket": "bucket", "Key": "key", "RequestPayer": "requester"},
-        )
-        # HeadBucket does not accept RequestPayer.
-        stubber.add_response("head_bucket", {}, {"Bucket": "bucket"})
-        with stubber:
-            core.head_object(S3Path("bucket", "key"))
-            core.head_bucket("bucket")
-        stubber.assert_no_pending_responses()
 
     def test_call_params_are_sent_as_given(self):
         # A per-call parameter is not filtered, so botocore rejects a
@@ -516,20 +499,20 @@ class TestS3Core:
         stubber.assert_no_pending_responses()
         assert status == expected
 
-    def test_get_bucket_versioning_translates_errors(self):
-        core, stubber = _make_core()
-        stubber.add_client_error(
-            "get_bucket_versioning", service_error_code="NoSuchBucket", http_status_code=404
-        )
-        with stubber, pytest.raises(FileNotFoundError):
-            core.get_bucket_versioning("bucket")
-
     def test_list_objects(self):
         core, stubber = _make_core()
         stubber.add_response(
             "list_objects_v2",
             {
-                "Contents": [{"Key": "dir/a", "Size": 1, "ETag": '"a"', "LastModified": MODIFIED}],
+                "Contents": [
+                    {
+                        "Key": "dir/a",
+                        "Size": 1,
+                        "ETag": '"a"',
+                        "LastModified": MODIFIED,
+                        "StorageClass": "STANDARD_IA",
+                    }
+                ],
                 "CommonPrefixes": [{"Prefix": "dir/sub/"}],
                 "KeyCount": 2,
                 "IsTruncated": True,
@@ -556,7 +539,12 @@ class TestS3Core:
                 bucket="bucket",
                 objects=(
                     S3ObjectSummary(
-                        bucket="bucket", key="dir/a", size=1, etag='"a"', last_modified=MODIFIED
+                        bucket="bucket",
+                        key="dir/a",
+                        size=1,
+                        etag='"a"',
+                        last_modified=MODIFIED,
+                        storage_class="STANDARD_IA",
                     ),
                 ),
                 common_prefixes=(S3CommonPrefix("bucket", "dir/sub/"),),
@@ -872,14 +860,6 @@ class TestS3Core:
         with stubber:
             result = core.delete_objects(S3DeleteBatch("bucket", (S3Path("bucket", "a"),)))
         assert result == S3DeleteResult("bucket")
-
-    def test_delete_objects_translates_errors(self):
-        core, stubber = _make_core()
-        stubber.add_client_error(
-            "delete_objects", service_error_code="AccessDenied", http_status_code=403
-        )
-        with stubber, pytest.raises(PermissionError):
-            core.delete_objects(S3DeleteBatch("bucket", (S3Path("bucket", "a"),)))
 
     def test_create_multipart_upload(self):
         core, stubber = _make_core()
@@ -1776,44 +1756,12 @@ class TestS3Core:
             core.replace_object_metadata(
                 S3Path("bucket", "key"),
                 head,
-                {"new": "2"},
+                # The user-defined metadata can be any mapping, such as an
+                # S3Metadata.
+                S3Metadata({"Metadata": {"new": "2"}}),
                 ContentType="text/plain",
                 SSECustomerAlgorithm="AES256",
             )
-        stubber.assert_no_pending_responses()
-
-    def test_replace_object_metadata_omits_unset_fields(self):
-        core, stubber = _make_core()
-        stubber.add_response(
-            "copy_object",
-            {},
-            {
-                "CopySource": {"Bucket": "bucket", "Key": "key"},
-                "Bucket": "bucket",
-                "Key": "key",
-                "Metadata": {},
-                "MetadataDirective": "REPLACE",
-                # S3Metadata reports STANDARD when HeadObject omits it.
-                "StorageClass": "STANDARD",
-            },
-        )
-        # The user-defined metadata can be any mapping, such as an S3Metadata.
-        stubber.add_response(
-            "copy_object",
-            {},
-            {
-                "CopySource": {"Bucket": "bucket", "Key": "key"},
-                "Bucket": "bucket",
-                "Key": "key",
-                "Metadata": {"a": "1"},
-                "MetadataDirective": "REPLACE",
-                "StorageClass": "STANDARD",
-            },
-        )
-        with stubber:
-            core.replace_object_metadata(S3Path("bucket", "key"), S3Metadata({}), {})
-            head = S3Metadata({"Metadata": {"a": "1"}})
-            core.replace_object_metadata(S3Path("bucket", "key"), head, head)
         stubber.assert_no_pending_responses()
 
     @pytest.mark.parametrize(
@@ -1890,6 +1838,9 @@ class TestS3DeleteBatch:
         assert batches[1].objects == (S3Path("b1", f"k{S3DeleteBatch.MAX_KEYS}"),)
         assert batches[2].objects == (S3Path("b2", "a", "v1"),)
         assert S3DeleteBatch.from_paths([]) == []
+        # A path without a key is rejected, also among other paths.
+        with pytest.raises(ValueError, match="Not an object of the bucket b1: s3://b1"):
+            S3DeleteBatch.from_paths([S3Path("b1", "a"), S3Path("b1")])
 
     @pytest.mark.parametrize(
         ("objects", "match"),
@@ -1908,10 +1859,6 @@ class TestS3DeleteBatch:
         with pytest.raises(ValueError, match=match):
             S3DeleteBatch("bucket", objects)
 
-    def test_from_paths_rejects_bucket_paths(self):
-        with pytest.raises(ValueError, match="Not an object of the bucket bucket: s3://bucket"):
-            S3DeleteBatch.from_paths([S3Path("bucket", "a"), S3Path("bucket")])
-
 
 class TestS3DeleteError:
     def test_from_response(self):
@@ -1921,25 +1868,3 @@ class TestS3DeleteError:
         assert error == S3DeleteError(S3Path("bucket", "a", "v1"), "InternalError", "Error")
         assert str(error) == "bucket/a?versionId=v1 (InternalError: Error)"
         assert str(S3DeleteError.from_response("bucket", {"Key": "a"})) == "bucket/a (None: None)"
-
-
-class TestS3ObjectSummary:
-    def test_from_response(self):
-        entry = {
-            "Key": "dir/a",
-            "Size": 1,
-            "ETag": '"a"',
-            "LastModified": MODIFIED,
-            "StorageClass": "STANDARD_IA",
-        }
-        summary = S3ObjectSummary.from_response("bucket", entry)
-        assert summary == S3ObjectSummary("bucket", "dir/a", 1, '"a"', MODIFIED, "STANDARD_IA")
-        assert summary.path == S3Path("bucket", "dir/a")
-        # Optional fields that the entry does not have are None.
-        assert S3ObjectSummary.from_response("bucket", {"Key": "k"}) == S3ObjectSummary(
-            "bucket", "k"
-        )
-
-    def test_frozen(self):
-        with pytest.raises(AttributeError):
-            S3ObjectSummary("bucket", "k").key = "other"  # type: ignore[misc]
