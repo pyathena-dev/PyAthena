@@ -7,7 +7,7 @@
 
 import gc
 import threading
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 
 import pyarrow as pa
 import pyarrow.csv as pa_csv
@@ -48,6 +48,35 @@ class _RecordingRangeFile:
     def open_stream(self, **kwargs):
         """Open a stream over the file that closes it."""
         return ReadAheadStream(self.read_range, len(self._data), on_close=self.close, **kwargs)
+
+
+class _InterruptedFuture(Future):
+    """A future whose first wait for the outcome is interrupted."""
+
+    def __init__(self):
+        super().__init__()
+        self.interrupted = False
+
+    def exception(self, timeout=None):
+        if not self.interrupted:
+            self.interrupted = True
+            raise KeyboardInterrupt
+        return super().exception(timeout)
+
+
+class _InterruptedWaitExecutor(ImmediateExecutor):
+    """An executor that runs each call when it is submitted, whose first wait for the
+    outcome of the first call is interrupted."""
+
+    def __init__(self, max_workers=None):
+        super().__init__(max_workers)
+        self.submitted = False
+
+    def _new_future(self):
+        if self.submitted:
+            return super()._new_future()
+        self.submitted = True
+        return _InterruptedFuture()
 
 
 class TestReadAheadStream:
@@ -133,6 +162,21 @@ class TestReadAheadStream:
         assert file.closes == 1
         with pytest.raises(ValueError, match="I/O operation on closed file"):
             stream.read(5)
+
+    def test_interrupted_wait(self, monkeypatch):
+        """An interrupt while waiting for a part leaves the part to the next read."""
+        monkeypatch.setattr(
+            "pyathena.filesystem.reader.ThreadPoolExecutor", _InterruptedWaitExecutor
+        )
+        data = bytes(range(30))
+        file = _RecordingRangeFile(data)
+        stream = file.open_stream(part_size=10, max_parts=2)
+        with pytest.raises(KeyboardInterrupt):
+            stream.read(10)
+        assert stream.read(10) == data[:10]
+        assert stream.read(5) == data[10:15]
+        assert sorted(file.reads) == [(0, 10), (10, 10), (20, 10)]
+        stream.close()
 
     def test_interrupted_close(self, monkeypatch):
         """An interrupted close leaves the file open, and closing again waits for the

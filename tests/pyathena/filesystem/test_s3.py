@@ -770,7 +770,6 @@ class TestS3FileSystem:
             ("dir", 2, True),
             ("dir", 1, False),
             ("dir", 3, False),
-            ("dir", 0, False),
             ("dir/sub", 1, True),
             ("dir/direct", None, True),
             ("dir/direct", 1, True),
@@ -784,15 +783,14 @@ class TestS3FileSystem:
         self._serve_keys(fs, self.FIND_KEYS)
         memory = self._memory_fs(self.FIND_KEYS)
 
-        try:
-            expected = [p.lstrip("/") for p in memory.find(f"/bucket/{path}", maxdepth, withdirs)]
-        except ValueError:
-            # A maxdepth below 1 is rejected before any request.
-            with pytest.raises(ValueError, match="maxdepth"):
-                fs.find(f"s3://bucket/{path}", maxdepth, withdirs)
-            fs._call.assert_not_called()
-            return
+        expected = [p.lstrip("/") for p in memory.find(f"/bucket/{path}", maxdepth, withdirs)]
         assert sorted(fs.find(f"s3://bucket/{path}", maxdepth, withdirs)) == expected
+
+    def test_find_rejects_maxdepth_below_one(self):
+        fs = self._make_fs()
+        with pytest.raises(ValueError, match="maxdepth"):
+            fs.find("s3://bucket/dir", maxdepth=0)
+        fs._call.assert_not_called()
 
     @pytest.mark.parametrize(
         ("pattern", "maxdepth"),
@@ -1957,27 +1955,63 @@ class TestS3FileSystem:
         fs.mv("s3://bucket/src", "s3://bucket/dst/", recursive=True, maxdepth=1)
         fs._call.assert_not_called()
 
-    def test_cp_file_multipart_parameters(self):
+    @pytest.mark.parametrize("size", [10, 5 * 2**30 + 2**20])
+    def test_cp_file_multipart_parameters(self, size):
         # GH-967: block_size and max_workers control a multipart copy and are
-        # not sent to S3.
+        # not sent to S3, whatever the size of the object.
         fs = self._make_fs()
-        requests = self._record_requests(fs)
+        # Fewer workers than the copy is given: both part copies have to run
+        # at once to pass the barrier.
+        fs.max_workers = 1
+        both_running = threading.Barrier(2, timeout=EVENT_TIMEOUT)
+        requests = []
+
+        def call(method, **request):
+            name = method if isinstance(method, str) else method._extract_mock_name()
+            name = name.split(".")[-1]
+            requests.append((name, request))
+            if name == "head_object":
+                return {"ContentLength": size}
+            if name == "create_multipart_upload":
+                return {"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"}
+            if name == "upload_part_copy":
+                both_running.wait()
+                return {"CopyPartResult": {"ETag": '"e"'}}
+            return {}
+
+        fs._call.side_effect = call
 
         fs.cp_file(
             "s3://bucket/src",
             "s3://bucket/dst",
-            block_size=fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE,
+            block_size=3 * 2**30,
             max_workers=2,
             RequestPayer="requester",
+            # Copy without reading the metadata, tags and annotations of the
+            # source (GH-973).
+            MetadataDirective="REPLACE",
+            TaggingDirective="REPLACE",
+            AnnotationDirective="EXCLUDE",
         )
-        assert [request for name, request in requests if name == "copy_object"] == [
-            {
-                "CopySource": {"Bucket": "bucket", "Key": "src"},
-                "Bucket": "bucket",
-                "Key": "dst",
-                "RequestPayer": "requester",
-            }
-        ]
+        assert not [r for _, r in requests if {"block_size", "max_workers"} & set(r)]
+        if size <= S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE:
+            assert [request for name, request in requests if name == "copy_object"] == [
+                {
+                    "CopySource": {"Bucket": "bucket", "Key": "src"},
+                    "Bucket": "bucket",
+                    "Key": "dst",
+                    "RequestPayer": "requester",
+                    "MetadataDirective": "REPLACE",
+                    "TaggingDirective": "REPLACE",
+                    "AnnotationDirective": "EXCLUDE",
+                }
+            ]
+            return
+        # The parts are copied in ranges of block_size by two workers.
+        assert sorted(
+            request["CopySourceRange"] for name, request in requests if name == "upload_part_copy"
+        ) == [f"bytes=0-{3 * 2**30 - 1}", f"bytes={3 * 2**30}-{size - 1}"]
+        assert "copy_object" not in [name for name, _ in requests]
 
     @staticmethod
     def _stubbed_copy_fs(**kwargs):
@@ -3782,6 +3816,26 @@ class TestS3FileSystem:
                 S3Path("bucket", "src"), S3Path("bucket", "dst"), block_size=block_size
             )
         fs._call.assert_not_called()
+
+    def test_ls_sparse_entries_keep_defaults(self):
+        # Listed entries without Size or StorageClass get S3Object's defaults,
+        # as they did when they were built from the response.
+        fs = self._make_fs()
+        fs.version_aware = True
+        fs._call.side_effect = [
+            {"Contents": [{"Key": "k"}]},
+            {"Versions": [{"Key": "k", "VersionId": "v1"}]},
+        ]
+
+        for files in (
+            fs.ls("s3://bucket", detail=True),
+            fs.ls("s3://bucket", detail=True, versions=True),
+        ):
+            assert (files[0]["size"], files[0]["content_length"], files[0]["storage_class"]) == (
+                0,
+                0,
+                S3StorageClass.S3_STORAGE_CLASS_STANDARD,
+            )
 
     def test_object_version_info_from_markers(self):
         # Explicit markers start the listing, and the next page follows the
@@ -5998,6 +6052,47 @@ class TestS3File:
             file.commit()
         fs.core.put_object.assert_not_called()
 
+    async def test_cancelled_async_write_finishes(self):
+        # Cancelling to_thread does not interrupt the buffered writer's thread.
+        fs = self._make_append_fs(b"")
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        upload = fs.core.create_multipart_upload.return_value
+
+        def create(*args, **kwargs):
+            started.set()
+            assert release.wait(5)
+            return upload
+
+        fs.core.create_multipart_upload.side_effect = create
+        file = S3File(
+            fs,
+            "s3://bucket/key.txt",
+            mode="wb",
+            block_size=4,
+            executor=S3AioExecutor(asyncio.get_running_loop(), max_workers=1),
+        )
+
+        def write():
+            try:
+                file._write_and_close(b"x" * 8)
+            finally:
+                finished.set()
+
+        task = asyncio.create_task(asyncio.to_thread(write))
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release.set()
+            assert await asyncio.to_thread(finished.wait, 5)
+        fs.core.complete_multipart_upload.assert_called_once()
+        fs._call.assert_not_called()
+        assert file.closed
+
     @staticmethod
     def _make_mock_fs():
         # A mocked filesystem that selects the request parameters of each
@@ -6522,6 +6617,8 @@ class TestS3File:
             [] if max_workers == 1 else [2]
         )
         assert events == ([] if max_workers == 1 else ["part 2 ended"])
+        # The abort stopped the retries of the part.
+        assert part.calls == (0 if max_workers == 1 else 1)
         fs._call.assert_called_once_with(
             S3_CLIENT.abort_multipart_upload, Bucket="bucket", Key="key.txt", UploadId="uploadid"
         )
