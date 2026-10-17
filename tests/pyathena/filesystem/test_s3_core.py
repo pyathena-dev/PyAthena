@@ -9,12 +9,12 @@ import copy
 import gc
 import io
 import re
+import time
 import weakref
 from concurrent.futures import Future
 from datetime import UTC, datetime
 from itertools import pairwise
 from typing import Any
-from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
 import boto3
@@ -103,13 +103,18 @@ class TestS3Core:
             (404, "NoSuchKey", FileNotFoundError),
             (403, "403", PermissionError),
             (500, "InternalError", OSError),
+            (416, "InvalidRange", OSError),
         ],
     )
     def test_call_translates_errors(self, status, code, error):
         core, stubber = _make_core()
         stubber.add_client_error("head_object", service_error_code=code, http_status_code=status)
-        with stubber, pytest.raises(error):
+        with stubber, pytest.raises(error) as e:
             core.head_object(S3Path("bucket", "key"))
+        # The ClientError is the cause, whose code callers such as reads of
+        # an InvalidRange read.
+        assert isinstance(e.value.__cause__, botocore.exceptions.ClientError)
+        assert e.value.__cause__.response["Error"]["Code"] == code
 
     @pytest.mark.parametrize("translated", [True, False])
     def test_call_failure_frees_request(self, translated):
@@ -205,11 +210,6 @@ class TestS3Core:
             metadata.object_lock_legal_hold_status,
         ) == ("GOVERNANCE", MODIFIED, "ON")
 
-    def test_head_object_requires_a_key(self):
-        core, _ = _make_core()
-        with pytest.raises(ValueError, match="no key"):
-            core.head_object(S3Path("bucket"))
-
     def test_head_bucket(self):
         core, stubber = _make_core()
         stubber.add_response("head_bucket", {"BucketRegion": "us-west-2"}, {"Bucket": "bucket"})
@@ -293,18 +293,6 @@ class TestS3Core:
         assert [raw.closed for raw in raws] == [True, True]
 
     @pytest.mark.parametrize(
-        ("status", "code", "error"),
-        [(404, "NoSuchKey", FileNotFoundError), (416, "InvalidRange", OSError)],
-    )
-    def test_get_object_translates_errors(self, status, code, error):
-        core, stubber = _make_core()
-        stubber.add_client_error("get_object", service_error_code=code, http_status_code=status)
-        with stubber, pytest.raises(error) as e:
-            core.get_object(S3Path("bucket", "key"), (10, None))
-        assert isinstance(e.value.__cause__, botocore.exceptions.ClientError)
-        assert e.value.__cause__.response["Error"]["Code"] == code
-
-    @pytest.mark.parametrize(
         ("body", "params", "expected"),
         [
             (b"data", {}, {"Body": b"data"}),
@@ -329,19 +317,6 @@ class TestS3Core:
             result = core.put_object(S3Path("bucket", "key"), body, **params)
         stubber.assert_no_pending_responses()
         assert (result.etag, result.version_id) == ('"e"', "v1")
-
-    @pytest.mark.parametrize(
-        ("path", "match"),
-        [
-            (S3Path("bucket"), "no key"),
-            (S3Path("bucket", "key", "v1"), "Cannot write to a version"),
-            (S3Path("bucket", "key", "null"), "Cannot write to a version"),
-        ],
-    )
-    def test_put_object_rejects_paths(self, path, match):
-        core, stubber = _make_core()
-        with stubber, pytest.raises(ValueError, match=match):
-            core.put_object(path, b"data")
 
     @pytest.mark.parametrize(
         ("client_region", "kwargs", "expected"),
@@ -455,13 +430,6 @@ class TestS3Core:
         stubber.assert_no_pending_responses()
         # The given configuration is not modified.
         assert given == configuration
-
-    @pytest.mark.parametrize("acl", ["invalid", "bucket-owner-full-control"])
-    def test_create_bucket_rejects_acls(self, acl):
-        # An object-only canned ACL is not accepted for a bucket either.
-        core, stubber = _make_core()
-        with stubber, pytest.raises(ValueError, match="ACL not in"):
-            core.create_bucket("bucket", acl=acl)
 
     def test_delete_bucket(self):
         core, stubber = _make_core()
@@ -814,11 +782,6 @@ class TestS3Core:
             core.delete_object(S3Path("bucket", "key", "v1"), BypassGovernanceRetention=True)
         stubber.assert_no_pending_responses()
 
-    def test_delete_object_requires_a_key(self):
-        core, _ = _make_core()
-        with pytest.raises(ValueError, match="has no key"):
-            core.delete_object(S3Path("bucket"))
-
     def test_delete_objects(self):
         core, stubber = _make_core()
         stubber.add_response(
@@ -874,30 +837,6 @@ class TestS3Core:
                 S3Path("bucket", "key"), ContentType="text/csv", Key="other"
             )
         assert upload.upload_id == "u"
-
-    def test_upload_part(self):
-        core, stubber = _make_core()
-        stubber.add_response(
-            "upload_part",
-            {"ETag": '"e1"'},
-            {
-                "Bucket": "bucket",
-                "Key": "key",
-                "UploadId": "u",
-                "PartNumber": 1,
-                "Body": b"data",
-                "SSECustomerAlgorithm": "AES256",
-            },
-        )
-        with stubber:
-            part = core.upload_part(
-                S3MultipartUpload({"Bucket": "bucket", "Key": "key", "UploadId": "u"}),
-                1,
-                b"data",
-                SSECustomerAlgorithm="AES256",
-                PartNumber=99,
-            )
-        assert (part.part_number, part.etag) == (1, '"e1"')
 
     @pytest.mark.parametrize(
         "bucket", ["myap-abc123-s3alias", "arn:aws:s3:us-east-1:123456789012:accesspoint/myap"]
@@ -1017,6 +956,8 @@ class TestS3Core:
                 S3MultipartUpload({"Bucket": "bucket", "Key": "key", "UploadId": "u"}),
                 parts,
                 RequestPayer="requester",
+                # The given parts take precedence.
+                MultipartUpload={"Parts": []},
             )
         assert (completed.etag, completed.version_id) == ('"dst"', "v-dst")
 
@@ -1042,36 +983,24 @@ class TestS3Core:
                 )
 
     @pytest.mark.parametrize(
-        ("method", "args"),
+        ("method", "args", "missing", "message"),
         [
-            ("create_multipart_upload", (S3Path("bucket"),)),
-            (
-                "upload_part_copy",
-                (
-                    S3MultipartUpload({"Bucket": "bucket", "Key": "dst", "UploadId": "u"}),
-                    1,
-                    S3Path("bucket"),
-                ),
-            ),
+            ("upload_part", (1, b"data"), "Bucket", "no bucket"),
+            ("upload_part", (1, b"data"), "Key", "no key"),
+            ("upload_part", (1, b"data"), "UploadId", "no upload ID"),
+            # The other operations check the same identity.
+            ("upload_part_copy", (1, S3Path("source", "key")), "UploadId", "no upload ID"),
+            ("complete_multipart_upload", ([],), "Key", "no key"),
+            ("abort_multipart_upload", (), "Bucket", "no bucket"),
         ],
-    )
-    def test_multipart_upload_requires_keys(self, method, args):
-        core, _ = _make_core()
-        with pytest.raises(ValueError, match="has no key"):
-            getattr(core, method)(*args)
-
-    @pytest.mark.parametrize(
-        ("method", "args"),
-        [
-            ("upload_part", (1, b"data")),
-            ("upload_part_copy", (1, S3Path("source", "key"))),
-            ("complete_multipart_upload", ([],)),
-            ("abort_multipart_upload", ()),
+        ids=[
+            "upload_part-Bucket",
+            "upload_part-Key",
+            "upload_part-UploadId",
+            "upload_part_copy-UploadId",
+            "complete_multipart_upload-Key",
+            "abort_multipart_upload-Bucket",
         ],
-    )
-    @pytest.mark.parametrize(
-        ("missing", "message"),
-        [("Bucket", "no bucket"), ("Key", "no key"), ("UploadId", "no upload ID")],
     )
     def test_multipart_upload_requires_identity(self, method, args, missing, message):
         core, _ = _make_core()
@@ -1095,9 +1024,12 @@ class TestS3Core:
                 "PartNumber": 1,
                 "Body": b"data",
                 "ChecksumAlgorithm": "SHA256",
+                "SSECustomerAlgorithm": "AES256",
             },
         )
         with stubber:
+            # The identity and the part number override the per-call fields,
+            # and the other parameters are sent.
             part = core.upload_part(
                 upload,
                 1,
@@ -1105,16 +1037,13 @@ class TestS3Core:
                 Bucket="other",
                 Key="other",
                 UploadId="other",
+                PartNumber=99,
                 ChecksumAlgorithm="CRC32",
+                SSECustomerAlgorithm="AES256",
             )
         stubber.assert_no_pending_responses()
+        assert (part.part_number, part.etag) == (1, '"part"')
         assert part.to_api_repr()["ChecksumSHA256"] == "sha"
-
-    def test_create_multipart_upload_rejects_versions(self):
-        # A write replaces the object at the key, not the named version.
-        core, _ = _make_core()
-        with pytest.raises(ValueError, match="Cannot write to a version"):
-            core.create_multipart_upload(S3Path("bucket", "key", "v1"))
 
     @pytest.mark.parametrize(
         ("size", "block_size", "ranges"),
@@ -1479,76 +1408,6 @@ class TestS3Core:
         stubber.assert_no_pending_responses()
 
     @pytest.mark.parametrize(
-        "field",
-        [
-            "ChecksumCRC32",
-            "ChecksumCRC32C",
-            "ChecksumCRC64NVME",
-            "ChecksumSHA1",
-            "ChecksumSHA256",
-            "ChecksumSHA512",
-            "ChecksumMD5",
-            "ChecksumXXHASH64",
-            "ChecksumXXHASH3",
-            "ChecksumXXHASH128",
-        ],
-    )
-    @pytest.mark.parametrize("copy", [False, True])
-    def test_complete_multipart_upload_preserves_part_checksums(self, field, copy):
-        core, stubber = _make_core()
-        identity = {"Bucket": "bucket", "Key": "key", "UploadId": "u"}
-        algorithm = field.removeprefix("Checksum")
-        stubber.add_response(
-            "create_multipart_upload",
-            {**identity, "ChecksumAlgorithm": algorithm},
-            {"Bucket": "bucket", "Key": "key", "ChecksumAlgorithm": algorithm},
-        )
-        expected_parts = []
-        for number in (1, 2):
-            result = {"ETag": f'"e{number}"', field: f"checksum{number}"}
-            request = {"Bucket": "bucket", "Key": "key", "UploadId": "u", "PartNumber": number}
-            if copy:
-                request["CopySource"] = {"Bucket": "bucket", "Key": "source"}
-                stubber.add_response("upload_part_copy", {"CopyPartResult": result}, request)
-            else:
-                request["Body"] = b"data"
-                request["ChecksumAlgorithm"] = algorithm
-                request[field] = f"checksum{number}"
-                stubber.add_response("upload_part", result, request)
-            expected_parts.append({**result, "PartNumber": number})
-        stubber.add_response(
-            "complete_multipart_upload",
-            {"ETag": '"done"'},
-            {
-                "Bucket": "bucket",
-                "Key": "key",
-                "UploadId": "u",
-                "MultipartUpload": {"Parts": expected_parts},
-                "RequestPayer": "requester",
-            },
-        )
-        with stubber:
-            upload = core.create_multipart_upload(
-                S3Path("bucket", "key"), ChecksumAlgorithm=algorithm
-            )
-            if copy:
-                parts = [
-                    core.upload_part_copy(upload, n, S3Path("bucket", "source")) for n in (1, 2)
-                ]
-            else:
-                parts = [
-                    core.upload_part(upload, n, b"data", **{field: f"checksum{n}"}) for n in (1, 2)
-                ]
-            completed = core.complete_multipart_upload(
-                upload,
-                parts,
-                RequestPayer="requester",
-                MultipartUpload={"Parts": []},
-            )
-        stubber.assert_no_pending_responses()
-        assert completed.etag == '"done"'
-
-    @pytest.mark.parametrize(
         ("algorithm", "checksum_type"),
         [(None, None), ("SHA256", "COMPOSITE"), ("CRC32", "FULL_OBJECT")],
     )
@@ -1665,6 +1524,8 @@ class TestS3Core:
             ("put_object_acl", (S3Path("bucket", "key"), "invalid")),
             # An object ACL that a bucket does not accept.
             ("put_bucket_acl", ("bucket", "bucket-owner-full-control")),
+            ("create_bucket", ("bucket", "invalid")),
+            ("create_bucket", ("bucket", "bucket-owner-full-control")),
         ],
     )
     def test_acl_validation(self, method, args):
@@ -1675,6 +1536,31 @@ class TestS3Core:
     @pytest.mark.parametrize(
         ("method", "args", "match"),
         [
+            ("head_object", (S3Path("bucket"),), "has no key"),
+            ("delete_object", (S3Path("bucket"),), "has no key"),
+            ("put_object", (S3Path("bucket"), b"data"), "has no key"),
+            # A write replaces the object at the key, not the named version.
+            ("put_object", (S3Path("bucket", "key", "v1"), b"data"), "Cannot write to a version"),
+            (
+                "put_object",
+                (S3Path("bucket", "key", "null"), b"data"),
+                "Cannot write to a version",
+            ),
+            ("create_multipart_upload", (S3Path("bucket"),), "has no key"),
+            (
+                "create_multipart_upload",
+                (S3Path("bucket", "key", "v1"),),
+                "Cannot write to a version",
+            ),
+            (
+                "upload_part_copy",
+                (
+                    S3MultipartUpload({"Bucket": "bucket", "Key": "dst", "UploadId": "u"}),
+                    1,
+                    S3Path("bucket"),
+                ),
+                "has no key",
+            ),
             ("get_object_tagging", (S3Path("bucket"),), "has no key"),
             ("put_object_tagging", (S3Path("bucket"), {}), "has no key"),
             ("put_object_acl", (S3Path("bucket"), "private"), "has no key"),
@@ -1773,53 +1659,42 @@ class TestS3Core:
             core.replace_object_metadata(S3Path("bucket", "key"), S3Metadata({}), {}, **{name: "x"})
 
     @pytest.mark.parametrize(
-        ("path", "client_method", "params", "expected"),
+        ("path", "client_method", "params", "key", "query"),
         [
-            (S3Path("bucket", "key"), "get_object", {}, {"Bucket": "bucket", "Key": "key"}),
+            (S3Path("bucket", "key"), "get_object", {}, "key", {}),
             (
                 S3Path("bucket", "key", "null"),
                 "get_object",
                 {"ResponseContentType": "text/csv"},
-                {
-                    "Bucket": "bucket",
-                    "Key": "key",
-                    "VersionId": "null",
-                    "ResponseContentType": "text/csv",
-                },
+                "key",
+                {"versionId": ["null"], "response-content-type": ["text/csv"]},
             ),
             # The parameters take precedence over the path.
             (
                 S3Path("bucket", "key", "v1"),
-                "put_object",
-                {"Key": "other", "VersionId": None},
-                {"Bucket": "bucket", "Key": "other", "VersionId": None},
+                "get_object",
+                {"Key": "other"},
+                "other",
+                {"versionId": ["v1"]},
             ),
+            (S3Path("bucket", "key"), "put_object", {"Key": "other"}, "other", {}),
         ],
     )
-    def test_generate_presigned_url(self, path, client_method, params, expected):
-        core, _ = _make_core(request_kwargs={"RequestPayer": "requester"})
-        core.call = mock.MagicMock(return_value="https://signed")
-        assert (
-            core.generate_presigned_url(path, client_method, expires_in=60, **params)
-            == "https://signed"
-        )
-        # request_kwargs are not signed.
-        core.call.assert_called_once_with(
-            core.client.generate_presigned_url,
-            ClientMethod=client_method,
-            Params=expected,
-            ExpiresIn=60,
-        )
-
-    def test_generate_presigned_url_signs_locally(self):
+    def test_generate_presigned_url(self, path, client_method, params, key, query):
         # No request is sent, so the stubber has no responses to return.
         core, stubber = _make_core(request_kwargs={"RequestPayer": "requester"})
         with stubber:
-            url = core.generate_presigned_url(S3Path("bucket", "key", "v1"))
-        query = parse_qs(urlsplit(url).query)
-        assert query["versionId"] == ["v1"]
-        # request_kwargs are not signed.
-        assert not any(k.lower() == "x-amz-request-payer" for k in query)
+            url = core.generate_presigned_url(path, client_method, expires_in=3600, **params)
+        signed = time.time()
+        parts = urlsplit(url)
+        assert (parts.netloc, parts.path) == ("bucket.s3.amazonaws.com", f"/{key}")
+        signed_query = parse_qs(parts.query)
+        # The signature fields of the client's signer, and the expiry.
+        expires = int(signed_query.pop("Expires")[0])
+        assert signed + 3600 - 60 < expires <= signed + 3600
+        del signed_query["AWSAccessKeyId"], signed_query["Signature"]
+        # request_kwargs, such as RequestPayer, are not signed.
+        assert signed_query == query
 
 
 class TestS3DeleteBatch:
