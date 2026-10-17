@@ -8,7 +8,7 @@
 import polars as pl
 import pytest
 
-from pyathena.polars.util import get_athena_type, holds_datetimes, to_microseconds
+from pyathena.polars.util import get_athena_type, to_microseconds
 
 _MAP = getattr(pl, "Map", None)
 _requires_map = pytest.mark.skipif(_MAP is None, reason="Polars 1.x has no Map type")
@@ -61,23 +61,6 @@ def test_to_microseconds_map():
     assert to_microseconds(dtype, maps=False) == pl.List(
         pl.List(pl.Struct({"key": _US, "value": pl.Struct({"t": _US})}))
     )
-
-
-@pytest.mark.parametrize(
-    ("dtype", "expected"),
-    [
-        (_US, True),
-        (pl.Date, False),
-        (pl.List(pl.Struct({"a": pl.Int8, "b": pl.List(_NS)})), True),
-        (pl.Struct({"a": pl.Int8, "b": pl.List(pl.String)}), False),
-    ],
-)
-def test_holds_datetimes(dtype, expected):
-    assert holds_datetimes(dtype) is expected
-
-
-@_requires_map
-def test_holds_datetimes_map():
-    assert holds_datetimes(pl.Map(_US, pl.Int8))
-    assert holds_datetimes(pl.Map(pl.String, pl.List(_NS)))
-    assert not holds_datetimes(pl.Map(pl.String, pl.Int8))
+    # A Map without nanosecond Datetimes is kept.
+    for kept in (pl.Map(pl.String, pl.Int8), pl.Map(pl.String, _US)):
+        assert to_microseconds(kept, maps=False) == kept

@@ -11,7 +11,7 @@ This cursor downloads the CSV file after executing the query and loads it into a
 Performance is better than fetching data with Cursor.
 
 PolarsCursor uses [Polars](https://pola.rs/) native reading capabilities (`pl.read_csv`, `pl.read_parquet`) and
-does not require PyArrow as a dependency, except for UNLOAD results with timestamps read with Polars 1.x; see {ref}`polars-unload-options`.
+does not require PyArrow as a dependency; for UNLOAD results with timestamps read with Polars 1.x, see {ref}`polars-unload-options`.
 CSV results read without the chunksize option, UNLOAD results read with it when pyarrow is
 installed and `execute()` is given no Polars read options, and UNLOAD results with timestamps read
 without it with Polars 1.x use PyAthena's own S3FileSystem (fsspec compatible), and other reads use
@@ -225,9 +225,12 @@ See {ref}`arrow-unload-options` for more information.
 
 Timestamps of UNLOAD results are read at microseconds, as `Datetime("us")`.
 Polars 2.0 and later read them with Polars.
-With Polars 1.x, a result with timestamps is read with pyarrow, through PyAthena's S3FileSystem, and a warning is logged.
-This needs pyarrow, and no Polars read options given to `execute()`; otherwise the read raises `NotSupportedError`.
-With `use_pyarrow=True` given to `execute()`, a result read without the chunksize option is read by Polars with pyarrow, with `coerce_int96_timestamp_unit="us"` added to `pyarrow_options` unless they set it.
+Polars 1.x reads them correctly only through pyarrow:
+
+- Without the chunksize option and without Polars read options given to `execute()`, a result with timestamps is read with pyarrow when it is installed, through PyAthena's S3FileSystem, and a warning is logged.
+- With the chunksize option and without Polars read options, the chunks are read with pyarrow when it is installed.
+- With `use_pyarrow=True` given to `execute()`, a result read without the chunksize option is read by Polars with pyarrow, with `coerce_int96_timestamp_unit="us"` added to `pyarrow_options` unless they set it.
+- Otherwise Polars 1.x reads the timestamps at nanoseconds, which gives wrong values outside 1677-09-21 to 2262-04-11; they are cast to microseconds, and a warning is logged.
 
 The unload option can be enabled by specifying it in the `cursor_kwargs` argument of the connect method or as an argument to the cursor method.
 An argument to the cursor method takes precedence over the same key in `cursor_kwargs`.

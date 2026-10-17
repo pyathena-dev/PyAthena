@@ -17,11 +17,13 @@ from io import BytesIO
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import polars as pl
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from fsspec.implementations.local import LocalFileSystem
 
 from pyathena.converter import _to_date, _to_default
-from pyathena.error import NotSupportedError, OperationalError
+from pyathena.error import OperationalError
 from pyathena.model import AthenaQueryExecution
 from pyathena.polars.converter import DefaultPolarsTypeConverter
 from pyathena.polars.result_set import AthenaPolarsResultSet, PolarsDataFrameIterator
@@ -50,7 +52,9 @@ _UNLOAD_READS = [
     pytest.param(3, {}, id="chunks"),
     pytest.param(3, {"low_memory": True}, id="scanned-chunks"),
 ]
-_UPGRADE = "Upgrade to Polars 2.0 or later"
+# The warnings of Polars 1.x reads of timestamps with pyarrow and at nanoseconds.
+_PYARROW_READ = "so they are read with pyarrow instead"
+_NANOSECOND_READ = "so those outside 1677-09-21 to 2262-04-11 are wrong"
 
 
 def _chunked_result_set() -> AthenaPolarsResultSet:
@@ -702,14 +706,10 @@ class TestAthenaPolarsResultSet:
     def test_read_parquet_int96(self, tmp_path, caplog, chunksize, kwargs):
         """INT96 timestamps that Athena writes are read at microseconds at any level.
 
-        Polars 1.x reads them with pyarrow and logs a warning, as it reads INT96 only
-        at nanoseconds; it cannot scan them.
+        Polars 1.x reads INT96 only at nanoseconds: it reads a whole result without
+        read options with pyarrow, and scans with them at nanoseconds, giving wrong
+        values outside 1677-09-21 to 2262-04-11; both log a warning.
         """
-        scanned = chunksize is not None and kwargs
-        if not _POLARS_2 and scanned:
-            with pytest.raises(NotSupportedError, match=_UPGRADE):
-                _read_unload_result(tmp_path, chunksize, kwargs)
-            return
         with caplog.at_level(logging.WARNING, logger="pyathena.polars.result_set"):
             df = pl.concat(_read_unload_result(tmp_path, chunksize, kwargs)).sort("id")
         timestamp = pl.Datetime("us")
@@ -721,6 +721,13 @@ class TestAthenaPolarsResultSet:
                 "mp": _MAP,
             }
         )
+        scanned_by_polars_1 = not _POLARS_2 and chunksize is not None and bool(kwargs)
+        assert (_NANOSECOND_READ in caplog.text) is scanned_by_polars_1
+        assert (_PYARROW_READ in caplog.text) is (
+            not _POLARS_2 and chunksize is None and not kwargs
+        )
+        if scanned_by_polars_1:
+            return
         assert df["ts"].to_list() == INT96_VALUES
         assert df["arr"].to_list() == [[v] for v in INT96_VALUES]
         assert df["st"].to_list() == [{"t": v} for v in INT96_VALUES]
@@ -729,24 +736,69 @@ class TestAthenaPolarsResultSet:
             if _POLARS_2
             else [[{"key": "k", "value": v}] for v in INT96_VALUES]
         )
-        assert (_UPGRADE in caplog.text) is (not _POLARS_2 and chunksize is None and not kwargs)
 
-    @pytest.mark.skipif(_POLARS_2, reason="Polars 2.0 reads INT96 without pyarrow.")
+    @pytest.mark.skipif(_POLARS_2, reason="Polars 2.0 reads INT96 at microseconds.")
     @pytest.mark.parametrize(
-        ("chunksize", "kwargs", "pyarrow"),
-        [(None, {}, False), (3, {}, False), (None, {"low_memory": True}, True)],
-        ids=["whole-without-pyarrow", "chunks-without-pyarrow", "whole-read-options"],
+        ("chunksize", "kwargs", "pyarrow", "warned"),
+        [
+            (None, {}, False, True),
+            (3, {}, False, True),
+            (None, {"low_memory": True}, True, True),
+            (None, {"columns": ["id"]}, True, False),
+        ],
+        ids=["whole-without-pyarrow", "chunks-without-pyarrow", "read-options", "no-timestamps"],
     )
-    def test_read_parquet_int96_polars_1(self, tmp_path, chunksize, kwargs, pyarrow):
-        """Polars 1.x reads INT96 at microseconds only with pyarrow and no read options."""
+    def test_read_parquet_int96_polars_1(
+        self, tmp_path, caplog, chunksize, kwargs, pyarrow, warned
+    ):
+        """Polars 1.x reads timestamps at nanoseconds without pyarrow or with read options.
+
+        They are cast to microseconds, and a warning is logged if the read has any.
+        """
+        timestamp = datetime(2020, 1, 2, 3, 4, 5, 123000)
+        file = tmp_path / "source.parquet"
+        pq.write_table(
+            pa.table({"id": [1], "ts": pa.array([timestamp], pa.timestamp("us"))}),
+            file,
+            use_deprecated_int96_timestamps=True,
+            store_schema=False,
+        )
+        unload = tmp_path / "unload"
+        unload.mkdir()
         with (
             patch(
                 "pyathena.polars.result_set.importlib.util.find_spec",
                 return_value=MagicMock() if pyarrow else None,
             ),
-            pytest.raises(NotSupportedError, match=_UPGRADE),
+            caplog.at_level(logging.WARNING, logger="pyathena.polars.result_set"),
         ):
-            _read_unload_result(tmp_path, chunksize, kwargs)
+            df = pl.concat(_read_unload_result(unload, chunksize, kwargs, file=file))
+        if warned:
+            assert df.schema["ts"] == pl.Datetime("us")
+            assert df["ts"].to_list() == [timestamp]
+        assert df["id"].to_list() == [1]
+        assert (_NANOSECOND_READ in caplog.text) is warned
+
+    @pytest.mark.skipif(not _POLARS_2, reason="Polars 1.x has no Map type.")
+    @pytest.mark.parametrize(
+        ("chunksize", "kwargs"), [(None, {}), (3, {"low_memory": True})], ids=["whole", "scanned"]
+    )
+    def test_read_parquet_int96_map_named_like_a_selector(self, tmp_path, chunksize, kwargs):
+        """A Map is restored by its name, which Polars would read as a selector in pl.col()."""
+        timestamp = datetime(1600, 1, 2, 3, 4, 5, 123000)
+        file = tmp_path / "source.parquet"
+        table = pa.table(
+            {
+                "id": [1],
+                "*": pa.array([[("k", timestamp)]], pa.map_(pa.string(), pa.timestamp("us"))),
+            }
+        )
+        pq.write_table(table, file, use_deprecated_int96_timestamps=True, store_schema=False)
+        unload = tmp_path / "unload"
+        unload.mkdir()
+        df = pl.concat(_read_unload_result(unload, chunksize, kwargs, file=file))
+        assert df.schema == pl.Schema({"id": pl.Int64, "*": _MAP})
+        assert df.row(0) == (1, {"k": timestamp})
 
     def test_read_parquet_int96_pyarrow_options(self, tmp_path):
         """coerce_int96_timestamp_unit in pyarrow_options replaces microseconds."""
