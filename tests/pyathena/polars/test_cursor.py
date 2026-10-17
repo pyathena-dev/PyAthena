@@ -209,44 +209,90 @@ class TestPolarsCursor:
         ids=["whole", "chunks", "scanned-chunks"],
     )
     def test_unload_nested_timestamps(self, polars_cursor, kwargs):
-        """UNLOAD timestamps inside arrays, rows, and maps are read at microseconds."""
+        """UNLOAD timestamps, alone and inside arrays, rows, and maps, are microseconds."""
         polars_cursor.execute(temporal.nested_query(), **kwargs)
         df = pl.concat(polars_cursor.iter_chunks()).sort("id")
+        us = pl.Datetime("us")
+        entries = pl.List(pl.Struct({"key": pl.String, "value": us}))
+        # Polars 2.0 reads a map as Map, and Polars 1.x as a List of key-value Structs.
+        mp = pl.Map(pl.String, us) if _POLARS_2 else entries
+        assert df.drop("id").schema == pl.Schema(
+            {
+                "ts": us,
+                "arr": pl.List(us),
+                "st": pl.Struct({"t": us}),
+                "*": mp,
+                "deep": pl.List(pl.Struct({"m": mp})),
+            }
+        )
+        assert df["ts"].to_list() == temporal.NESTED_VALUES
         assert df["arr"].to_list() == [[v] for v in temporal.NESTED_VALUES]
         assert df["st"].to_list() == [{"t": v} for v in temporal.NESTED_VALUES]
-        # Polars 2.0 reads a map as Map, and Polars 1.x as a List of key-value Structs.
-        entries = pl.List(pl.Struct({"key": pl.String, "value": pl.Datetime("us")}))
         assert df.get_column("*").cast(entries).to_list() == [
             [{"key": "k", "value": v}] for v in temporal.NESTED_VALUES
+        ]
+        assert df.get_column("deep").cast(pl.List(pl.Struct({"m": entries}))).to_list() == [
+            [{"m": [{"key": "k", "value": v}]}] for v in temporal.NESTED_VALUES
         ]
 
     @pytest.mark.skipif(_POLARS_2, reason="Polars 2.0 reads INT96 at microseconds.")
     @pytest.mark.parametrize(
-        "polars_cursor", [{"cursor_kwargs": {"unload": True}}], indirect=["polars_cursor"]
+        ("polars_cursor", "kwargs", "columns", "warned"),
+        [
+            ({"cursor_kwargs": {"unload": True}}, {"columns": ["ts"]}, ["ts"], True),
+            (
+                {"cursor_kwargs": {"unload": True, "chunksize": 1}},
+                {"low_memory": True},
+                ["id", "ts"],
+                True,
+            ),
+            ({"cursor_kwargs": {"unload": True}}, {"columns": ["id"]}, ["id"], False),
+        ],
+        indirect=["polars_cursor"],
+        ids=["whole", "scanned-chunks", "no-timestamps"],
     )
-    def test_unload_timestamps_with_read_options_polars_1(self, polars_cursor, caplog):
-        """With read options, Polars 1.x reads the timestamps itself and a warning is logged."""
+    def test_unload_timestamps_with_read_options_polars_1(
+        self, polars_cursor, caplog, kwargs, columns, warned
+    ):
+        """With read options, Polars 1.x reads the timestamps itself and a warning is logged.
+
+        The timestamps are cast to microseconds; the warning is logged only when the read
+        has timestamps.
+        """
+        query = "SELECT 1 AS id, TIMESTAMP '2020-01-02 03:04:05.123' AS ts"
         with caplog.at_level(logging.WARNING, logger="pyathena.polars.result_set"):
-            df = polars_cursor.execute(
-                "SELECT TIMESTAMP '2020-01-02 03:04:05.123' AS ts", low_memory=True
-            ).as_polars()
-        assert df.schema == pl.Schema({"ts": pl.Datetime("us")})
-        assert df["ts"].to_list() == [datetime(2020, 1, 2, 3, 4, 5, 123000)]
-        assert [r.levelno for r in caplog.records if r.name == "pyathena.polars.result_set"] == [
-            logging.WARNING
+            polars_cursor.execute(query, **kwargs)
+            df = pl.concat(polars_cursor.iter_chunks())
+        assert df.columns == columns
+        if "ts" in columns:
+            assert df.schema["ts"] == pl.Datetime("us")
+            assert df["ts"].to_list() == [datetime(2020, 1, 2, 3, 4, 5, 123000)]
+        warnings = [
+            r
+            for r in caplog.records
+            if r.name == "pyathena.polars.result_set" and r.levelno == logging.WARNING
         ]
+        assert bool(warnings) is warned
 
     @pytest.mark.skipif(not _POLARS_2, reason="Polars 1.x reads INT96 at nanoseconds.")
     @pytest.mark.parametrize(
-        "polars_cursor", [{"cursor_kwargs": {"unload": True}}], indirect=["polars_cursor"]
+        ("polars_cursor", "kwargs"),
+        [
+            ({"cursor_kwargs": {"unload": True}}, {}),
+            ({"cursor_kwargs": {"unload": True, "chunksize": 1}}, {"low_memory": True}),
+        ],
+        indirect=["polars_cursor"],
+        ids=["whole", "scanned-chunks"],
     )
-    def test_unload_schema_option(self, polars_cursor):
+    def test_unload_schema_option(self, polars_cursor, kwargs):
         """A schema given to execute() is used as given, a map as a List of Structs too."""
         schema = {"mp": pl.List(pl.Struct({"key": pl.String, "value": pl.Datetime("ms")}))}
-        df = polars_cursor.execute(
+        polars_cursor.execute(
             "SELECT MAP(ARRAY['k'], ARRAY[TIMESTAMP '2020-01-02 03:04:05.123']) AS mp",
             schema=schema,
-        ).as_polars()
+            **kwargs,
+        )
+        df = pl.concat(polars_cursor.iter_chunks())
         assert df.schema == pl.Schema(schema)
         assert df["mp"].to_list() == [
             [{"key": "k", "value": datetime(2020, 1, 2, 3, 4, 5, 123000)}]

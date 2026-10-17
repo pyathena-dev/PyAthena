@@ -206,12 +206,20 @@ class TestArrowCursor:
         "arrow_cursor", [{"cursor_kwargs": {"unload": True}}], indirect=["arrow_cursor"]
     )
     def test_unload_nested_timestamps(self, arrow_cursor):
-        """UNLOAD timestamps inside arrays, rows, and maps are read at microseconds."""
+        """UNLOAD timestamps, alone and inside arrays, rows, and maps, are microseconds."""
         table = arrow_cursor.execute(temporal.nested_query()).as_arrow().sort_by("id")
+        us = pa.timestamp("us")
+        assert table.column("ts").type == us
+        assert table.column("arr").type.value_type == us
+        assert table.column("st").type.field("t").type == us
+        assert table.column("*").type.item_type == us
+        assert table.column("deep").type.value_type.field("m").type.item_type == us
         assert table.drop_columns("id").to_pydict() == {
+            "ts": temporal.NESTED_VALUES,
             "arr": [[v] for v in temporal.NESTED_VALUES],
             "st": [{"t": v} for v in temporal.NESTED_VALUES],
             "*": [[("k", v)] for v in temporal.NESTED_VALUES],
+            "deep": [[{"m": [("k", v)]}] for v in temporal.NESTED_VALUES],
         }
 
     def test_complex(self, arrow_cursor):

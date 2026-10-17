@@ -193,8 +193,9 @@ def zones(row: tuple[Any, ...]) -> list[Any]:
 
 
 # UNLOAD writes the timestamps inside arrays, rows, and maps as INT96 too. Each row
-# holds one timestamp, ordered by id; the map column is named "*", which Polars would
-# read as a selector in pl.col().
+# holds one timestamp, ordered by id, in ts, alone in arr, st, and the map "*", and in
+# deep, a map in a row in an array. "*" is a name that Polars would read as a selector
+# in pl.col().
 _NESTED = [
     c
     for name in ("ts_min", "ts_1600", "ts_max", "ts_null")
@@ -205,9 +206,11 @@ NESTED_VALUES = [c.value for c in _NESTED]
 
 
 def nested_query() -> str:
-    """The SELECT query of the timestamps of NESTED_VALUES in an array, a row, and a map."""
+    """The SELECT query of the timestamps of NESTED_VALUES, alone and in containers."""
     rows = ", ".join(f"({i}, {c.sql})" for i, c in enumerate(_NESTED))
     return (
-        "SELECT id, ARRAY[ts] AS arr, CAST(ROW(ts) AS ROW(t TIMESTAMP)) AS st, "
-        f"MAP(ARRAY['k'], ARRAY[ts]) AS \"*\" FROM (VALUES {rows}) AS t (id, ts)"
+        "SELECT id, ts, ARRAY[ts] AS arr, CAST(ROW(ts) AS ROW(t TIMESTAMP)) AS st, "
+        "MAP(ARRAY['k'], ARRAY[ts]) AS \"*\", "
+        "ARRAY[CAST(ROW(MAP(ARRAY['k'], ARRAY[ts])) AS ROW(m MAP(VARCHAR, TIMESTAMP)))] AS deep "
+        f"FROM (VALUES {rows}) AS t (id, ts)"
     )

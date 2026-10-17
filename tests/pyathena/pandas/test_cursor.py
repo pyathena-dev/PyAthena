@@ -569,13 +569,19 @@ class TestPandasCursor:
         ids=["whole", "chunks"],
     )
     def test_unload_nested_timestamps(self, pandas_cursor):
-        """UNLOAD timestamps inside arrays, rows, and maps are read at microseconds."""
+        """UNLOAD timestamps, alone and inside arrays, rows, and maps, are microseconds."""
         pandas_cursor.execute(temporal.nested_query())
         df = pd.concat(pandas_cursor.iter_chunks()).sort_values("id")
-        # The arrays are numpy arrays of datetime64[us].
+        assert df["ts"].dtype == "datetime64[us]"
+        assert [None if pd.isna(v) else v for v in df["ts"]] == temporal.NESTED_VALUES
+        # The arrays are numpy arrays, and the rows and maps Python objects.
+        assert {v.dtype for v in df["arr"]} == {np.dtype("datetime64[us]")}
         assert [v.tolist() for v in df["arr"]] == [[v] for v in temporal.NESTED_VALUES]
         assert df["st"].tolist() == [{"t": v} for v in temporal.NESTED_VALUES]
         assert df["*"].tolist() == [[("k", v)] for v in temporal.NESTED_VALUES]
+        assert [v.tolist() for v in df["deep"]] == [
+            [{"m": [("k", v)]}] for v in temporal.NESTED_VALUES
+        ]
 
     @pytest.mark.parametrize(
         "pandas_cursor", [{"cursor_kwargs": {"unload": True}}], indirect=["pandas_cursor"]
