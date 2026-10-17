@@ -313,8 +313,7 @@ def unstoppable_retries() -> Iterator[None]:
     policy. For cleanup that has to run to its end even when the work that it
     cleans up was stopped, such as the close of an object whose construction
     was cancelled, or a request that stops a query. A scope that
-    :func:`stop_retries_on` opens in the block stops the retries again, and so
-    does the ``stop_when`` condition of a call.
+    :func:`stop_retries_on` opens in the block stops the retries again.
 
     Yields:
         None.
@@ -332,7 +331,6 @@ def retry_api_call(
     logger: logging.Logger | None = None,
     *args,
     stop_on: Callable[[BaseException], bool] | None = None,
-    stop_when: Callable[[], bool] | None = None,
     **kwargs,
 ) -> Any:
     """Execute a function with automatic retry logic for AWS API calls.
@@ -348,10 +346,6 @@ def retry_api_call(
         *args: Positional arguments to pass to the function.
         stop_on: Optional predicate; an exception it accepts is raised at once
             instead of being retried.
-        stop_when: Optional condition, checked from the thread of the call,
-            that stops the retries once it holds, as the event of
-            :func:`stop_retries_on` does. The backoff wait checks it at least
-            every 0.1 seconds.
         **kwargs: Keyword arguments to pass to the function.
 
     Returns:
@@ -379,13 +373,13 @@ def retry_api_call(
     events = _RETRY_STOP_EVENTS.get()
 
     def stopped() -> bool:
-        """Whether an event of the enclosing scopes is set or ``stop_when`` holds."""
-        return any(event.is_set() for event in events) or (stop_when is not None and stop_when())
+        """Whether an event of the enclosing scopes is set."""
+        return any(event.is_set() for event in events)
 
     # The error of the attempt before a backoff wait, raised if the wait is stopped.
     failures: list[BaseException] = []
     # A single event can be waited for; anything else is polled.
-    wait_for_event = len(events) == 1 and stop_when is None
+    wait_for_event = len(events) == 1
 
     def record_failure(retry_state: RetryCallState) -> None:
         """Keep the error of the failed attempt, which a stopped wait raises.
@@ -419,9 +413,7 @@ def retry_api_call(
         raise failures[0]
 
     # Without a stop, tenacity's own sleep is kept.
-    stop_kwargs: dict[str, Any] = (
-        {"before_sleep": record_failure, "sleep": sleep} if events or stop_when is not None else {}
-    )
+    stop_kwargs: dict[str, Any] = {"before_sleep": record_failure, "sleep": sleep} if events else {}
 
     retry = tenacity.Retrying(
         retry=retry_if_exception(

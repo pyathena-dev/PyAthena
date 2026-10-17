@@ -69,7 +69,6 @@ async def async_retry_api_call(
     logger: logging.Logger | None = None,
     *args: Any,
     stop_on: Callable[[BaseException], bool] | None = None,
-    stop_when: Callable[[], bool] | None = None,
     stoppable: bool = True,
     **kwargs: Any,
 ) -> Any:
@@ -85,7 +84,6 @@ async def async_retry_api_call(
         logger: Optional logger for retry attempt logging.
         *args: Positional arguments to pass to ``retry_api_call``.
         stop_on: Passed to ``retry_api_call``.
-        stop_when: Passed to ``retry_api_call``.
         stoppable: Whether a cancellation of the caller stops the retries. A
             request that cleans up, such as one that stops a query or
             terminates a session, passes False: its retries then run to their
@@ -100,9 +98,7 @@ async def async_retry_api_call(
     def call() -> Any:
         """Make the call, ignoring the stop scopes unless it is stoppable."""
         with contextlib.nullcontext() if stoppable else unstoppable_retries():
-            return retry_api_call(
-                func, config, logger, *args, stop_on=stop_on, stop_when=stop_when, **kwargs
-            )
+            return retry_api_call(func, config, logger, *args, stop_on=stop_on, **kwargs)
 
     return await (run_in_thread(call) if stoppable else asyncio.to_thread(call))
 

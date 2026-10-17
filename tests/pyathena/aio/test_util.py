@@ -12,7 +12,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from botocore.exceptions import ClientError
 
 from pyathena.aio.util import async_retry_api_call, create_in_thread, run_in_thread
 from pyathena.util import RetryConfig, retry_api_call, stop_retries_on
@@ -237,16 +236,6 @@ async def test_async_retry_api_call_cancelled(stop_in):
     finally:
         operation.release.set()
         executor.shutdown(wait=True)
-
-
-async def test_async_retry_api_call_stop_when():
-    """``stop_when`` is passed to ``retry_api_call()``."""
-    operation = ThrottledOperation()
-    with pytest.raises(ClientError):
-        await async_retry_api_call(
-            operation, RetryConfig(attempt=3, multiplier=0), stop_when=lambda: True
-        )
-    assert operation.calls == 1
 
 
 async def test_async_retry_api_call_not_stoppable():
