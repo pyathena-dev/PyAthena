@@ -17,9 +17,11 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait
 from unittest import mock
 
 import pytest
+from botocore.exceptions import ClientError
 
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3AioThreadPool, S3ThreadPoolExecutor
-from tests.pyathena.util import EVENT_TIMEOUT, overlapping_calls
+from pyathena.util import RetryConfig, retry_api_call, stop_retries_on
+from tests.pyathena.util import EVENT_TIMEOUT, ThrottledOperation, overlapping_calls
 
 
 class TestS3AioThreadPool:
@@ -57,6 +59,42 @@ class TestS3AioThreadPool:
 
         assert asyncio.run(main()) == "caller"
         pool.shutdown()
+
+    @pytest.mark.parametrize("shielded", [False, True])
+    def test_run_cancelled_while_retrying(self, shielded):
+        # GH-1203: cancelling the waiting task stops the retries of a running
+        # call, unless it runs shielded. Without the stop, the backoff wait
+        # would take at least EVENT_TIMEOUT seconds.
+        operation = ThrottledOperation(block=True, failures=None if not shielded else 2)
+        finished = threading.Event()
+        pool = S3AioThreadPool(1)
+
+        def work():
+            try:
+                config = RetryConfig(attempt=3, multiplier=0 if shielded else EVENT_TIMEOUT)
+                return retry_api_call(operation, config)
+            finally:
+                finished.set()
+
+        async def main():
+            run = pool.run_shielded if shielded else pool.run
+            task = asyncio.ensure_future(run(work))
+            await asyncio.to_thread(operation.started.wait, EVENT_TIMEOUT)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            operation.release.set()
+            started = time.monotonic()
+            assert await asyncio.to_thread(finished.wait, EVENT_TIMEOUT)
+            return time.monotonic() - started
+
+        try:
+            assert asyncio.run(main()) < EVENT_TIMEOUT
+        finally:
+            operation.release.set()
+            pool.shutdown()
+
+        assert operation.calls == (3 if shielded else 1)
 
     @pytest.mark.parametrize("shielded", [False, True])
     def test_run_cancelled_before_start(self, shielded):
@@ -192,6 +230,36 @@ class TestS3AioExecutor:
         assert succeeded.result() == 3
         with pytest.raises(ValueError, match="invalid literal"):
             failed.result()
+
+    def test_submit_context(self):
+        # GH-1203: a function runs with the context of its submitter, as the
+        # task that dispatches it does, so that the stop scope of the
+        # submitter reaches its retries.
+        variable: contextvars.ContextVar[str] = contextvars.ContextVar("variable")
+        stop = threading.Event()
+        stop.set()
+        operation = ThrottledOperation()
+
+        def work():
+            with pytest.raises(ClientError):
+                retry_api_call(operation, RetryConfig(attempt=3, multiplier=0))
+            return variable.get()
+
+        async def main():
+            executor = S3AioExecutor(loop=asyncio.get_running_loop())
+
+            def submit():
+                variable.set("submitter")
+                with stop_retries_on(stop):
+                    return executor.submit(work).result(EVENT_TIMEOUT)
+
+            variable.set("loop")
+            result = await asyncio.to_thread(submit)
+            executor.shutdown()
+            return result
+
+        assert asyncio.run(main()) == "submitter"
+        assert operation.calls == 1
 
     def test_submit_beyond_default_executor(self):
         # GH-1159: max_workers functions run at once, whatever the size of the
@@ -433,6 +501,27 @@ class TestS3AioExecutor:
 
 
 class TestS3Executor:
+    @pytest.mark.parametrize("executor_class", [S3ThreadPoolExecutor, S3AioThreadPool])
+    def test_submit_context(self, executor_class):
+        # GH-1203: a callable runs with a copy of the context of its submitter,
+        # so that the stop scope of the submitter reaches its retries.
+        variable: contextvars.ContextVar[str] = contextvars.ContextVar("variable")
+        stop = threading.Event()
+        stop.set()
+        operation = ThrottledOperation()
+
+        def work():
+            with pytest.raises(ClientError):
+                retry_api_call(operation, RetryConfig(attempt=3, multiplier=0))
+            return variable.get()
+
+        variable.set("submitter")
+        with executor_class(max_workers=1) as executor, stop_retries_on(stop):
+            future: Future[str] = Future()
+            executor.submit_to(future, work)
+            assert future.result(EVENT_TIMEOUT) == "submitter"
+        assert operation.calls == 1
+
     def test_submit_to(self):
         # The callable's outcome resolves the future of the caller.
         with S3ThreadPoolExecutor(max_workers=1) as executor:

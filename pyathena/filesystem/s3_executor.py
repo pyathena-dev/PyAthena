@@ -24,7 +24,7 @@ from concurrent.futures.thread import ThreadPoolExecutor
 from multiprocessing import cpu_count
 from typing import Any, ClassVar, Generic, TypeVar, cast
 
-from pyathena.util import override
+from pyathena.util import override, stop_retries_on
 
 T = TypeVar("T")
 
@@ -122,6 +122,9 @@ class S3Executor(metaclass=ABCMeta):
     work to run in parallel and for shutting down the executor when done.
     Both ``submit`` and ``shutdown`` mirror the ``concurrent.futures.Executor``
     interface so that ``as_completed()`` and ``Future.cancel()`` work unchanged.
+    Each submitted callable runs with a copy of the context variables of its
+    submitter, so that the stop scopes of :func:`~pyathena.util.stop_retries_on`
+    reach the requests that it makes.
     """
 
     @abstractmethod
@@ -186,7 +189,8 @@ class S3ThreadPoolExecutor(S3Executor):
 
     @override
     def submit(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> Future[T]:
-        return self._executor.submit(fn, *args, **kwargs)
+        context = contextvars.copy_context()
+        return self._executor.submit(context.run, fn, *args, **kwargs)
 
     @override
     def shutdown(self, wait: bool = True) -> None:
@@ -269,8 +273,10 @@ class S3AioThreadPool(S3Executor):
     async def run(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         """Run a blocking call in a thread of the pool and wait for it.
 
-        Cancelling the waiting task cancels a call that has not started; a
-        running call keeps running, as with ``asyncio.to_thread()``.
+        Cancelling the waiting task cancels a call that has not started, and
+        stops the retries of the AWS API calls that a running call makes, as
+        :func:`~pyathena.aio.util.run_in_thread` does; the call itself keeps
+        running until it returns or raises.
 
         Args:
             fn: The blocking callable.
@@ -283,14 +289,25 @@ class S3AioThreadPool(S3Executor):
         Raises:
             RuntimeError: If the pool has been shut down.
         """
-        return await asyncio.wrap_future(self.submit(fn, *args, **kwargs))
+        stop = threading.Event()
+
+        def call() -> T:
+            """Run the call in a scope that the cancellation stops."""
+            with stop_retries_on(stop):
+                return fn(*args, **kwargs)
+
+        try:
+            return await asyncio.wrap_future(self.submit(call))
+        except asyncio.CancelledError:
+            stop.set()
+            raise
 
     async def run_shielded(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         """Run a blocking call that a cancellation of the waiting task does not stop.
 
         The call runs to its end, even if it has not started when the waiting
-        task is cancelled; its outcome is then dropped. See
-        :meth:`wait_shielded`.
+        task is cancelled, and its retries are not stopped; its outcome is then
+        dropped. See :meth:`wait_shielded`.
 
         Args:
             fn: The blocking callable.
@@ -432,6 +449,9 @@ class S3AioExecutor(S3Executor):
             with self._lock:
                 if self._shutdown:
                     raise RuntimeError("cannot schedule new futures after shutdown")
+                # The task runs in a copy of the submitter's context, which
+                # call_soon_threadsafe() schedules it with, and so does the
+                # function in the thread of the pool.
                 task = asyncio.run_coroutine_threadsafe(self._pool.run(item.run), self._loop)
             task.add_done_callback(item.settle)
             return future
