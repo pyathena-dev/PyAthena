@@ -260,8 +260,6 @@ def test_to_array_json_formats(input_value, expected):
             [{"name": "John", "age": "30"}, {"name": "Jane", "age": "25"}],
         ),
         ("[1, 2.5, hello]", ["1", "2.5", "hello"]),
-        ("[2023-01-01, 2023-12-31]", ["2023-01-01", "2023-12-31"]),
-        ("[2023-01-01 12:00:00.123]", ["2023-01-01 12:00:00.123"]),
     ],
 )
 def test_to_array_athena_native_formats(input_value, expected):

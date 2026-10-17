@@ -224,9 +224,9 @@ def test_retry_api_call_waits_with_jitter(monkeypatch, multiplier, max_delay, ex
     jitters = [waited - base for waited, base in zip(sleeps, expected_bases, strict=True)]
     assert all(0 <= jitter <= multiplier for jitter in jitters)
     if multiplier:
-        # Random, so the six waits do not add the same jitter. Rounded, so that
-        # the float residuals of a constant jitter do not differ.
-        assert len({round(jitter, 6) for jitter in jitters}) > 1
+        # Random, so the six jitters spread over more than the float residuals of a
+        # constant one would.
+        assert max(jitters) - min(jitters) > multiplier / 100
 
 
 @pytest.mark.parametrize(
