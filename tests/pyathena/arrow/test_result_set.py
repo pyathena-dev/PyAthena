@@ -14,6 +14,7 @@ import pytest
 from pyathena.arrow.converter import DefaultArrowTypeConverter
 from pyathena.arrow.result_set import AthenaArrowResultSet
 from pyathena.connection import Connection
+from pyathena.error import OperationalError
 from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
 
@@ -46,6 +47,46 @@ class TestAthenaArrowResultSet:
         assert result_set.fetchone() is None
         assert result_set.fetchmany() == []
         assert result_set.fetchall() == []
+
+    def test_csv_file_closed_when_stream_fails(self):
+        """The CSV result file is closed when reading it cannot start, as when HEAD fails.
+
+        No AWS calls; the Athena and S3 clients and pyarrow's S3 filesystem are mocked.
+        """
+        connection = MagicMock()
+        connection.client.get_query_results.return_value = {
+            "ResultSet": {
+                "ResultSetMetadata": {
+                    "ColumnInfo": [
+                        {
+                            "Name": "a",
+                            "Type": "integer",
+                            "Precision": 10,
+                            "Scale": 0,
+                            "Nullable": "UNKNOWN",
+                        }
+                    ]
+                },
+                "Rows": [],
+            }
+        }
+        connection.s3_client.head_object.return_value = {"ContentLength": 4}
+        with patch("pyarrow.fs.S3FileSystem") as file_system:
+            file = file_system.return_value.open_input_file.return_value
+            file.size.side_effect = OSError("HEAD failed")
+            with pytest.raises(OperationalError):
+                AthenaArrowResultSet(
+                    connection=connection,
+                    converter=DefaultArrowTypeConverter(),
+                    query_execution=MagicMock(
+                        state=AthenaQueryExecution.STATE_SUCCEEDED,
+                        output_location="s3://bucket/query.csv",
+                        substatement_type="SELECT",
+                    ),
+                    arraysize=1,
+                    retry_config=RetryConfig(),
+                )
+        file.close.assert_called_once_with()
 
     @pytest.mark.parametrize("method", ["fetchone", "fetchmany", "fetchall", "iter", "mixed"])
     @pytest.mark.parametrize(

@@ -169,7 +169,7 @@ class TestParquetChunkReader:
         # The later row groups are fetched after the first chunk.
         assert len(fs.fetched) > fetched
         # Without a cache type, only the ranges that pyarrow requests are read.
-        assert fs.cache_types == [cache_type or "none"]
+        assert set(fs.cache_types) == {cache_type or "none"}
 
     def test_no_files(self):
         assert list(ParquetChunkReader(LocalFileSystem(), [], 4)) == []

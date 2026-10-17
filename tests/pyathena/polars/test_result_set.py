@@ -39,6 +39,7 @@ def _local_result_set(
     data_manifest: list[str] | None = None,
     chunksize: int | None = None,
     credentials_error: Exception | None = None,
+    file_system: Any = None,
     **kwargs: Any,
 ) -> AthenaPolarsResultSet:
     """Create a result set of a succeeded query whose result files are local files.
@@ -54,6 +55,7 @@ def _local_result_set(
         chunksize: The chunk size of the result set.
         credentials_error: An error that the session raises when credentials are looked
             up, or None for a session without credentials.
+        file_system: Creates PyAthena's filesystem; by default, one of local files.
         **kwargs: The read arguments given to ``execute()``.
 
     Returns:
@@ -91,7 +93,10 @@ def _local_result_set(
     with (
         # The HEAD request parses the output location, which is a local path here.
         patch.object(AthenaPolarsResultSet, "_get_content_length", return_value=1),
-        patch("pyathena.polars.result_set.S3FileSystem", lambda **_: LocalFileSystem()),
+        patch(
+            "pyathena.polars.result_set.S3FileSystem",
+            file_system or (lambda **_: LocalFileSystem()),
+        ),
     ):
         return AthenaPolarsResultSet(
             connection=connection,
@@ -303,9 +308,9 @@ class TestAthenaPolarsResultSet:
     def test_storage_options_replace_defaults(self, tmp_path, unload, chunksize):
         """storage_options given to execute() reach every Polars read as given.
 
-        They are read without PyAthena's credentials, whose lookup fails here. These
-        reads use Polars' native object store, which ignores the options for local
-        files, so the reads are observed.
+        They are read without PyAthena's credentials, whose lookup fails here, or its
+        filesystem. These reads use Polars' native object store, which ignores the
+        options for local files, so the reads are observed.
         """
         storage_options = {"aws_region": "us-west-2"}
         if unload:
@@ -326,6 +331,7 @@ class TestAthenaPolarsResultSet:
                 **files,
                 chunksize=chunksize,
                 credentials_error=OSError("no credentials"),
+                file_system=MagicMock(side_effect=AssertionError("PyAthena's filesystem")),
                 storage_options=storage_options,
             )
             assert result_set.fetchall() == [(1,), (2,)]
@@ -543,6 +549,13 @@ class TestPolarsDataFrameIterator:
         rows = list(PolarsDataFrameIterator(df, {"s": _to_default}, ["n", "s"]).itertuples())
 
         assert rows == [(i, f"v{i}") for i in range(size)]
+
+    def test_itertuples_without_column_names(self):
+        """Without column names, each row of a chunk is empty."""
+        df = pl.DataFrame({"n": [1, 2]})
+
+        assert list(PolarsDataFrameIterator(df, {}, []).itertuples()) == [(), ()]
+        assert list(PolarsDataFrameIterator(df, {}, []).iterrows()) == [(0, {}), (1, {})]
 
     def test_iterrows_continuous_row_numbers(self):
         """Row numbers continue across chunks, with each row keyed by the column names."""
