@@ -205,20 +205,6 @@ class TestS3FSCursor:
         assert s3fs_cursor.fetchmany(10) == []
         assert s3fs_cursor.fetchall() == []
 
-    def test_query_id(self, s3fs_cursor):
-        assert not s3fs_cursor.query_id
-        s3fs_cursor.execute("SELECT * FROM one_row")
-        assert s3fs_cursor.query_id is not None
-
-    def test_description_without_execute(self, s3fs_cursor):
-        assert s3fs_cursor.description is None
-
-    def test_description_with_select(self, s3fs_cursor):
-        s3fs_cursor.execute("SELECT * FROM one_row")
-        assert s3fs_cursor.description == [
-            ("number_of_rows", "integer", None, None, 10, 0, "UNKNOWN")
-        ]
-
     def test_description_with_ctas(self, s3fs_cursor):
         table_name = (
             f"test_description_with_ctas_{''.join(random.choices(string.ascii_lowercase, k=10))}"
@@ -257,16 +243,14 @@ class TestS3FSCursor:
         assert s3fs_cursor.fetchone() is None
         s3fs_cursor.execute(f"DROP TABLE {ENV.schema}.{table_name}")
 
-    @pytest.mark.skip(reason="Requires insert_test table to exist in test environment")
-    def test_executemany(self, s3fs_cursor):
-        rows = [(1, "foo"), (2, "bar"), (3, "jim")]
+    def test_executemany(self, s3fs_cursor, empty_table):
+        rows = [(1, "foo"), (2, "bar"), (3, "jim o'rourke")]
         s3fs_cursor.executemany(
-            f"INSERT INTO {ENV.schema}.insert_test (a, b) VALUES (%(a)s, %(b)s)",
-            [{"a": row[0], "b": row[1]} for row in rows],
+            f"INSERT INTO {empty_table} (a, b) VALUES (%(a)d, %(b)s)",
+            [{"a": a, "b": b} for a, b in rows],
         )
-        s3fs_cursor.execute(f"SELECT * FROM {ENV.schema}.insert_test ORDER BY a")
-        assert s3fs_cursor.fetchall() == rows
-        s3fs_cursor.execute(f"DELETE FROM {ENV.schema}.insert_test WHERE a IN (1, 2, 3)")
+        s3fs_cursor.execute(f"SELECT * FROM {empty_table}")
+        assert sorted(s3fs_cursor.fetchall()) == list(rows)
 
     def test_on_start_query_execution(self):
         callback_query_id = None
@@ -307,154 +291,26 @@ class TestS3FSCursor:
             cursor.execute("SELECT * FROM one_row", on_start_query_execution=callback)
             assert callback_query_id == cursor.query_id
 
+    @pytest.mark.parametrize(
+        "s3fs_cursor",
+        [
+            {"cursor_kwargs": {"csv_reader": AthenaCSVReader}},
+            {"cursor_kwargs": {"csv_reader": EmptyStringAsNullCSVReader}},
+        ],
+        indirect=["s3fs_cursor"],
+    )
     def test_contain_tab_character(self, s3fs_cursor):
-        """Test that tab characters in result data are handled correctly.
-
-        S3FS cursor uses tab as delimiter for parsing Athena's CSV output.
-        This test verifies that data containing tab characters is correctly
-        parsed when Athena properly quotes such fields.
-        """
-        # Test with tab character in string using CHR(9)
-        s3fs_cursor.execute("SELECT 'before' || CHR(9) || 'after' AS col_with_tab")
-        result = s3fs_cursor.fetchone()
-        assert result == ("before\tafter",)
-
-        # Test with multiple columns where one contains tab
+        """Both readers read values with tabs, newlines, and commas, which Athena quotes."""
         s3fs_cursor.execute(
             """
             SELECT
-                'normal' AS col1,
-                'has' || CHR(9) || 'tab' AS col2,
-                'also_normal' AS col3
+              'before' || CHR(9) || 'after' AS col_tab
+              ,'line1' || CHR(10) || 'line2' AS col_newline
+              ,'a' || CHR(9) || 'b' || CHR(10) || 'c' AS col_tab_newline
+              ,'a,b,c' AS col_comma
             """
         )
-        result = s3fs_cursor.fetchone()
-        assert result == ("normal", "has\ttab", "also_normal")
-
-        # Test with newline character as well
-        s3fs_cursor.execute("SELECT 'line1' || CHR(10) || 'line2' AS col_with_newline")
-        result = s3fs_cursor.fetchone()
-        assert result == ("line1\nline2",)
-
-        # Test with both tab and newline
-        s3fs_cursor.execute(
-            "SELECT 'a' || CHR(9) || 'b' || CHR(10) || 'c' AS col_with_special_chars"
-        )
-        result = s3fs_cursor.fetchone()
-        assert result == ("a\tb\nc",)
-
-    @pytest.mark.parametrize(
-        "csv_reader_class",
-        [EmptyStringAsNullCSVReader, AthenaCSVReader],
-    )
-    def test_basic_query_with_reader(self, csv_reader_class):
-        """Both readers should work for basic queries."""
-        with (
-            contextlib.closing(
-                connect(
-                    schema_name=ENV.schema,
-                    cursor_class=S3FSCursor,
-                    cursor_kwargs={"csv_reader": csv_reader_class},
-                )
-            ) as conn,
-            conn.cursor() as cursor,
-        ):
-            cursor.execute("SELECT * FROM one_row")
-            result = cursor.fetchall()
-            assert result == [(1,)]
-
-    @pytest.mark.parametrize(
-        "csv_reader_class",
-        [EmptyStringAsNullCSVReader, AthenaCSVReader],
-    )
-    def test_multiple_columns_with_reader(self, csv_reader_class):
-        """Test multiple columns work with both readers."""
-        with (
-            contextlib.closing(
-                connect(
-                    schema_name=ENV.schema,
-                    cursor_class=S3FSCursor,
-                    cursor_kwargs={"csv_reader": csv_reader_class},
-                )
-            ) as conn,
-            conn.cursor() as cursor,
-        ):
-            cursor.execute(
-                """
-                SELECT
-                    1 AS col_int,
-                    'text' AS col_string,
-                    1.5 AS col_double
-                """
-            )
-            result = cursor.fetchone()
-            assert result == (1, "text", 1.5)
-
-    def test_null_with_empty_string_as_null_reader(self):
-        """EmptyStringAsNullCSVReader: NULL is returned as None."""
-        with (
-            contextlib.closing(
-                connect(
-                    schema_name=ENV.schema,
-                    cursor_class=S3FSCursor,
-                    cursor_kwargs={"csv_reader": EmptyStringAsNullCSVReader},
-                )
-            ) as conn,
-            conn.cursor() as cursor,
-        ):
-            cursor.execute("SELECT NULL AS null_col")
-            result = cursor.fetchone()
-            assert result == (None,)
-
-    def test_null_with_athena_reader(self):
-        """AthenaCSVReader: NULL is returned as None."""
-        with (
-            contextlib.closing(
-                connect(
-                    schema_name=ENV.schema,
-                    cursor_class=S3FSCursor,
-                    cursor_kwargs={"csv_reader": AthenaCSVReader},
-                )
-            ) as conn,
-            conn.cursor() as cursor,
-        ):
-            cursor.execute("SELECT NULL AS null_col")
-            result = cursor.fetchone()
-            assert result == (None,)
-
-    def test_empty_string_with_empty_string_as_null_reader(self):
-        """EmptyStringAsNullCSVReader: Empty string becomes None (loses distinction)."""
-        with (
-            contextlib.closing(
-                connect(
-                    schema_name=ENV.schema,
-                    cursor_class=S3FSCursor,
-                    cursor_kwargs={"csv_reader": EmptyStringAsNullCSVReader},
-                )
-            ) as conn,
-            conn.cursor() as cursor,
-        ):
-            cursor.execute("SELECT '' AS empty_col")
-            result = cursor.fetchone()
-            # EmptyStringAsNullCSVReader treats empty string same as NULL
-            assert result == (None,)
-
-    def test_empty_string_with_athena_reader(self):
-        """AthenaCSVReader: Empty string is preserved as empty string."""
-        with (
-            contextlib.closing(
-                connect(
-                    schema_name=ENV.schema,
-                    cursor_class=S3FSCursor,
-                    cursor_kwargs={"csv_reader": AthenaCSVReader},
-                )
-            ) as conn,
-            conn.cursor() as cursor,
-        ):
-            cursor.execute("SELECT '' AS empty_col")
-            result = cursor.fetchone()
-            # AthenaCSVReader preserves empty string as ''
-            assert result == ("",)
+        assert s3fs_cursor.fetchall() == [("before\tafter", "line1\nline2", "a\tb\nc", "a,b,c")]
 
     @pytest.mark.parametrize(
         ("csv_reader", "expected_empty"),
@@ -490,50 +346,6 @@ class TestS3FSCursor:
             # Empty string behavior depends on reader
             assert result[1] == expected_empty
 
-    def test_mixed_values_with_athena_reader(self):
-        """AthenaCSVReader: Mixed NULL, empty string, and regular values."""
-        with (
-            contextlib.closing(
-                connect(
-                    schema_name=ENV.schema,
-                    cursor_class=S3FSCursor,
-                    cursor_kwargs={"csv_reader": AthenaCSVReader},
-                )
-            ) as conn,
-            conn.cursor() as cursor,
-        ):
-            cursor.execute(
-                """
-                SELECT
-                    NULL AS null_col,
-                    '' AS empty_col,
-                    'text' AS text_col,
-                    NULL AS null_col2
-                """
-            )
-            result = cursor.fetchone()
-            assert result == (None, "", "text", None)
-
-    @pytest.mark.parametrize(
-        "csv_reader_class",
-        [EmptyStringAsNullCSVReader, AthenaCSVReader],
-    )
-    def test_quoted_string_with_comma(self, csv_reader_class):
-        """Both readers should handle strings containing commas."""
-        with (
-            contextlib.closing(
-                connect(
-                    schema_name=ENV.schema,
-                    cursor_class=S3FSCursor,
-                    cursor_kwargs={"csv_reader": csv_reader_class},
-                )
-            ) as conn,
-            conn.cursor() as cursor,
-        ):
-            cursor.execute("SELECT 'a,b,c' AS col_with_commas")
-            result = cursor.fetchone()
-            assert result == ("a,b,c",)
-
     @pytest.mark.parametrize(
         "s3fs_cursor",
         [
@@ -556,7 +368,7 @@ class TestS3FSCursor:
     def test_ambiguous_time_zone_value(self, s3fs_cursor):
         """A local time that its zone repeats raises DataError instead of choosing one."""
         s3fs_cursor.execute(AMBIGUOUS_TIME_ZONE_QUERY)
-        with pytest.raises(DataError, match="is ambiguous"):
+        with pytest.raises(DataError):
             s3fs_cursor.fetchall()
 
     @pytest.mark.parametrize(

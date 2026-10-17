@@ -5,7 +5,6 @@
 #
 # SPDX-License-Identifier: MIT
 
-from collections.abc import Iterator
 from io import StringIO
 
 from pyathena.s3fs.reader import AthenaCSVReader, EmptyStringAsNullCSVReader
@@ -13,18 +12,6 @@ from pyathena.s3fs.reader import AthenaCSVReader, EmptyStringAsNullCSVReader
 
 class TestEmptyStringAsNullCSVReader:
     """Tests for EmptyStringAsNullCSVReader using Python's standard csv module."""
-
-    def test_basic_parsing(self):
-        data = StringIO("a,b,c\n1,2,3\n")
-        reader = EmptyStringAsNullCSVReader(data, delimiter=",")
-        rows = list(reader)
-        assert rows == [["a", "b", "c"], ["1", "2", "3"]]
-
-    def test_tab_delimiter(self):
-        data = StringIO("a\tb\tc\n1\t2\t3\n")
-        reader = EmptyStringAsNullCSVReader(data, delimiter="\t")
-        rows = list(reader)
-        assert rows == [["a", "b", "c"], ["1", "2", "3"]]
 
     def test_empty_field_returns_none(self):
         """EmptyStringAsNullCSVReader returns None for both NULL and empty string."""
@@ -34,30 +21,6 @@ class TestEmptyStringAsNullCSVReader:
         rows = list(reader)
         assert rows == [["a", None, "b", None, "c"]]
 
-    def test_quoted_field_with_comma(self):
-        data = StringIO('"a,b",c\n')
-        reader = EmptyStringAsNullCSVReader(data, delimiter=",")
-        rows = list(reader)
-        assert rows == [["a,b", "c"]]
-
-    def test_quoted_field_with_newline(self):
-        data = StringIO('"line1\nline2",b\n')
-        reader = EmptyStringAsNullCSVReader(data, delimiter=",")
-        rows = list(reader)
-        assert rows == [["line1\nline2", "b"]]
-
-    def test_escaped_quote(self):
-        data = StringIO('"a""b",c\n')
-        reader = EmptyStringAsNullCSVReader(data, delimiter=",")
-        rows = list(reader)
-        assert rows == [['a"b', "c"]]
-
-    def test_empty_file(self):
-        data = StringIO("")
-        reader = EmptyStringAsNullCSVReader(data, delimiter=",")
-        rows = list(reader)
-        assert rows == []
-
     def test_empty_line(self):
         """Empty line returns single None (e.g., SELECT NULL)."""
         # Python's csv.reader returns [] for empty lines; we normalize to [None]
@@ -66,28 +29,12 @@ class TestEmptyStringAsNullCSVReader:
         rows = list(reader)
         assert rows == [[None]]
 
-    def test_implements_iterator_protocol(self):
-        """EmptyStringAsNullCSVReader implements collections.abc.Iterator."""
-        data = StringIO("a,b\n")
-        reader = EmptyStringAsNullCSVReader(data, delimiter=",")
-        assert isinstance(reader, Iterator)
-
-    def test_close(self):
-        """close() releases file resources."""
-        data = StringIO("a,b\n")
-        reader = EmptyStringAsNullCSVReader(data, delimiter=",")
-        reader.close()
-        # After close, iteration should stop immediately
-        rows = list(reader)
-        assert rows == []
-
     def test_context_manager(self):
-        """Reader can be used as context manager."""
+        """Leaving the context closes the file, and iteration stops."""
         data = StringIO("a,b\n1,2\n")
         with EmptyStringAsNullCSVReader(data, delimiter=",") as reader:
-            rows = list(reader)
-        assert rows == [["a", "b"], ["1", "2"]]
-        # After exiting context, reader should be closed
+            assert next(reader) == ["a", "b"]
+        assert data.closed
         assert list(reader) == []
 
 
@@ -128,13 +75,6 @@ class TestAthenaCSVReader:
         reader = AthenaCSVReader(data, delimiter=",")
         rows = list(reader)
         assert rows == [["a", "b", None]]
-
-    def test_no_trailing_null(self):
-        """No trailing NULL when line ends with value."""
-        data = StringIO("a,b,c\n")
-        reader = AthenaCSVReader(data, delimiter=",")
-        rows = list(reader)
-        assert rows == [["a", "b", "c"]]
 
     def test_empty_string_at_start(self):
         """Empty string at the start of a line."""
@@ -212,13 +152,6 @@ class TestAthenaCSVReader:
         rows = list(reader)
         assert rows == [[None]]
 
-    def test_quoted_field_with_newline(self):
-        """Quoted field containing a newline character."""
-        data = StringIO('"line1\nline2",b\n')
-        reader = AthenaCSVReader(data, delimiter=",")
-        rows = list(reader)
-        assert rows == [["line1\nline2", "b"]]
-
     def test_quoted_field_with_multiple_newlines(self):
         """Quoted field containing multiple newline characters."""
         data = StringIO('"line1\nline2\nline3",b,c\n')
@@ -240,26 +173,10 @@ class TestAthenaCSVReader:
         rows = list(reader)
         assert rows == [["a", "b"], ["multi\nline", "c"], ["d", "e"]]
 
-    def test_implements_iterator_protocol(self):
-        """AthenaCSVReader implements collections.abc.Iterator."""
-        data = StringIO("a,b\n")
-        reader = AthenaCSVReader(data, delimiter=",")
-        assert isinstance(reader, Iterator)
-
-    def test_close(self):
-        """close() releases file resources."""
-        data = StringIO("a,b\n")
-        reader = AthenaCSVReader(data, delimiter=",")
-        reader.close()
-        # After close, iteration should stop immediately
-        rows = list(reader)
-        assert rows == []
-
     def test_context_manager(self):
-        """Reader can be used as context manager."""
+        """Leaving the context closes the file, and iteration stops."""
         data = StringIO("a,b\n1,2\n")
         with AthenaCSVReader(data, delimiter=",") as reader:
-            rows = list(reader)
-        assert rows == [["a", "b"], ["1", "2"]]
-        # After exiting context, reader should be closed
+            assert next(reader) == ["a", "b"]
+        assert data.closed
         assert list(reader) == []

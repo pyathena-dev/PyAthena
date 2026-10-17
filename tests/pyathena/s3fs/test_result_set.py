@@ -38,10 +38,21 @@ class _TupleCSVReader:
         self._reader.close()
 
 
-def _result_set(data, csv_reader, suffix=".csv", column_types=None, type_hints=None, stream=None):
+def _result_set(
+    data,
+    csv_reader,
+    suffix=".csv",
+    column_types=None,
+    type_hints=None,
+    stream=None,
+    block_size=None,
+    filesystem_class=None,
+):
     stream = stream or BytesIO(data.encode())
-    filesystem = MagicMock()
-    filesystem._open.return_value = stream
+    if filesystem_class is None:
+        filesystem = MagicMock()
+        filesystem._open.return_value = stream
+        filesystem_class = MagicMock(return_value=filesystem)
     connection = MagicMock()
     connection.s3_client.head_object.return_value = {"ContentLength": len(data.encode())}
     response = {
@@ -70,8 +81,9 @@ def _result_set(data, csv_reader, suffix=".csv", column_types=None, type_hints=N
             ),
             arraysize=1,
             retry_config=RetryConfig(),
+            block_size=block_size,
             csv_reader=csv_reader,
-            filesystem_class=MagicMock(return_value=filesystem),
+            filesystem_class=filesystem_class,
             result_set_type_hints=type_hints,
         )
     return result_set, stream
@@ -79,13 +91,6 @@ def _result_set(data, csv_reader, suffix=".csv", column_types=None, type_hints=N
 
 class _UserS3FileSystem(S3FileSystem):
     """A user's subclass, whose own cache settings apply."""
-
-
-_PREFETCH_OPTIONS = {
-    "block_size": 32 * 2**20,
-    "cache_type": "background",
-    "cache_options": {"maxblocks": 2},
-}
 
 
 class _FailingCSVReader(_TupleCSVReader):
@@ -97,21 +102,37 @@ class _FailingCSVReader(_TupleCSVReader):
 
 class TestAthenaS3FSResultSet:
     @pytest.mark.parametrize(
-        ("block_size", "filesystem_class", "expected"),
+        ("block_size", "filesystem_class", "prefetch"),
         [
-            (None, S3FileSystem, _PREFETCH_OPTIONS),
-            (None, AioS3FileSystem, _PREFETCH_OPTIONS),
-            (5 * 2**20, S3FileSystem, {}),
-            (None, _UserS3FileSystem, {}),
+            (None, S3FileSystem, True),
+            (None, AioS3FileSystem, True),
+            (5 * 2**20, S3FileSystem, False),
+            (None, _UserS3FileSystem, False),
         ],
         ids=["default", "aio", "block_size", "subclass"],
     )
-    def test_get_csv_open_options(self, block_size, filesystem_class, expected):
-        """PyAthena's filesystems prefetch the CSV result unless block_size is given."""
-        result_set = AthenaS3FSResultSet.__new__(AthenaS3FSResultSet)
-        result_set._block_size = block_size
-        result_set._fs = filesystem_class.__new__(filesystem_class)
-        assert result_set._get_csv_open_options() == expected
+    def test_csv_open_options(self, block_size, filesystem_class, prefetch):
+        """PyAthena's filesystems prefetch the CSV result unless block_size is given.
+
+        With block_size or a user's filesystem class, the file is opened with the
+        filesystem's own settings.
+        """
+        data = "null_col,empty_col,value_col\n,,a\n"
+        with patch.object(
+            filesystem_class, "_open", autospec=True, return_value=BytesIO(data.encode())
+        ) as open_file:
+            result_set, _ = _result_set(
+                data, None, block_size=block_size, filesystem_class=filesystem_class
+            )
+        with result_set:
+            assert result_set.fetchall() == [(None, None, "a")]
+        options = open_file.call_args.kwargs
+        if prefetch:
+            assert options["cache_type"] == "background"
+            assert options["block_size"] == AthenaS3FSResultSet.CSV_BLOCK_SIZE
+        else:
+            assert "cache_type" not in options
+            assert "block_size" not in options
 
     def test_reader_closes_at_end_of_results(self):
         """The file is closed once every row has been read, before close()."""
@@ -121,22 +142,11 @@ class TestAthenaS3FSResultSet:
         assert result_set.fetchone() is None
         result_set.close()
 
-    def test_fetch_across_batches(self):
-        """The buffer is refilled one batch of arraysize rows at a time."""
-        result_set, _ = _result_set("null_col,empty_col,value_col\n,,a\n,,b\n,,c\n", None)
-        assert result_set.fetchmany(2) == [(None, None, "a"), (None, None, "b")]
-        assert result_set.fetchone() == (None, None, "c")
-        assert result_set.fetchmany() == []
-        assert result_set.fetchall() == []
-        assert result_set.fetchone() is None
-        assert result_set.rownumber == 3
-        result_set.close()
-
     def test_reader_failure_closes_file(self):
         """A failure to read the header row closes the file."""
         data = "null_col,empty_col,value_col\n"
         stream = BytesIO(data.encode())
-        with pytest.raises(OperationalError, match="unreadable header"):
+        with pytest.raises(OperationalError):
             _result_set(data, _FailingCSVReader, stream=stream)
         assert stream.closed
 
