@@ -222,6 +222,7 @@ Name that contract before writing the test, and check whether an existing test o
 Check behavior against Athena and Amazon S3 where the services can observe it.
 Run only the queries and requests that the contract needs, and put the values a test checks in the columns of one query where possible.
 Use offline tests with mocks or botocore's `Stubber` for logic that the services cannot exercise deterministically, such as concurrency, combinations of failures and aborts, and interrupts, and try the relevant patterns in one parametrized test.
+Inject failures and interrupts through public objects, such as the S3 client, the executor, a future, or `Stubber`, rather than through private methods.
 
 Do not add a test that:
 
