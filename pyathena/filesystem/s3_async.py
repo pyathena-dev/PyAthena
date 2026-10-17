@@ -710,14 +710,15 @@ class AioS3FileSystem(AsyncFileSystem):
             # Also on cancellation, as S3FileSystem._finish_multipart_upload
             # does on an interrupt.
             failed = True
-            stop.set()
             # The requests that have not started are cancelled here, before
-            # the cleanup waits for a thread after them.
+            # the cleanup waits for a thread after them, and before the stop,
+            # which would let a thread that it frees take one of them.
             creation.cancel()
             for part_copy in part_copies:
                 part_copy.cancel()
             if completion is not None:
                 completion.cancel()
+            stop.set()
             # A repeated cancellation of this task returns without stopping
             # the cleanup.
             await self._thread_pool.run_shielded(_abort)
@@ -1478,8 +1479,14 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             self._pool.shutdown(wait=False)
             return
         self.buffer = None
-        # Set here, so that the creation and the running parts stop even
-        # while they hold every thread of the file, ahead of _discard().
+        # Here, so that the creation and the running parts stop even while
+        # they hold every thread of the file, ahead of _discard(). The
+        # requests that have not started are cancelled before the stop, which
+        # would let a thread that it frees take one of them.
+        if self._creation is not None:
+            self._creation.cancel()
+        for part in self._parts:
+            part.cancel()
         self._parts_stop.set()
         try:
             await self._pool.run_shielded(self._discard)
@@ -1661,13 +1668,17 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         logged instead of raised, so that it does not mask the error that the
         caller is handling, also when no task waits for the abort any more.
         """
-        # The creation and the running parts make no further attempt.
+        # The requests that have not started are cancelled before the stop,
+        # which would let a thread that it frees take one of them, and the
+        # creation and the running parts make no further attempt.
+        creating = self._creation is not None and not self._creation.cancel()
+        running = [part for part in self._parts if not part.cancel()]
         self._parts_stop.set()
         try:
-            if self._creation is not None and not self._creation.cancel():
-                wait([self._creation])
+            if creating:
+                wait([cast(Future[S3MultipartUpload], self._creation)])
             if self._writer is not None and self._writer.upload is not None:
-                wait([part for part in self._parts if not part.cancel()])
+                wait(running)
                 self._writer.abort(**self._get_request_kwargs("abort_multipart_upload"))
         except Exception:
             _logger.exception(

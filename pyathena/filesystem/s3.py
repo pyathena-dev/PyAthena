@@ -1714,6 +1714,11 @@ class S3FileSystem(AbstractFileSystem):
                     abort=False,
                 )
             except BaseException:
+                # The requests that have not started are cancelled before the
+                # stop, which would let a thread that it frees take one of them.
+                creation.cancel()
+                for future in futures:
+                    future.cancel()
                 stop.set()
                 if not creation.cancel():
                     while not creation.done():
@@ -2325,10 +2330,12 @@ class S3FileSystem(AbstractFileSystem):
                     for future in as_completed(futures):
                         future.result()
                 except BaseException:
-                    # No more ACL is applied after one failed.
-                    stop.set()
+                    # No more ACL is applied after one failed. The updates that
+                    # have not started are cancelled before the stop, which
+                    # would let a thread that it frees take one of them.
                     for future in futures:
                         future.cancel()
+                    stop.set()
                     raise
             if s3_path.key:
                 # A key prefix is not an object itself; only the objects
@@ -3090,7 +3097,13 @@ class S3File(AbstractBufferedFile):
             return
         self.buffer = None
         self.closed = True
-        # The creation and the running parts make no further attempt.
+        # The requests that have not started are cancelled before the stop,
+        # which would let a thread that it frees take one of them, and the
+        # creation and the running parts make no further attempt.
+        if creation is not None:
+            creation.cancel()
+        for part in self.multipart_upload_parts:
+            part.cancel()
         self._parts_stop.set()
         try:
             if creation is not None and not creation.cancel():
@@ -3376,11 +3389,13 @@ class S3File(AbstractBufferedFile):
         abort, whose own retries are not stopped.
         """
         if self.multipart_upload:
-            self._parts_stop.set()
             # A part that is still uploading when the upload is aborted may
             # be stored after the abort, so wait for the parts that could not
-            # be cancelled first.
-            wait([f for f in self.multipart_upload_parts if not f.cancel()])
+            # be cancelled first. They are cancelled before the stop, which
+            # would let a thread that it frees take one of them.
+            running = [f for f in self.multipart_upload_parts if not f.cancel()]
+            self._parts_stop.set()
+            wait(running)
             self._get_multipart_writer().abort(**self._get_request_kwargs("abort_multipart_upload"))
 
         self.multipart_upload = None
@@ -3477,24 +3492,24 @@ class S3File(AbstractBufferedFile):
                 with stop_retries_on(stop):
                     for r in ranges:
                         # Tracked before it is scheduled, so that an interrupt
-                        # while it is being scheduled still lets it be cancelled.
-                        read: Future[bytes] = Future()
-                        futures.append(read)
+                        # while it is being scheduled still lets it be
+                        # cancelled; not by a variable, which would keep it in
+                        # this frame, which the traceback of an error keeps.
+                        futures.append(Future())
                         self._executor.submit_to(
-                            read, self.fs.core.get_object, path, r, **request_kwargs
+                            futures[-1], self.fs.core.get_object, path, r, **request_kwargs
                         )
-                # Otherwise this frame, which the traceback of an error keeps,
-                # keeps the last read.
-                del read
                 done = wait(futures, return_when=FIRST_EXCEPTION).done
             except BaseException as e:
                 # The reads are cancelled with the read of the range, as below,
                 # and the frames of the wait, which keep their futures, are
                 # cleared; clear_frames() skips this frame, which is executing.
                 traceback.clear_frames(e.__traceback__)
-                stop.set()
                 while futures:
                     futures.pop().cancel()
+                # After the cancellation, which a thread that it frees could
+                # otherwise precede by taking a queued read.
+                stop.set()
                 raise
             failed = next(
                 (f for f in done if not f.cancelled() and f.exception() is not None), None
@@ -3503,9 +3518,9 @@ class S3File(AbstractBufferedFile):
                 # The reads that have not started are cancelled, and the
                 # futures of the others are dropped, so that this frame, which
                 # the traceback of the error keeps, does not keep their data.
-                stop.set()
                 while futures:
                     futures.pop().cancel()
+                stop.set()
                 done.clear()
                 failed.result()
             return b"".join(f.result() for f in futures)
