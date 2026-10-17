@@ -230,15 +230,29 @@ class TestS3Core:
         ],
     )
     def test_get_object(self, version_id, range_, expected):
-        core, stubber = _make_core(request_kwargs={"ServerSideEncryption": "AES256"})
-        # ServerSideEncryption, which GetObject does not accept, is not sent.
+        core, stubber = _make_core(
+            request_kwargs={"ServerSideEncryption": "AES256", "ExpectedBucketOwner": "111122223333"}
+        )
+        # ServerSideEncryption, which GetObject does not accept, is not sent,
+        # and a parameter of the call takes precedence over request_kwargs.
         stubber.add_response(
             "get_object",
             {"Body": StreamingBody(io.BytesIO(b"data"), 4)},
-            {"Bucket": "bucket", "Key": "key", "IfMatch": '"e"', **expected},
+            {
+                "Bucket": "bucket",
+                "Key": "key",
+                "IfMatch": '"e"',
+                "ExpectedBucketOwner": "444455556666",
+                **expected,
+            },
         )
         with stubber:
-            data = core.get_object(S3Path("bucket", "key", version_id), range_, IfMatch='"e"')
+            data = core.get_object(
+                S3Path("bucket", "key", version_id),
+                range_,
+                IfMatch='"e"',
+                ExpectedBucketOwner="444455556666",
+            )
         stubber.assert_no_pending_responses()
         assert data == b"data"
 
