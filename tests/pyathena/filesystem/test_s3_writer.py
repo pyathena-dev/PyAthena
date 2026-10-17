@@ -11,6 +11,7 @@ import threading
 import weakref
 from concurrent.futures import CancelledError
 from types import SimpleNamespace
+from unittest import mock
 
 import boto3
 import pytest
@@ -436,12 +437,13 @@ class TestS3WriteSession:
                 session.submit_part(1, body)  # type: ignore[arg-type]
                 del body
                 assert session.ready().result(5) is None
-                assert body_ref() is None
-                with pytest.raises(PermissionError) as info:
-                    session.check()
-                del info
-                assert error_ref() is None
-                session.abort()
+            # The worker has returned from the request and its callbacks.
+            assert body_ref() is None
+            with pytest.raises(PermissionError) as info:
+                session.check()
+            del info
+            assert error_ref() is None
+            session.abort()
         finally:
             gc.enable()
 
@@ -643,3 +645,19 @@ class TestS3WriteSession:
             session.abort()
         assert requests.calls == []
         assert session.state is _S3WriteState.ABORTED
+
+    def test_unrecorded_part_is_not_completed(self):
+        # A part request whose done callback was stopped, such as by an
+        # interrupt on the thread that cancelled it, is neither waited for
+        # forever nor completed without its data.
+        session, requests, executor = _make_session()
+        with executor:
+            _start(session)
+            with mock.patch.object(session, "_on_part_done", return_value=None):
+                session.submit_part(1, b"abcd")
+            session.submit_part(2, b"efgh")
+            with pytest.raises(RuntimeError, match=r"The parts \[1\] .* have not been uploaded"):
+                session.complete()
+            session.abort()
+        assert ("complete", (2,)) not in requests.calls
+        assert requests.calls[-1] == ("abort",)
