@@ -11,7 +11,7 @@ from typing import (
 )
 
 from pyathena import OperationalError
-from pyathena.arrow.converter import _to_timestamp
+from pyathena.arrow.converter import _to_null, _to_timestamp
 from pyathena.arrow.util import to_column_info
 from pyathena.converter import Converter, _to_default
 from pyathena.filesystem.reader import ReadAheadStream
@@ -298,6 +298,13 @@ class AthenaArrowResultSet(AthenaResultSet):
             if d[1] == "timestamp" and isinstance(dtype := column_types.get(name), pa.TimestampType)
         }
         binary_columns = {i for i, d in enumerate(description) if d[1] == "varbinary"}
+        # Athena never writes an empty string for these types, so an empty string in
+        # their text columns is NULL.
+        null_text_columns = {
+            i
+            for i, d in enumerate(description)
+            if d[1] in ("time", "time with time zone", "timestamp with time zone")
+        }
         if length and self.output_location and self.output_location.endswith(".txt"):
             read_opts = csv.ReadOptions(
                 skip_rows=0,
@@ -356,13 +363,16 @@ class AthenaArrowResultSet(AthenaResultSet):
                 )
             if has_duplicate_names:
                 table = table.rename_columns(names)
-            if binary_columns:
-                for index, field in enumerate(table.schema):
-                    if index not in binary_columns and (
-                        pa.types.is_string(field.type) or pa.types.is_binary(field.type)
-                    ):
-                        # Preserve the existing CSV behavior for non-binary Athena columns.
-                        table = table.set_column(index, field, table.column(index).fill_null(""))
+            for index, field in enumerate(table.schema):
+                if index in null_text_columns and pa.types.is_string(field.type):
+                    table = table.set_column(index, field, _to_null(table.column(index)))
+                elif (
+                    binary_columns
+                    and index not in binary_columns
+                    and (pa.types.is_string(field.type) or pa.types.is_binary(field.type))
+                ):
+                    # Preserve the existing CSV behavior for non-binary Athena columns.
+                    table = table.set_column(index, field, table.column(index).fill_null(""))
             return table
         except Exception as e:
             _logger.exception(f"Failed to read {location}.")

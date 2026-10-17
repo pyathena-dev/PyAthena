@@ -10,7 +10,7 @@ from datetime import datetime
 import pyarrow as pa
 import pytest
 
-from pyathena.arrow.converter import DefaultArrowUnloadTypeConverter, _to_timestamp
+from pyathena.arrow.converter import DefaultArrowUnloadTypeConverter, _to_null, _to_timestamp
 
 
 class TestDefaultArrowUnloadTypeConverter:
@@ -18,6 +18,28 @@ class TestDefaultArrowUnloadTypeConverter:
         """convert() dispatches through the default converter instead of returning None."""
         converter = DefaultArrowUnloadTypeConverter()
         assert converter.convert("varchar", "hello") == "hello"
+
+
+def test_to_null():
+    """Empty strings become null in every chunk, including a sliced and an empty one."""
+    column = pa.chunked_array(
+        [
+            pa.array(["03:04:05.123", "", None, "03:04:05"], pa.string()),
+            pa.array(["", "", "03:04:05.123+05:30", ""], pa.string()).slice(1, 2),
+            pa.array([], pa.string()),
+        ]
+    )
+    values = _to_null(column)
+    assert values.type == pa.string()
+    assert values.to_pylist() == [
+        "03:04:05.123",
+        None,
+        None,
+        "03:04:05",
+        None,
+        "03:04:05.123+05:30",
+    ]
+    assert values.null_count == 3
 
 
 @pytest.mark.parametrize(

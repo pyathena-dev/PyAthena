@@ -38,6 +38,35 @@ _DEFAULT_ARROW_CONVERTERS: dict[str, Callable[[str | None], Any | None]] = {
 }
 
 
+def _to_null(column: ChunkedArray) -> ChunkedArray:
+    """Replace the empty strings of a text column with null.
+
+    The CSV reader reads an Athena NULL as an empty string in a text column.
+
+    Args:
+        column: The text, with NULL as null or as an empty string.
+
+    Returns:
+        The text, with NULL as null.
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    chunks = []
+    for chunk in column.chunks:
+        valid = pc.fill_null(pc.not_equal(chunk, ""), False)
+        if chunk.offset:
+            chunks.append(pc.if_else(valid, chunk, pa.scalar(None, chunk.type)))
+        else:
+            # Only the validity bitmap changes; the offsets and the text are shared.
+            chunks.append(
+                pa.Array.from_buffers(
+                    chunk.type, len(chunk), [valid.buffers()[1], *chunk.buffers()[1:]]
+                )
+            )
+    return pa.chunked_array(chunks, column.type)
+
+
 def _to_timestamp(column: ChunkedArray, type_: TimestampType) -> ChunkedArray:
     """Convert timestamp text to a timestamp type, truncating finer fractions.
 
@@ -51,13 +80,12 @@ def _to_timestamp(column: ChunkedArray, type_: TimestampType) -> ChunkedArray:
     Returns:
         The timestamps.
     """
-    import pyarrow as pa
     import pyarrow.compute as pc
 
     length = _TIMESTAMP_TEXT_LENGTHS[type_.unit]
     if (pc.max(pc.utf8_length(column)).as_py() or 0) > length:
         column = pc.utf8_slice_codeunits(column, 0, length)
-    return pc.if_else(pc.equal(column, ""), pa.scalar(None, pa.string()), column).cast(type_)
+    return _to_null(column).cast(type_)
 
 
 class DefaultArrowTypeConverter(Converter):
@@ -113,7 +141,7 @@ class DefaultArrowTypeConverter(Converter):
                 "varchar": pa.string(),
                 "string": pa.string(),
                 "timestamp": pa.timestamp("us"),
-                "date": pa.timestamp("ms"),
+                "date": pa.date32(),
                 "time": pa.string(),
                 "time with time zone": pa.string(),
                 "timestamp with time zone": pa.string(),

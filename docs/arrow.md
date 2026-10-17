@@ -149,7 +149,7 @@ class CustomArrowTypeConverter(Converter):
                 "varchar": pa.string(),
                 "string": pa.string(),
                 "timestamp": pa.timestamp("us"),
-                "date": pa.timestamp("ms"),
+                "date": pa.date32(),
                 "time": pa.string(),
                 "varbinary": pa.string(),
                 "array": pa.string(),

@@ -236,6 +236,8 @@ print(value_col.null_count)
 # 0  <- No null values detected
 ```
 
+Columns of `time`, `time with time zone`, and `timestamp with time zone`, which `ArrowCursor` reads as text, read NULL as `null`.
+
 ### With Unload (Parquet) - Recommended
 
 ```python
