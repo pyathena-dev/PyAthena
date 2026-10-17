@@ -9,6 +9,7 @@ import gc
 import io
 import threading
 import weakref
+from concurrent.futures import CancelledError
 from types import SimpleNamespace
 
 import boto3
@@ -284,7 +285,23 @@ class _Requests:
         core.put_object = lambda path, body, **params: self._respond(("put", body), "put")  # type: ignore[method-assign]
 
 
-def _make_session(max_workers=2, executor_workers=4):
+class _DroppingExecutor(S3ThreadPoolExecutor):
+    """Drops the requests, as S3AioExecutor does when its event loop shuts down."""
+
+    def __init__(self, drop) -> None:
+        super().__init__(max_workers=1)
+        self._drop = drop
+
+    def submit_to(self, future, fn, *args, **kwargs):
+        if self._drop(kwargs):
+            # As _S3WorkItem.settle() does for a cancelled dispatch.
+            future.cancel()
+            future.set_running_or_notify_cancel()
+        else:
+            super().submit_to(future, fn, *args, **kwargs)
+
+
+def _make_session(max_workers=2, executor_workers=4, executor=None):
     client = boto3.client(
         "s3", region_name="us-east-1", aws_access_key_id="dummy", aws_secret_access_key="dummy"
     )
@@ -293,7 +310,7 @@ def _make_session(max_workers=2, executor_workers=4):
     core.MULTIPART_UPLOAD_MAX_PART_SIZE = 8
     requests = _Requests()
     requests.install(core)
-    executor = S3ThreadPoolExecutor(max_workers=executor_workers)
+    executor = executor or S3ThreadPoolExecutor(max_workers=executor_workers)
     session = _S3WriteSession(
         core, S3Path("bucket", "key"), executor, block_size=4, max_workers=max_workers
     )
@@ -557,4 +574,31 @@ class TestS3WriteSession:
             session.submit_part(1, b"abcd")
         session.abort()
         assert requests.calls == [("create",), ("abort",)]
+        assert session.state is _S3WriteState.ABORTED
+
+    def test_part_dropped_by_executor(self):
+        # A part request that the executor drops without running it, such as
+        # when the event loop of an S3AioExecutor shuts down, fails the write,
+        # so that the upload is not completed without the part.
+        session, requests, executor = _make_session(
+            max_workers=1, executor=_DroppingExecutor(lambda kwargs: "part_number" in kwargs)
+        )
+        with executor:
+            _start(session)
+            session.submit_part(1, b"abcd")
+            assert session.state is _S3WriteState.FAILED
+            with pytest.raises(CancelledError, match="part request was cancelled"):
+                session.complete()
+            session.abort()
+        assert requests.calls == [("create",), ("abort",)]
+
+    def test_creation_dropped_by_executor(self):
+        session, requests, executor = _make_session(executor=_DroppingExecutor(lambda kwargs: True))
+        with executor:
+            session.start()
+            assert session.ready().result(5) is None
+            with pytest.raises(CancelledError, match="creation of the multipart upload"):
+                session.check()
+            session.abort()
+        assert requests.calls == []
         assert session.state is _S3WriteState.ABORTED

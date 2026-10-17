@@ -12,7 +12,7 @@ from __future__ import annotations
 import enum
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from concurrent.futures import Future, wait
+from concurrent.futures import CancelledError, Future, wait
 from typing import Any, BinaryIO, cast
 
 from pyathena.filesystem.s3_core import S3Core
@@ -712,9 +712,13 @@ class _S3WriteSession:
             self._creation = None
             if self._state is _S3WriteState.CREATING:
                 if creation.cancelled():
-                    self._fail(None, "The creation of the multipart upload was cancelled.")
-                elif creation.exception() is not None:
-                    self._fail(creation.exception())
+                    # Such as by the shutdown of the event loop of an
+                    # S3AioExecutor.
+                    self._fail(
+                        CancelledError("The creation of the multipart upload was cancelled.")
+                    )
+                elif (error := creation.exception()) is not None:
+                    self._fail(error)
                 else:
                     self._state = _S3WriteState.ACTIVE
             waiters = self._take_waiters()
@@ -729,29 +733,33 @@ class _S3WriteSession:
         """
         with self._lock:
             self._requests.discard(request)
-            if not request.cancelled():
-                if request.exception() is None:
-                    part = request.result()
-                    self._parts[part.part_number] = part
-                elif self._state not in (_S3WriteState.ABORTING, _S3WriteState.ABORT_FAILED):
-                    self._fail(request.exception())
+            if request.cancelled():
+                if self._state not in (_S3WriteState.ABORTING, _S3WriteState.ABORT_FAILED):
+                    # Not cancelled by abort(), but such as by the shutdown of
+                    # the event loop of an S3AioExecutor, so the upload lacks
+                    # the part.
+                    self._fail(CancelledError("A part request was cancelled before it ran."))
+            elif (error := request.exception()) is None:
+                part = request.result()
+                self._parts[part.part_number] = part
+            elif self._state not in (_S3WriteState.ABORTING, _S3WriteState.ABORT_FAILED):
+                self._fail(error)
             waiters = self._take_waiters()
             self._changed.notify_all()
         self._notify(waiters)
 
-    def _fail(self, error: BaseException | None, summary: str | None = None) -> None:
+    def _fail(self, error: BaseException) -> None:
         """Record a failure; called with the lock held.
 
         The first failure is kept until it is raised. A write that is being
         committed stays in that state, as its commit raises the failure.
 
         Args:
-            error: The error to raise, or None if there is none to raise.
-            summary: A description of the failure, by default that of the error.
+            error: The error of the failed request.
         """
         if self._failure_summary is None:
             self._failure = error
-            self._failure_summary = summary or f"{type(error).__name__}: {error}"
+            self._failure_summary = f"{type(error).__name__}: {error}"
         if self._state in (_S3WriteState.CREATING, _S3WriteState.ACTIVE):
             self._state = _S3WriteState.FAILED
 
@@ -773,10 +781,8 @@ class _S3WriteSession:
             error: The error that the commit raises.
         """
         with self._lock:
-            if self._failure is error:
-                # Raised by the commit.
-                self._failure = None
-            elif self._failure_summary is None:
+            # A failure of a part has been raised by the commit already.
+            if self._failure_summary is None:
                 self._failure_summary = f"{type(error).__name__}: {error}"
             self._state = _S3WriteState.FAILED
             self._changed.notify_all()
