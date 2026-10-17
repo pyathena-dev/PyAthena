@@ -88,17 +88,23 @@ With the `compression` argument (a codec of fsspec, or `"infer"` from the extens
 the path), `pipe`/`pipe_file` compress the data before uploading it, and the sizes in
 this section apply to the compressed data.
 
-A multipart write keeps at most `max_workers` parts of the written data in flight and
-waits for one of them to finish before it uploads another. The parts take about
-`max_workers` × the block size of memory, in addition to the buffered data of the file.
-If one of these parts has failed when the write waits, or a part copied from the
-existing object in an append has failed before the write uploads another part, the
-write raises its error instead of uploading the rest of the data, and aborts the
-multipart upload after the parts being uploaded or copied finish. A part that fails
-later raises its error when the file is closed, or when the transaction commits, and
-the multipart upload is aborted.
+A multipart write of a file returned by `open` keeps at most `max_workers` parts in
+flight, counting the parts of the written data and the parts copied from the existing
+object in an append, and waits for one of them to finish before it submits another. The
+parts take about `max_workers` × the block size of memory, in addition to the buffered
+data of the file. If a part has failed before the write submits another part, the write
+raises its error instead of uploading the rest of the data, and aborts the multipart
+upload after the parts being uploaded or copied finish. A part that fails after the last
+write raises its error at the next write, when the file is closed, or when the
+transaction commits, and the multipart upload is aborted.
 `max_workers` is an argument of `S3FileSystem`, `AioS3FileSystem`, `open`, `put`, and
 `pipe`.
+
+A file returned by `open` whose write or commit has failed, or which has been
+discarded, cannot be committed: its `commit()` raises `S3MultipartStateError`. Inside a
+transaction, a write error that the caller catches therefore makes the transaction fail
+when it commits, and fsspec discards the files of the transaction that are not
+committed yet.
 
 The block size for writing, given by the `block_size` argument of `open` or by the
 filesystem's `default_block_size`, must be between 5 MiB and 5 GiB, inclusive, the part
@@ -543,11 +549,11 @@ The caller can therefore retry a failed abort.
 The writer does not invalidate the filesystem cache; call `fs.invalidate_cache()` after a direct write.
 
 When an `S3File` wait for multipart creation is interrupted, it waits for any creation that has already started and recovers the successful response before aborting.
-It drops the buffer and closes the file before waiting, so a later close or deferred commit cannot upload the interrupted write.
+It drops the buffer and closes the file before waiting, so a later close cannot upload the interrupted write, and a deferred commit raises `S3MultipartStateError`.
 It suppresses Ctrl-C during the blocking recovery wait and re-raises the original error when cleanup finishes.
 An additional interruption outside that wait can stop cleanup; once the upload identity is known, `discard()` can retry the abort.
 An abort failure retains the upload identity for `discard()` to retry.
-A failed multipart `commit()` also closes the file without its buffered data, so a later `commit()` neither completes that upload nor uploads the last part alone with PutObject.
+A failed multipart `commit()` also closes the file without its buffered data and aborts the upload; a later `commit()` raises `S3MultipartStateError`.
 Cancelling an async buffered write through `asyncio.to_thread` still allows its writer thread to finish.
 
 ### Multipart requests

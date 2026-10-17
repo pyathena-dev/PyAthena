@@ -144,3 +144,5 @@ Multipart Writer
 
 .. autoclass:: pyathena.filesystem.s3_writer.S3MultipartWriter
    :members:
+
+.. autoclass:: pyathena.filesystem.s3_writer.S3MultipartStateError
