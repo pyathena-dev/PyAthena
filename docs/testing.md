@@ -222,24 +222,29 @@ Name that contract before writing the test, and check whether an existing test o
 Check behavior against Athena and Amazon S3 where the services can observe it.
 Run only the queries and requests that the contract needs, and put the values a test checks in the columns of one query where possible.
 Use offline tests with mocks or botocore's `Stubber` for logic that the services cannot exercise deterministically, such as concurrency, combinations of failures and aborts, and interrupts, and try the relevant patterns in one parametrized test.
-Inject failures and interrupts through public objects, such as the S3 client, the executor, a future, or `Stubber`, rather than through private methods.
+Inject failures and interrupts through public objects, such as the S3 client, the executor, a future, or `Stubber`.
+Patch a private method only to reach a failure point that no public object reaches, and assert the public behavior that follows.
 
 Do not add a test that:
 
-- asserts what the code literally states, such as a stored constructor argument, a default value, a constant, or a `__repr__`, or tests Python or a third-party library instead of PyAthena;
+- asserts what the code literally states, such as a stored constructor argument, an internal default or constant, or a `__repr__`, or tests Python or a third-party library instead of PyAthena;
 - only exercises a branch or a private helper that has no contract a caller can observe;
-- repeats another test's contract, including a copy of a synchronous test for an asynchronous or aio variant that runs through the same code;
-- patches private methods or attributes, or asserts the order, count, or exact arguments of internal calls that are not part of the contract;
-- matches exception or log message text that is not documented, or dtypes and reprs that differ between Python, pandas, Polars, or PyArrow versions;
+- repeats another test's contract with the same kind of evidence, including a copy of a synchronous test for an asynchronous or aio variant that runs through the same code;
+- asserts the order, count, or exact arguments of internal calls that are not part of the contract;
+- matches exception or log message text that is not documented, or dtypes and reprs that a Python, pandas, Polars, or PyArrow version determines rather than PyAthena;
 - depends on thread or task timing, sleeps, or ordering between workers without synchronizing it;
 - passes without the behavior it names because a mock or fake omits that behavior.
 
 The exception type that a public API raises is a contract; its message text usually is not.
+A documented public value, such as `pyathena.threadsafety`, is a contract.
+When the result type that PyAthena produces depends on a supported library version, state the expected type for each supported version.
+An offline test and a real-service test of the same contract provide different evidence when the real-service test does not run in every environment or the offline test cannot reproduce the service behavior.
 Test asynchronous and aio variants where they have their own code, such as their own cancellation, shutdown, or request scheduling.
 
 Before submitting a test, remove or break the behavior it names, confirm that the test fails, and restore the behavior.
 Bound every wait in a test so that a regression fails instead of hanging.
-Before removing a test, confirm that another test fails without its contract.
+Before removing a test of a behavior that remains supported, confirm that another test fails without that behavior.
+When a change intentionally replaces a behavior, replace its tests with tests of the new behavior.
 
 ## Organize tests
 

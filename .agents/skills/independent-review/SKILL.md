@@ -30,7 +30,7 @@ Freeze the review merge-base SHA and published head SHA, as defined in the workf
 Use a detached worktree or an exported snapshot of tracked files that matches the reviewed commit.
 Exclude credentials, `.env`, local memory, and unrelated artifacts from an external review package.
 Supply the literal diff and relevant source/tests plus repository conventions.
-When the diff adds, rewrites, or removes tests, include [Choose what to test](../../../docs/testing.md#choose-what-to-test) and ask whether each added test protects a contract no other test protects and whether each removed test leaves its contract covered.
+When the diff adds, rewrites, or removes tests, include [Choose what to test](../../../docs/testing.md#choose-what-to-test) and ask whether each added test protects a contract no other test protects and whether each removed test of a behavior that remains supported leaves that behavior covered.
 Keep author framing out of the review prompt: omit the PR number, PR description, commit message, prior findings, and author conclusions.
 
 Request review only: no edits, builds, tests, commits, pushes, GitHub writes, or access to PR discussion or agent memory.
