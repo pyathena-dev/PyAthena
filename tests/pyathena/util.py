@@ -19,6 +19,8 @@ import pytest
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from botocore.response import StreamingBody
+from fsspec.implementations.dirfs import DirFileSystem
+from fsspec.implementations.local import LocalFileSystem
 from jinja2 import Environment, FileSystemLoader
 from sqlalchemy import types
 
@@ -28,7 +30,7 @@ from pyathena.filesystem.s3_async import AioS3FileSystem
 from pyathena.filesystem.s3_core import S3Core
 from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaCalculationExecutionStatus, AthenaQueryExecution
-from pyathena.util import retry_api_call
+from pyathena.util import override, retry_api_call
 
 _queries = Environment(
     loader=FileSystemLoader(Path(__file__).parents[1].resolve() / "resources" / "queries")
@@ -637,3 +639,56 @@ def stub_multipart_copy(stubber, fail_list=False, fail_part=False, fail_annotati
             )
             return
         stubber.add_response("put_object_annotation", {}, put)
+
+
+def query_results_response(columns):
+    """Build a ``GetQueryResults`` response with the metadata of the given columns.
+
+    Args:
+        columns: The (name, Athena type) pairs of the result columns.
+
+    Returns:
+        The response, without rows, as for a result that is read from its result file.
+    """
+    return {
+        "ResultSet": {
+            "ResultSetMetadata": {
+                "ColumnInfo": [
+                    {"Name": name, "Type": type_, "Precision": 3, "Scale": 0, "Nullable": "UNKNOWN"}
+                    for name, type_ in columns
+                ]
+            },
+            "Rows": [],
+        }
+    }
+
+
+class LocalBucketFileSystem(DirFileSystem):
+    """The local files under a directory, addressed by S3 paths, with the files it opened.
+
+    ``s3://bucket/key`` is the file ``bucket/key`` under the directory.
+    """
+
+    def __init__(self, root):
+        """Initialize the filesystem.
+
+        Args:
+            root: The directory that holds the files.
+        """
+        super().__init__(path=str(root), fs=LocalFileSystem(), skip_instance_cache=True)
+        # The keyword arguments of each open() and the file that it returned.
+        self.opened = []
+
+    @override
+    def _join(self, path):
+        if isinstance(path, str):
+            path = path.removeprefix("s3://")
+        elif isinstance(path, list):
+            path = [p.removeprefix("s3://") for p in path]
+        return super()._join(path)
+
+    @override
+    def open(self, path, *args, **kwargs):
+        file = super().open(path, *args, **kwargs)
+        self.opened.append((kwargs, file))
+        return file

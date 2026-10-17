@@ -17,7 +17,6 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from fsspec.implementations.dirfs import DirFileSystem
 from fsspec.implementations.local import LocalFileSystem
 from pandas.testing import assert_frame_equal
 
@@ -32,7 +31,17 @@ from pyathena.pandas.result_set import (
     _read_csv_with_pyarrow,
 )
 from pyathena.util import RetryConfig, retry_api_call, stop_retries_on
-from tests.pyathena.util import ThrottledOperation, assert_fetches_fail
+from tests.pyathena.util import (
+    LocalBucketFileSystem,
+    ThrottledOperation,
+    assert_fetches_fail,
+    query_results_response,
+)
+
+# A value that makes a result file larger than the smallest that the PyArrow engine reads.
+_PADDING = "x" * 120
+# A CSV result file of two rows.
+_TEXT_CSV = '"v"\n"a"\n"b"\n'
 
 
 def _typed_values(rows):
@@ -308,7 +317,7 @@ class TestAthenaPandasResultSet:
         """
         assert len(data) >= AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES
         types = [(name, "string") for name in names]
-        fs = _BucketFileSystem(tmp_path)
+        fs = LocalBucketFileSystem(tmp_path)
         with pd.option_context("future.infer_string", infer_string):
             df = _local_result_set(
                 fs, types, data, name="result.txt", engine="pyarrow", **read_csv_kwargs
@@ -316,6 +325,62 @@ class TestAthenaPandasResultSet:
         assert all(file.closed for _, file in fs.opened)
         assert df.columns.tolist() == names
         assert df.iloc[:, 0].tolist() == expected_names
+
+    @pytest.mark.parametrize(
+        ("columns", "rows", "read_options", "expected", "sizes"),
+        [
+            (
+                [("a", "integer"), ("s", "varchar")],
+                [("1", _PADDING), ("2", _PADDING)],
+                {"chunksize": 1},
+                [(1, _PADDING), (2, _PADDING)],
+                [1, 1],
+            ),
+            (
+                [("s", "varchar")],
+                [(_PADDING,)],
+                {"quoting": csv.QUOTE_NONE},
+                [(f'"{_PADDING}"',)],
+                [1],
+            ),
+            (
+                [("x", "integer"), ("x", "varchar")],
+                [("1", f"007{_PADDING}")],
+                {},
+                [(1, f"007{_PADDING}")],
+                [1],
+            ),
+            (
+                [("b", "varbinary"), ("s", "varchar")],
+                [("00 ff", _PADDING)],
+                {},
+                [(b"\x00\xff", _PADDING)],
+                [1],
+            ),
+        ],
+        ids=["chunksize", "quoting", "duplicate_names", "converters"],
+    )
+    def test_pyarrow_engine_incompatible_options(
+        self, tmp_path, columns, rows, read_options, expected, sizes
+    ):
+        """engine="pyarrow" reads with the C engine what the PyArrow engine cannot read.
+
+        That is a result in chunks, with another quoting, with columns of the same name,
+        or with converters.
+        """
+        text = io.StringIO(newline="")
+        writer = csv.writer(text, quoting=csv.QUOTE_ALL, lineterminator="\n")
+        writer.writerows([[name for name, _ in columns], *rows])
+        result_set = _local_result_set(
+            LocalBucketFileSystem(tmp_path),
+            columns,
+            text.getvalue(),
+            engine="pyarrow",
+            **read_options,
+        )
+        chunks = list(result_set.iter_chunks())
+        assert [len(chunk) for chunk in chunks] == sizes
+        assert [tuple(row) for chunk in chunks for row in chunk.itertuples(index=False)] == expected
 
     def test_read_small_csv_with_pyarrow_engine(self, tmp_path):
         """A CSV result smaller than PYARROW_MIN_FILE_SIZE_BYTES is read with the C engine.
@@ -326,7 +391,7 @@ class TestAthenaPandasResultSet:
         assert len(data) < AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES
         types = [("d", "date"), ("t", "timestamp")]
         df = _local_result_set(
-            _BucketFileSystem(tmp_path), types, data, engine="pyarrow"
+            LocalBucketFileSystem(tmp_path), types, data, engine="pyarrow"
         ).as_pandas()
         assert df.to_dict("list") == {
             "d": [pd.Timestamp("2024-01-01")],
@@ -370,7 +435,7 @@ class TestAthenaPandasResultSet:
         data = '"v","d"\n' + "".join(f"{line}\n" for line in lines)
         assert len(data) >= AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES
         types = [("v", "varchar"), ("d", "date")]
-        fs = _BucketFileSystem(tmp_path)
+        fs = LocalBucketFileSystem(tmp_path)
         if expected is OperationalError:
             with pytest.raises(OperationalError):
                 _local_result_set(fs, types, data, engine="pyarrow", **kwargs)
@@ -459,7 +524,7 @@ class TestAthenaPandasResultSet:
             pa.table({"a": [1, 2], "s": [{"x": 1}, {"x": 2}]}),
             pa.table({"a": [3], "s": [{"x": 3}]}),
         ]
-        fs = _BucketFileSystem(tmp_path)
+        fs = LocalBucketFileSystem(tmp_path)
         if sizes is None:
             with pytest.raises(OperationalError):
                 _local_result_set(fs, tables=tables, chunksize=1, **kwargs)
@@ -468,29 +533,26 @@ class TestAthenaPandasResultSet:
         assert [len(chunk) for chunk in chunks] == sizes
         assert [chunk.columns.tolist() for chunk in chunks] == [columns] * len(sizes)
 
+    def test_unload_user_filesystem(self, tmp_path):
+        """A filesystem given to execute() reads the UNLOAD result instead of PyAthena's."""
+        fs = LocalBucketFileSystem(tmp_path / "pyathena")
+        user_fs = LocalBucketFileSystem(tmp_path / "user")
+        _write_unload_tables(user_fs, [pa.table({"a": [2]})])
+        result_set = _local_result_set(fs, tables=[pa.table({"a": [1]})], filesystem=user_fs)
+        assert result_set.fetchall() == [(2,)]
+
     @pytest.mark.parametrize(
         ("option", "value"),
-        [
-            ("filesystem", "user"),
-            ("storage_options", {}),
-            ("storage_options", None),
-            ("filesystem", None),
-        ],
-        ids=["filesystem", "storage_options", "storage_options-none", "filesystem-none"],
+        [("storage_options", {}), ("storage_options", None), ("filesystem", None)],
+        ids=["storage_options", "storage_options-none", "filesystem-none"],
     )
     def test_unload_filesystem_options(self, tmp_path, option, value):
-        """filesystem or storage_options given to execute(), even None, replace PyAthena's.
+        """storage_options, even None, or a None filesystem given to execute() replace PyAthena's.
 
-        A given filesystem reads its own files. Otherwise pandas opens the S3 files
-        itself, so the read is observed.
+        pandas opens the S3 files itself, so the read is observed.
         """
-        fs = _BucketFileSystem(tmp_path / "pyathena")
+        fs = LocalBucketFileSystem(tmp_path / "pyathena")
         tables = [pa.table({"a": [1]})]
-        if value == "user":
-            value = _BucketFileSystem(tmp_path / "user")
-            _write_unload_tables(value, [pa.table({"a": [2]})])
-            assert _local_result_set(fs, tables=tables, filesystem=value).fetchall() == [(2,)]
-            return
         with patch("pandas.read_parquet", return_value=pd.DataFrame({"a": [2]})) as read_parquet:
             assert _local_result_set(fs, tables=tables, **{option: value}).fetchall() == [(2,)]
         # The S3 location, which pandas opens with the given options instead of PyAthena's.
@@ -499,19 +561,22 @@ class TestAthenaPandasResultSet:
         assert read_parquet.call_args.kwargs.get("filesystem") is None
 
     @pytest.mark.parametrize(
-        ("data", "types", "chunksize"),
+        ("data", "types", "chunksize", "kwargs", "prefetch"),
         [
-            pytest.param('"v"\n"a"\n"b"\n', [("v", "varchar")], None, id="text"),
-            pytest.param('"v"\n"a"\n"b"\n', [("v", "varchar")], 1, id="text-chunks"),
-            pytest.param('"b"\n"00 ff"\n', [("b", "varbinary")], None, id="binary"),
-        ],
-    )
-    @pytest.mark.parametrize(
-        ("kwargs", "prefetch"),
-        [
-            pytest.param({}, True, id="default"),
-            pytest.param({"block_size": 5 * 2**20}, False, id="block_size"),
-            pytest.param({"cache_type": "bytes"}, False, id="cache_type"),
+            pytest.param(_TEXT_CSV, [("v", "varchar")], None, {}, True, id="text"),
+            pytest.param(_TEXT_CSV, [("v", "varchar")], 1, {}, True, id="text-chunks"),
+            pytest.param('"b"\n"00 ff"\n', [("b", "varbinary")], None, {}, True, id="binary"),
+            pytest.param(
+                _TEXT_CSV,
+                [("v", "varchar")],
+                None,
+                {"block_size": 5 * 2**20},
+                False,
+                id="block_size",
+            ),
+            pytest.param(
+                _TEXT_CSV, [("v", "varchar")], None, {"cache_type": "bytes"}, False, id="cache_type"
+            ),
         ],
     )
     def test_csv_open_options(self, tmp_path, data, types, chunksize, kwargs, prefetch):
@@ -519,7 +584,7 @@ class TestAthenaPandasResultSet:
 
         With block_size or cache_type, the file is opened with the filesystem's settings.
         """
-        fs = _BucketFileSystem(tmp_path)
+        fs = LocalBucketFileSystem(tmp_path)
         result_set = _local_result_set(fs, types, data, chunksize=chunksize, **kwargs)
         assert len(result_set.fetchall()) == len(data.splitlines()) - 1
         [(options, _)] = fs.opened
@@ -873,27 +938,6 @@ def _read_csv_result(data, types, engine="c", chunksize=None, **kwargs):
     return PandasDataFrameIterator(result, result_set._finish_csv_frame, result_set._csv_stream)
 
 
-class _BucketFileSystem(DirFileSystem):
-    """The local files under a directory, addressed by S3 paths, with the files it opened."""
-
-    def __init__(self, root):
-        super().__init__(path=str(root), fs=LocalFileSystem(), skip_instance_cache=True)
-        # The keyword arguments of each open() and the file that it returned.
-        self.opened = []
-
-    def _join(self, path):
-        if isinstance(path, str):
-            path = path.removeprefix("s3://")
-        elif isinstance(path, list):
-            path = [p.removeprefix("s3://") for p in path]
-        return super()._join(path)
-
-    def open(self, path, *args, **kwargs):
-        file = super().open(path, *args, **kwargs)
-        self.opened.append((kwargs, file))
-        return file
-
-
 def _write_unload_tables(fs, tables):
     """Write the Parquet files of an UNLOAD result under ``s3://bucket/unload/``.
 
@@ -945,17 +989,7 @@ def _local_result_set(fs, types=(), data=None, tables=None, name="result.csv", *
     }
     connection.s3_client.meta.config.max_pool_connections = 2
     connection.s3_client.head_object.return_value = {"ContentLength": length}
-    connection.client.get_query_results.return_value = {
-        "ResultSet": {
-            "ResultSetMetadata": {
-                "ColumnInfo": [
-                    {"Name": n, "Type": t, "Precision": 3, "Scale": 0, "Nullable": "UNKNOWN"}
-                    for n, t in types
-                ]
-            },
-            "Rows": [],
-        }
-    }
+    connection.client.get_query_results.return_value = query_results_response(types)
     with patch("pyathena.pandas.result_set.S3FileSystem", return_value=fs):
         return AthenaPandasResultSet(
             connection=connection,

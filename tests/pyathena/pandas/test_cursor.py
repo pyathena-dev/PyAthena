@@ -1,5 +1,6 @@
 import contextlib
 import csv
+import io
 import math
 import random
 import string
@@ -7,13 +8,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
 import pytest
-from fsspec.implementations.local import LocalFileSystem
 
 from pyathena.error import DatabaseError, DataError, OperationalError, ProgrammingError
 from pyathena.filesystem.s3 import S3FileSystem
@@ -31,7 +30,9 @@ from tests.pyathena.util import (
     CONVERTED_VALUES_QUERY,
     CONVERTED_VALUES_ROW,
     RESULT_FILE_VALUES_QUERY,
+    LocalBucketFileSystem,
     cached_file_systems,
+    query_results_response,
 )
 
 
@@ -41,34 +42,9 @@ def _pandas_converter_without_bigint_dtype():
     return converter
 
 
-class _ResultFileSystem(LocalFileSystem):
-    """A filesystem that serves one local file for every path and keeps the files it opens."""
-
-    def __init__(self, path: str, **kwargs: Any) -> None:
-        """Initialize the filesystem.
-
-        Args:
-            path: The local file that every path opens.
-            **kwargs: Ignored filesystem options.
-        """
-        super().__init__()
-        self.path = path
-        self.opened: list[Any] = []
-
-    def _open(self, path: str, mode: str = "rb", **kwargs: Any) -> Any:
-        """Open the local file instead of the given path.
-
-        Args:
-            path: The path to open, which is ignored.
-            mode: The mode to open the file in.
-            **kwargs: Ignored open options.
-
-        Returns:
-            The opened local file.
-        """
-        file = super()._open(self.path, mode)
-        self.opened.append(file)
-        return file
+# The columns and rows of a binary result file larger than pandas' read buffer.
+_BINARY_COLUMNS = [("value", "varbinary"), ("padding", "varchar")]
+_BINARY_ROWS = [("00", "x" * 4096)] * 100
 
 
 @contextlib.contextmanager
@@ -88,11 +64,14 @@ def _offline_cursor(tmp_path, columns, rows, **cursor_kwargs):
     Yields:
         The cursor and the filesystem that reads the result file.
     """
-    path = tmp_path / "result.csv"
-    with path.open("w", newline="") as file:
-        writer = csv.writer(file, quoting=csv.QUOTE_ALL, lineterminator="\n")
-        writer.writerow([name for name, _ in columns])
-        writer.writerows(rows)
+    text = io.StringIO(newline="")
+    writer = csv.writer(text, quoting=csv.QUOTE_ALL, lineterminator="\n")
+    writer.writerow([name for name, _ in columns])
+    writer.writerows(rows)
+    data = text.getvalue().encode()
+    fs = LocalBucketFileSystem(tmp_path)
+    fs.makedirs("bucket", exist_ok=True)
+    fs.pipe_file("s3://bucket/result.csv", data)
     connection = MagicMock()
     connection.client.start_query_execution.return_value = {"QueryExecutionId": "query_id"}
     connection.client.get_query_execution.return_value = {
@@ -104,19 +83,8 @@ def _offline_cursor(tmp_path, columns, rows, **cursor_kwargs):
             "ResultConfiguration": {"OutputLocation": "s3://bucket/result.csv"},
         }
     }
-    connection.client.get_query_results.return_value = {
-        "ResultSet": {
-            "Rows": [{"Data": [{"VarCharValue": name} for name, _ in columns]}],
-            "ResultSetMetadata": {
-                "ColumnInfo": [
-                    {"Name": name, "Type": type_, "Precision": 0, "Scale": 0, "Nullable": "UNKNOWN"}
-                    for name, type_ in columns
-                ]
-            },
-        }
-    }
-    connection.s3_client.head_object.return_value = {"ContentLength": path.stat().st_size}
-    fs = _ResultFileSystem(str(path), skip_instance_cache=True)
+    connection.client.get_query_results.return_value = query_results_response(columns)
+    connection.s3_client.head_object.return_value = {"ContentLength": len(data)}
     with (
         patch("pyathena.pandas.result_set.S3FileSystem", lambda **_: fs),
         PandasCursor(
@@ -128,10 +96,6 @@ def _offline_cursor(tmp_path, columns, rows, **cursor_kwargs):
         ) as cursor,
     ):
         yield cursor, fs
-
-
-# A value that makes a result file larger than the smallest that the PyArrow engine reads.
-_PADDING = "x" * 120
 
 
 class _QuoteNoneDialect(csv.excel):
@@ -187,15 +151,15 @@ class TestPandasCursor:
         """
         with _offline_cursor(
             tmp_path,
-            [("value", "varbinary"), ("padding", "varchar")],
-            [("00", "x" * 4096)] * 100,
+            _BINARY_COLUMNS,
+            _BINARY_ROWS,
             chunksize=1,
         ) as (cursor, fs):
             cursor.execute("SELECT 1", engine=engine, nrows=2 if close_method == "nrows" else None)
             dataframe_iterator = cursor.as_pandas()
             chunks = cursor.iter_chunks() if close_method == "generator" else dataframe_iterator
             assert next(chunks)["value"].tolist() == [b"\x00"]
-            opened = list(fs.opened)
+            opened = [file for _, file in fs.opened]
             assert opened
             assert not any(file.closed for file in opened)
 
@@ -233,9 +197,7 @@ class TestPandasCursor:
 
         No AWS calls; the result file is a local file larger than pandas' read buffer.
         """
-        with _offline_cursor(
-            tmp_path, [("value", "varbinary"), ("padding", "varchar")], [("00", "x" * 4096)] * 100
-        ) as (cursor, fs):
+        with _offline_cursor(tmp_path, _BINARY_COLUMNS, _BINARY_ROWS) as (cursor, fs):
             if fails:
                 with pytest.raises(OperationalError):
                     cursor.execute("SELECT 1", engine=engine, dtype={"padding": "int64"})
@@ -243,7 +205,7 @@ class TestPandasCursor:
                 cursor.execute("SELECT 1", engine=engine)
                 assert cursor.fetchone() == (b"\x00", "x" * 4096)
             assert fs.opened
-            assert all(file.closed for file in fs.opened)
+            assert all(file.closed for _, file in fs.opened)
 
     @pytest.mark.parametrize("engine", ["c", "python"])
     @pytest.mark.parametrize("read_method", ["next", "get_chunk"])
@@ -255,18 +217,18 @@ class TestPandasCursor:
         """
         with _offline_cursor(
             tmp_path,
-            [("value", "varbinary"), ("padding", "varchar")],
-            [("00", "x" * 4096)] * 100,
+            _BINARY_COLUMNS,
+            _BINARY_ROWS,
             chunksize=1,
         ) as (cursor, fs):
             cursor.execute("SELECT 1", engine=engine, dtype={"padding": "int64"})
             chunks = cursor.as_pandas()
             assert fs.opened
-            assert not any(file.closed for file in fs.opened)
+            assert not any(file.closed for _, file in fs.opened)
             read_chunk = chunks.__next__ if read_method == "next" else chunks.get_chunk
             with pytest.raises(ValueError):  # noqa: PT011
                 read_chunk()
-            assert all(file.closed for file in fs.opened)
+            assert all(file.closed for _, file in fs.opened)
             for later in (lambda: next(chunks), chunks.get_chunk, cursor.fetchone):
                 with pytest.raises(ProgrammingError):
                     later()
@@ -1213,54 +1175,6 @@ class TestPandasCursor:
         conn.close()
 
     @pytest.mark.parametrize(
-        ("columns", "rows", "read_options", "expected", "sizes"),
-        [
-            (
-                [("a", "integer"), ("s", "varchar")],
-                [("1", _PADDING), ("2", _PADDING)],
-                {"chunksize": 1},
-                [(1, _PADDING), (2, _PADDING)],
-                [1, 1],
-            ),
-            (
-                [("s", "varchar")],
-                [(_PADDING,)],
-                {"quoting": csv.QUOTE_NONE},
-                [(f'"{_PADDING}"',)],
-                [1],
-            ),
-            (
-                [("x", "integer"), ("x", "varchar")],
-                [("1", f"007{_PADDING}")],
-                {},
-                [(1, f"007{_PADDING}")],
-                [1],
-            ),
-            (
-                [("b", "varbinary"), ("s", "varchar")],
-                [("00 ff", _PADDING)],
-                {},
-                [(b"\x00\xff", _PADDING)],
-                [1],
-            ),
-        ],
-        ids=["chunksize", "quoting", "duplicate_names", "converters"],
-    )
-    def test_pyarrow_engine_incompatible_options(
-        self, tmp_path, columns, rows, read_options, expected, sizes
-    ):
-        """engine="pyarrow" reads with the C engine what the PyArrow engine cannot read.
-
-        That is a result in chunks, with another quoting, with columns of the same name,
-        or with converters. No AWS calls; the result file is a local file.
-        """
-        with _offline_cursor(tmp_path, columns, rows) as (cursor, _):
-            cursor.execute("SELECT 1", engine="pyarrow", **read_options)
-            chunks = list(cursor.iter_chunks())
-        assert [len(chunk) for chunk in chunks] == sizes
-        assert [tuple(row) for chunk in chunks for row in chunk.itertuples(index=False)] == expected
-
-    @pytest.mark.parametrize(
         ("pandas_cursor", "parquet_engine", "chunksize"),
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
@@ -1619,43 +1533,52 @@ class TestPandasCursor:
         assert df.to_dict("records") == [{"number_of_rows": 1}]
 
     @pytest.mark.parametrize(
-        ("pandas_cursor", "size_options", "read", "expected"),
+        "pandas_cursor", [{"cursor_kwargs": {"auto_optimize_chunksize": True}}], indirect=True
+    )
+    def test_pandas_cursor_auto_optimize_chunksize_enabled(self, pandas_cursor, monkeypatch):
+        """auto_optimize_chunksize chunks a CSV result of Athena by its size."""
+        # Make the five-row result exceed the size threshold, one byte per row.
+        monkeypatch.setattr(AthenaPandasResultSet, "LARGE_FILE_THRESHOLD_BYTES", 0)
+        monkeypatch.setattr(AthenaPandasResultSet, "ESTIMATED_BYTES_PER_ROW", 1)
+        monkeypatch.setattr(AthenaPandasResultSet, "AUTO_CHUNK_THRESHOLD_MEDIUM", 0)
+        monkeypatch.setattr(AthenaPandasResultSet, "AUTO_CHUNK_SIZE_MEDIUM", 2)
+        pandas_cursor.execute("SELECT number FROM (VALUES (1), (2), (3), (4), (5)) AS t(number)")
+        chunks = list(pandas_cursor.iter_chunks())
+        assert [len(chunk) for chunk in chunks] == [2, 2, 1]
+        assert pd.concat(chunks)["number"].tolist() == [1, 2, 3, 4, 5]
+
+    @pytest.mark.parametrize(
+        ("cursor_kwargs", "size_options", "read", "expected"),
         [
-            ({"cursor_kwargs": {"auto_optimize_chunksize": True}}, {}, "iter_chunks", [5]),
+            ({}, {}, "iter_chunks", [5]),
             (
-                {"cursor_kwargs": {"auto_optimize_chunksize": True}},
-                {"AUTO_CHUNK_THRESHOLD_MEDIUM": 0, "AUTO_CHUNK_SIZE_MEDIUM": 2},
-                "iter_chunks",
-                [2, 2, 1],
-            ),
-            (
-                {"cursor_kwargs": {"auto_optimize_chunksize": True}},
+                {},
                 {"AUTO_CHUNK_THRESHOLD_LARGE": 0, "AUTO_CHUNK_SIZE_LARGE": 2},
                 "iter_chunks",
                 [2, 2, 1],
             ),
             (
-                {"cursor_kwargs": {"auto_optimize_chunksize": True}},
+                {},
                 {"AUTO_CHUNK_THRESHOLD_MEDIUM": 0, "AUTO_CHUNK_SIZE_MEDIUM": 2},
                 "as_pandas",
                 None,
             ),
             (
-                {"cursor_kwargs": {"auto_optimize_chunksize": True, "chunksize": 3}},
+                {"chunksize": 3},
                 {"AUTO_CHUNK_THRESHOLD_MEDIUM": 0, "AUTO_CHUNK_SIZE_MEDIUM": 2},
                 "iter_chunks",
                 [3, 2],
             ),
         ],
-        indirect=["pandas_cursor"],
-        ids=["small", "medium", "large", "medium-as_pandas", "explicit_chunksize"],
+        ids=["small", "large", "medium-as_pandas", "explicit_chunksize"],
     )
-    def test_pandas_cursor_auto_optimize_chunksize_enabled(
-        self, pandas_cursor, size_options, read, expected, monkeypatch
+    def test_auto_optimize_chunksize(
+        self, tmp_path, monkeypatch, cursor_kwargs, size_options, read, expected
     ):
         """auto_optimize_chunksize chunks a CSV result by its size; a chunksize wins.
 
-        as_pandas() joins the chunks into the whole result.
+        as_pandas() joins the chunks into the whole result. No AWS calls; the result
+        file is a local file.
         """
         if size_options:
             # Make the five-row result exceed the size threshold, one byte per row.
@@ -1663,15 +1586,19 @@ class TestPandasCursor:
             monkeypatch.setattr(AthenaPandasResultSet, "ESTIMATED_BYTES_PER_ROW", 1)
         for name, value in size_options.items():
             monkeypatch.setattr(AthenaPandasResultSet, name, value)
-        pandas_cursor.execute("SELECT number FROM (VALUES (1), (2), (3), (4), (5)) AS t(number)")
-        if read == "as_pandas":
-            df = pandas_cursor.as_pandas()
-            assert df["number"].tolist() == [1, 2, 3, 4, 5]
-            assert df.index.tolist() == [0, 1, 2, 3, 4]
-        else:
-            chunks = list(pandas_cursor.iter_chunks())
-            assert [len(chunk) for chunk in chunks] == expected
-            assert pd.concat(chunks)["number"].tolist() == [1, 2, 3, 4, 5]
+        rows = [(str(number),) for number in range(1, 6)]
+        with _offline_cursor(
+            tmp_path, [("number", "integer")], rows, auto_optimize_chunksize=True, **cursor_kwargs
+        ) as (cursor, _):
+            cursor.execute("SELECT 1")
+            if read == "as_pandas":
+                df = cursor.as_pandas()
+                assert df["number"].tolist() == [1, 2, 3, 4, 5]
+                assert df.index.tolist() == [0, 1, 2, 3, 4]
+            else:
+                chunks = list(cursor.iter_chunks())
+                assert [len(chunk) for chunk in chunks] == expected
+                assert pd.concat(chunks)["number"].tolist() == [1, 2, 3, 4, 5]
 
     def test_pandas_cursor_whole_result_reused(self, pandas_cursor):
         """Test that as_pandas() and iter_chunks() do not consume the fetched rows."""
