@@ -511,7 +511,9 @@ def _annotation(name):
     return {"AnnotationName": name, "LastModified": MULTIPART_COPY_EXPIRES, "Size": 1}
 
 
-def stub_multipart_copy(stubber, fail_list=False, fail_part=False, fail_annotation=False):
+def stub_multipart_copy(
+    stubber, fail_list=False, fail_part=False, fail_abort=False, fail_annotation=False
+):
     """Queue the requests of a multipart copy with MULTIPART_COPY_KWARGS.
 
     The source, in a versioned bucket, has user-defined metadata, a tag and
@@ -523,6 +525,7 @@ def stub_multipart_copy(stubber, fail_list=False, fail_part=False, fail_annotati
         fail_list: Deny the listing of the annotations; nothing is written
             then.
         fail_part: Fail the second part copy; the upload is then aborted.
+        fail_abort: Deny that abort, with fail_part.
         fail_annotation: Fail the write of the first annotation; no
             other annotation is copied then.
     """
@@ -601,7 +604,17 @@ def stub_multipart_copy(stubber, fail_list=False, fail_part=False, fail_annotati
             stubber.add_client_error(
                 "upload_part_copy", "InternalError", "part failed", 500, expected_params=part
             )
-            stubber.add_response("abort_multipart_upload", {}, {**destination, "UploadId": "u"})
+            abort = {**destination, "UploadId": "u"}
+            if fail_abort:
+                stubber.add_client_error(
+                    "abort_multipart_upload",
+                    "AccessDenied",
+                    "abort denied",
+                    403,
+                    expected_params=abort,
+                )
+            else:
+                stubber.add_response("abort_multipart_upload", {}, abort)
             return
         stubber.add_response(
             "upload_part_copy", {"CopyPartResult": {"ETag": f'"p{part_number}"'}}, part
