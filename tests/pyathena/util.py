@@ -266,6 +266,30 @@ def throttle_metadata_api(
     return calls
 
 
+def succeeded_query_execution_data(query_id, query, completion_date_time, schema="this_schema"):
+    """Build a succeeded DML query execution as ``BatchGetQueryExecution`` returns it.
+
+    Args:
+        query_id: The query execution ID.
+        query: The query string.
+        completion_date_time: The completion time.
+        schema: The database the query ran against.
+
+    Returns:
+        The ``QueryExecution`` dictionary.
+    """
+    return {
+        "QueryExecutionId": query_id,
+        "Query": query,
+        "StatementType": AthenaQueryExecution.STATEMENT_TYPE_DML,
+        "QueryExecutionContext": {"Database": schema},
+        "Status": {
+            "State": AthenaQueryExecution.STATE_SUCCEEDED,
+            "CompletionDateTime": completion_date_time,
+        },
+    }
+
+
 def succeeded_query_execution(query_id, query, completion_date_time, schema="this_schema"):
     """Build a succeeded DML query execution, as the result cache search lists it.
 
@@ -280,18 +304,65 @@ def succeeded_query_execution(query_id, query, completion_date_time, schema="thi
     """
     return AthenaQueryExecution(
         {
-            "QueryExecution": {
-                "QueryExecutionId": query_id,
-                "Query": query,
-                "StatementType": AthenaQueryExecution.STATEMENT_TYPE_DML,
-                "QueryExecutionContext": {"Database": schema},
-                "Status": {
-                    "State": AthenaQueryExecution.STATE_SUCCEEDED,
-                    "CompletionDateTime": completion_date_time,
-                },
-            }
+            "QueryExecution": succeeded_query_execution_data(
+                query_id, query, completion_date_time, schema
+            )
         }
     )
+
+
+class QueryExecutionHistory:
+    """An Athena client stand-in that lists the query executions of a work group.
+
+    ``ListQueryExecutions`` returns up to ``MaxResults`` IDs per page in the given
+    order, latest first as Athena lists them, and ``BatchGetQueryExecution``
+    returns their executions.
+
+    Attributes:
+        executions: The ``QueryExecution`` dictionaries, latest first.
+        list_requests: The number of ``ListQueryExecutions`` requests.
+    """
+
+    def __init__(self, executions):
+        """Initialize the history.
+
+        Args:
+            executions: The ``QueryExecution`` dictionaries, latest first.
+        """
+        self.executions = executions
+        self.list_requests = 0
+
+    def list_query_executions(self, **request):
+        """List a page of query execution IDs.
+
+        Args:
+            **request: The request parameters: ``MaxResults``, the ``NextToken``
+                of a later page, and others such as ``WorkGroup``.
+
+        Returns:
+            The response, with a ``NextToken`` unless the page is the last.
+        """
+        self.list_requests += 1
+        start = int(request.get("NextToken", 0))
+        end = start + request["MaxResults"]
+        response = {
+            "QueryExecutionIds": [e["QueryExecutionId"] for e in self.executions[start:end]]
+        }
+        if end < len(self.executions):
+            response["NextToken"] = str(end)
+        return response
+
+    def batch_get_query_execution(self, **request):
+        """Get the executions of query execution IDs.
+
+        Args:
+            **request: The request parameters, with ``QueryExecutionIds``.
+
+        Returns:
+            The response.
+        """
+        executions = {e["QueryExecutionId"]: e for e in self.executions}
+        return {"QueryExecutions": [executions[i] for i in request["QueryExecutionIds"]]}
 
 
 def unreachable_glue(connection):

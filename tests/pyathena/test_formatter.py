@@ -12,7 +12,6 @@ from decimal import Decimal
 import pytest
 
 from pyathena.error import ProgrammingError
-from pyathena.formatter import _escape_trino
 
 # A value whose single quote must not be allowed to terminate the string
 # literal. Trino and Athena do not treat a backslash as an escape character
@@ -599,7 +598,6 @@ class TestDefaultParameterFormatter:
         )
 
 
-def test_escape_trino_doubles_single_quotes():
-    assert _escape_trino("a'b") == "'a''b'"
+def test_backslash_before_quote_stays_literal_in_trino_statement(formatter):
     # A backslash is not an escape character in Trino/Presto; it stays literal.
-    assert _escape_trino("a\\'b") == "'a\\''b'"
+    assert formatter.format("SELECT %(v)s", {"v": "a\\'b"}) == "SELECT 'a\\''b'"
