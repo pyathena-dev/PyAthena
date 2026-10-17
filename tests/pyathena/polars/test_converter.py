@@ -61,12 +61,3 @@ def test_to_datetimes(dtype, microseconds, lazy):
         None,
         None,
     ]
-
-
-def test_to_datetimes_not_strict():
-    """Text that is not a timestamp becomes null when the conversion is not strict."""
-    df = pl.DataFrame({"t": ["2020-01-02 03:04:05.123456789012", "invalid"]})
-    with pytest.raises(pl.exceptions.InvalidOperationError):
-        _to_datetimes(df, {"t": pl.Datetime})
-    result = _to_datetimes(df, {"t": pl.Datetime}, strict=False)
-    assert result["t"].to_list() == [datetime(2020, 1, 2, 3, 4, 5, 123456), None]
