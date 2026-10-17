@@ -725,12 +725,20 @@ class AioS3FileSystem(AsyncFileSystem):
 
         failed = False
 
-        def _copy_annotation_in_thread(name: str) -> None:
+        # The index of the copy that failed first, whose error is raised
+        # instead of those of the copies that its failure stopped. Recorded
+        # with the stop, in the thread of the failed copy.
+        first_failure: int | None = None
+        failure_lock = threading.Lock()
+
+        def _copy_annotation_in_thread(i: int, name: str) -> None:
             """Copy an annotation in a scope that a failed copy stops.
 
             Args:
+                i: The index of the annotation.
                 name: The name of the annotation.
             """
+            nonlocal first_failure
             if stop.is_set():
                 # Waited for a thread of the filesystem until a copy failed.
                 return
@@ -745,26 +753,23 @@ class AioS3FileSystem(AsyncFileSystem):
                         **kwargs,
                     )
             except Exception:
-                # Set in this thread, before it takes a waiting copy.
-                stop.set()
+                with failure_lock:
+                    if not stop.is_set():
+                        first_failure = i
+                        # Set in this thread, before it takes a waiting copy.
+                        stop.set()
                 raise
 
-        # The index of the copy that failed first, whose error is raised
-        # instead of those of the copies that its failure stopped.
-        first_failure: int | None = None
-
         async def _copy_annotation(i: int, name: str) -> None:
-            nonlocal failed, first_failure
+            nonlocal failed
             async with semaphore:
                 if failed:
                     # Do not start more copies after one failed, as
                     # S3FileSystem does.
                     return
                 try:
-                    await self._thread_pool.run(_copy_annotation_in_thread, name)
+                    await self._thread_pool.run(_copy_annotation_in_thread, i, name)
                 except Exception:
-                    if not failed:
-                        first_failure = i
                     # The running copies make no further attempt.
                     failed = True
                     stop.set()
@@ -776,6 +781,9 @@ class AioS3FileSystem(AsyncFileSystem):
         )
         if first_failure is not None:
             raise cast(BaseException, results[first_failure])
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
 
     async def _find(
         self,

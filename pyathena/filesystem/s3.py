@@ -2313,11 +2313,15 @@ class S3FileSystem(AbstractFileSystem):
                 futures: list[Future[None]] = []
                 try:
                     with stop_retries_on(stop):
-                        # extend() keeps the futures submitted before an interrupt.
-                        futures.extend(
-                            executor.submit(self.chmod, p, acl, recursive=False, **kwargs)
-                            for p in paths
-                        )
+                        for p in paths:
+                            # Tracked before it is scheduled, so that an
+                            # interrupt while it is being scheduled still lets
+                            # it be cancelled.
+                            future: Future[None] = Future()
+                            futures.append(future)
+                            executor.submit_to(
+                                future, self.chmod, p, acl, recursive=False, **kwargs
+                            )
                     for future in as_completed(futures):
                         future.result()
                 except BaseException:
@@ -3471,11 +3475,17 @@ class S3File(AbstractBufferedFile):
             futures: list[Future[bytes]] = []
             try:
                 with stop_retries_on(stop):
-                    # extend() keeps the futures submitted before an interrupt.
-                    futures.extend(
-                        self._executor.submit(self.fs.core.get_object, path, r, **request_kwargs)
-                        for r in ranges
-                    )
+                    for r in ranges:
+                        # Tracked before it is scheduled, so that an interrupt
+                        # while it is being scheduled still lets it be cancelled.
+                        read: Future[bytes] = Future()
+                        futures.append(read)
+                        self._executor.submit_to(
+                            read, self.fs.core.get_object, path, r, **request_kwargs
+                        )
+                # Otherwise this frame, which the traceback of an error keeps,
+                # keeps the last read.
+                del read
                 done = wait(futures, return_when=FIRST_EXCEPTION).done
             except BaseException as e:
                 # The reads are cancelled with the read of the range, as below,

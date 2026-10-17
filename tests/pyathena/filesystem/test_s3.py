@@ -3540,29 +3540,48 @@ class TestS3FileSystem:
         # GH-1203: an interrupt while the reads are being submitted stops the
         # running ones, whose backoff wait would take at least EVENT_TIMEOUT
         # seconds.
+        # The read that is queued when the interrupt comes is not sent.
         fs = self._make_fs()
         fs.info = mock.MagicMock(return_value=self._file_object("key"))
-        fs.info.return_value.size = 32
+        fs.info.return_value.size = 48
         operation = ThrottledOperation()
-        fs.core.get_object = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
+        throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
+        read = []
+
+        def get_object(path, range_, **kwargs):
+            read.append(range_[0])
+            return throttled()
+
+        fs.core.get_object = get_object
         f = fs.open("s3://bucket/key", "rb", cache_type="none", block_size=16, max_workers=2)
-        submit = f._executor.submit
+        executor = f._executor
+        submit = executor.submit
+
+        submitted = []
 
         def interrupted_submit(fn, *args, **kwargs):
-            if operation.started.is_set():
-                raise KeyboardInterrupt
+            submitted.append(fn)
+            if len(submitted) == 3:
+                # The third read waits for the two threads of the running reads.
+                deadline = time.monotonic() + EVENT_TIMEOUT
+                while len(read) < 2:
+                    assert time.monotonic() < deadline
+                    time.sleep(0.01)
             future = submit(fn, *args, **kwargs)
-            assert operation.started.wait(EVENT_TIMEOUT)
+            if len(submitted) == 3:
+                # As an interrupt after the call is queued.
+                raise KeyboardInterrupt
             return future
 
-        f._executor.submit = interrupted_submit  # type: ignore[method-assign]
+        executor.submit = interrupted_submit  # type: ignore[method-assign]
         started = time.monotonic()
         with pytest.raises(KeyboardInterrupt):
             f.read()
-        # Waits for the running read.
+        # Waits for the running reads.
         f.close()
         assert time.monotonic() - started < EVENT_TIMEOUT
-        assert operation.calls == 1
+        assert sorted(read) == [0, 16]
+        assert operation.calls == 2
 
     def test_interrupted_read_frees_ranges(self):
         # GH-1186: an interrupted parallel read cancels the reads that have
@@ -4590,20 +4609,32 @@ class TestS3FileSystem:
         # GH-1203: an interrupt while the updates are being submitted stops
         # the running ones, whose backoff wait would take at least
         # EVENT_TIMEOUT seconds.
+        # The update that is queued when the interrupt comes is not sent.
         fs = self._make_fs()
         fs.find = mock.MagicMock(return_value=["bucket/key1", "bucket/key2"])
         operation = ThrottledOperation(operation_name="PutObjectAcl")
-        fs.core.put_object_acl = retried(
-            operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT)
-        )
-        executor = S3ThreadPoolExecutor(max_workers=2)
+        throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
+        updated = []
+
+        def put_object_acl(path, acl, **kwargs):
+            updated.append(path.key)
+            return throttled()
+
+        fs.core.put_object_acl = put_object_acl
+        executor = S3ThreadPoolExecutor(max_workers=1)
         submit = executor.submit
 
+        submitted = []
+
         def interrupted_submit(fn, *args, **kwargs):
-            if operation.started.is_set():
-                raise KeyboardInterrupt
+            submitted.append(fn)
+            if len(submitted) == 2:
+                # The second update waits for the only thread.
+                assert operation.started.wait(EVENT_TIMEOUT)
             future = submit(fn, *args, **kwargs)
-            assert operation.started.wait(EVENT_TIMEOUT)
+            if len(submitted) == 2:
+                # As an interrupt after the call is queued.
+                raise KeyboardInterrupt
             return future
 
         executor.submit = interrupted_submit  # type: ignore[method-assign]
@@ -4612,6 +4643,7 @@ class TestS3FileSystem:
         with pytest.raises(KeyboardInterrupt):
             fs.chmod("s3://bucket/path", "private", recursive=True)
         assert time.monotonic() - started < EVENT_TIMEOUT
+        assert updated == ["key1"]
         assert operation.calls == 1
 
     def test_put_tags_merge(self):
