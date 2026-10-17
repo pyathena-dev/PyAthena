@@ -1561,14 +1561,11 @@ class AthenaPandasResultSet(AthenaResultSet):
             and len(set(columns)) == len(columns)
         )
 
-    def _iter_parquet_chunks(self, paths: list[str]) -> Iterator[DataFrame]:
+    def _iter_parquet_chunks(self) -> Iterator[DataFrame]:
         """Read the UNLOAD result in DataFrames of ``chunksize`` rows.
 
         See ``_convert_parquet_chunk()`` for the conversion of each chunk.
-
-        Args:
-            paths: The files of the data manifest, which ``_read_parquet_footers()``
-                read.
+        ``_read_parquet_footers()`` must have read the data manifest first.
 
         Yields:
             The DataFrames of the result rows.
@@ -1580,7 +1577,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         try:
             with ParquetChunkReader(
                 self._fs,
-                paths,
+                self._data_manifest,
                 cast(int, self._chunksize),
                 columns=self._kwargs.get("columns"),
                 cache_type=self._cache_type,
@@ -1733,7 +1730,7 @@ class AthenaPandasResultSet(AthenaResultSet):
                 if engine != "pyarrow":
                     raise ProgrammingError("Engine must be `pyarrow`.")
                 self._metadata = to_column_info(schema)
-                return self._iter_parquet_chunks(self._data_manifest)
+                return self._iter_parquet_chunks()
             # Columns that are not top-level columns of the result are read whole,
             # where pandas selects nested fields or raises for missing columns.
         if self.is_unload:

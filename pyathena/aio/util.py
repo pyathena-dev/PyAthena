@@ -161,8 +161,7 @@ async def create_in_thread(
             if not cancelled.is_set():
                 constructed.append(obj)
                 return obj
-        with unstoppable_retries():
-            obj.close()
+        _close_logging_errors(obj)
         return None
 
     future = asyncio.get_running_loop().run_in_executor(
@@ -178,7 +177,9 @@ async def create_in_thread(
         # Retrieve a later construction error, which nobody else awaits.
         future.add_done_callback(lambda f: f.cancelled() or f.exception())
         if constructed:
-            threading.Thread(target=constructed[0].close, name="create_in_thread-close").start()
+            threading.Thread(
+                target=_close_logging_errors, args=(constructed[0],), name="create_in_thread-close"
+            ).start()
         raise
     return cast(_ClosableT, future.result())
 
@@ -208,7 +209,7 @@ async def run_in_thread_or_close(
     """
     lock = threading.Lock()
     cancelled = threading.Event()
-    started = ended = False
+    running = False
 
     def call() -> T | None:
         """Run the function unless the caller was cancelled, closing the object if it was then.
@@ -217,17 +218,17 @@ async def run_in_thread_or_close(
             The return value of the function, or None if the caller was cancelled
             before it started.
         """
-        nonlocal started, ended
+        nonlocal running
         with lock:
             if cancelled.is_set():
                 return None
-            started = True
+            running = True
         try:
             with stop_retries_on(cancelled):
                 return func(*args, **kwargs)
         finally:
             with lock:
-                ended = True
+                running = False
                 close = cancelled.is_set()
             if close:
                 _close_logging_errors(closable)
@@ -238,7 +239,7 @@ async def run_in_thread_or_close(
     except asyncio.CancelledError:
         with lock:
             cancelled.set()
-            close = not started or ended
+            close = not running
         if close:
             threading.Thread(
                 target=_close_logging_errors, args=(closable,), name="run_in_thread_or_close-close"

@@ -15,12 +15,14 @@ from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+import pytest
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from botocore.response import StreamingBody
 from jinja2 import Environment, FileSystemLoader
 from sqlalchemy import types
 
+from pyathena.error import ProgrammingError
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.filesystem.s3_async import AioS3FileSystem
 from pyathena.filesystem.s3_core import S3Core
@@ -63,6 +65,17 @@ def get_query_results_responses(*pages):
             response["NextToken"] = f"token{i + 1}"
         responses.append(response)
     return responses
+
+
+def assert_fetches_fail(result_set):
+    """Assert that each fetch of a result set raises for an earlier failed fetch.
+
+    Args:
+        result_set: The synchronous result set.
+    """
+    for fetch in (result_set.fetchone, result_set.fetchmany, result_set.fetchall):
+        with pytest.raises(ProgrammingError, match=r"cannot be fetched after a failed fetch\."):
+            fetch()
 
 
 def throttling_error(operation_name="GetQueryResults"):

@@ -32,7 +32,7 @@ from pyathena.pandas.result_set import (
     _read_csv_with_pyarrow,
 )
 from pyathena.util import RetryConfig, retry_api_call, stop_retries_on
-from tests.pyathena.util import ThrottledOperation
+from tests.pyathena.util import ThrottledOperation, assert_fetches_fail
 
 
 def _typed_values(rows):
@@ -257,7 +257,7 @@ class TestAthenaPandasResultSet:
         assert result_set.fetchone() == (0, pd.Timestamp(0, unit="s"))
         with pytest.raises(OverflowError):
             getattr(result_set, method)()
-        _assert_fetches_fail(result_set)
+        assert_fetches_fail(result_set)
 
     def test_fetch_after_failed_chunk_read(self):
         """GH-1225: after iter_chunks() fails to read a chunk, the fetch methods raise."""
@@ -271,7 +271,7 @@ class TestAthenaPandasResultSet:
             list(result_set.iter_chunks())
         with pytest.raises(ProgrammingError, match=r"cannot be read after a failed read\."):
             result_set.fetchone()
-        _assert_fetches_fail(result_set)
+        assert_fetches_fail(result_set)
 
     def test_fetch_after_chunks_run_out(self):
         """The rows of a chunk that a fetch started stay after iter_chunks() runs out."""
@@ -1276,13 +1276,6 @@ def test_read_csv_with_pyarrow_multiline_values_across_blocks():
     )
     assert df["id"].tolist() == [i for i, _ in rows]
     assert df["v"].tolist() == [v for _, v in rows]
-
-
-def _assert_fetches_fail(result_set):
-    """Assert that each fetch of a result set raises for an earlier failed fetch."""
-    for fetch in (result_set.fetchone, result_set.fetchmany, result_set.fetchall):
-        with pytest.raises(ProgrammingError, match=r"cannot be fetched after a failed fetch\."):
-            fetch()
 
 
 def _fetching_result_set(result, arraysize):

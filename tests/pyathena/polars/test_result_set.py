@@ -21,6 +21,7 @@ from pyathena.model import AthenaQueryExecution
 from pyathena.polars.converter import DefaultPolarsTypeConverter
 from pyathena.polars.result_set import AthenaPolarsResultSet, PolarsDataFrameIterator
 from pyathena.util import RetryConfig
+from tests.pyathena.util import assert_fetches_fail
 
 _ROWS_BEFORE_FAILURE = 300_000
 # A timestamp column of a CSV result file with 12 fractional digits and NULL, as text and
@@ -56,13 +57,6 @@ def _read_all(result: pl.DataFrame | Iterator[pl.DataFrame]) -> pl.DataFrame:
         The DataFrame, or the chunks concatenated.
     """
     return result if isinstance(result, pl.DataFrame) else pl.concat(list(result))
-
-
-def _assert_fetches_fail(result_set):
-    """Assert that each fetch of a result set raises for an earlier failed fetch."""
-    for fetch in (result_set.fetchone, result_set.fetchmany, result_set.fetchall):
-        with pytest.raises(ProgrammingError, match=r"cannot be fetched after a failed fetch\."):
-            fetch()
 
 
 def _fetching_result_set(chunks, names, arraysize, converters=None) -> AthenaPolarsResultSet:
@@ -164,7 +158,7 @@ class TestAthenaPolarsResultSet:
         assert result_set.fetchone() == (0, date(2024, 1, 1))
         with pytest.raises(ValueError, match="bad"):
             getattr(result_set, method)()
-        _assert_fetches_fail(result_set)
+        assert_fetches_fail(result_set)
 
     def test_fetch_after_failed_chunk_read(self):
         """GH-1225: after iter_chunks() fails to read a chunk, the fetch methods raise."""
@@ -178,7 +172,7 @@ class TestAthenaPolarsResultSet:
             list(result_set.iter_chunks())
         with pytest.raises(ProgrammingError, match=r"cannot be read after a failed read\."):
             result_set.fetchone()
-        _assert_fetches_fail(result_set)
+        assert_fetches_fail(result_set)
 
     def test_fetch_after_chunks_run_out(self):
         """The rows of a chunk that a fetch started stay after iter_chunks() runs out."""

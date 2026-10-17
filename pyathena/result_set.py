@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-_FETCH_FAILED_MESSAGE = "AthenaResultSet cannot be fetched after a failed fetch."
+_FETCH_FAILED_MESSAGE = "The result set cannot be fetched after a failed fetch."
 
 
 class AthenaResultSet(CursorIterator):
@@ -609,9 +609,8 @@ class AthenaResultSet(CursorIterator):
         Args:
             count: The number of rows taken.
         """
-        rownumber = self._rownumber
-        if rownumber is not None:
-            self._rownumber = rownumber + count
+        if self._rownumber is not None:
+            self._rownumber += count
 
     def _process_metadata(self, response: dict[str, Any]) -> None:
         result_set = response.get("ResultSet")

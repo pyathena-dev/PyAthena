@@ -16,7 +16,7 @@ from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet, WithFetch, WithResultSet
 from pyathena.util import RetryConfig
-from tests.pyathena.util import get_query_results_responses
+from tests.pyathena.util import assert_fetches_fail, get_query_results_responses
 
 
 def _row(*values):
@@ -97,9 +97,7 @@ class TestAthenaResultSet:
         assert result_set.fetchmany(2) == [(1,), (2,)]
         with pytest.raises(expected):
             getattr(result_set, method)()
-        for fetch in (result_set.fetchone, result_set.fetchmany, result_set.fetchall):
-            with pytest.raises(ProgrammingError, match=r"cannot be fetched after a failed fetch\."):
-                fetch()
+        assert_fetches_fail(result_set)
         assert result_set.connection.client.get_query_results.call_count == 2
 
     def test_fetch_after_close(self):

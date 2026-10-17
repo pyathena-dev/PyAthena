@@ -15,15 +15,13 @@ from pyathena.aio.util import async_retry_api_call
 from pyathena.converter import Converter
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
-from pyathena.result_set import AthenaDictResultSet, AthenaResultSet
+from pyathena.result_set import _FETCH_FAILED_MESSAGE, AthenaDictResultSet, AthenaResultSet
 from pyathena.util import RetryConfig, override
 
 if TYPE_CHECKING:
     from pyathena.connection import Connection
 
 _logger = logging.getLogger(__name__)
-
-_FETCH_FAILED_MESSAGE = "AthenaAioResultSet cannot be fetched after a failed fetch."
 
 
 class AthenaAioResultSet(AthenaResultSet):
