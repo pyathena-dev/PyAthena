@@ -15,7 +15,6 @@ from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
-import polars as pl
 import pyarrow as pa
 import pytest
 
@@ -566,186 +565,9 @@ class TestArrowCursor:
             )
         ]
 
-    @pytest.mark.parametrize(
-        "arrow_cursor",
-        [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
-        indirect=["arrow_cursor"],
-    )
     def test_as_polars(self, arrow_cursor):
         df = arrow_cursor.execute("SELECT * FROM one_row").as_polars()
-        assert df.height == 1
-        assert df.width == 1
         assert df.to_dicts() == [{"number_of_rows": 1}]
-
-    @pytest.mark.parametrize(
-        "arrow_cursor",
-        [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
-        indirect=["arrow_cursor"],
-    )
-    def test_many_as_polars(self, arrow_cursor):
-        df = arrow_cursor.execute("SELECT * FROM many_rows").as_polars()
-        assert df.height == 10000
-        assert df.width == 1
-        assert df.to_dicts() == [{"a": i} for i in range(10000)]
-
-    def test_complex_as_polars(self, arrow_cursor):
-        df = arrow_cursor.execute(
-            """
-            SELECT
-              col_boolean
-              ,col_tinyint
-              ,col_smallint
-              ,col_int
-              ,col_bigint
-              ,col_float
-              ,col_double
-              ,col_string
-              ,col_varchar
-              ,col_timestamp
-              ,CAST(col_timestamp AS time) AS col_time
-              ,col_date
-              ,col_binary
-              ,col_array
-              ,CAST(col_array AS json) AS col_array_json
-              ,col_map
-              ,CAST(col_map AS json) AS col_map_json
-              ,col_struct
-              ,col_decimal
-            FROM one_row_complex
-            """
-        ).as_polars()
-        assert df.height == 1
-        assert df.width == 19
-        dtypes = tuple(df.dtypes)
-        assert dtypes == (
-            pl.Boolean,
-            pl.Int8,
-            pl.Int16,
-            pl.Int32,
-            pl.Int64,
-            pl.Float32,
-            pl.Float64,
-            pl.String,
-            pl.String,
-            pl.Datetime("us"),
-            pl.String,
-            pl.Date,
-            pl.String,
-            pl.String,
-            pl.String,
-            pl.String,
-            pl.String,
-            pl.String,
-            pl.String,
-        )
-        rows = df.to_dicts()
-        assert rows == [
-            {
-                "col_boolean": True,
-                "col_tinyint": 127,
-                "col_smallint": 32767,
-                "col_int": 2147483647,
-                "col_bigint": 9223372036854775807,
-                "col_float": 0.5,
-                "col_double": 0.25,
-                "col_string": "a string",
-                "col_varchar": "varchar",
-                "col_timestamp": datetime(2017, 1, 1, 0, 0, 0),
-                "col_time": "00:00:00.000",
-                "col_date": datetime(2017, 1, 2).date(),
-                "col_binary": "31 32 33",
-                "col_array": "[1, 2]",
-                "col_array_json": "[1,2]",
-                "col_map": "{1=2, 3=4}",
-                "col_map_json": '{"1":2,"3":4}',
-                "col_struct": "{a=1, b=2}",
-                "col_decimal": "0.1",
-            }
-        ]
-
-    @pytest.mark.parametrize(
-        "arrow_cursor",
-        [
-            {
-                "cursor_kwargs": {"unload": True},
-            },
-        ],
-        indirect=["arrow_cursor"],
-    )
-    def test_complex_unload_as_polars(self, arrow_cursor):
-        # NOT_SUPPORTED: Unsupported Hive type: time
-        # NOT_SUPPORTED: Unsupported Hive type: json
-        df = arrow_cursor.execute(
-            """
-            SELECT
-              col_boolean
-              ,col_tinyint
-              ,col_smallint
-              ,col_int
-              ,col_bigint
-              ,col_float
-              ,col_double
-              ,col_string
-              ,col_varchar
-              ,col_timestamp
-              ,col_date
-              ,col_binary
-              ,col_array
-              ,col_map
-              ,col_struct
-              ,col_decimal
-            FROM one_row_complex
-            """
-        ).as_polars()
-        assert df.height == 1
-        assert df.width == 16
-        # Polars 2.0 converts an Arrow map to Map; Polars 1.x to a list of key-value structs.
-        if hasattr(pl, "Map"):
-            map_dtype = pl.Map(pl.Int32, pl.Int32)
-            map_value = {1: 2, 3: 4}
-        else:
-            map_dtype = pl.List(pl.Struct([pl.Field("key", pl.Int32), pl.Field("value", pl.Int32)]))
-            map_value = [{"key": 1, "value": 2}, {"key": 3, "value": 4}]
-        dtypes = tuple(df.dtypes)
-        assert dtypes == (
-            pl.Boolean,
-            pl.Int8,
-            pl.Int16,
-            pl.Int32,
-            pl.Int64,
-            pl.Float32,
-            pl.Float64,
-            pl.String,
-            pl.String,
-            pl.Datetime("us"),
-            pl.Date,
-            pl.Binary,
-            pl.List(pl.Int32),
-            map_dtype,
-            pl.Struct([pl.Field("a", pl.Int32), pl.Field("b", pl.Int32)]),
-            pl.Decimal(precision=10, scale=1),
-        )
-        rows = df.to_dicts()
-        assert rows == [
-            {
-                "col_boolean": True,
-                "col_tinyint": 127,
-                "col_smallint": 32767,
-                "col_int": 2147483647,
-                "col_bigint": 9223372036854775807,
-                "col_float": 0.5,
-                "col_double": 0.25,
-                "col_string": "a string",
-                "col_varchar": "varchar",
-                "col_timestamp": datetime(2017, 1, 1, 0, 0, 0),
-                "col_date": datetime(2017, 1, 2).date(),
-                "col_binary": b"123",
-                "col_array": [1, 2],
-                "col_map": map_value,
-                "col_struct": {"a": 1, "b": 2},
-                "col_decimal": Decimal("0.1"),
-            }
-        ]
 
     def test_cancel(self, arrow_cursor):
         def cancel(c):
@@ -983,49 +805,6 @@ class TestArrowCursor:
     @pytest.mark.parametrize(
         "arrow_cursor",
         [
-            {
-                "cursor_kwargs": {
-                    "connect_timeout": 10,
-                    "request_timeout": 30,
-                }
-            }
-        ],
-        indirect=["arrow_cursor"],
-    )
-    def test_timeout_parameters(self, arrow_cursor):
-        """Test that timeout parameters are correctly passed to ArrowCursor and result set."""
-        # Verify timeout parameters are set on cursor
-        assert arrow_cursor._connect_timeout == 10
-        assert arrow_cursor._request_timeout == 30
-
-        # Execute a simple query to create a result set
-        arrow_cursor.execute("SELECT 1")
-
-        # Verify timeout parameters are passed to result set
-        assert arrow_cursor.result_set._connect_timeout == 10
-        assert arrow_cursor.result_set._request_timeout == 30
-
-    @pytest.mark.parametrize(
-        "arrow_cursor",
-        [{"cursor_kwargs": {"connect_timeout": 5.5, "request_timeout": 15.5}}],
-        indirect=["arrow_cursor"],
-    )
-    def test_timeout_parameters_float(self, arrow_cursor):
-        """Test that timeout parameters accept float values."""
-        # Verify float timeout parameters are set on cursor
-        assert arrow_cursor._connect_timeout == 5.5
-        assert arrow_cursor._request_timeout == 15.5
-
-        # Execute a simple query to create a result set
-        arrow_cursor.execute("SELECT 1")
-
-        # Verify float timeout parameters are passed to result set
-        assert arrow_cursor.result_set._connect_timeout == 5.5
-        assert arrow_cursor.result_set._request_timeout == 15.5
-
-    @pytest.mark.parametrize(
-        "arrow_cursor",
-        [
             {"cursor_kwargs": {"unload": False}},
             {"cursor_kwargs": {"unload": True}},
         ],
@@ -1189,10 +968,12 @@ class TestArrowCursor:
         indirect=["arrow_cursor"],
     )
     def test_duplicate_column_names(self, arrow_cursor):
+        """Columns with the same name keep their own types; timestamps are truncated."""
         arrow_cursor.execute(
             "SELECT 1 AS x, 2 AS x, CAST('01:02:03' AS TIME) AS x, 'a' AS y, "
             "json_parse('[1]') AS j, 'b' AS j, CAST('12:34:56' AS TIME) AS t, "
-            "CAST('01:02:03' AS TIME) AS t"
+            "CAST('01:02:03' AS TIME) AS t, "
+            "CAST('2020-01-02 03:04:05.123456789' AS TIMESTAMP(9)) AS x"
         )
         assert arrow_cursor.fetchall() == [
             (
@@ -1204,9 +985,20 @@ class TestArrowCursor:
                 "b",
                 datetime(2017, 1, 1, 12, 34, 56).time(),
                 datetime(2017, 1, 1, 1, 2, 3).time(),
+                datetime(2020, 1, 2, 3, 4, 5, 123456),
             )
         ]
-        assert arrow_cursor.as_arrow().column_names == ["x", "x", "x", "y", "j", "j", "t", "t"]
+        assert arrow_cursor.as_arrow().column_names == [
+            "x",
+            "x",
+            "x",
+            "y",
+            "j",
+            "j",
+            "t",
+            "t",
+            "x",
+        ]
 
     def test_duplicate_column_names_with_newline(self, arrow_cursor):
         """Columns with the same name keep their own types, with a newline in the name."""

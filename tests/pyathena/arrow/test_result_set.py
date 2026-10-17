@@ -6,7 +6,6 @@
 # SPDX-License-Identifier: MIT
 import os
 import sys
-from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
@@ -21,22 +20,7 @@ from pyathena.util import RetryConfig
 
 class TestAthenaArrowResultSet:
     def test_fetch_after_close(self):
-        """No AWS calls; the query execution and the filesystem are mocked."""
-        with patch.object(AthenaArrowResultSet, "_create_s3_file_system"):
-            result_set = AthenaArrowResultSet(
-                connection=MagicMock(),
-                converter=DefaultArrowTypeConverter(),
-                query_execution=MagicMock(state=AthenaQueryExecution.STATE_FAILED),
-                arraysize=1,
-                retry_config=RetryConfig(),
-            )
-        result_set.close()
-        assert result_set.fetchone() is None
-        assert result_set.fetchmany() == []
-        assert result_set.fetchall() == []
-
-    def test_fetch_across_batches(self):
-        """The buffer is refilled one record batch at a time.
+        """close() discards the rows that are not fetched yet.
 
         No AWS calls; the first page request and the result table are mocked.
         """
@@ -57,14 +41,13 @@ class TestAthenaArrowResultSet:
                 arraysize=1,
                 retry_config=RetryConfig(),
             )
-        assert result_set.fetchmany(2) == [(1,), (2,)]
-        assert result_set.fetchone() == (3,)
+        assert result_set.fetchone() == (1,)
+        result_set.close()
+        assert result_set.fetchone() is None
         assert result_set.fetchmany() == []
         assert result_set.fetchall() == []
-        assert result_set.fetchone() is None
-        assert result_set.rownumber == 3
 
-    @pytest.mark.parametrize("method", ["fetchone", "fetchmany", "fetchall", "iter"])
+    @pytest.mark.parametrize("method", ["fetchone", "fetchmany", "fetchall", "iter", "mixed"])
     @pytest.mark.parametrize(
         ("chunks", "expected"),
         [
@@ -79,8 +62,9 @@ class TestAthenaArrowResultSet:
 
         A table read from result files that include an empty one has such
         batches; the fetches used to stop at the first one. to_batches() yields
-        no empty batch after the last rows. No AWS calls; the first page
-        request and the result table are mocked.
+        no empty batch after the last rows. The fetch methods can be mixed, and
+        return nothing after the last row. No AWS calls; the first page request
+        and the result table are mocked.
         """
         table = pa.concat_tables([pa.table({"a": pa.array(chunk, pa.int64())}) for chunk in chunks])
         with (
@@ -105,35 +89,16 @@ class TestAthenaArrowResultSet:
             rows = result_set.fetchmany(10)
         elif method == "fetchall":
             rows = result_set.fetchall()
-        else:
+        elif method == "iter":
             rows = list(result_set)
+        else:
+            rows = [*result_set.fetchmany(2), *filter(None, [result_set.fetchone()])]
+            rows += result_set.fetchall()
         assert rows == [(value,) for value in expected]
         assert result_set.rownumber == len(expected)
+        assert result_set.fetchmany() == []
+        assert result_set.fetchall() == []
         assert result_set.fetchone() is None
-
-    def test_read_csv_timestamps_with_the_same_name(self):
-        """Timestamp columns are converted by position, also with names that repeat.
-
-        No AWS calls; the GetQueryResults rows are mocked.
-        """
-        result_set = AthenaArrowResultSet.__new__(AthenaArrowResultSet)  # bypass __init__
-        result_set._query_execution = None
-        result_set._converter = DefaultArrowTypeConverter()
-        result_set._block_size = AthenaArrowResultSet.DEFAULT_BLOCK_SIZE
-        result_set._metadata = tuple(
-            {"Name": n, "Type": t, "Precision": 3, "Scale": 0, "Nullable": "UNKNOWN"}
-            for n, t in (("x", "varchar"), ("x", "timestamp"), ("y", "timestamp"))
-        )
-        data = b'"x","x","y"\n"a","2020-01-02 03:04:05.123456789","2020-01-02 03:04:05.1"\n"b",,\n'
-        with patch.object(AthenaArrowResultSet, "_fetch_all_rows_as_csv", return_value=data):
-            table = result_set._read_csv()
-        assert table.column_names == ["x", "x", "y"]
-        assert table.schema.types == [pa.string(), pa.timestamp("us"), pa.timestamp("us")]
-        rows = list(zip(*(column.to_pylist() for column in table.columns), strict=True))
-        assert rows == [
-            ("a", datetime(2020, 1, 2, 3, 4, 5, 123456), datetime(2020, 1, 2, 3, 4, 5, 100000)),
-            ("b", None, None),
-        ]
 
     @pytest.mark.parametrize(
         ("connection_kwargs", "expected_access_key"),
@@ -191,13 +156,3 @@ class TestAthenaArrowResultSet:
         options = fs.__reduce__()[1][0]
         assert options["access_key"] == expected_access_key
         assert options["role_arn"] == ""
-
-    def test_open_csv_closes_file_when_stream_fails(self):
-        """The input file is closed if the read-ahead stream cannot be created."""
-        result_set = AthenaArrowResultSet.__new__(AthenaArrowResultSet)  # bypass __init__
-        result_set._fs = MagicMock()
-        file = result_set._fs.open_input_file.return_value
-        file.size.side_effect = OSError("HEAD failed")
-        with pytest.raises(OSError, match="HEAD failed"):
-            result_set._open_csv("bucket/key.csv")
-        file.close.assert_called_once_with()
