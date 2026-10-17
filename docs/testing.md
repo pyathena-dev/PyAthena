@@ -216,7 +216,7 @@ Sanitize logs before sharing them.
 
 ## Choose what to test
 
-Each test protects a behavior that a caller can observe and that no other test protects.
+Each test protects a behavior that a caller can observe and that no other test checks with the same kind of evidence.
 Name that contract before writing the test, and check whether an existing test or parameter already covers it.
 
 Check behavior against Athena and Amazon S3 where the services can observe it.
@@ -238,7 +238,7 @@ Do not add a test that:
 The exception type that a public API raises is a contract; its message text usually is not.
 A documented public value, such as `pyathena.threadsafety`, is a contract.
 When the result type that PyAthena produces depends on a supported library version, state the expected type for each supported version.
-An offline test and a real-service test of the same contract provide different evidence when the real-service test does not run in every environment or the offline test cannot reproduce the service behavior.
+An offline test and a real-service test of the same contract are different kinds of evidence only when the real-service test is opt-in and skipped by default, or the offline test reaches cases that the service cannot produce on demand.
 Test asynchronous and aio variants where they have their own code, such as their own cancellation, shutdown, or request scheduling.
 
 Before submitting a test, remove or break the behavior it names, confirm that the test fails, and restore the behavior.
