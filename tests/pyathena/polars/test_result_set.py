@@ -733,19 +733,18 @@ class TestAthenaPolarsResultSet:
 
     @pytest.mark.skipif(_POLARS_2, reason="Polars 2.0 reads INT96 without pyarrow.")
     @pytest.mark.parametrize(
-        ("chunksize", "kwargs", "match"),
-        [
-            (None, {}, "install pyarrow"),
-            (3, {}, "install pyarrow"),
-            (None, {"low_memory": True}, "give no read options"),
-        ],
-        ids=["whole", "chunks", "whole-read-options"],
+        ("chunksize", "kwargs", "pyarrow"),
+        [(None, {}, False), (3, {}, False), (None, {"low_memory": True}, True)],
+        ids=["whole-without-pyarrow", "chunks-without-pyarrow", "whole-read-options"],
     )
-    def test_read_parquet_int96_polars_1(self, tmp_path, chunksize, kwargs, match):
+    def test_read_parquet_int96_polars_1(self, tmp_path, chunksize, kwargs, pyarrow):
         """Polars 1.x reads INT96 at microseconds only with pyarrow and no read options."""
         with (
-            patch("pyathena.polars.result_set.importlib.util.find_spec", return_value=None),
-            pytest.raises(NotSupportedError, match=match),
+            patch(
+                "pyathena.polars.result_set.importlib.util.find_spec",
+                return_value=MagicMock() if pyarrow else None,
+            ),
+            pytest.raises(NotSupportedError, match=_UPGRADE),
         ):
             _read_unload_result(tmp_path, chunksize, kwargs)
 

@@ -831,7 +831,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 filesystem=S3FileSystem(**self._csv_storage_options),
                 coerce_int96_timestamp_unit="us",
             ).read(use_threads=True)
-            return cast("pl.DataFrame", pl.from_arrow(table))
+            # Not rechunked, as Polars does not rechunk its own reads.
+            return cast("pl.DataFrame", pl.from_arrow(table, rechunk=False))
         except Exception as e:
             _logger.exception(f"Failed to read {self._unload_location}.")
             raise OperationalError(*e.args) from e
