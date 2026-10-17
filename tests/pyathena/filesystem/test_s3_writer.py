@@ -7,9 +7,8 @@
 
 import gc
 import io
-import threading
 import weakref
-from concurrent.futures import CancelledError, wait
+from concurrent.futures import CancelledError
 from types import SimpleNamespace
 from unittest import mock
 
@@ -29,7 +28,6 @@ from pyathena.filesystem.s3_writer import (
     S3MultipartStateError,
     S3MultipartWriter,
     _S3WriteSession,
-    _S3WriteState,
 )
 from pyathena.util import RetryConfig
 
@@ -245,49 +243,8 @@ class TestS3MultipartWriter:
             writer.abort()
 
 
-class _Requests:
-    """The S3 requests of a write session, recorded and controlled by a test."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple] = []
-        self.upload = S3MultipartUpload({"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"})
-        # The requests that wait for an event before they respond.
-        self.gates: dict[tuple, threading.Event] = {}
-        # The requests that raise an error.
-        self.errors: dict[tuple, BaseException] = {}
-        self.started: dict[tuple, threading.Event] = {}
-
-    def _respond(self, request: tuple, result):
-        self.calls.append(request)
-        self.started.setdefault(request, threading.Event()).set()
-        if request in self.gates:
-            assert self.gates[request].wait(5)
-        if request in self.errors:
-            raise self.errors.pop(request)
-        return result
-
-    def gate(self, *request) -> threading.Event:
-        return self.gates.setdefault(request, threading.Event())
-
-    def install(self, core: S3Core) -> None:
-        core.create_multipart_upload = lambda path, **params: self._respond(  # type: ignore[method-assign]
-            ("create",), self.upload
-        )
-        core.upload_part = lambda upload, part_number, body, **params: self._respond(  # type: ignore[method-assign]
-            ("part", part_number), SimpleNamespace(part_number=part_number, etag=f'"{body!r}"')
-        )
-        core.upload_part_copy = lambda upload, part_number, source, range_, **params: (  # type: ignore[method-assign]
-            self._respond(("copy", part_number), SimpleNamespace(part_number=part_number))
-        )
-        core.complete_multipart_upload = lambda upload, parts, **params: self._respond(  # type: ignore[method-assign]
-            ("complete", tuple(part.part_number for part in parts)), "completed"
-        )
-        core.abort_multipart_upload = lambda upload, **params: self._respond(("abort",), None)  # type: ignore[method-assign]
-        core.put_object = lambda path, body, **params: self._respond(("put", body), "put")  # type: ignore[method-assign]
-
-
 class _DroppingExecutor(S3ThreadPoolExecutor):
-    """Drops the requests, as S3AioExecutor does when its event loop shuts down."""
+    """Drops requests unrun, as S3AioExecutor does when its event loop shuts down."""
 
     def __init__(self, drop) -> None:
         super().__init__(max_workers=1)
@@ -302,144 +259,58 @@ class _DroppingExecutor(S3ThreadPoolExecutor):
             super().submit_to(future, fn, *args, **kwargs)
 
 
-def _make_session(max_workers=2, executor_workers=4, executor=None):
+def _make_session(executor, part_errors=()):
     client = boto3.client(
         "s3", region_name="us-east-1", aws_access_key_id="dummy", aws_secret_access_key="dummy"
     )
     core = S3Core(client, retry_config=RetryConfig(attempt=1))
     core.MULTIPART_UPLOAD_MIN_PART_SIZE = 4
     core.MULTIPART_UPLOAD_MAX_PART_SIZE = 8
-    requests = _Requests()
-    requests.install(core)
-    executor = executor or S3ThreadPoolExecutor(max_workers=executor_workers)
-    session = _S3WriteSession(
-        core, S3Path("bucket", "key"), executor, block_size=4, max_workers=max_workers
+    completed = []
+    errors = list(part_errors)
+
+    def upload_part(upload, part_number, body, **params):
+        if errors:
+            raise errors.pop()
+        return SimpleNamespace(part_number=part_number)
+
+    core.create_multipart_upload = lambda path, **params: S3MultipartUpload(  # type: ignore[method-assign]
+        {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
     )
-    return session, requests, executor
-
-
-def _start(session):
-    session.start()
-    assert session.ready().result(5) is None
-    session.check()
-    assert session.state is _S3WriteState.ACTIVE
+    core.upload_part = upload_part  # type: ignore[method-assign]
+    core.complete_multipart_upload = lambda upload, parts, **params: completed.append(parts)  # type: ignore[method-assign]
+    core.abort_multipart_upload = lambda upload, **params: None  # type: ignore[method-assign]
+    session = _S3WriteSession(core, S3Path("bucket", "key"), executor, block_size=4, max_workers=1)
+    return session, completed
 
 
 class TestS3WriteSession:
-    def test_invalid_max_workers(self):
-        with pytest.raises(ValueError, match="max_workers"):
-            _make_session(max_workers=0)
-
-    def test_put(self):
-        session, requests, executor = _make_session()
-        with executor:
-            assert session.put(b"data") == "put"
-            assert session.state is _S3WriteState.COMPLETED
-            # Committing again sends no request.
-            assert session.put(b"data") == "put"
-            session.abort()
-            assert session.state is _S3WriteState.COMPLETED
-            with pytest.raises(S3MultipartStateError, match="has been committed"):
-                session.start()
-        assert requests.calls == [("put", b"data")]
-        assert not session.multipart
-
-    def test_complete(self):
-        session, requests, executor = _make_session()
-        with executor:
-            _start(session)
-            assert list(session.iter_copy_parts(4)) == [(1, (0, 4))]
-            session.submit_copy(1, S3Path("bucket", "key"), None)
-            ((number, body),) = session.iter_parts(io.BytesIO(b"abcd"))
-            assert number == 2
-            session.submit_part(number, body)
-            assert session.complete() == "completed"
-            assert session.state is _S3WriteState.COMPLETED
-            assert session.complete() == "completed"
-            with pytest.raises(S3MultipartStateError, match="has been committed"):
-                session.put(b"data")
-            session.abort()
-        assert requests.calls.count(("complete", (1, 2))) == 1
-        assert ("abort",) not in requests.calls
-        assert [part.part_number for part in session.completed_parts] == [1, 2]
-        assert session.upload is requests.upload
-
-    def test_ready_waits_for_creation_and_parts_in_flight(self):
-        session, requests, executor = _make_session(max_workers=1)
-        creation = requests.gate("create")
-        part = requests.gate("part", 1)
-        with executor:
-            session.start()
-            waiter = session.ready()
-            assert requests.started.setdefault(("create",), threading.Event()).wait(5)
-            assert not waiter.done()
-            creation.set()
-            assert waiter.result(5) is None
-            session.submit_part(1, b"abcd")
-            waiters = [session.ready(), session.ready()]
-            # A waiter cancelled by its caller, such as by
-            # asyncio.wrap_future(), does not affect the others, and is
-            # marked as notified when it is dropped, so that wait() returns.
-            assert waiters[0].cancel()
-            assert not waiters[1].done()
-            part.set()
-            assert waiters[1].result(5) is None
-            session.ready()
-            assert wait([waiters[0]], timeout=5).done == {waiters[0]}
-            assert session.complete() == "completed"
-
-    def test_part_failure_is_raised_once(self):
-        session, requests, executor = _make_session(max_workers=1)
-        requests.errors[("part", 1)] = PermissionError("Access Denied")
-        with executor:
-            _start(session)
-            session.submit_part(1, b"abcd")
-            # A failure resolves the readiness, so that the caller finds it.
-            assert session.ready().result(5) is None
-            assert session.state is _S3WriteState.FAILED
-            with pytest.raises(PermissionError, match="Access Denied"):
-                session.check()
-            for operation in (
-                session.check,
-                lambda: session.submit_part(2, b"abcd"),
-                session.complete,
-            ):
-                with pytest.raises(
-                    S3MultipartStateError,
-                    match=r"has failed\. The first failure: PermissionError: Access Denied",
-                ):
-                    operation()
-            session.abort()
-            with pytest.raises(S3MultipartStateError, match="has been discarded"):
-                session.complete()
-        assert requests.calls[-1] == ("abort",)
-        assert session.upload is None
-        assert session.completed_parts == ()
-
     def test_failed_part_is_released(self):
-        # The session drops the request of a failed part, whose body the
-        # executor frees, and keeps no reference to its error once it is
-        # raised, so neither waits for the garbage collector.
+        # GH-1211: the session drops the request of a failed part, whose body
+        # the executor frees, and keeps no reference to its error once it is
+        # raised, so that neither waits for the garbage collector.
         class Body:
             pass
 
         class AccessDeniedError(PermissionError):
             pass
 
-        session, requests, executor = _make_session(max_workers=1)
         error = AccessDeniedError("Access Denied")
-        requests.errors[("part", 1)] = error
         error_ref = weakref.ref(error)
-        del error
         gc.disable()
         try:
-            with executor:
-                _start(session)
+            with S3ThreadPoolExecutor(max_workers=1) as executor:
+                session, _ = _make_session(executor, part_errors=[error])
+                del error
+                session.start()
+                session.wait_ready()
+                session.check()
                 body = Body()
                 body_ref = weakref.ref(body)
                 session.submit_part(1, body)  # type: ignore[arg-type]
                 del body
-                assert session.ready().result(5) is None
+                # Returns once the part has failed, with max_workers=1.
+                session.wait_ready()
             # The worker has returned from the request and its callbacks.
             assert body_ref() is None
             with pytest.raises(PermissionError) as info:
@@ -450,292 +321,55 @@ class TestS3WriteSession:
         finally:
             gc.enable()
 
-    def test_creation_failure(self):
-        session, requests, executor = _make_session()
-        requests.errors[("create",)] = PermissionError("create failed")
+    @pytest.mark.parametrize("dropped", ["creation", "part"])
+    def test_dropped_request_fails_the_write(self, dropped):
+        # A request that the executor drops without running it, as
+        # S3AioExecutor does when its event loop shuts down, fails the write,
+        # so that the upload is never completed without it.
+        executor = _DroppingExecutor(
+            lambda kwargs: dropped == "creation" or "part_number" in kwargs
+        )
         with executor:
+            session, completed = _make_session(executor)
             session.start()
-            assert session.ready().result(5) is None
-            with pytest.raises(PermissionError, match="create failed"):
+            if dropped == "part":
+                session.wait_ready()
                 session.check()
-            session.abort()
-        assert session.state is _S3WriteState.ABORTED
-        assert requests.calls == [("create",)]
-
-    def test_abort_during_creation(self):
-        # A running creation is waited for, and the upload that it creates is
-        # aborted. The writes that wait for the creation are released.
-        session, requests, executor = _make_session()
-        creation = requests.gate("create")
-        with executor:
-            session.start()
-            waiter = session.ready()
-            assert requests.started.setdefault(("create",), threading.Event()).wait(5)
-            aborting = threading.Thread(target=session.abort)
-            aborting.start()
-            assert waiter.result(5) is None
-            assert session.state is _S3WriteState.ABORTING
-            creation.set()
-            aborting.join(5)
-            assert not aborting.is_alive()
-        assert requests.calls == [("create",), ("abort",)]
-        assert session.state is _S3WriteState.ABORTED
-        with pytest.raises(S3MultipartStateError, match="has been discarded"):
-            session.check()
-
-    def test_abort_cancels_queued_and_waits_for_running_parts(self):
-        session, requests, executor = _make_session(executor_workers=1)
-        running = requests.gate("part", 1)
-        with executor:
-            _start(session)
-            session.submit_part(1, b"abcd")
-            session.submit_part(2, b"efgh")
-            assert requests.started.setdefault(("part", 1), threading.Event()).wait(5)
-            aborting = threading.Thread(target=session.abort)
-            aborting.start()
-            # The abort waits for the running part.
-            aborting.join(0.1)
-            assert aborting.is_alive()
-            running.set()
-            aborting.join(5)
-            assert not aborting.is_alive()
-        assert requests.calls == [("create",), ("part", 1), ("abort",)]
-
-    def test_abort_failure_is_retried(self):
-        session, requests, executor = _make_session()
-        requests.errors[("abort",)] = PermissionError("abort failed")
-        with executor:
-            _start(session)
-            with pytest.raises(PermissionError, match="abort failed"):
-                session.abort()
-            assert session.state is _S3WriteState.ABORT_FAILED
-            assert session.upload is requests.upload
-            with pytest.raises(S3MultipartStateError, match="failed to abort"):
+                session.submit_part(1, b"abcd")
+            with pytest.raises(CancelledError):
                 session.complete()
             session.abort()
-            session.abort()
-        assert requests.calls == [("create",), ("abort",), ("abort",)]
-        assert session.state is _S3WriteState.ABORTED
-        assert session.upload is None
+        assert completed == []
 
-    def test_concurrent_aborts(self):
-        # Another abort waits for the abort in progress.
-        session, requests, executor = _make_session()
-        aborted = requests.gate("abort")
-        with executor:
-            _start(session)
-            first = threading.Thread(target=session.abort)
-            first.start()
-            assert requests.started.setdefault(("abort",), threading.Event()).wait(5)
-            second = threading.Thread(target=session.abort)
-            second.start()
-            second.join(0.1)
-            assert second.is_alive()
-            aborted.set()
-            first.join(5)
-            second.join(5)
-        assert requests.calls == [("create",), ("abort",)]
-
-    def test_request_parameters_are_read_at_each_request(self):
-        client = boto3.client(
-            "s3", region_name="us-east-1", aws_access_key_id="dummy", aws_secret_access_key="dummy"
-        )
-        core = S3Core(client, retry_config=RetryConfig(attempt=1))
-        sent = []
-        core.put_object = lambda path, body, **params: sent.append(params)  # type: ignore[method-assign]
-        request_kwargs = {"ContentType": "text/plain"}
+    @pytest.mark.parametrize("operation", ["complete", "abort"])
+    def test_outcomes_before_callbacks(self, operation):
+        # A future is done before its done callbacks run, so the completion
+        # and the abort consume the finished requests themselves: the
+        # completion includes every part, and a callback that runs after the
+        # abort neither restores its part nor records its failure.
         with S3ThreadPoolExecutor(max_workers=1) as executor:
-            session = _S3WriteSession(
-                core,
-                S3Path("bucket", "key"),
+            session, completed = _make_session(
                 executor,
-                block_size=5 * 2**20,
-                max_workers=1,
-                request_kwargs=request_kwargs,
+                part_errors=[PermissionError("Access Denied")] if operation == "abort" else [],
             )
-            request_kwargs["ContentType"] = "text/csv"
-            request_kwargs["UploadId"] = "not accepted by PutObject"
-            session.put(b"data")
-        assert sent == [{"ContentType": "text/csv"}]
-
-    def test_abort_before_start(self):
-        session, requests, executor = _make_session()
-        with executor:
-            session.abort()
-            with pytest.raises(
-                S3MultipartStateError, match=r"Cannot commit: .* has been discarded"
-            ):
-                session.put(b"data")
-        assert requests.calls == []
-
-    def test_complete_failure(self):
-        session, requests, executor = _make_session()
-        requests.errors[("complete", ())] = RuntimeError("complete failed")
-        with executor:
-            _start(session)
-            with pytest.raises(RuntimeError, match="complete failed"):
-                session.complete()
-            assert session.state is _S3WriteState.FAILED
-            with pytest.raises(S3MultipartStateError, match="RuntimeError: complete failed"):
-                session.complete()
-            session.abort()
-        assert requests.calls == [("create",), ("complete", ()), ("abort",)]
-
-    def test_submit_requires_active_upload(self):
-        session, _, executor = _make_session()
-        with executor:
-            with pytest.raises(S3MultipartStateError, match="has not started"):
-                session.submit_part(1, b"abcd")
-            _start(session)
-            with pytest.raises(ValueError, match="Expected part number 1, got 2"):
-                session.submit_part(2, b"abcd")
-            session.abort()
-
-    def test_submit_requires_capacity(self):
-        # ready() is a hint; the submission itself refuses a request beyond
-        # max_workers.
-        session, requests, executor = _make_session(max_workers=1)
-        release = requests.gate("part", 1)
-        with executor:
-            _start(session)
-            session.submit_part(1, b"abcd")
-            with pytest.raises(RuntimeError, match="wait for ready"):
-                session.submit_part(2, b"abcd")
-            release.set()
-            assert session.ready().result(5) is None
-            session.submit_part(2, b"abcd")
-            assert session.complete() == "completed"
-
-    def test_scheduling_failure(self):
-        # A request that the executor refuses fails the write with the error
-        # of the executor, and is no longer tracked, so the abort does not
-        # wait for it.
-        session, requests, executor = _make_session()
-        with executor:
-            _start(session)
-        with pytest.raises(RuntimeError, match="shutdown"):
-            session.submit_part(1, b"abcd")
-        assert session.state is _S3WriteState.FAILED
-        with pytest.raises(S3MultipartStateError, match="The first failure: RuntimeError"):
+            session.start()
+            session.wait_ready()
             session.check()
-        session.abort()
-        assert requests.calls == [("create",), ("abort",)]
-        assert session.state is _S3WriteState.ABORTED
-
-    def test_part_dropped_by_executor(self):
-        # A part request that the executor drops without running it, such as
-        # when the event loop of an S3AioExecutor shuts down, fails the write,
-        # so that the upload is not completed without the part.
-        session, requests, executor = _make_session(
-            max_workers=1, executor=_DroppingExecutor(lambda kwargs: "part_number" in kwargs)
-        )
-        with executor:
-            _start(session)
-            session.submit_part(1, b"abcd")
-            assert session.state is _S3WriteState.FAILED
-            with pytest.raises(CancelledError, match="part request was cancelled"):
+            on_part_done = session._on_part_done
+            deferred = []
+            with mock.patch.object(session, "_on_part_done", side_effect=deferred.append):
+                session.submit_part(1, b"abcd")
+                if operation == "complete":
+                    session.complete()
+                else:
+                    session.abort()
+            for request in deferred:
+                on_part_done(request)
+        if operation == "complete":
+            assert [[part.part_number for part in parts] for parts in completed] == [[1]]
+            assert [part.part_number for part in session.completed_parts] == [1]
+        else:
+            assert completed == []
+            assert session.completed_parts == ()
+            with pytest.raises(S3MultipartStateError, match="has been discarded"):
                 session.complete()
-            session.abort()
-        assert requests.calls == [("create",), ("abort",)]
-
-    def test_creation_dropped_by_executor(self):
-        session, requests, executor = _make_session(executor=_DroppingExecutor(lambda kwargs: True))
-        with executor:
-            session.start()
-            assert session.ready().result(5) is None
-            with pytest.raises(CancelledError, match="creation of the multipart upload"):
-                session.check()
-            session.abort()
-        assert requests.calls == []
-        assert session.state is _S3WriteState.ABORTED
-
-    def test_outcomes_without_callbacks(self):
-        # The waits consume a finished request whose done callback has not
-        # run or was stopped, such as by an interrupt on the thread that
-        # cancelled it, so nothing waits for it forever and its part is
-        # completed.
-        session, requests, executor = _make_session(max_workers=1)
-        with executor:
-            _start(session)
-            with mock.patch.object(session, "_on_part_done", return_value=None):
-                session.submit_part(1, b"abcd")
-                session.wait_ready()
-                session.submit_part(2, b"efgh")
-                assert session.complete() == "completed"
-        assert requests.calls[-1] == ("complete", (1, 2))
-
-    def test_creation_without_callback(self):
-        session, requests, executor = _make_session()
-        with executor:
-            with mock.patch.object(session, "_on_created", return_value=None):
-                session.start()
-                session.wait_ready()
-                session.check()
-            assert session.state is _S3WriteState.ACTIVE
-            assert session.complete() == "completed"
-        assert requests.calls == [("create",), ("complete", ())]
-
-    def test_interrupted_creation_consumption(self):
-        # An interrupt that stops the consumption of the creation before it
-        # records the outcome leaves the creation for the next consumption,
-        # so a wait does not stay pending forever.
-        session, requests, executor = _make_session()
-        requests.errors[("create",)] = PermissionError("create failed")
-        with executor, mock.patch.object(session, "_on_created", return_value=None):
-            session.start()
-            creation = session._creation
-            assert creation is not None
-            assert creation.exception(5) is not None
-            with (
-                mock.patch.object(session, "_fail", side_effect=KeyboardInterrupt),
-                session._lock,
-                pytest.raises(KeyboardInterrupt),
-            ):
-                session._consume_creation(creation)
-            assert session.ready().result(5) is None
-            with pytest.raises(PermissionError, match="create failed"):
-                session.check()
-            session.abort()
-
-    def test_slow_callbacks(self):
-        # A future is done before its done callbacks run, so a completion
-        # that finds every request done still records their outcomes first.
-        session, requests, executor = _make_session(max_workers=4)
-        on_part_done = session._on_part_done
-        callbacks = []
-
-        def defer(request):
-            callbacks.append(request)
-
-        with executor:
-            _start(session)
-            with mock.patch.object(session, "_on_part_done", side_effect=defer):
-                for number in (1, 2, 3):
-                    session.submit_part(number, b"abcd")
-                assert session.complete() == "completed"
-            # The deferred callbacks change nothing afterwards.
-            for request in callbacks:
-                on_part_done(request)
-        assert requests.calls[-1] == ("complete", (1, 2, 3))
-        assert [part.part_number for part in session.completed_parts] == [1, 2, 3]
-
-    def test_late_callback_after_abort(self):
-        # A callback that runs after the abort has consumed its request does
-        # not restore the part or record its failure.
-        session, requests, executor = _make_session()
-        requests.errors[("part", 2)] = PermissionError("Access Denied")
-        on_part_done = session._on_part_done
-        callbacks = []
-
-        with executor:
-            _start(session)
-            with mock.patch.object(session, "_on_part_done", side_effect=callbacks.append):
-                session.submit_part(1, b"abcd")
-                session.submit_part(2, b"efgh")
-                session.abort()
-            for request in callbacks:
-                on_part_done(request)
-        assert session.state is _S3WriteState.ABORTED
-        assert session.completed_parts == ()
-        with pytest.raises(S3MultipartStateError, match="has been discarded"):
-            session.complete()

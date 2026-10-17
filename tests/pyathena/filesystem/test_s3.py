@@ -46,7 +46,7 @@ from pyathena.filesystem.s3_executor import S3AioExecutor, S3Executor, S3ThreadP
 from pyathena.filesystem.s3_object import S3MultipartUpload, S3Object, S3ObjectType, S3StorageClass
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_path_pairing import S3PathPairing
-from pyathena.filesystem.s3_writer import S3MultipartStateError, _S3WriteSession, _S3WriteState
+from pyathena.filesystem.s3_writer import S3MultipartStateError, _S3WriteSession
 from pyathena.util import RetryConfig, stop_retries_on
 from tests import ENV
 from tests.pyathena.conftest import connect
@@ -4958,7 +4958,7 @@ class TestS3FileSystem:
             with fs.open(path, "wb", block_size=block_size, s3_additional_kwargs=kwargs) as file:
                 file.write(data)
             assert fs.cat_file(path) == data
-            assert fs.list_multipart_uploads(path) == []
+            assert not fs.list_multipart_uploads(path)
         finally:
             fs.clear_multipart_uploads(path)
             if fs.exists(path):
@@ -4983,7 +4983,7 @@ class TestS3FileSystem:
             lpath.write_bytes(data)
             fs.put_file(str(lpath), path, block_size=block_size, s3_additional_kwargs=kwargs)
             assert fs.cat_file(path) == data
-            assert fs.list_multipart_uploads(path) == []
+            assert not fs.list_multipart_uploads(path)
         finally:
             fs.clear_multipart_uploads(path)
             if fs.exists(path):
@@ -5006,7 +5006,7 @@ class TestS3FileSystem:
         try:
             fs.pipe_file(path, data, block_size=block_size, s3_additional_kwargs=kwargs)
             assert fs.cat_file(path) == data
-            assert fs.list_multipart_uploads(path) == []
+            assert not fs.list_multipart_uploads(path)
         finally:
             fs.clear_multipart_uploads(path)
             if fs.exists(path):
@@ -5032,7 +5032,7 @@ class TestS3FileSystem:
             with fs.open(path, "ab", block_size=block_size, s3_additional_kwargs=kwargs) as file:
                 file.write(data)
             assert fs.cat_file(path) == original + data
-            assert fs.list_multipart_uploads(path) == []
+            assert not fs.list_multipart_uploads(path)
         finally:
             fs.clear_multipart_uploads(path)
             if fs.exists(path):
@@ -5113,7 +5113,7 @@ class TestS3FileSystem:
             ) as list_mock:
                 fs.clear_multipart_uploads(path)
                 list_mock.assert_called_once_with(path)
-            assert fs.list_multipart_uploads(path) == []
+            assert not fs.list_multipart_uploads(path)
         finally:
             fs.clear_multipart_uploads(path)
 
@@ -5233,9 +5233,12 @@ class TestS3FileSystem:
             f"filesystem/test_write_transaction_rollback/{uuid.uuid4()}"
         )
 
+        files = []
+
         def write_then_fail():
             with fs.transaction:
                 f = fs.open(path, "wb")
+                files.append(f)
                 f.write(data)
                 f.close()
                 raise RuntimeError("rollback")
@@ -5243,6 +5246,12 @@ class TestS3FileSystem:
         with pytest.raises(RuntimeError):
             write_then_fail()
         fs.invalidate_cache(path)
+        assert not fs.exists(path)
+        # The multipart upload, if any, was aborted, and GH-1211: the
+        # discarded write cannot be committed afterwards.
+        assert not fs.list_multipart_uploads(path)
+        with pytest.raises(S3MultipartStateError, match="has been discarded"):
+            files[0].commit()
         assert not fs.exists(path)
 
     @pytest.mark.parametrize(
@@ -6547,15 +6556,11 @@ class TestS3File:
         fs.s3_additional_kwargs = {}
         fs._strip_protocol.side_effect = S3FileSystem._strip_protocol
         started = threading.Event()
-        waiting = threading.Event()
         interrupted = threading.Event()
         upload = fs.core.create_multipart_upload.return_value
 
         def create(*args, **kwargs):
             started.set()
-            if threading.current_thread() is threading.main_thread():
-                # The old implementation sent creation on the main thread.
-                waiting.set()
             assert interrupted.wait(5)
             return upload
 
@@ -6563,21 +6568,6 @@ class TestS3File:
         if abort_fails:
             fs._call.side_effect = PermissionError("abort failed")
         executor = S3ThreadPoolExecutor(max_workers=1)
-        ready = _S3WriteSession.ready
-
-        def ready_and_signal(session):
-            # The write waits for the creation through the readiness of the
-            # session.
-            waiter = ready(session)
-            result = waiter.result
-
-            def wait_for_result(timeout=None):
-                waiting.set()
-                return result(timeout)
-
-            waiter.result = wait_for_result  # type: ignore[method-assign]
-            return waiter
-
         mode = {"append": "ab", "exclusive": "xb"}.get(operation, "wb")
         file = S3File(
             fs,
@@ -6613,9 +6603,9 @@ class TestS3File:
                 raise KeyboardInterrupt
 
         def interrupt():
-            if started.wait(5) and waiting.wait(5):
-                # A signal that arrives just before the main thread blocks on
-                # the creation can miss waking it, so it is repeated until handled.
+            if started.wait(5):
+                # Sent while the creation runs, until handled, as a signal that
+                # arrives just before the main thread blocks can miss waking it.
                 while True:
                     signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
                     if interrupted.wait(0.1):
@@ -6625,10 +6615,7 @@ class TestS3File:
         previous_handler = signal.signal(signal.SIGINT, handle_interrupt)
         try:
             thread.start()
-            with (
-                mock.patch.object(_S3WriteSession, "ready", ready_and_signal),
-                pytest.raises(KeyboardInterrupt),
-            ):
+            with pytest.raises(KeyboardInterrupt):
                 perform()
             fs._call.assert_called_once_with(
                 S3_CLIENT.abort_multipart_upload,
@@ -6656,7 +6643,6 @@ class TestS3File:
         finally:
             signal.signal(signal.SIGINT, lambda signum, frame: None)
             started.set()
-            waiting.set()
             interrupted.set()
             if thread.ident is not None:
                 # Joined without a timeout, so that no signal is sent after the
@@ -6788,20 +6774,9 @@ class TestS3File:
         # part could be stored after it.
         fs = self._make_append_fs(b"a" * 6 if operation == "append" else b"")
         events = []
-        started = threading.Event()
-        release = threading.Event()
         # Appends copy the existing object as the first part.
         part_request = fs.core.upload_part_copy if operation == "append" else fs.core.upload_part
-        respond = part_request.side_effect
-
-        def store_part(**kwargs):
-            started.set()
-            # Uploading until the cleanup waits for it.
-            assert release.wait(5)
-            events.append("part stored")
-            return respond(**kwargs)
-
-        part_request.side_effect = store_part
+        running, part_request.side_effect = self._retrying_part(events)
         fs._call.side_effect = lambda *args, **kwargs: events.append("abort")
         executor = S3ThreadPoolExecutor(max_workers=2)
         submit = executor.submit
@@ -6812,7 +6787,7 @@ class TestS3File:
             submitted.append(future)
             if len(submitted) == 2:
                 # The first part, interrupted once its request started.
-                assert started.wait(5)
+                assert running.started.wait(EVENT_TIMEOUT)
                 raise KeyboardInterrupt
             return future
 
@@ -6821,18 +6796,12 @@ class TestS3File:
         file = S3File(fs, "s3://bucket/key.txt", mode=mode, block_size=4, executor=executor)
 
         try:
-            with (
-                mock.patch.object(
-                    _S3WriteSession, "_cancel_requests", self._cancel_and_release(release)
-                ),
-                pytest.raises(KeyboardInterrupt),
-            ):
+            with pytest.raises(KeyboardInterrupt):
                 file.write(b"x" * 8)
         finally:
-            release.set()
             executor.shutdown()
 
-        assert events == ["part stored", "abort"]
+        assert events == ["part 1 ended", "abort"]
         assert file.closed
         assert file.buffer is None
         assert file.multipart_upload is None
@@ -7023,40 +6992,20 @@ class TestS3File:
         return file
 
     @staticmethod
-    def _cancel_and_release(release: threading.Event):
-        # Releases the requests that the abort waits for once it has
-        # cancelled those that have not started.
-        cancel_requests = _S3WriteSession._cancel_requests
+    def _retrying_part(events):
+        # A part request that throttles and waits EVENT_TIMEOUT seconds to
+        # retry, until the abort stops its retries (GH-1203). It records when
+        # it ends, so that a test can order it with the abort.
+        operation = ThrottledOperation(operation_name="UploadPart")
+        throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
 
-        def cancel_and_release(session):
-            cancel_requests(session)
-            release.set()
+        def request(**kwargs):
+            try:
+                return throttled()
+            finally:
+                events.append(f"part {kwargs['part_number']} ended")
 
-        return cancel_and_release
-
-    @staticmethod
-    def _release_when_waiting(on_wait):
-        # Calls on_wait(session) when a write would wait for the session, and
-        # bounds the wait, so that a write that waits for the wrong request
-        # times out.
-        ready = _S3WriteSession.ready
-
-        def release_and_wait(session):
-            waiter = ready(session)
-            if not waiter.done():
-                on_wait(session)
-                result = waiter.result
-                waiter.result = lambda timeout=None: result(5)  # type: ignore[method-assign]
-            return waiter
-
-        return release_and_wait
-
-    @staticmethod
-    def _wait_for_state(session, state):
-        deadline = time.monotonic() + 5
-        while session.state is not state:
-            assert time.monotonic() < deadline, session.state
-            time.sleep(0.01)
+        return operation, request
 
     @staticmethod
     def _make_append_fs(existing: bytes):
@@ -7391,24 +7340,19 @@ class TestS3File:
         in_flight = []
 
         def record_upload(future, fn, *args, **kwargs):
-            if "body" in kwargs:
-                gates[kwargs["part_number"]] = threading.Event()
-                uploads[kwargs["part_number"]] = future
-                in_flight.append(sum(not upload.done() for upload in uploads.values()))
+            if "body" not in kwargs:
+                submit_to(future, fn, *args, **kwargs)
+                return
+            gates[kwargs["part_number"]] = threading.Event()
+            uploads[kwargs["part_number"]] = future
+            in_flight.append(sum(not upload.done() for upload in uploads.values()))
             submit_to(future, fn, *args, **kwargs)
+            if in_flight[-1] >= max_workers:
+                # Only the newest part in flight finishes, so a write that
+                # waits for an older one times out.
+                gates[kwargs["part_number"]].set()
 
         executor.submit_to = record_upload  # type: ignore[method-assign]
-        released = []
-
-        def release_newest(session):
-            uploading = [n for n, upload in uploads.items() if not upload.done()]
-            if len(uploading) >= max_workers:
-                # Only the newest part in flight finishes, so a write that
-                # waits for the oldest one would time out. A write that waits
-                # for the part copy of an append waits for it to finish.
-                released.append(max(uploading))
-                gates[max(uploading)].set()
-
         f = S3File(
             fs,
             "s3://bucket/key.txt",
@@ -7417,71 +7361,15 @@ class TestS3File:
             max_workers=max_workers,
             executor=executor,
         )
-        with mock.patch.object(
-            _S3WriteSession, "ready", self._release_when_waiting(release_newest)
-        ):
-            for data in writes:
-                f.write(data)
-            for gate in gates.values():
-                gate.set()
-            f.close()
+        for data in writes:
+            f.write(data)
+        for gate in gates.values():
+            gate.set()
+        f.close()
 
         assert self._uploaded_object(fs, existing) == existing + b"".join(writes)
         # Each part was submitted once fewer than max_workers were in flight.
         assert in_flight == [min(n, max_workers) for n in range(1, len(uploads) + 1)]
-        assert len(released) == len(uploads) - max_workers
-
-    def test_write_interrupted_while_waiting_for_part(self):
-        # GH-1158: an interrupt while a write waits for a part closes the file
-        # without committing it. The part that is still uploading is waited
-        # for before the abort, and the next part is not submitted.
-        fs = self._make_append_fs(b"")
-        events = []
-        started = threading.Event()
-        release = threading.Event()
-        respond = fs.core.upload_part.side_effect
-
-        def upload_part(**kwargs):
-            started.set()
-            # Uploading until the cleanup waits for it.
-            assert release.wait(5)
-            events.append(f"part {kwargs['part_number']} stored")
-            return respond(**kwargs)
-
-        fs.core.upload_part.side_effect = upload_part
-        fs._call.side_effect = lambda *args, **kwargs: events.append("abort")
-
-        def interrupt(session):
-            if session.state is _S3WriteState.ACTIVE:
-                # The write waits for the first part, which is uploading.
-                assert started.wait(5)
-                raise KeyboardInterrupt
-
-        executor = S3ThreadPoolExecutor(max_workers=2)
-        f = S3File(
-            fs, "s3://bucket/key.txt", mode="wb", block_size=4, max_workers=1, executor=executor
-        )
-        try:
-            with (
-                mock.patch.object(_S3WriteSession, "ready", self._release_when_waiting(interrupt)),
-                mock.patch.object(
-                    _S3WriteSession, "_cancel_requests", self._cancel_and_release(release)
-                ),
-                pytest.raises(KeyboardInterrupt),
-            ):
-                f.write(b"a" * 8)
-        finally:
-            release.set()
-            executor.shutdown()
-
-        assert events == ["part 1 stored", "abort"]
-        fs.core.upload_part.assert_called_once()
-        assert f.closed
-        assert f.buffer is None
-        assert f.multipart_upload is None
-        with pytest.raises(S3MultipartStateError):
-            f.commit()
-        fs.core.complete_multipart_upload.assert_not_called()
 
     @pytest.mark.parametrize("autocommit", [True, False])
     @pytest.mark.parametrize("max_workers", [1, 2, 3])
@@ -7597,13 +7485,23 @@ class TestS3File:
             assert release.wait(5)
             raise PermissionError("Access Denied")
 
-        def release_copy(session):
-            if session.state is _S3WriteState.ACTIVE:
-                # The write waits for the part copy.
+        fs.core.upload_part_copy.side_effect = upload_part_copy
+        executor = S3ThreadPoolExecutor(max_workers=max_workers)
+        submit_to = executor.submit_to
+        copies: list[Future] = []
+        parts = []
+
+        def record(future, fn, *args, **kwargs):
+            if "source" in kwargs:
+                copies.append(future)
+            elif "body" in kwargs:
+                parts.append(kwargs["part_number"])
+            submit_to(future, fn, *args, **kwargs)
+            if "source" in kwargs and max_workers == 1:
+                # The write waits for the copy before it uploads a part.
                 release.set()
 
-        fs.core.upload_part_copy.side_effect = upload_part_copy
-        executor = mock.MagicMock(wraps=S3ThreadPoolExecutor(max_workers=max_workers))
+        executor.submit_to = record  # type: ignore[method-assign]
         f = S3File(
             fs,
             "s3://bucket/key.txt",
@@ -7613,25 +7511,18 @@ class TestS3File:
             executor=executor,
         )
         try:
-            with mock.patch.object(
-                _S3WriteSession, "ready", self._release_when_waiting(release_copy)
-            ):
-                if max_workers == 1:
-                    with pytest.raises(PermissionError, match="Access Denied"):
-                        f.write(b"b" * 4)
-                else:
-                    f.write(b"b" * 4)
-                    release.set()
-                    self._wait_for_state(f._session, _S3WriteState.FAILED)
-                    with pytest.raises(PermissionError, match="Access Denied"):
-                        f.write(b"b" * 4)
+            if max_workers > 1:
+                # The write uploads a part while the copy is in flight.
+                f.write(b"b" * 4)
+                release.set()
+                assert wait(copies, timeout=5).done == set(copies)
+            with pytest.raises(PermissionError, match="Access Denied"):
+                f.write(b"b" * 4)
         finally:
             release.set()
             executor.shutdown()
 
-        assert [
-            c.kwargs["part_number"] for c in executor.submit_to.call_args_list if "body" in c.kwargs
-        ] == ([] if max_workers == 1 else [2])
+        assert parts == ([] if max_workers == 1 else [2])
         fs._call.assert_called_once_with(
             S3_CLIENT.abort_multipart_upload, Bucket="bucket", Key="key.txt", UploadId="uploadid"
         )
@@ -7768,6 +7659,8 @@ class TestS3File:
             # Deferred: nothing is uploaded until commit() runs.
             file.fs.core.put_object.assert_not_called()
             file.commit()
+        # GH-1211: committing again sends no request.
+        file.commit()
         file.fs.core.put_object.assert_called_once_with(S3Path("bucket", "key.txt"), data)
 
     def test_upload_chunk_empty_file(self):
@@ -7814,33 +7707,17 @@ class TestS3File:
         file = self._make_multipart_write_file(b"x" * 8, autocommit=False)
         events = []
         file.fs._call.side_effect = lambda *args, **kwargs: events.append("abort")
-        started = threading.Event()
-        release = threading.Event()
-        respond = file.fs.core.upload_part.side_effect
-
-        def upload_part(**kwargs):
-            started.set()
-            # Uploading until the abort waits for it, so that an abort that
-            # does not wait comes first.
-            assert release.wait(5)
-            events.append(f"part {kwargs['part_number']} stored")
-            return respond(**kwargs)
-
-        file.fs.core.upload_part.side_effect = upload_part
+        running, file.fs.core.upload_part.side_effect = self._retrying_part(events)
         try:
             # The executor of the file has one thread, so the second part
             # waits for the first one.
             assert file._upload_chunk(final=True) is False
-            assert started.wait(5)
-            with mock.patch.object(
-                _S3WriteSession, "_cancel_requests", self._cancel_and_release(release)
-            ):
-                file.discard()
+            assert running.started.wait(EVENT_TIMEOUT)
+            file.discard()
         finally:
-            release.set()
             file._executor.shutdown()
 
-        assert events == ["part 1 stored", "abort"]
+        assert events == ["part 1 ended", "abort"]
         file.fs.core.upload_part.assert_called_once()
 
     @pytest.mark.parametrize("abort_fails", [False, True])
@@ -7894,58 +7771,43 @@ class TestS3File:
         file = self._make_multipart_write_file(
             b"x" * 16, autocommit=False, executor=S3ThreadPoolExecutor(max_workers=2)
         )
-        started = {1: threading.Event(), 3: threading.Event()}
+        events = []
+        file.fs._call.side_effect = lambda *args, **kwargs: events.append("abort")
+        first, retrying_first = self._retrying_part(events)
+        third, retrying_third = self._retrying_part(events)
         fail = threading.Event()
-        release = threading.Event()
-        cleanup = []
-        respond = file.fs.core.upload_part.side_effect
 
         def upload_part(**kwargs):
-            part_number = kwargs["part_number"]
-            if part_number == 2:
-                assert fail.wait(5)
+            if kwargs["part_number"] == 2:
+                assert fail.wait(EVENT_TIMEOUT)
                 raise PermissionError("Access Denied")
-            started[part_number].set()
-            # Uploading until the cleanup waits for it.
-            assert release.wait(5)
-            return respond(**kwargs)
+            return (retrying_first if kwargs["part_number"] == 1 else retrying_third)(**kwargs)
 
         file.fs.core.upload_part.side_effect = upload_part
-        cancel_and_release = self._cancel_and_release(release)
-
-        def record_cleanup(session):
-            # Whether the first part had finished when the cleanup started.
-            cleanup.append(release.is_set())
-            cancel_and_release(session)
-
         try:
             file._upload_chunk(final=True)
-            assert started[1].wait(5)
+            assert first.started.wait(EVENT_TIMEOUT)
             fail.set()
             # The thread of the failed part has taken the third part, and the
             # fourth one waits for a thread.
-            assert started[3].wait(5)
-            with (
-                mock.patch.object(_S3WriteSession, "_cancel_requests", record_cleanup),
-                pytest.raises(PermissionError, match="Access Denied"),
-            ):
+            assert third.started.wait(EVENT_TIMEOUT)
+            with pytest.raises(PermissionError, match="Access Denied"):
                 file.commit()
         finally:
-            release.set()
             fail.set()
             file._executor.shutdown()
 
-        assert cleanup == [False]
-        # The fourth part was cancelled.
+        # The running parts were stopped during their first backoff, so the
+        # commit did not wait for them, and the fourth part was cancelled.
+        assert (first.calls, third.calls) == (1, 1)
+        assert sorted(events) == ["abort", "part 1 ended", "part 3 ended"]
+        assert events[-1] == "abort"
         assert sorted(c.kwargs["part_number"] for c in file.fs.core.upload_part.call_args_list) == [
             1,
             2,
             3,
         ]
         file.fs.core.complete_multipart_upload.assert_not_called()
-        file.fs._call.assert_called_once_with(
-            S3_CLIENT.abort_multipart_upload, Bucket="bucket", Key="key.txt", UploadId="uploadid"
-        )
         assert file.multipart_upload is None
 
     def test_commit_failure_and_interrupted_abort(self):
@@ -8097,6 +7959,8 @@ class TestS3File:
             # Deferred: the multipart upload is completed by commit().
             file.fs.core.complete_multipart_upload.assert_not_called()
             file.commit()
+        # GH-1211: committing again sends no request.
+        file.commit()
         file.fs.core.complete_multipart_upload.assert_called_once()
         file.fs.core.put_object.assert_not_called()
 

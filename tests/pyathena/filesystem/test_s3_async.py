@@ -36,7 +36,7 @@ from pyathena.filesystem.s3_object import (
     S3StorageClass,
 )
 from pyathena.filesystem.s3_path import S3Path
-from pyathena.filesystem.s3_writer import S3MultipartStateError, _S3WriteSession
+from pyathena.filesystem.s3_writer import S3MultipartStateError
 from pyathena.util import RetryConfig, stop_retries_on
 from tests import ENV
 from tests.pyathena.conftest import connect
@@ -3046,24 +3046,17 @@ class TestAioS3File:
         in_flight = []
 
         def record_upload(executor, future, fn, *args, **kwargs):
-            if "body" in kwargs:
-                gates[kwargs["part_number"]] = threading.Event()
-                uploads[kwargs["part_number"]] = future
-                in_flight.append(sum(not upload.done() for upload in uploads.values()))
+            if "body" not in kwargs:
+                submit_to(executor, future, fn, *args, **kwargs)
+                return
+            gates[kwargs["part_number"]] = threading.Event()
+            uploads[kwargs["part_number"]] = future
+            in_flight.append(sum(not upload.done() for upload in uploads.values()))
             submit_to(executor, future, fn, *args, **kwargs)
-
-        ready = _S3WriteSession.ready
-
-        def release_newest(session):
-            waiter = ready(session)
-            uploading = [n for n, upload in uploads.items() if not upload.done()]
-            if not waiter.done() and len(uploading) >= 2:
+            if in_flight[-1] >= 2:
                 # Only the newest part in flight finishes, so a write that
-                # waits for the oldest one would time out.
-                gates[max(uploading)].set()
-                result = waiter.result
-                waiter.result = lambda timeout=None: result(5)  # type: ignore[method-assign]
-            return waiter
+                # waits for an older one times out.
+                gates[kwargs["part_number"]].set()
 
         def write():
             with fs.open("s3://bucket/key", "wb", block_size=block_size, max_workers=2) as f:
@@ -3071,10 +3064,7 @@ class TestAioS3File:
                 for gate in gates.values():
                     gate.set()
 
-        with (
-            mock.patch.object(S3Executor, "submit_to", autospec=True, side_effect=record_upload),
-            mock.patch.object(_S3WriteSession, "ready", release_newest),
-        ):
+        with mock.patch.object(S3Executor, "submit_to", autospec=True, side_effect=record_upload):
             await asyncio.to_thread(write)
 
         assert sync_fs.core.upload_part.call_count == 4
