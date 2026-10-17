@@ -6,6 +6,7 @@
 # SPDX-License-Identifier: MIT
 
 import contextlib
+import logging
 import random
 import string
 import time
@@ -33,6 +34,9 @@ from tests.pyathena.util import (
     RESULT_FILE_VALUES_QUERY,
     cached_file_systems,
 )
+
+# Polars 2.0 reads INT96 at the time unit of the read schema; Polars 1.x at nanoseconds.
+_POLARS_2 = int(pl.__version__.split(".")[0]) >= 2
 
 
 class TestPolarsCursor:
@@ -188,6 +192,64 @@ class TestPolarsCursor:
         assert dict(df.schema) == {c.name: types.get(c.athena_type, pl.String()) for c in columns}
         assert [df[c.name][0] for c in columns] == [
             c.value if c.athena_type in types else c.text for c in columns
+        ]
+
+    @pytest.mark.parametrize(
+        ("polars_cursor", "kwargs"),
+        [
+            ({"cursor_kwargs": {"unload": True}}, {}),
+            ({"cursor_kwargs": {"unload": True, "chunksize": 1}}, {}),
+            pytest.param(
+                {"cursor_kwargs": {"unload": True, "chunksize": 1}},
+                {"low_memory": True},
+                marks=pytest.mark.skipif(not _POLARS_2, reason="Polars 1.x scans at nanoseconds."),
+            ),
+        ],
+        indirect=["polars_cursor"],
+        ids=["whole", "chunks", "scanned-chunks"],
+    )
+    def test_unload_nested_timestamps(self, polars_cursor, kwargs):
+        """UNLOAD timestamps inside arrays, rows, and maps are read at microseconds."""
+        polars_cursor.execute(temporal.nested_query(), **kwargs)
+        df = pl.concat(polars_cursor.iter_chunks()).sort("id")
+        assert df["arr"].to_list() == [[v] for v in temporal.NESTED_VALUES]
+        assert df["st"].to_list() == [{"t": v} for v in temporal.NESTED_VALUES]
+        # Polars 2.0 reads a map as Map, and Polars 1.x as a List of key-value Structs.
+        entries = pl.List(pl.Struct({"key": pl.String, "value": pl.Datetime("us")}))
+        assert df.get_column("*").cast(entries).to_list() == [
+            [{"key": "k", "value": v}] for v in temporal.NESTED_VALUES
+        ]
+
+    @pytest.mark.skipif(_POLARS_2, reason="Polars 2.0 reads INT96 at microseconds.")
+    @pytest.mark.parametrize(
+        "polars_cursor", [{"cursor_kwargs": {"unload": True}}], indirect=["polars_cursor"]
+    )
+    def test_unload_timestamps_with_read_options_polars_1(self, polars_cursor, caplog):
+        """With read options, Polars 1.x reads the timestamps itself and a warning is logged."""
+        with caplog.at_level(logging.WARNING, logger="pyathena.polars.result_set"):
+            df = polars_cursor.execute(
+                "SELECT TIMESTAMP '2020-01-02 03:04:05.123' AS ts", low_memory=True
+            ).as_polars()
+        assert df.schema == pl.Schema({"ts": pl.Datetime("us")})
+        assert df["ts"].to_list() == [datetime(2020, 1, 2, 3, 4, 5, 123000)]
+        assert [r.levelno for r in caplog.records if r.name == "pyathena.polars.result_set"] == [
+            logging.WARNING
+        ]
+
+    @pytest.mark.skipif(not _POLARS_2, reason="Polars 1.x reads INT96 at nanoseconds.")
+    @pytest.mark.parametrize(
+        "polars_cursor", [{"cursor_kwargs": {"unload": True}}], indirect=["polars_cursor"]
+    )
+    def test_unload_schema_option(self, polars_cursor):
+        """A schema given to execute() is used as given, a map as a List of Structs too."""
+        schema = {"mp": pl.List(pl.Struct({"key": pl.String, "value": pl.Datetime("ms")}))}
+        df = polars_cursor.execute(
+            "SELECT MAP(ARRAY['k'], ARRAY[TIMESTAMP '2020-01-02 03:04:05.123']) AS mp",
+            schema=schema,
+        ).as_polars()
+        assert df.schema == pl.Schema(schema)
+        assert df["mp"].to_list() == [
+            [{"key": "k", "value": datetime(2020, 1, 2, 3, 4, 5, 123000)}]
         ]
 
     def test_complex(self, polars_cursor):

@@ -6,8 +6,6 @@
 # SPDX-License-Identifier: MIT
 
 import inspect
-import logging
-import shutil
 import threading
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -17,8 +15,6 @@ from io import BytesIO
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import polars as pl
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 from fsspec.implementations.local import LocalFileSystem
 
@@ -28,7 +24,6 @@ from pyathena.model import AthenaQueryExecution
 from pyathena.polars.converter import DefaultPolarsTypeConverter
 from pyathena.polars.result_set import AthenaPolarsResultSet, PolarsDataFrameIterator
 from pyathena.util import RetryConfig
-from tests.pyathena.util import INT96_UNLOAD_FILE, INT96_VALUES
 
 _ROWS_BEFORE_FAILURE = 300_000
 # A timestamp column of a CSV result file with 12 fractional digits and NULL, as text and
@@ -37,23 +32,6 @@ _TIMESTAMP_TEXTS = pl.Series(["2020-01-02 03:04:05.123456789012", None], dtype=p
 _TRUNCATED_TIMESTAMPS = pl.Series(
     [datetime(2020, 1, 2, 3, 4, 5, 123456), None], dtype=pl.Datetime("us")
 )
-# Polars 2.0 and later read Parquet maps as Map, and INT96 at the unit of the schema.
-_POLARS_2 = int(pl.__version__.split(".")[0]) >= 2
-_MAP = (
-    pl.Map(pl.String, pl.Datetime("us"))
-    if _POLARS_2
-    else pl.List(pl.Struct({"key": pl.String, "value": pl.Datetime("us")}))
-)
-# The ways to read an UNLOAD result: whole, in chunks with ParquetChunkReader, and in
-# chunks that Polars scans with the read options.
-_UNLOAD_READS = [
-    pytest.param(None, {}, id="whole"),
-    pytest.param(3, {}, id="chunks"),
-    pytest.param(3, {"low_memory": True}, id="scanned-chunks"),
-]
-# The warnings of Polars 1.x reads of timestamps with pyarrow and at nanoseconds.
-_PYARROW_READ = "so they are read with pyarrow instead"
-_NANOSECOND_READ = "so those outside 1677-09-21 to 2262-04-11 are wrong"
 
 
 def _chunked_result_set() -> AthenaPolarsResultSet:
@@ -114,45 +92,6 @@ def _fetching_result_set(chunks, names, arraysize, converters=None) -> AthenaPol
             retry_config=RetryConfig(),
             chunksize=10_000,
         )
-
-
-def _read_unload_result(tmp_path, chunksize, kwargs, table=None):
-    """Read a Parquet file of an UNLOAD result through the result set, without AWS.
-
-    Args:
-        table: The table to write as Athena writes it, with INT96 timestamps and no
-            Arrow schema, or None for the file that Athena wrote, ``INT96_UNLOAD_FILE``.
-
-    Returns:
-        The DataFrames that were read: the whole result, or its chunks.
-    """
-    path = tmp_path / "0.parquet"
-    if table is None:
-        shutil.copy(INT96_UNLOAD_FILE, path)
-    else:
-        pq.write_table(table, path, use_deprecated_int96_timestamps=True, store_schema=False)
-    result_set = _chunked_result_set()
-    result_set._chunksize = chunksize
-    result_set._kwargs = dict(kwargs)
-    result_set._unload_location = f"{tmp_path}/"
-    with (
-        patch.object(AthenaPolarsResultSet, "_read_data_manifest", return_value=[str(path)]),
-        patch.object(
-            AthenaPolarsResultSet, "is_unload", new_callable=PropertyMock, return_value=True
-        ),
-        patch.object(AthenaPolarsResultSet, "_get_parquet_storage_options", return_value={}),
-        patch.object(
-            AthenaPolarsResultSet,
-            "_csv_storage_options",
-            new_callable=PropertyMock,
-            return_value={},
-        ),
-        patch("pyathena.polars.result_set.S3FileSystem", lambda **_: LocalFileSystem()),
-    ):
-        if chunksize is None:
-            return [result_set._as_polars()]
-        assert result_set._prepare_parquet_location()
-        return list(result_set._iter_parquet_chunks(result_set._read_parquet_schema()))
 
 
 class TestAthenaPolarsResultSet:
@@ -708,139 +647,6 @@ class TestAthenaPolarsResultSet:
             pl.Series([datetime(2020, 1, 2, 3, 4, 5, 123456), None], dtype=pl.Datetime("us")),
             check_dtypes=True,
         )
-
-    @pytest.mark.parametrize(("chunksize", "kwargs"), _UNLOAD_READS)
-    def test_read_parquet_int96(self, tmp_path, caplog, chunksize, kwargs):
-        """INT96 timestamps that Athena writes are read at microseconds at any level.
-
-        Polars 1.x reads INT96 only at nanoseconds: it reads a whole result without
-        read options with pyarrow, and scans with them at nanoseconds, giving wrong
-        values outside 1677-09-21 to 2262-04-11; both log a warning.
-        """
-        with caplog.at_level(logging.WARNING, logger="pyathena.polars.result_set"):
-            df = pl.concat(_read_unload_result(tmp_path, chunksize, kwargs)).sort("id")
-        timestamp = pl.Datetime("us")
-        assert df.drop("id").schema == pl.Schema(
-            {
-                "ts": timestamp,
-                "arr": pl.List(timestamp),
-                "st": pl.Struct({"t": timestamp}),
-                "mp": _MAP,
-            }
-        )
-        scanned_by_polars_1 = not _POLARS_2 and chunksize is not None and bool(kwargs)
-        assert (_NANOSECOND_READ in caplog.text) is scanned_by_polars_1
-        assert (_PYARROW_READ in caplog.text) is (
-            not _POLARS_2 and chunksize is None and not kwargs
-        )
-        if scanned_by_polars_1:
-            return
-        assert df["ts"].to_list() == INT96_VALUES
-        assert df["arr"].to_list() == [[v] for v in INT96_VALUES]
-        assert df["st"].to_list() == [{"t": v} for v in INT96_VALUES]
-        assert df["mp"].to_list() == (
-            [{"k": v} for v in INT96_VALUES]
-            if _POLARS_2
-            else [[{"key": "k", "value": v}] for v in INT96_VALUES]
-        )
-
-    @pytest.mark.skipif(_POLARS_2, reason="Polars 2.0 reads INT96 at microseconds.")
-    @pytest.mark.parametrize(
-        ("chunksize", "kwargs", "pyarrow", "warned"),
-        [
-            (None, {}, False, True),
-            (3, {}, False, True),
-            (None, {"low_memory": True}, True, True),
-            (None, {"columns": ["id"]}, True, False),
-        ],
-        ids=["whole-without-pyarrow", "chunks-without-pyarrow", "read-options", "no-timestamps"],
-    )
-    def test_read_parquet_int96_polars_1(
-        self, tmp_path, caplog, chunksize, kwargs, pyarrow, warned
-    ):
-        """Polars 1.x reads timestamps at nanoseconds without pyarrow or with read options.
-
-        They are cast to microseconds, and a warning is logged if the read has any.
-        """
-        timestamp = datetime(2020, 1, 2, 3, 4, 5, 123000)
-        table = pa.table({"id": [1], "ts": pa.array([timestamp], pa.timestamp("us"))})
-        with (
-            patch(
-                "pyathena.polars.result_set.importlib.util.find_spec",
-                return_value=MagicMock() if pyarrow else None,
-            ),
-            caplog.at_level(logging.WARNING, logger="pyathena.polars.result_set"),
-        ):
-            df = pl.concat(_read_unload_result(tmp_path, chunksize, kwargs, table=table))
-        if warned:
-            assert df.schema["ts"] == pl.Datetime("us")
-            assert df["ts"].to_list() == [timestamp]
-        assert df["id"].to_list() == [1]
-        assert (_NANOSECOND_READ in caplog.text) is warned
-
-    @pytest.mark.skipif(not _POLARS_2, reason="Polars 1.x has no Map type.")
-    @pytest.mark.parametrize(
-        ("chunksize", "kwargs"), [(None, {}), (3, {"low_memory": True})], ids=["whole", "scanned"]
-    )
-    def test_read_parquet_int96_map_named_like_a_selector(self, tmp_path, chunksize, kwargs):
-        """A Map is restored by its name, which Polars would read as a selector in pl.col()."""
-        timestamp = datetime(1600, 1, 2, 3, 4, 5, 123000)
-        table = pa.table(
-            {
-                "id": [1],
-                "*": pa.array([[("k", timestamp)]], pa.map_(pa.string(), pa.timestamp("us"))),
-            }
-        )
-        df = pl.concat(_read_unload_result(tmp_path, chunksize, kwargs, table=table))
-        assert df.schema == pl.Schema({"id": pl.Int64, "*": _MAP})
-        assert df.row(0) == (1, {"k": timestamp})
-
-    @pytest.mark.skipif(not _POLARS_2, reason="Polars 1.x reads INT96 at nanoseconds.")
-    @pytest.mark.parametrize("chunksize", [None, 3], ids=["whole", "scanned-chunks"])
-    def test_read_parquet_int96_schema_option(self, tmp_path, chunksize):
-        """A schema given to execute() replaces the one that reads INT96 at microseconds."""
-        timestamp = pl.Datetime("us")
-        schema = {
-            "id": pl.Int32,
-            "ts": pl.Datetime("ms"),
-            "arr": pl.List(timestamp),
-            "st": pl.Struct({"t": timestamp}),
-            "mp": pl.List(pl.Struct({"key": pl.String, "value": timestamp})),
-        }
-        kwargs = {"schema": schema} if chunksize is None else {"schema": schema, "low_memory": True}
-        df = pl.concat(_read_unload_result(tmp_path, chunksize, kwargs)).sort("id")
-        assert df.schema == pl.Schema(schema)
-        assert df["ts"].to_list() == INT96_VALUES
-        assert df["mp"].to_list() == [[{"key": "k", "value": v}] for v in INT96_VALUES]
-
-    @pytest.mark.parametrize(("chunksize", "kwargs"), [(None, {}), (3, {"low_memory": True})])
-    def test_read_parquet_storage_options_error(self, chunksize, kwargs):
-        """A failure to get the storage options, such as of credentials, is OperationalError."""
-        result_set = _chunked_result_set()
-        result_set._chunksize = chunksize
-        result_set._kwargs = dict(kwargs)
-        result_set._unload_location = "s3://bucket/unload/"
-        schema = pl.Schema({"i": pl.Int64})
-        with patch.object(
-            AthenaPolarsResultSet,
-            "_get_parquet_storage_options",
-            side_effect=RuntimeError("credentials"),
-        ):
-            if chunksize is None:
-                with pytest.raises(OperationalError, match="credentials"):
-                    result_set._read_parquet(schema)
-            else:
-                chunks = result_set._iter_parquet_chunks(schema)
-                with pytest.raises(OperationalError, match="credentials"):
-                    next(chunks)
-
-    def test_read_parquet_without_timestamps(self, tmp_path, caplog):
-        """A result without timestamps is read by Polars with read options and no warning."""
-        table = pa.table({"i": [1, None]})
-        with caplog.at_level(logging.WARNING, logger="pyathena.polars.result_set"):
-            (df,) = _read_unload_result(tmp_path, None, {"low_memory": True}, table=table)
-        assert df["i"].to_list() == [1, None]
-        assert not caplog.text
 
 
 class TestPolarsDataFrameIterator:

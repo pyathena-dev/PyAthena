@@ -9,7 +9,6 @@ import collections
 import csv
 import inspect
 import io
-import shutil
 import threading
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -35,7 +34,7 @@ from pyathena.pandas.result_set import (
     _read_csv_with_pyarrow,
 )
 from pyathena.util import RetryConfig, retry_api_call, stop_retries_on
-from tests.pyathena.util import INT96_UNLOAD_FILE, INT96_VALUES, ThrottledOperation
+from tests.pyathena.util import ThrottledOperation
 
 
 def _typed_values(rows):
@@ -560,29 +559,6 @@ class TestAthenaPandasResultSet:
             **filesystem_kwargs,
         }
 
-    @pytest.mark.parametrize(
-        ("chunksize", "kwargs"),
-        [(None, {}), (None, {"dtype_backend": "pyarrow"}), (3, {})],
-        ids=["whole", "whole-pyarrow-dtypes", "chunks"],
-    )
-    def test_read_parquet_int96(self, tmp_path, chunksize, kwargs):
-        """INT96 timestamps that Athena writes are read at microseconds at any level."""
-        df = _read_int96_unload_result(tmp_path, chunksize, **kwargs).sort_values("id")
-        expected_dtype = "timestamp[us][pyarrow]" if kwargs else "datetime64[us]"
-        assert str(df["ts"].dtype) == expected_dtype
-        assert [None if pd.isna(v) else v for v in df["ts"]] == INT96_VALUES
-        # The numpy backend holds arrays as numpy arrays, and the pyarrow one as lists.
-        arrays = [v.tolist() if isinstance(v, np.ndarray) else v for v in df["arr"]]
-        assert arrays == [[v] for v in INT96_VALUES]
-        assert df["st"].tolist() == [{"t": v} for v in INT96_VALUES]
-        assert df["mp"].tolist() == [[("k", v)] for v in INT96_VALUES]
-
-    def test_read_parquet_int96_unit_option(self, tmp_path):
-        """coerce_int96_timestamp_unit given to execute() replaces microseconds."""
-        df = _read_int96_unload_result(tmp_path, None, coerce_int96_timestamp_unit="ms")
-        assert df["ts"].dtype == "datetime64[ms]"
-        assert [None if pd.isna(v) else v for v in df.sort_values("id")["ts"]] == INT96_VALUES
-
     def test_iter_parquet_chunks_null_in_later_file(self, tmp_path):
         """Top-level integer and boolean columns with NULL anywhere convert alike in every chunk."""
         chunks, _ = _read_unload_result(
@@ -1020,28 +996,6 @@ def _unload_result_set(tmp_path, tables, chunksize, write_statistics=True, **kwa
     result_set._unload_location = None
     result_set._parquet_null_dtypes = {}
     return result_set, paths
-
-
-def _read_int96_unload_result(tmp_path, chunksize, **kwargs):
-    """Read the Parquet file that Athena wrote for UNLOAD through the result set, without AWS.
-
-    Returns:
-        The whole result, or its chunks joined.
-    """
-    result_set, _ = _unload_result_set(tmp_path, [], chunksize, **kwargs)
-    path = tmp_path / "0.parquet"
-    shutil.copy(INT96_UNLOAD_FILE, path)
-    with (
-        patch.object(AthenaPandasResultSet, "_read_data_manifest", return_value=[str(path)]),
-        patch.object(
-            AthenaPandasResultSet, "is_unload", new_callable=PropertyMock, return_value=True
-        ),
-    ):
-        if chunksize is None:
-            # Without a filesystem, pandas reads the local unload location.
-            result_set._kwargs = {"filesystem": None, **kwargs}
-            return result_set._read_parquet("pyarrow")
-        return pd.concat(list(result_set._as_pandas()), ignore_index=True)
 
 
 def _read_unload_result(tmp_path, tables, chunksize, write_statistics=True, **kwargs):

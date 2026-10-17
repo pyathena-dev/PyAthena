@@ -563,6 +563,32 @@ class TestPandasCursor:
         assert row == temporal.fetched_row(unload)
 
     @pytest.mark.parametrize(
+        "pandas_cursor",
+        [{"cursor_kwargs": {"unload": True}}, {"cursor_kwargs": {"unload": True, "chunksize": 1}}],
+        indirect=["pandas_cursor"],
+        ids=["whole", "chunks"],
+    )
+    def test_unload_nested_timestamps(self, pandas_cursor):
+        """UNLOAD timestamps inside arrays, rows, and maps are read at microseconds."""
+        pandas_cursor.execute(temporal.nested_query())
+        df = pd.concat(pandas_cursor.iter_chunks()).sort_values("id")
+        # The arrays are numpy arrays of datetime64[us].
+        assert [v.tolist() for v in df["arr"]] == [[v] for v in temporal.NESTED_VALUES]
+        assert df["st"].tolist() == [{"t": v} for v in temporal.NESTED_VALUES]
+        assert df["*"].tolist() == [[("k", v)] for v in temporal.NESTED_VALUES]
+
+    @pytest.mark.parametrize(
+        "pandas_cursor", [{"cursor_kwargs": {"unload": True}}], indirect=["pandas_cursor"]
+    )
+    def test_unload_int96_unit_option(self, pandas_cursor):
+        """coerce_int96_timestamp_unit given to execute() replaces microseconds."""
+        df = pandas_cursor.execute(
+            "SELECT TIMESTAMP '2020-01-02 03:04:05.123' AS ts", coerce_int96_timestamp_unit="ms"
+        ).as_pandas()
+        assert df["ts"].dtype == "datetime64[ms]"
+        assert df["ts"].tolist() == [pd.Timestamp(2020, 1, 2, 3, 4, 5, 123000)]
+
+    @pytest.mark.parametrize(
         ("pandas_cursor", "chunksize"),
         [
             ({}, None),

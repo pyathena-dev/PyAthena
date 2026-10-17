@@ -190,3 +190,24 @@ def fetched_row(unload: bool = False) -> tuple[Any, ...]:
 def zones(row: tuple[Any, ...]) -> list[Any]:
     """The time zone of each aware value: a fixed-offset timezone or a ZoneInfo."""
     return [v.tzinfo for v in row if isinstance(v, datetime | time) and v.tzinfo is not None]
+
+
+# UNLOAD writes the timestamps inside arrays, rows, and maps as INT96 too. Each row
+# holds one timestamp, ordered by id; the map column is named "*", which Polars would
+# read as a selector in pl.col().
+_NESTED = [
+    c
+    for name in ("ts_min", "ts_1600", "ts_max", "ts_null")
+    for c in UNLOAD_COLUMNS
+    if c.name == name
+]
+NESTED_VALUES = [c.value for c in _NESTED]
+
+
+def nested_query() -> str:
+    """The SELECT query of the timestamps of NESTED_VALUES in an array, a row, and a map."""
+    rows = ", ".join(f"({i}, {c.sql})" for i, c in enumerate(_NESTED))
+    return (
+        "SELECT id, ARRAY[ts] AS arr, CAST(ROW(ts) AS ROW(t TIMESTAMP)) AS st, "
+        f"MAP(ARRAY['k'], ARRAY[ts]) AS \"*\" FROM (VALUES {rows}) AS t (id, ts)"
+    )

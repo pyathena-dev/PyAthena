@@ -202,6 +202,18 @@ class TestArrowCursor:
         assert row == temporal.fetched_row(unload)
         assert temporal.zones(row) == temporal.zones(temporal.fetched_row(unload))
 
+    @pytest.mark.parametrize(
+        "arrow_cursor", [{"cursor_kwargs": {"unload": True}}], indirect=["arrow_cursor"]
+    )
+    def test_unload_nested_timestamps(self, arrow_cursor):
+        """UNLOAD timestamps inside arrays, rows, and maps are read at microseconds."""
+        table = arrow_cursor.execute(temporal.nested_query()).as_arrow().sort_by("id")
+        assert table.drop_columns("id").to_pydict() == {
+            "arr": [[v] for v in temporal.NESTED_VALUES],
+            "st": [{"t": v} for v in temporal.NESTED_VALUES],
+            "*": [[("k", v)] for v in temporal.NESTED_VALUES],
+        }
+
     def test_complex(self, arrow_cursor):
         arrow_cursor.execute(
             """

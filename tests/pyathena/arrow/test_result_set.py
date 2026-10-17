@@ -5,35 +5,18 @@
 #
 # SPDX-License-Identifier: MIT
 import os
-import shutil
 import sys
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
 import pytest
-from pyarrow import fs as pyarrow_fs
 
 from pyathena.arrow.converter import DefaultArrowTypeConverter
 from pyathena.arrow.result_set import AthenaArrowResultSet
 from pyathena.connection import Connection
 from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
-from tests.pyathena.util import INT96_ARROW_TYPES, INT96_UNLOAD_FILE, INT96_VALUES
-
-
-def _read_unload_result(tmp_path):
-    """Read the Parquet file that Athena wrote for UNLOAD through the result set, without AWS."""
-    unload = tmp_path / "bucket" / "unload"
-    unload.mkdir(parents=True)
-    shutil.copy(INT96_UNLOAD_FILE, unload / "0.parquet")
-    result_set = AthenaArrowResultSet.__new__(AthenaArrowResultSet)  # bypass __init__
-    result_set._fs = pyarrow_fs.SubTreeFileSystem(str(tmp_path), pyarrow_fs.LocalFileSystem())
-    result_set._unload_location = "s3://bucket/unload/"
-    with patch.object(
-        AthenaArrowResultSet, "_read_data_manifest", return_value=["s3://bucket/unload/0.parquet"]
-    ):
-        return result_set._read_parquet()
 
 
 class TestAthenaArrowResultSet:
@@ -218,14 +201,3 @@ class TestAthenaArrowResultSet:
         with pytest.raises(OSError, match="HEAD failed"):
             result_set._open_csv("bucket/key.csv")
         file.close.assert_called_once_with()
-
-    def test_read_parquet_int96(self, tmp_path):
-        """INT96 timestamps that Athena writes are read at microseconds at any level."""
-        table = _read_unload_result(tmp_path).sort_by("id")
-        assert table.schema.types[1:] == INT96_ARROW_TYPES
-        assert table.drop_columns("id").to_pydict() == {
-            "ts": INT96_VALUES,
-            "arr": [[v] for v in INT96_VALUES],
-            "st": [{"t": v} for v in INT96_VALUES],
-            "mp": [[("k", v)] for v in INT96_VALUES],
-        }

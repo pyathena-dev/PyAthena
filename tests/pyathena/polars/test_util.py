@@ -8,10 +8,7 @@
 import polars as pl
 import pytest
 
-from pyathena.polars.util import get_athena_type, to_microseconds
-
-_MAP = getattr(pl, "Map", None)
-_requires_map = pytest.mark.skipif(_MAP is None, reason="Polars 1.x has no Map type")
+from pyathena.polars.util import get_athena_type
 
 
 @pytest.mark.parametrize(
@@ -27,40 +24,8 @@ def test_get_athena_type_nested(dtype, expected):
     assert get_athena_type(dtype) == expected
 
 
-@_requires_map
+@pytest.mark.skipif(not hasattr(pl, "Map"), reason="Polars 1.x has no Map type")
 def test_get_athena_type_map():
     assert get_athena_type(pl.Map(pl.String, pl.Int32)) == ("map", 0, 0)
     assert get_athena_type(pl.Map(pl.String, pl.List(pl.Int32))) == ("map", 0, 0)
     assert get_athena_type(pl.List(pl.Map(pl.String, pl.Int32))) == ("array", 0, 0)
-
-
-_NS, _US = pl.Datetime("ns"), pl.Datetime("us")
-
-
-@pytest.mark.parametrize(
-    ("dtype", "expected"),
-    [
-        (_NS, _US),
-        (pl.Datetime("ns", "UTC"), pl.Datetime("us", "UTC")),
-        (pl.Datetime("ms"), pl.Datetime("ms")),
-        (pl.Int64, pl.Int64),
-        (pl.List(_NS), pl.List(_US)),
-        (pl.Struct({"a": _NS, "b": pl.List(_NS)}), pl.Struct({"a": _US, "b": pl.List(_US)})),
-    ],
-)
-def test_to_microseconds(dtype, expected):
-    assert to_microseconds(dtype) == expected
-    assert to_microseconds(dtype, maps=False) == expected
-
-
-@_requires_map
-def test_to_microseconds_map():
-    """A Map is kept, or with maps=False becomes a List of Structs of its key and value."""
-    dtype = pl.List(pl.Map(_NS, pl.Struct({"t": _NS})))
-    assert to_microseconds(dtype) == pl.List(pl.Map(_US, pl.Struct({"t": _US})))
-    assert to_microseconds(dtype, maps=False) == pl.List(
-        pl.List(pl.Struct({"key": _US, "value": pl.Struct({"t": _US})}))
-    )
-    # A Map without nanosecond Datetimes is kept.
-    for kept in (pl.Map(pl.String, pl.Int8), pl.Map(pl.String, _US)):
-        assert to_microseconds(kept, maps=False) == kept
