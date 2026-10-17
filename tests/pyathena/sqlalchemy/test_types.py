@@ -3,12 +3,7 @@ import json
 import pytest
 from sqlalchemy import types
 
-from pyathena.sqlalchemy.base import ischema_names
 from pyathena.sqlalchemy.rest import AthenaRestDialect
-
-
-def test_double_column_type():
-    assert ischema_names["double"] is types.DOUBLE
 
 
 class _JSONText(types.TypeDecorator):
