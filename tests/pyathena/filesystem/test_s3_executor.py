@@ -197,7 +197,9 @@ class TestS3AioThreadPool:
         pool.submit(release.wait, EVENT_TIMEOUT)
         pending = pool.submit(events.append, "pending finished")
         pool.shutdown(wait=False)
-        with pytest.raises(RuntimeError, match="after shutdown"):
+        # The shutdown did not wait for the running call.
+        assert not pending.done()
+        with pytest.raises(RuntimeError):
             pool.submit(sum, [1, 2])
         release.set()
         pending.result(timeout=EVENT_TIMEOUT)

@@ -2668,17 +2668,21 @@ class TestAioS3StreamedFile:
             await wait_until(lambda: len(running_reads()) <= 1)
 
         def get_object(path, range_, **kwargs):
-            # Unlike bytes, an array can be weakly referenced.
-            data = array.array("B", bytes(range_[1] - range_[0]))
-            read.append(weakref.ref(data))
-            all_read.wait()
             if range_[0] == 0:
+                all_read.wait()
                 # Retrying when the read is cancelled, once the tasks of the
-                # other ranges have taken their results.
+                # other ranges have taken their results. Its data is created
+                # afterwards, so that the traceback of the stopped retry does
+                # not keep it.
                 asyncio.run_coroutine_threadsafe(others_done(), loop).result(EVENT_TIMEOUT)
                 held.set()
                 with contextlib.suppress(Exception):
                     throttled()
+            # Unlike bytes, an array can be weakly referenced.
+            data = array.array("B", bytes(range_[1] - range_[0]))
+            read.append(weakref.ref(data))
+            if range_[0] != 0:
+                all_read.wait()
             return data
 
         fs.core.get_object = mock.MagicMock(side_effect=get_object)
@@ -2697,9 +2701,9 @@ class TestAioS3StreamedFile:
         started = time.monotonic()
         task.cancel()
         with pytest.raises(asyncio.CancelledError) as info_:
-            await task
+            await asyncio.wait_for(task, EVENT_TIMEOUT)
         await f.close()
-        await asyncio.to_thread(f._pool.shutdown, True)
+        await asyncio.wait_for(asyncio.to_thread(f._pool.shutdown, True), EVENT_TIMEOUT)
         # The retries of the held range stopped.
         assert time.monotonic() - started < EVENT_TIMEOUT
         assert operation.calls == 1

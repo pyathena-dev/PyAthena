@@ -1721,10 +1721,16 @@ class TestS3Core:
         else:
             expires = int(signed_query["Expires"][0])
             assert signed + 60 - 30 < expires <= signed + 60
-        # SigV2 also signs the content type in the query.
-        assert signed_query.pop("content-type", [params.get("ContentType")]) == [
-            params.get("ContentType")
-        ]
+        # The content type is signed: in the query with SigV2, as a header
+        # with SigV4.
+        content_type = params.get("ContentType")
+        if "Signature" in signed_query:
+            assert signed_query.pop("content-type", None) == (
+                [content_type] if content_type else None
+            )
+        else:
+            signed_headers = signed_query["X-Amz-SignedHeaders"][0].split(";")
+            assert ("content-type" in signed_headers) is (content_type is not None)
         signature_fields = {"AWSAccessKeyId", "Signature", "Expires"}
         signed_query = {
             k: v
