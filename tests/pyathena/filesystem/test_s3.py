@@ -3389,9 +3389,11 @@ class TestS3FileSystem:
         operation = ThrottledOperation()
         throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
         read = []
+        both_running = threading.Barrier(3)
 
         def get_object(path, range_, **kwargs):
             read.append(range_[0])
+            both_running.wait(EVENT_TIMEOUT)
             return throttled()
 
         fs.core.get_object = get_object
@@ -3405,10 +3407,7 @@ class TestS3FileSystem:
             submitted.append(fn)
             if len(submitted) == 3:
                 # The third read waits for the two threads of the running reads.
-                deadline = time.monotonic() + EVENT_TIMEOUT
-                while len(read) < 2:
-                    assert time.monotonic() < deadline
-                    time.sleep(0.01)
+                both_running.wait(EVENT_TIMEOUT)
             future = submit(fn, *args, **kwargs)
             if len(submitted) == 3:
                 # As an interrupt after the call is queued.
