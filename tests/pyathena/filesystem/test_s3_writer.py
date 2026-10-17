@@ -76,6 +76,16 @@ class TestS3MultipartWriter:
         writer, _ = _make_writer()
         assert list(writer.iter_parts(ShortReads(b"abcdefghij"))) == [(1, b"abcd"), (2, b"efghij")]
 
+    @pytest.mark.parametrize(
+        ("size", "ranges"),
+        [(0, []), (8, [(0, 8)]), (10, [(0, 5), (5, 10)]), (17, [(0, 8), (8, 12), (12, 17)])],
+    )
+    def test_writer_copy_parts(self, size, ranges):
+        writer, stubber = _make_writer()
+        with stubber:
+            parts = list(writer.iter_copy_parts(size))
+        assert parts == list(enumerate(ranges, 1))
+
     def test_writer_part_limit_includes_copies(self):
         writer, _ = _make_writer()
         copies = list(writer.iter_copy_parts(10))

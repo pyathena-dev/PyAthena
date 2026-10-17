@@ -1,10 +1,12 @@
 import array
 import asyncio
+import bz2
 import contextlib
 import functools
 import gc
 import gzip
 import io
+import lzma
 import os
 import re
 import signal
@@ -3485,7 +3487,7 @@ class TestS3FileSystem:
             # As the wait of concurrent.futures, whose frame keeps the futures
             # in a set, interrupted once the reads have finished.
             futures = set(futures)
-            wait(futures)
+            wait(futures, timeout=EVENT_TIMEOUT)
             raise KeyboardInterrupt
 
         f = fs.open("s3://bucket/key", "rb", cache_type="none", block_size=16, max_workers=4)
@@ -3684,7 +3686,7 @@ class TestS3FileSystem:
         def wait_for_parts(futures):
             if any(not future.done() for future in futures):
                 release.set()
-            return wait(futures)
+            return wait(futures, timeout=EVENT_TIMEOUT)
 
         try:
             with (
@@ -3749,7 +3751,7 @@ class TestS3FileSystem:
             if not release.is_set():
                 release.set()
                 raise KeyboardInterrupt("second interrupt")
-            return wait(futures)
+            return wait(futures, timeout=EVENT_TIMEOUT)
 
         try:
             with (
@@ -3842,6 +3844,36 @@ class TestS3FileSystem:
                 0,
                 S3StorageClass.S3_STORAGE_CLASS_STANDARD,
             )
+
+    def test_object_version_info_paginates(self):
+        # The versions of every page are returned.
+        fs = self._make_fs()
+        fs._call.side_effect = [
+            {
+                "Versions": [
+                    {"Key": "key", "VersionId": "v2", "IsLatest": True, "Size": 4},
+                ],
+                "DeleteMarkers": [
+                    {"Key": "key", "VersionId": "m1", "IsLatest": False},
+                ],
+                "IsTruncated": True,
+                "NextKeyMarker": "key",
+                "NextVersionIdMarker": "v2",
+            },
+            {
+                "Versions": [
+                    {"Key": "key", "VersionId": "v1", "IsLatest": False, "Size": 2},
+                ],
+                "IsTruncated": False,
+            },
+        ]
+
+        actual = fs.object_version_info("s3://bucket/key")
+        assert [(v.key, v.version_id, v.is_latest, v.size) for v in actual] == [
+            ("key", "v2", True, 4),
+            ("key", "v1", False, 2),
+        ]
+        assert all(not v.is_delete_marker for v in actual)
 
     def test_object_version_info_from_markers(self):
         # Explicit markers start the listing, and the next page follows the
@@ -4225,6 +4257,53 @@ class TestS3FileSystem:
         assert time.monotonic() - started < EVENT_TIMEOUT
         assert updated == ["key1"]
         assert operation.calls == 1
+
+    def test_put_tags_merge(self):
+        # The tags of the given version are read and replaced.
+        fs = self._make_fs()
+        fs._call.side_effect = [
+            {"TagSet": [{"Key": "a", "Value": "1"}, {"Key": "b", "Value": "2"}]},
+            {},
+        ]
+
+        fs.put_tags("s3://bucket/key?versionId=v1", {"b": "3", "c": "4"}, mode="m")
+        request = {"Bucket": "bucket", "Key": "key", "VersionId": "v1"}
+        assert fs._call.call_args_list == [
+            mock.call(fs._client.get_object_tagging, **request),
+            mock.call(
+                fs._client.put_object_tagging,
+                **request,
+                Tagging={
+                    "TagSet": [
+                        {"Key": "a", "Value": "1"},
+                        {"Key": "b", "Value": "3"},
+                        {"Key": "c", "Value": "4"},
+                    ]
+                },
+            ),
+        ]
+
+    def test_list_multipart_uploads_paginates(self):
+        # The uploads of every page are returned.
+        fs = self._make_fs()
+        fs._call.side_effect = [
+            {
+                "Uploads": [{"Key": "key1", "UploadId": "upload1"}],
+                "IsTruncated": True,
+                "NextKeyMarker": "key1",
+                "NextUploadIdMarker": "upload1",
+            },
+            {
+                "Uploads": [{"Key": "key2", "UploadId": "upload2"}],
+                "IsTruncated": False,
+            },
+        ]
+
+        actual = fs.list_multipart_uploads("s3://bucket")
+        assert [(u.bucket, u.key, u.upload_id) for u in actual] == [
+            ("bucket", "key1", "upload1"),
+            ("bucket", "key2", "upload2"),
+        ]
 
     @pytest.mark.parametrize(
         ("path", "expected"),
@@ -5896,7 +5975,7 @@ class TestS3File:
                 closed_at_recovery.append(file.closed and file.buffer is None)
                 release.set()
                 raise KeyboardInterrupt("second interrupt")
-            return wait(futures)
+            return wait(futures, timeout=EVENT_TIMEOUT)
 
         try:
             with (
@@ -6007,7 +6086,7 @@ class TestS3File:
             def wait_for_creation(futures):
                 # The wait for the creation; no public object observes it.
                 release.set()
-                return wait(futures)
+                return wait(futures, timeout=EVENT_TIMEOUT)
 
             waiting = mock.patch(
                 "pyathena.filesystem.s3_writer.wait", side_effect=wait_for_creation
@@ -6252,6 +6331,9 @@ class TestS3File:
         fs.core.complete_multipart_upload.assert_called_once()
         parts = TestS3File._parts(fs, existing)
         assert [n for n, _ in parts] == list(range(1, len(parts) + 1))
+        # The completion lists every uploaded part, in order.
+        completed = fs.core.complete_multipart_upload.call_args.args[1]
+        assert [part.part_number for part in completed] == [n for n, _ in parts]
         return b"".join(body for _, body in parts)
 
     @staticmethod
@@ -7038,6 +7120,13 @@ class TestS3File:
 
 
 class TestCompressedBuffer:
+    @pytest.mark.parametrize(
+        ("compression", "decompress"),
+        [("gzip", gzip.decompress), ("bz2", bz2.decompress), ("xz", lzma.decompress)],
+    )
+    def test_compress(self, compression, decompress):
+        assert decompress(CompressedBuffer.compress(b"a" * 100, compression)) == b"a" * 100
+
     @pytest.mark.parametrize("compression", ["unknown", "infer"])
     def test_compress_unsupported(self, compression):
         # "infer" is resolved from a path by the caller, as open() does.

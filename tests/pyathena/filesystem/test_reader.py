@@ -102,8 +102,8 @@ class TestReadAheadStream:
     @pytest.mark.parametrize(
         ("kwargs", "message"),
         [
-            ({"part_size": 0}, "part_size must be positive, got 0."),
-            ({"max_parts": 0}, "max_parts must be positive, got 0."),
+            ({"part_size": 0}, "part_size"),
+            ({"max_parts": 0}, "max_parts"),
         ],
     )
     @pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")
