@@ -26,7 +26,7 @@ An issue report alone is not proof of its proposed cause.
 | AWS operator | How do botocore and application retries compose? What bounds attempts and elapsed time? Is a quota diagnosis based on the actual API, region/account, and run, or merely on an error string? Does reducing requests preserve freshness and error visibility? |
 | Adversarial caller | Can another Inspector, schema, catalog, backend, concurrent request, or DDL operation break a stated cache or lifecycle guarantee? Check absence versus failure and stale versus fresh metadata where applicable. |
 | Documentation reader | Do the examples work with the documented dependencies and environment? Search related docs and examples for statements the change makes obsolete, including prose outside the diff. |
-| Evidence reviewer | Do tests exercise both success and failure with meaningful assertions? Separate local from CI, synchronous from asynchronous, and fake-provider counts from measured AWS traffic. Does the result belong to the published revision? |
+| Evidence reviewer | Do tests exercise both success and failure with meaningful assertions? Separate local from CI, synchronous from asynchronous, and fake-provider counts from measured AWS traffic. Does the result belong to the published revision? Was each added or rewritten test seen to fail with its behavior removed? |
 
 Measure a performance or service claim when the authorized environment permits it, or narrow the claim to the evidence available.
 Document unmeasured limits explicitly; do not present a static source review as runtime validation.
