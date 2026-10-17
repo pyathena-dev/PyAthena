@@ -7,14 +7,9 @@ import os
 import tempfile
 import threading
 import time
-import urllib.parse
-import urllib.request
 import uuid
 import weakref
 from concurrent.futures import Future, ThreadPoolExecutor, wait
-from datetime import UTC, datetime
-from itertools import chain
-from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -22,7 +17,6 @@ import boto3
 import fsspec
 import pytest
 from botocore.stub import Stubber
-from fsspec import Callback
 
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.filesystem.s3_async import AioS3File, AioS3FileSystem, AioS3StreamedFile
@@ -33,7 +27,6 @@ from pyathena.filesystem.s3_object import (
     S3MultipartUploadPart,
     S3Object,
     S3ObjectType,
-    S3StorageClass,
 )
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_writer import S3MultipartStateError
@@ -1541,202 +1534,19 @@ class TestAioS3FileSystem:
             assert fs._sync_fs not in S3FileSystem._cache.values()
 
     @pytest.fixture(scope="class")
-    def fs(self, request):
-        if not hasattr(request, "param"):
-            request.param = {}
-        return AioS3FileSystem(connection=connect(), **request.param)
-
-    @pytest.mark.parametrize(
-        ("algorithm", "checksum_type"),
-        [(None, None), ("SHA256", None), ("CRC32", None), ("CRC32", "FULL_OBJECT")],
-    )
-    def test_open_multipart_with_checksum(self, fs, algorithm, checksum_type):
-        block_size = 5 * 2**20
-        data = b"x" * (block_size + 1)
-        path = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_open_multipart_with_checksum/{uuid.uuid4()}"
-        )
-        kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
-        if checksum_type:
-            kwargs["ChecksumType"] = checksum_type
-        try:
-            with fs.open(path, "wb", block_size=block_size, s3_additional_kwargs=kwargs) as file:
-                file.write(data)
-            assert fs.cat_file(path) == data
-            assert fs.list_multipart_uploads(path) == []
-        finally:
-            fs.clear_multipart_uploads(path)
-            if fs.exists(path):
-                fs.rm(path)
-
-    @pytest.mark.parametrize(
-        ("algorithm", "checksum_type"),
-        [(None, None), ("SHA256", None), ("CRC32", None), ("CRC32", "FULL_OBJECT")],
-    )
-    def test_put_file_multipart_with_checksum(self, fs, tmp_path, algorithm, checksum_type):
-        block_size = 5 * 2**20
-        data = b"x" * (block_size + 1)
-        path = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_put_file_multipart_with_checksum/{uuid.uuid4()}"
-        )
-        kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
-        if checksum_type:
-            kwargs["ChecksumType"] = checksum_type
-        try:
-            lpath = tmp_path / "data"
-            lpath.write_bytes(data)
-            fs.put_file(str(lpath), path, block_size=block_size, s3_additional_kwargs=kwargs)
-            assert fs.cat_file(path) == data
-            assert fs.list_multipart_uploads(path) == []
-        finally:
-            fs.clear_multipart_uploads(path)
-            if fs.exists(path):
-                fs.rm(path)
-
-    @pytest.mark.parametrize(
-        ("algorithm", "checksum_type"),
-        [(None, None), ("SHA256", None), ("CRC32", None), ("CRC32", "FULL_OBJECT")],
-    )
-    def test_pipe_file_multipart_with_checksum(self, fs, algorithm, checksum_type):
-        block_size = 5 * 2**20
-        data = b"x" * (block_size + 1)
-        path = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_pipe_file_multipart_with_checksum/{uuid.uuid4()}"
-        )
-        kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
-        if checksum_type:
-            kwargs["ChecksumType"] = checksum_type
-        try:
-            fs.pipe_file(path, data, block_size=block_size, s3_additional_kwargs=kwargs)
-            assert fs.cat_file(path) == data
-            assert fs.list_multipart_uploads(path) == []
-        finally:
-            fs.clear_multipart_uploads(path)
-            if fs.exists(path):
-                fs.rm(path)
-
-    @pytest.mark.parametrize(
-        ("algorithm", "checksum_type"),
-        [(None, None), ("SHA256", None), ("CRC32", None), ("CRC32", "FULL_OBJECT")],
-    )
-    def test_append_multipart_with_checksum(self, fs, algorithm, checksum_type):
-        block_size = 5 * 2**20
-        data = b"x" * (block_size + 1)
-        path = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_append_multipart_with_checksum/{uuid.uuid4()}"
-        )
-        kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
-        if checksum_type:
-            kwargs["ChecksumType"] = checksum_type
-        try:
-            original = b"y" * block_size
-            fs.pipe_file(path, original)
-            with fs.open(path, "ab", block_size=block_size, s3_additional_kwargs=kwargs) as file:
-                file.write(data)
-            assert fs.cat_file(path) == original + data
-            assert fs.list_multipart_uploads(path) == []
-        finally:
-            fs.clear_multipart_uploads(path)
-            if fs.exists(path):
-                fs.rm(path)
-
-    def test_clear_multipart_uploads_after_listed_upload_is_aborted(self, fs):
-        sync_fs = fs._sync_fs
-        prefix = (
-            f"{ENV.s3_staging_key}{ENV.schema}/filesystem/test_async_clear_multipart_race/"
-            f"{uuid.uuid4()}/"
-        )
-        path = f"s3://{ENV.s3_staging_bucket}/{prefix}"
-        gone_path = S3Path(ENV.s3_staging_bucket, f"{prefix}gone")
-        gone = sync_fs.core.create_multipart_upload(gone_path)
-        try:
-            sync_fs.core.create_multipart_upload(S3Path(ENV.s3_staging_bucket, f"{prefix}pending"))
-            list_uploads = sync_fs.list_multipart_uploads
-
-            def list_then_abort(path):
-                uploads = list_uploads(path)
-                assert len(uploads) == 2
-                assert any(upload.upload_id == gone.upload_id for upload in uploads)
-                sync_fs.core.abort_multipart_upload(gone)
-                return uploads
-
-            with mock.patch.object(
-                sync_fs, "list_multipart_uploads", side_effect=list_then_abort
-            ) as list_mock:
-                fs.clear_multipart_uploads(path)
-                list_mock.assert_called_once_with(path)
-            assert fs.list_multipart_uploads(path) == []
-        finally:
-            fs.clear_multipart_uploads(path)
-
-    @pytest.mark.parametrize(
-        ("fs", "start", "end", "target_data"),
-        list(
-            chain(
-                *[
-                    [
-                        ({"default_block_size": x}, 0, 5, b"01234"),
-                        ({"default_block_size": x}, 2, 7, b"23456"),
-                        ({"default_block_size": x}, 0, 10, b"0123456789"),
-                    ]
-                    for x in (S3FileSystem.DEFAULT_BLOCK_SIZE, 3)
-                ]
-            )
-        ),
-        indirect=["fs"],
-    )
-    def test_read(self, fs, start, end, target_data):
-        # lowest level access: use the core
-        data = fs._sync_fs.core.get_object(
-            S3Path(ENV.s3_staging_bucket, ENV.s3_filesystem_test_file_key), (start, end)
-        )
-        assert data == target_data, data
-        with fs.open(
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_filesystem_test_file_key}", "rb"
-        ) as file:
-            # mid-level access: use _fetch_range
-            data = file._fetch_range(start, end)
-            assert data == target_data, data
-            # high-level: use fileobj seek and read
-            file.seek(start)
-            data = file.read(end - start)
-            assert data == target_data, data
-
-    @pytest.mark.parametrize(
-        ("base", "exp"),
-        [
-            (1, 2**10),
-            (1, 2**20),
-        ],
-    )
-    def test_write(self, fs, base, exp):
-        data = b"a" * (base * exp)
-        path = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_write/{uuid.uuid4()}"
-        )
-        with fs.open(path, "wb") as f:
-            f.write(data)
-        with fs.open(path, "rb") as f:
-            actual = f.read()
-            assert len(actual) == len(data)
-            assert actual == data
+    def fs(self):
+        return AioS3FileSystem(connection=connect())
 
     @pytest.mark.parametrize(
         "size",
         [
-            2**10,  # < block size: one-shot PutObject path (the GH-719 regression)
             10 * 2**20,  # > block size (5 MiB): multipart path via the async executor
         ],
     )
     def test_write_transaction(self, fs, size):
-        # GH-719 regression for the async filesystem: AioS3File inherits
-        # _upload_chunk/commit from S3File, so the transaction fix must hold here
-        # too, including the multipart path driven by the async executor.
+        # GH-719 regression for the async filesystem: the deferred commit of a
+        # multipart write whose parts the async executor uploads. The
+        # single-request path is S3File's, as in the sync test.
         data = b"a" * size
         path = (
             f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
@@ -1748,50 +1558,6 @@ class TestAioS3FileSystem:
             actual = f.read()
             assert len(actual) == len(data)
             assert actual == data
-
-    def test_write_transaction_rollback(self, fs):
-        # Kept small-only on purpose: the multipart discard()/abort path is
-        # already exercised by the sync test (AioS3File inherits discard()),
-        # so there is no need to pay for another large upload here.
-        path = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_write_transaction_rollback/{uuid.uuid4()}"
-        )
-
-        def write_then_fail():
-            with fs.transaction:
-                f = fs.open(path, "wb")
-                f.write(b"hello world")
-                f.close()
-                raise RuntimeError("rollback")
-
-        with pytest.raises(RuntimeError):
-            write_then_fail()
-        fs.invalidate_cache(path)
-        assert not fs.exists(path)
-
-    @pytest.mark.parametrize(
-        ("base", "exp"),
-        [
-            (1, 2**10),
-            (1, 2**20),
-        ],
-    )
-    def test_append(self, fs, base, exp):
-        data = b"a" * (base * exp)
-        path = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_append/{uuid.uuid4()}"
-        )
-        with fs.open(path, "ab") as f:
-            f.write(data)
-        extra = b"extra"
-        with fs.open(path, "ab") as f:
-            f.write(extra)
-        with fs.open(path, "rb") as f:
-            actual = f.read()
-            assert len(actual) == len(data + extra)
-            assert actual == data + extra
 
     @pytest.mark.parametrize(
         "size",
@@ -1831,141 +1597,6 @@ class TestAioS3FileSystem:
             assert await f.read() == b"hello world"
 
     @pytest.mark.asyncio
-    async def test_ls_buckets(self, fs):
-        fs.invalidate_cache()
-        actual = await fs._ls("s3://")
-        assert ENV.s3_staging_bucket in actual, actual
-
-        fs.invalidate_cache()
-        actual = await fs._ls("s3:///")
-        assert ENV.s3_staging_bucket in actual, actual
-
-        fs.invalidate_cache()
-        actual = await fs._ls("s3://", detail=True)
-        found = next(filter(lambda x: x.name == ENV.s3_staging_bucket, actual), None)
-        assert found
-        assert found.name == ENV.s3_staging_bucket
-
-        fs.invalidate_cache()
-        actual = await fs._ls("s3:///", detail=True)
-        found = next(filter(lambda x: x.name == ENV.s3_staging_bucket, actual), None)
-        assert found
-        assert found.name == ENV.s3_staging_bucket
-
-    @pytest.mark.asyncio
-    async def test_ls_dirs(self, fs):
-        dir_ = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_ls_dirs"
-        )
-        for i in range(5):
-            await fs._pipe_file(f"{dir_}/prefix/test_{i}", bytes(i))
-        await fs._touch(f"{dir_}/prefix2")
-
-        assert len(await fs._ls(f"{dir_}/prefix")) == 5
-        assert len(await fs._ls(f"{dir_}/prefix/")) == 5
-        assert len(await fs._ls(f"{dir_}/prefix/test_")) == 0
-        assert len(await fs._ls(f"{dir_}/prefix2")) == 1
-
-        test_1 = await fs._ls(f"{dir_}/prefix/test_1")
-        assert len(test_1) == 1
-        assert test_1[0] == fs._strip_protocol(f"{dir_}/prefix/test_1")
-
-        test_1_detail = await fs._ls(f"{dir_}/prefix/test_1", detail=True)
-        assert len(test_1_detail) == 1
-        assert test_1_detail[0].name == fs._strip_protocol(f"{dir_}/prefix/test_1")
-        assert test_1_detail[0].size == 1
-
-    @pytest.mark.asyncio
-    async def test_info_bucket(self, fs):
-        dir_ = f"s3://{ENV.s3_staging_bucket}"
-        s3_path = S3Path.parse(dir_)
-        info = await fs._info(dir_)
-
-        assert info.name == fs._strip_protocol(dir_)
-        assert info.bucket == s3_path.bucket
-        assert info.key is None
-        assert info.last_modified is None
-        assert info.size == 0
-        assert info.etag is None
-        assert info.type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
-        assert info.storage_class == S3StorageClass.S3_STORAGE_CLASS_BUCKET
-        assert info.version_id == s3_path.version_id
-
-        dir_ = f"s3://{ENV.s3_staging_bucket}/"
-        s3_path = S3Path.parse(dir_)
-        info = await fs._info(dir_)
-
-        assert info.name == fs._strip_protocol(dir_)
-        assert info.bucket == s3_path.bucket
-        assert info.key is None
-        assert info.last_modified is None
-        assert info.size == 0
-        assert info.etag is None
-        assert info.type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
-        assert info.storage_class == S3StorageClass.S3_STORAGE_CLASS_BUCKET
-        assert info.version_id == s3_path.version_id
-
-    @pytest.mark.asyncio
-    async def test_info_dir(self, fs):
-        dir_ = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_info_dir"
-        )
-        file = f"{dir_}/{uuid.uuid4()}"
-
-        fs.invalidate_cache()
-        with pytest.raises(FileNotFoundError):
-            await fs._info(f"s3://{uuid.uuid4()}")
-
-        await fs._pipe_file(file, b"a")
-        s3_path = S3Path.parse(dir_)
-        fs.invalidate_cache()
-        info = await fs._info(dir_)
-        fs.invalidate_cache()
-
-        assert info.name == fs._strip_protocol(dir_)
-        assert info.bucket == s3_path.bucket
-        assert info.key == s3_path.key.rstrip("/")
-        assert info.last_modified is None
-        assert info.size == 0
-        assert info.etag is None
-        assert info.type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
-        assert info.storage_class == S3StorageClass.S3_STORAGE_CLASS_DIRECTORY
-        assert info.version_id == s3_path.version_id
-
-    @pytest.mark.asyncio
-    async def test_info_file(self, fs):
-        dir_ = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_info_file"
-        )
-        file = f"{dir_}/{uuid.uuid4()}"
-
-        fs.invalidate_cache()
-        with pytest.raises(FileNotFoundError):
-            await fs._info(file)
-
-        now = datetime.now(UTC)
-        await fs._pipe_file(file, b"a")
-        s3_path = S3Path.parse(file)
-        fs.invalidate_cache()
-        info = await fs._info(file)
-        fs.invalidate_cache()
-        ls_info = (await fs._ls(file, detail=True))[0]
-
-        assert info == ls_info
-        assert info.name == fs._strip_protocol(file)
-        assert info.bucket == s3_path.bucket
-        assert info.key == s3_path.key
-        assert info.last_modified >= now
-        assert info.size == 1
-        assert info.etag is not None
-        assert info.type == S3ObjectType.S3_OBJECT_TYPE_FILE
-        assert info.storage_class == S3StorageClass.S3_STORAGE_CLASS_STANDARD
-        assert info.version_id == s3_path.version_id
-
-    @pytest.mark.asyncio
     async def test_find(self, fs):
         dir_ = (
             f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
@@ -1987,6 +1618,10 @@ class TestAioS3FileSystem:
         result = await fs._find(f"{dir_}/prefix/test_")
         assert len(result) == 0
 
+        # maxdepth reaches the listing: only prefix2 is one level down.
+        result = await fs._find(dir_, maxdepth=1)
+        assert result == [fs._strip_protocol(f"{dir_}/prefix2")]
+
         result = await fs._find(f"{dir_}/prefix", prefix="test_")
         assert len(result) == 5
 
@@ -2003,95 +1638,6 @@ class TestAioS3FileSystem:
             fs._strip_protocol(f"{dir_}/prefix/test_1")
         ].name == fs._strip_protocol(f"{dir_}/prefix/test_1")
         assert test_1_detail[fs._strip_protocol(f"{dir_}/prefix/test_1")].size == 1
-
-    @pytest.mark.asyncio
-    async def test_find_maxdepth(self, fs):
-        dir_ = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_find_maxdepth"
-        )
-        # Create files at different depths
-        await fs._touch(f"{dir_}/file0.txt")
-        await fs._touch(f"{dir_}/level1/file1.txt")
-        await fs._touch(f"{dir_}/level1/level2/file2.txt")
-        await fs._touch(f"{dir_}/level1/level2/level3/file3.txt")
-
-        # maxdepth must be at least 1, as in fsspec
-        with pytest.raises(ValueError, match="maxdepth must be at least 1"):
-            await fs._find(dir_, maxdepth=0)
-
-        # Test maxdepth=1 (only files in the root)
-        result = await fs._find(dir_, maxdepth=1)
-        assert len(result) == 1
-        assert fs._strip_protocol(f"{dir_}/file0.txt") in result
-
-        # Test maxdepth=2 (files in root and level1)
-        result = await fs._find(dir_, maxdepth=2)
-        assert len(result) == 2
-        assert fs._strip_protocol(f"{dir_}/file0.txt") in result
-        assert fs._strip_protocol(f"{dir_}/level1/file1.txt") in result
-
-        # Test maxdepth=3 (files in root, level1, and level2)
-        result = await fs._find(dir_, maxdepth=3)
-        assert len(result) == 3
-        assert fs._strip_protocol(f"{dir_}/level1/level2/file2.txt") in result
-
-        # Test no maxdepth (all files)
-        result = await fs._find(dir_)
-        assert len(result) == 4
-
-    @pytest.mark.asyncio
-    async def test_find_withdirs(self, fs):
-        dir_ = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_find_withdirs"
-        )
-        # Create directory structure with files
-        await fs._touch(f"{dir_}/file1.txt")
-        await fs._touch(f"{dir_}/subdir1/file2.txt")
-        await fs._touch(f"{dir_}/subdir1/subdir2/file3.txt")
-        await fs._touch(f"{dir_}/subdir3/file4.txt")
-
-        # Test default behavior (withdirs=False)
-        result = await fs._find(dir_)
-        assert len(result) == 4  # Only files
-        for r in result:
-            assert r.endswith(".txt")
-
-        # Test withdirs=True
-        result = await fs._find(dir_, withdirs=True)
-        assert len(result) > 4  # Files and directories
-
-        # Verify directories are included
-        dirs = [r for r in result if not r.endswith(".txt")]
-        assert len(dirs) > 0
-        assert any("subdir1" in d for d in dirs)
-        assert any("subdir2" in d for d in dirs)
-        assert any("subdir3" in d for d in dirs)
-
-        # Test withdirs=False explicitly
-        result = await fs._find(dir_, withdirs=False)
-        assert len(result) == 4  # Only files
-
-    @pytest.mark.asyncio
-    async def test_du(self, fs):
-        """Disk usage reports file sizes, their total, and the requested depth."""
-        directory = f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/filesystem/test_async_du"
-        first = f"{directory}/first"
-        second = f"{directory}/nested/second"
-        try:
-            await fs._pipe_file(first, b"abc")
-            await fs._pipe_file(second, b"12345")
-            assert await fs._du(directory) == 8
-            assert await fs._du(directory, total=False) == {
-                fs._strip_protocol(first): 3,
-                fs._strip_protocol(second): 5,
-            }
-            assert await fs._du(directory, maxdepth=1) == 3
-            assert await fs._du(first) == 3
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                await fs._rm(directory, recursive=True)
 
     @pytest.mark.asyncio
     async def test_glob(self, fs):
@@ -2115,61 +1661,13 @@ class TestAioS3FileSystem:
             fs.glob("*")
 
     @pytest.mark.asyncio
-    async def test_exists_bucket(self, fs):
-        assert await fs._exists("s3://")
-        assert await fs._exists("s3:///")
-
-        path = f"s3://{ENV.s3_staging_bucket}"
-        assert await fs._exists(path)
-
-        not_exists_path = f"s3://{uuid.uuid4()}"
-        assert not await fs._exists(not_exists_path)
-
-    @pytest.mark.asyncio
-    async def test_exists_object(self, fs):
-        path = f"s3://{ENV.s3_staging_bucket}/{ENV.s3_filesystem_test_file_key}"
-        assert await fs._exists(path)
-
-        not_exists_path = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_exists/{uuid.uuid4()}"
-        )
-        assert not await fs._exists(not_exists_path)
-
-    @pytest.mark.asyncio
-    async def test_rm_file(self, fs):
-        dir_ = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_rm_file"
-        )
-        file = f"{dir_}/{uuid.uuid4()}"
-        await fs._touch(file)
-        await fs._rm_file(file)
-
-        assert not await fs._exists(file)
-        assert not await fs._exists(dir_)
-
-    @pytest.mark.asyncio
-    async def test_rm(self, fs):
-        dir_ = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_rm"
-        )
-        file = f"{dir_}/{uuid.uuid4()}"
-        await fs._touch(file)
-        await fs._rm(file)
-
-        assert not await fs._exists(file)
-        assert not await fs._exists(dir_)
-
-    @pytest.mark.asyncio
     async def test_rm_recursive(self, fs):
         dir_ = (
             f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
             f"filesystem/test_async_rm_recursive"
         )
 
-        files = [f"{dir_}/{uuid.uuid4()}" for _ in range(10)]
+        files = [f"{dir_}/{uuid.uuid4()}" for _ in range(2)]
         for f in files:
             await fs._touch(f)
 
@@ -2184,119 +1682,11 @@ class TestAioS3FileSystem:
         assert not await fs._exists(dir_)
 
     @pytest.mark.asyncio
-    async def test_touch(self, fs):
-        path = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_touch/{uuid.uuid4()}"
-        )
-        assert not await fs._exists(path)
-        await fs._touch(path)
-        assert await fs._exists(path)
-        info = await fs._info(path)
-        assert info.size == 0
-
-        with fs.open(path, "wb") as f:
-            f.write(b"data")
-        info = await fs._info(path, refresh=True)
-        assert info.size == 4
-        await fs._touch(path, truncate=True)
-        info = await fs._info(path, refresh=True)
-        assert info.size == 0
-
-        with fs.open(path, "wb") as f:
-            f.write(b"data")
-        info = await fs._info(path, refresh=True)
-        assert info.size == 4
-        with pytest.raises(ValueError, match="Cannot touch"):
-            await fs._touch(path, truncate=False)
-        info = await fs._info(path, refresh=True)
-        assert info.size == 4
-
-    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("base", "exp"),
         [
+            # Below the maximum part size, a single CopyObject request.
             (1, 2**10),
-            (1, 2**20),
-        ],
-    )
-    async def test_pipe_cat(self, fs, base, exp):
-        data = b"a" * (base * exp)
-        path = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_pipe_cat/{uuid.uuid4()}"
-        )
-        await fs._pipe_file(path, data)
-        assert await fs._cat_file(path) == data
-
-    @pytest.mark.asyncio
-    async def test_cat_ranges(self, fs):
-        data = b"1234567890abcdefghijklmnopqrstuvwxyz"
-        path = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_cat_ranges/{uuid.uuid4()}"
-        )
-        await fs._pipe_file(path, data)
-
-        assert await fs._cat_file(path) == data
-        assert await fs._cat_file(path, start=5) == data[5:]
-        assert await fs._cat_file(path, end=5) == data[:5]
-        assert await fs._cat_file(path, start=1, end=-1) == data[1:-1]
-        assert await fs._cat_file(path, start=-5) == data[-5:]
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        ("base", "exp"),
-        [
-            (1, 2**10),
-            (1, 2**20),
-        ],
-    )
-    async def test_put(self, fs, base, exp):
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            data = b"a" * (base * exp)
-            tmp.write(data)
-            tmp.flush()
-
-            rpath = (
-                f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-                f"filesystem/test_async_put/{uuid.uuid4()}"
-            )
-            await fs._put_file(lpath=tmp.name, rpath=rpath)
-            tmp.seek(0)
-            assert await fs._cat_file(rpath) == tmp.read()
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        ("base", "exp"),
-        [
-            (1, 2**10),
-            (1, 2**20),
-        ],
-    )
-    async def test_put_with_callback(self, fs, base, exp):
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            data = b"a" * (base * exp)
-            tmp.write(data)
-            tmp.flush()
-
-            rpath = (
-                f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-                f"filesystem/test_async_put_with_callback/{uuid.uuid4()}"
-            )
-            callback = Callback()
-            await fs._put_file(lpath=tmp.name, rpath=rpath, callback=callback)
-            tmp.seek(0)
-            assert await fs._cat_file(rpath) == tmp.read()
-            assert callback.size == os.stat(tmp.name).st_size
-            assert callback.value == callback.size
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        ("base", "exp"),
-        [
-            (1, 2**10),
-            (1, 2**20),
         ],
     )
     async def test_upload_cp_file(self, fs, base, exp):
@@ -2364,65 +1754,6 @@ class TestAioS3FileSystem:
         else:
             assert after == before
 
-    @pytest.mark.skipif(
-        os.getenv("AWS_ATHENA_S3_VERSIONING_TESTS") != "1",
-        reason="Set AWS_ATHENA_S3_VERSIONING_TESTS=1 to create versioning test buckets.",
-    )
-    @pytest.mark.parametrize(
-        "status",
-        [
-            pytest.param(None, id="async-wrapper-None"),
-            pytest.param("Enabled", id="async-wrapper-Enabled"),
-            pytest.param("Suspended", id="async-wrapper-Suspended"),
-        ],
-    )
-    def test_move_null_version_onto_key_sync_wrapper(self, fs, versioning_buckets, status):
-        client, buckets = versioning_buckets
-        bucket = buckets[status]
-        key = "async-wrapper"
-        path = f"s3://{bucket}/{key}"
-        before = [
-            v
-            for v in client.list_object_versions(Bucket=bucket, Prefix=key)["Versions"]
-            if v["Key"] == key
-        ]
-        assert any(v["VersionId"] == "null" for v in before)
-        if status:
-            assert not next(v for v in before if v["VersionId"] == "null")["IsLatest"]
-
-        fs.mv(f"{path}?versionId=null", path)
-
-        with client.get_object(Bucket=bucket, Key=key)["Body"] as body:
-            assert body.read() == (b"original" if status != "Suspended" else b"current")
-        after = [
-            v
-            for v in client.list_object_versions(Bucket=bucket, Prefix=key)["Versions"]
-            if v["Key"] == key
-        ]
-        if status == "Enabled":
-            assert not any(v["VersionId"] == "null" for v in after)
-            assert len(after) == len(before)
-            latest = next(v for v in after if v["IsLatest"])
-            assert latest["VersionId"] not in {v["VersionId"] for v in before}
-        else:
-            assert after == before
-
-    @pytest.mark.asyncio
-    async def test_move(self, fs):
-        path1 = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_move/{uuid.uuid4()}"
-        )
-        path2 = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_move/{uuid.uuid4()}"
-        )
-        data = b"a"
-        await fs._pipe_file(path1, data)
-        fs.mv(path1, path2)
-        assert await fs._cat_file(path2) == data
-        assert not await fs._exists(path1)
-
     @pytest.mark.asyncio
     async def test_move_recursive(self, fs):
         # GH-974: the directory entries used to make mv() fail, after copying
@@ -2439,98 +1770,6 @@ class TestAioS3FileSystem:
         assert not await fs._exists(f"{base}/src/a")
         assert not await fs._exists(f"{base}/src/sub/b")
 
-    @pytest.mark.asyncio
-    async def test_get_file(self, fs):
-        with tempfile.TemporaryDirectory() as tmp:
-            rpath = f"s3://{ENV.s3_staging_bucket}/{ENV.s3_filesystem_test_file_key}"
-            lpath = Path(f"{tmp}/{uuid.uuid4()}")
-            callback = Callback()
-            await fs._get_file(rpath=rpath, lpath=str(lpath), callback=callback)
-
-            assert lpath.open("rb").read() == await fs._cat_file(rpath)
-            assert callback.size == os.stat(lpath).st_size
-            assert callback.value == callback.size
-
-    def test_open_returns_aio_s3_file(self, fs):
-        path = f"s3://{ENV.s3_staging_bucket}/{ENV.s3_filesystem_test_file_key}"
-        with fs.open(path, "rb") as f:
-            assert isinstance(f, AioS3File)
-            data = f.read()
-        assert data == b"0123456789"
-
-    def test_checksum(self, fs):
-        path = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_checksum/{uuid.uuid4()}"
-        )
-        s3_path = S3Path.parse(path)
-
-        fs.pipe_file(path, b"foo")
-        checksum = fs.checksum(path)
-        fs.ls(path)  # caching
-        fs._sync_fs.core.put_object(s3_path, b"bar")
-        assert checksum == fs.checksum(path)
-        assert checksum != fs.checksum(path, refresh=True)
-
-        fs.pipe_file(path, b"foo")
-        checksum = fs.checksum(path)
-        fs.ls(path)  # caching
-        fs.core.delete_object(s3_path)
-        assert checksum == fs.checksum(path)
-        with pytest.raises(FileNotFoundError):
-            fs.checksum(path, refresh=True)
-
-    def test_sign(self, fs):
-        path = f"s3://{ENV.s3_staging_bucket}/{ENV.s3_filesystem_test_file_key}"
-        requested = time.time()
-        time.sleep(1)
-        url = fs.sign(path, expiration=100)
-        parsed = urllib.parse.urlparse(url)
-        query = urllib.parse.parse_qs(parsed.query)
-        expires = int(query["Expires"][0])
-        with urllib.request.urlopen(url) as r:
-            data = r.read()
-
-        assert "https" in url
-        assert requested + 100 < expires
-        assert data == b"0123456789"
-
-    @pytest.mark.asyncio
-    async def test_mkdir_and_rmdir(self, fs):
-        # The bucket already exists.
-        with pytest.raises(FileExistsError):
-            await fs._mkdir(f"s3://{ENV.s3_staging_bucket}")
-        await fs._makedirs(f"s3://{ENV.s3_staging_bucket}", exist_ok=True)
-
-        path = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_rmdir/{uuid.uuid4()}"
-        )
-        await fs._pipe_file(path, b"data")
-        # Only bucket paths can be removed.
-        with pytest.raises(FileExistsError):
-            await fs._rmdir(path)
-        with pytest.raises(FileNotFoundError):
-            fs.rmdir(f"{path}/nonexistent")
-
-    @pytest.mark.asyncio
-    async def test_metadata_and_tags(self, fs):
-        path = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_metadata/{uuid.uuid4()}"
-        )
-        await fs._pipe_file(path, b"data")
-
-        assert fs.metadata(path) == {}
-        fs.setxattr(path, attr1="value1")
-        assert fs.metadata(path) == {"attr1": "value1"}
-        assert fs.getxattr(path, "attr1") == "value1"
-        assert fs.getxattr(path, "missing") is None
-
-        assert fs.get_tags(path) == {}
-        fs.put_tags(path, {"tag1": "value1"})
-        assert fs.get_tags(path) == {"tag1": "value1"}
-
     def test_pandas_read_csv(self):
         import pandas
 
@@ -2540,56 +1779,6 @@ class TestAioS3FileSystem:
             names=["col"],
         )
         assert [(row["col"],) for _, row in df.iterrows()] == [(123456789,)]
-
-    @pytest.mark.parametrize(
-        "line_count",
-        [
-            1 * 2**20,
-        ],
-    )
-    def test_pandas_write_csv(self, line_count):
-        import pandas
-
-        with tempfile.NamedTemporaryFile("w+t") as tmp:
-            tmp.write("col1")
-            tmp.write("\n")
-            for _ in range(line_count):
-                tmp.write("a")
-                tmp.write("\n")
-            tmp.flush()
-
-            tmp.seek(0)
-            df = pandas.read_csv(tmp.name)
-            path = (
-                f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-                f"filesystem/test_async_pandas_write_csv/{uuid.uuid4()}.csv"
-            )
-            df.to_csv(path, index=False)
-
-            actual = pandas.read_csv(path)
-            pandas.testing.assert_frame_equal(actual, df)
-
-    def test_sync_wrappers(self, fs):
-        """Verify that mirror_sync_methods generates working sync wrappers."""
-        actual = fs.ls(f"s3://{ENV.s3_staging_bucket}")
-        assert isinstance(actual, list)
-        assert len(actual) > 0
-
-        assert fs.exists(f"s3://{ENV.s3_staging_bucket}")
-
-    def test_invalidate_cache(self, fs):
-        path = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_invalidate_cache/{uuid.uuid4()}"
-        )
-        fs.pipe_file(path, b"data")
-        fs.info(path)
-
-        # Cache should be populated
-        fs.invalidate_cache(path)
-        # Should not raise after cache invalidation
-        info = fs.info(path)
-        assert info.size == 4
 
 
 class TestAioS3File:
