@@ -222,6 +222,12 @@ CONVERTED_VALUES_ROW = (
     None,
 )
 
+# A TIMESTAMP WITH TIME ZONE value in the hour that a DST transition repeats. Athena
+# writes 05:30 and 06:30 UTC both as 2020-11-01 01:30:00.000 America/New_York.
+AMBIGUOUS_TIME_ZONE_QUERY = """
+SELECT at_timezone(TIMESTAMP '2020-11-01 06:30:00 UTC', 'America/New_York') AS col_timestamp_tz
+"""
+
 # Values that the cursors reading CSV result files must read the same way from the
 # GetQueryResults rows of managed query result storage.
 RESULT_FILE_VALUES_QUERY = """

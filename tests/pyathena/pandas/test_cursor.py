@@ -14,7 +14,7 @@ import pandas as pd
 import pytest
 from pandas.io.parsers import TextFileReader
 
-from pyathena.error import DatabaseError, OperationalError, ProgrammingError
+from pyathena.error import DatabaseError, DataError, OperationalError, ProgrammingError
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.model import AthenaQueryExecution
 from pyathena.pandas.converter import DefaultPandasTypeConverter
@@ -28,6 +28,7 @@ from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
+    AMBIGUOUS_TIME_ZONE_QUERY,
     CONVERTED_VALUES_QUERY,
     CONVERTED_VALUES_ROW,
     RESULT_FILE_VALUES_QUERY,
@@ -1902,6 +1903,24 @@ class TestPandasCursor:
 
         pandas_cursor.execute(CONVERTED_VALUES_QUERY)
         assert pandas_cursor.fetchall() == [CONVERTED_VALUES_ROW]
+
+    def test_ambiguous_time_zone_value(self, pandas_cursor):
+        """A local time that its zone repeats raises instead of choosing one.
+
+        A whole read converts the values in execute() and wraps the converter's
+        DataError in OperationalError.
+        """
+        with pytest.raises(DatabaseError, match="is ambiguous"):
+            pandas_cursor.execute(AMBIGUOUS_TIME_ZONE_QUERY)
+
+    @pytest.mark.parametrize(
+        "pandas_cursor", [{"cursor_kwargs": {"chunksize": 1}}], indirect=["pandas_cursor"]
+    )
+    def test_ambiguous_time_zone_value_chunked(self, pandas_cursor):
+        """A chunked read raises DataError when it reads the chunk with the value."""
+        pandas_cursor.execute(AMBIGUOUS_TIME_ZONE_QUERY)
+        with pytest.raises(DataError, match="is ambiguous"):
+            pandas_cursor.fetchall()
 
     @pytest.mark.skipif(not ENV.managed_work_group, reason="AWS_ATHENA_MANAGED_WORKGROUP not set")
     def test_managed_results_match_result_file(self):

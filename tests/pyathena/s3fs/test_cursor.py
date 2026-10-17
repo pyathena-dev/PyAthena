@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from pyathena.converter import _to_default
-from pyathena.error import DatabaseError, ProgrammingError
+from pyathena.error import DatabaseError, DataError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.s3fs.converter import DefaultS3FSTypeConverter
 from pyathena.s3fs.cursor import S3FSCursor
@@ -19,7 +19,12 @@ from pyathena.s3fs.result_set import AthenaS3FSResultSet
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
-from tests.pyathena.util import CONVERTED_VALUES_QUERY, CONVERTED_VALUES_ROW, cached_file_systems
+from tests.pyathena.util import (
+    AMBIGUOUS_TIME_ZONE_QUERY,
+    CONVERTED_VALUES_QUERY,
+    CONVERTED_VALUES_ROW,
+    cached_file_systems,
+)
 
 
 def _s3fs_converter_with_json_text():
@@ -540,6 +545,12 @@ class TestS3FSCursor:
     def test_fetch_all_rows(self, s3fs_cursor):
         s3fs_cursor.execute(CONVERTED_VALUES_QUERY)
         assert s3fs_cursor.fetchall() == [CONVERTED_VALUES_ROW]
+
+    def test_ambiguous_time_zone_value(self, s3fs_cursor):
+        """A local time that its zone repeats raises DataError instead of choosing one."""
+        s3fs_cursor.execute(AMBIGUOUS_TIME_ZONE_QUERY)
+        with pytest.raises(DataError, match="is ambiguous"):
+            s3fs_cursor.fetchall()
 
     @pytest.mark.parametrize(
         "s3fs_cursor",

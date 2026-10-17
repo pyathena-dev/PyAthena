@@ -15,6 +15,7 @@ from decimal import Decimal
 from typing import Any, ClassVar
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from pyathena.error import DataError
 from pyathena.parser import (
     TypedValueConverter,
     TypeNode,
@@ -94,31 +95,37 @@ def _parse_utc_offset(value: str) -> timezone | None:
 
 
 @functools.cache
-def _parse_time_zone(value: str) -> tzinfo | None:
+def _parse_time_zone(value: str) -> tzinfo:
     """Parse the time zone of an Athena TIMESTAMP WITH TIME ZONE value.
-
-    Results are cached per text, so an unknown zone name logs a warning only on its
-    first lookup.
 
     Args:
         value: A ``+HH:MM`` or ``-HH:MM`` UTC offset or an IANA time zone name.
 
     Returns:
-        The fixed-offset time zone or ``ZoneInfo``, or None if the IANA time zone
-        database available to Python cannot provide a zone with the name.
+        The fixed-offset time zone or ``ZoneInfo``.
+
+    Raises:
+        DataError: If the IANA time zone database available to Python cannot
+            provide a zone with the name.
     """
     offset = _parse_utc_offset(value)
     if offset is not None:
         return offset
     try:
         return ZoneInfo(value)
-    except (ZoneInfoNotFoundError, ValueError, OSError):
-        _logger.warning(f"Unknown time zone {value!r}; returning naive datetimes for it.")
-        return None
+    except (ZoneInfoNotFoundError, ValueError, OSError) as e:
+        raise DataError(
+            f"Unknown time zone {value!r}. "
+            "Update the tzdata package or the system time zone database."
+        ) from e
 
 
 def _to_datetime_with_tz(varchar_value: str | None) -> datetime | None:
     """Convert an Athena TIMESTAMP WITH TIME ZONE value to an aware datetime.
+
+    Athena writes a value with a zone name as the local time in that zone. A local
+    time that a change of the zone's UTC offset, such as DST, repeats or skips does
+    not identify one instant, so it is not converted.
 
     Args:
         varchar_value: The value as text with a trailing zone name or ``+HH:MM`` /
@@ -126,12 +133,32 @@ def _to_datetime_with_tz(varchar_value: str | None) -> datetime | None:
             Arrow CSV reader return for NULL, is None.
 
     Returns:
-        The aware datetime, a naive datetime if the zone name is unknown, or None.
+        The aware datetime, or None.
+
+    Raises:
+        DataError: If the zone name is unknown, or the local time is ambiguous or
+            does not exist in the zone.
     """
     if not varchar_value:
         return None
     datetime_, _, tz = varchar_value.rpartition(" ")
-    return _parse_datetime(datetime_).replace(tzinfo=_parse_time_zone(tz))
+    zone = _parse_time_zone(tz)
+    value = _parse_datetime(datetime_).replace(tzinfo=zone)
+    if isinstance(zone, timezone):
+        return value
+    # PEP 495: fold=0 and fold=1 give different offsets only at a transition. At a
+    # repeated local time, fold=0 is the earlier instant; at a skipped one, the later.
+    folded = value.replace(fold=1)
+    if value.utcoffset() != folded.utcoffset():
+        if value.timestamp() < folded.timestamp():
+            reason = "is ambiguous: the local time occurs twice"
+        else:
+            reason = "does not exist: the local time is skipped"
+        raise DataError(
+            f"{varchar_value!r} {reason} in {tz}. Convert the value to UTC in SQL, "
+            "for example with AT TIME ZONE 'UTC'."
+        )
+    return value
 
 
 def _parse_time(value: str) -> time:

@@ -1307,7 +1307,7 @@ requires-dist = [
     { name = "sqlalchemy", marker = "extra == 'sqlalchemy'", specifier = ">=2.0.0" },
     { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'aiosqlalchemy'", specifier = ">=2.0.0" },
     { name = "tenacity", specifier = ">=8.0.1" },
-    { name = "tzdata" },
+    { name = "tzdata", specifier = ">=2024.2" },
 ]
 provides-extras = ["aiosqlalchemy", "arrow", "pandas", "polars", "sqlalchemy"]
 

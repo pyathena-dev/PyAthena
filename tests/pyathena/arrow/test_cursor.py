@@ -22,12 +22,13 @@ import pytest
 from pyathena.arrow.converter import DefaultArrowTypeConverter
 from pyathena.arrow.cursor import ArrowCursor
 from pyathena.arrow.result_set import AthenaArrowResultSet
-from pyathena.error import DatabaseError, ProgrammingError
+from pyathena.error import DatabaseError, DataError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
+    AMBIGUOUS_TIME_ZONE_QUERY,
     CONVERTED_VALUES_QUERY,
     CONVERTED_VALUES_ROW,
     RESULT_FILE_VALUES_QUERY,
@@ -1065,6 +1066,15 @@ class TestArrowCursor:
         assert arrow_cursor.as_arrow().column("col_timestamp_tz").to_pylist() == [
             "2024-02-29 23:59:58.123 +05:30"
         ]
+
+    def test_ambiguous_time_zone_value(self, arrow_cursor):
+        """Fetch methods raise DataError for a local time that its zone repeats.
+
+        The table keeps the text, as for every TIMESTAMP WITH TIME ZONE value.
+        """
+        arrow_cursor.execute(AMBIGUOUS_TIME_ZONE_QUERY)
+        with pytest.raises(DataError, match="is ambiguous"):
+            arrow_cursor.fetchall()
 
     @pytest.mark.skipif(not ENV.managed_work_group, reason="AWS_ATHENA_MANAGED_WORKGROUP not set")
     def test_managed_results_match_result_file(self):
