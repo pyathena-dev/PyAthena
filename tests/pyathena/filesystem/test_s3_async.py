@@ -7,6 +7,7 @@ import os
 import tempfile
 import threading
 import time
+import traceback
 import uuid
 import weakref
 from concurrent.futures import Future, ThreadPoolExecutor, wait
@@ -2671,13 +2672,16 @@ class TestAioS3StreamedFile:
             if range_[0] == 0:
                 all_read.wait()
                 # Retrying when the read is cancelled, once the tasks of the
-                # other ranges have taken their results. Its data is created
-                # afterwards, so that the traceback of the stopped retry does
-                # not keep it.
+                # other ranges have taken their results.
                 asyncio.run_coroutine_threadsafe(others_done(), loop).result(EVENT_TIMEOUT)
                 held.set()
-                with contextlib.suppress(Exception):
+                try:
                     throttled()
+                except Exception as e:
+                    # The stopped retry keeps its error in a reference cycle
+                    # through the frames of its traceback, which would keep
+                    # this frame and the data, as S3Core.call() avoids.
+                    traceback.clear_frames(e.__traceback__)
             # Unlike bytes, an array can be weakly referenced.
             data = array.array("B", bytes(range_[1] - range_[0]))
             read.append(weakref.ref(data))
