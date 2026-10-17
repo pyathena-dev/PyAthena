@@ -160,11 +160,10 @@ class TestPandasCursor:
             read_chunk()
         assert stream.closed
         assert source.closed
-        with pytest.raises(StopIteration):
-            next(chunks)
-        with pytest.raises(StopIteration):
-            chunks.get_chunk()
-        assert pandas_cursor.fetchone() is None
+        # GH-1225: reads and fetches after the failed read raise.
+        for later in (lambda: next(chunks), chunks.get_chunk, pandas_cursor.fetchone):
+            with pytest.raises(ProgrammingError, match=r"after a failed read\."):
+                later()
 
     def test_binary_converter_override(self, pandas_cursor):
         pandas_cursor.execute(

@@ -6,11 +6,10 @@ import csv
 import importlib
 import logging
 import sys
-import threading
 from collections import abc
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack
 from contextvars import copy_context
 from functools import partial
 from io import BufferedReader, BytesIO, IOBase, StringIO, TextIOWrapper
@@ -34,7 +33,7 @@ from pyathena.error import ProgrammingError
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.model import AthenaQueryExecution
 from pyathena.pandas.reader import _BINARY_NULL, BinaryCSVReader
-from pyathena.result_set import AthenaResultSet
+from pyathena.result_set import _FETCH_FAILED_MESSAGE, AthenaResultSet
 from pyathena.util import RetryConfig, override, parse_output_location
 
 if TYPE_CHECKING:
@@ -46,6 +45,8 @@ if TYPE_CHECKING:
     from pyathena.connection import Connection
 
 _logger = logging.getLogger(__name__)
+
+_READ_FAILED_MESSAGE = "PandasDataFrameIterator cannot be read after a failed read."
 
 
 def _convert_binary_csv(converter: Callable[[str | None], Any], value: str) -> Any:
@@ -337,31 +338,8 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
             self._reader = reader
         self._trunc_date = trunc_date
         self._csv_stream = csv_stream
-        self._lock = threading.Lock()
-        self._readers = 0
-        self._close_requested = False
-
-    @contextmanager
-    def _read(self) -> Iterator[TextFileReader | Iterator[DataFrame]]:
-        """Track a chunk read and run a close that was requested during it.
-
-        Yields:
-            The reader to read the chunk from.
-        """
-        with self._lock:
-            self._readers += 1
-            reader = iter(()) if self._close_requested else self._reader
-        try:
-            yield reader
-        finally:
-            with self._lock:
-                self._readers -= 1
-                close = self._close_requested and not self._readers
-            if close:
-                try:
-                    self.close()
-                except Exception:
-                    _logger.exception("Failed to close the chunk reader after a read.")
+        # Whether a read raised, after which the position of the next chunk is unknown.
+        self._read_failed = False
 
     @override
     def __next__(self) -> DataFrame:
@@ -372,12 +350,35 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
 
         Raises:
             StopIteration: When no more chunks are available.
+            ProgrammingError: If an earlier read failed.
         """
+        return self._read_chunk(next)
+
+    def _read_chunk(self, read: Callable[[Any], DataFrame]) -> DataFrame:
+        """Read the next chunk with date truncation applied.
+
+        The iterator is closed at the end of the chunks and after an exception, and
+        later reads after an exception raise ``ProgrammingError``.
+
+        Args:
+            read: The function that reads the chunk from the reader.
+
+        Returns:
+            The chunk.
+
+        Raises:
+            StopIteration: When no more chunks are available.
+            ProgrammingError: If an earlier read failed.
+        """
+        if self._read_failed:
+            raise ProgrammingError(_READ_FAILED_MESSAGE)
         try:
-            with self._read() as reader:
-                df = next(reader)
-            return self._trunc_date(df)
+            return self._trunc_date(read(self._reader))
+        except StopIteration:
+            self.close()
+            raise
         except BaseException:
+            self._read_failed = True
             self.close()
             raise
 
@@ -395,21 +396,11 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         self.close()
 
     def close(self) -> None:
-        """Close the iterator and release resources.
-
-        If another thread is reading a chunk, the read returns that chunk, and the
-        reader and the CSV stream are closed when it completes. Reads that start after the
-        close get no chunks, and an error from the deferred close is logged.
-        """
+        """Close the iterator and release resources; later reads get no chunks."""
         from pandas.io.parsers import TextFileReader
 
-        with self._lock:
-            if self._readers:
-                self._close_requested = True
-                return
-            self._close_requested = False
-            reader, self._reader = self._reader, iter(())
-            csv_stream, self._csv_stream = self._csv_stream, None
+        reader, self._reader = self._reader, iter(())
+        csv_stream, self._csv_stream = self._csv_stream, None
         try:
             if isinstance(reader, (TextFileReader, GeneratorType)):
                 reader.close()
@@ -498,16 +489,18 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
 
         Returns:
             DataFrame chunk, with date truncation applied as in iteration.
+
+        Raises:
+            StopIteration: When no more chunks are available.
+            ProgrammingError: If an earlier read failed.
         """
         from pandas.io.parsers import TextFileReader
 
-        try:
-            with self._read() as reader:
-                df = reader.get_chunk(size) if isinstance(reader, TextFileReader) else next(reader)
-            return self._trunc_date(df)
-        except BaseException:
-            self.close()
-            raise
+        return self._read_chunk(
+            lambda reader: reader.get_chunk(size)
+            if isinstance(reader, TextFileReader)
+            else next(reader)
+        )
 
     def as_pandas(self) -> DataFrame:
         """Collect all remaining chunks into a single DataFrame.
@@ -981,9 +974,15 @@ class AthenaPandasResultSet(AthenaResultSet):
     def fetchone(
         self,
     ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
-        row = next(self._row_iter, None)
-        if row is not None:
-            self._count_rows(1)
+        if self._fetch_failed:
+            raise ProgrammingError(_FETCH_FAILED_MESSAGE)
+        try:
+            row = next(self._row_iter, None)
+            if row is not None:
+                self._count_rows(1)
+        except BaseException:
+            self._fetch_failed = True
+            raise
         return row
 
     @override
@@ -1562,16 +1561,11 @@ class AthenaPandasResultSet(AthenaResultSet):
             and len(set(columns)) == len(columns)
         )
 
-    def _iter_parquet_chunks(self, paths: list[str]) -> Iterator[DataFrame]:
+    def _iter_parquet_chunks(self) -> Iterator[DataFrame]:
         """Read the UNLOAD result in DataFrames of ``chunksize`` rows.
 
         See ``_convert_parquet_chunk()`` for the conversion of each chunk.
-
-        Args:
-            paths: The files of the data manifest, which ``_read_parquet_footers()``
-                read. They are given when the iterator is created, as ``close()`` from
-                another thread can reset the result set's data manifest before the
-                first read.
+        ``_read_parquet_footers()`` must have read the data manifest first.
 
         Yields:
             The DataFrames of the result rows.
@@ -1583,7 +1577,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         try:
             with ParquetChunkReader(
                 self._fs,
-                paths,
+                self._data_manifest,
                 cast(int, self._chunksize),
                 columns=self._kwargs.get("columns"),
                 cache_type=self._cache_type,
@@ -1736,7 +1730,7 @@ class AthenaPandasResultSet(AthenaResultSet):
                 if engine != "pyarrow":
                     raise ProgrammingError("Engine must be `pyarrow`.")
                 self._metadata = to_column_info(schema)
-                return self._iter_parquet_chunks(self._data_manifest)
+                return self._iter_parquet_chunks()
             # Columns that are not top-level columns of the result are read whole,
             # where pandas selects nested fields or raises for missing columns.
         if self.is_unload:

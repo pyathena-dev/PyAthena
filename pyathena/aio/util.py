@@ -19,6 +19,8 @@ from typing import Any, Protocol, TypeVar, cast
 
 from pyathena.util import RetryConfig, retry_api_call, stop_retries_on, unstoppable_retries
 
+_logger = logging.getLogger(__name__)
+
 T = TypeVar("T")
 
 
@@ -69,7 +71,6 @@ async def async_retry_api_call(
     logger: logging.Logger | None = None,
     *args: Any,
     stop_on: Callable[[BaseException], bool] | None = None,
-    stop_when: Callable[[], bool] | None = None,
     stoppable: bool = True,
     **kwargs: Any,
 ) -> Any:
@@ -85,7 +86,6 @@ async def async_retry_api_call(
         logger: Optional logger for retry attempt logging.
         *args: Positional arguments to pass to ``retry_api_call``.
         stop_on: Passed to ``retry_api_call``.
-        stop_when: Passed to ``retry_api_call``.
         stoppable: Whether a cancellation of the caller stops the retries. A
             request that cleans up, such as one that stops a query or
             terminates a session, passes False: its retries then run to their
@@ -100,9 +100,7 @@ async def async_retry_api_call(
     def call() -> Any:
         """Make the call, ignoring the stop scopes unless it is stoppable."""
         with contextlib.nullcontext() if stoppable else unstoppable_retries():
-            return retry_api_call(
-                func, config, logger, *args, stop_on=stop_on, stop_when=stop_when, **kwargs
-            )
+            return retry_api_call(func, config, logger, *args, stop_on=stop_on, **kwargs)
 
     return await (run_in_thread(call) if stoppable else asyncio.to_thread(call))
 
@@ -163,8 +161,7 @@ async def create_in_thread(
             if not cancelled.is_set():
                 constructed.append(obj)
                 return obj
-        with unstoppable_retries():
-            obj.close()
+        _close_logging_errors(obj)
         return None
 
     future = asyncio.get_running_loop().run_in_executor(
@@ -180,6 +177,84 @@ async def create_in_thread(
         # Retrieve a later construction error, which nobody else awaits.
         future.add_done_callback(lambda f: f.cancelled() or f.exception())
         if constructed:
-            threading.Thread(target=constructed[0].close, name="create_in_thread-close").start()
+            threading.Thread(
+                target=_close_logging_errors, args=(constructed[0],), name="create_in_thread-close"
+            ).start()
         raise
     return cast(_ClosableT, future.result())
+
+
+async def run_in_thread_or_close(
+    closable: _Closable, func: Callable[..., T], /, *args: Any, **kwargs: Any
+) -> T:
+    """Run a blocking function that uses a closable object in the default executor.
+
+    Like :func:`run_in_thread`, the function runs in the event loop's default
+    executor with a copy of the caller's context, a cancellation of the caller
+    skips a function that has not started, and it stops the retries of the AWS
+    API calls that a running function makes. A cancellation also closes the
+    object once the function is no longer running: a running function closes it
+    in its thread when it ends, and otherwise a new thread closes it. As with
+    :func:`create_in_thread`, the close needs neither the event loop nor its
+    executor.
+
+    Args:
+        closable: The object that the function uses.
+        func: The blocking function.
+        *args: Positional arguments for ``func``.
+        **kwargs: Keyword arguments for ``func``.
+
+    Returns:
+        The return value of ``func``.
+    """
+    lock = threading.Lock()
+    cancelled = threading.Event()
+    running = False
+
+    def call() -> T | None:
+        """Run the function unless the caller was cancelled, closing the object if it was then.
+
+        Returns:
+            The return value of the function, or None if the caller was cancelled
+            before it started.
+        """
+        nonlocal running
+        with lock:
+            if cancelled.is_set():
+                return None
+            running = True
+        try:
+            with stop_retries_on(cancelled):
+                return func(*args, **kwargs)
+        finally:
+            with lock:
+                running = False
+                close = cancelled.is_set()
+            if close:
+                _close_logging_errors(closable)
+
+    future = asyncio.get_running_loop().run_in_executor(None, contextvars.copy_context().run, call)
+    try:
+        return cast(T, await future)
+    except asyncio.CancelledError:
+        with lock:
+            cancelled.set()
+            close = not running
+        if close:
+            threading.Thread(
+                target=_close_logging_errors, args=(closable,), name="run_in_thread_or_close-close"
+            ).start()
+        raise
+
+
+def _close_logging_errors(closable: _Closable) -> None:
+    """Close an object for a cancelled caller, logging an error that nobody else sees.
+
+    Args:
+        closable: The object to close.
+    """
+    try:
+        with unstoppable_retries():
+            closable.close()
+    except Exception:
+        _logger.exception(f"Failed to close {closable!r} after a cancellation.")

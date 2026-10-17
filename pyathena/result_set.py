@@ -26,6 +26,8 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
+_FETCH_FAILED_MESSAGE = "The result set cannot be fetched after a failed fetch."
+
 
 class AthenaResultSet(CursorIterator):
     """Result set for Athena query execution using the GetQueryResults API.
@@ -115,6 +117,8 @@ class AthenaResultSet(CursorIterator):
             collections.deque()
         )
         self._next_token: str | None = None
+        # Whether a fetch raised, after which the position of the next row is unknown.
+        self._fetch_failed = False
 
         if self.state == AthenaQueryExecution.STATE_SUCCEEDED:
             self._rownumber = 0
@@ -438,8 +442,7 @@ class AthenaResultSet(CursorIterator):
 
         Raises:
             ProgrammingError: If the query ID is missing, the query has not
-                succeeded, or the result set is closed, also during the
-                request, which then makes no further attempt.
+                succeeded, or the result set is closed.
             OperationalError: If the request fails.
         """
         if self.is_closed:
@@ -450,13 +453,9 @@ class AthenaResultSet(CursorIterator):
                 self.connection.client.get_query_results,
                 config=self._retry_config,
                 logger=_logger,
-                stop_when=lambda: self.is_closed,
                 **request,
             )
         except Exception as e:
-            if self.is_closed:
-                # close() during the request stopped its retries.
-                raise ProgrammingError("AthenaResultSet is closed.") from e
             _logger.exception("Failed to fetch result set.")
             raise OperationalError(*e.args) from e
         else:
@@ -466,8 +465,7 @@ class AthenaResultSet(CursorIterator):
         """Fetch the next rows, if any, into the buffer.
 
         The default result set fetches the next page; it fetches nothing when no
-        page remains or the result set is closed. A ``close()`` during the request
-        stops its retries, and the page is discarded.
+        page remains, as after ``close()``.
 
         Raises:
             ProgrammingError: If the next page is requested and the query ID is
@@ -476,20 +474,9 @@ class AthenaResultSet(CursorIterator):
         """
         if not self._next_token:
             return
-        try:
-            response = self._get_query_results(self._arraysize, self._next_token)
-        except ProgrammingError:
-            # Raised for a close() before the request or during its retries.
-            if not self.is_closed:
-                raise
-        else:
-            rows, self._next_token = self._parse_result_rows(response)
-            self._process_rows(rows)
-        # close() clears the connection before the rest, so checking after the
-        # assignments catches a close() during the request or this method.
-        if self.is_closed:
-            self._next_token = None
-            self._rows.clear()
+        response = self._get_query_results(self._arraysize, self._next_token)
+        rows, self._next_token = self._parse_result_rows(response)
+        self._process_rows(rows)
 
     def _pre_fetch(self) -> None:
         """Fetch the first page of rows along with the result metadata.
@@ -510,15 +497,21 @@ class AthenaResultSet(CursorIterator):
     def fetchone(
         self,
     ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
-        if not self._rows:
-            self._fetch()
+        if self._fetch_failed:
+            raise ProgrammingError(_FETCH_FAILED_MESSAGE)
+        try:
             if not self._rows:
-                return None
-        row = self._rows.popleft()
-        # As _count_rows() does, inline on the per-row path.
-        rownumber = self._rownumber
-        if rownumber is not None:
-            self._rownumber = rownumber + 1
+                self._fetch()
+                if not self._rows:
+                    return None
+            row = self._rows.popleft()
+            # As _count_rows() does, inline on the per-row path.
+            rownumber = self._rownumber
+            if rownumber is not None:
+                self._rownumber = rownumber + 1
+        except BaseException:
+            self._fetch_failed = True
+            raise
         return row
 
     @override
@@ -536,10 +529,18 @@ class AthenaResultSet(CursorIterator):
 
         Raises:
             TypeError: If ``size`` is not an integer and not replaced with ``arraysize``.
+            ProgrammingError: If an earlier fetch failed.
         """
         if not size or size <= 0:
             size = self._arraysize
-        return self._take_rows(operator.index(size))
+        size = operator.index(size)
+        if self._fetch_failed:
+            raise ProgrammingError(_FETCH_FAILED_MESSAGE)
+        try:
+            return self._take_rows(size)
+        except BaseException:
+            self._fetch_failed = True
+            raise
 
     @override
     def fetchall(
@@ -549,8 +550,17 @@ class AthenaResultSet(CursorIterator):
 
         Returns:
             The remaining rows.
+
+        Raises:
+            ProgrammingError: If an earlier fetch failed.
         """
-        return self._take_rows(None)
+        if self._fetch_failed:
+            raise ProgrammingError(_FETCH_FAILED_MESSAGE)
+        try:
+            return self._take_rows(None)
+        except BaseException:
+            self._fetch_failed = True
+            raise
 
     def _take_rows(self, size: int | None) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         """Take the next rows and count them in ``rownumber``.
@@ -586,33 +596,21 @@ class AthenaResultSet(CursorIterator):
         start = len(rows)
         limit = None if size is None else size - start
         if limit is not None and limit < len(self._rows):
-            # A row is never None, so popleft() runs until the limit or an empty
-            # buffer, and extend() keeps the rows that it appended before that.
-            # try costs nothing without an exception, unlike contextlib.suppress().
-            try:  # noqa: SIM105
-                rows.extend(islice(iter(self._rows.popleft, None), limit))
-            except IndexError:
-                pass
+            # A row is never None, so popleft() runs until the limit.
+            rows.extend(islice(iter(self._rows.popleft, None), limit))
         else:
-            # The buffer is replaced, not cleared after it is read, so that a close()
-            # in between empties only the new buffer.
-            buffered, self._rows = self._rows, collections.deque()
-            rows.extend(buffered)
+            rows.extend(self._rows)
+            self._rows.clear()
         self._count_rows(len(rows) - start)
 
     def _count_rows(self, count: int) -> None:
-        """Count the rows that a fetch took in ``rownumber``.
-
-        ``rownumber`` stays None for a result set that another thread closed before
-        the update. It is read once, so that a ``close()`` during the update raises no
-        TypeError, though it may leave the count in place.
+        """Count the rows that a fetch took in ``rownumber``, unless it is None.
 
         Args:
             count: The number of rows taken.
         """
-        rownumber = self._rownumber
-        if rownumber is not None:
-            self._rownumber = rownumber + count
+        if self._rownumber is not None:
+            self._rownumber += count
 
     def _process_metadata(self, response: dict[str, Any]) -> None:
         result_set = response.get("ResultSet")
@@ -763,8 +761,7 @@ class AthenaResultSet(CursorIterator):
             the first page starts with the column labels.
 
         Raises:
-            ProgrammingError: If the result set is closed, also during a request,
-                which then makes no further attempt.
+            ProgrammingError: If the result set is closed.
             OperationalError: If a request fails.
         """
         _logger.warning(
@@ -777,9 +774,6 @@ class AthenaResultSet(CursorIterator):
         first_page = True
         while True:
             response = self._get_query_results(self.DEFAULT_FETCH_SIZE, next_token)
-            if self.is_closed:
-                # close() ran during the request; its page is not returned.
-                raise ProgrammingError("AthenaResultSet is closed.")
             rows, next_token = self._parse_result_rows(response)
             # Only the first page starts with the column labels.
             offset = 1 if first_page and rows and self._is_first_row_column_labels(rows) else 0

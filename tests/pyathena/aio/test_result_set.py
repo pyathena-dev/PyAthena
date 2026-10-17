@@ -4,7 +4,8 @@
 # See LICENSE or https://opensource.org/licenses/MIT.
 #
 # SPDX-License-Identifier: MIT
-import time
+import asyncio
+import threading
 from unittest.mock import MagicMock
 
 import pytest
@@ -14,12 +15,7 @@ from pyathena.converter import DefaultTypeConverter
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
-from tests.pyathena.util import (
-    EVENT_TIMEOUT,
-    close_during_next_request,
-    close_during_next_retries,
-    get_query_results_responses,
-)
+from tests.pyathena.util import EVENT_TIMEOUT, get_query_results_responses
 
 
 async def _create_result_set(result_set_class, pages=(("1", "2"),)):
@@ -48,6 +44,17 @@ async def _create_result_set(result_set_class, pages=(("1", "2"),)):
     return await result_set_class.create(
         connection, DefaultTypeConverter(), query_execution, 2, RetryConfig()
     )
+
+
+async def _assert_fetches_fail(result_set):
+    """Assert that each fetch of a result set raises for an earlier failed fetch.
+
+    Args:
+        result_set: The asyncio result set.
+    """
+    for fetch in (result_set.fetchone, result_set.fetchmany, result_set.fetchall):
+        with pytest.raises(ProgrammingError, match=r"cannot be fetched after a failed fetch\."):
+            await fetch()
 
 
 class TestAthenaAioResultSet:
@@ -105,15 +112,43 @@ class TestAthenaAioResultSet:
         assert result_set.rownumber == 3
         assert result_set.connection.client.get_query_results.call_count == 2
 
-    @pytest.mark.parametrize(("method", "args"), [("fetchmany", (3,)), ("fetchall", ())])
-    async def test_fetch_counts_rows_taken_before_error(self, method, args):
-        """The rows taken before a failed page request are counted in rownumber."""
-        result_set = await _create_result_set(
-            AthenaAioResultSet, [("1", "2"), RuntimeError("failed")]
-        )
-        with pytest.raises(OperationalError):
-            await getattr(result_set, method)(*args)
-        assert result_set.rownumber == 2
+    @pytest.mark.parametrize(
+        ("page", "expected"), [(RuntimeError("failed"), OperationalError), (("x",), ValueError)]
+    )
+    @pytest.mark.parametrize("method", ["fetchone", "fetchmany", "fetchall"])
+    async def test_fetch_after_failed_fetch(self, method, page, expected):
+        """GH-1225: after a fetch raises, later fetches raise without a request."""
+        result_set = await _create_result_set(AthenaAioResultSet, [("1", "2"), page, ("3",)])
+        assert await result_set.fetchmany(2) == [(1,), (2,)]
+        with pytest.raises(expected):
+            await getattr(result_set, method)()
+        await _assert_fetches_fail(result_set)
+        assert result_set.connection.client.get_query_results.call_count == 2
+
+    @pytest.mark.parametrize("method", ["fetchone", "fetchmany", "fetchall"])
+    async def test_fetch_after_cancelled_fetch(self, method):
+        """GH-1225: after a fetch is cancelled during its page request, later fetches raise."""
+        result_set = await _create_result_set(AthenaAioResultSet, [("1", "2"), ("3",)])
+        assert await result_set.fetchmany(2) == [(1,), (2,)]
+        requested, release = threading.Event(), threading.Event()
+        responses = result_set.connection.client.get_query_results.side_effect
+
+        def respond(**kwargs):
+            requested.set()
+            assert release.wait(EVENT_TIMEOUT)
+            return next(responses)
+
+        result_set.connection.client.get_query_results.side_effect = respond
+        task = asyncio.create_task(getattr(result_set, method)())
+        try:
+            assert await asyncio.to_thread(requested.wait, EVENT_TIMEOUT)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await _assert_fetches_fail(result_set)
+        finally:
+            release.set()
+        assert result_set.connection.client.get_query_results.call_count == 2
 
     async def test_fetch_after_close(self):
         result_set = await _create_result_set(AthenaAioResultSet, [("1", "2"), ("3",)])
@@ -123,39 +158,8 @@ class TestAthenaAioResultSet:
         assert await result_set.fetchall() == []
         assert result_set.rownumber is None
 
-    @pytest.mark.parametrize("close_in", ["request", "backoff"])
-    @pytest.mark.parametrize(
-        ("method", "expected"), [("fetchone", None), ("fetchmany", []), ("fetchall", [])]
-    )
-    async def test_fetch_with_close_during_retries(self, close_in, method, expected):
-        """GH-1202: a close() during the retries of a page request stops them."""
-        result_set = await _create_result_set(AthenaAioResultSet, [("1", "2"), ("3",)])
-        assert await result_set.fetchmany(2) == [(1,), (2,)]
-        operation = close_during_next_retries(result_set, close_in)
-        started = time.monotonic()
-        assert await getattr(result_set, method)() == expected
-        assert time.monotonic() - started < EVENT_TIMEOUT
-        operation.join()
-        assert await result_set.fetchone() is None
-        assert operation.calls == 1
-
     async def test_get_query_results_after_close(self):
         result_set = await _create_result_set(AthenaAioResultSet, [("1", "2"), ("3",)])
         result_set.close()
         with pytest.raises(ProgrammingError, match=r"AthenaAioResultSet is closed\."):
             await result_set._async_get_query_results(2, "token1")
-
-    @pytest.mark.parametrize(
-        ("method", "expected"), [("fetchone", None), ("fetchmany", []), ("fetchall", [])]
-    )
-    async def test_fetch_with_close_during_request(self, method, expected):
-        """A close() during a page request discards the page and fetches nothing more."""
-        result_set = await _create_result_set(AthenaAioResultSet, [("1", "2"), ("3", "4"), ("5",)])
-        assert await result_set.fetchmany(2) == [(1,), (2,)]
-        get_query_results = close_during_next_request(result_set)
-        assert await getattr(result_set, method)() == expected
-        assert await result_set.fetchone() is None
-        assert await result_set.fetchmany() == []
-        assert await result_set.fetchall() == []
-        assert result_set.rownumber is None
-        assert get_query_results.call_count == 2

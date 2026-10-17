@@ -130,6 +130,13 @@ for row in cursor:
     print(row)
 ```
 
+After a fetch raises an exception, including `KeyboardInterrupt`, later fetches of the same result raise `ProgrammingError`.
+An invalid argument, such as a `fetchmany()` size that is not an integer, raises its error without that effect.
+Execute the query again to read its result.
+
+As `pyathena.threadsafety = 2` declares, threads can share connections, but not cursors.
+Calling the methods of one cursor or its result set from several threads, including `close()` and `cancel()`, is not supported.
+
 (usage-query-with-parameters)=
 
 ## Query with parameters
@@ -399,7 +406,7 @@ Result columns from a passthrough query come back with the source system's types
 
 PyAthena provides a callback mechanism that allows you to get immediate access to the query ID
 as soon as the `start_query_execution` API call is made, before waiting for query completion.
-This is useful for monitoring, logging, or cancelling long-running queries from another thread.
+This is useful for monitoring, logging, or stopping long-running queries by their ID, for example with `AsyncCursor.cancel(query_id)`.
 When `cache_size` finds a reusable query, no new query starts, and the callback receives the reused query's ID.
 
 The `on_start_query_execution` callback can be configured at both the connection level and
@@ -444,91 +451,6 @@ cursor.execute(
     "SELECT * FROM many_rows",
     on_start_query_execution=specific_callback
 )
-```
-
-### Query cancellation example
-
-A common use case is to cancel long-running analytical queries after a timeout:
-
-```python
-import threading
-from pyathena import connect
-
-def cancel_long_running_query():
-    """Example: Cancel a complex analytical query after 10 minutes."""
-    timeout_minutes = 10
-
-    def track_query_start(query_id):
-        print(f"Long-running analysis started: {query_id}")
-
-    def cancel_on_timeout(cursor):
-        """Cancel the query that is still running when the timer fires."""
-        try:
-            cursor.cancel()
-            print(f"Query cancelled after {timeout_minutes} minutes timeout")
-        except Exception as e:
-            print(f"Cancellation failed: {e}")
-
-    cursor = connect(
-        s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
-        region_name="us-west-2",
-        on_start_query_execution=track_query_start
-    ).cursor()
-
-    # Complex analytical query that might run for a long time
-    long_query = """
-    WITH daily_metrics AS (
-        SELECT
-            date_trunc('day', timestamp_col) as day,
-            user_id,
-            COUNT(*) as events,
-            AVG(duration) as avg_duration
-        FROM large_events_table
-        WHERE timestamp_col >= current_date - interval '1' year
-        GROUP BY 1, 2
-    ),
-    user_segments AS (
-        SELECT
-            user_id,
-            CASE
-                WHEN AVG(events) > 100 THEN 'high_activity'
-                WHEN AVG(events) > 10 THEN 'medium_activity'
-                ELSE 'low_activity'
-            END as segment
-        FROM daily_metrics
-        GROUP BY user_id
-    )
-    SELECT
-        segment,
-        COUNT(DISTINCT dm.user_id) as users,
-        AVG(events) as avg_daily_events
-    FROM daily_metrics dm
-    JOIN user_segments us ON dm.user_id = us.user_id
-    GROUP BY segment
-    ORDER BY avg_daily_events DESC
-    """
-
-    # Cancel the query if it is still running after the timeout
-    timer = threading.Timer(timeout_minutes * 60, cancel_on_timeout, args=(cursor,))
-    timer.start()
-    try:
-        print("Starting complex analytical query (10-minute timeout)...")
-        cursor.execute(long_query)
-
-        # Process results
-        results = cursor.fetchall()
-        print(f"Analysis completed successfully: {len(results)} segments found")
-        for row in results:
-            print(f"  {row[0]}: {row[1]} users, {row[2]:.1f} avg events")
-
-    except Exception as e:
-        print(f"Query failed or was cancelled: {e}")
-    finally:
-        # Stop the timer once the query has finished
-        timer.cancel()
-
-# Run the example
-cancel_long_running_query()
 ```
 
 ### Multiple callbacks

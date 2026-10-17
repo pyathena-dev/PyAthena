@@ -6,12 +6,9 @@
 # SPDX-License-Identifier: MIT
 
 import inspect
-import threading
 from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
-from io import BytesIO
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import polars as pl
@@ -19,11 +16,12 @@ import pytest
 from fsspec.implementations.local import LocalFileSystem
 
 from pyathena.converter import _to_date, _to_default
-from pyathena.error import OperationalError
+from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.polars.converter import DefaultPolarsTypeConverter
 from pyathena.polars.result_set import AthenaPolarsResultSet, PolarsDataFrameIterator
 from pyathena.util import RetryConfig
+from tests.pyathena.util import assert_fetches_fail
 
 _ROWS_BEFORE_FAILURE = 300_000
 # A timestamp column of a CSV result file with 12 fractional digits and NULL, as text and
@@ -139,20 +137,17 @@ class TestAthenaPolarsResultSet:
         assert result_set.rownumber == 4
 
     @pytest.mark.parametrize(
-        ("dates", "method", "rownumber"),
+        ("dates", "method"),
         [
-            (["2024-01-01", "bad", "2024-01-03"], "fetchone", 1),
-            (["2024-01-01", "bad", "2024-01-03"], "fetchmany", 1),
-            (["2024-01-01", "bad", "2024-01-03"], "fetchall", 1),
-            (["2024-01-01", "2024-01-02", "bad"], "fetchmany", 2),
-            (["2024-01-01", "2024-01-02", "bad"], "fetchall", 2),
+            (["2024-01-01", "bad", "2024-01-03"], "fetchone"),
+            (["2024-01-01", "bad", "2024-01-03"], "fetchmany"),
+            (["2024-01-01", "bad", "2024-01-03"], "fetchall"),
+            (["2024-01-01", "2024-01-02", "bad"], "fetchmany"),
+            (["2024-01-01", "2024-01-02", "bad"], "fetchall"),
         ],
     )
-    def test_fetch_after_conversion_error(self, dates, method, rownumber):
-        """After a value fails to convert, the fetch methods return no more rows.
-
-        ``rownumber`` counts the rows taken before the error, as fetching row by row did.
-        """
+    def test_fetch_after_conversion_error(self, dates, method):
+        """GH-1225: after a value fails to convert, the fetch methods raise."""
         chunks = [
             pl.DataFrame({"n": [0, 1, 2], "d": dates}),
             pl.DataFrame({"n": [3], "d": ["2024-01-04"]}),
@@ -163,11 +158,31 @@ class TestAthenaPolarsResultSet:
         assert result_set.fetchone() == (0, date(2024, 1, 1))
         with pytest.raises(ValueError, match="bad"):
             getattr(result_set, method)()
-        assert result_set.rownumber == rownumber
-        assert result_set.fetchone() is None
-        assert result_set.fetchmany() == []
-        assert result_set.fetchall() == []
-        assert result_set.rownumber == rownumber
+        assert_fetches_fail(result_set)
+
+    def test_fetchone_interrupted_while_counting(self):
+        """GH-1225: an interrupt after fetchone() took its row breaks the result set."""
+        result_set = _fetching_result_set([pl.DataFrame({"n": [0, 1]})], ["n"], arraysize=3)
+        with (
+            patch.object(result_set, "_count_rows", side_effect=KeyboardInterrupt),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            result_set.fetchone()
+        assert_fetches_fail(result_set)
+
+    def test_fetch_after_failed_chunk_read(self):
+        """GH-1225: after iter_chunks() fails to read a chunk, the fetch methods raise."""
+
+        def chunks():
+            yield pl.DataFrame({"n": [0]})
+            raise OperationalError("failed")
+
+        result_set = _fetching_result_set(chunks(), ["n"], arraysize=3)
+        with pytest.raises(OperationalError):
+            list(result_set.iter_chunks())
+        with pytest.raises(ProgrammingError, match=r"cannot be read after a failed read\."):
+            result_set.fetchone()
+        assert_fetches_fail(result_set)
 
     def test_fetch_after_chunks_run_out(self):
         """The rows of a chunk that a fetch started stay after iter_chunks() runs out."""
@@ -177,133 +192,6 @@ class TestAthenaPolarsResultSet:
         assert list(result_set.iter_chunks()) == []
         assert result_set.fetchall() == [(i,) for i in range(1, size)]
         assert result_set.rownumber == size
-
-    def test_close_during_fetchall(self):
-        """A fetchall() in another thread does not set rownumber after close()."""
-        requested = threading.Event()
-        closed = threading.Event()
-
-        class Chunks:
-            def __init__(self):
-                self._chunks = iter([pl.DataFrame({"n": [0, 1]}), pl.DataFrame({"n": [2, 3]})])
-                self._calls = 0
-
-            def __iter__(self):
-                return self
-
-            def __next__(self):
-                self._calls += 1
-                if self._calls == 2:
-                    requested.set()
-                    assert closed.wait(10)
-                return next(self._chunks)
-
-        result_set = _fetching_result_set(Chunks(), ["n"], arraysize=3)
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(result_set.fetchall)
-            assert requested.wait(10)
-            result_set.close()
-            closed.set()
-            # The fetch still returns the chunk that it was reading.
-            assert future.result(10) == [(0,), (1,), (2,), (3,)]
-        assert result_set.rownumber is None
-
-    def test_close_during_fetchall_generator(self):
-        """A close() during a fetch from a generator, such as a chunked UNLOAD, does not raise."""
-        reading, release = threading.Event(), threading.Event()
-
-        def chunks():
-            yield pl.DataFrame({"n": [0, 1]})
-            reading.set()
-            release.wait(10)
-            yield pl.DataFrame({"n": [2, 3]})
-            yield pl.DataFrame({"n": [4]})
-
-        reader = chunks()
-        result_set = _fetching_result_set(reader, ["n"], arraysize=3)
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(result_set.fetchall)
-            assert reading.wait(10)
-            result_set.close()
-            release.set()
-            assert future.result(10) == [(0,), (1,), (2,), (3,)]
-        assert inspect.getgeneratorstate(reader) == inspect.GEN_CLOSED
-
-    @pytest.mark.parametrize(
-        ("unload", "kwargs", "credentials"),
-        [(False, {}, (0, 1)), (True, {}, (1, 1)), (True, {"low_memory": True}, (1, 2))],
-        ids=["csv", "parquet-chunk-reader", "scan-parquet"],
-    )
-    def test_close_during_first_read(self, tmp_path, unload, kwargs, credentials):
-        """A close() as a fetch starts its first read leaves the fetch its chunk.
-
-        A fetch in another thread, such as one of AioPolarsCursor that keeps running
-        after its task is cancelled, can start its first read as close() lands. The
-        credentials of the Polars scans are frozen at the first read, so ``credentials``
-        counts them after the result set is created and after the read; the schema of
-        an UNLOAD result is read when it is created.
-        """
-        if unload:
-            pl.DataFrame({"a": [1, 2, 3]}).write_parquet(tmp_path / "0.parquet")
-            manifest = str(tmp_path / "0.parquet")
-            output_location = "s3://bucket/result.csv"
-        else:
-            (tmp_path / "result.csv").write_text('"a"\n"1"\n"2"\n"3"\n')
-            manifest = ""
-            output_location = str(tmp_path / "result.csv")
-        connection = MagicMock(region_name=None)
-        connection.session.get_credentials.return_value = None
-        connection.s3_client.get_object.side_effect = lambda **_: {
-            "Body": BytesIO(manifest.encode())
-        }
-        query_execution = MagicMock(
-            state=AthenaQueryExecution.STATE_SUCCEEDED,
-            output_location=output_location,
-            data_manifest_location="s3://bucket/manifest.csv",
-            query="UNLOAD (SELECT a FROM t) TO 's3://bucket/unload/' WITH (format = 'PARQUET')"
-            if unload
-            else "SELECT a FROM t",
-        )
-        metadata = (
-            {"Name": "a", "Type": "integer", "Precision": 10, "Scale": 0, "Nullable": "UNKNOWN"},
-        )
-        with (
-            patch.object(
-                AthenaPolarsResultSet,
-                "_pre_fetch",
-                autospec=True,
-                side_effect=lambda rs: setattr(rs, "_metadata", metadata),
-            ),
-            patch.object(AthenaPolarsResultSet, "_get_content_length", return_value=16),
-            patch("pyathena.polars.result_set.S3FileSystem", lambda **_: LocalFileSystem()),
-        ):
-            result_set = AthenaPolarsResultSet(
-                connection=connection,
-                converter=DefaultPolarsTypeConverter(),
-                query_execution=query_execution,
-                arraysize=3,
-                retry_config=RetryConfig(),
-                unload=unload,
-                chunksize=2,
-                **kwargs,
-            )
-        assert connection.session.get_credentials.call_count == credentials[0]
-        reading, release = threading.Event(), threading.Event()
-        reader = result_set._df_iter._reader
-
-        def blocked():
-            reading.set()
-            assert release.wait(10)
-            yield from reader
-
-        result_set._df_iter._reader = blocked()
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(result_set.fetchall)
-            assert reading.wait(10)
-            result_set.close()
-            release.set()
-            assert future.result(10) == [(1,), (2,)]
-        assert connection.session.get_credentials.call_count == credentials[1]
 
     def test_fetchmany_size_above_maxsize(self):
         """A size above sys.maxsize returns the remaining rows."""
@@ -791,34 +679,19 @@ class TestPolarsDataFrameIterator:
         df_iter.close()
         assert list(df_iter) == []
 
-    @pytest.mark.parametrize("close_error", [None, RuntimeError("close failed")])
-    def test_close_during_read(self, caplog, close_error):
-        """A close during a read in another thread is deferred until the read completes."""
-        reading, release = threading.Event(), threading.Event()
+    @pytest.mark.parametrize("error", [OperationalError("failed"), KeyboardInterrupt()])
+    def test_read_after_failed_read(self, error):
+        """GH-1225: after a read raises, the iterator is closed and later reads raise."""
 
         def chunks():
-            try:
-                yield pl.DataFrame({"a": [1]})
-                reading.set()
-                release.wait(10)
-                yield pl.DataFrame({"a": [2]})
-                yield pl.DataFrame({"a": [3]})
-            finally:
-                if close_error:
-                    raise close_error
+            yield pl.DataFrame({"a": [1]})
+            raise error
 
         reader = chunks()
         df_iter = PolarsDataFrameIterator(reader, {}, ["a"])
-        next(df_iter)
-        with ThreadPoolExecutor(1) as executor:
-            future = executor.submit(next, df_iter)
-            assert reading.wait(10)
-            df_iter.close()
-            with pytest.raises(StopIteration):
-                next(df_iter)
-            assert inspect.getgeneratorstate(reader) == inspect.GEN_RUNNING
-            release.set()
-            assert future.result(10)["a"].to_list() == [2]
+        assert next(df_iter)["a"].to_list() == [1]
+        with pytest.raises(type(error)):
+            next(df_iter)
         assert inspect.getgeneratorstate(reader) == inspect.GEN_CLOSED
-        assert ("Failed to close the chunk reader" in caplog.text) == bool(close_error)
-        assert list(df_iter) == []
+        with pytest.raises(ProgrammingError, match=r"cannot be read after a failed read\."):
+            next(df_iter)

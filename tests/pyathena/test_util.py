@@ -394,22 +394,6 @@ def test_retry_api_call_stopped_by_event(stop_in):
     assert call.calls == 1
 
 
-@pytest.mark.parametrize("stop_in", ["request", "backoff"])
-def test_retry_api_call_stopped_by_stop_when(stop_in):
-    """GH-1202: ``stop_when`` ends the retries and their backoff wait."""
-    stopped = threading.Event()
-    call = StoppingOperation(stopped.set, stop_in)
-    started = time.monotonic()
-    with pytest.raises(ClientError) as caught:
-        retry_api_call(
-            call, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT), stop_when=stopped.is_set
-        )
-    call.join()
-    assert time.monotonic() - started < EVENT_TIMEOUT
-    assert caught.value is call.error
-    assert call.calls == 1
-
-
 def test_retry_api_call_stopped_before_call():
     """A call in a stopped scope makes its first attempt, but no retry."""
     event = threading.Event()

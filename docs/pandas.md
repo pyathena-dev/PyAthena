@@ -825,8 +825,8 @@ cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 ## AioPandasCursor
 
 AioPandasCursor is a native asyncio cursor that returns results as pandas DataFrames.
-Unlike AsyncPandasCursor which uses `concurrent.futures`, this cursor uses
-`asyncio.to_thread()` for both result set creation and fetch operations,
+Unlike AsyncPandasCursor which uses `concurrent.futures`, this cursor runs
+both result set creation and fetch operations in threads,
 keeping the event loop free.
 
 ```python

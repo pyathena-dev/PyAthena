@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import operator
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, NoReturn, TypeVar, cast
 
 from botocore.exceptions import BotoCoreError, ClientError
 
-from pyathena.aio.util import async_retry_api_call, close_in_thread
+from pyathena.aio.util import async_retry_api_call, close_in_thread, run_in_thread_or_close
 from pyathena.common import BaseCursor, CursorIterator
 from pyathena.error import DatabaseError, OperationalError, ProgrammingError
 from pyathena.glue import GlueMetadataClient
@@ -709,11 +710,11 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
     Combines ``WithResultSet`` with ``AioBaseCursor`` and ``CursorIterator``,
     and provides async fetch, ``executemany``, and ``cancel``, async
     iteration, and the async context manager protocol. The fetch methods run
-    the result set's synchronous fetch with ``asyncio.to_thread``; a subclass
-    whose result set fetches asynchronously overrides them. Closing the
+    the result set's synchronous fetch in a thread (see ``_fetch_in_thread()``);
+    a subclass whose result set fetches asynchronously overrides them. Closing the
     previous result set when a query is executed, and closing the cursor at
     the end of an ``async with`` block, also run in a thread, because closing
-    a result stream can wait for a read in progress. Synchronous iteration
+    a result stream can wait for its read-ahead requests in progress. Synchronous iteration
     raises ``TypeError``.
 
     Subclasses override ``execute()`` and optionally ``__init__`` and
@@ -793,8 +794,8 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
     ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
         """Fetch the next row of the result set.
 
-        Wraps the synchronous fetch in ``asyncio.to_thread`` to avoid
-        blocking the event loop.
+        Runs the synchronous fetch in a thread to avoid blocking the event
+        loop (see ``_fetch_in_thread()``).
 
         Returns:
             A tuple representing the next row, or None if no more rows.
@@ -802,10 +803,7 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
         Raises:
             ProgrammingError: If no result set is available.
         """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaResultSet, self.result_set)
-        return await asyncio.to_thread(result_set.fetchone)
+        return await self._fetch_in_thread(operator.methodcaller("fetchone"))
 
     @override
     async def fetchmany(
@@ -813,8 +811,8 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
     ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         """Fetch multiple rows from the result set.
 
-        Wraps the synchronous fetch in ``asyncio.to_thread`` to avoid
-        blocking the event loop.
+        Runs the synchronous fetch in a thread to avoid blocking the event
+        loop (see ``_fetch_in_thread()``).
 
         Args:
             size: Maximum number of rows to fetch. If None or not positive,
@@ -826,10 +824,7 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
         Raises:
             ProgrammingError: If no result set is available.
         """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaResultSet, self.result_set)
-        return await asyncio.to_thread(result_set.fetchmany, size)
+        return await self._fetch_in_thread(operator.methodcaller("fetchmany", size))
 
     @override
     async def fetchall(
@@ -837,8 +832,8 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
     ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         """Fetch all remaining rows from the result set.
 
-        Wraps the synchronous fetch in ``asyncio.to_thread`` to avoid
-        blocking the event loop.
+        Runs the synchronous fetch in a thread to avoid blocking the event
+        loop (see ``_fetch_in_thread()``).
 
         Returns:
             List of tuples representing all remaining rows.
@@ -846,10 +841,34 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
         Raises:
             ProgrammingError: If no result set is available.
         """
+        return await self._fetch_in_thread(operator.methodcaller("fetchall"))
+
+    async def _fetch_in_thread(self, fetch: Callable[[AthenaResultSet], _T]) -> _T:
+        """Run a synchronous fetch of the result set in a thread.
+
+        A cancellation stops the retries of the AWS API calls that the fetch makes
+        and detaches the result set from the cursor, so that later fetches raise
+        ``ProgrammingError``. The result set is closed once the fetch is no longer
+        running (see :func:`~pyathena.aio.util.run_in_thread_or_close`).
+
+        Args:
+            fetch: The function that fetches from the result set.
+
+        Returns:
+            The return value of ``fetch``.
+
+        Raises:
+            ProgrammingError: If no result set is available.
+        """
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaResultSet, self.result_set)
-        return await asyncio.to_thread(result_set.fetchall)
+        try:
+            return await run_in_thread_or_close(result_set, fetch, result_set)
+        except asyncio.CancelledError:
+            if self.result_set is result_set:
+                self.result_set = None
+            raise
 
     @override
     def __iter__(self) -> NoReturn:

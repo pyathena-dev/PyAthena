@@ -15,18 +15,20 @@ from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+import pytest
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from botocore.response import StreamingBody
 from jinja2 import Environment, FileSystemLoader
 from sqlalchemy import types
 
+from pyathena.error import ProgrammingError
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.filesystem.s3_async import AioS3FileSystem
 from pyathena.filesystem.s3_core import S3Core
 from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaCalculationExecutionStatus, AthenaQueryExecution
-from pyathena.util import RetryConfig, retry_api_call
+from pyathena.util import retry_api_call
 
 _queries = Environment(
     loader=FileSystemLoader(Path(__file__).parents[1].resolve() / "resources" / "queries")
@@ -41,8 +43,9 @@ def get_query_results_responses(*pages):
     """Build stubbed ``GetQueryResults`` responses of an integer column ``a``.
 
     Args:
-        *pages: The values of the column, one sequence per page, or an exception that
-            the request for the page raises.
+        *pages: The values of the column, one sequence per page, or an exception,
+            including a ``BaseException`` such as ``KeyboardInterrupt``, that the
+            request for the page raises.
 
     Returns:
         The responses, the first with the result set metadata and each but the last
@@ -50,7 +53,7 @@ def get_query_results_responses(*pages):
     """
     responses = []
     for i, page in enumerate(pages):
-        if isinstance(page, Exception):
+        if isinstance(page, BaseException):
             responses.append(page)
             continue
         response = {"ResultSet": {"Rows": [{"Data": [{"VarCharValue": v}]} for v in page]}}
@@ -64,25 +67,15 @@ def get_query_results_responses(*pages):
     return responses
 
 
-def close_during_next_request(result_set):
-    """Close the result set during its next ``GetQueryResults`` request, as another thread may.
+def assert_fetches_fail(result_set):
+    """Assert that each fetch of a result set raises for an earlier failed fetch.
 
     Args:
-        result_set: A result set whose ``GetQueryResults`` responses are stubbed with
-            the pages of :func:`get_query_results_responses`, none of them an exception.
-
-    Returns:
-        The stubbed ``GetQueryResults`` mock.
+        result_set: The synchronous result set.
     """
-    get_query_results = result_set.connection.client.get_query_results
-    responses = get_query_results.side_effect
-
-    def close_and_respond(**kwargs):
-        result_set.close()
-        return next(responses)
-
-    get_query_results.side_effect = close_and_respond
-    return get_query_results
+    for fetch in (result_set.fetchone, result_set.fetchmany, result_set.fetchall):
+        with pytest.raises(ProgrammingError, match=r"cannot be fetched after a failed fetch\."):
+            fetch()
 
 
 def throttling_error(operation_name="GetQueryResults"):
@@ -190,27 +183,6 @@ class StoppingOperation:
         """Wait for the thread that stops the retries during the backoff wait, if any."""
         if self._stopper.ident is not None:
             self._stopper.join()
-
-
-def close_during_next_retries(result_set, close_in):
-    """Throttle the next ``GetQueryResults`` request and close the result set during its retries.
-
-    The retry policy of the result set is replaced with one whose first backoff
-    wait takes at least ``EVENT_TIMEOUT`` seconds, so that a test can tell
-    whether the close ended it.
-
-    Args:
-        result_set: A result set whose ``GetQueryResults`` responses are stubbed.
-        close_in: "request" or "backoff"; see :class:`StoppingOperation`.
-
-    Returns:
-        The stubbed ``GetQueryResults`` operation, whose ``join()`` the caller
-        calls before the end of the test.
-    """
-    result_set._retry_config = RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT)
-    operation = StoppingOperation(result_set.close, close_in)
-    result_set.connection.client.get_query_results.side_effect = operation
-    return operation
 
 
 async def wait_until(predicate, timeout=EVENT_TIMEOUT):
