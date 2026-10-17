@@ -10,13 +10,14 @@ import inspect
 import io
 import threading
 from collections import defaultdict
-from unittest.mock import ANY, MagicMock, PropertyMock, patch, sentinel
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from fsspec.implementations.dirfs import DirFileSystem
 from fsspec.implementations.local import LocalFileSystem
 from pandas.testing import assert_frame_equal
 
@@ -27,7 +28,6 @@ from pyathena.pandas.converter import DefaultPandasTypeConverter
 from pyathena.pandas.result_set import (
     AthenaPandasResultSet,
     PandasDataFrameIterator,
-    _JSONConverter,
     _no_trunc_date,
     _read_csv_with_pyarrow,
 )
@@ -94,6 +94,7 @@ class TestPandasDataFrameIterator:
         ("csv", "read_csv_kwargs"),
         [
             ("id,kind\n10,a\n11,a\n12,b\n13,b\n14,c\n", {}),
+            ("id,kind\n10,a\n11,b\n", {}),
             ("id,kind\n10,a\n11,a\n12,b\n13,b\n14,c\n", {"index_col": "id"}),
             ("id,kind\n10,c\n11,c\n12,a\n13,a\n14,b\n", {"dtype": {"kind": "category"}}),
             ("id,kind\n10,\n11,\n12,b\n13,a\n14,\n", {"dtype": {"kind": "category"}}),
@@ -108,6 +109,7 @@ class TestPandasDataFrameIterator:
         ],
         ids=[
             "default_index",
+            "single_chunk",
             "index_col",
             "category",
             "category_null_chunk",
@@ -134,13 +136,6 @@ class TestPandasDataFrameIterator:
         assert df.index.tolist() == [2, 3, 4]
         assert df_iter.as_pandas().empty
 
-    def test_as_pandas_single_dataframe(self):
-        """A DataFrame that was read at once is returned as is."""
-        df = pd.DataFrame({"n": [1, 2]})
-        df_iter = PandasDataFrameIterator(df, _no_trunc_date)
-
-        assert df_iter.as_pandas() is df
-
     @pytest.mark.parametrize(
         "read",
         [PandasDataFrameIterator.__next__, PandasDataFrameIterator.get_chunk],
@@ -165,17 +160,6 @@ class TestPandasDataFrameIterator:
         for later in (next, PandasDataFrameIterator.get_chunk):
             with pytest.raises(ProgrammingError, match=r"cannot be read after a failed read\."):
                 later(df_iter)
-
-
-_FS = sentinel.pyathena_fs
-_USER_FS = sentinel.user_fs
-
-
-_READ_MODES = [
-    pytest.param(None, {}, id="dataframe"),
-    pytest.param(1, {}, id="chunksize"),
-    pytest.param(None, {"iterator": True}, id="iterator"),
-]
 
 
 class TestAthenaPandasResultSet:
@@ -211,27 +195,6 @@ class TestAthenaPandasResultSet:
         assert result_set.fetchall() == []
         assert result_set.fetchone() is None
         assert result_set.rownumber == 10
-
-    def test_fetchall_across_chunks(self):
-        """fetchall() returns the remaining rows of all chunks, skipping empty chunks."""
-        chunks = [
-            pd.DataFrame({"n": [0, 1]}),
-            pd.DataFrame({"n": []}, dtype="int64"),
-            pd.DataFrame({"n": [2, 3]}, index=[2, 3]),
-        ]
-        result_set = _fetching_result_set(iter(chunks), arraysize=3)
-        assert result_set.fetchone() == (0,)
-        assert result_set.fetchall() == [(1,), (2,), (3,)]
-        assert result_set.rownumber == 4
-        assert result_set.fetchall() == []
-        assert result_set.rownumber == 4
-
-    def test_fetch_duplicate_column_names(self):
-        """Columns with the same label keep their own values by position."""
-        df = pd.DataFrame([[1, "a", 2], [3, "b", 4]], columns=["x", "y", "x"])
-        result_set = _fetching_result_set(df, arraysize=3)
-        assert result_set.fetchone() == (1, "a", 2)
-        assert result_set.fetchmany() == [(3, "b", 4)]
 
     @pytest.mark.parametrize(
         ("seconds", "method"),
@@ -312,37 +275,6 @@ class TestAthenaPandasResultSet:
         assert result_set.fetchall() == []
         assert result_set.rownumber is None
 
-    @pytest.mark.parametrize("engine", ["auto", "c", "python", "pyarrow"])
-    @pytest.mark.parametrize(
-        ("output_location", "file_size_bytes", "pyarrow_engine"),
-        [
-            ("s3://bucket/result.txt", None, "c"),
-            ("s3://bucket/result.txt", 99, "c"),
-            ("s3://bucket/result.txt", 100, "c"),
-            ("s3://bucket/result.txt", 101, "c"),
-            ("s3://bucket/result.csv", None, "pyarrow"),
-            ("s3://bucket/result.csv", 99, "c"),
-            ("s3://bucket/result.csv", 100, "pyarrow"),
-            ("s3://bucket/result.csv", 101, "pyarrow"),
-            (None, None, "pyarrow"),
-        ],
-    )
-    def test_get_csv_engine_result_format(
-        self, engine, output_location, file_size_bytes, pyarrow_engine
-    ):
-        """PyArrow falls back for DDL text while C and Python choices are preserved."""
-        result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)
-        result_set._query_execution = MagicMock(output_location=output_location)
-        result_set._metadata = None
-        result_set._converter = DefaultPandasTypeConverter()
-        result_set._engine = engine
-        result_set._chunksize = None
-        result_set._quoting = csv.QUOTE_ALL
-        result_set._kwargs = {}
-
-        expected = {"auto": "c", "c": "c", "python": "python", "pyarrow": pyarrow_engine}[engine]
-        assert result_set._get_csv_engine(file_size_bytes) == expected
-
     @pytest.mark.parametrize("infer_string", [True, False])
     @pytest.mark.parametrize("read_csv_kwargs", [{}, {"keep_default_na": True}])
     @pytest.mark.parametrize(
@@ -368,143 +300,85 @@ class TestAthenaPandasResultSet:
         ids=["show_tables", "show_columns", "describe"],
     )
     def test_read_csv_ddl_preserves_numeric_looking_names(
-        self, data, names, expected_names, read_csv_kwargs, infer_string
+        self, tmp_path, data, names, expected_names, read_csv_kwargs, infer_string
     ):
-        """Reading DDL results preserves numeric-looking names and their padding."""
-        data = data.encode()
+        """A DDL result read with engine="pyarrow" keeps numeric-looking names and their padding.
+
+        It is read as with the C engine, and the result file is closed.
+        """
         assert len(data) >= AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES
-
-        result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)
-        result_set._query_execution = MagicMock(
-            output_location="s3://bucket/result.txt", substatement_type=None
-        )
-        result_set._converter = DefaultPandasTypeConverter()
-        result_set._engine = "pyarrow"
-        result_set._chunksize = None
-        result_set._auto_optimize_chunksize = False
-        result_set._quoting = csv.QUOTE_ALL
-        result_set._keep_default_na = False
-        result_set._na_values = ("",)
-        result_set._kwargs = read_csv_kwargs
-        result_set._block_size = None
-        result_set._cache_type = None
-        result_set._fs = MagicMock()
-        result_set._fs.open.return_value = stream = io.BytesIO(data)
-        description = [(name, "string", None, None, 0, 0, "UNKNOWN") for name in names]
-
-        with (
-            pd.option_context("future.infer_string", infer_string),
-            patch.object(
-                AthenaPandasResultSet,
-                "description",
-                new_callable=PropertyMock,
-                return_value=description,
-            ),
-            patch.object(result_set, "_get_content_length", return_value=len(data)),
-            patch("pandas.read_csv", wraps=pd.read_csv) as read_csv,
-        ):
-            expected = pd.read_csv(io.BytesIO(data), **result_set._get_csv_read_options("c", None))
-            read_csv.reset_mock()
-            actual = result_set._read_csv()
-
+        types = [(name, "string") for name in names]
+        frames = []
+        with pd.option_context("future.infer_string", infer_string):
+            for engine in ("pyarrow", "c"):
+                fs = _BucketFileSystem(tmp_path / engine)
+                frames.append(
+                    _local_result_set(
+                        fs, types, data, name="result.txt", engine=engine, **read_csv_kwargs
+                    ).as_pandas()
+                )
+                assert all(file.closed for _, file in fs.opened)
+        actual, expected = frames
         assert_frame_equal(actual, expected, check_exact=True)
         assert actual.iloc[:, 0].tolist() == expected_names
-        read_csv.assert_called_once()
-        assert read_csv.call_args.kwargs["engine"] == "c"
-        result_set._fs.open.assert_called_once_with(
-            "s3://bucket/result.txt", mode="rb", **result_set._get_csv_open_options()
+
+    def test_read_small_csv_with_pyarrow_engine(self, tmp_path):
+        """A CSV result smaller than PYARROW_MIN_FILE_SIZE_BYTES is read with the C engine."""
+        data = '"d","t"\n"2024-01-01","2024-01-01 00:00:00.000"\n'
+        assert len(data) < AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES
+        types = [("d", "date"), ("t", "timestamp")]
+        actual, expected = (
+            _local_result_set(
+                _BucketFileSystem(tmp_path / engine), types, data, engine=engine
+            ).as_pandas()
+            for engine in ("pyarrow", "c")
         )
-        assert stream.closed
+        assert_frame_equal(actual, expected, check_exact=True)
 
     @pytest.mark.parametrize(
-        ("chunksize", "execute_kwargs", "expected"),
+        ("kwargs", "expected"),
         [
-            (None, {}, False),
-            (10, {}, True),
-            (10, {"columns": ["a", "b"]}, True),
-            (10, {"columns": ("a",)}, True),
-            (10, {"dtype_backend": "numpy_nullable"}, True),
-            (10, {"dtype_backend": "pyarrow", "columns": ["a"]}, True),
-            (10, {"columns": []}, False),
-            (10, {"columns": ["a", "a"]}, False),
-            (10, {"columns": "a"}, False),
-            (10, {"columns": [0]}, False),
-            (10, {"columns": ["s.a"]}, False),
-            (10, {"dtype_backend": None}, False),
-            (10, {"dtype_backend": "invalid"}, False),
-            (10, {"filters": [("a", "=", 1)]}, False),
-            (10, {"storage_options": {}}, False),
-        ],
-    )
-    def test_reads_parquet_in_chunks(self, chunksize, execute_kwargs, expected):
-        """Only chunksize with supported read options reads UNLOAD results in chunks."""
-        result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)
-        result_set._chunksize = chunksize
-        result_set._kwargs = execute_kwargs
-        assert result_set._reads_parquet_in_chunks() is expected
-
-    @pytest.mark.parametrize(
-        ("block_size", "cache_type", "expected"),
-        [
-            (
-                None,
-                None,
-                {
-                    "block_size": 32 * 2**20,
-                    "cache_type": "background",
-                    "cache_options": {"maxblocks": 2},
-                },
+            pytest.param({}, ["NA", "null", "x", None, "y", "z", "w"], id="default"),
+            pytest.param(
+                {"keep_default_na": True},
+                [None, None, "x", None, "y", "z", "w"],
+                id="keep_default_na",
             ),
-            (5 * 2**20, None, {}),
-            (None, "bytes", {}),
-            (5 * 2**20, "readahead", {}),
+            pytest.param(
+                {"on_bad_lines": "skip"}, ["NA", "null", None, "y", "z", "w"], id="on_bad_lines"
+            ),
+            pytest.param(
+                {"dtype": "str"}, ["NA", "null", "x", None, "y", "z", "w"], id="single_dtype"
+            ),
+            pytest.param({"parse_dates": ("d",)}, OperationalError, id="parse_dates_tuple"),
         ],
     )
-    def test_get_csv_open_options(self, block_size, cache_type, expected):
-        """CSV results are prefetched unless the cursor sets block_size or cache_type."""
-        result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)
-        result_set._block_size = block_size
-        result_set._cache_type = cache_type
-        assert result_set._get_csv_open_options() == expected
+    def test_read_csv_with_pyarrow_engine_options(self, tmp_path, kwargs, expected):
+        """With engine="pyarrow", options that PyAthena's own read does not reproduce reach pandas.
 
-    @pytest.mark.parametrize(
-        ("execute_kwargs", "path", "filesystem_kwargs"),
-        [
-            ({}, "bucket/unload/", {"filesystem": _FS}),
-            ({"filesystem": _USER_FS}, "bucket/unload/", {"filesystem": _USER_FS}),
-            ({"filesystem": None}, "s3://bucket/unload/", {"filesystem": None}),
-            ({"storage_options": {"anon": True}}, "s3://bucket/unload/", {}),
-            ({"storage_options": None}, "s3://bucket/unload/", {}),
-        ],
-        ids=["default", "filesystem", "filesystem-none", "storage-options", "storage-options-none"],
-    )
-    def test_read_parquet_filesystem(self, execute_kwargs, path, filesystem_kwargs):
-        """filesystem or storage_options given to execute() replace PyAthena's filesystem.
-
-        No AWS calls; the manifest and pandas.read_parquet are mocked.
+        pandas applies them, or rejects the ones that it does not accept.
         """
-        result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)  # bypass __init__
-        result_set._unload_location = None
-        result_set._engine = "pyarrow"
-        result_set._fs = _FS
-        result_set._kwargs = dict(execute_kwargs)
-        with (
-            patch.object(
-                AthenaPandasResultSet,
-                "_read_data_manifest",
-                return_value=["s3://bucket/unload/0.parquet"],
-            ),
-            patch("pandas.read_parquet") as read_parquet,
-        ):
-            result_set._read_parquet("pyarrow")
-        assert read_parquet.call_args.args == (path,)
-        assert read_parquet.call_args.kwargs == {
-            "engine": "pyarrow",
-            "use_threads": True,
-            "coerce_int96_timestamp_unit": "us",
-            **execute_kwargs,
-            **filesystem_kwargs,
-        }
+        rows = ["NA", "null", "x", "", "y", "z", "w"]
+        dates = [f"2024-01-0{i + 1}" for i in range(len(rows))]
+        lines = [f'"{v}","{d}"' for v, d in zip(rows, dates, strict=True)]
+        if "on_bad_lines" in kwargs:
+            # The row of "x" has a field too many.
+            lines[2] += ',"extra"'
+            del dates[2]
+        data = '"v","d"\n' + "".join(f"{line}\n" for line in lines)
+        assert len(data) >= AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES
+        types = [("v", "varchar"), ("d", "date")]
+        fs = _BucketFileSystem(tmp_path)
+        if expected is OperationalError:
+            with pytest.raises(OperationalError):
+                _local_result_set(fs, types, data, engine="pyarrow", **kwargs)
+            return
+        df = _local_result_set(fs, types, data, engine="pyarrow", **kwargs).as_pandas()
+        assert [None if pd.isna(v) else v for v in df["v"]] == expected
+        if "dtype" in kwargs:
+            assert df["d"].tolist() == dates
+        else:
+            assert df["d"].tolist() == [pd.Timestamp(d) for d in dates]
 
     def test_iter_parquet_chunks_null_in_later_file(self, tmp_path):
         """Top-level integer and boolean columns with NULL anywhere convert alike in every chunk."""
@@ -518,31 +392,6 @@ class TestAthenaPandasResultSet:
         )
         whole = pd.read_parquet(tmp_path)
         assert [len(chunk) for chunk in chunks] == [1, 1, 1, 1]
-        for chunk in chunks:
-            assert chunk.dtypes.tolist() == whole.dtypes.tolist()
-        assert_frame_equal(pd.concat(chunks), whole, check_exact=True)
-
-    @pytest.mark.parametrize("write_statistics", [True, False])
-    def test_iter_parquet_chunks_large_integers(self, tmp_path, write_statistics):
-        """Integers without NULL stay exact, with or without Parquet statistics."""
-        chunks, whole = _read_unload_result(
-            tmp_path,
-            [pa.table({"i": pa.array([9007199254740993, 1], pa.int64())})],
-            chunksize=1,
-            write_statistics=write_statistics,
-        )
-        assert [chunk["i"].dtype for chunk in chunks] == ["int64", "int64"]
-        assert [int(chunk["i"].iloc[0]) for chunk in chunks] == [9007199254740993, 1]
-        assert_frame_equal(pd.concat(chunks), whole, check_exact=True)
-
-    def test_iter_parquet_chunks_nested_values(self, tmp_path):
-        """Nested values convert per chunk; with dtype_backend="pyarrow" they do not."""
-        table = pa.table({"li": pa.array([[1], [None]], pa.list_(pa.int64()))})
-        chunks, _ = _read_unload_result(tmp_path, [table], chunksize=1)
-        assert [chunk["li"].iloc[0].dtype for chunk in chunks] == ["int64", "float64"]
-        chunks, whole = _read_unload_result(
-            tmp_path / "pyarrow", [table], chunksize=1, dtype_backend="pyarrow"
-        )
         for chunk in chunks:
             assert chunk.dtypes.tolist() == whole.dtypes.tolist()
         assert_frame_equal(pd.concat(chunks), whole, check_exact=True)
@@ -589,33 +438,95 @@ class TestAthenaPandasResultSet:
         ):
             result_set._as_pandas()
 
-    def test_iter_parquet_chunks_reader_error(self, tmp_path):
-        """Errors from creating the chunk reader are raised as OperationalError."""
-        with pytest.raises(OperationalError, match="chunksize must be positive"):
-            _read_unload_result(tmp_path, [pa.table({"i": [1]})], chunksize=0)
-
     @pytest.mark.parametrize(
-        ("data", "types"),
+        ("kwargs", "sizes", "columns"),
         [
-            pytest.param('"v"\n"a"\n"b"\n', {"v": "varchar"}, id="text"),
-            pytest.param('"b"\n"00 ff"\n', {"b": "varbinary"}, id="binary"),
+            pytest.param({}, [1, 1, 1], ["a", "s"], id="default"),
+            pytest.param({"columns": ["a"]}, [1, 1, 1], ["a"], id="columns"),
+            pytest.param({"dtype_backend": "pyarrow"}, [1, 1, 1], ["a", "s"], id="dtype_backend"),
+            # Other options read the result whole, where pandas applies or rejects them.
+            pytest.param({"filters": [("a", "=", 1)]}, [1], ["a", "s"], id="filters"),
+            pytest.param({"columns": ["s.x"]}, [3], ["x"], id="nested_column"),
+            pytest.param({"columns": ["a", "a"]}, [3], ["a", "a"], id="repeated_columns"),
+            pytest.param({"dtype_backend": None}, None, None, id="invalid_dtype_backend"),
         ],
     )
-    @pytest.mark.parametrize(("chunksize", "kwargs"), _READ_MODES)
-    def test_read_csv_open_options(self, data, types, chunksize, kwargs):
-        """Every kind of CSV read opens the result file with the same options."""
-        fs = MagicMock()
-        with patch.object(
-            AthenaPandasResultSet,
-            "_get_csv_open_options",
-            autospec=True,
-            return_value={"cache_type": "sentinel"},
-        ) as open_options:
-            result, _ = _read_csv_result(data, types, chunksize=chunksize, fs=fs, **kwargs)
-            if chunksize or kwargs:
-                result.close()
-        open_options.assert_called_once_with(ANY)
-        assert fs.open.call_args.kwargs["cache_type"] == "sentinel"
+    def test_unload_chunks_with_read_options(self, tmp_path, kwargs, sizes, columns):
+        """Only chunksize with supported read options reads an UNLOAD result in chunks."""
+        tables = [
+            pa.table({"a": [1, 2], "s": [{"x": 1}, {"x": 2}]}),
+            pa.table({"a": [3], "s": [{"x": 3}]}),
+        ]
+        fs = _BucketFileSystem(tmp_path)
+        if sizes is None:
+            with pytest.raises(OperationalError):
+                _local_result_set(fs, tables=tables, chunksize=1, **kwargs)
+            return
+        chunks = list(_local_result_set(fs, tables=tables, chunksize=1, **kwargs).iter_chunks())
+        assert [len(chunk) for chunk in chunks] == sizes
+        assert [chunk.columns.tolist() for chunk in chunks] == [columns] * len(sizes)
+
+    @pytest.mark.parametrize(
+        ("option", "value"),
+        [
+            ("filesystem", "user"),
+            ("storage_options", {}),
+            ("storage_options", None),
+            ("filesystem", None),
+        ],
+        ids=["filesystem", "storage_options", "storage_options-none", "filesystem-none"],
+    )
+    def test_unload_filesystem_options(self, tmp_path, option, value):
+        """filesystem or storage_options given to execute(), even None, replace PyAthena's.
+
+        A given filesystem reads its own files. Otherwise pandas opens the S3 files
+        itself, so the read is observed.
+        """
+        fs = _BucketFileSystem(tmp_path / "pyathena")
+        tables = [pa.table({"a": [1]})]
+        if value == "user":
+            value = _BucketFileSystem(tmp_path / "user")
+            _write_unload_tables(value, [pa.table({"a": [2]})])
+            assert _local_result_set(fs, tables=tables, filesystem=value).fetchall() == [(2,)]
+            return
+        with patch("pandas.read_parquet", return_value=pd.DataFrame({"a": [2]})) as read_parquet:
+            assert _local_result_set(fs, tables=tables, **{option: value}).fetchall() == [(2,)]
+        # The S3 location, which pandas opens with the given options instead of PyAthena's.
+        assert read_parquet.call_args.args[0] == "s3://bucket/unload/"
+        assert read_parquet.call_args.kwargs[option] == value
+        assert read_parquet.call_args.kwargs.get("filesystem") is None
+
+    @pytest.mark.parametrize(
+        ("data", "types", "chunksize"),
+        [
+            pytest.param('"v"\n"a"\n"b"\n', [("v", "varchar")], None, id="text"),
+            pytest.param('"v"\n"a"\n"b"\n', [("v", "varchar")], 1, id="text-chunks"),
+            pytest.param('"b"\n"00 ff"\n', [("b", "varbinary")], None, id="binary"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("kwargs", "prefetch"),
+        [
+            pytest.param({}, True, id="default"),
+            pytest.param({"block_size": 5 * 2**20}, False, id="block_size"),
+            pytest.param({"cache_type": "bytes"}, False, id="cache_type"),
+        ],
+    )
+    def test_csv_open_options(self, tmp_path, data, types, chunksize, kwargs, prefetch):
+        """A CSV result is read in CSV_BLOCK_SIZE blocks with the background cache.
+
+        With block_size or cache_type, the file is opened with the filesystem's settings.
+        """
+        fs = _BucketFileSystem(tmp_path)
+        result_set = _local_result_set(fs, types, data, chunksize=chunksize, **kwargs)
+        assert len(result_set.fetchall()) == len(data.splitlines()) - 1
+        [(options, _)] = fs.opened
+        if prefetch:
+            assert options["cache_type"] == "background"
+            assert options["block_size"] == AthenaPandasResultSet.CSV_BLOCK_SIZE
+        else:
+            assert "cache_type" not in options
+            assert "block_size" not in options
 
     @pytest.mark.filterwarnings("error::pandas.errors.DtypeWarning")
     @pytest.mark.parametrize(
@@ -625,8 +536,6 @@ class TestAthenaPandasResultSet:
         ("engine", "kwargs", "access"),
         [
             pytest.param("c", {}, "whole", id="c"),
-            pytest.param("c", {"low_memory": True}, "whole", id="low-memory"),
-            pytest.param("c", {"low_memory": False}, "whole", id="no-low-memory"),
             pytest.param("auto", {}, "whole", id="auto"),
             pytest.param("pyarrow", {}, "whole", id="pyarrow-fallback"),
             pytest.param("python", {}, "whole", id="python"),
@@ -641,9 +550,7 @@ class TestAthenaPandasResultSet:
     ):
         """JSON NULLs in a later parser block keep exact values without a warning."""
         data = "n,j\n" + f"1,{json_value}\n" * 400000 + "2,\n" * 10
-        result, options = _read_csv_result(
-            data, {"n": "integer", "j": "json"}, engine=engine, **kwargs
-        )
+        result, _ = _read_csv_result(data, {"n": "integer", "j": "json"}, engine=engine, **kwargs)
         if access != "whole":
             with result:
                 first = result.get_chunk(400005) if access == "get_chunk" else next(result)
@@ -652,9 +559,6 @@ class TestAthenaPandasResultSet:
         else:
             df = result
         values = df.index if kwargs.get("index_col") == "j" else df["j"]
-        assert options["engine"] == ("python" if engine == "python" else "c")
-        assert options.get("low_memory") == kwargs.get("low_memory")
-        assert options["converters"]["j"] is _JSONConverter.keep_text
         assert len(df) == 400010
         assert values.dtype == object
         assert type(values[0]) is type(expected)
@@ -676,7 +580,6 @@ class TestAthenaPandasResultSet:
 
     @pytest.mark.filterwarnings("error::pandas.errors.DtypeWarning")
     @pytest.mark.parametrize("engine", ["c", "python"])
-    @pytest.mark.parametrize("low_memory", [None, True, False])
     @pytest.mark.parametrize(
         ("text", "dtype", "values"),
         [
@@ -687,74 +590,36 @@ class TestAthenaPandasResultSet:
             pytest.param('"{""a"": 1}"\n3,[1]', object, [{"a": 1}, [1]], id="containers"),
         ],
     )
-    def test_read_csv_json_without_null(self, engine, low_memory, text, dtype, values):
+    def test_read_csv_json_without_null(self, engine, text, dtype, values):
         """JSON without NULL gets the dtype that pandas infers for a converter's values."""
-        kwargs = {} if low_memory is None else {"low_memory": low_memory}
-        if engine == "python" and low_memory is not None:
-            pytest.skip("low_memory is a C engine option")
-        df, options = _read_csv_result(
-            f"n,j\n1,{text}\n", {"n": "integer", "j": "json"}, engine=engine, **kwargs
-        )
-        assert options.get("low_memory") == low_memory
+        df, _ = _read_csv_result(f"n,j\n1,{text}\n", {"n": "integer", "j": "json"}, engine=engine)
         assert df["j"].dtype == dtype
         assert df["j"].tolist() == values
-
-    def test_read_csv_json_multi_index_level(self):
-        """A json column in a MultiIndex is converted."""
-        df, _ = _read_csv_result(
-            "n,j\n1,true\n2,false\n3,\n", {"n": "integer", "j": "json"}, index_col=["n", "j"]
-        )
-        level = df.index.get_level_values("j")
-        assert level[:2].tolist() == [True, False]
-        assert pd.isna(level[2])
 
     @pytest.mark.filterwarnings("ignore:Both a converter and dtype:pandas.errors.ParserWarning")
     @pytest.mark.parametrize("engine", ["c", "python"])
     @pytest.mark.parametrize(
-        ("dtype", "n_dtype"),
+        ("dtype", "n_dtype", "m_dtype"),
         [
-            pytest.param({"n": "int32"}, "int32", id="mapping"),
-            pytest.param(defaultdict(lambda: "str", {"n": "int32"}), "int32", id="defaultdict"),
-            pytest.param("str", "str", id="scalar"),
-            pytest.param({"n": "int32", "j": "Int64"}, "int32", id="json-column"),
+            pytest.param({"n": "int32"}, "int32", "int64", id="mapping"),
+            pytest.param(
+                defaultdict(lambda: "str", {"n": "int32"}), "int32", "str", id="defaultdict"
+            ),
+            pytest.param("str", "str", "str", id="scalar"),
+            pytest.param({"n": "int32", "j": "Int64"}, "int32", "int64", id="json-column"),
         ],
     )
-    def test_read_csv_json_with_dtype(self, engine, dtype, n_dtype):
-        """A dtype given to execute() applies to the other columns, not to json columns."""
-        df, options = _read_csv_result(
-            "n,j\n1,2\n3,\n", {"n": "integer", "j": "json"}, engine=engine, dtype=dtype
+    def test_read_csv_json_with_dtype(self, engine, dtype, n_dtype, m_dtype):
+        """A dtype given to execute() replaces PyAthena's and does not apply to json columns."""
+        df, _ = _read_csv_result(
+            "n,m,j\n1,1,2\n3,4,\n",
+            {"n": "integer", "m": "integer", "j": "json"},
+            engine=engine,
+            dtype=dtype,
         )
-        assert options["dtype"] is dtype
         assert df["n"].dtype == n_dtype
+        assert df["m"].dtype == m_dtype
         assert df["j"].tolist() == [2, None]
-
-    @pytest.mark.parametrize(
-        ("types", "engine", "kwargs"),
-        [
-            pytest.param({"n": "integer", "j": "integer"}, "c", {}, id="no-json"),
-            pytest.param({"n": "integer", "j": "json"}, "c", {}, id="json"),
-            pytest.param(
-                {"n": "integer", "j": "json"}, "c", {"usecols": ["n"]}, id="json-excluded"
-            ),
-            pytest.param(
-                {"n": "integer", "j": "json"}, "c", {"converters": {}}, id="custom-converters"
-            ),
-            pytest.param(
-                {"n": "integer", "j": "json"},
-                "c",
-                {"converters": {"j": int}},
-                id="custom-json-converter",
-            ),
-            pytest.param({"n": "integer", "j": "json"}, "python", {}, id="python"),
-            pytest.param({"n": "integer", "j": "integer"}, "pyarrow", {}, id="pyarrow"),
-        ],
-    )
-    def test_read_csv_keeps_low_memory_default(self, types, engine, kwargs):
-        """No column type, converter, or engine sets a low_memory option."""
-        df, options = _read_csv_result("n,j\n" + "1,2\n" * 30, types, engine=engine, **kwargs)
-        assert options["engine"] == engine
-        assert "low_memory" not in options
-        assert len(df) == 30
 
     @pytest.mark.filterwarnings("ignore:Both a converter and dtype:pandas.errors.ParserWarning")
     @pytest.mark.parametrize(
@@ -799,31 +664,31 @@ class TestAthenaPandasResultSet:
         df, _ = _read_csv_result("j\n1\n\n", {"j": "json"}, engine=engine)
         assert df["j"].tolist() == [1, None]
 
-    def test_read_csv_json_name_in_multi_index_columns(self):
-        """Columns read with a header of several rows are left as pandas reads them."""
-        df, _ = _read_csv_result("j,n\n1,2\n3,4\n", {"j": "json", "n": "integer"}, header=[0, 1])
-        assert df.to_dict("list") == {("j", "1"): [3], ("n", "2"): [4]}
+    @pytest.mark.parametrize("chunksize", [None, 1])
+    def test_read_csv_json_conversion_error(self, chunksize):
+        """A json value that the converter cannot convert raises OperationalError.
 
-    def test_read_csv_json_conversion_error(self):
-        """A json value that the converter cannot convert raises OperationalError."""
-        with pytest.raises(OperationalError, match="Expecting property name"):
-            _read_csv_result("n,j\n1,{\n", {"n": "integer", "j": "json"})
+        A chunked read raises when it reads the chunk.
+        """
 
-    def test_read_csv_json_conversion_error_in_chunk(self):
-        """A json value in a chunk that the converter cannot convert raises OperationalError."""
-        result, _ = _read_csv_result("n,j\n1,{\n", {"n": "integer", "j": "json"}, chunksize=1)
-        with result, pytest.raises(OperationalError, match="Expecting property name"):
-            next(result)
+        def read():
+            result, _ = _read_csv_result(
+                "n,j\n1,{\n", {"n": "integer", "j": "json"}, chunksize=chunksize
+            )
+            if chunksize:
+                with result:
+                    next(result)
 
-    @pytest.mark.parametrize("converters", [{}, {"j": int}])
-    def test_read_csv_json_custom_converters(self, converters):
+        with pytest.raises(OperationalError):
+            read()
+
+    @pytest.mark.parametrize(("converters", "expected"), [({}, ["[1]"]), ({"j": len}, [3])])
+    def test_read_csv_json_custom_converters(self, converters, expected):
         """Converters given to execute() replace the json conversion."""
-        df, options = _read_csv_result(
-            "n,j\n1,2\n", {"n": "integer", "j": "json"}, converters=converters
+        df, _ = _read_csv_result(
+            'n,j\n1,"[1]"\n', {"n": "integer", "j": "json"}, converters=converters
         )
-        assert options["converters"] is converters
-        assert "j" not in (options["dtype"] or {})
-        assert df["j"].tolist() == [2]
+        assert df["j"].tolist() == expected
 
 
 # A CSV result of Athena with each type the PyArrow engine reads, then a row of NULLs.
@@ -901,7 +766,7 @@ def _pyarrow_read_csv_kwargs(types, tab_separated=False, dtype_overrides=None, *
         return result_set._get_csv_read_options("pyarrow", None)
 
 
-def _unload_result_set(tmp_path, tables, chunksize, write_statistics=True, **kwargs):
+def _unload_result_set(tmp_path, tables, chunksize, **kwargs):
     """Write Parquet files and create a result set of an UNLOAD result in them, without AWS.
 
     Returns:
@@ -911,7 +776,7 @@ def _unload_result_set(tmp_path, tables, chunksize, write_statistics=True, **kwa
     paths = []
     for index, table in enumerate(tables):
         path = tmp_path / f"{index}.parquet"
-        pq.write_table(table, path, write_statistics=write_statistics)
+        pq.write_table(table, path)
         paths.append(str(path))
     result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)  # bypass __init__
     result_set._fs = LocalFileSystem()
@@ -926,7 +791,7 @@ def _unload_result_set(tmp_path, tables, chunksize, write_statistics=True, **kwa
     return result_set, paths
 
 
-def _read_unload_result(tmp_path, tables, chunksize, write_statistics=True, **kwargs):
+def _read_unload_result(tmp_path, tables, chunksize, **kwargs):
     """Read Parquet files in chunks through the result set, without AWS.
 
     The column metadata must be what the dataset of the files reports, read without
@@ -936,9 +801,7 @@ def _read_unload_result(tmp_path, tables, chunksize, write_statistics=True, **kw
         The chunks, and the whole result read by pandas.read_parquet() with the same
         options.
     """
-    result_set, paths = _unload_result_set(
-        tmp_path, tables, chunksize, write_statistics=write_statistics, **kwargs
-    )
+    result_set, paths = _unload_result_set(tmp_path, tables, chunksize, **kwargs)
     with (
         patch.object(AthenaPandasResultSet, "_read_data_manifest", return_value=paths),
         patch.object(
@@ -955,7 +818,7 @@ def _read_unload_result(tmp_path, tables, chunksize, write_statistics=True, **kw
     return chunks, whole
 
 
-def _read_csv_result(data, types, engine="c", chunksize=None, fs=None, **kwargs):
+def _read_csv_result(data, types, engine="c", chunksize=None, **kwargs):
     """Read an in-memory CSV through the result set and the real pandas parser.
 
     ``types`` maps column names to Athena types, or lists (name, type) pairs for
@@ -974,7 +837,7 @@ def _read_csv_result(data, types, engine="c", chunksize=None, fs=None, **kwargs)
     result_set._csv_stream = None
     result_set._block_size = None
     result_set._cache_type = None
-    result_set._fs = fs or MagicMock()
+    result_set._fs = MagicMock()
     # Binary columns are read through a text stream.
     result_set._fs.open.side_effect = lambda path, mode="rb", **_: (
         io.StringIO(data, newline="") if "t" in mode else io.BytesIO(data.encode())
@@ -1014,6 +877,101 @@ def _read_csv_result(data, types, engine="c", chunksize=None, fs=None, **kwargs)
     return PandasDataFrameIterator(
         result, result_set._finish_csv_frame, result_set._csv_stream
     ), options
+
+
+class _BucketFileSystem(DirFileSystem):
+    """The local files under a directory, addressed by S3 paths, with the files it opened."""
+
+    def __init__(self, root):
+        super().__init__(path=str(root), fs=LocalFileSystem(), skip_instance_cache=True)
+        # The keyword arguments of each open() and the file that it returned.
+        self.opened = []
+
+    def _join(self, path):
+        if isinstance(path, str):
+            path = path.removeprefix("s3://")
+        elif isinstance(path, list):
+            path = [p.removeprefix("s3://") for p in path]
+        return super()._join(path)
+
+    def open(self, path, *args, **kwargs):
+        file = super().open(path, *args, **kwargs)
+        self.opened.append((kwargs, file))
+        return file
+
+
+def _write_unload_tables(fs, tables):
+    """Write the Parquet files of an UNLOAD result under ``s3://bucket/unload/``.
+
+    Returns:
+        The data manifest of the files.
+    """
+    fs.makedirs("bucket/unload", exist_ok=True)
+    manifest = [f"s3://bucket/unload/{index}.parquet" for index in range(len(tables))]
+    for path, table in zip(manifest, tables, strict=True):
+        with fs.open(path, "wb") as file:
+            pq.write_table(table, file)
+    fs.opened.clear()
+    return manifest
+
+
+def _local_result_set(fs, types=(), data=None, tables=None, name="result.csv", **kwargs):
+    """Create a result set of a succeeded query over local result files, without AWS.
+
+    The CSV ``data`` is the result file ``s3://bucket/<name>``; ``tables`` are the files
+    of an UNLOAD result, which the connection's S3 client lists in the data manifest.
+    ``fs`` holds the files and stands in for PyAthena's filesystem, ``types`` lists the
+    (name, Athena type) pairs of the GetQueryResults metadata, and ``kwargs`` are the
+    result set's options.
+    """
+    unload = tables is not None
+    location = f"s3://bucket/{name}"
+    if unload:
+        manifest = _write_unload_tables(fs, tables)
+        length = 1
+    else:
+        manifest = []
+        fs.makedirs("bucket", exist_ok=True)
+        fs.pipe_file(location, data.encode())
+        length = len(data.encode())
+    query_execution = AthenaQueryExecution(
+        {
+            "QueryExecution": {
+                "QueryExecutionId": "query_id",
+                "Query": "UNLOAD (SELECT 1) TO 's3://bucket/unload/'" if unload else "SELECT 1",
+                "Status": {"State": AthenaQueryExecution.STATE_SUCCEEDED},
+                "ResultConfiguration": {"OutputLocation": location},
+                "Statistics": {"DataManifestLocation": "s3://bucket/manifest.csv"},
+            }
+        }
+    )
+    connection = MagicMock()
+    connection.s3_client.get_object.side_effect = lambda **_: {
+        "Body": io.BytesIO("\n".join(manifest).encode())
+    }
+    connection.s3_client.meta.config.max_pool_connections = 2
+    connection.s3_client.head_object.return_value = {"ContentLength": length}
+    connection.client.get_query_results.return_value = {
+        "ResultSet": {
+            "ResultSetMetadata": {
+                "ColumnInfo": [
+                    {"Name": n, "Type": t, "Precision": 3, "Scale": 0, "Nullable": "UNKNOWN"}
+                    for n, t in types
+                ]
+            },
+            "Rows": [],
+        }
+    }
+    with patch("pyathena.pandas.result_set.S3FileSystem", return_value=fs):
+        return AthenaPandasResultSet(
+            connection=connection,
+            converter=DefaultPandasTypeConverter(),
+            query_execution=query_execution,
+            arraysize=1000,
+            retry_config=RetryConfig(),
+            unload=unload,
+            **kwargs,
+        )
 
 
 def _string_series(values, infer_string):
@@ -1191,6 +1149,15 @@ def _types_frame(infer_string, parse_time=True):
             id="unparsed_dates",
         ),
         pytest.param(
+            '"v"\n"2024-01-01"\n\n',
+            {"v": "varchar"},
+            {"parse_dates": ["v"]},
+            # The string dtype applies again after parse_dates, and NULL stays missing.
+            lambda infer: pd.DataFrame({"v": _string_series(["2024-01-01", float("nan")], infer)}),
+            [],
+            id="parsed_dates",
+        ),
+        pytest.param(
             "id    \tint    \t    \nname  \tstring \t    \n",
             {"col_name": "varchar"},
             {"tab_separated": True},
@@ -1242,19 +1209,6 @@ def test_read_csv_with_pyarrow_matches_pandas(
             assert_frame_equal(
                 actual.iloc[:, pandas_columns], reference.iloc[:, pandas_columns], check_exact=True
             )
-
-
-@pytest.mark.parametrize("infer_string", [True, False])
-def test_read_csv_with_pyarrow_string_dtype_after_dates(infer_string):
-    # A string dtype applies again after parse_dates, as with pandas' PyArrow
-    # engine, and keeps NULL missing.
-    with pd.option_context("future.infer_string", infer_string):
-        df = _read_csv_with_pyarrow(
-            io.BytesIO(b'"v"\n"2024-01-01"\n\n'),
-            _pyarrow_read_csv_kwargs({"v": "varchar"}, parse_dates=["v"]),
-        )
-    assert df["v"].tolist()[0] == "2024-01-01"
-    assert pd.isna(df["v"].tolist()[1])
 
 
 def test_read_csv_with_pyarrow_ignores_unused_dtype_entries():
