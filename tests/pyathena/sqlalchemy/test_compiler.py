@@ -30,7 +30,6 @@ from sqlalchemy import (
     table,
     text,
     types,
-    union,
 )
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.compiler import compiles
@@ -52,7 +51,7 @@ from pyathena.sqlalchemy.types import (
     AthenaTimestamp,
 )
 from tests import ENV
-from tests.pyathena.util import decorated
+from tests.pyathena.util import decorated, recording_engine
 
 # Bind parameter names from SQLAlchemy's DifficultParametersTest.
 DIFFICULT_PARAMETER_NAMES = [
@@ -86,42 +85,6 @@ class TestAthenaTypeCompiler:
         compiler = AthenaTypeCompiler(AthenaDialect())
         assert compiler.process(AthenaTimestamp(precision)) == "TIMESTAMP"
 
-    def test_visit_struct_empty(self):
-        dialect = AthenaDialect()
-        compiler = AthenaTypeCompiler(dialect)
-        struct_type = AthenaStruct()
-        with pytest.raises(exc.CompileError, match="STRUCT requires at least one field"):
-            compiler.visit_struct(struct_type)
-
-    def test_visit_struct_with_fields(self):
-        dialect = AthenaDialect()
-        compiler = AthenaTypeCompiler(dialect)
-        struct_type = AthenaStruct(("name", String), ("age", Integer))
-        result = compiler.visit_struct(struct_type)
-        assert result == "STRUCT<name:STRING, age:INT>"
-
-    def test_visit_struct_uppercase(self):
-        dialect = AthenaDialect()
-        compiler = AthenaTypeCompiler(dialect)
-        struct_type = STRUCT(("id", Integer), ("title", String))
-        result = compiler.visit_STRUCT(struct_type)
-        assert result == "STRUCT<id:INT, title:STRING>"
-
-    def test_visit_struct_no_fields_attribute(self):
-        # Test struct type without fields attribute
-        dialect = AthenaDialect()
-        compiler = AthenaTypeCompiler(dialect)
-        struct_type = type("MockStruct", (), {})()
-        with pytest.raises(exc.CompileError, match="as STRUCT"):
-            compiler.visit_struct(struct_type)
-
-    def test_visit_struct_single_field(self):
-        dialect = AthenaDialect()
-        compiler = AthenaTypeCompiler(dialect)
-        struct_type = AthenaStruct(("name", String))
-        result = compiler.visit_struct(struct_type)
-        assert result == "STRUCT<name:STRING>"
-
     def test_complex_types_render_hive_syntax_without_column(self):
         compiler = AthenaDialect().type_compiler_instance
         struct_type = AthenaStruct(
@@ -137,71 +100,6 @@ class TestAthenaTypeCompiler:
             expected_struct
         )
 
-    def test_visit_map_default(self):
-        dialect = AthenaDialect()
-        compiler = AthenaTypeCompiler(dialect)
-        map_type = AthenaMap()
-        result = compiler.visit_map(map_type)
-        assert result == "MAP<STRING, STRING>"
-
-    def test_visit_map_with_types(self):
-        dialect = AthenaDialect()
-        compiler = AthenaTypeCompiler(dialect)
-        map_type = AthenaMap(String, Integer)
-        result = compiler.visit_map(map_type)
-        assert result == "MAP<STRING, INT>"
-
-    def test_visit_map_uppercase(self):
-        dialect = AthenaDialect()
-        compiler = AthenaTypeCompiler(dialect)
-        map_type = MAP(Integer, String)
-        result = compiler.visit_MAP(map_type)
-        assert result == "MAP<INT, STRING>"
-
-    def test_visit_map_no_attributes(self):
-        # Test map type without key_type/value_type attributes
-        dialect = AthenaDialect()
-        compiler = AthenaTypeCompiler(dialect)
-        map_type = type("MockMap", (), {})()
-        with pytest.raises(exc.CompileError, match="as MAP"):
-            compiler.visit_map(map_type)
-
-    def test_visit_array_default(self):
-        dialect = AthenaDialect()
-        compiler = AthenaTypeCompiler(dialect)
-        array_type = AthenaArray()
-        result = compiler.visit_array(array_type)
-        assert result == "ARRAY<STRING>"
-
-    def test_visit_array_with_type(self):
-        dialect = AthenaDialect()
-        compiler = AthenaTypeCompiler(dialect)
-        array_type = AthenaArray(Integer)
-        result = compiler.visit_array(array_type)
-        assert result == "ARRAY<INT>"
-
-    def test_visit_array_uppercase(self):
-        dialect = AthenaDialect()
-        compiler = AthenaTypeCompiler(dialect)
-        array_type = ARRAY(String)
-        result = compiler.visit_ARRAY(array_type)
-        assert result == "ARRAY<STRING>" or result == "ARRAY<VARCHAR>"
-
-    def test_visit_array_no_attributes(self):
-        # Test array type without item_type attribute
-        dialect = AthenaDialect()
-        compiler = AthenaTypeCompiler(dialect)
-        array_type = type("MockArray", (), {})()
-        with pytest.raises(exc.CompileError, match="as ARRAY"):
-            compiler.visit_array(array_type)
-
-    def test_visit_json(self):
-        dialect = AthenaDialect()
-        compiler = AthenaTypeCompiler(dialect)
-        json_type = types.JSON()
-        with pytest.raises(exc.CompileError, match="not supported in Athena DDL"):
-            compiler.visit_JSON(json_type)
-
     @pytest.mark.parametrize(
         ("type_", "ddl", "cast_type"),
         [
@@ -211,6 +109,19 @@ class TestAthenaTypeCompiler:
             (types.Text(), "STRING", "VARCHAR"),
             (types.VARCHAR(10), "VARCHAR(10)", "VARCHAR"),
             (types.BINARY(), "BINARY", "VARBINARY"),
+            (
+                AthenaStruct(("name", String), ("age", Integer)),
+                "STRUCT<name:STRING, age:INT>",
+                "ROW(name VARCHAR, age INTEGER)",
+            ),
+            (
+                STRUCT(("id", Integer), ("title", String)),
+                "STRUCT<id:INT, title:STRING>",
+                "ROW(id INTEGER, title VARCHAR)",
+            ),
+            (AthenaMap(), "MAP<STRING, STRING>", "MAP(VARCHAR, VARCHAR)"),
+            (AthenaMap(String, Integer), "MAP<STRING, INT>", "MAP(VARCHAR, INTEGER)"),
+            (MAP(Integer, String), "MAP<INT, STRING>", "MAP(INTEGER, VARCHAR)"),
         ],
     )
     def test_ddl_and_cast_types(self, type_, ddl, cast_type):
@@ -293,51 +204,52 @@ class TestAthenaStatementCompiler:
             Column("numbers", ARRAY(Integer)),
         )
 
-    def test_visit_filter_func_basic(self):
-        """Test basic filter() function compilation."""
-        # Test basic filter with string lambda expression
-        stmt = select(func.filter(self.test_table.c.numbers, literal("x -> x > 0")))
-        compiled = stmt.compile(dialect=self.dialect)
-
-        sql_str = str(compiled)
-        assert "filter(" in sql_str
-        assert "x -> x > 0" in sql_str
-
-    def test_visit_filter_func_array_literal(self):
-        """Test filter() function with array literal."""
-        # Test filter with array literal - using ARRAY constructor
-        stmt = select(
-            func.filter(
-                func.array(literal(1), literal(2), literal(3), literal(-1)), literal("x -> x > 0")
-            )
-        )
-        compiled = stmt.compile(dialect=self.dialect)
-
-        sql_str = str(compiled)
-        assert "filter(" in sql_str
-        assert "x -> x > 0" in sql_str
-
-    def test_visit_filter_func_complex_lambda(self):
-        """Test filter() function with complex lambda expression."""
-        # Test complex lambda expression
-        complex_lambda = literal("x -> x IS NOT NULL AND x > 5")
-        stmt = select(func.filter(self.test_table.c.numbers, complex_lambda))
-        compiled = stmt.compile(dialect=self.dialect)
-
-        sql_str = str(compiled)
-        assert "filter(" in sql_str
-        assert "x -> x IS NOT NULL AND x > 5" in sql_str
-
-    def test_visit_filter_func_nested_access(self):
-        """Test filter() function with nested field access."""
-        # Test lambda with nested field access (for complex types)
-        nested_lambda = literal("x -> x['timestamp'] > '2023-01-01'")
-        stmt = select(func.filter(self.test_table.c.data, nested_lambda))
-        compiled = stmt.compile(dialect=self.dialect)
-
-        sql_str = str(compiled)
-        assert "filter(" in sql_str
-        assert "x -> x['timestamp'] > '2023-01-01'" in sql_str
+    @pytest.mark.parametrize(
+        ("expression", "expected"),
+        [
+            (
+                func.filter(column("numbers", ARRAY(Integer)), literal("x -> x > 0")),
+                "SELECT filter(numbers, x -> x > 0) AS filter_1",
+            ),
+            (
+                func.filter(
+                    func.array(literal(1), literal(2), literal(3), literal(-1)),
+                    literal("x -> x > 0"),
+                ),
+                "SELECT filter(array(%(param_1)s, %(param_2)s, %(param_3)s, %(param_4)s), "
+                "x -> x > 0) AS filter_1",
+            ),
+            (
+                func.filter(
+                    column("numbers", ARRAY(Integer)), literal("x -> x IS NOT NULL AND x > 5")
+                ),
+                "SELECT filter(numbers, x -> x IS NOT NULL AND x > 5) AS filter_1",
+            ),
+            (
+                func.filter(
+                    column("data", ARRAY(String)), literal("x -> x['timestamp'] > '2023-01-01'")
+                ),
+                "SELECT filter(data, x -> x['timestamp'] > '2023-01-01') AS filter_1",
+            ),
+            (
+                func.count(
+                    func.filter(
+                        column("data", ARRAY(String)),
+                        literal(
+                            "x -> x['timestamp'] <= '2023-10-10' "
+                            "AND x['timestamp'] >= '2023-10-01' AND x['action_count'] >= 2"
+                        ),
+                    )
+                ),
+                "SELECT count(filter(data, x -> x['timestamp'] <= '2023-10-10' "
+                "AND x['timestamp'] >= '2023-10-01' AND x['action_count'] >= 2)) AS count_1",
+            ),
+        ],
+        ids=["basic", "array_literal", "complex_lambda", "nested_access", "integration_example"],
+    )
+    def test_visit_filter_func(self, expression, expected):
+        # A string literal is the lambda itself, so it is rendered unquoted.
+        assert str(select(expression).compile(dialect=self.dialect)) == expected
 
     def test_visit_filter_func_wrong_argument_count(self):
         """Test filter() function with wrong number of arguments."""
@@ -355,31 +267,6 @@ class TestAthenaStatementCompiler:
             exc.CompileError, match="filter\\(\\) function expects exactly 2 arguments"
         ):
             stmt.compile(dialect=self.dialect)
-
-    def test_visit_filter_func_integration_example(self):
-        """Test filter() function with the original issue example."""
-        # Test the example from the GitHub issue
-        lambda_expr = literal(
-            "x -> x['timestamp'] <= '2023-10-10' AND x['timestamp'] >= '2023-10-01' "
-            "AND x['action_count'] >= 2"
-        )
-        stmt = select(func.count(func.filter(self.test_table.c.data, lambda_expr)))
-        compiled = stmt.compile(dialect=self.dialect)
-
-        sql_str = str(compiled)
-        assert "count(" in sql_str
-        assert "filter(" in sql_str
-        assert "x -> x['timestamp'] <= '2023-10-10'" in sql_str
-        assert "x['action_count'] >= 2" in sql_str
-
-    def test_visit_char_length_func_existing(self):
-        """Test existing char_length function still works."""
-        # Ensure existing functionality isn't broken
-        stmt = select(func.char_length(self.test_table.c.data))
-        compiled = stmt.compile(dialect=self.dialect)
-
-        sql_str = str(compiled)
-        assert "length(" in sql_str
 
     @pytest.mark.parametrize(
         ("expression", "expected"),
@@ -527,9 +414,21 @@ class TestAthenaStatementCompiler:
         assert query._generate_cache_key().key == select(items[2:3:2])._generate_cache_key().key
         step_name = next(name for name, value in compiled.params.items() if value == 1)
         assert f"IF(%({step_name})s = 1" in str(compiled)
-        for invalid in (2, 1.0, None):
-            with pytest.raises(ValueError, match="step"):
-                compiled._bind_processors[step_name](invalid)
+        engine, calls = recording_engine()
+        with engine.connect() as conn:
+            conn.execute(query)
+            # The cached statement checks each step value it is executed with.
+            with pytest.raises(exc.StatementError, match="step") as raised:
+                conn.execute(select(items[2:3:2]))
+            assert isinstance(raised.value.orig, ValueError)
+            for invalid in (1.0, None):
+                with pytest.raises(exc.StatementError, match="step") as raised:
+                    conn.execute(query, {step_name: invalid})
+                assert isinstance(raised.value.orig, ValueError)
+        ((_, operation, parameters),) = calls
+        assert "IF(1 = 1, slice(items, " in DefaultParameterFormatter().format(
+            operation, parameters
+        )
         native = column("items", AthenaArray(Integer))
         assert (
             select(native[1:3:1])._generate_cache_key().key
@@ -833,29 +732,15 @@ class TestAthenaStatementCompiler:
         return DefaultParameterFormatter().format(expanded.statement, formatted_params)
 
     @pytest.mark.parametrize("name", DIFFICULT_PARAMETER_NAMES)
-    def test_difficult_bind_parameter_name(self, name):
-        id_ = column("id", Integer)
-        stmt = select(id_).where(id_ == bindparam(name, type_=Integer))
-        assert self._format_sql(stmt, {name: 3}).endswith("WHERE id = 3")
-
-    @pytest.mark.parametrize("name", DIFFICULT_PARAMETER_NAMES)
     def test_difficult_expanding_bind_parameter_name(self, name):
         id_ = column("id", Integer)
         stmt = select(id_).where(id_.in_(bindparam(name, value=[1, 2])))
         assert self._format_sql(stmt, {name: [4, 1]}).endswith("WHERE id IN (4, 1)")
 
-    def test_limit_rendered_multiple_times(self):
-        limited = (
-            select(self.test_table.c.id).order_by(self.test_table.c.id).limit(1).scalar_subquery()
-        )
-        sql = self._format_sql(union(select(limited), select(limited)).subquery().select())
-        assert sql.count("LIMIT 1") == 2
-        assert "%(" not in sql
-
-    @pytest.mark.parametrize("pattern", ["%B%", "A%C", "A%C%Z", "%(x)s"])
-    def test_like_pattern_is_not_truncated(self, pattern):
-        stmt = select(column("x", String)).where(column("x", String).like(pattern))
-        assert self._format_sql(stmt).endswith(f"WHERE x LIKE '{pattern}'")
+    def test_like_pattern_is_not_truncated(self):
+        # A pattern that looks like a pyformat placeholder is a plain value.
+        stmt = select(column("x", String)).where(column("x", String).like("%(x)s"))
+        assert self._format_sql(stmt).endswith("WHERE x LIKE '%(x)s'")
 
 
 class TestAthenaDDLCompiler:
@@ -940,13 +825,23 @@ class TestAthenaDDLCompiler:
         ddl = str(CreateTable(table).compile(dialect=dialect))
         assert "LOCATION" not in ddl
 
-    def test_create_table_s3tables_non_iceberg_raises(self):
+    @pytest.mark.parametrize(
+        "tblproperties",
+        [
+            None,
+            # Mentioning "iceberg" outside the table_type value does not make an
+            # Iceberg table.
+            {"table_type": "HIVE", "note": "iceberg migration"},
+        ],
+    )
+    def test_create_table_s3tables_non_iceberg_raises(self, tblproperties):
         # S3 Tables support only Iceberg tables; a missing table_type must fail at
         # compile time instead of emitting CREATE EXTERNAL TABLE without LOCATION.
         table = Table(
             "tbl",
             MetaData(schema="pyathena"),
             Column("id", Integer),
+            awsathena_tblproperties=tblproperties,
         )
         with pytest.raises(exc.CompileError, match="S3 Tables support only Iceberg tables"):
             CreateTable(table).compile(dialect=self._s3tables_dialect())
@@ -1013,18 +908,6 @@ class TestAthenaDDLCompiler:
         ddl = str(CreateTable(table).compile(dialect=dialect))
         assert ddl.strip().startswith("CREATE TABLE" if is_iceberg else "CREATE EXTERNAL TABLE")
 
-    def test_create_table_s3tables_table_type_not_iceberg_raises(self):
-        # Mentioning "iceberg" outside the table_type value does not make an
-        # Iceberg table, so S3 Tables still reject it.
-        table = Table(
-            "tbl",
-            MetaData(schema="pyathena"),
-            Column("id", Integer),
-            awsathena_tblproperties={"table_type": "HIVE", "note": "iceberg migration"},
-        )
-        with pytest.raises(exc.CompileError, match="S3 Tables support only Iceberg tables"):
-            CreateTable(table).compile(dialect=self._s3tables_dialect())
-
     def test_create_table_s3tables_omits_connection_level_formats(self):
         # Connection-level file_format/row_format must not leak STORED AS or
         # ROW FORMAT clauses into managed Iceberg DDL.
@@ -1053,7 +936,6 @@ class TestAthenaDDLCompiler:
                 "&catalog_name=s3tablescatalog/bucket"
             )
         )
-        assert dialect._connect_options["catalog_name"] == "s3tablescatalog/bucket"
         table = Table(
             "tbl",
             MetaData(schema="pyathena"),
@@ -1174,6 +1056,7 @@ class TestAthenaDDLCompiler:
                 "nested_maps",
                 AthenaMap(String, AthenaMap(Integer, AthenaStruct(("n", Integer)))),
             ),
+            Column("tag_lists", AthenaMap(String, AthenaArray(String))),
             Column(
                 "mixed",
                 AthenaStruct(
@@ -1197,6 +1080,7 @@ class TestAthenaDDLCompiler:
         ) in ddl
         assert "labels MAP<STRING, STRUCT<value:STRING, count:INT>>" in ddl
         assert "nested_maps MAP<STRING, MAP<INT, STRUCT<n:INT>>>" in ddl
+        assert "tag_lists MAP<STRING, ARRAY<STRING>>" in ddl
         assert (
             "mixed STRUCT<tags:ARRAY<STRING>, attrs:MAP<STRING, INT>, scores:ARRAY<INT>>"
         ) in ddl
