@@ -223,12 +223,28 @@ class TestAioS3FileSystem:
                 {"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"}
             )
         )
-        # Waits briefly for a fourth overlapping call, which only a copy that
-        # exceeds max_workers runs.
-        call, state = overlapping_calls(4, timeout=0.5)
+        condition = threading.Condition()
+        state = {"calls": 0, "active": 0, "peak": 0}
+        # The first three part copies run at once.
+        first_three = threading.Barrier(3, timeout=EVENT_TIMEOUT)
 
         def upload_part_copy(**kw):
-            call()
+            with condition:
+                state["calls"] += 1
+                number = state["calls"]
+                state["active"] += 1
+                state["peak"] = max(state["peak"], state["active"])
+                condition.notify_all()
+            try:
+                if number <= 3:
+                    first_three.wait()
+                    # Waits briefly for a fourth overlapping call, which only a
+                    # copy that exceeds max_workers runs.
+                    with condition:
+                        condition.wait_for(lambda: state["active"] > 3, timeout=0.5)
+            finally:
+                with condition:
+                    state["active"] -= 1
             return SimpleNamespace(etag='"e"', part_number=kw["part_number"])
 
         sync_fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
@@ -1361,10 +1377,10 @@ class TestAioS3FileSystem:
         [
             # GH-979: a version is downloaded to a local path named after its
             # key.
-            (lambda tmp_path: f"{tmp_path}/", "b"),
+            ("directory", "b"),
             # A Path destination is paired too: the version is downloaded to
             # the file, not into a directory of that name.
-            (lambda tmp_path: tmp_path / "out.bin", "out.bin"),
+            ("path", "out.bin"),
         ],
         ids=["directory", "path"],
     )
@@ -1374,7 +1390,8 @@ class TestAioS3FileSystem:
         fs._sync_fs.isdir = mock.MagicMock(return_value=False)
         fs._get_file = mock.AsyncMock()
 
-        await fs._get("s3://bucket/b?versionId=v1", destination(tmp_path))
+        lpath = f"{tmp_path}/" if destination == "directory" else tmp_path / "out.bin"
+        await fs._get("s3://bucket/b?versionId=v1", lpath)
         assert fs._get_file.await_args.args[:2] == (
             "bucket/b?versionId=v1",
             f"{tmp_path.as_posix()}/{expected}",
@@ -2560,15 +2577,26 @@ class TestAioS3StreamedFile:
         held = threading.Event()
         release = threading.Event()
 
+        async def others_done():
+            def running_reads():
+                return [
+                    t
+                    for t in asyncio.all_tasks()
+                    if t.get_coro().__qualname__ == "S3AioThreadPool.run" and not t.done()
+                ]
+
+            while len(running_reads()) > 1:
+                await asyncio.sleep(0)
+
         def get_object(path, range_, **kwargs):
             # Unlike bytes, an array can be weakly referenced.
             data = array.array("B", bytes(range_[1] - range_[0]))
             read.append(weakref.ref(data))
             all_read.wait()
             if range_[0] == 0:
-                # Held until the read is cancelled, after a pass of the event
-                # loop that takes the results of the other ranges.
-                asyncio.run_coroutine_threadsafe(asyncio.sleep(0), loop).result(EVENT_TIMEOUT)
+                # Held until the read is cancelled, once the tasks of the
+                # other ranges have taken their results.
+                asyncio.run_coroutine_threadsafe(others_done(), loop).result(EVENT_TIMEOUT)
                 held.set()
                 assert release.wait(EVENT_TIMEOUT)
             return data

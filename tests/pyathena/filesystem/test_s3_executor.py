@@ -27,6 +27,11 @@ from tests.pyathena.util import EVENT_TIMEOUT, ThrottledOperation, overlapping_c
 
 
 class TestS3AioThreadPool:
+    def test_default_max_workers(self):
+        # None takes the default of ThreadPoolExecutor, as documented.
+        with ThreadPoolExecutor() as executor:
+            assert S3AioThreadPool().max_workers == executor._max_workers
+
     def test_run_beyond_default_executor(self):
         # GH-1159: the calls run in threads of the pool, so that max_workers,
         # not the default executor of the event loop, bounds them.
@@ -188,10 +193,25 @@ class TestS3AioThreadPool:
     @pytest.mark.filterwarnings("ignore:.*fork\\(\\) may lead to deadlocks:DeprecationWarning")
     def test_fork(self):
         # A forked child, whose copy of the pool has no threads, creates new
-        # ones.
+        # ones, also if a thread of the parent held the lock of the pool.
         pool = S3AioThreadPool(1)
         assert pool.submit(sum, [1, 2]).result(timeout=EVENT_TIMEOUT) == 3
-        pid = os.fork()
+        # No public call holds the lock across a fork; a thread of the parent
+        # holds it while the main thread forks.
+        held, release = threading.Event(), threading.Event()
+
+        def hold_lock():
+            with pool._lock:
+                held.set()
+                release.wait(EVENT_TIMEOUT)
+
+        holder = threading.Thread(target=hold_lock)
+        holder.start()
+        try:
+            assert held.wait(EVENT_TIMEOUT)
+            pid = os.fork()
+        finally:
+            release.set()
         if pid == 0:
             # The child exits here, whatever happens, instead of running pytest.
             code = 1
@@ -212,6 +232,7 @@ class TestS3AioThreadPool:
             if status == (0, 0):
                 os.kill(pid, signal.SIGKILL)
                 os.waitpid(pid, 0)
+            holder.join(EVENT_TIMEOUT)
             pool.shutdown()
         assert os.waitstatus_to_exitcode(status[1]) == 0
 
@@ -576,3 +597,25 @@ class TestS3Executor:
         asyncio.run(main())
 
         assert not future.cancelled()
+
+    def test_submit_to_cancelled_executor_shut_down(self):
+        # A future that the caller cancels before S3AioExecutor reports the
+        # error is marked as notified, so that wait() counts it as done.
+        future: Future[int] = Future()
+
+        async def main():
+            loop = asyncio.get_running_loop()
+            executor = S3AioExecutor(loop=loop)
+            # Fails the dispatch of the callable to the pool.
+            executor._pool.shutdown()
+            executor.submit_to(future, sum, [1, 2])
+            assert future.cancel()
+            with ThreadPoolExecutor(max_workers=1) as waiter:
+                return await loop.run_in_executor(
+                    waiter, lambda: wait([future], timeout=EVENT_TIMEOUT)
+                )
+
+        _, not_done = asyncio.run(main())
+
+        assert not not_done
+        assert future.cancelled()

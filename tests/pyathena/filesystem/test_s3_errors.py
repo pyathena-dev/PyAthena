@@ -42,7 +42,9 @@ class TestS3ClientError:
         ],
     )
     def test_os_error_by_error_code(self, code, expected):
-        actual = S3ClientError(_client_error(code)).os_error
+        error = S3ClientError(_client_error(code))
+        assert (error.code, error.message) == (code, "error message")
+        actual = error.os_error
         assert type(actual) is expected
         assert "error message" in str(actual)
 
@@ -82,7 +84,9 @@ class TestS3ClientError:
         ],
     )
     def test_os_error_by_http_status_code(self, status_code, expected_errno):
-        actual = S3ClientError(_client_error("UnknownCode", status_code=status_code)).os_error
+        error = S3ClientError(_client_error("UnknownCode", status_code=status_code))
+        assert error.http_status_code == status_code
+        actual = error.os_error
         assert isinstance(actual, OSError)
         assert actual.errno == expected_errno
 

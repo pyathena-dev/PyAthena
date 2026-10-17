@@ -1701,12 +1701,22 @@ class TestS3Core:
             url = core.generate_presigned_url(path, client_method, expires_in=3600, **params)
         signed = time.time()
         parts = urlsplit(url)
-        assert (parts.netloc, parts.path) == ("bucket.s3.amazonaws.com", f"/{key}")
+        # The addressing style is botocore's.
+        assert parts.netloc.startswith("bucket.") or parts.path.startswith("/bucket/")
+        assert parts.path.endswith(f"/{key}")
         signed_query = parse_qs(parts.query)
-        # The signature fields of the client's signer, and the expiry.
-        expires = int(signed_query.pop("Expires")[0])
-        assert signed + 3600 - 60 < expires <= signed + 3600
-        del signed_query["AWSAccessKeyId"], signed_query["Signature"]
+        # The expiry, in the fields of the client's signature version.
+        if "X-Amz-Expires" in signed_query:
+            assert signed_query["X-Amz-Expires"] == ["3600"]
+        else:
+            expires = int(signed_query["Expires"][0])
+            assert signed + 3600 - 60 < expires <= signed + 3600
+        signature_fields = {"AWSAccessKeyId", "Signature", "Expires"}
+        signed_query = {
+            k: v
+            for k, v in signed_query.items()
+            if k not in signature_fields and not k.startswith("X-Amz-")
+        }
         # request_kwargs, such as RequestPayer, are not signed.
         assert signed_query == query
 
