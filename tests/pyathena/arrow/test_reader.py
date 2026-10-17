@@ -42,11 +42,13 @@ class _RecordingFileSystem(AbstractFileSystem):
         super().__init__()
         self.block_size = block_size
         self.fetched = []
+        self.cache_types = []
 
     def size(self, path):
         return os.path.getsize(path)
 
     def _open(self, path, mode="rb", block_size=None, cache_type="bytes", **kwargs):
+        self.cache_types.append(cache_type)
         return _RecordingFile(
             self, path, block_size=block_size or self.block_size, cache_type=cache_type, **kwargs
         )
@@ -154,7 +156,7 @@ class TestParquetChunkReader:
 
     @pytest.mark.parametrize("cache_type", [None, "bytes"], ids=["default", "bytes"])
     def test_streamed_file_row_groups(self, tmp_path, monkeypatch, cache_type):
-        """A streamed file is read one row group at a time, when needed."""
+        """A streamed file is read one row group at a time, when needed, with the cache type."""
         monkeypatch.setattr(ParquetChunkReader, "MAX_PREFETCH_SIZE", -1)
         path = tmp_path / "groups.parquet"
         columns = {f"c{i}": pa.array([os.urandom(256) for _ in range(300)]) for i in range(3)}
@@ -166,6 +168,8 @@ class TestParquetChunkReader:
             assert sum(table.num_rows for table in reader) == 250
         # The later row groups are fetched after the first chunk.
         assert len(fs.fetched) > fetched
+        # Without a cache type, only the ranges that pyarrow requests are read.
+        assert fs.cache_types == [cache_type or "none"]
 
     def test_no_files(self):
         assert list(ParquetChunkReader(LocalFileSystem(), [], 4)) == []

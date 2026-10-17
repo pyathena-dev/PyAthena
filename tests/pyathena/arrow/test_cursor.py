@@ -566,8 +566,10 @@ class TestArrowCursor:
         ]
 
     def test_as_polars(self, arrow_cursor):
-        df = arrow_cursor.execute("SELECT * FROM one_row").as_polars()
-        assert df.to_dicts() == [{"number_of_rows": 1}]
+        df = arrow_cursor.execute(
+            "SELECT * FROM (VALUES (1, 'a'), (2, 'b')) AS t(k, s) ORDER BY k"
+        ).as_polars()
+        assert df.to_dicts() == [{"k": 1, "s": "a"}, {"k": 2, "s": "b"}]
 
     def test_cancel(self, arrow_cursor):
         def cancel(c):

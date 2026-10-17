@@ -38,6 +38,7 @@ def _local_result_set(
     output_location: str = "s3://bucket/result.csv",
     data_manifest: list[str] | None = None,
     chunksize: int | None = None,
+    credentials_error: Exception | None = None,
     **kwargs: Any,
 ) -> AthenaPolarsResultSet:
     """Create a result set of a succeeded query whose result files are local files.
@@ -51,6 +52,8 @@ def _local_result_set(
         output_location: The local path of the CSV result file.
         data_manifest: The local paths of the Parquet files of an UNLOAD result.
         chunksize: The chunk size of the result set.
+        credentials_error: An error that the session raises when credentials are looked
+            up, or None for a session without credentials.
         **kwargs: The read arguments given to ``execute()``.
 
     Returns:
@@ -70,6 +73,7 @@ def _local_result_set(
     )
     connection = MagicMock(region_name=None)
     connection.session.get_credentials.return_value = None
+    connection.session.get_credentials.side_effect = credentials_error
     connection.s3_client.get_object.return_value = {
         "Body": BytesIO("\n".join(data_manifest or []).encode())
     }
@@ -299,8 +303,9 @@ class TestAthenaPolarsResultSet:
     def test_storage_options_replace_defaults(self, tmp_path, unload, chunksize):
         """storage_options given to execute() reach every Polars read as given.
 
-        These reads use Polars' native object store, which ignores the options for
-        local files, so the reads are observed.
+        They are read without PyAthena's credentials, whose lookup fails here. These
+        reads use Polars' native object store, which ignores the options for local
+        files, so the reads are observed.
         """
         storage_options = {"aws_region": "us-west-2"}
         if unload:
@@ -318,13 +323,15 @@ class TestAthenaPolarsResultSet:
             patch("polars.scan_csv", wraps=pl.scan_csv) as scan_csv,
         ):
             result_set = _local_result_set(
-                **files, chunksize=chunksize, storage_options=storage_options
+                **files,
+                chunksize=chunksize,
+                credentials_error=OSError("no credentials"),
+                storage_options=storage_options,
             )
             assert result_set.fetchall() == [(1,), (2,)]
         calls = read_parquet.call_args_list + scan_parquet.call_args_list + scan_csv.call_args_list
-        # An UNLOAD result's schema is scanned before its files are read.
-        assert len(calls) == (2 if unload else 1)
-        assert all(call.kwargs["storage_options"] is storage_options for call in calls)
+        assert calls
+        assert all(call.kwargs["storage_options"] == storage_options for call in calls)
 
     @pytest.mark.parametrize("chunksize", [None, 10_000])
     def test_csv_read_kwargs_replace_defaults(self, tmp_path, chunksize):

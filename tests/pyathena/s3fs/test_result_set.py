@@ -112,7 +112,8 @@ class TestAthenaS3FSResultSet:
         ids=["default", "aio", "block_size", "subclass"],
     )
     def test_csv_open_options(self, block_size, filesystem_class, prefetch):
-        """PyAthena's filesystems prefetch the CSV result unless block_size is given.
+        """PyAthena's filesystems read the CSV result in 32 MiB blocks with the background
+        cache, which keeps two blocks, unless block_size is given.
 
         With block_size or a user's filesystem class, the file is opened with the
         filesystem's own settings.
@@ -129,7 +130,8 @@ class TestAthenaS3FSResultSet:
         options = open_file.call_args.kwargs
         if prefetch:
             assert options["cache_type"] == "background"
-            assert options["block_size"] == AthenaS3FSResultSet.CSV_BLOCK_SIZE
+            assert options["block_size"] == 32 * 2**20
+            assert options["cache_options"] == {"maxblocks": 2}
         else:
             assert "cache_type" not in options
             assert "block_size" not in options
