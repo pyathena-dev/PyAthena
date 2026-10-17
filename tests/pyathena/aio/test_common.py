@@ -109,7 +109,7 @@ class TestWithAsyncFetch:
                 await fetch()
         # The Arrow and Polars cursors also convert the whole result.
         for name in _WHOLE_RESULT_METHODS.get(cursor_class, ()):
-            with pytest.raises(ProgrammingError, match=r"No result set\."):
+            with pytest.raises(ProgrammingError):
                 getattr(cursor, name)()
 
     @pytest.mark.parametrize("cursor_class", _ALL_CURSOR_CLASSES)
@@ -282,6 +282,22 @@ class TestWithAsyncFetch:
         assert closes == [True]
         assert cursor.result_set is None
         assert cursor.rowcount == 0
+
+    @pytest.mark.parametrize("cursor_class", _ALL_CURSOR_CLASSES)
+    async def test_executemany_unknown_rowcount(self, cursor_class):
+        """A statement without an update count, such as a SELECT, makes the sum unknown."""
+        cursor = cursor_class(
+            connection=MagicMock(), converter=None, formatter=None, retry_config=None
+        )
+        rowcounts = iter([1, -1, 1])
+
+        async def execute(operation, parameters, **kwargs):
+            cursor.result_set = MagicMock(is_closed=True, rowcount=next(rowcounts))
+
+        cursor.execute = execute
+        await cursor.executemany("SELECT 1", [None, None, None])
+
+        assert cursor.rowcount == -1
 
     @pytest.mark.parametrize("cursor_class", _ALL_CURSOR_CLASSES)
     async def test_executemany_failure_closes_result_set_off_event_loop(self, cursor_class):

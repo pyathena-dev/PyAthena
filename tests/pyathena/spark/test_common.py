@@ -459,3 +459,12 @@ class TestSparkBaseCursor:
         _close(cursor)
 
         assert connection.client.terminate_session.call_count == 2
+
+    def test_async_close_shuts_down_executor_without_terminating_session(self):
+        connection = _connection()
+        cursor = _init_cursor(AsyncSparkCursor, connection, session_id="supplied-session")
+        cursor.close()
+
+        connection.client.terminate_session.assert_not_called()
+        with pytest.raises(RuntimeError):
+            cursor.calculation_execution("calculation_id")

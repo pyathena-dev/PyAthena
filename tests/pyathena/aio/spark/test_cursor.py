@@ -106,7 +106,10 @@ def _starting_cursor(kill_on_interrupt=True, response=None):
 
 class TestAioSparkCursor:
     async def test_spark_dataframe(self, aio_spark_cursor):
-        await aio_spark_cursor.execute("print('hello')", description="test description")
+        # A Spark job, so that the calculation reports its DPU time and progress.
+        await aio_spark_cursor.execute(
+            "print(spark.range(3).count())", description="test description"
+        )
         assert aio_spark_cursor.calculation_execution
         assert aio_spark_cursor.session_id
         assert aio_spark_cursor.calculation_id
@@ -122,7 +125,7 @@ class TestAioSparkCursor:
         assert aio_spark_cursor.std_error_s3_uri
         assert aio_spark_cursor.result_s3_uri
         assert aio_spark_cursor.result_type
-        assert await aio_spark_cursor.get_std_out() == "hello"
+        assert await aio_spark_cursor.get_std_out() == "3"
 
     async def test_failed(self, aio_spark_cursor):
         with pytest.raises(OperationalError):
