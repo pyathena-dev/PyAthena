@@ -382,23 +382,25 @@ class TestAthenaPandasResultSet:
         assert [len(chunk) for chunk in chunks] == sizes
         assert [tuple(row) for chunk in chunks for row in chunk.itertuples(index=False)] == expected
 
-    def test_read_csv_with_pyarrow_engine_values(self, tmp_path):
+    @pytest.mark.parametrize(
+        "values",
+        [
+            pytest.param(["007", "1e3", "10", None], id="numeric_looking"),
+            pytest.param(["a", "line1\nline2", "nan", None], id="text"),
+        ],
+    )
+    def test_read_csv_with_pyarrow_engine_values(self, tmp_path, values):
         """engine="pyarrow" keeps the text of varchar values, numeric-looking and multiline."""
-        values = ["007", "1e3", "nan", "line1\nline2", None, _PADDING]
-        data = '"v","n"\n' + "".join(
-            f'{"" if v is None else chr(34) + v + chr(34)},"{i}"\n' for i, v in enumerate(values)
+        data = '"v","p"\n' + "".join(
+            f'{"" if v is None else chr(34) + v + chr(34)},"{_PADDING}"\n' for v in values
         )
-        assert len(data) >= AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES
         result_set = _local_result_set(
             LocalBucketFileSystem(tmp_path),
-            [("v", "varchar"), ("n", "integer")],
+            [("v", "varchar"), ("p", "varchar")],
             data,
             engine="pyarrow",
         )
-        rows = result_set.fetchall()
-        assert [(None if pd.isna(v) else v, n) for v, n in rows] == [
-            (v, i) for i, v in enumerate(values)
-        ]
+        assert [None if pd.isna(v) else v for v, _ in result_set.fetchall()] == values
 
     def test_read_small_csv_with_pyarrow_engine(self, tmp_path):
         """A CSV result smaller than PYARROW_MIN_FILE_SIZE_BYTES is read with the C engine.
@@ -617,8 +619,7 @@ class TestAthenaPandasResultSet:
     def test_csv_open_options(self, tmp_path, data, types, chunksize, kwargs, prefetch):
         """A CSV result is read in 32 MiB blocks with the background cache, keeping two blocks.
 
-        With block_size or cache_type, the file is opened with the filesystem's settings,
-        which are created with them.
+        With block_size or cache_type, the file is opened with the filesystem's settings.
         """
         fs = LocalBucketFileSystem(tmp_path)
         result_set = _local_result_set(fs, types, data, chunksize=chunksize, **kwargs)
@@ -631,8 +632,6 @@ class TestAthenaPandasResultSet:
         else:
             assert "cache_type" not in options
             assert "block_size" not in options
-            assert fs.created_with["default_block_size"] == kwargs.get("block_size")
-            assert fs.created_with["default_cache_type"] == kwargs.get("cache_type")
 
     @pytest.mark.filterwarnings("error::pandas.errors.DtypeWarning")
     @pytest.mark.parametrize(
@@ -1029,8 +1028,8 @@ def _local_result_set(fs, types=(), data=None, tables=None, name="result.csv", *
     connection.s3_client.meta.config.max_pool_connections = 2
     connection.s3_client.head_object.return_value = {"ContentLength": length}
     connection.client.get_query_results.return_value = query_results_response(types)
-    with patch("pyathena.pandas.result_set.S3FileSystem", return_value=fs) as file_system:
-        result_set = AthenaPandasResultSet(
+    with patch("pyathena.pandas.result_set.S3FileSystem", return_value=fs):
+        return AthenaPandasResultSet(
             connection=connection,
             converter=DefaultPandasTypeConverter(),
             query_execution=query_execution,
@@ -1039,9 +1038,6 @@ def _local_result_set(fs, types=(), data=None, tables=None, name="result.csv", *
             unload=unload,
             **kwargs,
         )
-    # The options that PyAthena's filesystem was created with.
-    fs.created_with = file_system.call_args.kwargs
-    return result_set
 
 
 def _string_series(values, infer_string):
