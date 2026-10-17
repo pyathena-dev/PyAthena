@@ -776,12 +776,14 @@ class TestAioS3FileSystem:
         # No upload was created.
         sync_fs._abort_multipart_upload.assert_not_called()
 
+    @pytest.mark.parametrize("failing", ["a1", "a2"])
     @pytest.mark.asyncio
     async def test_copy_object_with_multipart_upload_failed_annotation_stops_running_copies(
-        self,
+        self, failing
     ):
         # GH-1203: a failed annotation copy stops the retries of the running
-        # ones, whose backoff wait would take at least EVENT_TIMEOUT seconds.
+        # ones, whose backoff wait would take at least EVENT_TIMEOUT seconds,
+        # and its error is raised, whichever annotation comes first.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
         sync_fs = fs._sync_fs
         plan = S3MultipartCopyPlan(
@@ -805,7 +807,7 @@ class TestAioS3FileSystem:
         throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
 
         def copy_object_annotation(name, *args, **kwargs):
-            if name == "a1":
+            if name == failing:
                 assert operation.started.wait(EVENT_TIMEOUT)
                 raise PermissionError("Access Denied")
             return throttled()
@@ -816,6 +818,45 @@ class TestAioS3FileSystem:
             await fs._copy_object_with_multipart_upload(plan.source, plan.destination)
         assert time.monotonic() - started < EVENT_TIMEOUT
         assert operation.calls == 1
+
+    @pytest.mark.asyncio
+    async def test_copy_object_with_multipart_upload_failed_annotation_skips_queued_copies(self):
+        # GH-1203: the annotation copies that wait for a thread of the filesystem
+        # when one fails are not sent.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), max_workers=1, skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        plan = S3MultipartCopyPlan(
+            source=S3Path("bucket", "src"),
+            destination=S3Path("bucket", "dst"),
+            size=1,
+            ranges=((0, 1),),
+            annotations=("a1", "a2", "a3"),
+        )
+        sync_fs.core.plan_multipart_copy = mock.MagicMock(return_value=plan)
+        sync_fs.core.create_multipart_upload = mock.MagicMock(
+            return_value=S3MultipartUpload({"Bucket": "bucket", "Key": "dst", "UploadId": "id"})
+        )
+        sync_fs.core.upload_part_copy = mock.MagicMock(
+            side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
+        )
+        sync_fs.core.complete_multipart_upload = mock.MagicMock(
+            return_value=SimpleNamespace(version_id=None, etag='"e"')
+        )
+
+        def copy_object_annotation(name, *args, **kwargs):
+            # Fails once the other copies wait for the only thread.
+            deadline = time.monotonic() + EVENT_TIMEOUT
+            while fs._thread_pool._get_executor()._work_queue.qsize() < 2:
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+            raise PermissionError("Access Denied")
+
+        sync_fs.core.copy_object_annotation = mock.MagicMock(side_effect=copy_object_annotation)
+        with pytest.raises(PermissionError, match="Access Denied"):
+            await fs._copy_object_with_multipart_upload(
+                plan.source, plan.destination, max_workers=3
+            )
+        sync_fs.core.copy_object_annotation.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_copy_object_with_multipart_upload_cancelled_queued_parts(self):
@@ -3616,7 +3657,8 @@ class TestAioS3StreamedFile:
             operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT)
         )
         block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
-        f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size)
+        # The creation holds the only thread, after which the cleanup waits.
+        f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size, max_workers=1)
         task = asyncio.ensure_future(f.write(b"x" * block_size))
         try:
             assert await asyncio.to_thread(operation.started.wait, EVENT_TIMEOUT)

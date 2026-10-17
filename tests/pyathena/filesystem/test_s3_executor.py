@@ -119,8 +119,10 @@ class TestS3AioThreadPool:
             task = asyncio.ensure_future(pool.run(work))
             await asyncio.sleep(0)
             # Blocks the event loop, so that the task is cancelled before it
-            # resumes after the call has returned.
+            # resumes after the call has returned, which follows the event at
+            # once.
             assert returned.wait(EVENT_TIMEOUT)
+            time.sleep(0.1)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task

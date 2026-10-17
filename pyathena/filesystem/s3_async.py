@@ -731,18 +731,30 @@ class AioS3FileSystem(AsyncFileSystem):
             Args:
                 name: The name of the annotation.
             """
-            with stop_retries_on(stop):
-                self.core.copy_object_annotation(
-                    name,
-                    plan.source,
-                    plan.destination,
-                    completed.version_id,
-                    completed.etag,
-                    **kwargs,
-                )
+            if stop.is_set():
+                # Waited for a thread of the filesystem until a copy failed.
+                return
+            try:
+                with stop_retries_on(stop):
+                    self.core.copy_object_annotation(
+                        name,
+                        plan.source,
+                        plan.destination,
+                        completed.version_id,
+                        completed.etag,
+                        **kwargs,
+                    )
+            except Exception:
+                # Set in this thread, before it takes a waiting copy.
+                stop.set()
+                raise
 
-        async def _copy_annotation(name: str) -> None:
-            nonlocal failed
+        # The index of the copy that failed first, whose error is raised
+        # instead of those of the copies that its failure stopped.
+        first_failure: int | None = None
+
+        async def _copy_annotation(i: int, name: str) -> None:
+            nonlocal failed, first_failure
             async with semaphore:
                 if failed:
                     # Do not start more copies after one failed, as
@@ -751,17 +763,19 @@ class AioS3FileSystem(AsyncFileSystem):
                 try:
                     await self._thread_pool.run(_copy_annotation_in_thread, name)
                 except Exception:
+                    if not failed:
+                        first_failure = i
                     # The running copies make no further attempt.
                     failed = True
                     stop.set()
                     raise
 
         results = await asyncio.gather(
-            *[_copy_annotation(name) for name in plan.annotations], return_exceptions=True
+            *[_copy_annotation(i, name) for i, name in enumerate(plan.annotations)],
+            return_exceptions=True,
         )
-        for result in results:
-            if isinstance(result, BaseException):
-                raise result
+        if first_failure is not None:
+            raise cast(BaseException, results[first_failure])
 
     async def _find(
         self,
@@ -1456,6 +1470,9 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             self._pool.shutdown(wait=False)
             return
         self.buffer = None
+        # Set here, so that the creation and the running parts stop even
+        # while they hold every thread of the file, ahead of _discard().
+        self._parts_stop.set()
         try:
             await self._pool.run_shielded(self._discard)
         finally:

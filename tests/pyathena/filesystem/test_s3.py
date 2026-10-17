@@ -3536,6 +3536,34 @@ class TestS3FileSystem:
         assert time.monotonic() - started < EVENT_TIMEOUT
         assert operation.calls == 1
 
+    def test_read_interrupted_submission_stops_running_reads(self):
+        # GH-1203: an interrupt while the reads are being submitted stops the
+        # running ones, whose backoff wait would take at least EVENT_TIMEOUT
+        # seconds.
+        fs = self._make_fs()
+        fs.info = mock.MagicMock(return_value=self._file_object("key"))
+        fs.info.return_value.size = 32
+        operation = ThrottledOperation()
+        fs.core.get_object = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
+        f = fs.open("s3://bucket/key", "rb", cache_type="none", block_size=16, max_workers=2)
+        submit = f._executor.submit
+
+        def interrupted_submit(fn, *args, **kwargs):
+            if operation.started.is_set():
+                raise KeyboardInterrupt
+            future = submit(fn, *args, **kwargs)
+            assert operation.started.wait(EVENT_TIMEOUT)
+            return future
+
+        f._executor.submit = interrupted_submit  # type: ignore[method-assign]
+        started = time.monotonic()
+        with pytest.raises(KeyboardInterrupt):
+            f.read()
+        # Waits for the running read.
+        f.close()
+        assert time.monotonic() - started < EVENT_TIMEOUT
+        assert operation.calls == 1
+
     def test_interrupted_read_frees_ranges(self):
         # GH-1186: an interrupted parallel read cancels the reads that have
         # not started and frees the data of the others, also while the
@@ -4554,6 +4582,34 @@ class TestS3FileSystem:
         fs.core.put_object_acl = put_object_acl
         started = time.monotonic()
         with pytest.raises(PermissionError, match="Access Denied"):
+            fs.chmod("s3://bucket/path", "private", recursive=True)
+        assert time.monotonic() - started < EVENT_TIMEOUT
+        assert operation.calls == 1
+
+    def test_chmod_recursive_interrupted_submission_stops_running_requests(self):
+        # GH-1203: an interrupt while the updates are being submitted stops
+        # the running ones, whose backoff wait would take at least
+        # EVENT_TIMEOUT seconds.
+        fs = self._make_fs()
+        fs.find = mock.MagicMock(return_value=["bucket/key1", "bucket/key2"])
+        operation = ThrottledOperation(operation_name="PutObjectAcl")
+        fs.core.put_object_acl = retried(
+            operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT)
+        )
+        executor = S3ThreadPoolExecutor(max_workers=2)
+        submit = executor.submit
+
+        def interrupted_submit(fn, *args, **kwargs):
+            if operation.started.is_set():
+                raise KeyboardInterrupt
+            future = submit(fn, *args, **kwargs)
+            assert operation.started.wait(EVENT_TIMEOUT)
+            return future
+
+        executor.submit = interrupted_submit  # type: ignore[method-assign]
+        fs._create_executor = mock.MagicMock(return_value=executor)
+        started = time.monotonic()
+        with pytest.raises(KeyboardInterrupt):
             fs.chmod("s3://bucket/path", "private", recursive=True)
         assert time.monotonic() - started < EVENT_TIMEOUT
         assert operation.calls == 1

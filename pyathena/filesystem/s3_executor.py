@@ -295,20 +295,28 @@ class S3AioThreadPool(S3Executor):
             RuntimeError: If the pool has been shut down.
         """
         stop = threading.Event()
+        # Orders the end of the call with a cancellation, after which work
+        # that the call left running, such as the parts of a write in a
+        # transaction, is not stopped.
+        lock = threading.Lock()
+        returned = False
 
         def call() -> T:
-            """Run the call in a scope that the cancellation stops."""
-            with stop_retries_on(stop):
-                return fn(*args, **kwargs)
+            """Run the call in a scope that the cancellation stops until it returns."""
+            nonlocal returned
+            try:
+                with stop_retries_on(stop):
+                    return fn(*args, **kwargs)
+            finally:
+                with lock:
+                    returned = True
 
-        future = self.submit(call)
         try:
-            return await asyncio.wrap_future(future)
+            return await asyncio.wrap_future(self.submit(call))
         except asyncio.CancelledError:
-            # Work that the call left running, such as the parts of a write
-            # in a transaction, is not stopped once the call has returned.
-            if not future.done():
-                stop.set()
+            with lock:
+                if not returned:
+                    stop.set()
             raise
 
     async def run_shielded(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:

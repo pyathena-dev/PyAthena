@@ -2310,12 +2310,14 @@ class S3FileSystem(AbstractFileSystem):
             # Set on failure, so that the running requests make no further attempt.
             stop = threading.Event()
             with self._create_executor(max_workers=self.max_workers) as executor:
-                with stop_retries_on(stop):
-                    futures = [
-                        executor.submit(self.chmod, p, acl, recursive=False, **kwargs)
-                        for p in paths
-                    ]
+                futures: list[Future[None]] = []
                 try:
+                    with stop_retries_on(stop):
+                        # extend() keeps the futures submitted before an interrupt.
+                        futures.extend(
+                            executor.submit(self.chmod, p, acl, recursive=False, **kwargs)
+                            for p in paths
+                        )
                     for future in as_completed(futures):
                         future.result()
                 except BaseException:
@@ -3466,12 +3468,14 @@ class S3File(AbstractBufferedFile):
         if len(ranges) > 1:
             # Set on failure, so that the running reads make no further attempt.
             stop = threading.Event()
-            with stop_retries_on(stop):
-                futures = [
-                    self._executor.submit(self.fs.core.get_object, path, r, **request_kwargs)
-                    for r in ranges
-                ]
+            futures: list[Future[bytes]] = []
             try:
+                with stop_retries_on(stop):
+                    # extend() keeps the futures submitted before an interrupt.
+                    futures.extend(
+                        self._executor.submit(self.fs.core.get_object, path, r, **request_kwargs)
+                        for r in ranges
+                    )
                 done = wait(futures, return_when=FIRST_EXCEPTION).done
             except BaseException as e:
                 # The reads are cancelled with the read of the range, as below,
