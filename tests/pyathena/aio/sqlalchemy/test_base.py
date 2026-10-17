@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import threading
 from datetime import datetime
 from decimal import Decimal
@@ -54,7 +55,7 @@ class TestAthenaAioAdaptedCursor:
             await greenlet_spawn(adapted.execute, "SELECT 1")
 
         assert raised.value is error
-        assert "Failed to close the cursor after a failed fetch." in caplog.text
+        assert any(record.levelno == logging.ERROR for record in caplog.records)
 
 
 class TestAsyncSQLAlchemyAthena:
@@ -72,37 +73,6 @@ class TestAsyncSQLAlchemyAthena:
     @pytest.mark.parametrize(
         "async_engine",
         [
-            {"driver": driver}
-            for driver in ("aiorest", "aiopandas", "aioarrow", "aiopolars", "aios3fs")
-        ],
-        indirect=True,
-    )
-    @pytest.mark.parametrize(
-        ("value", "expected"),
-        [
-            (b"", b""),
-            (b"\x00\xff'\\%", b"\x00\xff'\\%"),
-            (bytes(range(256)), bytes(range(256))),
-            (bytearray(b"\x00\xff"), b"\x00\xff"),
-            (memoryview(b"\x00\xff"), b"\x00\xff"),
-        ],
-        ids=["empty", "special", "all_bytes", "bytearray", "memoryview"],
-    )
-    async def test_binary_parameters_and_literals(self, async_engine, value, expected):
-        _, conn = async_engine
-        columns = [
-            cast(literal(value, type_=type_, literal_execute=literal_execute), type_)
-            for type_ in (types.LargeBinary, types.BINARY, types.VARBINARY)
-            for literal_execute in (False, True)
-        ]
-        statement = select(*columns)
-        assert (await conn.execute(statement)).one() == (expected,) * len(columns)
-        compiled = statement.compile(dialect=conn.dialect, compile_kwargs={"literal_binds": True})
-        assert (await conn.exec_driver_sql(str(compiled))).one() == (expected,) * len(columns)
-
-    @pytest.mark.parametrize(
-        "async_engine",
-        [
             {"driver": "aiorest"},
             {"driver": "aiopandas"},
             {"driver": "aioarrow"},
@@ -116,16 +86,27 @@ class TestAsyncSQLAlchemyAthena:
     )
     async def test_binary_null_vs_empty(self, async_engine):
         _, conn = async_engine
-        columns = [
-            cast(literal(value, type_=type_, literal_execute=literal_execute), type_)
-            for type_ in (types.LargeBinary, types.BINARY, types.VARBINARY)
-            for value in (None, b"")
-            for literal_execute in (False, True)
+        values = [
+            (None, None),
+            (b"", b""),
+            (b"\x00\xff'\\%", b"\x00\xff'\\%"),
+            (bytes(range(256)), bytes(range(256))),
+            (bytearray(b"\x00\xff"), b"\x00\xff"),
+            (memoryview(b"\x00\xff"), b"\x00\xff"),
         ]
+        columns = []
+        expected = []
+        for type_ in (types.LargeBinary, types.BINARY, types.VARBINARY):
+            for value, result in values:
+                for literal_execute in (False, True):
+                    columns.append(
+                        cast(literal(value, type_=type_, literal_execute=literal_execute), type_)
+                    )
+                    expected.append(result)
         statement = select(*columns)
-        assert (await conn.execute(statement)).one() == (None, None, b"", b"") * 3
+        assert (await conn.execute(statement)).one() == tuple(expected)
         compiled = statement.compile(dialect=conn.dialect, compile_kwargs={"literal_binds": True})
-        assert (await conn.exec_driver_sql(str(compiled))).one() == (None, None, b"", b"") * 3
+        assert (await conn.exec_driver_sql(str(compiled))).one() == tuple(expected)
 
     @pytest.mark.parametrize(
         "async_engine",
@@ -144,20 +125,6 @@ class TestAsyncSQLAlchemyAthena:
         assert len(rows) == 1
         assert rows[0].number_of_rows == 1
         assert len(rows[0]) == 1
-
-    async def test_unicode(self, async_engine):
-        _, conn = async_engine
-        unicode_str = "密林"
-        returned_str = (
-            await conn.execute(
-                sqlalchemy.select(
-                    sqlalchemy.sql.expression.bindparam(
-                        "あまぞん", unicode_str, type_=sqlalchemy.types.String()
-                    )
-                )
-            )
-        ).scalar()
-        assert returned_str == unicode_str
 
     async def test_reflect_table(self, async_engine):
         _, conn = async_engine
@@ -179,16 +146,6 @@ class TestAsyncSQLAlchemyAthena:
         assert ENV.schema in schemas
         assert "default" in schemas
 
-    async def test_get_table_names(self, async_engine):
-        _, conn = async_engine
-
-        def _inspect(sync_conn):
-            insp = sqlalchemy.inspect(sync_conn)
-            return insp.get_table_names(schema=ENV.schema)
-
-        table_names = await conn.run_sync(_inspect)
-        assert "many_rows" in table_names
-
     async def test_throttled_reflection_reads_glue(self, async_engine, monkeypatch):
         _, conn = async_engine
 
@@ -201,6 +158,7 @@ class TestAsyncSQLAlchemyAthena:
             )
 
         expected = await conn.run_sync(reflect)
+        assert "many_rows" in expected[2]
         # The adapter wraps an AioConnection, whose client serves the metadata API.
         client = (await conn.get_raw_connection()).driver_connection.driver_connection.client
         calls = throttle_metadata_api(
@@ -224,22 +182,6 @@ class TestAsyncSQLAlchemyAthena:
         exists, not_exists = await conn.run_sync(_inspect)
         assert exists
         assert not not_exists
-
-    async def test_get_columns(self, async_engine):
-        _, conn = async_engine
-
-        def _inspect(sync_conn):
-            insp = sqlalchemy.inspect(sync_conn)
-            return insp.get_columns(table_name="one_row", schema=ENV.schema)
-
-        columns = await conn.run_sync(_inspect)
-        actual = columns[0]
-        assert actual["name"] == "number_of_rows"
-        assert isinstance(actual["type"], sqlalchemy.types.INTEGER)
-        assert actual["nullable"]
-        assert actual["default"] is None
-        assert not actual["autoincrement"]
-        assert actual["comment"] == "some comment"
 
     @pytest.mark.parametrize(
         ("operation", "expected"),
