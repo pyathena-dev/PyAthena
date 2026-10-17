@@ -12,6 +12,7 @@ import time
 from concurrent.futures import Future, wait
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -20,7 +21,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 from botocore.response import StreamingBody
 from jinja2 import Environment, FileSystemLoader
-from sqlalchemy import types
+from sqlalchemy import create_engine, engine_from_config, types
 
 from pyathena.error import ProgrammingError
 from pyathena.filesystem.s3 import S3FileSystem
@@ -411,6 +412,53 @@ def decorated(impl):
         A TypeDecorator instance whose implementation is ``impl``.
     """
     return type("Decorated", (types.TypeDecorator,), {"impl": impl, "cache_ok": True})()
+
+
+def recording_engine(rowcounts=None, query="", config=None, **kwargs):
+    """Create an engine whose DB API connection records statements offline.
+
+    Args:
+        rowcounts: Row counts reported by successive cursor calls. By default,
+            a call reports the number of rows it inserted.
+        query: The query string of the connection URL, without ``?``.
+        config: String engine options to pass through ``engine_from_config``
+            instead of calling ``create_engine`` directly.
+        **kwargs: Additional keyword arguments for ``create_engine``.
+
+    Returns:
+        A tuple of the engine and the list of recorded
+        ``(method, operation, parameters)`` calls.
+    """
+    calls = []
+    counts = iter(rowcounts or ())
+
+    class RecordingCursor:
+        description = None
+        rowcount = -1
+
+        def execute(self, operation, parameters=None, **_):
+            calls.append(("execute", operation, parameters))
+            rows = sum(1 for key in parameters if key.startswith("id"))
+            self.rowcount = next(counts, rows)
+
+        def executemany(self, operation, seq_of_parameters, **_):
+            calls.append(("executemany", operation, seq_of_parameters))
+            self.rowcount = next(counts, len(seq_of_parameters))
+
+        def close(self):
+            pass
+
+    connection = SimpleNamespace(
+        cursor=RecordingCursor, close=lambda: None, commit=lambda: None, rollback=lambda: None
+    )
+    url = f"awsathena+rest://athena.us-west-2.amazonaws.com/default?{query}"
+    if config is not None:
+        configuration = {"sqlalchemy.url": url}
+        configuration.update({f"sqlalchemy.{key}": value for key, value in config.items()})
+        engine = engine_from_config(configuration, creator=lambda: connection, **kwargs)
+    else:
+        engine = create_engine(url, creator=lambda: connection, **kwargs)
+    return engine, calls
 
 
 def wait_for_spark_session_state(client, session_id, state, timeout=120):
