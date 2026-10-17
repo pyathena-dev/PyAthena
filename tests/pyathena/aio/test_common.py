@@ -29,6 +29,11 @@ _ALL_CURSOR_CLASSES = [
     AioS3FSCursor,
 ]
 
+_WHOLE_RESULT_METHODS = {
+    AioArrowCursor: ("as_arrow", "as_polars"),
+    AioPolarsCursor: ("as_polars", "as_arrow"),
+}
+
 
 def _result_set_closing_after_loop_responds() -> tuple[MagicMock, list[bool]]:
     """Return a result set whose ``close()`` waits for a callback on the running loop.
@@ -103,10 +108,9 @@ class TestWithAsyncFetch:
             with pytest.raises(ProgrammingError, match=r"No result set\."):
                 await fetch()
         # The Arrow and Polars cursors also convert the whole result.
-        for name in ("as_arrow", "as_polars"):
-            if hasattr(cursor, name):
-                with pytest.raises(ProgrammingError):
-                    getattr(cursor, name)()
+        for name in _WHOLE_RESULT_METHODS.get(cursor_class, ()):
+            with pytest.raises(ProgrammingError, match=r"No result set\."):
+                getattr(cursor, name)()
 
     @pytest.mark.parametrize("cursor_class", _ALL_CURSOR_CLASSES)
     async def test_cancel_without_query(self, cursor_class):

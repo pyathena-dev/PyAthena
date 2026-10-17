@@ -80,7 +80,15 @@ START_CALLBACK_CURSORS = [
     AioS3FSCursor,
 ]
 # The native asyncio cursors, whose execute() is a coroutine function.
-AIO_CURSOR_CLASSES = [c for c in CURSOR_CLASSES if c.__module__.startswith("pyathena.aio.")]
+AIO_CURSOR_CLASSES = [
+    AioCursor,
+    AioDictCursor,
+    AioArrowCursor,
+    AioPandasCursor,
+    AioPolarsCursor,
+    AioS3FSCursor,
+    AioSparkCursor,
+]
 # Cursors that pass execute() keyword arguments to a DataFrame reader.
 READER_CURSOR_CLASSES = [PandasCursor, PolarsCursor, AsyncPandasCursor, AsyncPolarsCursor]
 
@@ -240,15 +248,14 @@ async def test_cursor_accepts_connection_callbacks(offline_connection, cursor_cl
 
     with answered_requests(offline_connection.client):
         async with _opened_cursor(offline_connection, cursor_class) as cursor:
-            try:
+            result = None
+            with contextlib.suppress(OperationalError):
                 result = cursor.execute("SELECT 1")
                 if inspect.isawaitable(result):
                     await result
-                else:
-                    # The Async cursors run the execution in a future.
-                    result[1].result(timeout=EVENT_TIMEOUT)
-            except OperationalError:
-                pass
+            if isinstance(result, tuple):
+                # The Async cursors run the execution in a future.
+                result[1].result(timeout=EVENT_TIMEOUT)
 
     assert [execution.state for execution in polled] == ["FAILED"]
     # The Async and Spark cursors do not run on_start_query_execution.

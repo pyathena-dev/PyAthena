@@ -24,6 +24,9 @@ from tests.pyathena.util import interrupt_start_waits
 
 SPARK_CURSOR_CLASSES = [SparkCursor, AsyncSparkCursor, AioSparkCursor]
 SYNC_SPARK_CURSOR_CLASSES = [SparkCursor, AsyncSparkCursor]
+# AsyncSparkCursor inherits _calculate and _start_execution from SparkCursor's bases;
+# the parameter keeps the test IDs.
+CALCULATE_CURSOR_CLASSES = [SparkCursor]
 _TIMEOUT = 10
 
 
@@ -155,13 +158,14 @@ class TestSparkBaseCursor:
             }
         }
 
-        with pytest.raises(OperationalError):
+        with pytest.raises(OperationalError, match="session failure reason"):
             _init_cursor(SparkCursor, connection, session_id="supplied-session")
 
+        connection.client.get_session.assert_called_once_with(SessionId="supplied-session")
         connection.client.start_session.assert_not_called()
         connection.client.terminate_session.assert_not_called()
 
-    @pytest.mark.parametrize("cursor_class", [SparkCursor])
+    @pytest.mark.parametrize("cursor_class", CALCULATE_CURSOR_CLASSES)
     @pytest.mark.parametrize("kill_on_interrupt", [True, False])
     def test_calculate_reuses_generated_token_on_retry(self, cursor_class, kill_on_interrupt):
         cursor = _calculation_cursor(cursor_class, kill_on_interrupt=kill_on_interrupt)
@@ -188,7 +192,7 @@ class TestSparkBaseCursor:
                 thread.join(_TIMEOUT)
                 assert not thread.is_alive()
 
-    @pytest.mark.parametrize("cursor_class", [SparkCursor])
+    @pytest.mark.parametrize("cursor_class", CALCULATE_CURSOR_CLASSES)
     def test_calculate_generates_token_per_call(self, cursor_class):
         cursor = _calculation_cursor(cursor_class)
         client = cursor._connection.client
@@ -202,7 +206,7 @@ class TestSparkBaseCursor:
         ]
         assert tokens[0] != tokens[1]
 
-    @pytest.mark.parametrize("cursor_class", [SparkCursor])
+    @pytest.mark.parametrize("cursor_class", CALCULATE_CURSOR_CLASSES)
     def test_calculate_keeps_caller_token(self, cursor_class):
         cursor = _calculation_cursor(cursor_class)
 
@@ -212,7 +216,7 @@ class TestSparkBaseCursor:
             SessionId="session_id", CodeBlock="code", ClientRequestToken="token"
         )
 
-    @pytest.mark.parametrize("cursor_class", [SparkCursor])
+    @pytest.mark.parametrize("cursor_class", CALCULATE_CURSOR_CLASSES)
     @pytest.mark.parametrize("failing", ["start", "cancel", "wait"])
     def test_calculate_interrupted_while_starting_failure(self, cursor_class, failing):
         cursor = _calculation_cursor(cursor_class)
@@ -246,7 +250,7 @@ class TestSparkBaseCursor:
             cursor._cancel.assert_called_once_with("calculation_id")
             assert cursor.calculation_id == "calculation_id"
 
-    @pytest.mark.parametrize("cursor_class", [SparkCursor])
+    @pytest.mark.parametrize("cursor_class", CALCULATE_CURSOR_CLASSES)
     def test_calculate_second_interrupt_while_starting(self, cursor_class):
         cursor = _calculation_cursor(cursor_class)
         started, release = _block_start(cursor)
@@ -262,7 +266,7 @@ class TestSparkBaseCursor:
         assert exc_info.value.__context__ is raised[0]
         cursor._cancel.assert_not_called()
 
-    @pytest.mark.parametrize("cursor_class", [SparkCursor])
+    @pytest.mark.parametrize("cursor_class", CALCULATE_CURSOR_CLASSES)
     @pytest.mark.parametrize("helper_starts", [False, True])
     def test_calculate_interrupted_before_request_is_sent(self, cursor_class, helper_starts):
         cursor = _calculation_cursor(cursor_class)

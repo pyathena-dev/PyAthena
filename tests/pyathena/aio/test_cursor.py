@@ -18,28 +18,16 @@ from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.util import (
     EVENT_TIMEOUT,
+    FAILED_EXECUTION_RESPONSES,
     QueryExecutionHistory,
     ThrottledOperation,
     answered_requests,
     cache_search_cursor,
+    placeholder_connection,
     succeeded_query_execution_data,
     throttle_metadata_api,
     wait_until,
 )
-
-
-def _offline_connection():
-    """Build a connection whose Athena requests the test answers.
-
-    Returns:
-        The connection, with ``AioCursor`` as its cursor class.
-    """
-    return AioConnection(
-        region_name="us-east-1",
-        s3_staging_dir="s3://bucket/path/",
-        aws_access_key_id="access_key",
-        aws_secret_access_key="secret_key",
-    )
 
 
 def _offline_cursor(kill_on_interrupt, final_state):
@@ -185,7 +173,7 @@ class TestAioCursor:
 
     async def test_execute_internal_options_passthrough(self):
         """The options of execute() reach its Athena requests (no AWS)."""
-        cursor = _offline_connection().cursor()
+        cursor = placeholder_connection(AioConnection).cursor()
         options = ExecuteOptions(
             work_group="test_work_group",
             s3_staging_dir="s3://test-bucket/path/",
@@ -195,8 +183,20 @@ class TestAioCursor:
             result_reuse_minutes=5,
             paramstyle="qmark",
         )
+        # The same query an hour ago, too old for cache_expiration_time to reuse.
+        previous = {
+            **succeeded_query_execution_data(
+                "previous", "SELECT 1", datetime.now(UTC) - timedelta(hours=1), schema="default"
+            ),
+            "QueryExecutionContext": {"Database": "default", "Catalog": "awsdatacatalog"},
+        }
+        responses = {
+            **FAILED_EXECUTION_RESPONSES,
+            "ListQueryExecutions": {"QueryExecutionIds": ["previous"]},
+            "BatchGetQueryExecution": {"QueryExecutions": [previous]},
+        }
         with (
-            answered_requests(cursor.connection.client) as requests,
+            answered_requests(cursor.connection.client, responses) as requests,
             pytest.raises(OperationalError),
         ):
             await cursor.execute("SELECT 1", options=options)
@@ -215,7 +215,7 @@ class TestAioCursor:
 
     async def test_execute_qmark_parameters_skip_cache(self):
         """A qmark query with parameters never searches the cache (no AWS, #941)."""
-        cursor = _offline_connection().cursor()
+        cursor = placeholder_connection(AioConnection).cursor()
         with (
             answered_requests(cursor.connection.client) as requests,
             pytest.raises(OperationalError),
@@ -632,22 +632,28 @@ class TestAioCursor:
         assert len(actual) == 5
 
     async def test_glue_request_runs_off_the_event_loop(self, monkeypatch):
-        """The Glue request of a throttled metadata lookup does not block the loop (no AWS)."""
-        conn = _offline_connection()
+        """The Glue client and request of a throttled lookup do not block the loop (no AWS)."""
+        conn = placeholder_connection(AioConnection)
         throttle_metadata_api(conn.client, monkeypatch)
         threads = []
 
         def get_table(**kwargs):
-            threads.append(threading.get_ident())
+            threads.append(("request", threading.get_ident()))
             return {"Table": {"Name": kwargs["Name"], "StorageDescriptor": {"Columns": []}}}
 
         glue = MagicMock()
         glue.get_table.side_effect = get_table
-        monkeypatch.setattr(conn.session, "client", lambda *args, **kwargs: glue)
+
+        def build_client(service_name, **kwargs):
+            assert service_name == "glue"
+            threads.append(("client", threading.get_ident()))
+            return glue
+
+        monkeypatch.setattr(conn.session, "client", build_client)
 
         assert (await conn.cursor().get_table_metadata("one_row")).name == "one_row"
-        assert len(threads) == 1
-        assert threading.get_ident() not in threads
+        assert sorted(step for step, _ in threads) == ["client", "request"]
+        assert threading.get_ident() not in [thread for _, thread in threads]
 
     async def test_throttled_metadata_reads_glue(self, aio_cursor, monkeypatch):
         def view(metadata):
@@ -667,7 +673,7 @@ class TestAioCursor:
         assert has_schema
         calls = throttle_metadata_api(aio_cursor.connection.client, monkeypatch)
 
-        # The Glue request runs in a worker thread, as the Athena calls do.
+        # Glue reports each table as Athena does, and nothing is retried first.
         assert await read() == expected
         assert sorted(calls) == ["get_table_metadata", "list_databases", "list_table_metadata"]
 

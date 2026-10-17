@@ -382,6 +382,25 @@ COMPLETED_CALCULATION_RESPONSES = {
 }
 
 
+def placeholder_connection(connection_class=Connection):
+    """Build a connection with placeholder settings and credentials.
+
+    Building it sends no request to AWS.
+
+    Args:
+        connection_class: The connection class, such as ``AioConnection``.
+
+    Returns:
+        The connection.
+    """
+    return connection_class(
+        region_name="us-east-1",
+        s3_staging_dir="s3://bucket/path/",
+        aws_access_key_id="access_key",
+        aws_secret_access_key="secret_key",
+    )
+
+
 def offline_spark_cursor(cursor_class):
     """Build a Spark cursor on a connection that sends no request to AWS on its own.
 
@@ -394,12 +413,7 @@ def offline_spark_cursor(cursor_class):
     Returns:
         The cursor.
     """
-    conn = Connection(
-        region_name="us-east-1",
-        s3_staging_dir="s3://bucket/path/",
-        aws_access_key_id="access_key",
-        aws_secret_access_key="secret_key",
-    )
+    conn = placeholder_connection()
     with patch.object(SparkBaseCursor, "_start_session", return_value="session"):
         return conn.cursor(cursor_class, terminate_session_on_close=False)
 
