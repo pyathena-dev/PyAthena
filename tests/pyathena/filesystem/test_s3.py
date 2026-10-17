@@ -6793,7 +6793,9 @@ class TestS3File:
         executor.submit = submit_and_interrupt  # type: ignore[method-assign]
         mode = "ab" if operation == "append" else "wb"
         file = S3File(fs, "s3://bucket/key.txt", mode=mode, block_size=4, executor=executor)
-        started, part_request.side_effect = self._part_held_until_waited_for(file, events)
+        started, waited_for, part_request.side_effect = self._part_held_until_waited_for(
+            file, events
+        )
 
         try:
             with pytest.raises(KeyboardInterrupt):
@@ -6801,6 +6803,7 @@ class TestS3File:
         finally:
             executor.shutdown()
 
+        assert waited_for == [True]
         assert events == ["part 1 ended", "abort"]
         assert file.closed
         assert file.buffer is None
@@ -6995,7 +6998,8 @@ class TestS3File:
     def _part_held_until_waited_for(file, events):
         # A part request that runs until the session waits for its requests,
         # such as the abort for the running parts, so that an abort that does
-        # not wait for it comes first. It records when it ends.
+        # not wait for it comes first. It records when it ends, and whether
+        # the session waited for it, which the test asserts.
         waiting = threading.Event()
 
         class SignallingCondition(threading.Condition):
@@ -7006,16 +7010,17 @@ class TestS3File:
         # The wait of the session; no public seam observes it.
         file._session._changed = SignallingCondition(file._session._lock)
         started = threading.Event()
+        waited_for = []
 
         def request(**kwargs):
             started.set()
             try:
-                waiting.wait(5)
+                waited_for.append(waiting.wait(5))
             finally:
                 events.append(f"part {kwargs['part_number']} ended")
             return SimpleNamespace(etag='"e"', part_number=kwargs["part_number"])
 
-        return started, request
+        return started, waited_for, request
 
     @staticmethod
     def _retrying_part(events):
@@ -7742,8 +7747,8 @@ class TestS3File:
         file = self._make_multipart_write_file(b"x" * 8, autocommit=False)
         events = []
         file.fs._call.side_effect = lambda *args, **kwargs: events.append("abort")
-        started, file.fs.core.upload_part.side_effect = self._part_held_until_waited_for(
-            file, events
+        started, waited_for, file.fs.core.upload_part.side_effect = (
+            self._part_held_until_waited_for(file, events)
         )
         try:
             # The executor of the file has one thread, so the second part
@@ -7754,6 +7759,7 @@ class TestS3File:
         finally:
             file._executor.shutdown()
 
+        assert waited_for == [True]
         assert events == ["part 1 ended", "abort"]
         file.fs.core.upload_part.assert_called_once()
 
