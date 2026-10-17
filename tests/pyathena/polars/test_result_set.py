@@ -708,6 +708,7 @@ class TestAthenaPolarsResultSet:
             pl.Series([datetime(2020, 1, 2, 3, 4, 5, 123456), None], dtype=pl.Datetime("us")),
             check_dtypes=True,
         )
+
     @pytest.mark.parametrize(("chunksize", "kwargs"), _UNLOAD_READS)
     def test_read_parquet_int96(self, tmp_path, caplog, chunksize, kwargs):
         """INT96 timestamps that Athena writes are read at microseconds at any level.
