@@ -3035,7 +3035,8 @@ class S3File(AbstractBufferedFile):
                 self._executor,
                 block_size=block_size,
                 max_workers=max_workers,
-                request_kwargs=target.request_kwargs,
+                # Read at each request, as the attribute may be changed.
+                request_kwargs=self.s3_additional_kwargs,
             )
         super().__init__(
             fs=fs,
@@ -3173,11 +3174,7 @@ class S3File(AbstractBufferedFile):
 
     @property
     def completed_parts(self) -> tuple[S3MultipartUploadPart, ...]:
-        """The parts that the write has uploaded or copied, in part-number order.
-
-        Empty for a file opened for reading, and once the multipart upload
-        has been aborted.
-        """
+        """The uploaded or copied parts in part-number order; empty after an abort."""
         return self._session.completed_parts if self._session is not None else ()
 
     def _initiate_upload(self) -> None:

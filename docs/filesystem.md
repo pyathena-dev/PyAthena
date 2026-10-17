@@ -88,22 +88,23 @@ With the `compression` argument (a codec of fsspec, or `"infer"` from the extens
 the path), `pipe`/`pipe_file` compress the data before uploading it, and the sizes in
 this section apply to the compressed data.
 
-A multipart write keeps at most `max_workers` parts in flight, counting the parts of the
-written data and the parts copied from the existing object in an append, and waits for
-one of them to finish before it submits another. The parts take about `max_workers` ×
-the block size of memory, in addition to the buffered data of the file. If a part has
-failed before the write submits another part, the write raises its error instead of
-uploading the rest of the data, and aborts the multipart upload after the parts being
-uploaded or copied finish. A part that fails after the last write raises its error at
-the next write, when the file is closed, or when the transaction commits, and the
-multipart upload is aborted.
-
-A write that has failed or has been discarded cannot be committed: its `commit()`
-raises `S3MultipartStateError`. Inside a transaction, a write error that the caller
-catches therefore makes the transaction fail when it commits, and fsspec discards the
-files of the transaction that are not committed yet.
+A multipart write of a file returned by `open` keeps at most `max_workers` parts in
+flight, counting the parts of the written data and the parts copied from the existing
+object in an append, and waits for one of them to finish before it submits another. The
+parts take about `max_workers` × the block size of memory, in addition to the buffered
+data of the file. If a part has failed before the write submits another part, the write
+raises its error instead of uploading the rest of the data, and aborts the multipart
+upload after the parts being uploaded or copied finish. A part that fails after the last
+write raises its error at the next write, when the file is closed, or when the
+transaction commits, and the multipart upload is aborted.
 `max_workers` is an argument of `S3FileSystem`, `AioS3FileSystem`, `open`, `put`, and
 `pipe`.
+
+A file returned by `open` whose write or commit has failed, or which has been
+discarded, cannot be committed: its `commit()` raises `S3MultipartStateError`. Inside a
+transaction, a write error that the caller catches therefore makes the transaction fail
+when it commits, and fsspec discards the files of the transaction that are not
+committed yet.
 
 The block size for writing, given by the `block_size` argument of `open` or by the
 filesystem's `default_block_size`, must be between 5 MiB and 5 GiB, inclusive, the part

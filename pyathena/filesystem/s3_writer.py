@@ -363,7 +363,8 @@ class _S3WriteSession:
             max_workers: The number of part requests in flight after which
                 :meth:`ready` waits for one of them to finish.
             request_kwargs: Parameters inherited by each request that accepts
-                them.
+                them. The mapping is read when each request is sent, so later
+                changes to it apply to the requests that follow.
 
         Raises:
             ValueError: If the destination, the block size, or
@@ -375,10 +376,10 @@ class _S3WriteSession:
         self._path = path
         self._executor = executor
         self._max_workers = max_workers
-        self._request_kwargs = dict(request_kwargs or {})
-        self._writer = S3MultipartWriter(
-            core, path, block_size=block_size, request_kwargs=self._request_kwargs
+        self._request_kwargs: Mapping[str, Any] = (
+            request_kwargs if request_kwargs is not None else {}
         )
+        self._writer = S3MultipartWriter(core, path, block_size=block_size)
         self._lock = threading.Lock()
         # Notified whenever a request settles or the state changes.
         self._changed = threading.Condition(self._lock)
@@ -414,10 +415,7 @@ class _S3WriteSession:
 
     @property
     def completed_parts(self) -> tuple[S3MultipartUploadPart, ...]:
-        """The parts that have been uploaded or copied, in part-number order.
-
-        Empty once the multipart upload has been aborted.
-        """
+        """The uploaded or copied parts in part-number order; empty after an abort."""
         with self._lock:
             return tuple(self._parts[number] for number in sorted(self._parts))
 
@@ -465,8 +463,12 @@ class _S3WriteSession:
             self._multipart = True
             self._creation = creation
         try:
-            self._executor.submit_to(creation, self._writer.initiate)
-        except BaseException:
+            self._executor.submit_to(
+                creation, self._writer.initiate, **self._params("create_multipart_upload")
+            )
+        except BaseException as e:
+            # Recorded before the cancellation, which would record its own.
+            self._finish_failed(e)
             # A creation that was not scheduled never runs.
             creation.cancel()
             raise
@@ -501,12 +503,6 @@ class _S3WriteSession:
             S3MultipartStateError: If the write failed earlier, or has been
                 committed or discarded.
         """
-        if self._failure_summary is None and self._state in (
-            _S3WriteState.IDLE,
-            _S3WriteState.CREATING,
-            _S3WriteState.ACTIVE,
-        ):
-            return
         with self._lock:
             self._refuse_unless(
                 _S3WriteState.IDLE,
@@ -528,7 +524,12 @@ class _S3WriteSession:
             S3MultipartStateError: If the upload is not active.
             ValueError: If the part number is not the next one.
         """
-        self._submit(self._writer.upload_part, part_number=part_number, body=body)
+        self._submit(
+            self._writer.upload_part,
+            part_number=part_number,
+            body=body,
+            **self._params("upload_part"),
+        )
 
     def submit_copy(self, part_number: int, source: S3Path, range_: tuple[int, int] | None) -> None:
         """Schedule the copy of a range of an object as a part.
@@ -550,6 +551,7 @@ class _S3WriteSession:
             part_number=part_number,
             source=source,
             range_=range_,
+            **self._params("upload_part_copy"),
         )
 
     def put(self, body: bytes | None) -> S3PutObject:
@@ -568,19 +570,24 @@ class _S3WriteSession:
             S3MultipartStateError: If the write started a multipart upload,
                 failed, or has been discarded.
         """
-        with self._lock:
-            if self._state is _S3WriteState.COMPLETED and not self._multipart:
-                return cast(S3PutObject, self._result)
-            self._refuse_unless(_S3WriteState.IDLE, operation="commit")
-            self._state = _S3WriteState.COMPLETING
+        reserved = False
         try:
+            with self._lock:
+                if self._state is _S3WriteState.COMPLETED and not self._multipart:
+                    return cast(S3PutObject, self._result)
+                self._refuse_unless(_S3WriteState.IDLE, operation="commit")
+                # Set first, so that an interrupt after the state changes
+                # leaves the write failed rather than being committed.
+                reserved = True
+                self._state = _S3WriteState.COMPLETING
             result = self._core.put_object(
                 self._path,
                 body,
-                **self._core.operation_params("put_object", self._request_kwargs),
+                **self._params("put_object"),
             )
         except BaseException as e:
-            self._finish_failed(e)
+            if reserved:
+                self._finish_failed(e)
             raise
         self._finish(result)
         return result
@@ -603,20 +610,24 @@ class _S3WriteSession:
             S3MultipartStateError: If no upload is active, or the write failed
                 earlier or has been discarded.
         """
-        with self._lock:
-            if self._state is _S3WriteState.COMPLETED and self._multipart:
-                return cast(S3CompleteMultipartUpload, self._result)
-            self._refuse_unless(_S3WriteState.ACTIVE, operation="commit")
-            self._state = _S3WriteState.COMPLETING
+        reserved = False
         try:
+            with self._lock:
+                if self._state is _S3WriteState.COMPLETED and self._multipart:
+                    return cast(S3CompleteMultipartUpload, self._result)
+                self._refuse_unless(_S3WriteState.ACTIVE, operation="commit")
+                # See put().
+                reserved = True
+                self._state = _S3WriteState.COMPLETING
             with self._lock:
                 while self._requests and self._failure_summary is None:
                     self._changed.wait()
                 self._refuse_unless(_S3WriteState.COMPLETING, operation="commit")
                 parts = [self._parts[number] for number in sorted(self._parts)]
-            result = self._writer.complete(parts)
+            result = self._writer.complete(parts, **self._params("complete_multipart_upload"))
         except BaseException as e:
-            self._finish_failed(e)
+            if reserved:
+                self._finish_failed(e)
             raise
         self._finish(result)
         return result
@@ -651,14 +662,14 @@ class _S3WriteSession:
                 return
             self._state = _S3WriteState.ABORTING
             waiters = self._take_waiters()
-        self._notify(waiters)
         try:
+            self._notify(waiters)
             self._settle_creation()
             self._cancel_requests()
             with self._lock:
                 while self._requests:
                     self._changed.wait()
-            self._writer.abort()
+            self._writer.abort(**self._params("abort_multipart_upload"))
         except BaseException:
             with self._lock:
                 self._state = _S3WriteState.ABORT_FAILED
@@ -671,6 +682,17 @@ class _S3WriteSession:
             self._failure = None
             self._parts.clear()
             self._changed.notify_all()
+
+    def _params(self, method: str) -> dict[str, Any]:
+        """Select the inherited parameters that an S3 operation accepts.
+
+        Args:
+            method: The name of the client method, such as ``upload_part``.
+
+        Returns:
+            The parameters of the request.
+        """
+        return self._core.operation_params(method, self._request_kwargs)
 
     def _submit(self, fn: Callable[..., S3MultipartUploadPart], **kwargs: Any) -> None:
         """Track a part request and schedule it.
@@ -696,7 +718,9 @@ class _S3WriteSession:
             self._next_part_number += 1
         try:
             self._executor.submit_to(request, fn, **kwargs)
-        except BaseException:
+        except BaseException as e:
+            # Recorded before the cancellation, which would record its own.
+            self._finish_failed(e)
             # A request that was not scheduled never runs. A started one is
             # tracked until it settles.
             request.cancel()
@@ -775,17 +799,28 @@ class _S3WriteSession:
             self._changed.notify_all()
 
     def _finish_failed(self, error: BaseException) -> None:
-        """Record a failed or interrupted commit.
+        """Record an error that an operation of the caller raises.
+
+        Such as a failed or interrupted commit, or a request that could not
+        be scheduled. Only its description is kept, as the caller holds it.
 
         Args:
-            error: The error that the commit raises.
+            error: The error that the operation raises.
         """
         with self._lock:
-            # A failure of a part has been raised by the commit already.
+            # A failure of a request may have been raised by the operation.
             if self._failure_summary is None:
                 self._failure_summary = f"{type(error).__name__}: {error}"
-            self._state = _S3WriteState.FAILED
+            if self._state in (
+                _S3WriteState.IDLE,
+                _S3WriteState.CREATING,
+                _S3WriteState.ACTIVE,
+                _S3WriteState.COMPLETING,
+            ):
+                self._state = _S3WriteState.FAILED
+            waiters = self._take_waiters()
             self._changed.notify_all()
+        self._notify(waiters)
 
     def _refuse_unless(self, *states: _S3WriteState, operation: str) -> None:
         """Raise unless the write is in one of the states without a failure.

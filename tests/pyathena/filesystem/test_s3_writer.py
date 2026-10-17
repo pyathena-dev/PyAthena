@@ -531,6 +531,28 @@ class TestS3WriteSession:
             second.join(5)
         assert requests.calls == [("create",), ("abort",)]
 
+    def test_request_parameters_are_read_at_each_request(self):
+        client = boto3.client(
+            "s3", region_name="us-east-1", aws_access_key_id="dummy", aws_secret_access_key="dummy"
+        )
+        core = S3Core(client, retry_config=RetryConfig(attempt=1))
+        sent = []
+        core.put_object = lambda path, body, **params: sent.append(params)  # type: ignore[method-assign]
+        request_kwargs = {"ContentType": "text/plain"}
+        with S3ThreadPoolExecutor(max_workers=1) as executor:
+            session = _S3WriteSession(
+                core,
+                S3Path("bucket", "key"),
+                executor,
+                block_size=5 * 2**20,
+                max_workers=1,
+                request_kwargs=request_kwargs,
+            )
+            request_kwargs["ContentType"] = "text/csv"
+            request_kwargs["UploadId"] = "not accepted by PutObject"
+            session.put(b"data")
+        assert sent == [{"ContentType": "text/csv"}]
+
     def test_abort_before_start(self):
         session, requests, executor = _make_session()
         with executor:
@@ -565,13 +587,17 @@ class TestS3WriteSession:
             session.abort()
 
     def test_scheduling_failure(self):
-        # A request that the executor refuses is no longer tracked, so the
-        # abort does not wait for it.
+        # A request that the executor refuses fails the write with the error
+        # of the executor, and is no longer tracked, so the abort does not
+        # wait for it.
         session, requests, executor = _make_session()
         with executor:
             _start(session)
         with pytest.raises(RuntimeError, match="shutdown"):
             session.submit_part(1, b"abcd")
+        assert session.state is _S3WriteState.FAILED
+        with pytest.raises(S3MultipartStateError, match="The first failure: RuntimeError"):
+            session.check()
         session.abort()
         assert requests.calls == [("create",), ("abort",)]
         assert session.state is _S3WriteState.ABORTED
