@@ -33,7 +33,8 @@ from pyathena.pandas.result_set import (
     _no_trunc_date,
     _read_csv_with_pyarrow,
 )
-from pyathena.util import RetryConfig
+from pyathena.util import RetryConfig, retry_api_call, stop_retries_on
+from tests.pyathena.util import ThrottledOperation
 
 
 def _typed_values(rows):
@@ -616,6 +617,35 @@ class TestAthenaPandasResultSet:
         result_set._df_iter = PandasDataFrameIterator(pd.DataFrame(), _no_trunc_date)
         result_set.close()
         assert [chunk["i"].tolist() for chunk in reader] == [[1], [2]]
+
+    def test_read_parquet_footers_stopped(self, tmp_path):
+        """GH-1202: the footer reads run in the stop scope of their caller.
+
+        A cancelled ``create_in_thread()`` of AioPandasCursor stops their retries too.
+        """
+        result_set, paths = _unload_result_set(
+            tmp_path, [pa.table({"i": [1]}), pa.table({"i": [2]})], chunksize=1
+        )
+        stop = threading.Event()
+        stop.set()
+        operations = []
+
+        def read_parquet_footer(path):
+            operation = ThrottledOperation()
+            operations.append(operation)
+            retry_api_call(operation, RetryConfig(attempt=3, multiplier=0))
+
+        with (
+            patch.object(AthenaPandasResultSet, "_read_data_manifest", return_value=paths),
+            patch.object(
+                AthenaPandasResultSet, "_read_parquet_footer", side_effect=read_parquet_footer
+            ),
+            stop_retries_on(stop),
+            pytest.raises(OperationalError, match="ThrottlingException"),
+        ):
+            result_set._read_parquet_footers()
+        assert operations
+        assert [operation.calls for operation in operations] == [1] * len(operations)
 
     def test_as_pandas_parquet_chunks_engine(self, tmp_path):
         """Chunks of an UNLOAD result need the pyarrow engine, as the whole result does."""

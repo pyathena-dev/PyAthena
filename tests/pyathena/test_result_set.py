@@ -6,6 +6,7 @@
 # SPDX-License-Identifier: MIT
 import collections
 import sys
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -17,7 +18,12 @@ from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet, WithFetch, WithResultSet
 from pyathena.util import RetryConfig, override
-from tests.pyathena.util import close_during_next_request, get_query_results_responses
+from tests.pyathena.util import (
+    EVENT_TIMEOUT,
+    close_during_next_request,
+    close_during_next_retries,
+    get_query_results_responses,
+)
 
 
 def _row(*values):
@@ -145,6 +151,50 @@ class TestAthenaResultSet:
         assert result_set.rownumber is None
         assert get_query_results.call_count == 2
 
+    @pytest.mark.parametrize("close_in", ["request", "backoff"])
+    @pytest.mark.parametrize(
+        ("method", "expected"), [("fetchone", None), ("fetchmany", []), ("fetchall", [])]
+    )
+    def test_fetch_with_close_during_retries(self, close_in, method, expected):
+        """GH-1202: a close() during the retries of a page request stops them.
+
+        The fetch returns nothing, as after a close(), instead of retrying the
+        throttled request with the policy's attempts and backoff.
+        """
+        result_set = _fetching_result_set(("1", "2"), ("3",))
+        assert result_set.fetchmany(2) == [(1,), (2,)]
+        operation = close_during_next_retries(result_set, close_in)
+        started = time.monotonic()
+        assert getattr(result_set, method)() == expected
+        assert time.monotonic() - started < EVENT_TIMEOUT
+        operation.join()
+        assert result_set.fetchone() is None
+        assert operation.calls == 1
+
+    @pytest.mark.parametrize("close_in", ["request", "backoff"])
+    def test_fetch_all_rows_with_close_during_retries(self, close_in):
+        """GH-1202: a close() during the retries of a whole read stops them.
+
+        ``_fetch_all_rows_as_csv()`` requests the pages in the same way.
+        """
+        result_set = _fetching_result_set(("1", "2"), ("3",))
+        operation = close_during_next_retries(result_set, close_in)
+        started = time.monotonic()
+        with pytest.raises(ProgrammingError, match=r"AthenaResultSet is closed\."):
+            result_set._fetch_all_rows()
+        assert time.monotonic() - started < EVENT_TIMEOUT
+        operation.join()
+        assert operation.calls == 1
+
+    @pytest.mark.parametrize("method", ["_fetch_all_rows", "_iter_all_row_pages"])
+    def test_fetch_all_rows_with_close_during_request(self, method):
+        """A whole read does not return the page of a request that close() interrupts."""
+        result_set = _fetching_result_set(("1", "2"), ("3",))
+        get_query_results = close_during_next_request(result_set)
+        with pytest.raises(ProgrammingError, match=r"AthenaResultSet is closed\."):
+            list(getattr(result_set, method)())
+        assert get_query_results.call_count == 2
+
     def test_get_query_results_after_close(self):
         result_set = _fetching_result_set(("1", "2"), ("3",))
         result_set.close()
@@ -184,6 +234,7 @@ class TestAthenaResultSet:
         them is data. No AWS calls; GetQueryResults is mocked.
         """
         result_set = AthenaResultSet.__new__(AthenaResultSet)  # bypass __init__
+        result_set._connection = MagicMock()
         result_set._query_execution = None
         result_set._metadata = tuple(
             {"Name": name, "Type": "varchar", "Precision": 0, "Scale": 0, "Nullable": "UNKNOWN"}

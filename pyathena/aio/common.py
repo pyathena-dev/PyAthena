@@ -267,6 +267,7 @@ class AioBaseCursor(BaseCursor):
                 self._connection.client.stop_query_execution,
                 config=self._retry_config,
                 logger=_logger,
+                stoppable=False,
                 **request,
             )
         except Exception as e:

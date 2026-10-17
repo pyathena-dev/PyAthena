@@ -24,6 +24,10 @@ Utility Functions
 
 .. autofunction:: pyathena.util.retry_api_call
 
+.. autofunction:: pyathena.util.stop_retries_on
+
+.. autofunction:: pyathena.util.unstoppable_retries
+
 .. autofunction:: pyathena.util.is_retryable_error
 
 .. autofunction:: pyathena.util.parse_output_location

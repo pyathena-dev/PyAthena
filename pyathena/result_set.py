@@ -438,7 +438,8 @@ class AthenaResultSet(CursorIterator):
 
         Raises:
             ProgrammingError: If the query ID is missing, the query has not
-                succeeded, or the result set is closed.
+                succeeded, or the result set is closed, also during the
+                request, which then makes no further attempt.
             OperationalError: If the request fails.
         """
         if self.is_closed:
@@ -449,9 +450,13 @@ class AthenaResultSet(CursorIterator):
                 self.connection.client.get_query_results,
                 config=self._retry_config,
                 logger=_logger,
+                stop_when=lambda: self.is_closed,
                 **request,
             )
         except Exception as e:
+            if self.is_closed:
+                # close() during the request stopped its retries.
+                raise ProgrammingError("AthenaResultSet is closed.") from e
             _logger.exception("Failed to fetch result set.")
             raise OperationalError(*e.args) from e
         else:
@@ -461,19 +466,25 @@ class AthenaResultSet(CursorIterator):
         """Fetch the next rows, if any, into the buffer.
 
         The default result set fetches the next page; it fetches nothing when no
-        page remains, as after ``close()``, and discards the page when ``close()``
-        runs during its request.
+        page remains or the result set is closed. A ``close()`` during the request
+        stops its retries, and the page is discarded.
 
         Raises:
             ProgrammingError: If the next page is requested and the query ID is
-                missing, the query has not succeeded, or the result set is closed.
+                missing or the query has not succeeded.
             OperationalError: If the request fails.
         """
         if not self._next_token:
             return
-        response = self._get_query_results(self._arraysize, self._next_token)
-        rows, self._next_token = self._parse_result_rows(response)
-        self._process_rows(rows)
+        try:
+            response = self._get_query_results(self._arraysize, self._next_token)
+        except ProgrammingError:
+            # Raised for a close() before the request or during its retries.
+            if not self.is_closed:
+                raise
+        else:
+            rows, self._next_token = self._parse_result_rows(response)
+            self._process_rows(rows)
         # close() clears the connection before the rest, so checking after the
         # assignments catches a close() during the request or this method.
         if self.is_closed:
@@ -750,6 +761,11 @@ class AthenaResultSet(CursorIterator):
         Yields:
             The rows of each page and the offset of their first data row, which is 1 when
             the first page starts with the column labels.
+
+        Raises:
+            ProgrammingError: If the result set is closed, also during a request,
+                which then makes no further attempt.
+            OperationalError: If a request fails.
         """
         _logger.warning(
             "output_location is not available (e.g. managed query result storage). "
@@ -761,6 +777,9 @@ class AthenaResultSet(CursorIterator):
         first_page = True
         while True:
             response = self._get_query_results(self.DEFAULT_FETCH_SIZE, next_token)
+            if self.is_closed:
+                # close() ran during the request; its page is not returned.
+                raise ProgrammingError("AthenaResultSet is closed.")
             rows, next_token = self._parse_result_rows(response)
             # Only the first page starts with the column labels.
             offset = 1 if first_page and rows and self._is_first_row_column_labels(rows) else 0
@@ -783,7 +802,9 @@ class AthenaResultSet(CursorIterator):
             List of converted row tuples.
 
         Raises:
-            ProgrammingError: If the metadata is not available.
+            ProgrammingError: If the metadata is not available or the result set
+                is closed.
+            OperationalError: If a request fails.
         """
         metadata = self._metadata
         if metadata is None:
@@ -812,7 +833,9 @@ class AthenaResultSet(CursorIterator):
             The CSV text encoded in UTF-8, or empty bytes when the result has no columns.
 
         Raises:
-            ProgrammingError: If the metadata is not available.
+            ProgrammingError: If the metadata is not available or the result set
+                is closed.
+            OperationalError: If a request fails.
         """
         if self._metadata is None:
             raise ProgrammingError("Metadata is not available.")

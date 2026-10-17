@@ -27,7 +27,7 @@ from pyathena.model import (
     AthenaQueryExecution,
     AthenaSessionStatus,
 )
-from pyathena.util import override, parse_output_location, retry_api_call
+from pyathena.util import override, parse_output_location, retry_api_call, unstoppable_retries
 
 _logger = logging.getLogger(__name__)
 
@@ -287,7 +287,9 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
 
         Session startup calls this synchronously in every cursor variant,
         including those that override ``_terminate_session`` with a coroutine,
-        so subclasses must not override this method with a coroutine.
+        so subclasses must not override this method with a coroutine. The
+        request cleans up, so a stop scope does not stop its retries (see
+        :func:`~pyathena.util.unstoppable_retries`).
 
         Args:
             session_id: The session ID.
@@ -297,12 +299,13 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         """
         request: dict[str, Any] = {"SessionId": session_id}
         try:
-            retry_api_call(
-                self._connection.client.terminate_session,
-                config=self._retry_config,
-                logger=_logger,
-                **request,
-            )
+            with unstoppable_retries():
+                retry_api_call(
+                    self._connection.client.terminate_session,
+                    config=self._retry_config,
+                    logger=_logger,
+                    **request,
+                )
         except Exception as e:
             _logger.exception(f"Failed to terminate session: {session_id}.")
             raise OperationalError(*e.args) from e
@@ -430,6 +433,9 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
     def _cancel(self, query_id: str) -> None:
         """Stop a calculation execution with ``StopCalculationExecution``.
 
+        The request cleans up, so a stop scope does not stop its retries (see
+        :func:`~pyathena.util.unstoppable_retries`).
+
         Args:
             query_id: The calculation execution ID.
 
@@ -438,12 +444,13 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         """
         request: dict[str, Any] = {"CalculationExecutionId": query_id}
         try:
-            retry_api_call(
-                self._connection.client.stop_calculation_execution,
-                config=self._retry_config,
-                logger=_logger,
-                **request,
-            )
+            with unstoppable_retries():
+                retry_api_call(
+                    self._connection.client.stop_calculation_execution,
+                    config=self._retry_config,
+                    logger=_logger,
+                    **request,
+                )
         except Exception as e:
             _logger.exception("Failed to cancel calculation.")
             raise OperationalError(*e.args) from e

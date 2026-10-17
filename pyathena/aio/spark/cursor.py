@@ -278,6 +278,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
                 self._connection.client.stop_calculation_execution,
                 config=self._retry_config,
                 logger=_logger,
+                stoppable=False,
                 **request,
             )
         except Exception as e:
@@ -292,6 +293,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
                 self._connection.client.terminate_session,
                 config=self._retry_config,
                 logger=_logger,
+                stoppable=False,
                 **request,
             )
         except Exception as e:

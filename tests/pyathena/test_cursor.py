@@ -42,7 +42,7 @@ from pyathena.error import (
 )
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaDictResultSet
-from pyathena.util import RetryConfig
+from pyathena.util import RetryConfig, stop_retries_on
 from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.tables import TABLES, VIEWS
@@ -51,6 +51,7 @@ from tests.pyathena.util import (
     CONVERTED_VALUES_QUERY,
     CONVERTED_VALUES_ROW,
     EVENT_TIMEOUT,
+    ThrottledOperation,
     interrupt_start_waits,
     succeeded_query_execution,
     throttle_metadata_api,
@@ -342,6 +343,19 @@ class TestCursor:
                 cursor._find_previous_query_id(query, None, cache_size=100)
                 == "query_id_other_schema"
             )
+
+    def test_cancel_in_stopped_scope(self):
+        """GH-1202: a stop scope does not stop the retries of StopQueryExecution (no AWS)."""
+        cursor = Cursor.__new__(Cursor)  # bypass __init__ to avoid AWS calls
+        cursor._connection = MagicMock()
+        cursor._retry_config = RetryConfig(attempt=3, multiplier=0)
+        operation = ThrottledOperation(failures=2, operation_name="StopQueryExecution")
+        cursor._connection.client.stop_query_execution.side_effect = operation
+        stop = threading.Event()
+        stop.set()
+        with stop_retries_on(stop):
+            cursor._cancel("query_id")
+        assert operation.calls == 3
 
     def test_cache_size_different_catalog(self):
         query = "SELECT * FROM one_row"

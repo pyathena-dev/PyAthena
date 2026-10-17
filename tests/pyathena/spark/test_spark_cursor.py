@@ -6,6 +6,7 @@
 # SPDX-License-Identifier: MIT
 
 import textwrap
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
@@ -15,15 +16,37 @@ import pytest
 from pyathena import NotSupportedError, OperationalError
 from pyathena.model import AthenaCalculationExecutionStatus, AthenaSessionStatus
 from pyathena.spark.cursor import SparkCursor
+from pyathena.util import RetryConfig, stop_retries_on
 from tests import ENV
 from tests.pyathena.util import (
     CANCELABLE_SPARK_JOB,
+    ThrottledOperation,
     wait_for_spark_job,
     wait_for_spark_session_state,
 )
 
 
 class TestSparkCursor:
+    @pytest.mark.parametrize(
+        ("method", "client_method"),
+        [
+            ("_terminate_session_by_id", "terminate_session"),
+            ("_cancel", "stop_calculation_execution"),
+        ],
+    )
+    def test_cleanup_in_stopped_scope(self, method, client_method):
+        """GH-1202: a stop scope does not stop the retries of a cleanup request (no AWS)."""
+        cursor = SparkCursor.__new__(SparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._connection = MagicMock()
+        cursor._retry_config = RetryConfig(attempt=3, multiplier=0)
+        operation = ThrottledOperation(failures=2)
+        getattr(cursor._connection.client, client_method).side_effect = operation
+        stop = threading.Event()
+        stop.set()
+        with stop_retries_on(stop):
+            getattr(cursor, method)("id")
+        assert operation.calls == 3
+
     def test_spark_dataframe(self, spark_cursor):
         spark_cursor.execute(
             textwrap.dedent(

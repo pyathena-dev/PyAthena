@@ -5,6 +5,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+import asyncio
 import io
 import threading
 import time
@@ -25,10 +26,15 @@ from pyathena.filesystem.s3_async import AioS3FileSystem
 from pyathena.filesystem.s3_core import S3Core
 from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaCalculationExecutionStatus, AthenaQueryExecution
+from pyathena.util import RetryConfig
 
 _queries = Environment(
     loader=FileSystemLoader(Path(__file__).parents[1].resolve() / "resources" / "queries")
 )
+
+
+# Seconds a test waits for an event from a helper thread before failing.
+EVENT_TIMEOUT = 10
 
 
 def get_query_results_responses(*pages):
@@ -77,6 +83,125 @@ def close_during_next_request(result_set):
 
     get_query_results.side_effect = close_and_respond
     return get_query_results
+
+
+def throttling_error(operation_name="GetQueryResults"):
+    """Build the ``ThrottlingException`` error of an AWS API operation.
+
+    Args:
+        operation_name: The name of the operation.
+
+    Returns:
+        The error.
+    """
+    return ClientError(
+        {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}}, operation_name
+    )
+
+
+class ThrottledOperation:
+    """A stubbed AWS API operation that throttles, signalling its first attempt.
+
+    The first attempt waits for ``release`` if ``block`` is set, so that a test
+    can stop the retries during the request.
+    """
+
+    def __init__(self, block=False, failures=None, operation_name="GetQueryResults"):
+        """Initialize the operation.
+
+        Args:
+            block: Whether the first attempt waits for ``release``.
+            failures: The number of attempts that throttle before one succeeds;
+                all of them if None.
+            operation_name: The name of the operation in its error.
+        """
+        self.block = block
+        self.failures = failures
+        self.operation_name = operation_name
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.calls = 0
+
+    def __call__(self, *args, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            self.started.set()
+            if self.block:
+                assert self.release.wait(EVENT_TIMEOUT)
+        if self.failures is None or self.calls <= self.failures:
+            raise throttling_error(self.operation_name)
+        return "success"
+
+
+class StoppingOperation:
+    """A stubbed AWS API operation that always throttles and stops its retries.
+
+    The retries are stopped during the first request, or from another thread
+    during the backoff wait after it.
+    """
+
+    def __init__(self, stop, stop_in, operation_name="GetQueryResults"):
+        """Initialize the operation.
+
+        Args:
+            stop: Stops the retries; called once.
+            stop_in: "request" to stop during the first request, "backoff" to
+                stop from another thread 0.1 seconds into the backoff wait.
+            operation_name: The name of the operation in its error.
+        """
+        self.stop = stop
+        self.stop_in = stop_in
+        self.error = throttling_error(operation_name)
+        self.calls = 0
+        self._stopper = threading.Timer(0.1, stop)
+
+    def __call__(self, *args, **kwargs):
+        if self.calls == 0:
+            if self.stop_in == "request":
+                self.stop()
+            else:
+                self._stopper.start()
+        self.calls += 1
+        raise self.error
+
+    def join(self):
+        """Wait for the thread that stops the retries during the backoff wait, if any."""
+        if self._stopper.ident is not None:
+            self._stopper.join()
+
+
+def close_during_next_retries(result_set, close_in):
+    """Throttle the next ``GetQueryResults`` request and close the result set during its retries.
+
+    The retry policy of the result set is replaced with one whose first backoff
+    wait takes at least ``EVENT_TIMEOUT`` seconds, so that a test can tell
+    whether the close ended it.
+
+    Args:
+        result_set: A result set whose ``GetQueryResults`` responses are stubbed.
+        close_in: "request" or "backoff"; see :class:`StoppingOperation`.
+
+    Returns:
+        The stubbed ``GetQueryResults`` operation, whose ``join()`` the caller
+        calls before the end of the test.
+    """
+    result_set._retry_config = RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT)
+    operation = StoppingOperation(result_set.close, close_in)
+    result_set.connection.client.get_query_results.side_effect = operation
+    return operation
+
+
+async def wait_until(predicate, timeout=EVENT_TIMEOUT):
+    """Wait, without blocking the event loop, until a condition holds.
+
+    Args:
+        predicate: The condition.
+        timeout: The longest wait, in seconds.
+    """
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline
+        await asyncio.sleep(0.01)
 
 
 def overlapping_calls(calls, timeout=5):
@@ -312,10 +437,6 @@ def wait_for_spark_session_state(client, session_id, state, timeout=120):
             return
         time.sleep(1)
     raise AssertionError(f"Session {session_id} did not become {state} in {timeout} seconds.")
-
-
-# Seconds a test waits for an event from a helper thread before failing.
-EVENT_TIMEOUT = 10
 
 
 class ImmediateExecutor:
