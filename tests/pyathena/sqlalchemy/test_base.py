@@ -49,7 +49,13 @@ from pyathena.sqlalchemy.types import (
 )
 from pyathena.util import RetryConfig
 from tests.pyathena.conftest import ENV
-from tests.pyathena.util import decorated, recording_engine, throttle_metadata_api
+from tests.pyathena.util import (
+    binary_columns,
+    decorated,
+    executed_sql,
+    recording_engine,
+    throttle_metadata_api,
+)
 
 # Amazon S3 Tables tests need a pre-provisioned table-bucket catalog; the session
 # creates its own namespace in it.
@@ -765,7 +771,6 @@ class TestAthenaDialect:
         assert result.rowcount == 5
 
     def test_insertmanyvalues_formats_rows(self):
-        engine, calls = recording_engine()
         table = Table(
             "t",
             MetaData(),
@@ -798,11 +803,7 @@ class TestAthenaDialect:
             },
         ]
 
-        with engine.connect() as conn:
-            conn.execute(table.insert(), rows)
-
-        ((_, operation, parameters),) = calls
-        assert DefaultParameterFormatter().format(operation, parameters) == (
+        assert executed_sql(table.insert(), rows) == (
             "INSERT INTO t (id, name, data, ts, amount, tags, scores) VALUES "
             "(1, 'it''s 100%', X'0001', TIMESTAMP '2026-01-02 03:04:05.123', DECIMAL '1.5', "
             "CAST(ARRAY[1, null] AS ARRAY(INTEGER)), CAST(ARRAY[1, 2] AS ARRAY(INTEGER))), "
@@ -2344,28 +2345,11 @@ OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat'
     )
     def test_binary_null_vs_empty(self, engine):
         _, conn = engine
-        values = [
-            (None, None),
-            (b"", b""),
-            (b"\x00\xff'\\%", b"\x00\xff'\\%"),
-            (bytes(range(256)), bytes(range(256))),
-            (bytearray(b"\x00\xff"), b"\x00\xff"),
-            (memoryview(b"\x00\xff"), b"\x00\xff"),
-        ]
-        columns = []
-        expected = []
-        for type_ in (types.LargeBinary, types.BINARY, types.VARBINARY):
-            for value, result in values:
-                for literal_execute in (False, True):
-                    literal = expression.literal(
-                        value, type_=type_, literal_execute=literal_execute
-                    )
-                    columns.append(expression.cast(literal, type_))
-                    expected.append(result)
+        columns, expected = binary_columns()
         statement = select(*columns)
-        assert conn.execute(statement).one() == tuple(expected)
+        assert conn.execute(statement).one() == expected
         compiled = statement.compile(dialect=conn.dialect, compile_kwargs={"literal_binds": True})
-        assert conn.exec_driver_sql(str(compiled)).one() == tuple(expected)
+        assert conn.exec_driver_sql(str(compiled)).one() == expected
 
     def test_cast_as_binary(self, engine):
         engine, conn = engine

@@ -7,14 +7,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import sqlalchemy
-from sqlalchemy import cast, literal, select, text, types
+from sqlalchemy import select, text, types
 from sqlalchemy.sql.schema import Column, MetaData, Table
 from sqlalchemy.util.concurrency import greenlet_spawn
 
 from pyathena.aio.sqlalchemy.base import AthenaAioAdaptedCursor
 from pyathena.sqlalchemy.types import AthenaArray
 from tests import ENV
-from tests.pyathena.util import throttle_metadata_api
+from tests.pyathena.util import binary_columns, throttle_metadata_api
 
 
 class TestAthenaAioAdaptedCursor:
@@ -92,27 +92,11 @@ class TestAsyncSQLAlchemyAthena:
     )
     async def test_binary_null_vs_empty(self, async_engine):
         _, conn = async_engine
-        values = [
-            (None, None),
-            (b"", b""),
-            (b"\x00\xff'\\%", b"\x00\xff'\\%"),
-            (bytes(range(256)), bytes(range(256))),
-            (bytearray(b"\x00\xff"), b"\x00\xff"),
-            (memoryview(b"\x00\xff"), b"\x00\xff"),
-        ]
-        columns = []
-        expected = []
-        for type_ in (types.LargeBinary, types.BINARY, types.VARBINARY):
-            for value, result in values:
-                for literal_execute in (False, True):
-                    columns.append(
-                        cast(literal(value, type_=type_, literal_execute=literal_execute), type_)
-                    )
-                    expected.append(result)
+        columns, expected = binary_columns()
         statement = select(*columns)
-        assert (await conn.execute(statement)).one() == tuple(expected)
+        assert (await conn.execute(statement)).one() == expected
         compiled = statement.compile(dialect=conn.dialect, compile_kwargs={"literal_binds": True})
-        assert (await conn.exec_driver_sql(str(compiled))).one() == tuple(expected)
+        assert (await conn.exec_driver_sql(str(compiled))).one() == expected
 
     @pytest.mark.parametrize(
         "async_engine",

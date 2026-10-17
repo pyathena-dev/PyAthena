@@ -40,7 +40,7 @@ from pyathena.sqlalchemy.types import (
     AthenaStruct,
     AthenaTimestamp,
 )
-from tests.pyathena.util import executed_sql, recording_engine
+from tests.pyathena.util import executed_sql, fetched_scalar
 
 
 class Color(Enum):
@@ -234,9 +234,7 @@ class TestAthenaArrayComparator:
         compiled = select(items[1:2]).compile(dialect=AthenaDialect())
         assert "transform(slice(items," in str(compiled)
         # The slice keeps the decorator's result processing.
-        engine, _ = recording_engine(rows=[('{"_pyathena_array":["1","2"]}',)])
-        with engine.connect() as conn:
-            assert conn.execute(select(items[1:2])).scalar_one() == (1, 2)
+        assert fetched_scalar(select(items[1:2]), '{"_pyathena_array":["1","2"]}') == (1, 2)
 
 
 class TestArrayTypeInspector:
@@ -631,21 +629,17 @@ class TestArrayJSONProjection:
         statement = select(literal([10], TupleArray()).label("items"))
         if compound:
             statement = statement.union_all(select(literal([2], TupleArray()).label("items")))
-        compiled = statement.order_by("items").compile(dialect=AthenaDialect())
-        assert "ORDER BY anon_1.items" in str(compiled)
+        statement = statement.order_by("items")
+        assert "ORDER BY anon_1.items" in str(statement.compile(dialect=AthenaDialect()))
         # The rewritten projection keeps the decorator's result processing.
-        engine, _ = recording_engine(rows=[('{"_pyathena_array":["2",null]}',)])
-        with engine.connect() as conn:
-            assert conn.execute(statement.order_by("items")).scalar_one() == (2, None)
+        assert fetched_scalar(statement, '{"_pyathena_array":["2",null]}') == (2, None)
 
     def test_array_variant_keeps_transport_projection(self):
         type_ = String().with_variant(AthenaArray(Integer), "awsathena")
         statement = select(literal([2], type_).label("items")).order_by("items")
         assert "transform(anon_1.items" in str(statement.compile(dialect=AthenaDialect()))
         # The variant's ARRAY type processes the result, not the String type.
-        engine, _ = recording_engine(rows=[('{"_pyathena_array":["2"]}',)])
-        with engine.connect() as conn:
-            assert conn.execute(statement).scalar_one() == [2]
+        assert fetched_scalar(statement, '{"_pyathena_array":["2"]}') == [2]
 
     @pytest.mark.parametrize("compound", [False, True])
     def test_array_ordering_rejects_columns_outside_distinct_or_union(self, compound):

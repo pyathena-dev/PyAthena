@@ -21,7 +21,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 from botocore.response import StreamingBody
 from jinja2 import Environment, FileSystemLoader
-from sqlalchemy import create_engine, engine_from_config, types
+from sqlalchemy import cast, create_engine, engine_from_config, literal, types
 
 from pyathena.error import ProgrammingError
 from pyathena.filesystem.s3 import S3FileSystem
@@ -457,12 +457,6 @@ def recording_engine(rowcounts=None, query="", config=None, rows=None, **kwargs)
         def fetchone(self):
             return next(self._rows, None)
 
-        def fetchmany(self, size=None):
-            return [row for _, row in zip(range(size or 1), self._rows, strict=False)]
-
-        def fetchall(self):
-            return list(self._rows)
-
         def close(self):
             pass
 
@@ -498,6 +492,51 @@ def executed_sql(statement, parameters=None):
         conn.execute(statement, parameters)
     ((_, operation, formatted_parameters),) = calls
     return DefaultParameterFormatter().format(operation, formatted_parameters)
+
+
+def fetched_scalar(statement, value):
+    """Execute a statement through ``recording_engine`` and return its processed result.
+
+    Args:
+        statement: SQLAlchemy statement that selects one column.
+        value: The value that the cursor returns for that column, as Athena returns it.
+
+    Returns:
+        The value after SQLAlchemy's result processing.
+    """
+    engine, _ = recording_engine(rows=[(value,)])
+    with engine.connect() as conn:
+        return conn.execute(statement).scalar_one()
+
+
+BINARY_VALUES = (
+    None,
+    b"",
+    b"\x00\xff'\\%",
+    bytes(range(256)),
+    bytearray(b"\x00\xff"),
+    memoryview(b"\x00\xff"),
+)
+
+
+def binary_columns():
+    """Cast each binary value to each binary type, as a bound and as a literal-execute parameter.
+
+    Returns:
+        A tuple of the column expressions to select and the row that Athena returns for them.
+    """
+    cases = [
+        (type_, value, literal_execute)
+        for type_ in (types.LargeBinary, types.BINARY, types.VARBINARY)
+        for value in BINARY_VALUES
+        for literal_execute in (False, True)
+    ]
+    columns = [
+        cast(literal(value, type_=type_, literal_execute=literal_execute), type_)
+        for type_, value, literal_execute in cases
+    ]
+    expected = tuple(None if value is None else bytes(value) for _, value, _ in cases)
+    return columns, expected
 
 
 def wait_for_spark_session_state(client, session_id, state, timeout=120):
