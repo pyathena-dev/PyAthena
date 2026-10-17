@@ -1038,12 +1038,14 @@ class TestS3Core:
                 "PartNumber": 1,
                 "Body": b"data",
                 "ChecksumAlgorithm": "SHA256",
+                "ChecksumSHA256": "c2hh",
                 "SSECustomerAlgorithm": "AES256",
             },
         )
         with stubber:
             # The identity and the part number override the per-call fields,
-            # and the other parameters are sent.
+            # and the other parameters, such as the checksum of the part, are
+            # sent.
             part = core.upload_part(
                 upload,
                 1,
@@ -1053,6 +1055,7 @@ class TestS3Core:
                 UploadId="other",
                 PartNumber=99,
                 ChecksumAlgorithm="CRC32",
+                ChecksumSHA256="c2hh",
                 SSECustomerAlgorithm="AES256",
             )
         stubber.assert_no_pending_responses()
@@ -1691,14 +1694,21 @@ class TestS3Core:
                 "other",
                 {"versionId": ["v1"]},
             ),
-            (S3Path("bucket", "key"), "put_object", {"Key": "other"}, "other", {}),
+            # A parameter that only PutObject accepts signs the method given.
+            (
+                S3Path("bucket", "key"),
+                "put_object",
+                {"Key": "other", "ContentType": "text/csv"},
+                "other",
+                {},
+            ),
         ],
     )
     def test_generate_presigned_url(self, path, client_method, params, key, query):
         # No request is sent, so the stubber has no responses to return.
         core, stubber = _make_core(request_kwargs={"RequestPayer": "requester"})
         with stubber:
-            url = core.generate_presigned_url(path, client_method, expires_in=3600, **params)
+            url = core.generate_presigned_url(path, client_method, expires_in=60, **params)
         signed = time.time()
         parts = urlsplit(url)
         # The addressing style is botocore's.
@@ -1707,10 +1717,14 @@ class TestS3Core:
         signed_query = parse_qs(parts.query)
         # The expiry, in the fields of the client's signature version.
         if "X-Amz-Expires" in signed_query:
-            assert signed_query["X-Amz-Expires"] == ["3600"]
+            assert signed_query["X-Amz-Expires"] == ["60"]
         else:
             expires = int(signed_query["Expires"][0])
-            assert signed + 3600 - 60 < expires <= signed + 3600
+            assert signed + 60 - 30 < expires <= signed + 60
+        # SigV2 also signs the content type in the query.
+        assert signed_query.pop("content-type", [params.get("ContentType")]) == [
+            params.get("ContentType")
+        ]
         signature_fields = {"AWSAccessKeyId", "Signature", "Expires"}
         signed_query = {
             k: v

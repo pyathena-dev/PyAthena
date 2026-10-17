@@ -189,6 +189,21 @@ class TestS3AioThreadPool:
 
         assert events == (["pending finished"] if shielded else [])
 
+    def test_shutdown(self):
+        # The calls submitted before the shutdown still run.
+        events = []
+        release = threading.Event()
+        pool = S3AioThreadPool(1)
+        pool.submit(release.wait, EVENT_TIMEOUT)
+        pending = pool.submit(events.append, "pending finished")
+        pool.shutdown(wait=False)
+        with pytest.raises(RuntimeError, match="after shutdown"):
+            pool.submit(sum, [1, 2])
+        release.set()
+        pending.result(timeout=EVENT_TIMEOUT)
+
+        assert events == ["pending finished"]
+
     @pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork() is not available.")
     @pytest.mark.filterwarnings("ignore:.*fork\\(\\) may lead to deadlocks:DeprecationWarning")
     def test_fork(self):

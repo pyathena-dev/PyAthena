@@ -1551,6 +1551,81 @@ class TestAioS3FileSystem:
         for fs in (fs1, fs2, fs3):
             assert fs._sync_fs not in S3FileSystem._cache.values()
 
+    @pytest.mark.parametrize(
+        ("algorithm", "checksum_type"),
+        [(None, None), ("SHA256", None), ("CRC32", None), ("CRC32", "FULL_OBJECT")],
+    )
+    @pytest.mark.asyncio
+    async def test_multipart_copy_uses_creation_algorithm(self, algorithm, checksum_type):
+        fs = AioS3FileSystem(
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            max_workers=1,
+            skip_instance_cache=True,
+        )
+        block_size = 5 * 2**30
+        size = 2 * block_size
+        checksum_kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
+        if checksum_type:
+            checksum_kwargs["ChecksumType"] = checksum_type
+        expected_parts = []
+        with Stubber(fs.core.client) as stubber:
+            stubber.add_response(
+                "head_object", {"ContentLength": size}, {"Bucket": "bucket", "Key": "src"}
+            )
+            stubber.add_response(
+                "create_multipart_upload",
+                {"Bucket": "bucket", "Key": "dst", "UploadId": "u", **checksum_kwargs},
+                {"Bucket": "bucket", "Key": "dst", **checksum_kwargs},
+            )
+            for number, range_ in (
+                (1, f"bytes=0-{block_size - 1}"),
+                (2, f"bytes={block_size}-{size - 1}"),
+            ):
+                result = {"ETag": f'"p{number}"', f"Checksum{algorithm or 'CRC32'}": "checksum"}
+                stubber.add_response(
+                    "upload_part_copy",
+                    {"CopyPartResult": result},
+                    {
+                        "Bucket": "bucket",
+                        "Key": "dst",
+                        "UploadId": "u",
+                        "PartNumber": number,
+                        "CopySource": {"Bucket": "bucket", "Key": "src"},
+                        "CopySourceRange": range_,
+                    },
+                )
+                expected_parts.append(
+                    {
+                        "ETag": result["ETag"],
+                        "PartNumber": number,
+                        **({f"Checksum{algorithm}": "checksum"} if algorithm else {}),
+                    }
+                )
+            stubber.add_response(
+                "complete_multipart_upload",
+                {"ETag": '"done"'},
+                {
+                    "Bucket": "bucket",
+                    "Key": "dst",
+                    "UploadId": "u",
+                    "MultipartUpload": {"Parts": expected_parts},
+                    **({"ChecksumType": checksum_type} if checksum_type else {}),
+                },
+            )
+            kwargs = {
+                "source": S3Path("bucket", "src"),
+                "destination": S3Path("bucket", "dst"),
+                "block_size": block_size,
+                "MetadataDirective": "REPLACE",
+                "TaggingDirective": "REPLACE",
+                "AnnotationDirective": "EXCLUDE",
+                **checksum_kwargs,
+            }
+            await fs._copy_object_with_multipart_upload(**kwargs)
+            stubber.assert_no_pending_responses()
+
     @pytest.fixture(scope="class")
     def fs(self):
         return AioS3FileSystem(connection=connect())
@@ -2569,14 +2644,16 @@ class TestAioS3StreamedFile:
     @pytest.mark.asyncio
     async def test_cancelled_read_frees_ranges(self, fs):
         # GH-1186: a cancelled parallel read cancels the reads that have not
-        # finished and frees the data of the others, also while the
-        # cancellation is held, as a failed read does.
+        # finished, which stops their retries, and frees the data of the
+        # others, also while the cancellation is held, as a failed read does.
         block_size = 2**10
         loop = asyncio.get_running_loop()
         read = []
         all_read = threading.Barrier(4, timeout=EVENT_TIMEOUT)
         held = threading.Event()
-        release = threading.Event()
+        # The held range throttles and would retry after EVENT_TIMEOUT.
+        operation = ThrottledOperation(failures=1)
+        throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
 
         async def others_done():
             def running_reads():
@@ -2596,11 +2673,12 @@ class TestAioS3StreamedFile:
             read.append(weakref.ref(data))
             all_read.wait()
             if range_[0] == 0:
-                # Held until the read is cancelled, once the tasks of the
+                # Retrying when the read is cancelled, once the tasks of the
                 # other ranges have taken their results.
                 asyncio.run_coroutine_threadsafe(others_done(), loop).result(EVENT_TIMEOUT)
                 held.set()
-                assert release.wait(EVENT_TIMEOUT)
+                with contextlib.suppress(Exception):
+                    throttled()
             return data
 
         fs.core.get_object = mock.MagicMock(side_effect=get_object)
@@ -2615,15 +2693,16 @@ class TestAioS3StreamedFile:
 
         f = await fs.open_async("s3://bucket/key", "rb", block_size=block_size, max_workers=4)
         task = asyncio.ensure_future(f.read())
-        try:
-            assert await asyncio.to_thread(held.wait, EVENT_TIMEOUT)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError) as info_:
-                await task
-        finally:
-            release.set()
+        assert await asyncio.to_thread(held.wait, EVENT_TIMEOUT)
+        started = time.monotonic()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError) as info_:
+            await task
         await f.close()
         await asyncio.to_thread(f._pool.shutdown, True)
+        # The retries of the held range stopped.
+        assert time.monotonic() - started < EVENT_TIMEOUT
+        assert operation.calls == 1
         for _ in range(3):
             await asyncio.sleep(0)
         assert len(read) == 4

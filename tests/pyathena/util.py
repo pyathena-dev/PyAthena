@@ -222,9 +222,7 @@ def overlapping_calls(calls, timeout=5):
             state["active"] += 1
             state["peak"] = max(state["peak"], state["active"])
             condition.notify_all()
-            # The peak, unlike the active calls, stays reached when the last
-            # call returns before the others wake up.
-            condition.wait_for(lambda: state["peak"] >= calls, timeout=timeout)
+            condition.wait_for(lambda: state["active"] >= calls, timeout=timeout)
         with condition:
             state["active"] -= 1
 
