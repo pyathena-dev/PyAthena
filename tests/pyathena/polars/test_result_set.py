@@ -7,6 +7,7 @@
 
 import inspect
 import threading
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
@@ -25,6 +26,12 @@ from pyathena.polars.result_set import AthenaPolarsResultSet, PolarsDataFrameIte
 from pyathena.util import RetryConfig
 
 _ROWS_BEFORE_FAILURE = 300_000
+# A timestamp column of a CSV result file with 12 fractional digits and NULL, as text and
+# as read into a Datetime column with the default time unit.
+_TIMESTAMP_TEXTS = pl.Series(["2020-01-02 03:04:05.123456789012", None], dtype=pl.String)
+_TRUNCATED_TIMESTAMPS = pl.Series(
+    [datetime(2020, 1, 2, 3, 4, 5, 123456), None], dtype=pl.Datetime("us")
+)
 
 
 def _chunked_result_set() -> AthenaPolarsResultSet:
@@ -40,6 +47,18 @@ def _chunked_result_set() -> AthenaPolarsResultSet:
     result_set._metadata = None
     result_set._connection = MagicMock()
     return result_set
+
+
+def _read_all(result: pl.DataFrame | Iterator[pl.DataFrame]) -> pl.DataFrame:
+    """Read the result of a whole read or a chunk reader into one DataFrame.
+
+    Args:
+        result: A DataFrame, or an iterator of DataFrame chunks.
+
+    Returns:
+        The DataFrame, or the chunks concatenated.
+    """
+    return result if isinstance(result, pl.DataFrame) else pl.concat(list(result))
 
 
 def _fetching_result_set(chunks, names, arraysize, converters=None) -> AthenaPolarsResultSet:
@@ -411,8 +430,7 @@ class TestAthenaPolarsResultSet:
             patch.object(AthenaPolarsResultSet, "_get_parquet_storage_options", return_value={}),
             patch.object(AthenaPolarsResultSet, "_is_csv_readable", return_value=True),
         ):
-            result = getattr(result_set, reader)()
-            df = result if isinstance(result, pl.DataFrame) else pl.concat(list(result))
+            df = _read_all(getattr(result_set, reader)())
         assert df.to_dict(as_series=False) == {first: ["1", "2"], second: ["x", "y"]}
 
     @pytest.mark.parametrize("reader", ["_read_csv", "_iter_csv_chunks"])
@@ -443,8 +461,7 @@ class TestAthenaPolarsResultSet:
             patch.object(AthenaPolarsResultSet, "_get_parquet_storage_options", return_value={}),
             patch.object(AthenaPolarsResultSet, "_is_csv_readable", return_value=True),
         ):
-            result = getattr(result_set, reader)()
-            df = result if isinstance(result, pl.DataFrame) else pl.concat(list(result))
+            df = _read_all(getattr(result_set, reader)())
         assert df.to_dict(as_series=False) == {"z": ["001"], "w": ["x"]}
 
     @pytest.mark.parametrize(
@@ -521,22 +538,43 @@ class TestAthenaPolarsResultSet:
         assert df.to_dict(as_series=False) == {"a": [1]}
 
     @pytest.mark.parametrize(
-        ("kwargs", "expected"),
+        ("reader", "kwargs", "expected"),
         [
-            ({}, {"t": [datetime(2020, 1, 2, 3, 4, 5, 123456), None]}),
-            ({"columns": ["v"]}, {}),
-            ({"new_columns": ["t2", "v2"]}, {"t2": [datetime(2020, 1, 2, 3, 4, 5, 123456), None]}),
-            ({"with_column_names": lambda names: [n.upper() for n in names]}, OperationalError),
+            ("_read_csv", {}, {"t": _TRUNCATED_TIMESTAMPS}),
+            ("_iter_csv_chunks", {}, {"t": _TRUNCATED_TIMESTAMPS}),
+            ("_read_csv", {"columns": ["v"]}, {}),
+            ("_read_csv", {"new_columns": ["t2", "v2"]}, {"t2": _TRUNCATED_TIMESTAMPS}),
+            ("_iter_csv_chunks", {"new_columns": ["t2", "v2"]}, {"t2": _TRUNCATED_TIMESTAMPS}),
+            ("_read_csv", {"schema": {"t": pl.String, "v": pl.String}}, {"t": _TIMESTAMP_TEXTS}),
+            (
+                "_iter_csv_chunks",
+                {"schema": {"t": pl.String, "v": pl.String}},
+                {"t": _TIMESTAMP_TEXTS},
+            ),
+            (
+                "_read_csv",
+                {"with_column_names": lambda names: [n.upper() for n in names]},
+                OperationalError,
+            ),
+            (
+                "_iter_csv_chunks",
+                {"with_column_names": lambda names: [n.upper() for n in names]},
+                OperationalError,
+            ),
         ],
     )
-    def test_read_csv_truncates_timestamps(self, kwargs, expected):
-        """Timestamps that fail to parse are read again as text and truncated.
+    def test_read_csv_truncates_timestamps(self, tmp_path, reader, kwargs, expected):
+        """Timestamps are read as text and truncated to the time unit.
+
+        A whole read does so when parsing them fails; a chunked read always does.
 
         With ``with_column_names`` given to execute(), Polars renames the columns as it
-        reads them, so they are not, and the read fails as before. No AWS calls; the
-        GetQueryResults rows are mocked.
+        reads them, so they are not read as text, and the read fails. With ``schema``,
+        the columns have the types it gives. ``scan_csv()`` does not take ``columns``.
         """
-        result_set = AthenaPolarsResultSet.__new__(AthenaPolarsResultSet)  # bypass __init__
+        path = tmp_path / "result.csv"
+        path.write_bytes(b'"t","v"\n"2020-01-02 03:04:05.123456789012","x"\n,"y"\n')
+        result_set = _chunked_result_set()
         result_set._query_execution = None
         result_set._converter = DefaultPolarsTypeConverter()
         result_set._kwargs = kwargs
@@ -544,26 +582,58 @@ class TestAthenaPolarsResultSet:
             {"Name": n, "Type": t, "Precision": 3, "Scale": 0, "Nullable": "UNKNOWN"}
             for n, t in (("t", "timestamp"), ("v", "varchar"))
         )
-        data = b'"t","v"\n"2020-01-02 03:04:05.123456789012","x"\n,"y"\n'
         with (
-            patch.object(AthenaPolarsResultSet, "_fetch_all_rows_as_csv", return_value=data),
+            patch.object(
+                AthenaPolarsResultSet,
+                "output_location",
+                new_callable=PropertyMock,
+                return_value=str(path),
+            ),
             patch.object(
                 AthenaPolarsResultSet,
                 "_csv_storage_options",
                 new_callable=PropertyMock,
                 return_value={},
             ),
+            patch.object(AthenaPolarsResultSet, "_get_parquet_storage_options", return_value={}),
+            patch.object(AthenaPolarsResultSet, "_is_csv_readable", return_value=True),
         ):
             if expected is OperationalError:
                 with pytest.raises(OperationalError):
-                    result_set._read_csv()
+                    _read_all(getattr(result_set, reader)())
                 return
-            df = result_set._read_csv()
+            df = _read_all(getattr(result_set, reader)())
         for name, values in expected.items():
-            assert df.schema[name] == pl.Datetime("us")
-            assert df[name].to_list() == values
+            assert df[name].equals(values, check_dtypes=True)
         if not expected:
             assert df.columns == ["v"]
+
+    def test_iter_csv_chunks_ignore_errors(self, tmp_path):
+        """With ignore_errors, timestamp text that is not a timestamp becomes null in chunks."""
+        path = tmp_path / "result.csv"
+        path.write_bytes(b'"t"\n"2020-01-02 03:04:05.123456789012"\n"invalid"\n')
+        result_set = _chunked_result_set()
+        result_set._query_execution = None
+        result_set._converter = DefaultPolarsTypeConverter()
+        result_set._kwargs = {"ignore_errors": True}
+        result_set._metadata = (
+            {"Name": "t", "Type": "timestamp", "Precision": 3, "Scale": 0, "Nullable": "UNKNOWN"},
+        )
+        with (
+            patch.object(
+                AthenaPolarsResultSet,
+                "output_location",
+                new_callable=PropertyMock,
+                return_value=str(path),
+            ),
+            patch.object(AthenaPolarsResultSet, "_get_parquet_storage_options", return_value={}),
+            patch.object(AthenaPolarsResultSet, "_is_csv_readable", return_value=True),
+        ):
+            df = _read_all(result_set._iter_csv_chunks())
+        assert df["t"].equals(
+            pl.Series([datetime(2020, 1, 2, 3, 4, 5, 123456), None], dtype=pl.Datetime("us")),
+            check_dtypes=True,
+        )
 
 
 class TestPolarsDataFrameIterator:
