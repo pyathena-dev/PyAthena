@@ -26,6 +26,7 @@ from pyathena.error import DatabaseError, DataError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
 from tests import ENV
+from tests.pyathena import temporal
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
     AMBIGUOUS_TIME_ZONE_QUERY,
@@ -149,6 +150,41 @@ class TestArrowCursor:
         assert arrow_cursor.arraysize == 10000
         with pytest.raises(ProgrammingError):
             arrow_cursor.arraysize = -1
+
+    @pytest.mark.parametrize(
+        ("arrow_cursor", "unload"),
+        [
+            pytest.param(
+                {"cursor_kwargs": {"unload": False}},
+                False,
+                marks=pytest.mark.xfail(strict=True, reason="#1216"),
+            ),
+            pytest.param(
+                {"cursor_kwargs": {"unload": True}},
+                True,
+                marks=pytest.mark.xfail(strict=True, reason="#1214"),
+            ),
+        ],
+        indirect=["arrow_cursor"],
+        ids=["csv", "unload"],
+    )
+    def test_temporal_types(self, arrow_cursor, unload):
+        """Temporal values convert as the contract of #1212 defines.
+
+        Types that Arrow cannot represent stay Athena's text.
+        """
+        types = {"timestamp": pa.timestamp("us"), "date": pa.date32()}
+        columns = temporal.columns(unload)
+        table = arrow_cursor.execute(temporal.query(unload)).as_arrow()
+        assert {field.name: field.type for field in table.schema} == {
+            c.name: types.get(c.athena_type, pa.string()) for c in columns
+        }
+        assert [table.column(c.name)[0].as_py() for c in columns] == [
+            c.value if c.athena_type in types else c.text for c in columns
+        ]
+        row = arrow_cursor.fetchone()
+        assert row == temporal.fetched_row(unload)
+        assert temporal.zones(row) == temporal.zones(temporal.fetched_row(unload))
 
     def test_complex(self, arrow_cursor):
         arrow_cursor.execute(

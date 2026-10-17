@@ -26,6 +26,7 @@ from pyathena.pandas.result_set import (
 )
 from pyathena.util import RetryConfig
 from tests import ENV
+from tests.pyathena import temporal
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
     AMBIGUOUS_TIME_ZONE_QUERY,
@@ -40,6 +41,17 @@ def _pandas_converter_without_bigint_dtype():
     converter = DefaultPandasTypeConverter()
     del converter.types["bigint"]
     return converter
+
+
+def _pandas_value(column: temporal.Column):
+    """The value that a DataFrame holds for a temporal column."""
+    if column.value is None:
+        return None
+    if column.athena_type == "timestamp with time zone":
+        return pd.Timestamp(column.value).tz_convert("UTC")
+    if column.athena_type in ("timestamp", "date"):
+        return pd.Timestamp(column.value)
+    return column.value
 
 
 class TestPandasCursor:
@@ -508,6 +520,47 @@ class TestPandasCursor:
         assert pandas_cursor.arraysize == 10000
         with pytest.raises(ProgrammingError):
             pandas_cursor.arraysize = -1
+
+    @pytest.mark.parametrize(
+        ("pandas_cursor", "unload"),
+        [
+            pytest.param(
+                {"cursor_kwargs": {"unload": False}},
+                False,
+                marks=pytest.mark.xfail(strict=True, reason="#1219"),
+            ),
+            pytest.param(
+                {"cursor_kwargs": {"unload": True}},
+                True,
+                marks=pytest.mark.xfail(strict=True, reason="#1214, #1219"),
+            ),
+        ],
+        indirect=["pandas_cursor"],
+        ids=["csv", "unload"],
+    )
+    def test_temporal_types(self, pandas_cursor, unload):
+        """Temporal values convert as the contract of #1212 defines.
+
+        Aware values are compared by instant, as the DataFrame holds them in UTC.
+        """
+        dtypes = {
+            "timestamp": "datetime64[us]",
+            "date": "datetime64[us]",
+            "timestamp with time zone": "datetime64[us, UTC]",
+            "time": "object",
+            "time with time zone": "object",
+        }
+        columns = temporal.columns(unload)
+        df = pandas_cursor.execute(temporal.query(unload)).as_pandas()
+        assert {name: str(dtype) for name, dtype in df.dtypes.items()} == {
+            c.name: dtypes[c.athena_type] for c in columns
+        }
+        assert [None if pd.isna(v) else v for v in df.iloc[0]] == [
+            _pandas_value(c) for c in columns
+        ]
+        # The fetch methods read the same DataFrame, whose aware values are in UTC.
+        row = pandas_cursor.fetchone()
+        assert row == temporal.fetched_row(unload)
 
     @pytest.mark.parametrize(
         ("pandas_cursor", "chunksize"),

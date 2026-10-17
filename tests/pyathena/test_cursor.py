@@ -44,6 +44,7 @@ from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaDictResultSet
 from pyathena.util import RetryConfig, stop_retries_on
 from tests import ENV
+from tests.pyathena import temporal
 from tests.pyathena.conftest import connect
 from tests.pyathena.tables import TABLES, VIEWS
 from tests.pyathena.util import (
@@ -770,6 +771,12 @@ class TestCursor:
         assert cursor.kms_key is None
         assert cursor.selected_engine_version is None
         assert cursor.effective_engine_version is None
+
+    def test_temporal_types(self, cursor):
+        """Temporal values convert as the contract of #1212 defines."""
+        row = cursor.execute(temporal.query()).fetchone()
+        assert row == temporal.fetched_row()
+        assert temporal.zones(row) == temporal.zones(temporal.fetched_row())
 
     def test_complex(self, cursor):
         cursor.execute(
