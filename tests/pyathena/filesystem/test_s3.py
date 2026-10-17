@@ -6993,12 +6993,11 @@ class TestS3File:
 
     @staticmethod
     def _retrying_part(events):
-        # A part request that throttles and waits at least a minute to retry,
-        # until the abort stops its retries (GH-1203), so that it is still
-        # running when the test needs it to be. It records when it ends, so
-        # that a test can order it with the abort.
+        # A part request that throttles and then waits an hour to retry, so
+        # that it ends only when the abort stops its retries (GH-1203). It
+        # records when it ends, so that a test can order it with the abort.
         operation = ThrottledOperation(operation_name="UploadPart")
-        throttled = retried(operation, RetryConfig(attempt=2, multiplier=60, max_delay=120))
+        throttled = retried(operation, RetryConfig(attempt=2, multiplier=3600, max_delay=3600))
 
         def request(**kwargs):
             try:

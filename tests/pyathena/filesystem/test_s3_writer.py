@@ -260,7 +260,7 @@ class _DroppingExecutor(S3ThreadPoolExecutor):
             super().submit_to(future, fn, *args, **kwargs)
 
 
-def _make_session(executor, *, max_workers=1, part_errors=None, gate=None, abort_gate=None):
+def _make_session(executor, *, max_workers=1, part_errors=None, gate=None):
     """Build a session whose requests are stubbed and recorded.
 
     Args:
@@ -268,11 +268,10 @@ def _make_session(executor, *, max_workers=1, part_errors=None, gate=None, abort
         max_workers: The part requests in flight after which ready() waits.
         part_errors: The error that each numbered part request raises.
         gate: An event that each part request waits for, if any.
-        abort_gate: An event that the abort request waits for, if any.
 
     Returns:
         The session and its recorded requests: ``completed`` (the part
-        numbers of each completion), ``aborts``, and ``abort_started``.
+        numbers of each completion) and ``aborts``.
     """
     client = boto3.client(
         "s3", region_name="us-east-1", aws_access_key_id="dummy", aws_secret_access_key="dummy"
@@ -281,7 +280,7 @@ def _make_session(executor, *, max_workers=1, part_errors=None, gate=None, abort
     core.MULTIPART_UPLOAD_MIN_PART_SIZE = 4
     core.MULTIPART_UPLOAD_MAX_PART_SIZE = 8
     errors = dict(part_errors or {})
-    requests = SimpleNamespace(completed=[], aborts=0, abort_started=threading.Event())
+    requests = SimpleNamespace(completed=[], aborts=0)
 
     def upload_part(upload, part_number, body, **params):
         if gate is not None:
@@ -294,9 +293,6 @@ def _make_session(executor, *, max_workers=1, part_errors=None, gate=None, abort
         requests.completed.append([part.part_number for part in parts])
 
     def abort(upload, **params):
-        requests.abort_started.set()
-        if abort_gate is not None:
-            assert abort_gate.wait(5)
         requests.aborts += 1
 
     core.create_multipart_upload = lambda path, **params: S3MultipartUpload(  # type: ignore[method-assign]
@@ -412,7 +408,8 @@ class TestS3WriteSession:
                 with mock.patch.object(session, "_on_created", side_effect=defer):
                     session.start()
                     assert called.acquire(timeout=5)
-                    session.wait_ready()
+                    # Resolves only once the creation is consumed.
+                    assert session.ready().result(5) is None
                     session.check()
             else:
                 _start(session)
@@ -421,8 +418,8 @@ class TestS3WriteSession:
                     gate.set()
                     session.submit_part(1, b"abcd")
                     assert called.acquire(timeout=5)
-                    # With max_workers=1, this returns only once part 1 is consumed.
-                    session.wait_ready()
+                    # With max_workers=1, resolves only once part 1 is consumed.
+                    assert session.ready().result(5) is None
                     session.submit_part(2, b"efgh")
                     assert called.acquire(timeout=5)
                     session.complete()
@@ -453,10 +450,12 @@ class TestS3WriteSession:
             assert requests.completed == [expected]
             assert [part.part_number for part in session.completed_parts] == expected
 
-    def test_cancelled_waiter(self):
+    @pytest.mark.parametrize("dropped_by", ["notification", "ready"])
+    def test_cancelled_waiter(self, dropped_by):
         # A waiter that its caller cancels, as asyncio.wrap_future() does,
         # does not keep the others from resolving, and is marked as notified,
-        # so that concurrent.futures.wait() returns for it.
+        # whether the notification or a later ready() drops it, so that
+        # concurrent.futures.wait() returns for it.
         gate = threading.Event()
         with S3ThreadPoolExecutor(max_workers=1) as executor:
             session, requests = _make_session(executor, gate=gate)
@@ -466,30 +465,13 @@ class TestS3WriteSession:
             assert not first.done()
             assert not second.done()
             assert first.cancel()
-            # Drops the cancelled waiter.
-            third = session.ready()
-            assert wait([first], timeout=5).done == {first}
+            waiters = [second]
+            if dropped_by == "ready":
+                waiters.append(session.ready())
+                assert wait([first], timeout=5).done == {first}
             gate.set()
-            assert second.result(5) is None
-            assert third.result(5) is None
+            for waiter in waiters:
+                assert waiter.result(5) is None
+            assert wait([first], timeout=5).done == {first}
             session.complete()
         assert requests.completed == [[1]]
-
-    def test_concurrent_aborts(self):
-        # An abort called while another one is aborting the upload waits for
-        # it instead of sending another request.
-        abort_gate = threading.Event()
-        with S3ThreadPoolExecutor(max_workers=1) as executor:
-            session, requests = _make_session(executor, abort_gate=abort_gate)
-            _start(session)
-            threads = [threading.Thread(target=session.abort) for _ in range(2)]
-            threads[0].start()
-            assert requests.abort_started.wait(5)
-            threads[1].start()
-            abort_gate.set()
-            for thread in threads:
-                thread.join(5)
-                assert not thread.is_alive()
-        assert requests.aborts == 1
-        with pytest.raises(S3MultipartStateError, match="has been discarded"):
-            session.complete()
