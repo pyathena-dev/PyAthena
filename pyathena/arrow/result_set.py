@@ -379,6 +379,14 @@ class AthenaArrowResultSet(AthenaResultSet):
             raise OperationalError(*e.args) from e
 
     def _read_parquet(self) -> Table:
+        """Read the UNLOAD result, with timestamps at microseconds.
+
+        Returns:
+            The table of the result, or an empty table without data files.
+
+        Raises:
+            OperationalError: If reading the Parquet files fails.
+        """
         import pyarrow as pa
         from pyarrow import parquet
 
@@ -390,7 +398,11 @@ class AthenaArrowResultSet(AthenaResultSet):
 
         bucket, key = parse_output_location(self._unload_location)
         try:
-            dataset = parquet.ParquetDataset(f"{bucket}/{key}", filesystem=self._fs)
+            # Athena writes timestamps as INT96, whose default unit, nanoseconds, cannot
+            # hold years before 1677 or after 2262.
+            dataset = parquet.ParquetDataset(
+                f"{bucket}/{key}", filesystem=self._fs, coerce_int96_timestamp_unit="us"
+            )
             return dataset.read(use_threads=True)
         except Exception as e:
             _logger.exception(f"Failed to read {bucket}/{key}.")

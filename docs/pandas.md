@@ -604,6 +604,7 @@ With `storage_options` given to `execute()`, or `filesystem` for an UNLOAD resul
 
 PandasCursor also supports the unload option, as does {ref}`arrow-cursor`.
 Reading the unloaded Parquet files requires pyarrow (`pip install PyAthena[Pandas,Arrow]`), and `engine` must be `auto` or `pyarrow`.
+Timestamps are read at microseconds, as `datetime64[us]`, unless `coerce_int96_timestamp_unit` is given to `execute()`.
 
 See {ref}`arrow-unload-options` for more information.
 

@@ -11,7 +11,8 @@ This cursor downloads the CSV file after executing the query and loads it into a
 Performance is better than fetching data with Cursor.
 
 PolarsCursor uses [Polars](https://pola.rs/) native reading capabilities (`pl.read_csv`, `pl.read_parquet`) and
-does not require PyArrow as a dependency. CSV results read without the chunksize option, and
+does not require PyArrow as a dependency, except for UNLOAD results with timestamps read with Polars 1.x; see {ref}`polars-unload-options`.
+CSV results read without the chunksize option, and
 UNLOAD results read with it when pyarrow is installed and `execute()` is given no Polars read
 options, use PyAthena's own S3FileSystem (fsspec compatible), and other reads use Polars' native
 S3 access, so s3fs is also not required.
@@ -214,11 +215,19 @@ cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 If the unload option is enabled, the Parquet file itself has a schema, so the conversion is done to the dtypes according to that schema,
 and the `types` setting of the Converter class is not used.
 
+(polars-unload-options)=
+
 ### Unload Options
 
 PolarsCursor supports the unload option, as does {ref}`arrow-cursor`.
 
 See {ref}`arrow-unload-options` for more information.
+
+Timestamps of UNLOAD results are read at microseconds, as `Datetime("us")`.
+Polars 2.0 and later read them with Polars.
+With Polars 1.x, a result with timestamps is read with pyarrow, through PyAthena's S3FileSystem, and a warning is logged.
+This needs pyarrow, and no Polars read options given to `execute()`; otherwise the read raises `NotSupportedError`.
+With `use_pyarrow=True` given to `execute()`, a result read without the chunksize option is read by Polars with pyarrow, with `coerce_int96_timestamp_unit="us"` added to `pyarrow_options` unless they set it.
 
 The unload option can be enabled by specifying it in the `cursor_kwargs` argument of the connect method or as an argument to the cursor method.
 An argument to the cursor method takes precedence over the same key in `cursor_kwargs`.

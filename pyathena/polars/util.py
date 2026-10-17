@@ -123,3 +123,53 @@ def get_athena_type(dtype: Any) -> tuple[str, int, int]:
         return ("decimal", 38, 9)  # Default precision and scale
 
     return ("string", 2147483647, 0)
+
+
+def to_microseconds(dtype: Any, maps: bool = True) -> Any:
+    """Get a dtype whose nanosecond Datetimes, at any nesting level, are in microseconds.
+
+    Args:
+        dtype: The dtype.
+        maps: Whether to keep Map dtypes. If False, a Map is a List of Structs of its
+            key and value, which Polars 2.0 needs to read INT96 timestamps in a Parquet
+            map at microseconds.
+
+    Returns:
+        The dtype with microsecond Datetimes.
+    """
+    import polars as pl
+
+    if isinstance(dtype, pl.Datetime):
+        return pl.Datetime("us", dtype.time_zone) if dtype.time_unit == "ns" else dtype
+    if isinstance(dtype, pl.List):
+        return pl.List(to_microseconds(dtype.inner, maps))
+    if isinstance(dtype, pl.Struct):
+        return pl.Struct({f.name: to_microseconds(f.dtype, maps) for f in dtype.fields})
+    map_dtype = getattr(pl, "Map", None)
+    if map_dtype is not None and isinstance(dtype, map_dtype):
+        key, value = to_microseconds(dtype.key, maps), to_microseconds(dtype.value, maps)
+        return map_dtype(key, value) if maps else pl.List(pl.Struct({"key": key, "value": value}))
+    return dtype
+
+
+def holds_datetimes(dtype: Any) -> bool:
+    """Whether a dtype is a Datetime or holds one at any nesting level.
+
+    Args:
+        dtype: The dtype.
+
+    Returns:
+        True if the dtype is or holds a Datetime.
+    """
+    import polars as pl
+
+    if isinstance(dtype, pl.Datetime):
+        return True
+    if isinstance(dtype, pl.List):
+        return holds_datetimes(dtype.inner)
+    if isinstance(dtype, pl.Struct):
+        return any(holds_datetimes(f.dtype) for f in dtype.fields)
+    map_dtype = getattr(pl, "Map", None)
+    if map_dtype is not None and isinstance(dtype, map_dtype):
+        return holds_datetimes(dtype.key) or holds_datetimes(dtype.value)
+    return False

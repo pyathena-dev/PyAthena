@@ -1469,6 +1469,22 @@ class AthenaPandasResultSet(AthenaResultSet):
             return stream
 
     def _read_parquet(self, engine) -> DataFrame:
+        """Read the UNLOAD result whole with ``pandas.read_parquet()``.
+
+        The options given to ``execute()`` are passed to ``pandas.read_parquet()``.
+        Timestamps are read at microseconds unless ``coerce_int96_timestamp_unit`` is
+        given.
+
+        Args:
+            engine: The Parquet engine, which must be ``"pyarrow"``.
+
+        Returns:
+            The DataFrame of the result, or an empty DataFrame without data files.
+
+        Raises:
+            OperationalError: If reading the Parquet files fails.
+            ProgrammingError: If the engine is not ``"pyarrow"``.
+        """
         import pandas as pd
 
         self._data_manifest = self._read_data_manifest()
@@ -1478,7 +1494,13 @@ class AthenaPandasResultSet(AthenaResultSet):
             self._unload_location = "/".join(self._data_manifest[0].split("/")[:-1]) + "/"
 
         if engine == "pyarrow":
-            kwargs: dict[str, Any] = {"use_threads": True, **self._kwargs}
+            kwargs: dict[str, Any] = {
+                "use_threads": True,
+                # Athena writes timestamps as INT96, whose default unit, nanoseconds,
+                # cannot hold years before 1677 or after 2262.
+                "coerce_int96_timestamp_unit": "us",
+                **self._kwargs,
+            }
             # Given storage_options, even None, pandas opens the files itself,
             # as for CSV results.
             if "filesystem" not in kwargs and "storage_options" not in kwargs:

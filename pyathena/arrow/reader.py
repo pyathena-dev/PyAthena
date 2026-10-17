@@ -41,7 +41,8 @@ class ParquetChunkReader(abc.Iterator):  # type: ignore[type-arg]
     coalesced ranges, which PyAthena's filesystem splits into parallel requests,
     and holds them until the row group is decoded.
 
-    The files must have the same schema, as the files of one UNLOAD query do.
+    The files must have the same schema, as the files of one UNLOAD query do. INT96
+    timestamps, which Athena writes, are read at microseconds.
 
     Example:
         >>> with fs.open(manifest) as f:
@@ -165,7 +166,7 @@ class ParquetChunkReader(abc.Iterator):  # type: ignore[type-arg]
         """
         import pyarrow.parquet as pq
 
-        parquet_file = pq.ParquetFile(source, pre_buffer=True)
+        parquet_file = pq.ParquetFile(source, pre_buffer=True, coerce_int96_timestamp_unit="us")
         if self._columns is not None and (
             missing := set(self._columns) - set(parquet_file.schema_arrow.names)
         ):

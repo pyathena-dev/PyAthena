@@ -665,3 +665,17 @@ def stub_multipart_copy(stubber, fail_list=False, fail_part=False, fail_annotati
             )
             return
         stubber.add_response("put_object_annotation", {}, put)
+
+
+# A Parquet file that Athena's UNLOAD wrote, with INT96 timestamps and no Arrow schema:
+# UNLOAD (SELECT id, ts, ARRAY[ts] AS arr, CAST(ROW(ts) AS ROW(t TIMESTAMP)) AS st,
+# MAP(ARRAY['k'], ARRAY[ts]) AS mp FROM (VALUES (1, ...), ...) AS t (id, ts))
+INT96_UNLOAD_FILE = Path(__file__).parents[1] / "resources" / "unload" / "int96_timestamps.parquet"
+# The timestamps of its rows, by id: years 1 to 9999 that nanoseconds cannot hold, and
+# NULL. Each row's arr, st, and mp hold its timestamp.
+INT96_VALUES = [
+    datetime(1, 1, 1),
+    datetime(1600, 1, 2, 3, 4, 5, 123000),
+    datetime(9999, 12, 31, 23, 59, 59, 999000),
+    None,
+]
