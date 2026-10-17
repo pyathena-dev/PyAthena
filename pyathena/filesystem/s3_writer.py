@@ -25,6 +25,7 @@ from pyathena.filesystem.s3_object import (
     S3PutObject,
 )
 from pyathena.filesystem.s3_path import S3Path
+from pyathena.util import stop_retries_on
 
 T = TypeVar("T")
 
@@ -406,6 +407,9 @@ class _S3WriteSession:
         self._next_part_number = 1
         self._parts: dict[int, S3MultipartUploadPart] = {}
         self._waiters: list[Future[None]] = []
+        # Set by abort(), so that the creation and the running part requests
+        # make no further attempt before the upload is aborted.
+        self._stop = threading.Event()
         # The first failure, until it is raised.
         self._failure: BaseException | None = None
         # A description of the first failure, kept after it is raised.
@@ -477,9 +481,10 @@ class _S3WriteSession:
             self._multipart = True
             self._creation = creation
         try:
-            self._executor.submit_to(
-                creation, self._writer.initiate, **self._params("create_multipart_upload")
-            )
+            with stop_retries_on(self._stop):
+                self._executor.submit_to(
+                    creation, self._writer.initiate, **self._params("create_multipart_upload")
+                )
         except BaseException as e:
             # Recorded before the cancellation, which would record its own.
             with self._update():
@@ -632,12 +637,14 @@ class _S3WriteSession:
         """Discard the write, and abort its multipart upload, if any.
 
         The creation and the part requests that have not started are
-        cancelled, and the running ones are waited for first, since a part
-        that is still uploading when the upload is aborted may be stored after
-        it. While a running creation is waited for, KeyboardInterrupts are
-        suppressed, so that its upload is recovered and aborted. Does nothing
-        if the write is being or has been committed, or has been discarded;
-        another call that is aborting the upload is waited for.
+        cancelled, and the running ones make no further attempt and are
+        waited for first, since a part that is still uploading when the
+        upload is aborted may be stored after it. The retries of the abort
+        request itself are not stopped. While a running creation is waited
+        for, KeyboardInterrupts are suppressed, so that its upload is
+        recovered and aborted. Does nothing if the write is being or has been
+        committed, or has been discarded; another call that is aborting the
+        upload is waited for.
 
         Raises:
             BaseException: The failure of the abort request, or an interrupt
@@ -665,8 +672,16 @@ class _S3WriteSession:
                 self._state = _S3WriteState.ABORTING
                 waiters = self._take_waiters()
             self._notify(waiters)
-            self._settle_creation()
+            # The requests that have not started are cancelled before the
+            # stop, which would let a thread that it frees take one of them;
+            # then the creation and the running parts make no further attempt.
+            with self._lock:
+                creation = self._creation
+            if creation is not None:
+                creation.cancel()
             self._cancel_requests()
+            self._stop.set()
+            self._settle_creation()
             with self._lock:
                 self._consume_finished()
                 while self._requests:
@@ -724,7 +739,8 @@ class _S3WriteSession:
             self._requests.add(request)
             self._next_part_number += 1
         try:
-            self._executor.submit_to(request, fn, **kwargs)
+            with stop_retries_on(self._stop):
+                self._executor.submit_to(request, fn, **kwargs)
         except BaseException as e:
             # Recorded before the cancellation, which would record its own.
             with self._update():

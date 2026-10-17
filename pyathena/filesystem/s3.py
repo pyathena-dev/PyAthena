@@ -3308,9 +3308,10 @@ class S3File(AbstractBufferedFile):
         """Discard the written data, and abort the multipart upload, if any.
 
         The part requests that have not started are cancelled, and the
-        running ones are waited for before the abort. If the abort fails or
-        is interrupted, the upload is kept, and calling this again retries
-        the abort. Afterwards, :meth:`commit` raises
+        running ones make no further attempt and are waited for before the
+        abort, whose own retries are not stopped. If the abort fails or is
+        interrupted, the upload is kept, and calling this again retries the
+        abort. Afterwards, :meth:`commit` raises
         :class:`~pyathena.filesystem.s3_writer.S3MultipartStateError`. Does
         nothing for a committed file or a file opened for reading.
         """
