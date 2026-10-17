@@ -55,11 +55,17 @@ def _result_set(
         filesystem_class = MagicMock(return_value=filesystem)
     connection = MagicMock()
     connection.s3_client.head_object.return_value = {"ContentLength": len(data.encode())}
-    response = {
+    connection.client.get_query_results.return_value = {
         "ResultSet": {
             "ResultSetMetadata": {
                 "ColumnInfo": [
-                    {"Name": name, "Type": col_type}
+                    {
+                        "Name": name,
+                        "Type": col_type,
+                        "Precision": 0,
+                        "Scale": 0,
+                        "Nullable": "UNKNOWN",
+                    }
                     for name, col_type in zip(
                         ("null_col", "empty_col", "value_col"),
                         column_types or ("varchar", "varchar", "varchar"),
@@ -70,22 +76,21 @@ def _result_set(
             "Rows": [],
         }
     }
-    with patch.object(AthenaS3FSResultSet, "_get_query_results", return_value=response):
-        result_set = AthenaS3FSResultSet(
-            connection=connection,
-            converter=DefaultS3FSTypeConverter(),
-            query_execution=MagicMock(
-                state=AthenaQueryExecution.STATE_SUCCEEDED,
-                output_location=f"s3://bucket/query{suffix}",
-                substatement_type="SELECT",
-            ),
-            arraysize=1,
-            retry_config=RetryConfig(),
-            block_size=block_size,
-            csv_reader=csv_reader,
-            filesystem_class=filesystem_class,
-            result_set_type_hints=type_hints,
-        )
+    result_set = AthenaS3FSResultSet(
+        connection=connection,
+        converter=DefaultS3FSTypeConverter(),
+        query_execution=MagicMock(
+            state=AthenaQueryExecution.STATE_SUCCEEDED,
+            output_location=f"s3://bucket/query{suffix}",
+            substatement_type="SELECT",
+        ),
+        arraysize=1,
+        retry_config=RetryConfig(),
+        block_size=block_size,
+        csv_reader=csv_reader,
+        filesystem_class=filesystem_class,
+        result_set_type_hints=type_hints,
+    )
     return result_set, stream
 
 

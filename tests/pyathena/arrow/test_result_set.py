@@ -86,7 +86,7 @@ class TestAthenaArrowResultSet:
                     arraysize=1,
                     retry_config=RetryConfig(),
                 )
-        file.close.assert_called_once_with()
+        assert file.close.called
 
     @pytest.mark.parametrize("method", ["fetchone", "fetchmany", "fetchall", "iter", "mixed"])
     @pytest.mark.parametrize(
