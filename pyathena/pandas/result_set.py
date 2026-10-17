@@ -987,12 +987,18 @@ class AthenaPandasResultSet(AthenaResultSet):
 
     @override
     def _take_rows(self, size: int | None) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
-        """Take the next rows from the row iterator in bulk."""
-        # islice() takes no size above sys.maxsize.
-        rows: list[tuple[Any | None, ...] | dict[Any, Any | None]] = list(
-            islice(self._row_iter, None if size is None else min(size, sys.maxsize))
-        )
-        self._count_rows(len(rows))
+        """Take the next rows from the row iterator in bulk.
+
+        The rows taken before an exception are counted in ``rownumber`` too.
+        """
+        rows: list[tuple[Any | None, ...] | dict[Any, Any | None]] = []
+        try:
+            # extend() keeps the rows that it appended before an exception, and
+            # islice() takes no size above sys.maxsize.
+            rows.extend(islice(self._row_iter, None if size is None else min(size, sys.maxsize)))
+        finally:
+            if rows:
+                self._count_rows(len(rows))
         return rows
 
     def _read_csv(self) -> TextFileReader | DataFrame:

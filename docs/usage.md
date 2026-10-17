@@ -131,6 +131,7 @@ for row in cursor:
 ```
 
 After a fetch raises an exception, including `KeyboardInterrupt`, later fetches of the same result raise `ProgrammingError`.
+An invalid argument, such as a `fetchmany()` size that is not an integer, raises its error without that effect.
 Execute the query again to read its result.
 
 As `pyathena.threadsafety = 2` declares, threads can share connections, but not cursors.
@@ -405,7 +406,7 @@ Result columns from a passthrough query come back with the source system's types
 
 PyAthena provides a callback mechanism that allows you to get immediate access to the query ID
 as soon as the `start_query_execution` API call is made, before waiting for query completion.
-This is useful for monitoring, logging, or cancelling long-running queries by their ID.
+This is useful for monitoring, logging, or stopping long-running queries by their ID, for example with `AsyncCursor.cancel(query_id)`.
 When `cache_size` finds a reusable query, no new query starts, and the callback receives the reused query's ID.
 
 The `on_start_query_execution` callback can be configured at both the connection level and

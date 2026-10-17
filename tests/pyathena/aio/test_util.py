@@ -13,7 +13,12 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from pyathena.aio.util import async_retry_api_call, create_in_thread, run_in_thread
+from pyathena.aio.util import (
+    async_retry_api_call,
+    create_in_thread,
+    run_in_thread,
+    run_in_thread_or_close,
+)
 from pyathena.util import RetryConfig, retry_api_call, stop_retries_on
 from tests.pyathena.util import EVENT_TIMEOUT, ThrottledOperation, wait_until
 
@@ -202,6 +207,97 @@ async def test_create_in_thread_cleanup_after_executor_shutdown():
         finally:
             release.set()
             executor.shutdown(wait=True)
+
+
+async def test_run_in_thread_or_close():
+    """The function runs in another thread with the caller's context, and nothing is closed."""
+    _VALUE.set("caller")
+    resource = _Resource()
+    thread, value = await run_in_thread_or_close(
+        resource, lambda: (threading.get_ident(), _VALUE.get())
+    )
+    assert thread != threading.get_ident()
+    assert value == "caller"
+    assert not resource.closed.is_set()
+
+
+async def test_run_in_thread_or_close_cancelled_during_function():
+    """GH-1206: the object is closed by the function's thread once the function ends."""
+    started, release = threading.Event(), threading.Event()
+    resource = _Resource()
+    threads = []
+
+    def func():
+        threads.append(threading.get_ident())
+        started.set()
+        assert release.wait(EVENT_TIMEOUT)
+
+    task = asyncio.create_task(run_in_thread_or_close(resource, func))
+    try:
+        assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not resource.closed.is_set()
+    finally:
+        release.set()
+    assert await asyncio.to_thread(resource.closed.wait, EVENT_TIMEOUT)
+    assert resource.closed_in == threads[0]
+
+
+async def test_run_in_thread_or_close_cancelled_after_function():
+    """GH-1206: an object whose function ended before the cancellation is closed in a new thread."""
+    resource = _Resource()
+    threads = []
+    started, release, returned = threading.Event(), threading.Event(), threading.Event()
+
+    def func():
+        threads.append(threading.get_ident())
+        started.set()
+        assert release.wait(EVENT_TIMEOUT)
+        returned.set()
+
+    task = asyncio.create_task(run_in_thread_or_close(resource, func))
+    assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+    # Blocking the event loop keeps the task from resuming after the function ends.
+    release.set()
+    assert returned.wait(EVENT_TIMEOUT)
+    time.sleep(0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert await asyncio.to_thread(resource.closed.wait, EVENT_TIMEOUT)
+    assert resource.closed_in not in (None, threads[0], threading.get_ident())
+
+
+async def test_run_in_thread_or_close_cancelled_before_function():
+    """GH-1206: a function that has not started is skipped, and a new thread closes the object."""
+    loop = asyncio.get_running_loop()
+    # One busy worker keeps the function queued until the caller is cancelled.
+    executor = ThreadPoolExecutor(max_workers=1)
+    loop.set_default_executor(executor)
+    busy = threading.Event()
+    calls = []
+    resource = _Resource()
+    try:
+        blocker = loop.run_in_executor(None, busy.wait, EVENT_TIMEOUT)
+        task = asyncio.create_task(run_in_thread_or_close(resource, lambda: calls.append(1)))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # The only worker of the default executor is busy, so this waits on the loop.
+        assert resource.closed.wait(EVENT_TIMEOUT)
+        assert resource.closed_in != threading.get_ident()
+        busy.set()
+        await blocker
+        # A function that the executor did not drop returns without running.
+        await loop.run_in_executor(None, lambda: None)
+        assert calls == []
+    finally:
+        busy.set()
+        executor.shutdown(wait=True)
 
 
 async def test_run_in_thread():

@@ -3,39 +3,25 @@
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import logging
 import operator
-import threading
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, NoReturn, TypeVar, cast
 
 from botocore.exceptions import BotoCoreError, ClientError
 
-from pyathena.aio.util import async_retry_api_call, close_in_thread
+from pyathena.aio.util import async_retry_api_call, close_in_thread, run_in_thread_or_close
 from pyathena.common import BaseCursor, CursorIterator
 from pyathena.error import DatabaseError, OperationalError, ProgrammingError
 from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaDatabase, AthenaQueryExecution, AthenaTableMetadata
 from pyathena.options import ExecuteOptions
 from pyathena.result_set import AthenaResultSet, WithResultSet
-from pyathena.util import _is_throttling_error, override, stop_retries_on
+from pyathena.util import _is_throttling_error, override
 
 _logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
-
-
-def _close_result_set(result_set: AthenaResultSet) -> None:
-    """Close a result set that a cancelled fetch detached, logging an error.
-
-    Args:
-        result_set: The result set.
-    """
-    try:
-        result_set.close()
-    except Exception:
-        _logger.exception("Failed to close the result set of a cancelled fetch.")
 
 
 class AioBaseCursor(BaseCursor):
@@ -728,7 +714,7 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
     a subclass whose result set fetches asynchronously overrides them. Closing the
     previous result set when a query is executed, and closing the cursor at
     the end of an ``async with`` block, also run in a thread, because closing
-    a result stream can wait for a read in progress. Synchronous iteration
+    a result stream can wait for its read-ahead requests in progress. Synchronous iteration
     raises ``TypeError``.
 
     Subclasses override ``execute()`` and optionally ``__init__`` and
@@ -861,10 +847,9 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
         """Run a synchronous fetch of the result set in a thread.
 
         A cancellation stops the retries of the AWS API calls that the fetch makes
-        (see :func:`~pyathena.util.stop_retries_on`) and detaches the result set from
-        the cursor, so that later fetches raise ``ProgrammingError``. The fetch can
-        still be running in its thread, so the result set is closed in a thread once
-        the fetch has ended there.
+        and detaches the result set from the cursor, so that later fetches raise
+        ``ProgrammingError``. The result set is closed once the fetch is no longer
+        running (see :func:`~pyathena.aio.util.run_in_thread_or_close`).
 
         Args:
             fetch: The function that fetches from the result set.
@@ -878,31 +863,11 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaResultSet, self.result_set)
-        stop = threading.Event()
-
-        def call() -> _T:
-            """Run the fetch in a scope that the cancellation stops."""
-            with stop_retries_on(stop):
-                return fetch(result_set)
-
-        def close_after_fetch(_: asyncio.Future[_T]) -> None:
-            """Close the detached result set in a thread once the fetch has ended."""
-            try:
-                loop.run_in_executor(None, _close_result_set, result_set)
-            except RuntimeError:
-                # The default executor is shut down, as at the end of asyncio.run().
-                _close_result_set(result_set)
-
-        loop = asyncio.get_running_loop()
-        future = loop.run_in_executor(None, contextvars.copy_context().run, call)
         try:
-            # The shield keeps the future pending until the fetch has ended.
-            return await asyncio.shield(future)
+            return await run_in_thread_or_close(result_set, fetch, result_set)
         except asyncio.CancelledError:
-            stop.set()
             if self.result_set is result_set:
                 self.result_set = None
-            future.add_done_callback(close_after_fetch)
             raise
 
     @override
