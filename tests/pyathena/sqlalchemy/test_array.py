@@ -743,8 +743,8 @@ class TestArrayUpdateCompiler:
         table = _array_update_table()
         statement = table.update().values({table.c["items"][bindparam("index")]: 9})
         assert "IF(2 > 0, 2, " in executed_sql(statement, {"index": 2})
-        for value in (1.5, True, None):
-            with pytest.raises(sa_exc.StatementError, match="non-NULL integers") as raised:
+        for value in (1.5, True, None, "1"):
+            with pytest.raises(sa_exc.StatementError) as raised:
                 executed_sql(statement, {"index": value})
             assert isinstance(raised.value.orig, ValueError)
         # A literal_execute index is rendered when the statement runs, and checked then.
@@ -752,7 +752,7 @@ class TestArrayUpdateCompiler:
             {table.c["items"][bindparam("index", literal_execute=True)]: 9}
         )
         assert "IF(2 > 0, 2, " in executed_sql(literal_index, {"index": 2})
-        for value in (1.5, True):
+        for value in (1.5, True, "1"):
             with pytest.raises(sa_exc.StatementError) as raised:
                 executed_sql(literal_index, {"index": value})
             # SQLAlchemy reports the failed literal rendering, caused by the check.

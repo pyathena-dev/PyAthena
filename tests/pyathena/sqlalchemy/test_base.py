@@ -16,6 +16,7 @@ import pandas as pd
 import pytest
 import sqlalchemy
 from botocore.exceptions import ClientError
+from botocore.stub import Stubber
 from sqlalchemy import create_engine, func, literal_column, select, text, types
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import NoSuchTableError
@@ -183,6 +184,35 @@ class TestAthenaDialect:
         finally:
             conn.close()
 
+    def test_failed_ping_raises_the_query_error(self):
+        # SQLAlchemy's pool decides from the raised error whether to reconnect.
+        # The ping runs a plain SELECT 1 even when the connection's cursor
+        # wraps queries in UNLOAD, which Athena rejects for an unnamed column.
+        conn = Connection(
+            region_name="us-west-2",
+            s3_staging_dir="s3://bucket/path/",
+            aws_access_key_id="access_key",
+            aws_secret_access_key="secret_key",
+            cursor_class=PandasCursor,
+            cursor_kwargs={"unload": True},
+        )
+        queries = []
+        conn.client.meta.events.register(
+            "provide-client-params.athena.StartQueryExecution",
+            lambda params, **kwargs: queries.append(params["QueryString"]),
+        )
+        try:
+            with Stubber(conn.client) as stubber:
+                stubber.add_client_error(
+                    "start_query_execution", service_error_code="InvalidRequestException"
+                )
+                with pytest.raises(DatabaseError) as raised:
+                    AthenaDialect().do_ping(conn)
+        finally:
+            conn.close()
+        assert raised.value.__cause__.response["Error"]["Code"] == "InvalidRequestException"
+        assert queries == ["SELECT 1"]
+
     def test_columns_from_information_schema(self):
         # Rows arrive unordered, and Athena reports a missing comment as NULL.
         # The API cursor this path pins hands that over as None or as an empty
@@ -307,6 +337,7 @@ class TestAthenaDialect:
                 "InternalServerException",
             )
         )
+        cursor_policy = RetryConfig(exceptions=("ThrottlingException",), attempt=2)
         retry_configs = []
         metadata = SimpleNamespace(columns=[], partition_keys=[])
         cursor = SimpleNamespace(get_table_metadata=lambda table_name, **kwargs: metadata)
@@ -316,7 +347,7 @@ class TestAthenaDialect:
             return contextlib.nullcontext(cursor)
 
         raw_connection = SimpleNamespace(
-            cursor_kwargs={"retry_config": policy} if configured else {},
+            cursor_kwargs={"retry_config": cursor_policy} if configured else {},
             catalog_name="awsdatacatalog",
             schema_name="default",
             retry_config=policy,
@@ -325,9 +356,10 @@ class TestAthenaDialect:
 
         AthenaDialect()._get_columns(SimpleNamespace(connection=raw_connection), "events")
 
+        # The policy reaches the lookup cursor that Connection.cursor() creates.
         (retry_config,) = retry_configs
         if configured:
-            assert retry_config is policy
+            assert retry_config is cursor_policy
         else:
             assert retry_config.exceptions == ("InternalServerException",)
 
@@ -659,6 +691,42 @@ class TestAthenaDialect:
         assert AthenaDialect().get_table_comment(connection, table_name) == {"text": "long table"}
         # The filter bounds the listing that Athena returns.
         assert [request["expression"] for request in requests] == [expression]
+
+    @pytest.mark.parametrize(
+        ("catalog_name", "requests_", "comments"),
+        [
+            # Glue lowercases table names, so both spellings are one cached table.
+            ("AwsDataCatalog", ["Events"], ["Events", "Events"]),
+            # Other catalogs may be case-sensitive, so each spelling is looked up.
+            ("other_catalog", ["Events", "events"], ["Events", "events"]),
+        ],
+        ids=["glue", "case_sensitive"],
+    )
+    def test_table_metadata_cache_follows_catalog_case_sensitivity(
+        self, catalog_name, requests_, comments
+    ):
+        requests = []
+
+        def get_table_metadata(table_name, **kwargs):
+            requests.append(table_name)
+            return SimpleNamespace(comment=table_name)
+
+        cursor = SimpleNamespace(get_table_metadata=get_table_metadata)
+        raw_connection = SimpleNamespace(
+            cursor_kwargs={},
+            catalog_name=catalog_name,
+            schema_name="default",
+            driver_connection=SimpleNamespace(cursor=lambda: contextlib.nullcontext(cursor)),
+        )
+        connection = SimpleNamespace(connection=raw_connection)
+        dialect = AthenaDialect()
+        info_cache = {}
+
+        assert [
+            dialect.get_table_comment(connection, name, info_cache=info_cache)["text"]
+            for name in ("Events", "events")
+        ] == comments
+        assert requests == requests_
 
     def test_insertmanyvalues_pages(self):
         engine, calls = recording_engine()

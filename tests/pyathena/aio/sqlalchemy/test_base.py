@@ -7,11 +7,19 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import sqlalchemy
+from botocore.stub import Stubber
 from sqlalchemy import select, text, types
 from sqlalchemy.sql.schema import Column, MetaData, Table
 from sqlalchemy.util.concurrency import greenlet_spawn
 
-from pyathena.aio.sqlalchemy.base import AthenaAioAdaptedCursor
+from pyathena.aio.connection import AioConnection
+from pyathena.aio.pandas.cursor import AioPandasCursor
+from pyathena.aio.sqlalchemy.base import (
+    AthenaAioAdaptedConnection,
+    AthenaAioAdaptedCursor,
+    AthenaAioDialect,
+)
+from pyathena.error import DatabaseError
 from pyathena.sqlalchemy.types import AthenaArray
 from tests import ENV
 from tests.pyathena.util import binary_columns, throttle_metadata_api
@@ -62,6 +70,37 @@ class TestAthenaAioAdaptedCursor:
             for record in caplog.records
             if record.levelno == logging.ERROR and record.exc_info
         ] == [close_error]
+
+
+class TestAthenaAioDialect:
+    async def test_failed_ping_raises_the_query_error(self):
+        # The async adapter maps the ping's API cursor to its own, so the ping
+        # still runs a plain SELECT 1 and raises the query error for the pool.
+        conn = AioConnection(
+            region_name="us-west-2",
+            s3_staging_dir="s3://bucket/path/",
+            aws_access_key_id="access_key",
+            aws_secret_access_key="secret_key",
+            cursor_class=AioPandasCursor,
+            cursor_kwargs={"unload": True},
+        )
+        queries = []
+        conn.client.meta.events.register(
+            "provide-client-params.athena.StartQueryExecution",
+            lambda params, **kwargs: queries.append(params["QueryString"]),
+        )
+        adapted = AthenaAioAdaptedConnection(MagicMock(), conn)
+        try:
+            with Stubber(conn.client) as stubber:
+                stubber.add_client_error(
+                    "start_query_execution", service_error_code="InvalidRequestException"
+                )
+                with pytest.raises(DatabaseError) as raised:
+                    await greenlet_spawn(AthenaAioDialect().do_ping, adapted)
+        finally:
+            conn.close()
+        assert raised.value.__cause__.response["Error"]["Code"] == "InvalidRequestException"
+        assert queries == ["SELECT 1"]
 
 
 class TestAsyncSQLAlchemyAthena:

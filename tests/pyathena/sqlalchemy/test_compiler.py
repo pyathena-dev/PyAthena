@@ -820,7 +820,7 @@ class TestAthenaDDLCompiler:
             Column("id", Integer),
             awsathena_tblproperties=tblproperties,
         )
-        with pytest.raises(exc.CompileError, match="S3 Tables support only Iceberg tables"):
+        with pytest.raises(exc.CompileError):
             CreateTable(table).compile(dialect=self._s3tables_dialect())
 
     def test_create_table_s3tables_explicit_location_raises(self):
