@@ -661,6 +661,17 @@ class TestS3WriteSession:
                 assert session.complete() == "completed"
         assert requests.calls[-1] == ("complete", (1, 2))
 
+    def test_creation_without_callback(self):
+        session, requests, executor = _make_session()
+        with executor:
+            with mock.patch.object(session, "_on_created", return_value=None):
+                session.start()
+                session.wait_ready()
+                session.check()
+            assert session.state is _S3WriteState.ACTIVE
+            assert session.complete() == "completed"
+        assert requests.calls == [("create",), ("complete", ())]
+
     def test_slow_callbacks(self):
         # A future is done before its done callbacks run, so a completion
         # that finds every request done still records their outcomes first.

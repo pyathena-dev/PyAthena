@@ -832,16 +832,17 @@ class _S3WriteSession:
         """
         if self._creation is not creation:
             return
+        if self._state is _S3WriteState.CREATING:
+            if creation.cancelled():
+                # Such as by the shutdown of the event loop of an S3AioExecutor.
+                self._fail(CancelledError("The creation of the multipart upload was cancelled."))
+            elif (error := creation.exception()) is not None:
+                self._fail(error)
+            else:
+                self._state = _S3WriteState.ACTIVE
+        # Cleared after the outcome is recorded, so that a callback stopped
+        # in between leaves the creation for the next consumption.
         self._creation = None
-        if self._state is not _S3WriteState.CREATING:
-            return
-        if creation.cancelled():
-            # Such as by the shutdown of the event loop of an S3AioExecutor.
-            self._fail(CancelledError("The creation of the multipart upload was cancelled."))
-        elif (error := creation.exception()) is not None:
-            self._fail(error)
-        else:
-            self._state = _S3WriteState.ACTIVE
 
     def _consume(self, request: Future[S3MultipartUploadPart]) -> None:
         """Record the outcome of a part request once and stop tracking it.
