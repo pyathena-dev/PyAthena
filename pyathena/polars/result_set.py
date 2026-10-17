@@ -552,8 +552,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
 
         Athena writes up to 12 fractional digits, which Polars does not parse into a
         Datetime whose time unit holds fewer. A chunked read always reads the timestamp
-        columns as text and converts them with ``_to_datetimes()``, and a whole read
-        does so when parsing them fails.
+        columns as text and converts them with ``_to_datetimes()``. A whole read does
+        so when parsing them fails, and with ``ignore_errors`` given to ``execute()``,
+        with which Polars reads the timestamps that it does not parse as null.
 
         Args:
             has_header: Whether the CSV data has a header. Without one, or with
@@ -740,19 +741,21 @@ class AthenaPolarsResultSet(AthenaResultSet):
             if self.output_location:
                 with fsspec.open(self.output_location, "rb", **(storage_options or {})) as file:
                     source = file.read()
-            try:
-                df = pl.read_csv(source, **kwargs)
-            except pl.exceptions.ComputeError:
-                schema_overrides, timestamp_dtypes = self._get_csv_schema_overrides(has_header)
-                if not timestamp_dtypes:
-                    raise
-                # The data is read again with the timestamp columns as text.
+            schema_overrides, timestamp_dtypes = self._get_csv_schema_overrides(has_header)
+            strict = not kwargs.get("ignore_errors", False)
+            df: pl.DataFrame | None = None
+            if strict or not timestamp_dtypes:
+                try:
+                    df = pl.read_csv(source, **kwargs)
+                except pl.exceptions.ComputeError:
+                    if not timestamp_dtypes:
+                        raise
+            if df is None:
+                # The timestamp columns are read as text, again after parsing them
+                # failed, or at once with ignore_errors, with which Polars reads the
+                # timestamps that it does not parse as null instead of failing.
                 kwargs["schema_overrides"] = schema_overrides
-                df = _to_datetimes(
-                    pl.read_csv(source, **kwargs),
-                    timestamp_dtypes,
-                    strict=not kwargs.get("ignore_errors", False),
-                )
+                df = _to_datetimes(pl.read_csv(source, **kwargs), timestamp_dtypes, strict=strict)
             if new_columns:
                 df.columns = [*new_columns, *df.columns[len(new_columns) :]]
             return df

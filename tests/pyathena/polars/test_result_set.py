@@ -608,8 +608,13 @@ class TestAthenaPolarsResultSet:
         if not expected:
             assert df.columns == ["v"]
 
-    def test_iter_csv_chunks_ignore_errors(self, tmp_path):
-        """With ignore_errors, timestamp text that is not a timestamp becomes null in chunks."""
+    @pytest.mark.parametrize("reader", ["_read_csv", "_iter_csv_chunks"])
+    def test_read_csv_ignore_errors(self, tmp_path, reader):
+        """With ignore_errors, timestamp text that is not a timestamp becomes null.
+
+        Timestamps with more fractional digits than the time unit are still truncated,
+        which Polars itself reads as null with ignore_errors.
+        """
         path = tmp_path / "result.csv"
         path.write_bytes(b'"t"\n"2020-01-02 03:04:05.123456789012"\n"invalid"\n')
         result_set = _chunked_result_set()
@@ -626,10 +631,16 @@ class TestAthenaPolarsResultSet:
                 new_callable=PropertyMock,
                 return_value=str(path),
             ),
+            patch.object(
+                AthenaPolarsResultSet,
+                "_csv_storage_options",
+                new_callable=PropertyMock,
+                return_value={},
+            ),
             patch.object(AthenaPolarsResultSet, "_get_parquet_storage_options", return_value={}),
             patch.object(AthenaPolarsResultSet, "_is_csv_readable", return_value=True),
         ):
-            df = _read_all(result_set._iter_csv_chunks())
+            df = _read_all(getattr(result_set, reader)())
         assert df["t"].equals(
             pl.Series([datetime(2020, 1, 2, 3, 4, 5, 123456), None], dtype=pl.Datetime("us")),
             check_dtypes=True,
