@@ -20,13 +20,6 @@ from pyathena.util import RetryConfig, override
 from tests.pyathena.util import close_during_next_request, get_query_results_responses
 
 
-def _page(values, next_token=None):
-    response = {"ResultSet": {"Rows": [{"Data": [{"VarCharValue": v}]} for v in values]}}
-    if next_token:
-        response["NextToken"] = next_token
-    return response
-
-
 def _row(*values):
     return {"Data": [{} if v is None else {"VarCharValue": v} for v in values]}
 
@@ -180,7 +173,7 @@ class TestAthenaResultSet:
         result_set._process_metadata(
             {"ResultSet": {"ResultSetMetadata": {"ColumnInfo": [{"Name": "a", "Type": "varchar"}]}}}
         )
-        pages = [_page(["a", "1"], "token"), _page(["a", "2"])]
+        pages = get_query_results_responses(["a", "1"], ["a", "2"])
         with patch.object(result_set, "_get_query_results", side_effect=pages):
             assert result_set._fetch_all_rows() == [("1",), ("a",), ("2",)]
 

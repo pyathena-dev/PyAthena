@@ -64,6 +64,53 @@ class TestAthenaArrowResultSet:
         assert result_set.fetchone() is None
         assert result_set.rownumber == 3
 
+    @pytest.mark.parametrize("method", ["fetchone", "fetchmany", "fetchall", "iter"])
+    @pytest.mark.parametrize(
+        ("chunks", "expected"),
+        [
+            ([[1, 2, 3], [], [4]], [1, 2, 3, 4]),
+            ([[], [1, 2]], [1, 2]),
+            ([[1], [], [], [2]], [1, 2]),
+        ],
+        ids=["middle", "leading", "consecutive"],
+    )
+    def test_fetch_across_empty_batches(self, method, chunks, expected):
+        """Empty record batches before or between others do not end the fetches.
+
+        A table read from result files that include an empty one has such
+        batches; the fetches used to stop at the first one. to_batches() yields
+        no empty batch after the last rows. No AWS calls; the first page
+        request and the result table are mocked.
+        """
+        table = pa.concat_tables([pa.table({"a": pa.array(chunk, pa.int64())}) for chunk in chunks])
+        with (
+            patch.object(AthenaArrowResultSet, "_pre_fetch"),
+            patch.object(AthenaArrowResultSet, "_create_s3_file_system"),
+            patch.object(AthenaArrowResultSet, "_as_arrow", return_value=table),
+        ):
+            result_set = AthenaArrowResultSet(
+                connection=MagicMock(),
+                converter=DefaultArrowTypeConverter(),
+                query_execution=MagicMock(
+                    state=AthenaQueryExecution.STATE_SUCCEEDED,
+                    output_location="s3://bucket/query.csv",
+                ),
+                arraysize=2,
+                retry_config=RetryConfig(),
+            )
+        assert 0 in [batch.num_rows for batch in table.to_batches(2)]
+        if method == "fetchone":
+            rows = list(iter(result_set.fetchone, None))
+        elif method == "fetchmany":
+            rows = result_set.fetchmany(10)
+        elif method == "fetchall":
+            rows = result_set.fetchall()
+        else:
+            rows = list(result_set)
+        assert rows == [(value,) for value in expected]
+        assert result_set.rownumber == len(expected)
+        assert result_set.fetchone() is None
+
     def test_read_csv_timestamps_with_the_same_name(self):
         """Timestamp columns are converted by position, also with names that repeat.
 

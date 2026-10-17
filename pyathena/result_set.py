@@ -5,7 +5,6 @@ from __future__ import annotations
 import collections
 import logging
 import operator
-import sys
 from datetime import datetime
 from itertools import islice
 from typing import (
@@ -529,8 +528,7 @@ class AthenaResultSet(CursorIterator):
         """
         if not size or size <= 0:
             size = self._arraysize
-        # islice() in the subclasses' _take_rows() takes no size above sys.maxsize.
-        return self._take_rows(min(operator.index(size), sys.maxsize))
+        return self._take_rows(operator.index(size))
 
     @override
     def fetchall(

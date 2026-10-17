@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import importlib
 import logging
+import sys
 import threading
 from collections import abc
 from collections.abc import Callable, Iterable, Iterator
@@ -992,8 +993,9 @@ class AthenaPandasResultSet(AthenaResultSet):
         """
         rows: list[tuple[Any | None, ...] | dict[Any, Any | None]] = []
         try:
-            # extend() keeps the rows that it appended before an exception.
-            rows.extend(islice(self._row_iter, size))
+            # extend() keeps the rows that it appended before an exception, and
+            # islice() takes no size above sys.maxsize.
+            rows.extend(islice(self._row_iter, None if size is None else min(size, sys.maxsize)))
         finally:
             if rows:
                 self._count_rows(len(rows))
