@@ -250,7 +250,7 @@ class TestS3FSCursor:
             [{"a": a, "b": b} for a, b in rows],
         )
         s3fs_cursor.execute(f"SELECT * FROM {empty_table}")
-        assert sorted(s3fs_cursor.fetchall()) == list(rows)
+        assert sorted(s3fs_cursor.fetchall()) == rows
 
     def test_on_start_query_execution(self):
         callback_query_id = None
@@ -292,59 +292,39 @@ class TestS3FSCursor:
             assert callback_query_id == cursor.query_id
 
     @pytest.mark.parametrize(
-        "s3fs_cursor",
+        ("s3fs_cursor", "expected_empty"),
         [
-            {"cursor_kwargs": {"csv_reader": AthenaCSVReader}},
-            {"cursor_kwargs": {"csv_reader": EmptyStringAsNullCSVReader}},
+            # EmptyStringAsNullCSVReader: empty string becomes None
+            ({"cursor_kwargs": {"csv_reader": EmptyStringAsNullCSVReader}}, None),
+            # AthenaCSVReader: empty string is preserved
+            ({"cursor_kwargs": {"csv_reader": AthenaCSVReader}}, ""),
         ],
         indirect=["s3fs_cursor"],
     )
-    def test_contain_tab_character(self, s3fs_cursor):
-        """Both readers read values with tabs, newlines, and commas, which Athena quotes."""
-        s3fs_cursor.execute(
-            """
-            SELECT
-              'before' || CHR(9) || 'after' AS col_tab
-              ,'line1' || CHR(10) || 'line2' AS col_newline
-              ,'a' || CHR(9) || 'b' || CHR(10) || 'c' AS col_tab_newline
-              ,'a,b,c' AS col_comma
-            """
-        )
-        assert s3fs_cursor.fetchall() == [("before\tafter", "line1\nline2", "a\tb\nc", "a,b,c")]
-
-    @pytest.mark.parametrize(
-        ("csv_reader", "expected_empty"),
-        [
-            # EmptyStringAsNullCSVReader: empty string becomes None
-            (EmptyStringAsNullCSVReader, None),
-            (AthenaCSVReader, ""),  # AthenaCSVReader: empty string is preserved
-        ],
-    )
-    def test_null_vs_empty_string(self, csv_reader, expected_empty):
+    def test_null_vs_empty_string(self, s3fs_cursor, expected_empty):
         """
         Test NULL vs empty string handling with different CSV readers.
 
         EmptyStringAsNullCSVReader: Both NULL and empty string become None.
         AthenaCSVReader: NULL is None, empty string is preserved as ''.
+        Both readers read values with tabs, newlines, and commas, which Athena quotes.
 
         See docs/null_handling.md for details.
         """
-        with (
-            contextlib.closing(
-                connect(
-                    schema_name=ENV.schema,
-                    cursor_class=S3FSCursor,
-                    cursor_kwargs={"csv_reader": csv_reader},
-                )
-            ) as conn,
-            conn.cursor() as cursor,
-        ):
-            cursor.execute("SELECT NULL AS null_col, '' AS empty_col")
-            result = cursor.fetchone()
-            # NULL is always None
-            assert result[0] is None
-            # Empty string behavior depends on reader
-            assert result[1] == expected_empty
+        s3fs_cursor.execute(
+            """
+            SELECT
+              NULL AS null_col
+              ,'' AS empty_col
+              ,'before' || CHR(9) || 'after' AS col_tab
+              ,'line1' || CHR(10) || 'line2' AS col_newline
+              ,'a' || CHR(9) || 'b' || CHR(10) || 'c' AS col_tab_newline
+              ,'a,b,c' AS col_comma
+            """
+        )
+        assert s3fs_cursor.fetchall() == [
+            (None, expected_empty, "before\tafter", "line1\nline2", "a\tb\nc", "a,b,c")
+        ]
 
     @pytest.mark.parametrize(
         "s3fs_cursor",

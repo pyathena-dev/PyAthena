@@ -42,8 +42,8 @@ def _local_result_set(
 ) -> AthenaPolarsResultSet:
     """Create a result set of a succeeded query whose result files are local files.
 
-    The given columns stand in for the GetQueryResults metadata, and the HEAD request of
-    the CSV result file finds it not empty. The connection's S3 client returns the data
+    GetQueryResults returns the given columns, and the HEAD request of the CSV result
+    file finds it not empty. The connection's S3 client returns the data
     manifest of an UNLOAD result, and PyAthena's filesystem reads the local files.
 
     Args:
@@ -73,16 +73,19 @@ def _local_result_set(
     connection.s3_client.get_object.return_value = {
         "Body": BytesIO("\n".join(data_manifest or []).encode())
     }
-    metadata = tuple(
-        {"Name": name, "Type": type_, "Precision": 3, "Scale": 0, "Nullable": "UNKNOWN"}
-        for name, type_ in column_types
-    )
-
-    def pre_fetch(self: AthenaPolarsResultSet) -> None:
-        self._metadata = metadata
-
+    connection.client.get_query_results.return_value = {
+        "ResultSet": {
+            "ResultSetMetadata": {
+                "ColumnInfo": [
+                    {"Name": name, "Type": type_, "Precision": 3, "Scale": 0, "Nullable": "UNKNOWN"}
+                    for name, type_ in column_types
+                ]
+            },
+            "Rows": [],
+        }
+    }
     with (
-        patch.object(AthenaPolarsResultSet, "_pre_fetch", pre_fetch),
+        # The HEAD request parses the output location, which is a local path here.
         patch.object(AthenaPolarsResultSet, "_get_content_length", return_value=1),
         patch("pyathena.polars.result_set.S3FileSystem", lambda **_: LocalFileSystem()),
     ):
@@ -96,18 +99,6 @@ def _local_result_set(
             chunksize=chunksize,
             **kwargs,
         )
-
-
-def _read_all(result_set: AthenaPolarsResultSet) -> pl.DataFrame:
-    """Read the rows of a result set into one DataFrame.
-
-    Args:
-        result_set: A result set read whole or in chunks.
-
-    Returns:
-        The DataFrame of the result, or its chunks concatenated.
-    """
-    return pl.concat(list(result_set.iter_chunks()))
 
 
 def _fetching_result_set(chunks, names, arraysize, converters=None) -> AthenaPolarsResultSet:
@@ -350,7 +341,7 @@ class TestAthenaPolarsResultSet:
             has_header=False,
             schema_overrides={first: pl.Utf8},
         )
-        df = _read_all(result_set)
+        df = result_set.as_polars()
         assert df.to_dict(as_series=False) == {first: ["1", "2"], second: ["x", "y"]}
 
     @pytest.mark.parametrize("chunksize", [None, 10_000])
@@ -366,7 +357,7 @@ class TestAthenaPolarsResultSet:
             new_columns=["z", "w"],
             schema_overrides={"z": pl.Utf8},
         )
-        df = _read_all(result_set)
+        df = result_set.as_polars()
         assert df.to_dict(as_series=False) == {"z": ["001"], "w": ["x"]}
 
     @pytest.mark.parametrize(
@@ -379,8 +370,16 @@ class TestAthenaPolarsResultSet:
             (10_000, {"new_columns": ["t2", "v2"]}, {"t2": _TRUNCATED_TIMESTAMPS}),
             (None, {"schema": {"t": pl.String, "v": pl.String}}, {"t": _TIMESTAMP_TEXTS}),
             (10_000, {"schema": {"t": pl.String, "v": pl.String}}, {"t": _TIMESTAMP_TEXTS}),
-            (None, {"with_column_names": lambda names: [n.upper() for n in names]}, None),
-            (10_000, {"with_column_names": lambda names: [n.upper() for n in names]}, None),
+            (
+                None,
+                {"with_column_names": lambda names: [n.upper() for n in names]},
+                OperationalError,
+            ),
+            (
+                10_000,
+                {"with_column_names": lambda names: [n.upper() for n in names]},
+                OperationalError,
+            ),
         ],
     )
     def test_read_csv_truncates_timestamps(self, tmp_path, chunksize, kwargs, expected):
@@ -395,11 +394,11 @@ class TestAthenaPolarsResultSet:
         path = tmp_path / "result.csv"
         path.write_bytes(b'"t","v"\n"2020-01-02 03:04:05.123456789012","x"\n,"y"\n')
         columns = [("t", "timestamp"), ("v", "varchar")]
-        if expected is None:
+        if expected is OperationalError:
             with pytest.raises(OperationalError):
-                _read_all(_local_result_set(columns, str(path), chunksize=chunksize, **kwargs))
+                _local_result_set(columns, str(path), chunksize=chunksize, **kwargs).as_polars()
             return
-        df = _read_all(_local_result_set(columns, str(path), chunksize=chunksize, **kwargs))
+        df = _local_result_set(columns, str(path), chunksize=chunksize, **kwargs).as_polars()
         for name, values in expected.items():
             assert df[name].equals(values, check_dtypes=True)
         if not expected:
@@ -417,12 +416,12 @@ class TestAthenaPolarsResultSet:
         path.write_bytes(b'"t"\n"2020-01-02 03:04:05.123456789012"\n"invalid"\n')
         if not ignore_errors:
             with pytest.raises(OperationalError):
-                _read_all(_local_result_set([("t", "timestamp")], str(path), chunksize=chunksize))
+                _local_result_set([("t", "timestamp")], str(path), chunksize=chunksize).as_polars()
             return
         result_set = _local_result_set(
             [("t", "timestamp")], str(path), chunksize=chunksize, ignore_errors=True
         )
-        assert _read_all(result_set)["t"].equals(
+        assert result_set.as_polars()["t"].equals(
             pl.Series([datetime(2020, 1, 2, 3, 4, 5, 123456), None], dtype=pl.Datetime("us")),
             check_dtypes=True,
         )

@@ -48,8 +48,8 @@ def _result_set(
     block_size=None,
     filesystem_class=None,
 ):
-    stream = stream or BytesIO(data.encode())
     if filesystem_class is None:
+        stream = stream or BytesIO(data.encode())
         filesystem = MagicMock()
         filesystem._open.return_value = stream
         filesystem_class = MagicMock(return_value=filesystem)

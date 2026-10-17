@@ -63,6 +63,25 @@ class TestParquetChunkReader:
         return request.param
 
     @pytest.fixture
+    def opened_files(self, monkeypatch):
+        """A local filesystem that records the files it opens, which are opened ahead at once.
+
+        A file opened ahead at once is never cancelled.
+        """
+        fs = LocalFileSystem()
+        opened = []
+        original_open = fs.open
+
+        def open_(path, mode="rb", **kwargs):
+            f = original_open(path, mode, **kwargs)
+            opened.append(f)
+            return f
+
+        monkeypatch.setattr(fs, "open", open_)
+        monkeypatch.setattr("pyathena.arrow.reader.ThreadPoolExecutor", ImmediateExecutor)
+        return fs, opened
+
+    @pytest.fixture
     def paths(self, tmp_path):
         """Three files of 3, 0, and 7 rows; the last has row groups of 2 rows."""
         paths = []
@@ -110,26 +129,15 @@ class TestParquetChunkReader:
         ):
             next(reader)
 
-    def test_releases_files_opened_ahead(self, paths, monkeypatch):
+    @pytest.mark.parametrize("max_prefetch_size", ["stream"], indirect=True)
+    def test_releases_files_opened_ahead(self, paths, max_prefetch_size, opened_files):
         """Files opened ahead are closed when reading fails."""
-        monkeypatch.setattr(ParquetChunkReader, "MAX_PREFETCH_SIZE", -1)
         # The third file fails while the files after it may be opened ahead.
         with open(paths[2], "rb") as f:
             valid = f.read()
         with open(paths[2], "wb") as f:
             f.write(valid[: len(valid) // 2] + b"\x00" * 64 + valid[-8:])
-        fs = LocalFileSystem()
-        opened = []
-        original_open = fs.open
-
-        def open_(path, mode="rb", **kwargs):
-            f = original_open(path, mode, **kwargs)
-            opened.append(f)
-            return f
-
-        monkeypatch.setattr(fs, "open", open_)
-        # Open ahead at once, so that a file opened ahead is never cancelled.
-        monkeypatch.setattr("pyathena.arrow.reader.ThreadPoolExecutor", ImmediateExecutor)
+        fs, opened = opened_files
         with pytest.raises((OSError, ValueError)):
             list(ParquetChunkReader(fs, [*paths, paths[0], paths[0]], 2))
         # A file after the failed third one was opened ahead.
@@ -167,20 +175,9 @@ class TestParquetChunkReader:
         with pytest.raises(ValueError):  # noqa: PT011
             ParquetChunkReader(LocalFileSystem(), paths, chunksize)
 
-    def test_close(self, paths, max_prefetch_size, monkeypatch):
+    def test_close(self, paths, max_prefetch_size, opened_files):
         """close() closes the file being read and the files opened ahead."""
-        fs = LocalFileSystem()
-        opened = []
-        original_open = fs.open
-
-        def open_(path, mode="rb", **kwargs):
-            f = original_open(path, mode, **kwargs)
-            opened.append(f)
-            return f
-
-        monkeypatch.setattr(fs, "open", open_)
-        # Open ahead at once, so that a file opened ahead is never cancelled.
-        monkeypatch.setattr("pyathena.arrow.reader.ThreadPoolExecutor", ImmediateExecutor)
+        fs, opened = opened_files
         reader = ParquetChunkReader(fs, paths, 2)
         assert next(reader).num_rows == 2
         reader.close()

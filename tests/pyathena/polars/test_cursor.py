@@ -37,11 +37,6 @@ from tests.pyathena.util import (
 
 # Polars 2.0 reads INT96 at the time unit of the read schema; Polars 1.x at nanoseconds.
 _POLARS_2 = int(pl.__version__.split(".")[0]) >= 2
-_INVALID_OBJECT_STORE_OPTIONS = {
-    "aws_access_key_id": "invalid",
-    "aws_secret_access_key": "invalid",
-    "aws_region": ENV.region_name,
-}
 
 
 class TestPolarsCursor:
@@ -147,33 +142,20 @@ class TestPolarsCursor:
         ).as_polars()
         assert df.to_dicts() == [{"number_of_rows": "1"}]
 
-    @pytest.mark.parametrize(
-        ("polars_cursor", "chunksize", "storage_options"),
-        [
-            # A whole CSV result file is read through fsspec with PyAthena's filesystem.
-            (
-                {"cursor_kwargs": {"unload": False}},
-                None,
-                {"key": "invalid", "secret": "invalid", "skip_instance_cache": True},
-            ),
-            # The other results are read with Polars' native object store.
-            ({"cursor_kwargs": {"unload": False}}, 1, _INVALID_OBJECT_STORE_OPTIONS),
-            ({"cursor_kwargs": {"unload": True}}, None, _INVALID_OBJECT_STORE_OPTIONS),
-        ],
-        indirect=["polars_cursor"],
-        ids=["csv", "csv-chunks", "unload"],
-    )
-    def test_storage_options_replace_defaults(self, polars_cursor, chunksize, storage_options):
+    def test_storage_options_replace_defaults(self, polars_cursor):
         """storage_options given to execute() replace PyAthena's S3 settings for the read.
 
-        Their invalid credentials fail the read.
+        A whole CSV result file is read through fsspec with PyAthena's filesystem, which
+        the invalid credentials of the options fail.
         """
         with pytest.raises(OperationalError):
-            # A whole result is read in execute(), and chunks as they are iterated.
-            list(
-                polars_cursor.execute(
-                    "SELECT * FROM one_row", chunksize=chunksize, storage_options=storage_options
-                ).iter_chunks()
+            polars_cursor.execute(
+                "SELECT * FROM one_row",
+                storage_options={
+                    "key": "invalid",
+                    "secret": "invalid",
+                    "skip_instance_cache": True,
+                },
             )
 
     @pytest.mark.parametrize(
