@@ -412,12 +412,13 @@ class TestCursor:
     def test_cache_search_stops_at_expired_execution(self):
         query = "SELECT * FROM one_row"
         now = datetime.now(UTC)
+        page_size = Cursor.LIST_QUERY_EXECUTIONS_MAX_RESULTS
         executions = [
             succeeded_query_execution_data("other", "SELECT 1", now),
             succeeded_query_execution_data("expired", query, now - timedelta(hours=2)),
             *(
                 succeeded_query_execution_data(f"older_{i}", "SELECT 1", now - timedelta(hours=3))
-                for i in range(48)
+                for i in range(page_size - 2)
             ),
             # A search that went on to the second page would return this match.
             succeeded_query_execution_data("next_page", query, now),
@@ -924,10 +925,8 @@ class TestCursor:
                 {"pos": {"x": 3, "y": 4}, "vel": {"x": 1.5}},
             ],
         )
-        row = cursor.fetchone()
-        assert row == expected
-        # The reprs also tell 123 from 123.0.
-        assert repr(row) == repr(expected)
+        # Unlike ==, the reprs also tell 123 from 123.0.
+        assert repr(cursor.fetchone()) == repr(expected)
 
     def test_cancel(self, cursor):
         def cancel(c):

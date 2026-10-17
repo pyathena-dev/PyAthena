@@ -187,11 +187,6 @@ FAILED_EXECUTION_RESPONSES = {
             "Query": "SELECT 1",
             "StatementType": "DML",
             "Status": {"State": "FAILED", "StateChangeReason": "failed"},
-            "Statistics": {},
-            "ResultConfiguration": {},
-            "QueryExecutionContext": {},
-            "ResultReuseConfiguration": {"ResultReuseByAgeConfiguration": {"Enabled": False}},
-            "EngineVersion": {},
         }
     },
     "StartCalculationExecution": {"CalculationExecutionId": "calculation-id", "State": "CREATING"},
