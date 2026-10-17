@@ -92,7 +92,11 @@ class TestAthenaArrowResultSet:
         elif method == "iter":
             rows = list(result_set)
         else:
-            rows = [*result_set.fetchmany(2), *filter(None, [result_set.fetchone()])]
+            rows = result_set.fetchmany(2)
+            row = result_set.fetchone()
+            assert row == ((expected[2],) if len(expected) > 2 else None)
+            if row is not None:
+                rows.append(row)
             rows += result_set.fetchall()
         assert rows == [(value,) for value in expected]
         assert result_set.rownumber == len(expected)

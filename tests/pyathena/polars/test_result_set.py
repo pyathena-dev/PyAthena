@@ -300,28 +300,39 @@ class TestAthenaPolarsResultSet:
         if not read_options:
             assert sum(chunk.height for chunk in chunks) == _ROWS_BEFORE_FAILURE
 
-    @pytest.mark.parametrize("chunksize", [None, 1])
-    def test_unload_storage_options_replace_defaults(self, tmp_path, chunksize):
-        """storage_options given to execute() reach every Polars read of an UNLOAD result.
+    @pytest.mark.parametrize(
+        ("unload", "chunksize"),
+        [(False, 1), (True, None), (True, 1)],
+        ids=["csv-chunks", "unload", "unload-chunks"],
+    )
+    def test_storage_options_replace_defaults(self, tmp_path, unload, chunksize):
+        """storage_options given to execute() reach every Polars read as given.
 
-        Polars ignores them for local files, so the reads are observed.
+        These reads use Polars' native object store, which ignores the options for
+        local files, so the reads are observed.
         """
-        pl.DataFrame({"a": [1, 2]}).write_parquet(tmp_path / "0.parquet")
         storage_options = {"aws_region": "us-west-2"}
+        if unload:
+            pl.DataFrame({"a": [1, 2]}).write_parquet(tmp_path / "0.parquet")
+            files = {"column_types": [], "data_manifest": [str(tmp_path / "0.parquet")]}
+        else:
+            (tmp_path / "result.csv").write_text("a\n1\n2\n")
+            files = {
+                "column_types": [("a", "integer")],
+                "output_location": str(tmp_path / "result.csv"),
+            }
         with (
             patch("polars.read_parquet", wraps=pl.read_parquet) as read_parquet,
             patch("polars.scan_parquet", wraps=pl.scan_parquet) as scan_parquet,
+            patch("polars.scan_csv", wraps=pl.scan_csv) as scan_csv,
         ):
             result_set = _local_result_set(
-                [],
-                data_manifest=[str(tmp_path / "0.parquet")],
-                chunksize=chunksize,
-                storage_options=storage_options,
+                **files, chunksize=chunksize, storage_options=storage_options
             )
             assert result_set.fetchall() == [(1,), (2,)]
-        calls = read_parquet.call_args_list + scan_parquet.call_args_list
-        # The schema scan, and the whole read or the scan of the chunks.
-        assert len(calls) == 2
+        calls = read_parquet.call_args_list + scan_parquet.call_args_list + scan_csv.call_args_list
+        # An UNLOAD result's schema is scanned before its files are read.
+        assert len(calls) == (2 if unload else 1)
         assert all(call.kwargs["storage_options"] is storage_options for call in calls)
 
     @pytest.mark.parametrize("chunksize", [None, 10_000])
@@ -513,8 +524,9 @@ class TestPolarsDataFrameIterator:
             ({"d": date(1970, 1, 1)}, 2),
         ]
         # Polars raises the failure within a struct as a BaseException of its own.
-        with pytest.raises(BaseException):  # noqa: B017, PT011
+        with pytest.raises(BaseException) as error:  # noqa: PT011
             next(rows)
+        assert not isinstance(error.value, StopIteration)
         assert list(rows) == []
 
     def test_itertuples_large_chunk(self):

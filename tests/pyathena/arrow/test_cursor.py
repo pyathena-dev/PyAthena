@@ -968,12 +968,13 @@ class TestArrowCursor:
         indirect=["arrow_cursor"],
     )
     def test_duplicate_column_names(self, arrow_cursor):
-        """Columns with the same name keep their own types; timestamps are truncated."""
+        """Columns with the same name keep their own types, as do their timestamps and NULLs."""
         arrow_cursor.execute(
             "SELECT 1 AS x, 2 AS x, CAST('01:02:03' AS TIME) AS x, 'a' AS y, "
             "json_parse('[1]') AS j, 'b' AS j, CAST('12:34:56' AS TIME) AS t, "
             "CAST('01:02:03' AS TIME) AS t, "
-            "CAST('2020-01-02 03:04:05.123456789' AS TIMESTAMP(9)) AS x"
+            "CAST('2020-01-02 03:04:05.123456789' AS TIMESTAMP(9)) AS x, "
+            "CAST(NULL AS TIMESTAMP) AS x"
         )
         assert arrow_cursor.fetchall() == [
             (
@@ -986,6 +987,7 @@ class TestArrowCursor:
                 datetime(2017, 1, 1, 12, 34, 56).time(),
                 datetime(2017, 1, 1, 1, 2, 3).time(),
                 datetime(2020, 1, 2, 3, 4, 5, 123456),
+                None,
             )
         ]
         assert arrow_cursor.as_arrow().column_names == [
@@ -997,6 +999,7 @@ class TestArrowCursor:
             "j",
             "t",
             "t",
+            "x",
             "x",
         ]
 
