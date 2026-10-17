@@ -96,7 +96,9 @@ class TestAthenaAioDialect:
                     "start_query_execution", service_error_code="InvalidRequestException"
                 )
                 with pytest.raises(DatabaseError) as raised:
-                    await greenlet_spawn(AthenaAioDialect().do_ping, adapted)
+                    await greenlet_spawn(
+                        AthenaAioDialect(dbapi=AthenaAioDialect.import_dbapi()).do_ping, adapted
+                    )
         finally:
             conn.close()
         assert raised.value.__cause__.response["Error"]["Code"] == "InvalidRequestException"

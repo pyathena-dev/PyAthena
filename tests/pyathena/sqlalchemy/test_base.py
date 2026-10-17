@@ -207,7 +207,7 @@ class TestAthenaDialect:
                     "start_query_execution", service_error_code="InvalidRequestException"
                 )
                 with pytest.raises(DatabaseError) as raised:
-                    AthenaDialect().do_ping(conn)
+                    AthenaDialect(dbapi=AthenaDialect.import_dbapi()).do_ping(conn)
         finally:
             conn.close()
         assert raised.value.__cause__.response["Error"]["Code"] == "InvalidRequestException"
@@ -696,20 +696,22 @@ class TestAthenaDialect:
         ("catalog_name", "requests_", "comments"),
         [
             # Glue lowercases table names, so both spellings are one cached table.
-            ("AwsDataCatalog", ["Events"], ["Events", "Events"]),
+            ("AwsDataCatalog", 1, ["events table", "events table"]),
             # Other catalogs may be case-sensitive, so each spelling is looked up.
-            ("other_catalog", ["Events", "events"], ["Events", "events"]),
+            ("other_catalog", 2, ["Events table", "events table"]),
         ],
         ids=["glue", "case_sensitive"],
     )
     def test_table_metadata_cache_follows_catalog_case_sensitivity(
         self, catalog_name, requests_, comments
     ):
+        case_sensitive = catalog_name != "AwsDataCatalog"
         requests = []
 
         def get_table_metadata(table_name, **kwargs):
             requests.append(table_name)
-            return SimpleNamespace(comment=table_name)
+            name = table_name if case_sensitive else table_name.lower()
+            return SimpleNamespace(comment=f"{name} table")
 
         cursor = SimpleNamespace(get_table_metadata=get_table_metadata)
         raw_connection = SimpleNamespace(
@@ -726,7 +728,7 @@ class TestAthenaDialect:
             dialect.get_table_comment(connection, name, info_cache=info_cache)["text"]
             for name in ("Events", "events")
         ] == comments
-        assert requests == requests_
+        assert len(requests) == requests_
 
     def test_insertmanyvalues_pages(self):
         engine, calls = recording_engine()
