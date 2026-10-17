@@ -18,6 +18,7 @@ from pyathena.s3fs.reader import AthenaCSVReader, EmptyStringAsNullCSVReader
 from pyathena.s3fs.result_set import AthenaS3FSResultSet
 from pyathena.util import RetryConfig
 from tests import ENV
+from tests.pyathena import temporal
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
     AMBIGUOUS_TIME_ZONE_QUERY,
@@ -77,6 +78,12 @@ class TestS3FSCursor:
         assert s3fs_cursor.arraysize == 10000
         with pytest.raises(ProgrammingError):
             s3fs_cursor.arraysize = -1
+
+    def test_temporal_types(self, s3fs_cursor):
+        """Temporal values convert as the contract of #1212 defines."""
+        row = s3fs_cursor.execute(temporal.query()).fetchone()
+        assert row == temporal.fetched_row()
+        assert temporal.zones(row) == temporal.zones(temporal.fetched_row())
 
     def test_complex(self, s3fs_cursor):
         s3fs_cursor.execute(

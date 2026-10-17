@@ -24,6 +24,7 @@ from pyathena.polars.cursor import PolarsCursor
 from pyathena.polars.result_set import AthenaPolarsResultSet
 from pyathena.util import RetryConfig
 from tests import ENV
+from tests.pyathena import temporal
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
     AMBIGUOUS_TIME_ZONE_QUERY,
@@ -147,6 +148,35 @@ class TestPolarsCursor:
         assert isinstance(df, pl.DataFrame)
         assert df.height == 10000
         assert df.width == 1
+
+    @pytest.mark.parametrize(
+        ("polars_cursor", "unload"),
+        [
+            ({"cursor_kwargs": {"unload": False}}, False),
+            pytest.param(
+                {"cursor_kwargs": {"unload": True}},
+                True,
+                marks=pytest.mark.xfail(strict=True, reason="#1214"),
+            ),
+        ],
+        indirect=["polars_cursor"],
+        ids=["csv", "unload"],
+    )
+    def test_temporal_types(self, polars_cursor, unload):
+        """Temporal values convert as the contract of #1212 defines.
+
+        Types that Polars cannot represent stay Athena's text.
+        """
+        types = {"timestamp": pl.Datetime("us"), "date": pl.Date()}
+        columns = temporal.columns(unload)
+        df = polars_cursor.execute(temporal.query(unload)).as_polars()
+        assert dict(df.schema) == {c.name: types.get(c.athena_type, pl.String()) for c in columns}
+        assert [df[c.name][0] for c in columns] == [
+            c.value if c.athena_type in types else c.text for c in columns
+        ]
+        row = polars_cursor.execute(temporal.query(unload)).fetchone()
+        assert row == temporal.fetched_row(unload)
+        assert temporal.zones(row) == temporal.zones(temporal.fetched_row(unload))
 
     def test_complex(self, polars_cursor):
         polars_cursor.execute(

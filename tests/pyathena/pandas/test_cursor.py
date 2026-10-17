@@ -26,6 +26,7 @@ from pyathena.pandas.result_set import (
 )
 from pyathena.util import RetryConfig
 from tests import ENV
+from tests.pyathena import temporal
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
     AMBIGUOUS_TIME_ZONE_QUERY,
@@ -508,6 +509,49 @@ class TestPandasCursor:
         assert pandas_cursor.arraysize == 10000
         with pytest.raises(ProgrammingError):
             pandas_cursor.arraysize = -1
+
+    @pytest.mark.parametrize(
+        ("pandas_cursor", "unload"),
+        [
+            pytest.param(
+                {"cursor_kwargs": {"unload": False}},
+                False,
+                marks=pytest.mark.xfail(strict=True, reason="#1219"),
+            ),
+            pytest.param(
+                {"cursor_kwargs": {"unload": True}},
+                True,
+                marks=pytest.mark.xfail(strict=True, reason="#1214, #1219"),
+            ),
+        ],
+        indirect=["pandas_cursor"],
+        ids=["csv", "unload"],
+    )
+    def test_temporal_types(self, pandas_cursor, unload):
+        """Temporal values convert as the contract of #1212 defines."""
+        dtypes = {
+            "timestamp": "datetime64[us]",
+            "date": "datetime64[us]",
+            "timestamp with time zone": "datetime64[us, UTC]",
+            "time": "object",
+            "time with time zone": "object",
+        }
+        columns = temporal.columns(unload)
+        df = pandas_cursor.execute(temporal.query(unload)).as_pandas()
+        assert {name: str(dtype) for name, dtype in df.dtypes.items()} == {
+            c.name: dtypes[c.athena_type] for c in columns
+        }
+        assert [None if pd.isna(v) else v for v in df.iloc[0]] == [
+            pd.Timestamp(c.value).tz_convert("UTC")
+            if c.athena_type == "timestamp with time zone" and c.value is not None
+            else pd.Timestamp(c.value)
+            if c.athena_type in ("timestamp", "date") and c.value is not None
+            else c.value
+            for c in columns
+        ]
+        row = pandas_cursor.execute(temporal.query(unload)).fetchone()
+        assert row == temporal.fetched_row(unload)
+        assert temporal.zones(row) == temporal.zones(temporal.fetched_row(unload))
 
     @pytest.mark.parametrize(
         ("pandas_cursor", "chunksize"),
