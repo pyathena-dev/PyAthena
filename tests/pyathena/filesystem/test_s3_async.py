@@ -3290,7 +3290,15 @@ class TestAioS3StreamedFile:
         # A part found failed when a write waits for a part stops the write
         # with its error and aborts the upload.
         block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
-        fs.core.upload_part = mock.MagicMock(side_effect=PermissionError("Access Denied"))
+        # Both parts start before either fails; otherwise the cleanup after a
+        # failure may cancel the other one before a thread takes it.
+        started = threading.Barrier(2, timeout=5)
+
+        def upload_part(**kwargs):
+            started.wait()
+            raise PermissionError("Access Denied")
+
+        fs.core.upload_part = mock.MagicMock(side_effect=upload_part)
         f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size, max_workers=2)
 
         with pytest.raises(PermissionError, match="Access Denied"):
