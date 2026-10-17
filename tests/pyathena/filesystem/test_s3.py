@@ -6993,11 +6993,12 @@ class TestS3File:
 
     @staticmethod
     def _retrying_part(events):
-        # A part request that throttles and waits EVENT_TIMEOUT seconds to
-        # retry, until the abort stops its retries (GH-1203). It records when
-        # it ends, so that a test can order it with the abort.
+        # A part request that throttles and waits at least a minute to retry,
+        # until the abort stops its retries (GH-1203), so that it is still
+        # running when the test needs it to be. It records when it ends, so
+        # that a test can order it with the abort.
         operation = ThrottledOperation(operation_name="UploadPart")
-        throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
+        throttled = retried(operation, RetryConfig(attempt=2, multiplier=60, max_delay=120))
 
         def request(**kwargs):
             try:
@@ -7541,8 +7542,14 @@ class TestS3File:
         }
 
         with S3File(
-            fs, "s3://bucket/key.txt", mode="wb", block_size=4, s3_additional_kwargs=kwargs
+            fs,
+            "s3://bucket/key.txt",
+            mode="wb",
+            block_size=4,
+            s3_additional_kwargs={**kwargs, "ContentType": "text/plain"},
         ) as f:
+            # The requests read the parameters of the file when they are sent.
+            f.s3_additional_kwargs["ContentType"] = "text/csv"
             f.write(b"x" * 8)
 
         fs.core.create_multipart_upload.assert_called_once_with(
@@ -7659,9 +7666,12 @@ class TestS3File:
             # Deferred: nothing is uploaded until commit() runs.
             file.fs.core.put_object.assert_not_called()
             file.commit()
-        # GH-1211: committing again sends no request.
+        # GH-1211: discarding or committing a committed file again sends no
+        # request.
+        file.discard()
         file.commit()
         file.fs.core.put_object.assert_called_once_with(S3Path("bucket", "key.txt"), data)
+        file.fs._call.assert_not_called()
 
     def test_upload_chunk_empty_file(self):
         # An intentionally empty file (tell() == 0) is created with a
@@ -7959,9 +7969,12 @@ class TestS3File:
             # Deferred: the multipart upload is completed by commit().
             file.fs.core.complete_multipart_upload.assert_not_called()
             file.commit()
-        # GH-1211: committing again sends no request.
+        # GH-1211: discarding or committing a committed file again sends no
+        # request.
+        file.discard()
         file.commit()
         file.fs.core.complete_multipart_upload.assert_called_once()
+        file.fs._call.assert_not_called()
         file.fs.core.put_object.assert_not_called()
 
 

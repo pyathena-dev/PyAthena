@@ -7,8 +7,9 @@
 
 import gc
 import io
+import threading
 import weakref
-from concurrent.futures import CancelledError
+from concurrent.futures import CancelledError, wait
 from types import SimpleNamespace
 from unittest import mock
 
@@ -259,36 +260,69 @@ class _DroppingExecutor(S3ThreadPoolExecutor):
             super().submit_to(future, fn, *args, **kwargs)
 
 
-def _make_session(executor, part_errors=()):
+def _make_session(executor, *, max_workers=1, part_errors=None, gate=None, abort_gate=None):
+    """Build a session whose requests are stubbed and recorded.
+
+    Args:
+        executor: The executor of the session.
+        max_workers: The part requests in flight after which ready() waits.
+        part_errors: The error that each numbered part request raises.
+        gate: An event that each part request waits for, if any.
+        abort_gate: An event that the abort request waits for, if any.
+
+    Returns:
+        The session and its recorded requests: ``completed`` (the part
+        numbers of each completion), ``aborts``, and ``abort_started``.
+    """
     client = boto3.client(
         "s3", region_name="us-east-1", aws_access_key_id="dummy", aws_secret_access_key="dummy"
     )
     core = S3Core(client, retry_config=RetryConfig(attempt=1))
     core.MULTIPART_UPLOAD_MIN_PART_SIZE = 4
     core.MULTIPART_UPLOAD_MAX_PART_SIZE = 8
-    completed = []
-    errors = list(part_errors)
+    errors = dict(part_errors or {})
+    requests = SimpleNamespace(completed=[], aborts=0, abort_started=threading.Event())
 
     def upload_part(upload, part_number, body, **params):
-        if errors:
-            raise errors.pop()
+        if gate is not None:
+            assert gate.wait(5)
+        if part_number in errors:
+            raise errors.pop(part_number)
         return SimpleNamespace(part_number=part_number)
+
+    def complete(upload, parts, **params):
+        requests.completed.append([part.part_number for part in parts])
+
+    def abort(upload, **params):
+        requests.abort_started.set()
+        if abort_gate is not None:
+            assert abort_gate.wait(5)
+        requests.aborts += 1
 
     core.create_multipart_upload = lambda path, **params: S3MultipartUpload(  # type: ignore[method-assign]
         {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
     )
     core.upload_part = upload_part  # type: ignore[method-assign]
-    core.complete_multipart_upload = lambda upload, parts, **params: completed.append(parts)  # type: ignore[method-assign]
-    core.abort_multipart_upload = lambda upload, **params: None  # type: ignore[method-assign]
-    session = _S3WriteSession(core, S3Path("bucket", "key"), executor, block_size=4, max_workers=1)
-    return session, completed
+    core.complete_multipart_upload = complete  # type: ignore[method-assign]
+    core.abort_multipart_upload = abort  # type: ignore[method-assign]
+    session = _S3WriteSession(
+        core, S3Path("bucket", "key"), executor, block_size=4, max_workers=max_workers
+    )
+    return session, requests
+
+
+def _start(session):
+    session.start()
+    session.wait_ready()
+    session.check()
 
 
 class TestS3WriteSession:
     def test_failed_part_is_released(self):
         # GH-1211: the session drops the request of a failed part, whose body
         # the executor frees, and keeps no reference to its error once it is
-        # raised, so that neither waits for the garbage collector.
+        # raised, so that neither waits for the garbage collector. The
+        # operations that the failure prohibits raise a state error.
         class Body:
             pass
 
@@ -300,11 +334,9 @@ class TestS3WriteSession:
         gc.disable()
         try:
             with S3ThreadPoolExecutor(max_workers=1) as executor:
-                session, _ = _make_session(executor, part_errors=[error])
+                session, requests = _make_session(executor, part_errors={1: error})
                 del error
-                session.start()
-                session.wait_ready()
-                session.check()
+                _start(session)
                 body = Body()
                 body_ref = weakref.ref(body)
                 session.submit_part(1, body)  # type: ignore[arg-type]
@@ -317,9 +349,19 @@ class TestS3WriteSession:
                 session.check()
             del info
             assert error_ref() is None
+            for operation in (
+                session.check,
+                lambda: session.submit_part(2, b"abcd"),
+                session.complete,
+            ):
+                with pytest.raises(
+                    S3MultipartStateError, match="The first failure: AccessDeniedError"
+                ):
+                    operation()
             session.abort()
         finally:
             gc.enable()
+        assert (requests.completed, requests.aborts) == ([], 1)
 
     @pytest.mark.parametrize("dropped", ["creation", "part"])
     def test_dropped_request_fails_the_write(self, dropped):
@@ -330,7 +372,7 @@ class TestS3WriteSession:
             lambda kwargs: dropped == "creation" or "part_number" in kwargs
         )
         with executor:
-            session, completed = _make_session(executor)
+            session, requests = _make_session(executor)
             session.start()
             if dropped == "part":
                 session.wait_ready()
@@ -339,37 +381,115 @@ class TestS3WriteSession:
             with pytest.raises(CancelledError):
                 session.complete()
             session.abort()
-        assert completed == []
+        assert requests.completed == []
 
-    @pytest.mark.parametrize("operation", ["complete", "abort"])
+    @pytest.mark.parametrize("operation", ["creation", "ready", "complete", "abort"])
     def test_outcomes_before_callbacks(self, operation):
-        # A future is done before its done callbacks run, so the completion
-        # and the abort consume the finished requests themselves: the
-        # completion includes every part, and a callback that runs after the
-        # abort neither restores its part nor records its failure.
-        with S3ThreadPoolExecutor(max_workers=1) as executor:
-            session, completed = _make_session(
+        # A future is done before its done callbacks run, and an interrupt may
+        # stop a callback, so the operations that depend on an outcome consume
+        # the finished requests themselves: the wait for the creation and for
+        # a part in flight returns, the completion includes every part, and a
+        # callback that runs after the abort neither restores a part nor
+        # records a failure.
+        gate = threading.Event()
+        deferred = []
+        called = threading.Semaphore(0)
+
+        def defer(future):
+            deferred.append(future)
+            called.release()
+
+        with S3ThreadPoolExecutor(max_workers=2) as executor:
+            session, requests = _make_session(
                 executor,
-                part_errors=[PermissionError("Access Denied")] if operation == "abort" else [],
+                max_workers=2 if operation == "abort" else 1,
+                part_errors={2: PermissionError("Access Denied")} if operation == "abort" else None,
+                gate=gate,
             )
-            session.start()
-            session.wait_ready()
-            session.check()
+            on_created = session._on_created
             on_part_done = session._on_part_done
-            deferred = []
-            with mock.patch.object(session, "_on_part_done", side_effect=deferred.append):
-                session.submit_part(1, b"abcd")
-                if operation == "complete":
+            if operation == "creation":
+                with mock.patch.object(session, "_on_created", side_effect=defer):
+                    session.start()
+                    assert called.acquire(timeout=5)
+                    session.wait_ready()
+                    session.check()
+            else:
+                _start(session)
+            with mock.patch.object(session, "_on_part_done", side_effect=defer):
+                if operation == "ready":
+                    gate.set()
+                    session.submit_part(1, b"abcd")
+                    assert called.acquire(timeout=5)
+                    # With max_workers=1, this returns only once part 1 is consumed.
+                    session.wait_ready()
+                    session.submit_part(2, b"efgh")
+                    assert called.acquire(timeout=5)
                     session.complete()
-                else:
+                elif operation == "complete":
+                    gate.set()
+                    session.submit_part(1, b"abcd")
+                    assert called.acquire(timeout=5)
+                    session.complete()
+                elif operation == "abort":
+                    session.submit_part(1, b"abcd")
+                    session.submit_part(2, b"efgh")
+                    gate.set()
+                    assert called.acquire(timeout=5)
+                    assert called.acquire(timeout=5)
                     session.abort()
-            for request in deferred:
-                on_part_done(request)
-        if operation == "complete":
-            assert [[part.part_number for part in parts] for parts in completed] == [[1]]
-            assert [part.part_number for part in session.completed_parts] == [1]
-        else:
-            assert completed == []
+                else:
+                    session.complete()
+        # Every deferred callback runs after the operation.
+        for future in deferred:
+            (on_created if operation == "creation" else on_part_done)(future)
+        if operation == "abort":
+            assert requests.completed == []
             assert session.completed_parts == ()
             with pytest.raises(S3MultipartStateError, match="has been discarded"):
                 session.complete()
+        else:
+            expected = {"creation": [], "ready": [1, 2], "complete": [1]}[operation]
+            assert requests.completed == [expected]
+            assert [part.part_number for part in session.completed_parts] == expected
+
+    def test_cancelled_waiter(self):
+        # A waiter that its caller cancels, as asyncio.wrap_future() does,
+        # does not keep the others from resolving, and is marked as notified,
+        # so that concurrent.futures.wait() returns for it.
+        gate = threading.Event()
+        with S3ThreadPoolExecutor(max_workers=1) as executor:
+            session, requests = _make_session(executor, gate=gate)
+            _start(session)
+            session.submit_part(1, b"abcd")
+            first, second = session.ready(), session.ready()
+            assert not first.done()
+            assert not second.done()
+            assert first.cancel()
+            # Drops the cancelled waiter.
+            third = session.ready()
+            assert wait([first], timeout=5).done == {first}
+            gate.set()
+            assert second.result(5) is None
+            assert third.result(5) is None
+            session.complete()
+        assert requests.completed == [[1]]
+
+    def test_concurrent_aborts(self):
+        # An abort called while another one is aborting the upload waits for
+        # it instead of sending another request.
+        abort_gate = threading.Event()
+        with S3ThreadPoolExecutor(max_workers=1) as executor:
+            session, requests = _make_session(executor, abort_gate=abort_gate)
+            _start(session)
+            threads = [threading.Thread(target=session.abort) for _ in range(2)]
+            threads[0].start()
+            assert requests.abort_started.wait(5)
+            threads[1].start()
+            abort_gate.set()
+            for thread in threads:
+                thread.join(5)
+                assert not thread.is_alive()
+        assert requests.aborts == 1
+        with pytest.raises(S3MultipartStateError, match="has been discarded"):
+            session.complete()
