@@ -250,8 +250,11 @@ def test_retry_api_call_waits_with_jitter(monkeypatch, multiplier, max_delay, ex
 def test_is_retryable_error(code, message, expected):
     error = ClientError({"Error": {"Code": code, "Message": message}}, "GetTableMetadata")
     assert is_retryable_error(error, RetryConfig()) is expected
-    assert is_retryable_error(ValueError("no response"), RetryConfig()) is False
-    assert is_retryable_error(_NoResponseError(), RetryConfig()) is False
+
+
+@pytest.mark.parametrize("error", [ValueError("no response"), _NoResponseError()])
+def test_is_retryable_error_without_response(error):
+    assert is_retryable_error(error, RetryConfig()) is False
 
 
 @pytest.mark.parametrize(

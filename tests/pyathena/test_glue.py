@@ -4,7 +4,9 @@
 # See LICENSE or https://opensource.org/licenses/MIT.
 #
 # SPDX-License-Identifier: MIT
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from botocore.exceptions import ParamValidationError
@@ -89,11 +91,29 @@ class TestGlueMetadataClient:
             # Athena's API version, which Glue does not have.
             api_version="2017-05-18",
         ) as conn:
-            client = conn._glue.client
+            glue = conn._glue
+            created = []
+            session_client = conn.session.client
 
-            assert client.meta.service_model.service_name == "glue"
-            assert client.meta.service_model.api_version == "2017-03-31"
-            assert client.meta.endpoint_url == f"https://glue.{ENV.region_name}.amazonaws.com"
+            def contended_client(*args, **kwargs):
+                created.append(args)
+                return session_client(*args, **kwargs)
+
+            conn.session.client = contended_client
+            barrier = threading.Barrier(8)
+
+            def get_client(_):
+                barrier.wait()
+                return glue.client
+
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                clients = list(executor.map(get_client, range(8)))
+
+            assert created == [("glue",)]
+            assert all(client is clients[0] for client in clients)
+            assert clients[0].meta.service_model.service_name == "glue"
+            assert clients[0].meta.service_model.api_version == "2017-03-31"
+            assert clients[0].meta.endpoint_url == f"https://glue.{ENV.region_name}.amazonaws.com"
 
     def test_table_metadata_leaves_out_columns_iceberg_no_longer_has(self):
         # Glue's columns after DROP COLUMN b and CHANGE COLUMN a a2, as measured

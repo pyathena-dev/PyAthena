@@ -394,11 +394,12 @@ class TestDefaultTypeConverter:
         assert result == {"header": {"seq": 123, "stamp": "2024"}, "x": 4.5}
 
     def test_fallback_returns_untyped_result(self):
-        """A value that the typed conversion cannot parse is converted without the hint."""
+        """A value that the type hint does not describe is converted without the hint."""
         converter = DefaultTypeConverter()
-        # The untyped conversion keeps the original string of nested native arrays.
-        value = "[{a=[1, 2]}, {b=[3]}]"
-        assert converter.convert("array", value, type_hint="array(row(a array(integer)))") == value
+        assert converter.convert("row", "{a=1, b=2}", type_hint="array(integer)") == {
+            "a": "1",
+            "b": "2",
+        }
 
     def test_normalize_hive_syntax_struct(self):
         converter = DefaultTypeConverter()

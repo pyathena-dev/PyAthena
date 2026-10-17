@@ -320,7 +320,7 @@ class QueryExecutionHistory:
 
     Attributes:
         executions: The ``QueryExecution`` dictionaries, latest first.
-        list_requests: The number of ``ListQueryExecutions`` requests.
+        list_requests: The parameters of each ``ListQueryExecutions`` request.
     """
 
     def __init__(self, executions):
@@ -330,7 +330,7 @@ class QueryExecutionHistory:
             executions: The ``QueryExecution`` dictionaries, latest first.
         """
         self.executions = executions
-        self.list_requests = 0
+        self.list_requests = []
 
     def list_query_executions(self, **request):
         """List a page of query execution IDs.
@@ -342,7 +342,7 @@ class QueryExecutionHistory:
         Returns:
             The response, with a ``NextToken`` unless the page is the last.
         """
-        self.list_requests += 1
+        self.list_requests.append(request)
         start = int(request.get("NextToken", 0))
         end = start + request["MaxResults"]
         response = {

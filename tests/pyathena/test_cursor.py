@@ -427,7 +427,12 @@ class TestCursor:
 
         # Without cache_size, cache_expiration_time alone bounds the search.
         assert cursor._find_previous_query_id(query, None, cache_expiration_time=3600) is None
-        assert history.list_requests == 1
+        assert len(history.list_requests) == 1
+        # A failed search would also return None, but the same search reuses the
+        # execution once it is within cache_expiration_time.
+        assert (
+            cursor._find_previous_query_id(query, None, cache_expiration_time=3 * 3600) == "expired"
+        )
 
     @pytest.mark.parametrize(
         ("position", "expected"),
@@ -442,9 +447,11 @@ class TestCursor:
             succeeded_query_execution_data(f"other_{i}", "SELECT 1", now) for i in range(70)
         ]
         executions[position] = succeeded_query_execution_data("match", query, now)
-        cursor = _cache_search_cursor(QueryExecutionHistory(executions))
+        history = QueryExecutionHistory(executions)
+        cursor = _cache_search_cursor(history)
 
         assert cursor._find_previous_query_id(query, "wg", cache_size=60) == expected
+        assert [request["WorkGroup"] for request in history.list_requests] == ["wg", "wg"]
 
     def test_cache_search_prefers_latest_execution(self):
         query = "SELECT * FROM one_row"
@@ -907,7 +914,7 @@ class TestCursor:
                 "data": "array(row(pos row(x integer, y integer), vel row(x double)))",
             },
         )
-        assert cursor.fetchone() == (
+        expected = (
             [1, 2],
             {"1": 2, "3": 4},
             {"a": 1, "b": 2},
@@ -917,6 +924,10 @@ class TestCursor:
                 {"pos": {"x": 3, "y": 4}, "vel": {"x": 1.5}},
             ],
         )
+        row = cursor.fetchone()
+        assert row == expected
+        # The reprs also tell 123 from 123.0.
+        assert repr(row) == repr(expected)
 
     def test_cancel(self, cursor):
         def cancel(c):
@@ -1652,7 +1663,7 @@ class TestCursor:
             return (
                 [self._metadata_view(cursor.get_table_metadata(t)) for t in tables],
                 sorted(self._metadata_view(m) for m in cursor.list_table_metadata()),
-                [m.name for m in cursor.list_table_metadata(expression="one_row")],
+                sorted(m.name for m in cursor.list_table_metadata(expression="one_row")),
                 ENV.schema in [d.name for d in cursor.list_databases("AwsDataCatalog")],
             )
 
