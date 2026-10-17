@@ -485,8 +485,8 @@ cursor = connect(
 ## AioArrowCursor
 
 AioArrowCursor is a native asyncio cursor that returns results as Apache Arrow Tables.
-Unlike AsyncArrowCursor which uses `concurrent.futures`, this cursor uses
-`asyncio.to_thread()` for both result set creation and fetch operations,
+Unlike AsyncArrowCursor which uses `concurrent.futures`, this cursor runs
+both result set creation and fetch operations in threads,
 keeping the event loop free.
 
 ```python

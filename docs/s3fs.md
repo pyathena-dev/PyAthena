@@ -410,8 +410,8 @@ cursor.cancel(query_id)
 ## AioS3FSCursor
 
 AioS3FSCursor is a native asyncio cursor that uses the same lightweight CSV parsing as S3FSCursor.
-Unlike AsyncS3FSCursor which uses `concurrent.futures`, this cursor uses
-`asyncio.to_thread()` for both result set creation and fetch operations,
+Unlike AsyncS3FSCursor which uses `concurrent.futures`, this cursor runs
+both result set creation and fetch operations in threads,
 keeping the event loop free.
 
 Since `AthenaS3FSResultSet` lazily streams rows from S3 via a CSV reader,

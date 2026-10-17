@@ -172,8 +172,9 @@ A request that has already been sent still runs to its end in its thread.
 The requests that stop a query or a calculation and the request that terminates a Spark session keep their retries.
 The start request of `execute()` with `kill_on_interrupt` enabled keeps its retries after a cancellation, and stops them when the task is cancelled again.
 After a fetch is cancelled, later fetches of its result raise `ProgrammingError`.
-The fetch methods of `AioPandasCursor`, `AioArrowCursor`, `AioPolarsCursor`, and `AioS3FSCursor` run in a thread, which keeps running after a cancellation.
-A cancellation also stops the retries of their requests, and the cursor drops the result, which is closed once the fetch ends in its thread.
+The fetch methods of `AioPandasCursor`, `AioArrowCursor`, `AioPolarsCursor`, and `AioS3FSCursor` run in a thread.
+A cancellation skips a fetch that has not started, and a started fetch keeps running in its thread without the retries of its requests.
+The cursor drops the result, which is closed once its fetch is no longer running.
 
 (aio-dict-cursor)=
 

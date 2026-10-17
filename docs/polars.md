@@ -618,8 +618,8 @@ for chunk in result_set.iter_chunks():
 ## AioPolarsCursor
 
 AioPolarsCursor is a native asyncio cursor that returns results as Polars DataFrames.
-Unlike AsyncPolarsCursor which uses `concurrent.futures`, this cursor uses
-`asyncio.to_thread()` for both result set creation and fetch operations,
+Unlike AsyncPolarsCursor which uses `concurrent.futures`, this cursor runs
+both result set creation and fetch operations in threads,
 keeping the event loop free.
 
 ```python
