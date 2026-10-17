@@ -190,7 +190,7 @@ class TestAthenaDialect:
         executed = []
 
         def execute(operation, **kwargs):
-            executed.append(operation)
+            executed.append((operation, kwargs.get("result_reuse_enable")))
 
         cursor = SimpleNamespace(execute=execute, fetchall=lambda: rows)
         raw_connection = SimpleNamespace(
@@ -216,8 +216,10 @@ class TestAthenaDialect:
             None,
             True,
         ]
-        (operation,) = executed
+        ((operation, result_reuse_enable),) = executed
         assert "WHERE table_schema = 'my_schema' AND table_name = 'o''neil'" in operation
+        # Reflection reads the catalog as it is now, never a reused result.
+        assert result_reuse_enable is False
 
     @pytest.mark.parametrize(
         ("map_type", "struct_type"),
@@ -613,16 +615,33 @@ class TestAthenaDialect:
             AthenaDialect().get_view_definition(self._view_connection(execute), "v")
         assert caught.value.__cause__ is error
 
-    def test_get_table_matches_long_names_case_insensitively(self):
+    @pytest.mark.parametrize(
+        ("table_name", "expression"),
+        [
+            ("Long" + "x" * 130, "long" + "x" * 130),
+            # The filter is a regular expression, so the name is escaped.
+            ("Long" + "x-" * 70, "long" + "x\\-" * 70),
+            # ListTableMetadata accepts at most 256 characters, so a longer
+            # escaped name lists the schema without a filter.
+            ("Long" + "x-" * 90, None),
+        ],
+        ids=["filtered", "escaped", "unfiltered"],
+    )
+    def test_get_table_matches_long_names_case_insensitively(self, table_name, expression):
         # GetTableMetadata rejects names over 128 characters, so the lookup lists
         # with a lowercase filter and matches the catalog's own casing.
-        table_name = "Long" + "x" * 130
         listed = [
             SimpleNamespace(name=None, comment="unnamed"),
             SimpleNamespace(name=f"{table_name.lower()}_suffix", comment="longer name"),
             SimpleNamespace(name=table_name.lower(), comment="long table"),
         ]
-        cursor = SimpleNamespace(list_table_metadata=lambda **kwargs: listed)
+        requests = []
+
+        def list_table_metadata(**kwargs):
+            requests.append(kwargs)
+            return listed
+
+        cursor = SimpleNamespace(list_table_metadata=list_table_metadata)
         raw_connection = SimpleNamespace(
             cursor_kwargs={},
             catalog_name="other_catalog",
@@ -632,6 +651,8 @@ class TestAthenaDialect:
         connection = SimpleNamespace(connection=raw_connection)
 
         assert AthenaDialect().get_table_comment(connection, table_name) == {"text": "long table"}
+        # The filter bounds the listing that Athena returns.
+        assert [request["expression"] for request in requests] == [expression]
 
     def test_insertmanyvalues_pages(self):
         engine, calls = recording_engine()
@@ -1149,7 +1170,7 @@ class TestSQLAlchemyAthena:
         [{"driver": "pandas", "glue_metadata_fallback": "false", "unload": "true"}],
         indirect=True,
     )
-    def test_throttled_columns_across_cursor_types(self, engine, monkeypatch):
+    def test_throttled_columns_with_unload_cursor(self, engine, monkeypatch):
         engine, conn = engine
         # A per-case table, not a shared one created with checkfirst: this suite
         # already contends for Athena's account-wide metadata API limit, and
@@ -1224,7 +1245,7 @@ class TestSQLAlchemyAthena:
     # The definition is read through the dialect's own API cursor, which every
     # cursor type shares, so one DataFrame cursor with UNLOAD stands for all of them.
     @pytest.mark.parametrize("engine", [{"driver": "pandas", "unload": "true"}], indirect=True)
-    def test_get_view_definition_across_cursor_types(self, engine):
+    def test_get_view_definition_with_unload_cursor(self, engine):
         engine, conn = engine
         # Athena formats this definition with a blank line. Read through a
         # DataFrame cursor those rows arrive as NaN, as an empty string, or not

@@ -40,7 +40,7 @@ from pyathena.sqlalchemy.types import (
     AthenaStruct,
     AthenaTimestamp,
 )
-from tests.pyathena.util import recording_engine
+from tests.pyathena.util import executed_sql, recording_engine
 
 
 class Color(Enum):
@@ -233,6 +233,10 @@ class TestAthenaArrayComparator:
         assert isinstance(items[1].type, Integer)
         compiled = select(items[1:2]).compile(dialect=AthenaDialect())
         assert "transform(slice(items," in str(compiled)
+        # The slice keeps the decorator's result processing.
+        engine, _ = recording_engine(rows=[('{"_pyathena_array":["1","2"]}',)])
+        with engine.connect() as conn:
+            assert conn.execute(select(items[1:2])).scalar_one() == (1, 2)
 
 
 class TestArrayTypeInspector:
@@ -629,15 +633,19 @@ class TestArrayJSONProjection:
             statement = statement.union_all(select(literal([2], TupleArray()).label("items")))
         compiled = statement.order_by("items").compile(dialect=AthenaDialect())
         assert "ORDER BY anon_1.items" in str(compiled)
+        # The rewritten projection keeps the decorator's result processing.
+        engine, _ = recording_engine(rows=[('{"_pyathena_array":["2",null]}',)])
+        with engine.connect() as conn:
+            assert conn.execute(statement.order_by("items")).scalar_one() == (2, None)
 
     def test_array_variant_keeps_transport_projection(self):
         type_ = String().with_variant(AthenaArray(Integer), "awsathena")
-        compiled = (
-            select(literal([2], type_).label("items"))
-            .order_by("items")
-            .compile(dialect=AthenaDialect())
-        )
-        assert "transform(anon_1.items" in str(compiled)
+        statement = select(literal([2], type_).label("items")).order_by("items")
+        assert "transform(anon_1.items" in str(statement.compile(dialect=AthenaDialect()))
+        # The variant's ARRAY type processes the result, not the String type.
+        engine, _ = recording_engine(rows=[('{"_pyathena_array":["2"]}',)])
+        with engine.connect() as conn:
+            assert conn.execute(statement).scalar_one() == [2]
 
     @pytest.mark.parametrize("compound", [False, True])
     def test_array_ordering_rejects_columns_outside_distinct_or_union(self, compound):
@@ -666,35 +674,18 @@ class TestArrayJSONProjection:
         assert sql.startswith("SELECT anon_1.value, json_format(")
 
 
-def _execute_formatted(statement, parameters=None):
-    """Execute a statement offline and format the SQL the cursor receives.
-
-    Args:
-        statement: SQLAlchemy statement to execute.
-        parameters: Execution parameters for the statement.
-
-    Returns:
-        The SQL string produced by ``DefaultParameterFormatter``.
-    """
-    engine, calls = recording_engine()
-    with engine.connect() as conn:
-        conn.execute(statement, parameters)
-    ((_, operation, formatted_parameters),) = calls
-    return DefaultParameterFormatter().format(operation, formatted_parameters)
-
-
 class TestArrayAssignmentType:
     def test_binary_element_assignment_uses_native_hex_parameter(self):
         table = _array_update_table(AthenaArray(types.BINARY))
         statement = table.update().values({table.c["items"][1]: b"\x00\xff"})
-        assert "FROM_HEX('00ff')" in _execute_formatted(statement)
+        assert "FROM_HEX('00ff')" in executed_sql(statement)
 
     def test_explicit_assignment_type_and_callable_value(self):
         table = _array_update_table(AthenaArray(types.String))
         stmt = table.update().values(
             {table.c["items"][1]: bindparam("value", type_=PrefixString(), callable_=lambda: "a")}
         )
-        assert "upper('prefix:a')" in _execute_formatted(stmt)
+        assert "upper('prefix:a')" in executed_sql(stmt)
 
 
 class TestArrayUpdate:
@@ -757,19 +748,21 @@ class TestArrayUpdateCompiler:
     def test_bound_index_uses_write_index_processor(self):
         table = _array_update_table()
         statement = table.update().values({table.c["items"][bindparam("index")]: 9})
-        assert "IF(2 > 0, 2, " in _execute_formatted(statement, {"index": 2})
+        assert "IF(2 > 0, 2, " in executed_sql(statement, {"index": 2})
         for value in (1.5, True, None):
             with pytest.raises(sa_exc.StatementError, match="non-NULL integers") as raised:
-                _execute_formatted(statement, {"index": value})
+                executed_sql(statement, {"index": value})
             assert isinstance(raised.value.orig, ValueError)
         # A literal_execute index is rendered when the statement runs, and checked then.
-        literal = table.update().values(
+        literal_index = table.update().values(
             {table.c["items"][bindparam("index", literal_execute=True)]: 9}
         )
-        assert "IF(2 > 0, 2, " in _execute_formatted(literal, {"index": 2})
+        assert "IF(2 > 0, 2, " in executed_sql(literal_index, {"index": 2})
         for value in (1.5, True):
-            with pytest.raises(sa_exc.StatementError):
-                _execute_formatted(literal, {"index": value})
+            with pytest.raises(sa_exc.StatementError) as raised:
+                executed_sql(literal_index, {"index": value})
+            # SQLAlchemy reports the failed literal rendering, caused by the check.
+            assert isinstance(raised.value.orig.__cause__, ValueError)
 
     def test_callable_index_and_slice_value(self):
         table = _array_update_table(AthenaArray(types.String))
@@ -798,7 +791,7 @@ class TestArrayUpdateCompiler:
         assert "SELECT" not in sql
         assert "WHERE arrays.id =" in sql
         assert statement._generate_cache_key().key == original_key
-        assert "ARRAY[" in _execute_formatted(statement)
+        assert "ARRAY[" in executed_sql(statement)
 
     @pytest.mark.parametrize("index", [0, -1, None, 1.5, True])
     def test_invalid_partial_update_index(self, index):
@@ -858,7 +851,7 @@ class TestArrayUpdateCompiler:
         table = _array_update_table()
         index = func.length("abc")
         statement = table.update().values({table.c["items"][index]: 9})
-        assert "length('abc')" in _execute_formatted(statement)
+        assert "length('abc')" in executed_sql(statement)
 
     def test_null_slice_assignment_rejected(self):
         table = _array_update_table()

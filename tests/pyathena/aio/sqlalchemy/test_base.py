@@ -48,14 +48,20 @@ class TestAthenaAioAdaptedCursor:
         cursor.execute = AsyncMock(return_value=cursor)
         cursor.description = [("col", "varchar", None, None, None, None, None)]
         cursor.fetchall = AsyncMock(side_effect=error)
-        cursor.close.side_effect = ValueError("generator already executing")
+        close_error = ValueError("generator already executing")
+        cursor.close.side_effect = close_error
         adapted = AthenaAioAdaptedCursor(cursor)
 
         with pytest.raises(type(error)) as raised:
             await greenlet_spawn(adapted.execute, "SELECT 1")
 
         assert raised.value is error
-        assert any(record.levelno == logging.ERROR for record in caplog.records)
+        # The close error is logged with its traceback instead of replacing the fetch error.
+        assert [
+            record.exc_info[1]
+            for record in caplog.records
+            if record.levelno == logging.ERROR and record.exc_info
+        ] == [close_error]
 
 
 class TestAsyncSQLAlchemyAthena:

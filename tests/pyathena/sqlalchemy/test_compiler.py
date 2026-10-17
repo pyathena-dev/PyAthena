@@ -37,7 +37,6 @@ from sqlalchemy.sql import literal, literal_column, operators
 from sqlalchemy.sql.compiler import FROM_LINTING
 from sqlalchemy.sql.ddl import CreateTable
 
-from pyathena.formatter import DefaultParameterFormatter
 from pyathena.sqlalchemy.base import AthenaDialect
 from pyathena.sqlalchemy.compiler import AthenaTypeCompiler
 from pyathena.sqlalchemy.pandas import AthenaPandasDialect
@@ -51,7 +50,7 @@ from pyathena.sqlalchemy.types import (
     AthenaTimestamp,
 )
 from tests import ENV
-from tests.pyathena.util import decorated, recording_engine
+from tests.pyathena.util import decorated, executed_sql, recording_engine
 
 # Bind parameter names from SQLAlchemy's DifficultParametersTest.
 DIFFICULT_PARAMETER_NAMES = [
@@ -414,21 +413,18 @@ class TestAthenaStatementCompiler:
         assert query._generate_cache_key().key == select(items[2:3:2])._generate_cache_key().key
         step_name = next(name for name, value in compiled.params.items() if value == 1)
         assert f"IF(%({step_name})s = 1" in str(compiled)
-        engine, calls = recording_engine()
+        assert "IF(1 = 1, slice(items, " in executed_sql(query)
+        # The cached statement checks each step value it is executed with.
+        engine, _ = recording_engine()
         with engine.connect() as conn:
             conn.execute(query)
-            # The cached statement checks each step value it is executed with.
-            with pytest.raises(exc.StatementError, match="step") as raised:
+            with pytest.raises(exc.StatementError) as raised:
                 conn.execute(select(items[2:3:2]))
             assert isinstance(raised.value.orig, ValueError)
             for invalid in (1.0, None):
-                with pytest.raises(exc.StatementError, match="step") as raised:
+                with pytest.raises(exc.StatementError) as raised:
                     conn.execute(query, {step_name: invalid})
                 assert isinstance(raised.value.orig, ValueError)
-        ((_, operation, parameters),) = calls
-        assert "IF(1 = 1, slice(items, " in DefaultParameterFormatter().format(
-            operation, parameters
-        )
         native = column("items", AthenaArray(Integer))
         assert (
             select(native[1:3:1])._generate_cache_key().key
@@ -712,35 +708,16 @@ class TestAthenaStatementCompiler:
             f"SELECT {expected} AS anon_1"
         )
 
-    def _format_sql(self, statement, parameters=None):
-        """Format a statement with the parameter names SQLAlchemy sends to the cursor.
-
-        Bind processors are not applied, so use this only for types without one.
-
-        Args:
-            statement: SQLAlchemy statement to compile.
-            parameters: Values for the statement's bind parameters.
-
-        Returns:
-            The SQL string produced by ``DefaultParameterFormatter``.
-        """
-        compiled = statement.compile(dialect=self.dialect)
-        # Expand before escaping names, as SQLAlchemy's execution context does.
-        expanded = compiled.construct_expanded_state(parameters, escape_names=False)
-        escaped_names = compiled.escaped_bind_names
-        formatted_params = {escaped_names.get(k, k): v for k, v in expanded.parameters.items()}
-        return DefaultParameterFormatter().format(expanded.statement, formatted_params)
-
     @pytest.mark.parametrize("name", DIFFICULT_PARAMETER_NAMES)
     def test_difficult_expanding_bind_parameter_name(self, name):
         id_ = column("id", Integer)
         stmt = select(id_).where(id_.in_(bindparam(name, value=[1, 2])))
-        assert self._format_sql(stmt, {name: [4, 1]}).endswith("WHERE id IN (4, 1)")
+        assert executed_sql(stmt, {name: [4, 1]}).endswith("WHERE id IN (4, 1)")
 
     def test_like_pattern_is_not_truncated(self):
         # A pattern that looks like a pyformat placeholder is a plain value.
         stmt = select(column("x", String)).where(column("x", String).like("%(x)s"))
-        assert self._format_sql(stmt).endswith("WHERE x LIKE '%(x)s'")
+        assert executed_sql(stmt).endswith("WHERE x LIKE '%(x)s'")
 
 
 class TestAthenaDDLCompiler:

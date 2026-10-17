@@ -27,6 +27,7 @@ from pyathena.error import ProgrammingError
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.filesystem.s3_async import AioS3FileSystem
 from pyathena.filesystem.s3_core import S3Core
+from pyathena.formatter import DefaultParameterFormatter
 from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaCalculationExecutionStatus, AthenaQueryExecution
 from pyathena.util import retry_api_call
@@ -414,7 +415,7 @@ def decorated(impl):
     return type("Decorated", (types.TypeDecorator,), {"impl": impl, "cache_ok": True})()
 
 
-def recording_engine(rowcounts=None, query="", config=None, **kwargs):
+def recording_engine(rowcounts=None, query="", config=None, rows=None, **kwargs):
     """Create an engine whose DB API connection records statements offline.
 
     Args:
@@ -423,6 +424,8 @@ def recording_engine(rowcounts=None, query="", config=None, **kwargs):
         query: The query string of the connection URL, without ``?``.
         config: String engine options to pass through ``engine_from_config``
             instead of calling ``create_engine`` directly.
+        rows: Result rows that each ``execute()`` returns, as tuples of the
+            values Athena returns. By default, a statement returns no rows.
         **kwargs: Additional keyword arguments for ``create_engine``.
 
     Returns:
@@ -438,12 +441,27 @@ def recording_engine(rowcounts=None, query="", config=None, **kwargs):
 
         def execute(self, operation, parameters=None, **_):
             calls.append(("execute", operation, parameters))
-            rows = sum(1 for key in parameters if key.startswith("id"))
-            self.rowcount = next(counts, rows)
+            inserted = sum(1 for key in parameters if key.startswith("id"))
+            self.rowcount = next(counts, inserted)
+            if rows is not None:
+                self.description = [
+                    (f"col_{i}", "varchar", None, None, None, None, True)
+                    for i in range(len(rows[0]))
+                ]
+                self._rows = iter(rows)
 
         def executemany(self, operation, seq_of_parameters, **_):
             calls.append(("executemany", operation, seq_of_parameters))
             self.rowcount = next(counts, len(seq_of_parameters))
+
+        def fetchone(self):
+            return next(self._rows, None)
+
+        def fetchmany(self, size=None):
+            return [row for _, row in zip(range(size or 1), self._rows, strict=False)]
+
+        def fetchall(self):
+            return list(self._rows)
 
         def close(self):
             pass
@@ -459,6 +477,27 @@ def recording_engine(rowcounts=None, query="", config=None, **kwargs):
     else:
         engine = create_engine(url, creator=lambda: connection, **kwargs)
     return engine, calls
+
+
+def executed_sql(statement, parameters=None):
+    """Execute a statement through ``recording_engine`` and format what the cursor receives.
+
+    Bind processors and SQLAlchemy's bind name escaping apply as in a real
+    execution, and ``DefaultParameterFormatter`` renders the parameters as
+    ``Cursor.execute()`` would.
+
+    Args:
+        statement: SQLAlchemy statement to execute.
+        parameters: Execution parameters for the statement.
+
+    Returns:
+        The formatted SQL of the single recorded call.
+    """
+    engine, calls = recording_engine()
+    with engine.connect() as conn:
+        conn.execute(statement, parameters)
+    ((_, operation, formatted_parameters),) = calls
+    return DefaultParameterFormatter().format(operation, formatted_parameters)
 
 
 def wait_for_spark_session_state(client, session_id, state, timeout=120):
