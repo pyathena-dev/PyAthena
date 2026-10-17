@@ -775,9 +775,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """Read query results from Parquet files in S3.
 
         Timestamps are read at microseconds; see ``_int96_read_options()``. Polars 1.x
-        reads them so only with ``use_pyarrow=True``. When ``_reads_with_pyarrow()``,
-        a result with timestamps is therefore read with pyarrow instead; otherwise
-        Polars 1.x reads them at nanoseconds, and they are cast to microseconds.
+        cannot read them so; when ``_reads_with_pyarrow()``, a result with timestamps
+        is read with pyarrow instead, and otherwise Polars 1.x reads them at
+        nanoseconds, and they are cast to microseconds.
 
         ``_prepare_parquet_location()`` must have found the unload location first.
 
@@ -802,14 +802,11 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 "to read them with Polars."
             )
             return self._read_parquet_with_pyarrow()
-        kwargs = self._read_kwargs(
-            lambda: self._get_parquet_storage_options(self.connection), **(options or {})
-        )
-        if options and "pyarrow_options" in options:
-            # The options given to execute() are in it.
-            kwargs["pyarrow_options"] = options["pyarrow_options"]
         dtypes = self._output_dtypes(schema, options)
         try:
+            kwargs = self._read_kwargs(
+                lambda: self._get_parquet_storage_options(self.connection), **(options or {})
+            )
             df = self._cast(pl.read_parquet(self._unload_location, **kwargs), dtypes)
         except Exception as e:
             _logger.exception(f"Failed to read {self._unload_location}.")
@@ -874,34 +871,24 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """Get the Polars read arguments that read the INT96 timestamps of UNLOAD at microseconds.
 
         Polars reads INT96 at nanoseconds by default, which gives wrong values outside
-        1677-09-21 to 2262-04-11. With ``use_pyarrow=True`` given to ``execute()``,
-        pyarrow reads it at microseconds unless ``pyarrow_options`` sets
-        ``coerce_int96_timestamp_unit``. Polars 2.0 and later read INT96 at the time
-        unit of the read schema, except in a Map, which the read schema therefore
-        makes a List of Structs; ``_output_dtypes()`` restores it. Polars 1.x reads
-        INT96 at nanoseconds whatever the schema.
+        1677-09-21 to 2262-04-11. Polars 2.0 and later read INT96 at the time unit of
+        the read schema, except in a Map, which the read schema therefore makes a List
+        of Structs; ``_output_dtypes()`` restores it. Polars 1.x reads INT96 at
+        nanoseconds whatever the schema.
 
         Args:
             schema: The schema of the Parquet files.
 
         Returns:
             No arguments if the files hold no nanosecond timestamps or ``execute()``
-            was given a ``schema``, ``pyarrow_options`` with ``use_pyarrow=True``, the
-            ``schema`` argument with Polars 2.0 and later, or None with Polars 1.x,
-            which cannot read them.
+            was given a ``schema``, the ``schema`` argument with Polars 2.0 and later,
+            or None with Polars 1.x, which cannot read them.
         """
         import polars as pl
 
-        if all(to_microseconds(dtype) == dtype for dtype in schema.values()):
-            return {}
-        if self._kwargs.get("use_pyarrow"):
-            return {
-                "pyarrow_options": {
-                    "coerce_int96_timestamp_unit": "us",
-                    **(self._kwargs.get("pyarrow_options") or {}),
-                }
-            }
-        if "schema" in self._kwargs:
+        if "schema" in self._kwargs or all(
+            to_microseconds(dtype) == dtype for dtype in schema.values()
+        ):
             return {}
         if int(pl.__version__.split(".")[0]) < 2:
             return None
@@ -1186,9 +1173,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             return self._read_parquet_chunks(
                 S3FileSystem(**self._csv_storage_options), self._data_manifest
             )
-        return self._scan_parquet_chunks(
-            self._unload_location, self.connection, schema, self._int96_read_options(schema)
-        )
+        return self._scan_parquet_chunks(self._unload_location, self.connection, schema)
 
     def _read_parquet_chunks(self, fs: S3FileSystem, paths: list[str]) -> Iterator[pl.DataFrame]:
         """Read the files of the data manifest in chunks with ``ParquetChunkReader``.
@@ -1223,7 +1208,6 @@ class AthenaPolarsResultSet(AthenaResultSet):
         location: str,
         connection: Connection[Any],
         schema: pl.Schema,
-        options: dict[str, Any] | None,
     ) -> Iterator[pl.DataFrame]:
         """Scan the unload location in chunks with Polars and the read options.
 
@@ -1232,7 +1216,6 @@ class AthenaPolarsResultSet(AthenaResultSet):
             connection: The connection whose credentials the read uses. They are
                 frozen when the first chunk is read.
             schema: The schema of the Parquet files.
-            options: The read arguments from ``_int96_read_options()``.
 
         Yields:
             Polars DataFrame for each chunk.
@@ -1242,10 +1225,11 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """
         import polars as pl
 
-        dtypes = self._output_dtypes(schema, options)
-        if options is None and dtypes:
-            self._warn_nanosecond_read(_NANOSECOND_READ_CONSEQUENCE)
         try:
+            options = self._int96_read_options(schema)
+            dtypes = self._output_dtypes(schema, options)
+            if options is None and dtypes:
+                self._warn_nanosecond_read(_NANOSECOND_READ_CONSEQUENCE)
             lazy_df = pl.scan_parquet(
                 location,
                 **self._read_kwargs(

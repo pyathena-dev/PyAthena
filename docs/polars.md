@@ -229,7 +229,6 @@ Polars 1.x reads them correctly only through pyarrow:
 
 - Without the chunksize option and without Polars read options given to `execute()`, a result with timestamps is read with pyarrow when it is installed, through PyAthena's S3FileSystem, and a warning is logged.
 - With the chunksize option and without Polars read options, the chunks are read with pyarrow when it is installed.
-- With `use_pyarrow=True` given to `execute()`, a result read without the chunksize option is read by Polars with pyarrow, with `coerce_int96_timestamp_unit="us"` added to `pyarrow_options` unless they set it.
 - Otherwise Polars 1.x reads the timestamps at nanoseconds, which gives wrong values outside 1677-09-21 to 2262-04-11; they are cast to microseconds, and a warning is logged.
 
 The unload option can be enabled by specifying it in the `cursor_kwargs` argument of the connect method or as an argument to the cursor method.

@@ -44,11 +44,10 @@ _MAP = (
     if _POLARS_2
     else pl.List(pl.Struct({"key": pl.String, "value": pl.Datetime("us")}))
 )
-# The ways to read an UNLOAD result: whole, whole by Polars with pyarrow, in chunks
-# with ParquetChunkReader, and in chunks that Polars scans with the read options.
+# The ways to read an UNLOAD result: whole, in chunks with ParquetChunkReader, and in
+# chunks that Polars scans with the read options.
 _UNLOAD_READS = [
     pytest.param(None, {}, id="whole"),
-    pytest.param(None, {"use_pyarrow": True}, id="whole-use-pyarrow"),
     pytest.param(3, {}, id="chunks"),
     pytest.param(3, {"low_memory": True}, id="scanned-chunks"),
 ]
@@ -795,16 +794,6 @@ class TestAthenaPolarsResultSet:
         assert df.schema == pl.Schema({"id": pl.Int64, "*": _MAP})
         assert df.row(0) == (1, {"k": timestamp})
 
-    def test_read_parquet_int96_pyarrow_options(self, tmp_path):
-        """coerce_int96_timestamp_unit in pyarrow_options replaces microseconds."""
-        (df,) = _read_unload_result(
-            tmp_path,
-            None,
-            {"use_pyarrow": True, "pyarrow_options": {"coerce_int96_timestamp_unit": "ms"}},
-        )
-        assert df.schema["ts"] == pl.Datetime("ms")
-        assert df.sort("id")["ts"].to_list() == INT96_VALUES
-
     @pytest.mark.skipif(not _POLARS_2, reason="Polars 1.x reads INT96 at nanoseconds.")
     @pytest.mark.parametrize("chunksize", [None, 3], ids=["whole", "scanned-chunks"])
     def test_read_parquet_int96_schema_option(self, tmp_path, chunksize):
@@ -822,6 +811,27 @@ class TestAthenaPolarsResultSet:
         assert df.schema == pl.Schema(schema)
         assert df["ts"].to_list() == INT96_VALUES
         assert df["mp"].to_list() == [[{"key": "k", "value": v}] for v in INT96_VALUES]
+
+    @pytest.mark.parametrize(("chunksize", "kwargs"), [(None, {}), (3, {"low_memory": True})])
+    def test_read_parquet_storage_options_error(self, chunksize, kwargs):
+        """A failure to get the storage options, such as of credentials, is OperationalError."""
+        result_set = _chunked_result_set()
+        result_set._chunksize = chunksize
+        result_set._kwargs = dict(kwargs)
+        result_set._unload_location = "s3://bucket/unload/"
+        schema = pl.Schema({"i": pl.Int64})
+        with patch.object(
+            AthenaPolarsResultSet,
+            "_get_parquet_storage_options",
+            side_effect=RuntimeError("credentials"),
+        ):
+            if chunksize is None:
+                with pytest.raises(OperationalError, match="credentials"):
+                    result_set._read_parquet(schema)
+            else:
+                chunks = result_set._iter_parquet_chunks(schema)
+                with pytest.raises(OperationalError, match="credentials"):
+                    next(chunks)
 
     def test_read_parquet_without_timestamps(self, tmp_path, caplog):
         """A result without timestamps is read by Polars with read options and no warning."""
