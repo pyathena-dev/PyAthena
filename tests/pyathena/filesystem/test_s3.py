@@ -3487,7 +3487,7 @@ class TestS3FileSystem:
             # As the wait of concurrent.futures, whose frame keeps the futures
             # in a set, interrupted once the reads have finished.
             futures = set(futures)
-            wait(futures, timeout=EVENT_TIMEOUT)
+            assert not wait(futures, timeout=EVENT_TIMEOUT).not_done
             raise KeyboardInterrupt
 
         f = fs.open("s3://bucket/key", "rb", cache_type="none", block_size=16, max_workers=4)
@@ -3686,7 +3686,9 @@ class TestS3FileSystem:
         def wait_for_parts(futures):
             if any(not future.done() for future in futures):
                 release.set()
-            return wait(futures, timeout=EVENT_TIMEOUT)
+            result = wait(futures, timeout=EVENT_TIMEOUT)
+            assert not result.not_done
+            return result
 
         try:
             with (
@@ -3751,7 +3753,9 @@ class TestS3FileSystem:
             if not release.is_set():
                 release.set()
                 raise KeyboardInterrupt("second interrupt")
-            return wait(futures, timeout=EVENT_TIMEOUT)
+            result = wait(futures, timeout=EVENT_TIMEOUT)
+            assert not result.not_done
+            return result
 
         try:
             with (
@@ -5975,7 +5979,9 @@ class TestS3File:
                 closed_at_recovery.append(file.closed and file.buffer is None)
                 release.set()
                 raise KeyboardInterrupt("second interrupt")
-            return wait(futures, timeout=EVENT_TIMEOUT)
+            result = wait(futures, timeout=EVENT_TIMEOUT)
+            assert not result.not_done
+            return result
 
         try:
             with (
@@ -6086,7 +6092,9 @@ class TestS3File:
             def wait_for_creation(futures):
                 # The wait for the creation; no public object observes it.
                 release.set()
-                return wait(futures, timeout=EVENT_TIMEOUT)
+                result = wait(futures, timeout=EVENT_TIMEOUT)
+                assert not result.not_done
+                return result
 
             waiting = mock.patch(
                 "pyathena.filesystem.s3_writer.wait", side_effect=wait_for_creation
