@@ -612,8 +612,8 @@ class TestAthenaPolarsResultSet:
     def test_read_csv_ignore_errors(self, tmp_path, reader):
         """With ignore_errors, timestamp text that is not a timestamp becomes null.
 
-        Timestamps with more fractional digits than the time unit are still truncated,
-        which Polars itself reads as null with ignore_errors.
+        Timestamps with more than nine fractional digits, which Polars itself reads as
+        null with ignore_errors, are still truncated.
         """
         path = tmp_path / "result.csv"
         path.write_bytes(b'"t"\n"2020-01-02 03:04:05.123456789012"\n"invalid"\n')

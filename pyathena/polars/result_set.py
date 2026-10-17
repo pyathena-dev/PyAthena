@@ -550,8 +550,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
     def _get_csv_schema_overrides(self, has_header: bool) -> tuple[dict[str, Any], dict[str, Any]]:
         """Get the Polars data types for reading CSV data, with the timestamp columns as text.
 
-        Athena writes up to 12 fractional digits, which Polars does not parse into a
-        Datetime whose time unit holds fewer. A chunked read always reads the timestamp
+        Athena writes up to 12 fractional digits, and Polars does not parse more than
+        nine into a Datetime. A chunked read always reads the timestamp
         columns as text and converts them with ``_to_datetimes()``. A whole read does
         so when parsing them fails, and with ``ignore_errors`` given to ``execute()``,
         with which Polars reads the timestamps that it does not parse as null.

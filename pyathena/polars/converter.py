@@ -48,8 +48,8 @@ _DEFAULT_POLARS_CONVERTERS: dict[str, Callable[[str | None], Any | None]] = {
 def _to_datetimes(frame: _FrameT, dtypes: dict[str, Any], strict: bool = True) -> _FrameT:
     """Convert timestamp text columns to Datetime dtypes, truncating finer fractions.
 
-    Athena writes up to 12 fractional digits, which Polars does not parse into a
-    Datetime whose time unit holds fewer.
+    Athena writes up to 12 fractional digits, and Polars does not parse more than
+    nine into a Datetime, so the text is cut to the digits that the time unit holds.
 
     Args:
         frame: The DataFrame or LazyFrame with the timestamp text columns, with NULL

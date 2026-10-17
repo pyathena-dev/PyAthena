@@ -182,7 +182,7 @@ class TestPolarsCursor:
     def test_temporal_types_chunked(self, polars_cursor):
         """Chunks of a CSV result have the temporal types and values of a whole read (#1191).
 
-        Timestamps with more fractional digits than the time unit are truncated.
+        Timestamps with up to 12 fractional digits are truncated to microseconds.
         """
         types = {"timestamp": pl.Datetime("us"), "date": pl.Date()}
         columns = temporal.columns()
