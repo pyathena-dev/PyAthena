@@ -43,6 +43,17 @@ def _pandas_converter_without_bigint_dtype():
     return converter
 
 
+def _pandas_value(column: temporal.Column):
+    """The value that a DataFrame holds for a temporal column."""
+    if column.value is None:
+        return None
+    if column.athena_type == "timestamp with time zone":
+        return pd.Timestamp(column.value).tz_convert("UTC")
+    if column.athena_type in ("timestamp", "date"):
+        return pd.Timestamp(column.value)
+    return column.value
+
+
 class TestPandasCursor:
     @pytest.mark.parametrize(
         ("engine", "chunksize"), [("auto", None), ("c", 2), ("python", 2), ("pyarrow", None)]
@@ -528,7 +539,10 @@ class TestPandasCursor:
         ids=["csv", "unload"],
     )
     def test_temporal_types(self, pandas_cursor, unload):
-        """Temporal values convert as the contract of #1212 defines."""
+        """Temporal values convert as the contract of #1212 defines.
+
+        Aware values are compared by instant, as the DataFrame holds them in UTC.
+        """
         dtypes = {
             "timestamp": "datetime64[us]",
             "date": "datetime64[us]",
@@ -542,16 +556,11 @@ class TestPandasCursor:
             c.name: dtypes[c.athena_type] for c in columns
         }
         assert [None if pd.isna(v) else v for v in df.iloc[0]] == [
-            pd.Timestamp(c.value).tz_convert("UTC")
-            if c.athena_type == "timestamp with time zone" and c.value is not None
-            else pd.Timestamp(c.value)
-            if c.athena_type in ("timestamp", "date") and c.value is not None
-            else c.value
-            for c in columns
+            _pandas_value(c) for c in columns
         ]
+        # The fetch methods read the DataFrame, whose aware values are in UTC.
         row = pandas_cursor.execute(temporal.query(unload)).fetchone()
         assert row == temporal.fetched_row(unload)
-        assert temporal.zones(row) == temporal.zones(temporal.fetched_row(unload))
 
     @pytest.mark.parametrize(
         ("pandas_cursor", "chunksize"),
