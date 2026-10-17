@@ -153,11 +153,7 @@ class TestPolarsCursor:
         ("polars_cursor", "unload"),
         [
             ({"cursor_kwargs": {"unload": False}}, False),
-            pytest.param(
-                {"cursor_kwargs": {"unload": True}},
-                True,
-                marks=pytest.mark.xfail(strict=True, reason="#1214"),
-            ),
+            ({"cursor_kwargs": {"unload": True}}, True),
         ],
         indirect=["polars_cursor"],
         ids=["csv", "unload"],

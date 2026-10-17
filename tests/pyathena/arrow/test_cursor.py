@@ -179,11 +179,7 @@ class TestArrowCursor:
         ("arrow_cursor", "unload"),
         [
             pytest.param({"cursor_kwargs": {"unload": False}}, False),
-            pytest.param(
-                {"cursor_kwargs": {"unload": True}},
-                True,
-                marks=pytest.mark.xfail(strict=True, reason="#1214"),
-            ),
+            ({"cursor_kwargs": {"unload": True}}, True),
         ],
         indirect=["arrow_cursor"],
         ids=["csv", "unload"],

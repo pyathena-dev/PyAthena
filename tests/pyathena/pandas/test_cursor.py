@@ -532,7 +532,7 @@ class TestPandasCursor:
             pytest.param(
                 {"cursor_kwargs": {"unload": True}},
                 True,
-                marks=pytest.mark.xfail(strict=True, reason="#1214, #1219"),
+                marks=pytest.mark.xfail(strict=True, reason="#1219"),
             ),
         ],
         indirect=["pandas_cursor"],
