@@ -4,9 +4,7 @@
 # See LICENSE or https://opensource.org/licenses/MIT.
 #
 # SPDX-License-Identifier: MIT
-import collections
 import sys
-import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -17,13 +15,8 @@ from pyathena.converter import DefaultTypeConverter
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet, WithFetch, WithResultSet
-from pyathena.util import RetryConfig, override
-from tests.pyathena.util import (
-    EVENT_TIMEOUT,
-    close_during_next_request,
-    close_during_next_retries,
-    get_query_results_responses,
-)
+from pyathena.util import RetryConfig
+from tests.pyathena.util import get_query_results_responses
 
 
 def _row(*values):
@@ -51,31 +44,6 @@ def _fetching_result_set(*pages):
         arraysize=2,
         retry_config=RetryConfig(),
     )
-
-
-class _ClosingDeque(collections.deque):
-    """A buffer that closes its result set when it is read, as another thread may."""
-
-    def __init__(self, rows, result_set):
-        """Initialize the buffer.
-
-        Args:
-            rows: The buffered rows.
-            result_set: The result set to close.
-        """
-        super().__init__(rows)
-        self._result_set = result_set
-
-    @override
-    def popleft(self):
-        row = super().popleft()
-        self._result_set.close()
-        return row
-
-    @override
-    def __iter__(self):
-        self._result_set.close()
-        return super().__iter__()
 
 
 class TestAthenaResultSet:
@@ -110,13 +78,29 @@ class TestAthenaResultSet:
             result_set.fetchmany(1.5)
         assert result_set.fetchall() == [(1,), (2,)]
 
-    @pytest.mark.parametrize(("method", "args"), [("fetchmany", (3,)), ("fetchall", ())])
-    def test_fetch_counts_rows_taken_before_error(self, method, args):
-        """The rows taken before a failed page request are counted in rownumber."""
-        result_set = _fetching_result_set(("1", "2"), RuntimeError("failed"))
-        with pytest.raises(OperationalError):
-            getattr(result_set, method)(*args)
-        assert result_set.rownumber == 2
+    @pytest.mark.parametrize(
+        ("page", "expected"),
+        [
+            (RuntimeError("failed"), OperationalError),
+            (KeyboardInterrupt(), KeyboardInterrupt),
+            (("x",), ValueError),
+        ],
+    )
+    @pytest.mark.parametrize("method", ["fetchone", "fetchmany", "fetchall"])
+    def test_fetch_after_failed_fetch(self, method, page, expected):
+        """GH-1225: after a fetch raises, later fetches raise without a request.
+
+        The page request fails, is interrupted, or returns a value that fails to
+        convert.
+        """
+        result_set = _fetching_result_set(("1", "2"), page, ("3",))
+        assert result_set.fetchmany(2) == [(1,), (2,)]
+        with pytest.raises(expected):
+            getattr(result_set, method)()
+        for fetch in (result_set.fetchone, result_set.fetchmany, result_set.fetchall):
+            with pytest.raises(ProgrammingError, match=r"cannot be fetched after a failed fetch\."):
+                fetch()
+        assert result_set.connection.client.get_query_results.call_count == 2
 
     def test_fetch_after_close(self):
         result_set = _fetching_result_set(("1", "2"), ("3",))
@@ -124,76 +108,6 @@ class TestAthenaResultSet:
         assert result_set.fetchmany() == []
         assert result_set.fetchall() == []
         assert result_set.rownumber is None
-
-    @pytest.mark.parametrize(
-        ("method", "args", "expected"),
-        [("fetchmany", (2,), [(1,)]), ("fetchall", (), [(1,), (2,), (3,)])],
-    )
-    def test_fetch_with_close_during_take(self, method, args, expected):
-        """A close() while the buffered rows are taken keeps the rows taken before it."""
-        result_set = _fetching_result_set(("1", "2", "3"))
-        result_set._rows = _ClosingDeque(result_set._rows, result_set)
-        assert getattr(result_set, method)(*args) == expected
-        assert result_set.rownumber is None
-
-    @pytest.mark.parametrize(
-        ("method", "expected"), [("fetchone", None), ("fetchmany", []), ("fetchall", [])]
-    )
-    def test_fetch_with_close_during_request(self, method, expected):
-        """A close() during a page request discards the page and fetches nothing more."""
-        result_set = _fetching_result_set(("1", "2"), ("3", "4"), ("5",))
-        assert result_set.fetchmany(2) == [(1,), (2,)]
-        get_query_results = close_during_next_request(result_set)
-        assert getattr(result_set, method)() == expected
-        assert result_set.fetchone() is None
-        assert result_set.fetchmany() == []
-        assert result_set.fetchall() == []
-        assert result_set.rownumber is None
-        assert get_query_results.call_count == 2
-
-    @pytest.mark.parametrize("close_in", ["request", "backoff"])
-    @pytest.mark.parametrize(
-        ("method", "expected"), [("fetchone", None), ("fetchmany", []), ("fetchall", [])]
-    )
-    def test_fetch_with_close_during_retries(self, close_in, method, expected):
-        """GH-1202: a close() during the retries of a page request stops them.
-
-        The fetch returns nothing, as after a close(), instead of retrying the
-        throttled request with the policy's attempts and backoff.
-        """
-        result_set = _fetching_result_set(("1", "2"), ("3",))
-        assert result_set.fetchmany(2) == [(1,), (2,)]
-        operation = close_during_next_retries(result_set, close_in)
-        started = time.monotonic()
-        assert getattr(result_set, method)() == expected
-        assert time.monotonic() - started < EVENT_TIMEOUT
-        operation.join()
-        assert result_set.fetchone() is None
-        assert operation.calls == 1
-
-    @pytest.mark.parametrize("close_in", ["request", "backoff"])
-    def test_fetch_all_rows_with_close_during_retries(self, close_in):
-        """GH-1202: a close() during the retries of a whole read stops them.
-
-        ``_fetch_all_rows_as_csv()`` requests the pages in the same way.
-        """
-        result_set = _fetching_result_set(("1", "2"), ("3",))
-        operation = close_during_next_retries(result_set, close_in)
-        started = time.monotonic()
-        with pytest.raises(ProgrammingError, match=r"AthenaResultSet is closed\."):
-            result_set._fetch_all_rows()
-        assert time.monotonic() - started < EVENT_TIMEOUT
-        operation.join()
-        assert operation.calls == 1
-
-    @pytest.mark.parametrize("method", ["_fetch_all_rows", "_iter_all_row_pages"])
-    def test_fetch_all_rows_with_close_during_request(self, method):
-        """A whole read does not return the page of a request that close() interrupts."""
-        result_set = _fetching_result_set(("1", "2"), ("3",))
-        get_query_results = close_during_next_request(result_set)
-        with pytest.raises(ProgrammingError, match=r"AthenaResultSet is closed\."):
-            list(getattr(result_set, method)())
-        assert get_query_results.call_count == 2
 
     def test_get_query_results_after_close(self):
         result_set = _fetching_result_set(("1", "2"), ("3",))

@@ -17,7 +17,8 @@ from pyathena.aio.pandas.cursor import AioPandasCursor
 from pyathena.aio.polars.cursor import AioPolarsCursor
 from pyathena.aio.s3fs.cursor import AioS3FSCursor
 from pyathena.error import OperationalError, ProgrammingError
-from tests.pyathena.util import EVENT_TIMEOUT
+from pyathena.util import RetryConfig
+from tests.pyathena.util import EVENT_TIMEOUT, ThrottledOperation, retried
 
 _ALL_CURSOR_CLASSES = [
     AioCursor,
@@ -104,6 +105,54 @@ class TestWithAsyncFetch:
         for fetch in (cursor.fetchone, cursor.fetchmany, cursor.fetchall):
             with pytest.raises(ProgrammingError, match=r"No result set\."):
                 await fetch()
+
+    @pytest.mark.parametrize(
+        ("method", "args"), [("fetchone", ()), ("fetchmany", (2,)), ("fetchall", ())]
+    )
+    @pytest.mark.parametrize(
+        "cursor_class",
+        [AioArrowCursor, AioPandasCursor, AioPolarsCursor, AioS3FSCursor],
+    )
+    async def test_cancelled_fetch_detaches_result_set(self, cursor_class, method, args):
+        """GH-1206: a cancelled fetch stops its retries and detaches the result set.
+
+        The result set is closed in a thread once the fetch has ended in its thread,
+        and later fetches raise ProgrammingError. Without the stop, the retries would
+        wait at least EVENT_TIMEOUT seconds before the next attempt.
+        """
+        cursor = cursor_class(
+            connection=MagicMock(), converter=None, formatter=None, retry_config=None
+        )
+        operation = ThrottledOperation(block=True)
+        closes = []
+        closed = threading.Event()
+
+        def close():
+            closes.append(threading.get_ident())
+            closed.set()
+
+        result_set = MagicMock(is_closed=False)
+        result_set.close.side_effect = close
+        getattr(result_set, method).side_effect = retried(
+            operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT)
+        )
+        cursor.result_set = result_set
+        task = asyncio.create_task(getattr(cursor, method)(*args))
+        try:
+            assert await asyncio.to_thread(operation.started.wait, EVENT_TIMEOUT)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert cursor.result_set is None
+            for fetch in (cursor.fetchone, cursor.fetchmany, cursor.fetchall):
+                with pytest.raises(ProgrammingError, match=r"No result set\."):
+                    await fetch()
+            assert not closes
+        finally:
+            operation.release.set()
+        assert await asyncio.to_thread(closed.wait, EVENT_TIMEOUT)
+        assert operation.calls == 1
+        assert closes != [threading.get_ident()]
 
     @pytest.mark.parametrize("cursor_class", _ALL_CURSOR_CLASSES)
     async def test_async_iteration(self, cursor_class):

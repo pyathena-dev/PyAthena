@@ -13,10 +13,8 @@ import csv
 import importlib.util
 import logging
 import sys
-import threading
 from collections import abc
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import contextmanager
 from io import BytesIO, StringIO
 from itertools import islice, repeat
 from multiprocessing import cpu_count
@@ -38,7 +36,7 @@ from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.model import AthenaQueryExecution
 from pyathena.polars.converter import _to_datetimes
 from pyathena.polars.util import to_column_info, to_microseconds
-from pyathena.result_set import AthenaResultSet
+from pyathena.result_set import _FETCH_FAILED_MESSAGE, AthenaResultSet
 from pyathena.util import RetryConfig, override
 
 if TYPE_CHECKING:
@@ -55,6 +53,7 @@ _NANOSECOND_READ_CONSEQUENCE = (
     "later, or install pyarrow and give no read options to execute(), to read them "
     "correctly."
 )
+_READ_FAILED_MESSAGE = "PolarsDataFrameIterator cannot be read after a failed read."
 
 
 class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
@@ -106,31 +105,8 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
             self._reader = reader
         self._converters = converters
         self._column_names = column_names
-        self._lock = threading.Lock()
-        self._readers = 0
-        self._close_requested = False
-
-    @contextmanager
-    def _read(self) -> Iterator[Iterator[pl.DataFrame]]:
-        """Track a chunk read and run a close that was requested during it.
-
-        Yields:
-            The reader to read the chunk from.
-        """
-        with self._lock:
-            self._readers += 1
-            reader = iter(()) if self._close_requested else self._reader
-        try:
-            yield reader
-        finally:
-            with self._lock:
-                self._readers -= 1
-                close = self._close_requested and not self._readers
-            if close:
-                try:
-                    self.close()
-                except Exception:
-                    _logger.exception("Failed to close the chunk reader after a read.")
+        # Whether a read raised, after which the position of the next chunk is unknown.
+        self._read_failed = False
 
     @override
     def __next__(self) -> pl.DataFrame:
@@ -139,13 +115,22 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         Returns:
             The next Polars DataFrame chunk.
 
+        The iterator is closed at the end of the chunks and after an exception, and
+        later reads after an exception raise ``ProgrammingError``.
+
         Raises:
             StopIteration: When no more chunks are available.
+            ProgrammingError: If an earlier read failed.
         """
+        if self._read_failed:
+            raise ProgrammingError(_READ_FAILED_MESSAGE)
         try:
-            with self._read() as reader:
-                return next(reader)
+            return next(self._reader)
         except StopIteration:
+            self.close()
+            raise
+        except BaseException:
+            self._read_failed = True
             self.close()
             raise
 
@@ -163,18 +148,8 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         self.close()
 
     def close(self) -> None:
-        """Close the iterator and release resources.
-
-        If another thread is reading a chunk, the read returns that chunk, and the
-        reader is closed when it completes. Reads that start after the
-        close get no chunks, and an error from the deferred close is logged.
-        """
-        with self._lock:
-            if self._readers:
-                self._close_requested = True
-                return
-            self._close_requested = False
-            reader, self._reader = self._reader, iter(())
+        """Close the iterator and release resources; later reads get no chunks."""
+        reader, self._reader = self._reader, iter(())
         if isinstance(reader, GeneratorType):
             reader.close()
 
@@ -632,9 +607,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
         files, as ``_as_polars()`` does, before the chunks are read.
 
         The chunk readers take the state that they need, such as the output location,
-        the column names, and the connection, when they are created, so that a
-        ``close()`` from another thread before their first read does not take it away.
-        The credentials are still frozen at the first read.
+        the column names, and the connection, when they are created. The credentials
+        are frozen at the first read.
 
         Returns:
             PolarsDataFrameIterator that reads each chunk lazily.
@@ -656,25 +630,25 @@ class AthenaPolarsResultSet(AthenaResultSet):
     def fetchone(
         self,
     ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
-        row = next(self._row_iter, None)
+        if self._fetch_failed:
+            raise ProgrammingError(_FETCH_FAILED_MESSAGE)
+        try:
+            row = next(self._row_iter, None)
+        except BaseException:
+            self._fetch_failed = True
+            raise
         if row is not None:
             self._count_rows(1)
         return row
 
     @override
     def _take_rows(self, size: int | None) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
-        """Take the next rows from the row iterator in bulk.
-
-        The rows taken before an exception are counted in ``rownumber`` too.
-        """
-        rows: list[tuple[Any | None, ...] | dict[Any, Any | None]] = []
-        try:
-            # extend() keeps the rows that it appended before an exception, and
-            # islice() takes no size above sys.maxsize.
-            rows.extend(islice(self._row_iter, None if size is None else min(size, sys.maxsize)))
-        finally:
-            if rows:
-                self._count_rows(len(rows))
+        """Take the next rows from the row iterator in bulk."""
+        # islice() takes no size above sys.maxsize.
+        rows: list[tuple[Any | None, ...] | dict[Any, Any | None]] = list(
+            islice(self._row_iter, None if size is None else min(size, sys.maxsize))
+        )
+        self._count_rows(len(rows))
         return rows
 
     def _is_csv_readable(self) -> bool:

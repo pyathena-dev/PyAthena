@@ -5,13 +5,11 @@
 #
 # SPDX-License-Identifier: MIT
 
-import collections
 import csv
 import inspect
 import io
 import threading
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import ANY, MagicMock, PropertyMock, patch, sentinel
 
 import numpy as np
@@ -148,40 +146,25 @@ class TestPandasDataFrameIterator:
         [PandasDataFrameIterator.__next__, PandasDataFrameIterator.get_chunk],
         ids=["next", "get_chunk"],
     )
-    @pytest.mark.parametrize("close_error", [None, RuntimeError("close failed")])
-    def test_close_during_read(self, caplog, read, close_error):
-        """A close during a read in another thread is deferred until the read completes."""
-        reading, release = threading.Event(), threading.Event()
+    @pytest.mark.parametrize("error", [OperationalError("failed"), KeyboardInterrupt()])
+    def test_read_after_failed_read(self, read, error):
+        """GH-1225: after a read raises, the iterator is closed and later reads raise."""
 
         def chunks():
-            try:
-                yield pd.DataFrame({"n": [1]})
-                reading.set()
-                release.wait(10)
-                yield pd.DataFrame({"n": [2]})
-                yield pd.DataFrame({"n": [3]})
-            finally:
-                if close_error:
-                    raise close_error
+            yield pd.DataFrame({"n": [1]})
+            raise error
 
         csv_stream = io.StringIO()
         reader = chunks()
         df_iter = PandasDataFrameIterator(reader, _no_trunc_date, csv_stream)
-        next(df_iter)
-        with ThreadPoolExecutor(1) as executor:
-            future = executor.submit(read, df_iter)
-            assert reading.wait(10)
-            df_iter.close()
-            with pytest.raises(StopIteration):
-                next(df_iter)
-            assert inspect.getgeneratorstate(reader) == inspect.GEN_RUNNING
-            assert not csv_stream.closed
-            release.set()
-            assert future.result(10)["n"].tolist() == [2]
+        assert read(df_iter)["n"].tolist() == [1]
+        with pytest.raises(type(error)):
+            read(df_iter)
         assert inspect.getgeneratorstate(reader) == inspect.GEN_CLOSED
-        assert ("Failed to close the chunk reader" in caplog.text) == bool(close_error)
         assert csv_stream.closed
-        assert list(df_iter) == []
+        for later in (next, PandasDataFrameIterator.get_chunk):
+            with pytest.raises(ProgrammingError, match=r"cannot be read after a failed read\."):
+                later(df_iter)
 
 
 _FS = sentinel.pyathena_fs
@@ -251,20 +234,17 @@ class TestAthenaPandasResultSet:
         assert result_set.fetchmany() == [(3, "b", 4)]
 
     @pytest.mark.parametrize(
-        ("seconds", "method", "rownumber"),
+        ("seconds", "method"),
         [
-            ([0, 10**13, 0], "fetchone", 1),
-            ([0, 10**13, 0], "fetchmany", 1),
-            ([0, 10**13, 0], "fetchall", 1),
-            ([0, 0, 10**13], "fetchmany", 2),
-            ([0, 0, 10**13], "fetchall", 2),
+            ([0, 10**13, 0], "fetchone"),
+            ([0, 10**13, 0], "fetchmany"),
+            ([0, 10**13, 0], "fetchall"),
+            ([0, 0, 10**13], "fetchmany"),
+            ([0, 0, 10**13], "fetchall"),
         ],
     )
-    def test_fetch_after_conversion_error(self, seconds, method, rownumber):
-        """After a value fails to convert, the fetch methods return no more rows.
-
-        ``rownumber`` counts the rows taken before the error, as fetching row by row did.
-        """
+    def test_fetch_after_conversion_error(self, seconds, method):
+        """GH-1225: after a value fails to convert, the fetch methods raise."""
         # A timestamp that does not fit a Python datetime fails while its row is built.
         timestamps = pa.array(seconds, type=pa.timestamp("s"))
         chunks = [
@@ -277,11 +257,21 @@ class TestAthenaPandasResultSet:
         assert result_set.fetchone() == (0, pd.Timestamp(0, unit="s"))
         with pytest.raises(OverflowError):
             getattr(result_set, method)()
-        assert result_set.rownumber == rownumber
-        assert result_set.fetchone() is None
-        assert result_set.fetchmany() == []
-        assert result_set.fetchall() == []
-        assert result_set.rownumber == rownumber
+        _assert_fetches_fail(result_set)
+
+    def test_fetch_after_failed_chunk_read(self):
+        """GH-1225: after iter_chunks() fails to read a chunk, the fetch methods raise."""
+
+        def chunks():
+            yield pd.DataFrame({"n": [0]})
+            raise OperationalError("failed")
+
+        result_set = _fetching_result_set(chunks(), arraysize=3)
+        with pytest.raises(OperationalError):
+            list(result_set.iter_chunks())
+        with pytest.raises(ProgrammingError, match=r"cannot be read after a failed read\."):
+            result_set.fetchone()
+        _assert_fetches_fail(result_set)
 
     def test_fetch_after_chunks_run_out(self):
         """The rows of a chunk that a fetch started stay after iter_chunks() runs out."""
@@ -291,59 +281,6 @@ class TestAthenaPandasResultSet:
         assert list(result_set.iter_chunks()) == []
         assert result_set.fetchall() == [(i,) for i in range(1, size)]
         assert result_set.rownumber == size
-
-    def test_close_during_fetchall(self):
-        """A fetchall() in another thread does not set rownumber after close()."""
-        requested = threading.Event()
-        closed = threading.Event()
-
-        class Chunks:
-            def __init__(self):
-                self._chunks = iter(
-                    [pd.DataFrame({"n": [0, 1]}), pd.DataFrame({"n": [2, 3]}, index=[2, 3])]
-                )
-                self._calls = 0
-
-            def __iter__(self):
-                return self
-
-            def __next__(self):
-                self._calls += 1
-                if self._calls == 2:
-                    requested.set()
-                    assert closed.wait(10)
-                return next(self._chunks)
-
-        result_set = _fetching_result_set(Chunks(), arraysize=3)
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(result_set.fetchall)
-            assert requested.wait(10)
-            result_set.close()
-            closed.set()
-            # The fetch still returns the chunk that it was reading.
-            assert future.result(10) == [(0,), (1,), (2,), (3,)]
-        assert result_set.rownumber is None
-
-    def test_close_during_fetchall_generator(self):
-        """A close() during a fetch from a generator, such as a chunked UNLOAD, does not raise."""
-        reading, release = threading.Event(), threading.Event()
-
-        def chunks():
-            yield pd.DataFrame({"n": [0, 1]})
-            reading.set()
-            release.wait(10)
-            yield pd.DataFrame({"n": [2, 3]}, index=[2, 3])
-            yield pd.DataFrame({"n": [4]}, index=[4])
-
-        reader = chunks()
-        result_set = _fetching_result_set(reader, arraysize=3)
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(result_set.fetchall)
-            assert reading.wait(10)
-            result_set.close()
-            release.set()
-            assert future.result(10) == [(0,), (1,), (2,), (3,)]
-        assert inspect.getgeneratorstate(reader) == inspect.GEN_CLOSED
 
     def test_fetchmany_size_above_maxsize(self):
         result_set = _fetching_result_set(pd.DataFrame({"n": [1, 2]}), arraysize=3)
@@ -599,25 +536,6 @@ class TestAthenaPandasResultSet:
         for chunk in chunks:
             assert chunk.dtypes.tolist() == whole.dtypes.tolist()
         assert_frame_equal(pd.concat(chunks), whole, check_exact=True)
-
-    def test_iter_parquet_chunks_after_close(self, tmp_path):
-        """Chunks of an UNLOAD result are read after close(), which resets the data manifest.
-
-        A fetch in another thread, such as one of AioPandasCursor that keeps running
-        after its task is cancelled, can start its first read as close() lands.
-        """
-        result_set, paths = _unload_result_set(tmp_path, [pa.table({"i": [1, 2]})], chunksize=1)
-        with (
-            patch.object(AthenaPandasResultSet, "_read_data_manifest", return_value=paths),
-            patch.object(
-                AthenaPandasResultSet, "is_unload", new_callable=PropertyMock, return_value=True
-            ),
-        ):
-            reader = result_set._as_pandas()
-        result_set._rows = collections.deque()
-        result_set._df_iter = PandasDataFrameIterator(pd.DataFrame(), _no_trunc_date)
-        result_set.close()
-        assert [chunk["i"].tolist() for chunk in reader] == [[1], [2]]
 
     def test_read_parquet_footers_stopped(self, tmp_path):
         """GH-1202: the footer reads run in the stop scope of their caller.
@@ -1358,6 +1276,13 @@ def test_read_csv_with_pyarrow_multiline_values_across_blocks():
     )
     assert df["id"].tolist() == [i for i, _ in rows]
     assert df["v"].tolist() == [v for _, v in rows]
+
+
+def _assert_fetches_fail(result_set):
+    """Assert that each fetch of a result set raises for an earlier failed fetch."""
+    for fetch in (result_set.fetchone, result_set.fetchmany, result_set.fetchall):
+        with pytest.raises(ProgrammingError, match=r"cannot be fetched after a failed fetch\."):
+            fetch()
 
 
 def _fetching_result_set(result, arraysize):

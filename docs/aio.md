@@ -171,7 +171,9 @@ No further attempt is made, and the wait before the next attempt ends.
 A request that has already been sent still runs to its end in its thread.
 The requests that stop a query or a calculation and the request that terminates a Spark session keep their retries.
 The start request of `execute()` with `kill_on_interrupt` enabled keeps its retries after a cancellation, and stops them when the task is cancelled again.
-The fetch methods of `AioPandasCursor`, `AioArrowCursor`, `AioPolarsCursor`, and `AioS3FSCursor` run to their end in their thread.
+After a fetch is cancelled, later fetches of its result raise `ProgrammingError`.
+The fetch methods of `AioPandasCursor`, `AioArrowCursor`, `AioPolarsCursor`, and `AioS3FSCursor` run in a thread, which keeps running after a cancellation.
+A cancellation also stops the retries of their requests, and the cursor drops the result, which is closed once the fetch ends in its thread.
 
 (aio-dict-cursor)=
 
@@ -227,7 +229,7 @@ All aio cursors use `await` for fetch operations, so fetching does not block the
   Parquet) inside `execute()`, wrapped in `asyncio.to_thread()`. When CSV results are read in
   chunks (`chunksize` for pandas and Polars, or a chunk size chosen by `auto_optimize_chunksize`
   for pandas), or with `chunksize` on Polars UNLOAD results, fetch calls read S3 lazily instead.
-  The fetch methods are also wrapped in `asyncio.to_thread()`.
+  The fetch methods also run in a thread.
 - `AioS3FSCursor` streams rows from the result file in S3 as they are fetched.
 
 With managed query result storage, where the query has no S3 output location, the pandas, Arrow,
