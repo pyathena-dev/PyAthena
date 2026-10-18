@@ -206,23 +206,29 @@ class TestS3AioThreadPool:
 
         assert events == ["pending finished"]
 
-    def test_submit_during_release(self):
-        # GH-1209: a call whose executor a release() from another thread shuts
-        # down before the call reaches it runs in a new one.
+    def test_release_after_calls(self):
+        # GH-1209: release() keeps the threads, and the max_workers bound,
+        # until no call runs or waits, and then ends them.
         pool = S3AioThreadPool(1)
-        get_executor = pool._get_executor
-        released = []
+        threads = []
+        started, release = threading.Event(), threading.Event()
 
-        def get_executor_then_release():
-            executor = get_executor()
-            if not released:
-                pool.release()
-                released.append(executor)
-            return executor
+        def block():
+            threads.append(threading.current_thread())
+            started.set()
+            release.wait(EVENT_TIMEOUT)
 
-        with mock.patch.object(pool, "_get_executor", side_effect=get_executor_then_release):
-            assert pool.submit(sum, [1, 2]).result(timeout=EVENT_TIMEOUT) == 3
-        assert pool._executor is not released[0]
+        first = pool.submit(block)
+        assert started.wait(EVENT_TIMEOUT)
+        pool.release()
+        second = pool.submit(lambda: threads.append(threading.current_thread()))
+        release.set()
+        first.result(timeout=EVENT_TIMEOUT)
+        second.result(timeout=EVENT_TIMEOUT)
+
+        assert threads[1] is threads[0]
+        threads[0].join(EVENT_TIMEOUT)
+        assert not threads[0].is_alive()
         pool.shutdown()
 
     @pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork() is not available.")

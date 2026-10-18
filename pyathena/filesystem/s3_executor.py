@@ -251,6 +251,10 @@ class S3AioThreadPool(S3Executor):
         self._lock = threading.Lock()
         self._executor: ThreadPoolExecutor | None = None
         self._shutdown = False
+        # The calls that were submitted and have not ended, and whether
+        # release() waits for them to end.
+        self._calls = 0
+        self._releasing = False
         S3AioThreadPool._instances.add(self)
 
     @override
@@ -274,15 +278,11 @@ class S3AioThreadPool(S3Executor):
             RuntimeError: If the pool has been shut down.
         """
         context = contextvars.copy_context()
-        while True:
-            executor = self._get_executor()
-            try:
-                return executor.submit(context.run, fn, *args, **kwargs)
-            except RuntimeError:
-                # A release() from another thread shut down the executor
-                # after it was taken; the next one takes the call.
-                if self._executor is executor or self._shutdown:
-                    raise
+        with self._lock:
+            future = self._get_executor().submit(context.run, fn, *args, **kwargs)
+            self._calls += 1
+        future.add_done_callback(self._end_call)
+        return future
 
     async def run(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         """Run a blocking call in a thread of the pool and wait for it.
@@ -387,14 +387,32 @@ class S3AioThreadPool(S3Executor):
             executor.shutdown(wait=wait)
 
     def release(self) -> None:
-        """Release the threads once they are idle, keeping the pool usable.
+        """Release the threads once no call runs or waits, keeping the pool usable.
 
-        The calls that were submitted before still run in their threads, which
-        end once those calls are done. A later call creates new threads, so
-        until the earlier calls end, more than ``max_workers`` calls can run at
-        once.
+        Until then, the calls, including those submitted after this method,
+        run in the threads of the pool, at most ``max_workers`` at once. A
+        call submitted after the threads have been released creates new ones.
+        This method does not block.
         """
         with self._lock:
+            if self._calls:
+                self._releasing = True
+                return
+            executor, self._executor = self._executor, None
+        if executor is not None:
+            executor.shutdown(wait=False)
+
+    def _end_call(self, future: Future[Any]) -> None:
+        """Count the end of a call, releasing the threads after the last one if requested.
+
+        Args:
+            future: The future of the call, which has ended.
+        """
+        with self._lock:
+            self._calls -= 1
+            if self._calls or not self._releasing:
+                return
+            self._releasing = False
             executor, self._executor = self._executor, None
         if executor is not None:
             executor.shutdown(wait=False)
@@ -411,9 +429,13 @@ class S3AioThreadPool(S3Executor):
                 cls._forked_executors.append(pool._executor)
             pool._lock = threading.Lock()
             pool._executor = None
+            pool._calls = 0
+            pool._releasing = False
 
     def _get_executor(self) -> ThreadPoolExecutor:
         """Return the thread pool of this process, creating it if needed.
+
+        The caller holds the lock of the pool.
 
         Returns:
             The thread pool.
@@ -421,15 +443,11 @@ class S3AioThreadPool(S3Executor):
         Raises:
             RuntimeError: If the pool has been shut down.
         """
-        if (executor := self._executor) is not None:
-            # Its submit() raises after the shutdown.
-            return executor
-        with self._lock:
-            if self._shutdown:
-                raise RuntimeError("cannot schedule new futures after shutdown")
-            if self._executor is None:
-                self._executor = ThreadPoolExecutor(max_workers=self.max_workers)
-            return self._executor
+        if self._shutdown:
+            raise RuntimeError("cannot schedule new futures after shutdown")
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=self.max_workers)
+        return self._executor
 
 
 if hasattr(os, "register_at_fork"):

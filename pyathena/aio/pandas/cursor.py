@@ -249,9 +249,9 @@ class AioPandasCursor(WithAsyncFetch):
     def as_pandas(self) -> DataFrame | PandasDataFrameIterator:
         """Return DataFrame or PandasDataFrameIterator based on chunksize setting.
 
-        When the result is read in chunks, this method, or the returned iterator,
-        reads S3 on the calling thread and blocks the event loop; use
-        :meth:`read_pandas` or :meth:`iter_chunks` instead.
+        The returned iterator, and this method when ``auto_optimize_chunksize``
+        chose a chunk size, read S3 on the calling thread and block the event
+        loop; use :meth:`iter_chunks` or :meth:`read_pandas` instead.
 
         Returns:
             DataFrame when chunksize is None, PandasDataFrameIterator when chunksize is set.
@@ -290,21 +290,22 @@ class AioPandasCursor(WithAsyncFetch):
         """Iterate over the DataFrame chunks of the query results, reading each in a thread.
 
         The chunks are those of :meth:`PandasCursor.iter_chunks()
-        <pyathena.pandas.cursor.PandasCursor.iter_chunks>`. A cancellation of a
-        read detaches and closes the result set, as one of a fetch does. Leaving
-        the loop early closes the chunk reader only when the iterator is closed,
-        such as with ``contextlib.aclosing()``.
+        <pyathena.pandas.cursor.PandasCursor.iter_chunks>`, read from the result set
+        that the cursor has when this method is called. A cancellation of a read
+        detaches and closes the result set, as one of a fetch does. Unlike the
+        synchronous method, leaving the loop early keeps the chunks that have not
+        been read, which the fetch methods and a later ``iter_chunks()`` read.
 
         Returns:
-            An async iterator of the DataFrame chunks.
+            An async iterator of the DataFrame chunks. It raises
+            ``ProgrammingError`` once the result set is closed, such as by another
+            query of the cursor.
 
         Raises:
-            ProgrammingError: If the cursor is closed or has no result set when
-                the iteration starts, or the result set is closed during it.
+            ProgrammingError: If the cursor is closed or has no result set.
 
         Example:
-            >>> async with contextlib.aclosing(cursor.iter_chunks()) as chunks:
-            ...     async for chunk in chunks:
-            ...         process_chunk(chunk)
+            >>> async for chunk in cursor.iter_chunks():
+            ...     process_chunk(chunk)
         """
         return self._iter_chunks_in_thread(operator.methodcaller("iter_chunks"))

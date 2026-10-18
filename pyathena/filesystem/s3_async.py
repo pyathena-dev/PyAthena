@@ -170,13 +170,14 @@ class AioS3FileSystem(AsyncFileSystem):
         return self._sync_fs.core
 
     def close(self) -> None:
-        """Release the threads of the filesystem once its calls in progress end.
+        """Release the threads of the filesystem once no call runs or waits in them.
 
-        The filesystem stays usable, also when it is cached and shared: a later
-        call creates threads again. The calls in progress run to their end,
-        including the cleanup of their multipart uploads. Files opened before
-        have threads of their own and are not affected. This method does not
-        block.
+        The filesystem stays usable, also when it is cached and shared: until
+        then, calls run in its threads as before, at most ``max_workers`` at
+        once, and a call after the release creates new threads. The calls in
+        progress run to their end, including the cleanup of their multipart
+        uploads. Files opened before have threads of their own and are not
+        affected. This method does not block.
         """
         self._thread_pool.release()
 

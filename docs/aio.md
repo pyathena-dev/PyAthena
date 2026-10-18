@@ -252,16 +252,15 @@ read the whole remaining result in a thread.
 chunk in a thread:
 
 ```python
-import contextlib
-
 await cursor.execute("SELECT * FROM many_rows", chunksize=50_000)
-async with contextlib.aclosing(cursor.iter_chunks()) as chunks:
-    async for df in chunks:
-        process(df)
+async for df in cursor.iter_chunks():
+    process(df)
 ```
 
 The chunks and the whole result are those of the synchronous `iter_chunks()` and `as_*()` methods.
-Leaving the loop early releases the chunk reader once the iterator is closed, as `contextlib.aclosing()` does.
+`iter_chunks()` reads the result of the query that the cursor has when it is called.
+Unlike the synchronous method, leaving the loop early keeps the chunks that have not been read for the fetch
+methods and a later `iter_chunks()`; closing the cursor or running another query releases them.
 After the cursor runs another query or closes, the iterator raises `ProgrammingError`.
 Cancelling `read_*()` or a chunk read drops the result, as cancelling a fetch does.
 

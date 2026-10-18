@@ -54,6 +54,8 @@ class _Chunks:
 
     def __next__(self):
         self.reads.append(threading.get_ident())
+        if self.closes:
+            raise StopIteration
         return self._read()
 
     def close(self):
@@ -372,8 +374,8 @@ class TestWithAsyncFetch:
         assert threading.get_ident() not in chunks.reads
 
     @pytest.mark.parametrize("cursor_class", _CHUNKED_CURSOR_CLASSES)
-    async def test_iter_chunks_aclose_closes_chunks_off_event_loop(self, cursor_class):
-        """GH-1209: closing iter_chunks() early closes the chunk iterator in a thread."""
+    async def test_iter_chunks_left_early_keeps_chunks(self, cursor_class):
+        """GH-1209: leaving iter_chunks() early keeps the chunks that were not read."""
         cursor = cursor_class(
             connection=MagicMock(), converter=None, formatter=None, retry_config=None
         )
@@ -385,9 +387,8 @@ class TestWithAsyncFetch:
             async for chunk in iterator:
                 assert chunk == "a"
                 break
-            assert not chunks.closes
-        assert len(chunks.closes) == 1
-        assert chunks.closes != [threading.get_ident()]
+        assert [chunk async for chunk in cursor.iter_chunks()] == ["b"]
+        assert not chunks.closes
 
     @pytest.mark.parametrize("cursor_class", _CHUNKED_CURSOR_CLASSES)
     async def test_cancelled_iter_chunks_detaches_result_set(self, cursor_class):

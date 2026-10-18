@@ -635,8 +635,6 @@ async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 `iter_chunks()` returns an async iterator of the chunks of `PolarsCursor.iter_chunks()`, read in threads:
 
 ```python
-import contextlib
-
 from pyathena import aio_connect
 from pyathena.aio.polars.cursor import AioPolarsCursor
 
@@ -644,9 +642,8 @@ async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor(AioPolarsCursor, chunksize=50_000)
     await cursor.execute("SELECT * FROM many_rows")
-    async with contextlib.aclosing(cursor.iter_chunks()) as chunks:
-        async for df in chunks:
-            print(df.describe())
+    async for df in cursor.iter_chunks():
+        print(df.describe())
 ```
 
 Support fetch and iterate query results:
