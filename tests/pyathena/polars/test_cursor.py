@@ -173,6 +173,35 @@ class TestPolarsCursor:
     @pytest.mark.parametrize(
         ("polars_cursor", "kwargs"),
         [
+            ({"cursor_kwargs": {"unload": False}}, {"schema": None}),
+            pytest.param(
+                {"cursor_kwargs": {"unload": False}},
+                {"with_column_names": None},
+                marks=pytest.mark.skipif(
+                    not _POLARS_2, reason="Polars 1.x read_csv() has no with_column_names."
+                ),
+            ),
+            ({"cursor_kwargs": {"unload": False, "chunksize": 1}}, {"schema": None}),
+            ({"cursor_kwargs": {"unload": False, "chunksize": 1}}, {"with_column_names": None}),
+        ],
+        indirect=["polars_cursor"],
+        ids=["whole-schema", "whole-names", "chunks-schema", "chunks-names"],
+    )
+    def test_csv_timestamps_with_default_options(self, polars_cursor, kwargs):
+        """Polars' default schema and with_column_names keep the CSV timestamp read (#1283).
+
+        Polars does not parse more than nine fractional digits into a Datetime, so the
+        timestamps are read as text and converted.
+        """
+        column = next(c for c in temporal.columns() if c.name == "ts_p12")
+        polars_cursor.execute(f"SELECT {column.sql} AS {column.name}", **kwargs)
+        df = pl.concat(polars_cursor.iter_chunks())
+        assert df.schema == pl.Schema({column.name: pl.Datetime("us")})
+        assert df[column.name].to_list() == [column.value]
+
+    @pytest.mark.parametrize(
+        ("polars_cursor", "kwargs"),
+        [
             pytest.param(
                 {"cursor_kwargs": {"unload": True}},
                 {},
@@ -184,12 +213,21 @@ class TestPolarsCursor:
                 {"low_memory": True},
                 marks=pytest.mark.skipif(not _POLARS_2, reason="Polars 1.x scans at nanoseconds."),
             ),
+            pytest.param(
+                {"cursor_kwargs": {"unload": True}},
+                {"schema": None},
+                marks=pytest.mark.skipif(not _POLARS_2, reason="Polars 1.x reads at nanoseconds."),
+            ),
+            ({"cursor_kwargs": {"unload": True, "chunksize": 1}}, {"schema": None}),
         ],
         indirect=["polars_cursor"],
-        ids=["whole", "chunks", "scanned-chunks"],
+        ids=["whole", "chunks", "scanned-chunks", "whole-schema-none", "chunks-schema-none"],
     )
     def test_unload_nested_timestamps(self, polars_cursor, kwargs):
-        """UNLOAD timestamps, alone and inside arrays, rows, and maps, are microseconds."""
+        """UNLOAD timestamps, alone and inside arrays, rows, and maps, are microseconds.
+
+        ``schema=None`` is the same as no ``schema`` (#1283).
+        """
         polars_cursor.execute(temporal.nested_query(), **kwargs)
         df = pl.concat(polars_cursor.iter_chunks()).sort("id")
         us = pl.Datetime("us")
@@ -228,9 +266,10 @@ class TestPolarsCursor:
             ),
             ({"cursor_kwargs": {"unload": True}}, {"columns": ["id"]}, ["id"], False),
             ({"cursor_kwargs": {"unload": True}}, {}, ["id", "ts"], True),
+            ({"cursor_kwargs": {"unload": True}}, {"schema": None}, ["id", "ts"], True),
         ],
         indirect=["polars_cursor"],
-        ids=["whole", "scanned-chunks", "no-timestamps", "whole-no-options"],
+        ids=["whole", "scanned-chunks", "no-timestamps", "whole-no-options", "whole-schema-none"],
     )
     def test_unload_timestamps_polars_1(self, polars_cursor, caplog, kwargs, columns, warned):
         """Polars 1.x reads the timestamps itself at nanoseconds, and a warning is logged.

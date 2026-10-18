@@ -17,6 +17,7 @@ installed and `execute()` is given no Polars read options, use PyAthena's own S3
 Polars' native S3 access, so s3fs is also not required.
 
 Options passed to `execute()`, other than PolarsCursor's own options such as `chunksize`, are passed to the Polars read function.
+`schema=None` is the same as no `schema`.
 Column types for a CSV result are given as `schema_overrides`, which replaces PyAthena's column types.
 Polars' deprecated alias `dtypes` is not supported: a CSV result read with it fails with an error.
 `pl.read_csv()` reads the CSV result with pyarrow when `use_pyarrow=True` is given with `schema_overrides=None`, which replaces PyAthena's column types, and Polars' other conditions for it hold.
@@ -226,6 +227,7 @@ Timestamps of UNLOAD results are read at microseconds, as `Datetime("us")`.
 Polars 2.0 and later read them with Polars.
 Polars 1.x reads them at nanoseconds, which gives wrong values outside 1677-09-21 to 2262-04-11; they are cast to microseconds, and a warning is logged.
 The exception is a read with the chunksize option, with pyarrow installed and without Polars read options given to `execute()`: the chunks are read with pyarrow at microseconds, without the cast or the warning.
+A `schema` given to `execute()` is passed to Polars as given, and the timestamps that it reads are not converted.
 
 The unload option can be enabled by specifying it in the `cursor_kwargs` argument of the connect method or as an argument to the cursor method.
 An argument to the cursor method takes precedence over the same key in `cursor_kwargs`.
