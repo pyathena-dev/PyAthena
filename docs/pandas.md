@@ -220,7 +220,9 @@ for row in cursor:
     print(row)
 ```
 
-The DATE and TIMESTAMP of Athena's data type are returned as [pandas.Timestamp](https://pandas.pydata.org/docs/reference/api/pandas.Timestamp.html) type.
+In a DataFrame, `timestamp` and `date` columns are `datetime64[us]`, and `timestamp with time zone` columns are `datetime64[us, UTC]`, with fractional digits beyond microseconds truncated.
+The fetch methods return their values as `datetime`, `date`, and aware `datetime` objects in UTC, and NULL as `None`.
+A `timestamp with time zone` value with an unknown zone, or with a local time that its zone repeats or skips, raises `DataError` naming the column.
 
 ```python
 from pyathena import connect
@@ -231,7 +233,7 @@ cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                  cursor_class=PandasCursor).cursor()
 
 cursor.execute("SELECT col_timestamp FROM one_row_complex")
-print(type(cursor.fetchone()[0]))  # <class 'pandas._libs.tslibs.timestamps.Timestamp'>
+print(type(cursor.fetchone()[0]))  # <class 'datetime.datetime'>
 ```
 
 Execution information of the query can also be retrieved.
@@ -566,7 +568,7 @@ PandasCursor reads a `json` column as text and applies the converter mapping's `
 A `json` column with NULL in the result or chunk holds objects, with `None` for NULL; otherwise it has the dtype that pandas infers from the converted values.
 Converters passed to `execute()` replace the converter mapping and are applied by pandas.
 
-With `engine="pyarrow"`, PandasCursor uses the PyArrow engine only when the result is not a tab-separated `.txt` file, pyarrow is installed, no chunksize is set (explicitly or by `auto_optimize_chunksize`), `quoting` is the default, the result has no columns that need a converter (`boolean`, `decimal`, `varbinary`, `json`, `time with time zone`, and `timestamp with time zone` with the default converter), and the result file is at least `AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES` bytes.
+With `engine="pyarrow"`, PandasCursor uses the PyArrow engine only when the result is not a tab-separated `.txt` file, pyarrow is installed, no chunksize is set (explicitly or by `auto_optimize_chunksize`), `quoting` is the default, the result has no columns that need a converter (`boolean`, `decimal`, `varbinary`, `json`, and `time with time zone`), and the result file is at least `AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES` bytes.
 Otherwise, it falls back to the C engine.
 With `engine="pyarrow"`, tab-separated `.txt` results from DDL statements such as `SHOW TABLES`, `SHOW COLUMNS`, and `DESCRIBE` use the C engine to preserve leading zeros, exponent notation, and padding in string values.
 With the PyArrow engine, when `keep_default_na` and `na_values` are the defaults and the only pandas.read_csv() options passed to `execute()` are `dtype` as a mapping and `parse_dates` as a list, PyAthena reads the file with `pyarrow.csv`, allowing newlines in quoted values, and converts it to a DataFrame as `pandas.read_csv(engine="pyarrow")` does, except that columns with a string dtype are read as text, and without `future.infer_string`, a column with dtype `str` keeps NULL as a missing value.
@@ -575,6 +577,7 @@ It also changes the values of a column with a string dtype whose values all look
 
 Apart from PandasCursor's own options such as `engine` and `chunksize`, an option passed here replaces the value PyAthena sets for the same pandas.read_csv() argument.
 For example, `dtype` replaces the whole column type mapping, and `parse_dates` replaces the list of date, time, and timestamp columns.
+With `parse_dates`, a `dtype` or `converters` entry that names a `date`, `timestamp`, or `timestamp with time zone` column, or a conversion function that the converter maps to one of these types, pandas reads the column as these options say, and the fetch methods return its values as pandas holds them.
 
 (pandas-s3-read-options)=
 
@@ -604,7 +607,8 @@ With `storage_options` given to `execute()`, or `filesystem` for an UNLOAD resul
 
 PandasCursor also supports the unload option, as does {ref}`arrow-cursor`.
 Reading the unloaded Parquet files requires pyarrow (`pip install PyAthena[Pandas,Arrow]`), and `engine` must be `auto` or `pyarrow`.
-Timestamps are read at microseconds, as `datetime64[us]`, unless `coerce_int96_timestamp_unit` is given to `execute()`.
+Timestamps are read at microseconds, as `datetime64[us]`, and dates as `datetime64[us]`, as from CSV results.
+With `coerce_int96_timestamp_unit` or `dtype_backend` given to `execute()`, the columns have the dtypes that these options give, and the fetch methods return their values as pandas holds them.
 
 See {ref}`arrow-unload-options` for more information.
 
@@ -768,7 +772,9 @@ print(df.describe())
 print(df.head())
 ```
 
-The DATE and TIMESTAMP of Athena's data type are returned as [pandas.Timestamp](https://pandas.pydata.org/docs/reference/api/pandas.Timestamp.html) type.
+In a DataFrame, `timestamp` and `date` columns are `datetime64[us]`, and `timestamp with time zone` columns are `datetime64[us, UTC]`, with fractional digits beyond microseconds truncated.
+The fetch methods return their values as `datetime`, `date`, and aware `datetime` objects in UTC, and NULL as `None`.
+A `timestamp with time zone` value with an unknown zone, or with a local time that its zone repeats or skips, raises `DataError` naming the column.
 
 ```python
 from pyathena import connect
@@ -780,7 +786,7 @@ cursor = connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
 
 query_id, future = cursor.execute("SELECT col_timestamp FROM one_row_complex")
 result_set = future.result()
-print(type(result_set.fetchone()[0]))  # <class 'pandas._libs.tslibs.timestamps.Timestamp'>
+print(type(result_set.fetchone()[0]))  # <class 'datetime.datetime'>
 ```
 
 As with AsyncCursor, you need a query ID to cancel a query.
