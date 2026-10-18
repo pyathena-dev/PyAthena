@@ -1020,6 +1020,38 @@ class TestPolarsCursor:
         assert polars_cursor.fetchall() == [(1, 2, "c")]
         assert polars_cursor.as_polars().columns == ["y", "x_duplicated_0", "x"]
 
+    @pytest.mark.parametrize("chunksize", [None, 2])
+    @pytest.mark.parametrize(
+        ("options", "expected"),
+        [
+            ({"columns": ["s", "k"], "new_columns": ["x", "y"]}, [(1, None, "a")]),
+            # The renamed column takes the name of a result column that is left out.
+            ({"columns": [2], "new_columns": ["d"]}, [(None, None, "a")]),
+        ],
+    )
+    def test_columns_with_new_columns(self, polars_cursor, chunksize, options, expected):
+        """GH-1235: rows keep the description's columns when new_columns renames selected ones.
+
+        The values of each result column are taken from the column that it was
+        renamed to, and the result columns that columns leaves out are None.
+        """
+        polars_cursor.execute(
+            "SELECT * FROM (VALUES (1, DATE '2024-01-02', 'a')) AS t(k, d, s)",
+            chunksize=chunksize,
+            **options,
+        )
+        assert [d[0] for d in polars_cursor.description] == ["k", "d", "s"]
+        assert polars_cursor.fetchall() == expected
+
+    @pytest.mark.parametrize("chunksize", [None, 2])
+    def test_columns_of_tab_separated_result(self, polars_cursor, chunksize):
+        """GH-1235: columns selects from a headerless .txt result, as from a CSV result."""
+        polars_cursor.execute("SHOW TBLPROPERTIES one_row", columns=[1], chunksize=chunksize)
+        rows = polars_cursor.fetchall()
+        assert [d[0] for d in polars_cursor.description] == ["prpt_name", "prpt_value"]
+        assert (None, "table comment") in rows
+        assert all(name is None for name, _ in rows)
+
     @pytest.mark.parametrize(
         "execute_kwargs",
         [{}, {"block_size": 2048, "cache_type": "none", "s3_max_workers": 3, "chunksize": 20}],

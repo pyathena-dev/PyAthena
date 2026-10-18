@@ -28,6 +28,9 @@ With the chunksize option and Polars read options, the result is read with `pl.s
 `columns` is applied to the scan as the read function applies it, and the other such options, which do not change the result of the scan, are not passed to it.
 With `use_pyarrow=True`, the result is read whole, as without the chunksize option.
 
+The fetch methods return rows of the columns of the query result, as `description` lists them.
+A column that `columns` leaves out is `None` in each row, and a column renamed with `new_columns` is returned at the position of the result column whose values it holds.
+
 You can use the PolarsCursor by specifying the `cursor_class`
 with the connect method or connection object.
 

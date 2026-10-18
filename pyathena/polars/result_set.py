@@ -90,6 +90,7 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         reader: Iterator[pl.DataFrame] | pl.DataFrame,
         converters: dict[str, Callable[[str | None], Any | None]],
         column_names: list[str],
+        sources: list[str | None] | None = None,
     ) -> None:
         """Initialize the iterator.
 
@@ -97,6 +98,9 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
             reader: Either a DataFrame iterator (for chunked) or a single DataFrame.
             converters: Dictionary mapping column names to converter functions.
             column_names: List of column names in order.
+            sources: The name of the DataFrame column that holds the values of each
+                column name, or None for a column that the DataFrames do not hold.
+                If None, each column name names its DataFrame column.
         """
         import polars as pl
 
@@ -106,6 +110,7 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
             self._reader = reader
         self._converters = converters
         self._column_names = column_names
+        self._sources = column_names if sources is None else sources
         # Whether a read raised, after which the position of the next chunk is unknown.
         self._read_failed = False
 
@@ -168,7 +173,7 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
 
         The tuples hold the values of the columns in the order of the column names
         that the iterator was created with, as ``iterrows()`` gives them. A name
-        that a chunk does not have gives None to the name's converter. The next
+        whose source column a chunk does not have gives None to the name's converter. The next
         chunk is read when the rows of the current one run out. After an exception,
         such as a value that fails to convert, the iteration ends.
 
@@ -196,14 +201,13 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         """
         import polars as pl
 
-        # Each column's Series, or None for a name the chunk does not have, and its
-        # converter, or None for the identity.
+        # Each column's Series, or None for a name whose source the chunk does not
+        # have, and its converter, or None for the identity.
         columns: list[tuple[pl.Series | None, Callable[[Any], Any] | None]] = []
-        for name in self._column_names:
+        for name, source in zip(self._column_names, self._sources, strict=True):
             converter = self._converters.get(name)
-            columns.append(
-                (df.get_column(name, default=None), None if converter is _to_default else converter)
-            )
+            series = None if source is None else df.get_column(source, default=None)
+            columns.append((series, None if converter is _to_default else converter))
 
         def take_values(block: pl.Series) -> Iterator[Any]:
             # A value that Python does not hold, such as a date in year 0, fails
@@ -403,7 +407,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
             # A clone keeps assignments to the DataFrame from as_polars()
             # out of the rows that the fetch methods return.
             self._df_iter = PolarsDataFrameIterator(
-                self._df.clone(), self._df_converters, self._get_frame_column_names()
+                self._df.clone(),
+                self._df_converters,
+                self._get_frame_column_names(),
+                self._get_frame_sources(),
             )
         self._row_iter: Iterator[tuple[Any, ...]] = self._df_iter.itertuples()
 
@@ -682,6 +689,64 @@ class AthenaPolarsResultSet(AthenaResultSet):
             return names
         return [*new_columns[: len(names)], *names[len(new_columns) :]]
 
+    def _get_frame_sources(self) -> list[str | None] | None:
+        """Get the DataFrame column of each name of ``_get_frame_column_names()``.
+
+        The readers rename the first columns of a CSV DataFrame after reading; see
+        ``_get_csv_params()``. With ``columns`` given to ``execute()``, those are
+        the first selected columns, so a renamed column does not hold the values of
+        the result column at its position, and the result columns that ``columns``
+        leaves out have no DataFrame column. The result set otherwise reads the
+        values of each name from the column of that name.
+
+        Returns:
+            The name of the DataFrame column of each result column, or None for one
+            that ``columns`` leaves out, or None if each name names its column.
+        """
+        if self.output_location and self.is_unload:
+            return None
+        _, has_header, new_columns = self._get_csv_params()
+        positions = self._get_selected_positions(has_header)
+        if not new_columns or positions is None:
+            return None
+        names = self._get_frame_column_names() if not has_header else self._get_column_names()
+        sources = {
+            position: new_columns[i] if i < len(new_columns) else names[position]
+            for i, position in enumerate(positions)
+        }
+        return [sources.get(position) for position in range(len(names))]
+
+    def _get_selected_positions(self, has_header: bool) -> list[int] | None:
+        """Get the positions of the result columns that ``columns`` selects from a CSV result.
+
+        ``polars.read_csv()`` selects them in the given order, and in the order of the
+        file in Polars 1.x. Columns named by Polars without a header are not resolved.
+
+        Args:
+            has_header: Whether the CSV data has a header, whose names ``columns``
+                can give.
+
+        Returns:
+            The positions in the order of the DataFrame, or None without ``columns``
+            given to ``execute()``, or with ones that do not name or index the result
+            columns, which Polars rejects.
+        """
+        import polars as pl
+
+        columns = self._kwargs.get("columns")
+        names = self._get_column_names()
+        if not columns:
+            return None
+        if all(isinstance(column, int) for column in columns):
+            if not all(-len(names) <= column < len(names) for column in columns):
+                return None
+            positions = [column % len(names) for column in columns]
+        elif has_header and all(column in names for column in columns):
+            positions = [names.index(column) for column in columns]
+        else:
+            return None
+        return sorted(positions) if int(pl.__version__.split(".")[0]) < 2 else positions
+
     def _create_dataframe_iterator(self) -> PolarsDataFrameIterator:
         """Create a DataFrame iterator that reads the result file in chunks.
 
@@ -709,7 +774,12 @@ class AthenaPolarsResultSet(AthenaResultSet):
             self._metadata = ()
             reader = iter(())
         column_names = self._get_frame_column_names()
-        return PolarsDataFrameIterator(reader, self._get_converters(column_names), column_names)
+        return PolarsDataFrameIterator(
+            reader,
+            self._get_converters(column_names),
+            column_names,
+            self._get_frame_sources(),
+        )
 
     @override
     def fetchone(
@@ -1176,12 +1246,18 @@ class AthenaPolarsResultSet(AthenaResultSet):
             names of the first columns, which the readers set after reading as Polars
             sets the ``new_columns`` given to ``execute()``. With ``schema_overrides``
             given to ``execute()``, which replace the result set's types, Polars
-            renames the columns of a CSV file itself.
+            renames the columns of a CSV file itself. A tab-separated ``.txt`` result
+            has no header, and its columns are named by the result columns, those
+            that ``columns`` selects when given to ``execute()``.
         """
         if self.output_location and self.output_location.endswith(".txt"):
             separator = "\t"
             has_header = False
-            new_columns: list[str] | None = self._get_frame_column_names()
+            names = self._get_frame_column_names()
+            positions = self._get_selected_positions(has_header)
+            new_columns: list[str] | None = (
+                names if positions is None else [names[position] for position in positions]
+            )
         else:
             separator = ","
             has_header = True
@@ -1408,7 +1484,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """
         if self._df is not None:
             return PolarsDataFrameIterator(
-                self._df, self._df_converters, self._get_frame_column_names()
+                self._df,
+                self._df_converters,
+                self._get_frame_column_names(),
+                self._get_frame_sources(),
             )
         return self._df_iter
 
