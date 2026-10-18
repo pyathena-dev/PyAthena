@@ -92,9 +92,6 @@ dev = [
     "sqlalchemy[asyncio]>=2.0.0",
     "pandas>=3.0.0",
     "pyarrow>=22.0.0",
-    # pyarrow 26.0.0 is the first release with Python 3.15 wheels; without this,
-    # the lock keeps the version that the benchmarks' awswrangler allows.
-    "pyarrow>=26.0.0; python_version >= '3.15'",
     "polars>=1.39.0",
     # Python 3.14 and later, including the newest version that pull requests test,
     # use Polars 2; Polars 1.x Series methods return None on Python 3.15
@@ -141,6 +138,9 @@ source = "vcs"
 version-file = "pyathena/_version.py"
 
 [tool.uv]
+# pyarrow 26.0.0 is the first release with Python 3.15 wheels; without this, every
+# resolution of the lock keeps the version that the benchmarks' awswrangler allows.
+constraint-dependencies = ["pyarrow>=26.0.0; python_version >= '3.15'"]
 # The benchmark measures PolarsCursor in one environment per Polars major version;
 # the root development group pins Polars by Python version instead.
 conflicts = [
