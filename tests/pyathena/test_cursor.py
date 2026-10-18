@@ -929,6 +929,27 @@ class TestCursor:
         # == does not tell 123 from 123.0.
         assert _types(row) == _types(expected)
 
+    def test_json_elements_with_type_hints(self, cursor):
+        # JSON leaves the dates in the JSON elements strings; only the hints make them dates.
+        cursor.execute(
+            """
+            SELECT
+              ARRAY[json_parse('"2024-01-01"'), NULL] AS col_dates
+              ,ARRAY[json_parse('{"d": "2024-01-01"}')] AS col_maps
+              ,ARRAY[json_parse('{"d": "2024-01-01"}')] AS col_rows
+            """,
+            result_set_type_hints={
+                "col_dates": "array(date)",
+                "col_maps": "array(map(varchar, date))",
+                "col_rows": "array(row(d date))",
+            },
+        )
+        assert cursor.fetchone() == (
+            [date(2024, 1, 1), None],
+            [{"d": date(2024, 1, 1)}],
+            [{"d": date(2024, 1, 1)}],
+        )
+
     def test_cancel(self, cursor):
         def cancel(c):
             time.sleep(randint(5, 10))
@@ -1479,15 +1500,18 @@ class TestCursor:
     def test_execute_interrupted_while_starting_without_kill_on_interrupt(self):
         """Without kill_on_interrupt, the request runs on the caller's thread (no AWS)."""
         cursor, cancel = _offline_cursor(kill_on_interrupt=False)
-        cursor._connection.client.start_query_execution.side_effect = KeyboardInterrupt()
+        threads = []
 
-        with (
-            patch("pyathena.common.threading.Thread") as thread,
-            pytest.raises(KeyboardInterrupt),
-        ):
+        def start_query_execution(**kwargs):
+            threads.append(threading.current_thread())
+            raise KeyboardInterrupt
+
+        cursor._connection.client.start_query_execution.side_effect = start_query_execution
+
+        with pytest.raises(KeyboardInterrupt):
             cursor.execute("SELECT 1")
 
-        thread.assert_not_called()
+        assert threads == [threading.current_thread()]
         cancel.assert_not_called()
         assert cursor.query_id is None
 
