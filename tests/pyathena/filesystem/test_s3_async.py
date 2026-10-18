@@ -11,7 +11,7 @@ import time
 import traceback
 import uuid
 import weakref
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from types import SimpleNamespace
 from unittest import mock
 
@@ -46,6 +46,8 @@ from tests.pyathena.util import (
     await_bounded,
     overlapping_calls,
     retried,
+    run_bounded,
+    shutdown_bounded,
     stub_multipart_copy,
     wait_until,
 )
@@ -75,7 +77,32 @@ def register_async_filesystem():
     )
 
 
-@pytest.mark.usefixtures("register_async_filesystem")
+@pytest.fixture
+def release_blocked_waits():
+    """Release a thread that a regression leaves waiting for a future that never runs.
+
+    The cleanup of an asynchronous multipart copy waits in a thread of the
+    filesystem for the completion, which it cancels if the completion never
+    runs. Without that cancellation, the thread would wait forever, and the
+    interpreter would not exit after the test fails. The futures that the
+    cleanup waits for are recorded, and those still pending at teardown are
+    cancelled and their waiters notified.
+    """
+    waited = []
+
+    def recording_wait(futures, *args, **kwargs):
+        futures = list(futures)
+        waited.extend(futures)
+        return wait(futures, *args, **kwargs)
+
+    with mock.patch("pyathena.filesystem.s3_async.wait", side_effect=recording_wait):
+        yield
+    for future in waited:
+        if not future.done() and future.cancel():
+            future.set_running_or_notify_cancel()
+
+
+@pytest.mark.usefixtures("register_async_filesystem", "release_blocked_waits")
 class TestAioS3FileSystem:
     @staticmethod
     async def _multipart_copy(fs=None, **kwargs):
@@ -662,7 +689,7 @@ class TestAioS3FileSystem:
         finally:
             release.set()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            await await_bounded(task)
         assert await asyncio.to_thread(aborted.wait, 5)
 
         # Part 3 waits for a worker and is not started after the cancellation.
@@ -736,10 +763,10 @@ class TestAioS3FileSystem:
         finally:
             release.set()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            await await_bounded(task)
         # The threads have run the callbacks of the requests once they are
         # shut down, and the event loop runs theirs on the next iterations.
-        await asyncio.to_thread(fs._thread_pool.shutdown, True)
+        await asyncio.to_thread(shutdown_bounded, fs._thread_pool)
         gc.collect()
         for _ in range(3):
             await asyncio.sleep(0)
@@ -806,10 +833,10 @@ class TestAioS3FileSystem:
         finally:
             release.set()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            await await_bounded(task)
         # The threads have run the callbacks of the requests once they are
         # shut down, and the event loop runs theirs on the next iterations.
-        await asyncio.to_thread(fs._thread_pool.shutdown, True)
+        await asyncio.to_thread(shutdown_bounded, fs._thread_pool)
         gc.collect()
         for _ in range(3):
             await asyncio.sleep(0)
@@ -1075,7 +1102,7 @@ class TestAioS3FileSystem:
             operation.release.set()
         started = time.monotonic()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            await await_bounded(task)
         assert time.monotonic() - started < EVENT_TIMEOUT
         assert operation.calls == 1
         # No upload was created.
@@ -1322,9 +1349,9 @@ class TestAioS3FileSystem:
                 # Lets the copy start its cleanup.
                 await asyncio.sleep(0.1)
 
-        asyncio.run(main())
+        run_bounded(main)
         # The cleanup may end after asyncio.run() returns.
-        fs._thread_pool.shutdown(wait=True)
+        shutdown_bounded(fs._thread_pool)
 
         assert events == expected
 
@@ -2955,7 +2982,9 @@ class TestAioS3StreamedFile:
                 ),
                 pytest.raises(asyncio.CancelledError),
             ):
-                await flush_and_exit()
+                # Bounded, so that a regression whose exit waits for the
+                # held part fails here and releases it.
+                await await_bounded(flush_and_exit())
         finally:
             release.set()
         # Waits for the commit, and for an abort queued after it.

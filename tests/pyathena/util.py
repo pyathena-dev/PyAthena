@@ -225,6 +225,57 @@ async def await_bounded(awaitable, timeout=EVENT_TIMEOUT):
     return task.result()
 
 
+def run_bounded(main, timeout=EVENT_TIMEOUT):
+    """Run a coroutine with ``asyncio.run()``, failing if it does not end within the timeout.
+
+    The event loop runs in a daemon thread, so that a shutdown of the loop
+    that waits for a task that a regression blocks fails the test instead of
+    hanging it, and does not keep the interpreter from exiting.
+
+    Args:
+        main: The coroutine function to run.
+        timeout: The longest run, in seconds.
+
+    Returns:
+        The result of the coroutine.
+
+    Raises:
+        BaseException: The error that the run raised.
+    """
+    outcome = {}
+
+    def run():
+        try:
+            outcome["result"] = asyncio.run(main())
+        except BaseException as e:
+            outcome["error"] = e
+
+    runner = threading.Thread(target=run, daemon=True)
+    runner.start()
+    runner.join(timeout)
+    assert not runner.is_alive(), f"asyncio.run() did not end within {timeout} s"
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("result")
+
+
+def shutdown_bounded(pool, timeout=EVENT_TIMEOUT):
+    """Shut down an executor and wait for its calls, failing if they run past the timeout.
+
+    The wait runs in a daemon thread, so that a call that a regression blocks
+    fails the test instead of hanging it, and does not keep the interpreter
+    from exiting through this wait.
+
+    Args:
+        pool: The executor, such as an ``S3AioThreadPool``.
+        timeout: The longest wait, in seconds.
+    """
+    waiter = threading.Thread(target=pool.shutdown, kwargs={"wait": True}, daemon=True)
+    waiter.start()
+    waiter.join(timeout)
+    assert not waiter.is_alive(), f"the calls of the executor did not end within {timeout} s"
+
+
 def overlapping_calls(calls, timeout=5, grace=0.5):
     """Return a callable that records the peak number of its overlapping calls.
 
