@@ -608,9 +608,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
         future that ``AsyncPolarsCursor.execute()`` returns. The requests that prepare
         the reads are made then, before the first fetch, and raise their errors there:
         the size check of a CSV result file, and the data manifest and the Parquet
-        schema of an UNLOAD result. The schema sets the metadata, and the Polars scan
-        of the chunks uses it to read timestamps at microseconds unless ``execute()``
-        was given a ``schema``. The chunks themselves are read lazily.
+        schema of an UNLOAD result. The schema sets the metadata and is passed to
+        ``_iter_parquet_chunks()``. The chunks themselves are read lazily.
 
         Returns:
             PolarsDataFrameIterator that reads each chunk lazily.
