@@ -44,6 +44,7 @@ On the EC2 instance, the dedicated checkout's root `/opt/pyathena/.venv` holds t
 The `polars1` and `polars2` dependency groups select Polars 1.x or 2.x, which PolarsCursor reads with different code paths.
 The environments above have `polars1`; a second environment beside each, `benchmarks/.venv-polars2` or `/opt/pyathena/.venv-polars2`, has `polars2`.
 The root `pyproject.toml` declares both groups and the root `dev` group as conflicting, so `uv.lock` resolves each of them separately.
+Select one of the two groups in every sync: without either, the environment gets whichever Polars version the lock resolves.
 The root `uv build -v` still builds only PyAthena, including a wheel built from its sdist.
 Benchmark dependencies do not become PyAthena runtime dependencies, and `uv sync --group dev` at the root does not install them.
 
@@ -376,7 +377,7 @@ With `--split-pages`, a job whose single trial needs at least that many pages be
 `jobs` accepts `--warmups` and `--repetitions` too; with either option, every job that is not split carries both values as arguments, so one queue can combine jobs with different trial counts under one stored configuration.
 `queue --jobs` accepts several job files, rejects duplicate job IDs, and orders the combined jobs as `jobs` orders one selection.
 `jobs --environment polars2` runs the selected jobs with Polars 2.x: each job names the environment, and its ID ends with `-polars2`, so one queue can hold the same cases for both Polars versions.
-A worker runs such a job with the interpreter of `.venv-polars2` beside its own environment, and refuses to start if a job's environment is missing on its host.
+A worker runs such a job with the interpreter of `.venv-polars2` beside its own environment, and refuses to start if a job's environment is missing on its host; start the worker from the default environment, whose interpreter runs the other jobs.
 Select the families that use Polars, `polars` and `sqla_polars`, for this environment.
 
 Deploy a new stack with the fleet size under its own name; changing `FleetSize` on an existing stack does not wait for the added hosts to finish bootstrap.

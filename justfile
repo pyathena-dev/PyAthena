@@ -102,6 +102,7 @@ _benchmark-lint:
     uvx ruff@{{RUFF_VERSION}} check --config benchmarks/pyproject.toml benchmarks
     uvx ruff@{{RUFF_VERSION}} format --check --config benchmarks/pyproject.toml benchmarks
     {{BENCHMARK_UV}} mypy
+    {{BENCHMARK_UV_POLARS2}} mypy
     {{BENCHMARK_UV}} cfn-lint cloudformation/benchmark.yaml
 
 _benchmark-test: _benchmark-lint

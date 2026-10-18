@@ -418,6 +418,11 @@ class TestMergeJobs:
         with pytest.raises(ValueError, match="unique"):
             merge_jobs([[job("a")], [job("a")]])
 
+    def test_unknown_environments_are_rejected_before_publishing(self):
+        known = {**job("b"), "environment": "polars2"}
+        with pytest.raises(ValueError, match=r"unknown environment: c$"):
+            merge_jobs([[job("a"), known], [{**job("c"), "environment": "polars3"}]])
+
 
 METADATA = {
     "instance-id": "i-123",

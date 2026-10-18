@@ -137,11 +137,14 @@ def merge_jobs(job_lists: Iterable[list[dict[str, Any]]]) -> list[dict[str, Any]
         All jobs, ordered as :func:`expand_jobs` orders one list.
 
     Raises:
-        ValueError: If job IDs are not unique.
+        ValueError: If job IDs are not unique, or a job names an unknown environment.
     """
     jobs = [job for jobs in job_lists for job in jobs]
     if len({j["id"] for j in jobs}) != len(jobs):
         raise ValueError("Job IDs must be unique")
+    unknown = [j["id"] for j in jobs if "environment" in j and j["environment"] not in ENVIRONMENTS]
+    if unknown:
+        raise ValueError(f"Jobs name an unknown environment: {', '.join(unknown)}")
     return sorted(jobs, key=job_order)
 
 
@@ -185,7 +188,6 @@ def expand_jobs(
     Raises:
         ValueError: If no case matches the selection.
     """
-    named = {"environment": environment} if environment else {}
     jobs: list[dict[str, Any]] = []
     for suite in suites:
         for scale in scales:
@@ -216,8 +218,6 @@ def expand_jobs(
                         chunks = [str(c) for c in sorted({c.chunksize or 0 for c in cases})]
                         base += "-c" + "_".join(chunks)
                         args += ["--chunksize", *chunks]
-                    if environment:
-                        base += f"-{environment}"
                     runnable = [c for c in cases if c.unsupported_reason(settings, scale) is None]
                     pages = max((api_pages(c, rows) for c in runnable), default=0)
                     api_weight = max(
@@ -233,7 +233,6 @@ def expand_jobs(
                                 "api_weight": api_weight,
                                 "pages": pages * len(runnable),
                                 "weight": weight,
-                                **named,
                             }
                             for repetition in range(1, settings.repetitions + 1)
                         )
@@ -252,11 +251,14 @@ def expand_jobs(
                                 "api_weight": api_weight,
                                 "pages": pages * len(runnable) * trials,
                                 "weight": weight * trials,
-                                **named,
                             }
                         )
     if not jobs:
         raise ValueError("No cases match the selected filters")
+    if environment:
+        for job in jobs:
+            job["id"] += f"-{environment}"
+            job["environment"] = environment
     return sorted(jobs, key=job_order)
 
 
