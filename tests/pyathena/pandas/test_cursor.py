@@ -6,7 +6,7 @@ import random
 import string
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -450,16 +450,8 @@ class TestPandasCursor:
     @pytest.mark.parametrize(
         ("pandas_cursor", "unload"),
         [
-            pytest.param(
-                {"cursor_kwargs": {"unload": False}},
-                False,
-                marks=pytest.mark.xfail(strict=True, reason="#1219"),
-            ),
-            pytest.param(
-                {"cursor_kwargs": {"unload": True}},
-                True,
-                marks=pytest.mark.xfail(strict=True, reason="#1219"),
-            ),
+            pytest.param({"cursor_kwargs": {"unload": False}}, False),
+            pytest.param({"cursor_kwargs": {"unload": True}}, True),
         ],
         indirect=["pandas_cursor"],
         ids=["csv", "unload"],
@@ -487,6 +479,7 @@ class TestPandasCursor:
         # The fetch methods read the same DataFrame, whose aware values are in UTC.
         row = pandas_cursor.fetchone()
         assert row == temporal.fetched_row(unload)
+        assert [type(v) for v in row] == [type(v) for v in temporal.fetched_row(unload)]
 
     @pytest.mark.parametrize(
         "pandas_cursor",
@@ -588,9 +581,9 @@ class TestPandasCursor:
                 0.25,
                 "a string",
                 "varchar",
-                pd.Timestamp(2017, 1, 1, 0, 0, 0),
+                datetime(2017, 1, 1, 0, 0, 0),
                 datetime(2017, 1, 1, 0, 0, 0).time(),
-                pd.Timestamp(2017, 1, 2),
+                date(2017, 1, 2),
                 b"123",
                 "[1, 2]",
                 [1, 2],
@@ -697,8 +690,8 @@ class TestPandasCursor:
                 0.25,
                 "a string",
                 "varchar",
-                pd.Timestamp(2017, 1, 1, 0, 0, 0),
-                datetime(2017, 1, 2).date(),
+                datetime(2017, 1, 1, 0, 0, 0),
+                date(2017, 1, 2),
                 b"123",
                 # ValueError: The truth value of an array with more than one element is ambiguous.
                 # Use a.any() or a.all()
@@ -1034,7 +1027,7 @@ class TestPandasCursor:
             str,
             str,
             np.datetime64,
-            np.object_,
+            np.datetime64,
             np.object_,
             np.object_,
             np.object_,
@@ -1074,7 +1067,7 @@ class TestPandasCursor:
                 "a string",
                 "varchar",
                 pd.Timestamp(2017, 1, 1, 0, 0, 0),
-                datetime(2017, 1, 2).date(),
+                pd.Timestamp(2017, 1, 2),
                 b"123",
                 # ValueError: The truth value of an array with more than one element is ambiguous.
                 # Use a.any() or a.all()
@@ -1585,12 +1578,11 @@ class TestPandasCursor:
         assert pandas_cursor.fetchall() == [CONVERTED_VALUES_ROW]
 
     def test_ambiguous_time_zone_value(self, pandas_cursor):
-        """A local time that its zone repeats raises instead of choosing one.
+        """A local time that its zone repeats raises DataError instead of choosing one.
 
-        A whole read converts the values in execute() and wraps the converter's
-        DataError in OperationalError.
+        A whole read converts the values in execute().
         """
-        with pytest.raises(DatabaseError, match="is ambiguous"):
+        with pytest.raises(DataError, match="col_timestamp_tz"):
             pandas_cursor.execute(AMBIGUOUS_TIME_ZONE_QUERY)
 
     @pytest.mark.parametrize(
@@ -1599,7 +1591,7 @@ class TestPandasCursor:
     def test_ambiguous_time_zone_value_chunked(self, pandas_cursor):
         """A chunked read raises DataError when it reads the chunk with the value."""
         pandas_cursor.execute(AMBIGUOUS_TIME_ZONE_QUERY)
-        with pytest.raises(DataError, match="is ambiguous"):
+        with pytest.raises(DataError, match="col_timestamp_tz"):
             pandas_cursor.fetchall()
 
     @pytest.mark.skipif(not ENV.managed_work_group, reason="AWS_ATHENA_MANAGED_WORKGROUP not set")

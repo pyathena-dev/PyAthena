@@ -7,10 +7,11 @@ import importlib
 import logging
 import sys
 from collections import abc
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from contextvars import copy_context
+from datetime import datetime, timezone
 from functools import partial
 from io import BufferedReader, BytesIO, IOBase, StringIO, TextIOWrapper
 from itertools import chain, islice
@@ -28,8 +29,8 @@ from fsspec import open as filesystem_open
 from pyathena import OperationalError
 from pyathena.arrow.reader import ParquetChunkReader
 from pyathena.arrow.util import to_column_info
-from pyathena.converter import Converter
-from pyathena.error import ProgrammingError
+from pyathena.converter import Converter, _parse_time_zone, _to_datetime_with_tz
+from pyathena.error import DataError, ProgrammingError
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.model import AthenaQueryExecution
 from pyathena.pandas.reader import _BINARY_NULL, BinaryCSVReader
@@ -37,7 +38,7 @@ from pyathena.result_set import _FETCH_FAILED_MESSAGE, AthenaResultSet
 from pyathena.util import RetryConfig, override, parse_output_location
 
 if TYPE_CHECKING:
-    from pandas import DataFrame, Index, Series
+    from pandas import DataFrame, Series
     from pandas.io.parsers import TextFileReader
     from pyarrow import Table
     from pyarrow.parquet import FileMetaData
@@ -47,6 +48,12 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 _READ_FAILED_MESSAGE = "PandasDataFrameIterator cannot be read after a failed read."
+
+# The Athena types whose CSV text AthenaPandasResultSet reads as text and converts after
+# reading; see _TemporalConverter.
+_CSV_TEMPORAL_TYPES = ("timestamp", "date", "timestamp with time zone")
+# A timestamp's text up to its sixth fractional digit, for years of four digits.
+_TIMESTAMP_TEXT_LENGTH = len("2000-01-01 00:00:00.000000")
 
 
 def _convert_binary_csv(converter: Callable[[str | None], Any], value: str) -> Any:
@@ -195,6 +202,32 @@ def _read_csv_with_pyarrow(source: str | IOBase, read_csv_kwargs: dict[str, Any]
     return df
 
 
+def _replace_by_label(df: DataFrame, name: Any, convert: Callable[[Series], Series]) -> None:
+    """Replace the values of a column or an index level of a DataFrame, given its label.
+
+    Args:
+        df: The DataFrame, updated in place.
+        name: The label of a column, or the name of an index level or of the index. A
+            partial label of MultiIndex columns is not replaced.
+        convert: Returns the new values of the given values, with their index.
+    """
+    import pandas as pd
+
+    index = df.index
+    if name in df.columns:
+        values = df[name]
+        if isinstance(values, pd.Series):
+            # Not a partial label of MultiIndex columns.
+            df[name] = convert(values)
+    elif isinstance(index, pd.MultiIndex) and name in index.names:
+        levels = [index.get_level_values(i) for i in range(index.nlevels)]
+        i = index.names.index(name)
+        levels[i] = pd.Index(convert(pd.Series(levels[i])), name=name)
+        df.index = pd.MultiIndex.from_arrays(levels, names=index.names)
+    elif index.name == name:
+        df.index = pd.Index(convert(pd.Series(index)), name=name)
+
+
 class _JSONConverter:
     """A json converter for the text of a json column that ``pandas.read_csv()`` read.
 
@@ -235,29 +268,14 @@ class _JSONConverter:
             df: The DataFrame or chunk, updated in place.
             name: The label of the json column, which can also be an index level.
         """
-        import pandas as pd
+        _replace_by_label(df, name, self._convert_values)
 
-        index = df.index
-        if name in df.columns:
-            values = df[name]
-            if isinstance(values, pd.Series):
-                # Not a partial label of MultiIndex columns.
-                df[name] = self._convert_values(values, index)
-        elif isinstance(index, pd.MultiIndex) and name in index.names:
-            levels = [index.get_level_values(i) for i in range(index.nlevels)]
-            i = index.names.index(name)
-            levels[i] = pd.Index(self._convert_values(levels[i]), name=name)
-            df.index = pd.MultiIndex.from_arrays(levels, names=index.names)
-        elif index.name == name:
-            df.index = pd.Index(self._convert_values(index), name=name)
-
-    def _convert_values(self, values: Series | Index, index: Index | None = None) -> Series:
+    def _convert_values(self, values: Series) -> Series:
         """Convert json text values.
 
         Args:
             values: The text values, with NaN for a value that pandas read as missing.
                 Values that pandas already parsed, such as an index or dates, are kept.
-            index: The index of the returned values, or None for a default index.
 
         Returns:
             The converted values: objects with None if there is NULL, as a NULL would
@@ -267,7 +285,7 @@ class _JSONConverter:
 
         if values.dtype.kind in "mM":
             # pandas parsed the text as dates, as parse_dates given to execute() asks.
-            return pd.Series(values.array, index=index)
+            return pd.Series(values.array, index=values.index)
         # Each value is one of three kinds:
         # - text, which pandas kept as read: the JSON text, converted here;
         # - a missing value: NULL, converted from an empty string, as pandas passes
@@ -281,10 +299,163 @@ class _JSONConverter:
                 else (self._converter("") if pd.isna(v) else v)
                 for v in values.to_numpy()
             ],
-            index=index,
+            index=values.index,
             dtype=object,
         )
         return converted if converted.isna().any() else converted.infer_objects()
+
+
+class _TemporalConverter:
+    """A converter for the text of a temporal column that ``pandas.read_csv()`` read.
+
+    ``timestamp``, ``date``, and ``timestamp with time zone`` columns are read as text
+    and converted as whole columns after reading, so that their dtypes depend only on
+    the Athena type: ``datetime64[us]``, ``datetime64[us]``, and ``datetime64[us, UTC]``.
+    Fractional digits beyond microseconds are truncated. A column that pandas already
+    parsed, as with ``parse_dates`` when a ``dtype`` given to ``execute()`` replaces
+    PyAthena's, gets the same unit.
+    """
+
+    __slots__ = ("_type",)
+
+    def __init__(self, type_: str) -> None:
+        """Create the converter of a column type.
+
+        Args:
+            type_: The Athena type of the column, one of ``_CSV_TEMPORAL_TYPES``.
+        """
+        self._type = type_
+
+    @property
+    def type(self) -> str:
+        """The Athena type of the column."""
+        return self._type
+
+    def convert(self, df: DataFrame, name: Any) -> None:
+        """Convert the text of a column in a DataFrame that ``read_csv()`` returned.
+
+        Args:
+            df: The DataFrame or chunk, updated in place.
+            name: The label of the column, which can also be an index level.
+
+        Raises:
+            DataError: If a value fails to convert, such as a ``timestamp with time
+                zone`` value with an unknown zone or a local time without one instant in
+                its zone. The message names the column.
+        """
+        try:
+            _replace_by_label(df, name, self._convert_values)
+        except Exception as e:
+            raise DataError(f"Column {name!r}: {e}") from e
+
+    def _convert_values(self, values: Series) -> Series:
+        """Convert the values of a column.
+
+        Args:
+            values: The text values, with missing values for NULL, or values that
+                pandas already parsed as dates.
+
+        Returns:
+            The converted values, with the index of ``values``.
+        """
+        if self._type == "timestamp with time zone":
+            return _to_utc_timestamps(values)
+        return _to_timestamps(values, date=self._type == "date")
+
+
+def _to_timestamps(values: Series, date: bool = False) -> Series:
+    """Convert timestamp or date text to ``datetime64[us]``.
+
+    Args:
+        values: The text values, with missing values for NULL, or datetime values.
+        date: Whether the values are dates, which have no time to truncate.
+
+    Returns:
+        The values as ``datetime64[us]``, with NaT for NULL.
+    """
+    import pandas as pd
+
+    if values.dtype.kind == "M":
+        return values.dt.as_unit("us")
+    if isinstance(values.dtype, pd.StringDtype) and values.dtype.storage == "pyarrow":
+        # pyarrow parses its strings without a Python object per value, as
+        # pandas.to_datetime() would make.
+        import pyarrow as pa
+        import pyarrow.compute as pc
+
+        array = pa.array(values.array)
+        if date:
+            parsed = pc.cast(pc.cast(array, pa.date32()), pa.timestamp("us"))
+        else:
+            # Truncate the fraction to microseconds, as Athena's years have four digits.
+            text = pc.utf8_slice_codeunits(array, 0, _TIMESTAMP_TEXT_LENGTH)
+            parsed = pc.cast(text, pa.timestamp("us"))
+        return pd.Series(parsed.to_numpy(zero_copy_only=False), index=values.index)
+    text = values.astype("string")
+    if not date:
+        text = text.str.slice(0, _TIMESTAMP_TEXT_LENGTH)
+    return pd.to_datetime(text, format="ISO8601").dt.as_unit("us")
+
+
+def _to_utc_timestamps(values: Series) -> Series:
+    """Convert ``timestamp with time zone`` text to ``datetime64[us, UTC]``.
+
+    The local times of each zone are localized together. As for the fetch methods of
+    the other cursors, a local time that the zone repeats or skips is not converted.
+
+    Args:
+        values: The text values, a local time followed by a zone name or a ``+HH:MM``
+            or ``-HH:MM`` offset, with missing values for NULL, or aware datetime
+            values.
+
+    Returns:
+        The instants as ``datetime64[us, UTC]``, with NaT for NULL.
+
+    Raises:
+        DataError: If a zone is unknown, or a local time does not identify one instant
+            in its zone.
+    """
+    import numpy as np
+    import pandas as pd
+
+    if values.dtype.kind == "M":
+        return values.dt.tz_convert("UTC").dt.as_unit("us")
+    text = values if isinstance(values.dtype, pd.StringDtype) else values.astype("string")
+    # The local time before the last space, and the zone after it. pandas runs these
+    # regular expressions in pyarrow for pyarrow-backed strings, without an object
+    # per value.
+    local = _to_timestamps(text.str.replace(r" [^ ]*$", "", regex=True)).to_numpy(
+        dtype="datetime64[us]"
+    )
+    # Integer codes of the zones, -1 for NULL, and the positions of each zone's values,
+    # grouped once by a stable sort of the codes.
+    codes, zone_names = pd.factorize(text.str.replace(r"^.* ", "", regex=True))
+    order = np.argsort(codes, kind="stable")
+    bounds = np.searchsorted(codes[order], np.arange(-1, len(zone_names) + 1))
+    utc = np.full(len(values), np.datetime64("NaT", "us"))
+    for code, zone_name in enumerate(zone_names):
+        positions = order[bounds[code + 1] : bounds[code + 2]]
+        zone = _parse_time_zone(zone_name)
+        if isinstance(zone, timezone):
+            utc[positions] = local[positions] - np.timedelta64(zone.utcoffset(None), "us")
+            continue
+        localized = pd.Series(local[positions]).dt.tz_localize(
+            zone, ambiguous="NaT", nonexistent="NaT"
+        )
+        utc[positions] = (
+            localized.dt.tz_convert("UTC").dt.tz_localize(None).to_numpy(dtype="datetime64[us]")
+        )
+        # pandas also reports local times before a zone's first transition as
+        # nonexistent, so the values that it does not localize are converted one at a
+        # time, which raises the DataError of a value without one instant.
+        failed = positions[np.isnat(utc[positions])]
+        if len(failed):
+            offsets = [
+                cast(datetime, _to_datetime_with_tz(value)).utcoffset()
+                for value in text.iloc[failed]
+            ]
+            utc[failed] = local[failed] - np.array(offsets, dtype="timedelta64[us]")
+    return pd.Series(utc, index=values.index).dt.tz_localize("UTC")
 
 
 class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
@@ -321,6 +492,7 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         reader: TextFileReader | Iterator[DataFrame] | DataFrame,
         trunc_date: Callable[[DataFrame], DataFrame],
         csv_stream: IOBase | None = None,
+        fetch_types: Mapping[Any, str] | None = None,
     ) -> None:
         """Initialize the iterator.
 
@@ -329,6 +501,9 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
                 single DataFrame.
             trunc_date: Function to apply to each chunk, such as date truncation.
             csv_stream: Optional CSV stream owned and closed by this iterator.
+            fetch_types: The labels of the datetime columns whose values the row
+                iterators return as ``"datetime"`` or ``"date"`` objects, with None
+                for NaT, instead of pandas ``Timestamp`` values.
         """
         from pandas import DataFrame
 
@@ -338,6 +513,7 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
             self._reader = reader
         self._trunc_date = trunc_date
         self._csv_stream = csv_stream
+        self._fetch_types: dict[Any, str] = dict(fetch_types or {})
         # Whether a read raised, after which the position of the next chunk is unknown.
         self._read_failed = False
 
@@ -445,9 +621,11 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
 
         A block takes the values of a column at once with ``tolist()`` where that
         gives the values that iterating over the column gives: for columns of a
-        NumPy array and of a pandas string dtype. The other columns, such as
-        nullable integer, datetime, and ``pyarrow``-backed columns, are iterated
-        over. Blocks bound the values held at once for a large chunk.
+        NumPy array and of a pandas string dtype. The datetime columns of
+        ``fetch_types`` become ``datetime`` or ``date`` objects, with None for NaT.
+        The other columns, such as nullable integer, datetime, and
+        ``pyarrow``-backed columns, are iterated over. Blocks bound the values held
+        at once for a large chunk.
 
         Args:
             df: The DataFrame chunk.
@@ -457,29 +635,52 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         """
         import pandas as pd
 
-        # Each column's values, and whether a slice of them is converted with tolist().
-        columns: list[tuple[Any, bool]] = []
+        # Each column's values, and how a slice of them is converted: "list" with
+        # tolist(), "datetime" or "date" to objects, or None to be iterated over.
+        columns: list[tuple[Any, str | None]] = []
         for i in range(df.shape[1]):
             series = df.iloc[:, i]
             array = series.array
-            if isinstance(array.dtype, pd.StringDtype):
-                columns.append((array, True))
+            fetch_type = self._fetch_types.get(df.columns[i])
+            if fetch_type is not None and series.dtype.kind == "M":
+                columns.append((array, fetch_type))
+            elif isinstance(array.dtype, pd.StringDtype):
+                columns.append((array, "list"))
             elif isinstance(array, pd.arrays.NumpyExtensionArray):
                 # NumpyExtensionArray.to_numpy() would scan the whole column for missing values.
-                columns.append((series.to_numpy(), True))
+                columns.append((series.to_numpy(), "list"))
             else:
-                columns.append((array, False))
+                columns.append((array, None))
         size = self._ROW_BLOCK_SIZE
         for start in range(0, len(df), size):
             yield zip(
-                *(
-                    values[start : start + size].tolist()
-                    if to_list
-                    else values[start : start + size]
-                    for values, to_list in columns
-                ),
+                *(self._take_block(values, mode, start, start + size) for values, mode in columns),
                 strict=True,
             )
+
+    @staticmethod
+    def _take_block(values: Any, mode: str | None, start: int, stop: int) -> Any:
+        """Take a block of a column's values for the row iterators.
+
+        Args:
+            values: The column's array.
+            mode: How the block is converted: ``"list"`` with ``tolist()``,
+                ``"datetime"`` or ``"date"`` to objects with None for NaT, or None to
+                be iterated over.
+            start: The position of the first value.
+            stop: The position after the last value.
+
+        Returns:
+            The values of the block.
+        """
+        block = values[start:stop]
+        if mode is None:
+            return block
+        if mode == "list":
+            return block.tolist()
+        objects = block.date if mode == "date" else block.to_pydatetime()
+        objects[block.isna()] = None
+        return objects.tolist()
 
     def get_chunk(self, size: int | None = None) -> DataFrame:
         """Get a chunk of specified size.
@@ -715,6 +916,9 @@ class AthenaPandasResultSet(AthenaResultSet):
         self._csv_stream: IOBase | None = None
         # The converters of the json columns that _read_csv() reads as text, keyed by label.
         self._csv_json_converters: dict[Any, _JSONConverter] = {}
+        # The converters of the temporal columns that _read_csv() reads as text, keyed by
+        # label; see _get_csv_temporal_converters().
+        self._csv_temporal_converters: dict[Any, _TemporalConverter] = {}
 
         # Cache time column names for efficient _trunc_date processing. _read_csv()
         # replaces them with the labels of the columns that it reads.
@@ -728,23 +932,32 @@ class AthenaPandasResultSet(AthenaResultSet):
         if self.state == AthenaQueryExecution.STATE_SUCCEEDED:
             if self.output_location:
                 result = self._as_pandas()
-                trunc_date = _no_trunc_date if self.is_unload else self._finish_csv_frame
+                trunc_date = (
+                    self._finish_parquet_frame if self.is_unload else self._finish_csv_frame
+                )
             else:
                 # Without a result file, as with managed query result storage, the rows
                 # from GetQueryResults are read as a CSV result file, but not in chunks.
                 result = self._read_csv()
                 trunc_date = self._finish_csv_frame
+            # The datetime columns that the fetch methods return as datetime or date.
+            self._fetch_types = self._get_fetch_types()
             if isinstance(result, pd.DataFrame):
                 self._df = trunc_date(result)
             else:
-                self._df_iter = PandasDataFrameIterator(result, trunc_date, self._csv_stream)
+                self._df_iter = PandasDataFrameIterator(
+                    result, trunc_date, self._csv_stream, self._fetch_types
+                )
         else:
+            self._fetch_types = {}
             self._df = pd.DataFrame()
         if self._df is not None:
             # A shallow copy keeps assignments to the DataFrame from as_pandas()
             # out of the rows that the fetch methods return. Mutable values in its
             # cells, such as lists from JSON columns, are still shared.
-            self._df_iter = PandasDataFrameIterator(self._df.copy(deep=False), _no_trunc_date)
+            self._df_iter = PandasDataFrameIterator(
+                self._df.copy(deep=False), _no_trunc_date, fetch_types=self._fetch_types
+            )
         self._row_iter: Iterator[tuple[Any, ...]] = self._df_iter.itertuples()
 
     def _get_parquet_engine(self) -> str:
@@ -787,7 +1000,13 @@ class AthenaPandasResultSet(AthenaResultSet):
             is_compatible = (
                 effective_chunksize is None
                 and self._quoting == 1
-                and not self.converters
+                # pandas' PyArrow engine takes no converters. Those of the temporal
+                # columns that are converted after reading are not used.
+                and self._kwargs.get("converters") is None
+                and not self.converters.keys()
+                - self._get_csv_temporal_converters(
+                    [(d[0], d) for d in self.description or []]
+                ).keys()
                 # The pyarrow engine does not rename columns with the same name, and
                 # the column labels cannot be resolved for it (see
                 # _get_csv_column_labels()).
@@ -923,7 +1142,7 @@ class AthenaPandasResultSet(AthenaResultSet):
     def _finish_csv_frame(self, df: DataFrame) -> DataFrame:
         """Finish a DataFrame read from the CSV result file.
 
-        Converts the json columns and truncates the time columns.
+        Converts the json and temporal columns and truncates the time columns.
 
         Args:
             df: The DataFrame or chunk that ``pandas.read_csv()`` returned.
@@ -933,6 +1152,8 @@ class AthenaPandasResultSet(AthenaResultSet):
 
         Raises:
             OperationalError: If converting a json column fails.
+            DataError: If a ``timestamp with time zone`` value has an unknown zone or a
+                local time without one instant, naming the column.
         """
         for name, converter in self._csv_json_converters.items():
             try:
@@ -940,7 +1161,90 @@ class AthenaPandasResultSet(AthenaResultSet):
             except Exception as e:
                 _logger.exception(f"Failed to convert the json column {name!r}.")
                 raise OperationalError(*e.args) from e
+        for name, temporal_converter in self._csv_temporal_converters.items():
+            temporal_converter.convert(df, name)
         return self._trunc_date(df)
+
+    def _finish_parquet_frame(self, df: DataFrame) -> DataFrame:
+        """Finish a DataFrame or chunk read from the Parquet files of an UNLOAD result.
+
+        ``date`` columns, which pyarrow reads as ``date`` objects, become
+        ``datetime64[us]``, as from a CSV result. With ``dtype_backend`` or
+        ``coerce_int96_timestamp_unit`` given to ``execute()``, the columns keep the
+        dtypes that these options give.
+
+        Args:
+            df: The DataFrame or chunk.
+
+        Returns:
+            The same DataFrame.
+        """
+        if self._kwargs.keys() & {"dtype_backend", "coerce_int96_timestamp_unit"}:
+            return df
+        dates = {d[0] for d in self.description or [] if d[1] == "date"}
+        for i, column in enumerate(df.columns):
+            if column in dates and df.dtypes.iloc[i].kind == "O":
+                df.isetitem(i, df.iloc[:, i].astype("datetime64[us]"))
+        return df
+
+    def _get_fetch_types(self) -> dict[Any, str]:
+        """Get the datetime columns that the fetch methods return as datetime or date.
+
+        These are the temporal columns that PyAthena converts: those of
+        ``_get_csv_temporal_converters()`` for a CSV result, and the ``timestamp`` and
+        ``date`` columns of an UNLOAD result, unless ``dtype_backend`` or
+        ``coerce_int96_timestamp_unit`` given to ``execute()`` set their dtypes.
+        Columns that ``parse_dates`` given to ``execute()`` parsed keep pandas' values.
+
+        Returns:
+            ``"datetime"`` or ``"date"``, keyed by column label.
+        """
+        if not self.is_unload:
+            return {
+                label: "date" if converter.type == "date" else "datetime"
+                for label, converter in self._csv_temporal_converters.items()
+            }
+        if self._kwargs.keys() & {"dtype_backend", "coerce_int96_timestamp_unit"}:
+            return {}
+        return {
+            d[0]: "date" if d[1] == "date" else "datetime"
+            for d in self.description or []
+            if d[1] in ("timestamp", "date")
+        }
+
+    def _get_csv_temporal_converters(
+        self, columns: list[tuple[Any, tuple[Any, ...]]]
+    ) -> dict[Any, _TemporalConverter]:
+        """Get the converters of the temporal columns that are converted after reading.
+
+        PyAthena converts the ``timestamp``, ``date``, and ``timestamp with time zone``
+        columns after reading, unless ``parse_dates``, ``dtype``, or ``converters`` is
+        given to ``execute()``, with which pandas reads them, or the converter maps the
+        type to a conversion function other than the default ``timestamp with time
+        zone`` one.
+
+        Args:
+            columns: The label and the description of each column that is read.
+
+        Returns:
+            The converters keyed by column label.
+        """
+        # None is the default of each option, as if it were not given.
+        if any(self._kwargs.get(key) is not None for key in ("parse_dates", "dtype", "converters")):
+            return {}
+        mappings = self._converter.mappings
+        temporal_converters = {}
+        for label, d in columns:
+            type_ = d[1]
+            if type_ not in _CSV_TEMPORAL_TYPES:
+                continue
+            if type_ == "timestamp with time zone":
+                if mappings.get(type_) is not _to_datetime_with_tz:
+                    continue
+            elif type_ in mappings:
+                continue
+            temporal_converters[label] = _TemporalConverter(type_)
+        return temporal_converters
 
     def _get_csv_converter(self, type_: str) -> Callable[[str | None], Any] | _JSONConverter:
         """Get the converter for a column type of the CSV result file.
@@ -1174,7 +1478,19 @@ class AthenaPandasResultSet(AthenaResultSet):
         )
 
     def _get_csv_read_options(self, csv_engine: str, chunksize: int | None) -> dict[str, Any]:
-        """Build pandas options for Athena CSV or tab-separated results."""
+        """Build pandas options for Athena CSV or tab-separated results.
+
+        The temporal columns of ``_get_csv_temporal_converters()`` are read as text, and
+        ``_finish_csv_frame()`` converts them. The options given to ``execute()``
+        replace the ones built here.
+
+        Args:
+            csv_engine: The CSV engine that reads the file.
+            chunksize: The number of rows of each chunk, or None for a whole read.
+
+        Returns:
+            The options for ``pandas.read_csv()``.
+        """
         if self.output_location and self.output_location.endswith(".txt"):
             sep = "\t"
             header = None
@@ -1184,17 +1500,27 @@ class AthenaPandasResultSet(AthenaResultSet):
             header = 0
             names = None
 
+        description = self.description or []
+        self._csv_temporal_converters = self._get_csv_temporal_converters(
+            [(d[0], d) for d in description]
+        )
+        # The temporal columns that are converted after reading are read as text.
+        # pandas' PyArrow engine turns NULL into "None" with the NumPy str dtype, which
+        # str means without future.infer_string, so the PyArrow engine reads pyarrow
+        # strings.
+        temporal = self._csv_temporal_converters
+        text_dtype = "string[pyarrow]" if csv_engine == "pyarrow" else "str"
         read_csv_kwargs: dict[str, Any] = {
             "sep": sep,
             "header": header,
             "names": names,
-            "dtype": self.dtypes,
+            "dtype": {**self.dtypes, **dict.fromkeys(temporal, text_dtype)},
             "converters": {
                 d[0]: self._get_csv_converter(d[1])
-                for d in self.description or []
-                if d[1] in self._converter.mappings
+                for d in description
+                if d[1] in self._converter.mappings and d[0] not in self._csv_temporal_converters
             },
-            "parse_dates": self.parse_dates,
+            "parse_dates": [name for name in self.parse_dates if name not in temporal],
             "skip_blank_lines": False,
             "keep_default_na": self._keep_default_na,
             "na_values": self._na_values,
@@ -1337,7 +1663,8 @@ class AthenaPandasResultSet(AthenaResultSet):
         Columns with the same name keep their own converters and date parsing, and
         options that rename or select columns get the types of the columns they
         read. The ``dtype``, ``converters``, and ``parse_dates`` given to
-        ``execute()`` are kept as they are.
+        ``execute()`` are kept as they are. The temporal columns that are converted
+        after reading are read as text.
 
         Args:
             read_csv_kwargs: The options for ``pandas.read_csv()``, updated in place.
@@ -1347,21 +1674,26 @@ class AthenaPandasResultSet(AthenaResultSet):
         columns = [
             (label, d) for label, d in zip(labels, description, strict=True) if label is not None
         ]
+        self._csv_temporal_converters = self._get_csv_temporal_converters(columns)
+        temporal = self._csv_temporal_converters
         if "dtype" not in self._kwargs:
             read_csv_kwargs["dtype"] = {
-                label: dtype
-                for label, d in columns
-                if (dtype := self._converter.get_dtype(d[1], d[4], d[5])) is not None
+                **{
+                    label: dtype
+                    for label, d in columns
+                    if (dtype := self._converter.get_dtype(d[1], d[4], d[5])) is not None
+                },
+                **dict.fromkeys(temporal, "str"),
             }
         if "converters" not in self._kwargs:
             read_csv_kwargs["converters"] = {
                 label: self._get_csv_converter(d[1])
                 for label, d in columns
-                if d[1] in self._converter.mappings
+                if d[1] in self._converter.mappings and label not in self._csv_temporal_converters
             }
         if "parse_dates" not in self._kwargs:
             read_csv_kwargs["parse_dates"] = [
-                label for label, d in columns if d[1] in self._PARSE_DATES
+                label for label, d in columns if d[1] in self._PARSE_DATES and label not in temporal
             ]
         self._time_columns = [label for label, d in columns if d[1] == "time"]
 
@@ -1795,7 +2127,7 @@ class AthenaPandasResultSet(AthenaResultSet):
             ...     process(df)  # Single DataFrame with all data
         """
         if self._df is not None:
-            return PandasDataFrameIterator(self._df, _no_trunc_date)
+            return PandasDataFrameIterator(self._df, _no_trunc_date, fetch_types=self._fetch_types)
         return self._df_iter
 
     @override
