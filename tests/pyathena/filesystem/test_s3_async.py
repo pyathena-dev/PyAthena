@@ -3,6 +3,7 @@ import asyncio
 import contextlib
 import gc
 import gzip
+import io
 import os
 import tempfile
 import threading
@@ -28,6 +29,7 @@ from pyathena.filesystem.s3_object import (
     S3MultipartUploadPart,
     S3Object,
     S3ObjectType,
+    S3ObjectVersion,
 )
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_writer import S3MultipartStateError
@@ -334,6 +336,125 @@ class TestAioS3FileSystem:
             await blocker
 
         assert info == {"name": "bucket/key"}
+
+    @staticmethod
+    def _serve_keys(fs, keys):
+        # Answer the S3 requests of the filesystem from a set of keys of
+        # "bucket", which is returned, and record them by operation name.
+        store = set(keys)
+        requests = []
+
+        def call(method, **request):
+            name = method if isinstance(method, str) else method.__name__
+            requests.append((name, request))
+            key = request.get("Key")
+            if name == "head_object":
+                if key not in store:
+                    raise FileNotFoundError(key)
+                return {"ContentLength": 2, "ETag": '"e"'}
+            if name == "get_object":
+                return {"Body": io.BytesIO(b"aa"), "ContentLength": 2, "ETag": '"e"'}
+            if name == "list_objects_v2":
+                prefix, delimiter = request.get("Prefix", ""), request.get("Delimiter")
+                listed = sorted(k for k in store if k.startswith(prefix))
+                directories = sorted(
+                    {
+                        prefix + k[len(prefix) :].split(delimiter)[0] + delimiter
+                        for k in listed
+                        if delimiter and delimiter in k[len(prefix) :]
+                    }
+                )
+                files = [k for k in listed if not delimiter or delimiter not in k[len(prefix) :]]
+                return {
+                    "Contents": [{"Key": k, "Size": 2, "ETag": '"e"'} for k in files],
+                    "CommonPrefixes": [{"Prefix": d} for d in directories],
+                    "KeyCount": len(files) + len(directories),
+                }
+            if name in {"put_object", "copy_object"}:
+                store.add(key)
+                return {"ETag": '"e"'}
+            if name == "delete_object":
+                store.discard(key)
+            if name == "delete_objects":
+                deleted = [o["Key"] for o in request["Delete"]["Objects"]]
+                store.difference_update(deleted)
+                return {"Deleted": [{"Key": k} for k in deleted]}
+            if name == "get_object_tagging":
+                return {"TagSet": [{"Key": "a", "Value": "1"}]}
+            if name == "list_object_versions":
+                return {"Versions": [{"Key": "key", "VersionId": "v1", "IsLatest": True}]}
+            return {}
+
+        fs._sync_fs._call = fs._sync_fs._core.call = call
+        return store, requests
+
+    @pytest.mark.parametrize(
+        ("method", "sync_method", "args", "kwargs"),
+        [
+            ("_info", "info", ("s3://bucket/key?versionId=v1",), {}),
+            ("_ls", "ls", ("s3://bucket/dir",), {"detail": True}),
+            ("_cat_file", "cat_file", ("s3://bucket/key",), {"start": 1, "end": 2}),
+            ("_exists", "exists", ("s3://bucket/key?versionId=v1",), {}),
+            ("_rm_file", "rm_file", ("s3://bucket/key?versionId=v1",), {}),
+            (
+                "_pipe_file",
+                "pipe_file",
+                ("s3://bucket/new", b"a"),
+                {"mode": "create", "ContentType": "text/csv"},
+            ),
+            ("_put_file", "put_file", ("local-source", "s3://bucket/new"), {"mode": "create"}),
+            ("_get_file", "get_file", ("s3://bucket/key?versionId=v1", "local-destination"), {}),
+            ("_touch", "touch", ("s3://bucket/new",), {"ContentType": "text/csv"}),
+            ("_find", "find", ("s3://bucket/dir",), {"maxdepth": 1, "withdirs": True}),
+            (
+                "_mv",
+                "mv",
+                ("s3://bucket/dir", "s3://bucket/out"),
+                {"recursive": True, "maxdepth": 1},
+            ),
+            ("metadata", "metadata", ("s3://bucket/key?versionId=v1",), {}),
+            ("get_tags", "get_tags", ("s3://bucket/key?versionId=v1",), {}),
+            ("put_tags", "put_tags", ("s3://bucket/key", {"b": "2"}), {"mode": "m"}),
+            ("chmod", "chmod", ("s3://bucket/dir", "private"), {"recursive": True}),
+            ("object_version_info", "object_version_info", ("s3://bucket/key",), {}),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_delegations_send_the_requests_of_the_sync_methods(
+        self, tmp_path, method, sync_method, args, kwargs
+    ):
+        # The methods that run the synchronous filesystem's methods pass their
+        # arguments through: each sends the requests, and returns the result,
+        # of the synchronous method called with the same arguments.
+        keys = {"key", "dir/a", "dir/sub/b"}
+        source = tmp_path / "source"
+        source.write_bytes(b"a")
+
+        def comparable(value):
+            # The listed versions have no equality of their own.
+            if isinstance(value, list):
+                return [comparable(v) for v in value]
+            if isinstance(value, S3ObjectVersion):
+                return vars(value)
+            return value
+
+        outcomes = []
+        for run, name in (("sync", sync_method), ("async", method)):
+            fs = AioS3FileSystem(
+                key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+            )
+            store, requests = self._serve_keys(fs, keys)
+            local = {"local-source": str(source), "local-destination": str(tmp_path / run)}
+            call_args = [local.get(a, a) if isinstance(a, str) else a for a in args]
+            if run == "sync":
+                result = getattr(fs._sync_fs, name)(*call_args, **kwargs)
+            else:
+                result = getattr(fs, name)(*call_args, **kwargs)
+                if asyncio.iscoroutine(result):
+                    result = await asyncio.wait_for(result, EVENT_TIMEOUT)
+            outcomes.append((comparable(result), sorted(map(repr, requests)), sorted(store)))
+        assert outcomes[0][1], "no request was sent"
+        assert outcomes[1] == outcomes[0]
 
     @pytest.mark.asyncio
     async def test_max_workers_none(self):
