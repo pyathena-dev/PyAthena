@@ -91,9 +91,10 @@ def test_json_shape_covers_pandas_and_wrangler_reads():
 
 
 def test_temporal_shape_covers_every_flat_case_in_the_single_query_suite():
-    cases = matrix(Settings(), "single", "temporal")
     # UNLOAD and CTAS read a Parquet projection instead of being unsupported.
-    assert [replace(c, shape="flat") for c in cases] == matrix(Settings(), "single", "flat")
+    assert matrix(Settings(), "single", "temporal") == [
+        replace(c, shape="temporal") for c in matrix(Settings(), "single", "flat")
+    ]
     assert matrix(Settings(), "init", "temporal") == []
     assert matrix(Settings(), "concurrent", "temporal") == []
 
