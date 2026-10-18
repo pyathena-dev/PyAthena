@@ -2649,10 +2649,12 @@ class TestAioS3StreamedFile:
         # Resolves once the part has failed, with max_workers=1; no public
         # object observes it.
         await asyncio.wrap_future(f._session.ready())
+        buffer = f.buffer
 
         with pytest.raises(PermissionError, match="Access Denied"):
             await f.write(b"a")
 
+        assert buffer.getvalue() == b""
         assert f.tell() == block_size
         assert f.closed
         with pytest.raises(ValueError, match="closed"):

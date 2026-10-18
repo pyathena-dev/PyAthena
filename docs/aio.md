@@ -349,8 +349,8 @@ async with await fs.open_async("s3://my-bucket/data/file.bin", "rb") as f:
 - Once closing or the final flush has begun the commit, the commit completes even if
   the task that closes or flushes the file is cancelled, and leaving an `async with`
   block with an exception afterward does not abort it. A commit that fails aborts the
-  upload; leaving the block after a cancelled final flush while that abort runs waits
-  for it.
+  upload; leaving the block with an exception after a cancelled final flush, while that
+  abort runs, waits for it.
 - A file opened for writing must be closed with `await f.close()` or an `async with`
   block. A file that is garbage collected before it is closed or its commit has begun
   is not committed: it emits a `ResourceWarning`, and its multipart upload is aborted.
