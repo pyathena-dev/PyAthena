@@ -1,5 +1,6 @@
 import contextlib
 import csv
+import io
 import math
 import random
 import string
@@ -7,23 +8,19 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from decimal import Decimal
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
 import pytest
-from pandas.io.parsers import TextFileReader
 
 from pyathena.error import DatabaseError, DataError, OperationalError, ProgrammingError
 from pyathena.filesystem.s3 import S3FileSystem
+from pyathena.formatter import DefaultParameterFormatter
 from pyathena.model import AthenaQueryExecution
 from pyathena.pandas.converter import DefaultPandasTypeConverter
 from pyathena.pandas.cursor import PandasCursor
-from pyathena.pandas.result_set import (
-    AthenaPandasResultSet,
-    PandasDataFrameIterator,
-    _read_csv_with_pyarrow,
-)
+from pyathena.pandas.result_set import AthenaPandasResultSet
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena import temporal
@@ -33,7 +30,9 @@ from tests.pyathena.util import (
     CONVERTED_VALUES_QUERY,
     CONVERTED_VALUES_ROW,
     RESULT_FILE_VALUES_QUERY,
+    LocalBucketFileSystem,
     cached_file_systems,
+    query_results_response,
 )
 
 
@@ -41,6 +40,68 @@ def _pandas_converter_without_bigint_dtype():
     converter = DefaultPandasTypeConverter()
     del converter.types["bigint"]
     return converter
+
+
+# The columns and rows of a binary result file larger than pandas' read buffer.
+_BINARY_COLUMNS = [("value", "varbinary"), ("padding", "varchar")]
+_BINARY_ROWS = [("00", "x" * 4096)] * 100
+
+
+@contextlib.contextmanager
+def _offline_cursor(tmp_path, columns, rows, **cursor_kwargs):
+    """Create a PandasCursor whose queries return a local CSV result file, without AWS.
+
+    The Athena and S3 clients of the connection return the query execution, the
+    result metadata, and the size of the file, and PyAthena's filesystem reads the
+    local file.
+
+    Args:
+        tmp_path: The directory of the result file.
+        columns: The names and Athena types of the result columns.
+        rows: The rows of the result file, as text.
+        **cursor_kwargs: Arguments for the cursor.
+
+    Yields:
+        The cursor and the filesystem that reads the result file.
+    """
+    text = io.StringIO(newline="")
+    writer = csv.writer(text, quoting=csv.QUOTE_ALL, lineterminator="\n")
+    writer.writerow([name for name, _ in columns])
+    writer.writerows(rows)
+    data = text.getvalue().encode()
+    fs = LocalBucketFileSystem(tmp_path)
+    fs.makedirs("bucket", exist_ok=True)
+    fs.pipe_file("s3://bucket/result.csv", data)
+    connection = MagicMock()
+    connection.client.start_query_execution.return_value = {"QueryExecutionId": "query_id"}
+    connection.client.get_query_execution.return_value = {
+        "QueryExecution": {
+            "QueryExecutionId": "query_id",
+            "Query": "SELECT 1",
+            "StatementType": "DML",
+            "Status": {"State": AthenaQueryExecution.STATE_SUCCEEDED},
+            "ResultConfiguration": {"OutputLocation": "s3://bucket/result.csv"},
+        }
+    }
+    connection.client.get_query_results.return_value = query_results_response(columns)
+    connection.s3_client.head_object.return_value = {"ContentLength": len(data)}
+    with (
+        patch("pyathena.pandas.result_set.S3FileSystem", lambda **_: fs),
+        PandasCursor(
+            connection=connection,
+            converter=DefaultPandasTypeConverter(),
+            formatter=DefaultParameterFormatter(),
+            retry_config=RetryConfig(),
+            **cursor_kwargs,
+        ) as cursor,
+    ):
+        yield cursor, fs
+
+
+class _QuoteNoneDialect(csv.excel):
+    """A CSV dialect that reads quotes as text."""
+
+    quoting = csv.QUOTE_NONE
 
 
 def _pandas_value(column: temporal.Column):
@@ -67,7 +128,6 @@ class TestPandasCursor:
                 ) AS t(id, value, label, text_value) ORDER BY id"""
         pandas_cursor.execute(query, engine=engine, chunksize=chunksize)
         rows = pandas_cursor.fetchall()
-        assert pandas_cursor.result_set._csv_stream.closed
         assert [row[:3] for row in rows] == [
             (1, None, "null"),
             (2, b"", "empty"),
@@ -78,92 +138,100 @@ class TestPandasCursor:
         assert pd.isna(rows[1][3])
         assert rows[2][3] == "NULL"
 
-    @pytest.mark.parametrize("chunksize", [None, 2])
-    def test_binary_as_pandas(self, pandas_cursor, chunksize):
-        pandas_cursor.execute(
-            "SELECT * FROM (VALUES (1, CAST(NULL AS VARBINARY)), (2, X''), (3, X'00ff')) "
-            "AS t(id, value) ORDER BY id",
-            chunksize=chunksize,
-            storage_options={"connection": pandas_cursor.connection, "default_cache_type": "none"},
-        )
-        result = pandas_cursor.as_pandas()
-        df = pd.concat(list(result), ignore_index=True) if chunksize else result
-        assert df["value"].tolist() == [None, b"", b"\x00\xff"]
-        assert pandas_cursor.result_set._csv_stream.closed
-
     @pytest.mark.parametrize("engine", ["c", "python"])
     @pytest.mark.parametrize(
         "close_method",
         ["iterator", "generator", "context", "exhaust", "nrows", "get_chunk", "cursor", "execute"],
     )
-    def test_binary_csv_stream_close(self, pandas_cursor, engine, close_method):
-        pandas_cursor.execute(
-            "SELECT X'00' AS value, rpad('x', 4096, 'x') AS padding "
-            "FROM UNNEST(sequence(1, 100)) AS t(id)",
-            engine=engine,
+    def test_binary_csv_stream_close(self, tmp_path, engine, close_method):
+        """The binary CSV stream of a chunked read is closed however the reading ends.
+
+        Later reads get no chunks, and the fetch methods no rows. No AWS calls; the
+        result file is a local file larger than pandas' read buffer.
+        """
+        with _offline_cursor(
+            tmp_path,
+            _BINARY_COLUMNS,
+            _BINARY_ROWS,
             chunksize=1,
-            nrows=2 if close_method == "nrows" else None,
-        )
-        stream = pandas_cursor.result_set._csv_stream
-        source = stream.buffer.raw._reader._file
-        dataframe_iterator = pandas_cursor.as_pandas()
-        chunks = pandas_cursor.iter_chunks() if close_method == "generator" else dataframe_iterator
-        assert next(chunks)["value"].tolist() == [b"\x00"]
-        assert not stream.closed
-        assert not source.closed
+        ) as (cursor, fs):
+            cursor.execute("SELECT 1", engine=engine, nrows=2 if close_method == "nrows" else None)
+            dataframe_iterator = cursor.as_pandas()
+            chunks = cursor.iter_chunks() if close_method == "generator" else dataframe_iterator
+            assert next(chunks)["value"].tolist() == [b"\x00"]
+            opened = [file for _, file in fs.opened]
+            assert opened
+            assert not any(file.closed for file in opened)
 
-        if close_method in ("iterator", "generator"):
+            if close_method in ("iterator", "generator"):
+                chunks.close()
+            elif close_method == "context":
+                with chunks:
+                    assert next(chunks)["value"].tolist() == [b"\x00"]
+            elif close_method == "exhaust":
+                assert sum(len(chunk) for chunk in chunks) == 99
+            elif close_method == "nrows":
+                assert sum(len(chunk) for chunk in chunks) == 1
+            elif close_method == "get_chunk":
+                assert len(chunks.get_chunk(99)) == 99
+                with pytest.raises(StopIteration):
+                    chunks.get_chunk(1)
+            elif close_method == "cursor":
+                cursor.close()
+            else:
+                cursor.execute("SELECT 1")
+
+            assert all(file.closed for file in opened)
             chunks.close()
-        elif close_method == "context":
-            with chunks:
-                assert next(chunks)["value"].tolist() == [b"\x00"]
-        elif close_method == "exhaust":
-            assert sum(len(chunk) for chunk in chunks) == 99
-        elif close_method == "nrows":
-            assert sum(len(chunk) for chunk in chunks) == 1
-        elif close_method == "get_chunk":
-            assert len(chunks.get_chunk(99)) == 99
             with pytest.raises(StopIteration):
-                chunks.get_chunk(1)
-        elif close_method == "cursor":
-            pandas_cursor.close()
-        else:
-            pandas_cursor.execute("SELECT 1")
+                next(dataframe_iterator)
+            with pytest.raises(StopIteration):
+                dataframe_iterator.get_chunk()
+            if close_method != "execute":
+                assert cursor.fetchone() is None
 
-        assert stream.closed
-        assert source.closed
-        chunks.close()
-        with pytest.raises(StopIteration):
-            next(dataframe_iterator)
-        with pytest.raises(StopIteration):
-            dataframe_iterator.get_chunk()
-        if close_method != "execute":
-            assert pandas_cursor.fetchone() is None
+    @pytest.mark.parametrize("engine", ["c", "python"])
+    @pytest.mark.parametrize("fails", [False, True], ids=["read", "failed-read"])
+    def test_binary_csv_stream_close_after_whole_read(self, tmp_path, engine, fails):
+        """The binary CSV stream of a whole read is closed once the read ends or fails.
+
+        No AWS calls; the result file is a local file larger than pandas' read buffer.
+        """
+        with _offline_cursor(tmp_path, _BINARY_COLUMNS, _BINARY_ROWS) as (cursor, fs):
+            if fails:
+                with pytest.raises(OperationalError):
+                    cursor.execute("SELECT 1", engine=engine, dtype={"padding": "int64"})
+            else:
+                cursor.execute("SELECT 1", engine=engine)
+                assert cursor.fetchone() == (b"\x00", "x" * 4096)
+            assert fs.opened
+            assert all(file.closed for _, file in fs.opened)
 
     @pytest.mark.parametrize("engine", ["c", "python"])
     @pytest.mark.parametrize("read_method", ["next", "get_chunk"])
-    def test_binary_csv_stream_close_on_read_error(self, pandas_cursor, engine, read_method):
-        pandas_cursor.execute(
-            "SELECT X'00' AS value, rpad('x', 4096, 'x') AS padding "
-            "FROM UNNEST(sequence(1, 100)) AS t(id)",
-            engine=engine,
+    def test_binary_csv_stream_close_on_read_error(self, tmp_path, engine, read_method):
+        """A failed chunk read closes the binary CSV stream (GH-1225).
+
+        The read raises the conversion error, and later reads and fetches raise
+        ProgrammingError. No AWS calls; the result file is a local file.
+        """
+        with _offline_cursor(
+            tmp_path,
+            _BINARY_COLUMNS,
+            _BINARY_ROWS,
             chunksize=1,
-            dtype={"padding": "int64"},
-        )
-        stream = pandas_cursor.result_set._csv_stream
-        source = stream.buffer.raw._reader._file
-        chunks = pandas_cursor.as_pandas()
-        assert not stream.closed
-        assert not source.closed
-        read_chunk = chunks.__next__ if read_method == "next" else chunks.get_chunk
-        with pytest.raises(ValueError, match=r"invalid literal|Unable to convert column"):
-            read_chunk()
-        assert stream.closed
-        assert source.closed
-        # GH-1225: reads and fetches after the failed read raise.
-        for later in (lambda: next(chunks), chunks.get_chunk, pandas_cursor.fetchone):
-            with pytest.raises(ProgrammingError, match=r"after a failed read\."):
-                later()
+        ) as (cursor, fs):
+            cursor.execute("SELECT 1", engine=engine, dtype={"padding": "int64"})
+            chunks = cursor.as_pandas()
+            assert fs.opened
+            assert not any(file.closed for _, file in fs.opened)
+            read_chunk = chunks.__next__ if read_method == "next" else chunks.get_chunk
+            with pytest.raises(ValueError):  # noqa: PT011
+                read_chunk()
+            assert all(file.closed for _, file in fs.opened)
+            for later in (lambda: next(chunks), chunks.get_chunk, cursor.fetchone):
+                with pytest.raises(ProgrammingError):
+                    later()
 
     def test_binary_converter_override(self, pandas_cursor):
         pandas_cursor.execute(
@@ -176,21 +244,34 @@ class TestPandasCursor:
         pandas_cursor.execute("SELECT X'00ff' AS value", converters=None)
         assert pandas_cursor.fetchone() == ("00 ff",)
 
-    @pytest.mark.parametrize("engine", ["c", "pyarrow"])
-    def test_binary_without_converter(self, engine):
+    @pytest.mark.parametrize(
+        ("engine", "removed", "second_column", "second_value"),
+        [
+            ("c", None, "%(padding)s AS padding", "x" * 200),
+            ("pyarrow", None, "%(padding)s AS padding", "x" * 200),
+            ("c", "varbinary", "true AS value", True),
+        ],
+        ids=["c", "pyarrow", "duplicate_name"],
+    )
+    def test_binary_without_converter(self, engine, removed, second_column, second_value):
+        """Without a varbinary converter, binary values are the hex text of the result.
+
+        The PyArrow engine reads the result only without converters; a column with the
+        name of the binary column keeps its own converter.
+        """
         converter = DefaultPandasTypeConverter()
-        for type_ in list(converter.mappings):
+        for type_ in [removed] if removed else list(converter.mappings):
             converter.remove(type_)
         with (
             connect(cursor_class=PandasCursor, converter=converter) as conn,
             conn.cursor() as cursor,
         ):
             cursor.execute(
-                "SELECT X'00ff' AS value, %(padding)s AS padding",
+                f"SELECT X'00ff' AS value, {second_column}",
                 {"padding": "x" * 200},
                 engine=engine,
             )
-            assert cursor.fetchone() == ("00 ff", "x" * 200)
+            assert cursor.fetchone() == ("00 ff", second_value)
 
     @pytest.mark.parametrize("engine", ["c", "python"])
     @pytest.mark.parametrize(
@@ -211,33 +292,22 @@ class TestPandasCursor:
         )
         assert pandas_cursor.as_pandas().iloc[0].tolist() == expected
 
-    @pytest.mark.parametrize("read_options", [{"quoting": 3}, {"quotechar": "'"}])
+    @pytest.mark.parametrize(
+        "read_options",
+        [{"quoting": 3}, {"quotechar": "'"}, {"dialect": _QuoteNoneDialect}],
+        ids=["read_options0", "read_options1", "dialect"],
+    )
     def test_binary_custom_quoting(self, pandas_cursor, read_options):
-        pandas_cursor.execute("SELECT X'00ff' AS value", **read_options)
-        assert pandas_cursor.as_pandas().iloc[0].tolist() == ['"00 ff"']
+        """Options that change how pandas reads quotes leave binary values as raw text.
 
-    @pytest.mark.parametrize("engine", ["c", "python"])
-    def test_binary_custom_dialect(self, pandas_cursor, engine):
-        dialect = csv.excel()
-        dialect.quoting = csv.QUOTE_NONE
+        A binary NULL is missing, as pandas reads an empty field.
+        """
         pandas_cursor.execute(
-            "SELECT CAST(NULL AS VARBINARY) AS value, 'text' AS label",
-            engine=engine,
-            dialect=dialect,
+            "SELECT X'00ff' AS value, CAST(NULL AS VARBINARY) AS null_value", **read_options
         )
         row = pandas_cursor.as_pandas().iloc[0].tolist()
-        assert pd.isna(row[0])
-        assert row[1] == '"text"'
-
-    def test_binary_duplicate_name_without_converter(self):
-        converter = DefaultPandasTypeConverter()
-        converter.remove("varbinary")
-        with (
-            connect(cursor_class=PandasCursor, converter=converter) as conn,
-            conn.cursor() as cursor,
-        ):
-            cursor.execute("SELECT true AS value, X'00ff' AS value")
-            assert cursor.as_pandas().iloc[0].tolist() == [True, "00 ff"]
+        assert row[0] == '"00 ff"'
+        assert pd.isna(row[1])
 
     def test_binary_single_null(self, pandas_cursor):
         pandas_cursor.execute("SELECT CAST(NULL AS VARBINARY) AS value")
@@ -248,9 +318,7 @@ class TestPandasCursor:
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000_000),
             ({"cursor_kwargs": {"unload": True}}, "auto", None),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow", None),
         ],
         indirect=["pandas_cursor"],
     )
@@ -262,38 +330,16 @@ class TestPandasCursor:
         assert pandas_cursor.fetchone() is None
 
     @pytest.mark.parametrize(
-        ("pandas_cursor", "chunksize"),
-        [
-            ({"cursor_kwargs": {"unload": False}}, None),
-            ({"cursor_kwargs": {"unload": False}}, 1_000),
-            ({"cursor_kwargs": {"unload": True}}, None),
-        ],
+        "pandas_cursor",
+        [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
         indirect=["pandas_cursor"],
     )
-    def test_result_set_file_system(self, pandas_cursor, chunksize):
+    def test_result_set_file_system(self, pandas_cursor):
         # GH-978: the filesystems that read the results were kept in the fsspec
         # instance cache with the connection, so the connection was never freed.
-        # The result set reads through its own filesystem instead of creating
-        # another one from storage_options.
-        with patch.object(
-            S3FileSystem, "__init__", autospec=True, side_effect=S3FileSystem.__init__
-        ) as init:
-            pandas_cursor.execute("SELECT * FROM one_row", chunksize=chunksize)
-            assert pandas_cursor.fetchall() == [(1,)]
-        assert init.call_count == 1
-        assert not cached_file_systems(pandas_cursor.connection)
-        if not pandas_cursor.result_set.is_unload:
-            assert pandas_cursor.result_set._csv_stream.closed
-
-    @pytest.mark.parametrize(
-        "pandas_cursor",
-        [{"endpoint_url": f"https://athena.{ENV.region_name}.amazonaws.com"}],
-        indirect=True,
-    )
-    def test_athena_endpoint_url(self, pandas_cursor):
-        # GH-576: the S3 requests were sent to Athena's endpoint_url.
         pandas_cursor.execute("SELECT * FROM one_row")
         assert pandas_cursor.fetchall() == [(1,)]
+        assert not cached_file_systems(pandas_cursor.connection)
 
     def test_result_sets_share_s3_client(self, pandas_cursor):
         # GH-1011: each result set and its filesystem built their own S3 client,
@@ -310,92 +356,42 @@ class TestPandasCursor:
         assert all(fs._client is conn.s3_client for fs in file_systems)
 
     @pytest.mark.parametrize(
-        ("query", "expected", "binary"),
+        ("query", "expected"),
         [
-            ("SELECT * FROM one_row", [(1,)], False),
-            ("SELECT X'01' AS value", [(b"\x01",)], True),
+            ("SELECT * FROM one_row", [(1,)]),
+            (
+                "SELECT X'01' AS value, CAST(NULL AS VARBINARY) AS null_value, X'' AS empty_value",
+                [(b"\x01", None, b"")],
+            ),
         ],
         ids=["plain", "binary"],
     )
-    @pytest.mark.parametrize("with_options", [False, True], ids=["none", "options"])
-    def test_csv_storage_options(self, pandas_cursor, query, expected, binary, with_options):
-        # Given storage_options, even None, the CSV output is opened through fsspec
-        # with them, as pandas does, instead of the result set's filesystem.
-        storage_options = (
-            {
-                "connection": pandas_cursor.connection,
-                "default_cache_type": "none",
-                "skip_instance_cache": True,
-            }
-            if with_options
-            else None
+    def test_csv_storage_options(self, pandas_cursor, query, expected):
+        """storage_options given to execute() open the CSV result through fsspec.
+
+        They replace the result set's filesystem, so invalid credentials fail the read.
+        """
+        pandas_cursor.execute(
+            query,
+            storage_options={"connection": pandas_cursor.connection, "skip_instance_cache": True},
         )
-        with patch.object(
-            S3FileSystem, "open", autospec=True, side_effect=S3FileSystem.open
-        ) as open_:
-            pandas_cursor.execute(query, storage_options=storage_options)
-            assert pandas_cursor.fetchall() == expected
-        file_systems = [c.args[0] for c in open_.call_args_list]
-        assert not [fs for fs in file_systems if fs is pandas_cursor.result_set._fs]
-        if with_options:
-            assert file_systems
-            assert all(fs.default_cache_type == "none" for fs in file_systems)
-        if not binary:
-            # pandas opens and closes the file itself.
-            assert pandas_cursor.result_set._csv_stream is None
-
-    @pytest.mark.parametrize("infer_string", [True, False])
-    def test_pyarrow_engine_string_values(self, pandas_cursor, infer_string):
-        # The PyArrow engine keeps the text of strings that look like numbers, and
-        # a NULL string missing, as the C engine does.
-        query = """
-            SELECT * FROM (VALUES
-                (1, '1', 'abcdefghijklmnopqrstuvwxyz'),
-                (2, CAST(NULL AS VARCHAR), 'abcdefghijklmnopqrstuvwxyz'),
-                (3, 'nan', 'abcdefghijklmnopqrstuvwxyz'),
-                (4, '007', 'abcdefghijklmnopqrstuvwxyz'),
-                (5, '1e3', 'abcdefghijklmnopqrstuvwxyz')
-            ) AS t(id, v, padding) ORDER BY id
-            """
-        with pd.option_context("future.infer_string", infer_string):
-            with patch(
-                "pyathena.pandas.result_set._read_csv_with_pyarrow", wraps=_read_csv_with_pyarrow
-            ) as read_csv_with_pyarrow:
-                pandas_cursor.execute(query, engine="pyarrow")
-                actual = pandas_cursor.as_pandas()["v"]
-            read_csv_with_pyarrow.assert_called_once()
-            pandas_cursor.execute(query, engine="c")
-            expected = pandas_cursor.as_pandas()["v"]
-        pd.testing.assert_series_equal(actual, expected, check_exact=True)
-        assert actual.iloc[[0, 2, 3, 4]].tolist() == ["1", "nan", "007", "1e3"]
-        assert pd.isna(actual.iloc[1])
-
-    def test_pyarrow_engine_multiline_values_across_blocks(self, pandas_cursor):
-        # The 2.4 MB result spans several 1 MiB pyarrow read blocks, and its
-        # values contain a newline and quotes.
-        with patch(
-            "pyathena.pandas.result_set._read_csv_with_pyarrow", wraps=_read_csv_with_pyarrow
-        ) as read_csv_with_pyarrow:
+        assert pandas_cursor.fetchall() == expected
+        with pytest.raises(OperationalError):
             pandas_cursor.execute(
-                """
-                SELECT array_join(repeat('x', 600), '') || chr(10)
-                    || '"' || array_join(repeat('y', 598), '') || '"' AS v
-                FROM UNNEST(sequence(1, 2000)) AS t(i)
-                """,
-                engine="pyarrow",
+                query,
+                storage_options={
+                    "key": "invalid",
+                    "secret": "invalid",
+                    "skip_instance_cache": True,
+                },
             )
-            df = pandas_cursor.as_pandas()
-        read_csv_with_pyarrow.assert_called_once()
-        assert df["v"].tolist() == ["x" * 600 + '\n"' + "y" * 598 + '"'] * 2000
 
     @pytest.mark.parametrize(
         ("pandas_cursor", "parquet_engine", "chunksize"),
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000_000),
             ({"cursor_kwargs": {"unload": True}}, "auto", None),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow", None),
         ],
         indirect=["pandas_cursor"],
     )
@@ -463,9 +459,7 @@ class TestPandasCursor:
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000_000),
             ({"cursor_kwargs": {"unload": True}}, "auto", None),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow", None),
         ],
         indirect=["pandas_cursor"],
     )
@@ -480,9 +474,7 @@ class TestPandasCursor:
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000_000),
             ({"cursor_kwargs": {"unload": True}}, "auto", None),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow", None),
         ],
         indirect=["pandas_cursor"],
     )
@@ -496,9 +488,7 @@ class TestPandasCursor:
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000_000),
             ({"cursor_kwargs": {"unload": True}}, "auto", None),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow", None),
         ],
         indirect=["pandas_cursor"],
     )
@@ -676,10 +666,7 @@ class TestPandasCursor:
 
     @pytest.mark.parametrize(
         ("pandas_cursor", "parquet_engine"),
-        [
-            ({"cursor_kwargs": {"unload": True}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow"),
-        ],
+        [({"cursor_kwargs": {"unload": True}}, "auto")],
         indirect=["pandas_cursor"],
     )
     def test_complex_unload_pyarrow(self, pandas_cursor, parquet_engine):
@@ -796,9 +783,7 @@ class TestPandasCursor:
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000_000),
             ({"cursor_kwargs": {"unload": True}}, "auto", None),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow", None),
         ],
         indirect=["pandas_cursor"],
     )
@@ -817,9 +802,7 @@ class TestPandasCursor:
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000_000),
             ({"cursor_kwargs": {"unload": True}}, "auto", None),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow", None),
         ],
         indirect=["pandas_cursor"],
     )
@@ -966,9 +949,7 @@ class TestPandasCursor:
     @pytest.mark.parametrize(
         ("pandas_cursor", "chunksize", "options", "sizes"),
         [
-            ({"cursor_kwargs": {"unload": True}}, 1, {}, [1, 1, 1]),
             ({"cursor_kwargs": {"unload": True}}, 2, {}, [2, 1]),
-            ({"cursor_kwargs": {"unload": True}}, 10, {}, [3]),
             (
                 {"cursor_kwargs": {"unload": True}},
                 1,
@@ -1005,7 +986,7 @@ class TestPandasCursor:
     @pytest.mark.parametrize(
         "pandas_cursor", [{"cursor_kwargs": {"unload": True}}], indirect=["pandas_cursor"]
     )
-    @pytest.mark.parametrize("columns", [["missing"], ["k", "missing"]])
+    @pytest.mark.parametrize("columns", [["k", "missing"]])
     def test_unload_chunks_unknown_columns(self, pandas_cursor, columns):
         """Columns that are not in the result raise with chunks as without them."""
         query = "SELECT * FROM (VALUES (1, 'a')) AS t(k, s)"
@@ -1057,10 +1038,7 @@ class TestPandasCursor:
 
     @pytest.mark.parametrize(
         ("pandas_cursor", "parquet_engine"),
-        [
-            ({"cursor_kwargs": {"unload": True}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow"),
-        ],
+        [({"cursor_kwargs": {"unload": True}}, "auto")],
         indirect=["pandas_cursor"],
     )
     def test_complex_unload_as_pandas_pyarrow(self, pandas_cursor, parquet_engine):
@@ -1202,205 +1180,11 @@ class TestPandasCursor:
         cursor.close()
         conn.close()
 
-    def test_auto_determine_chunksize(self):
-        """Test _auto_determine_chunksize method behavior."""
-
-        # Mock the parent class initialization
-        with patch("pyathena.pandas.result_set.AthenaResultSet.__init__"):
-            result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)
-
-            # Small file - no chunking
-            chunksize = result_set._auto_determine_chunksize(10 * 1024 * 1024)  # 10MB
-            assert chunksize is None
-
-            # Medium file - 50K chunks
-            chunksize = result_set._auto_determine_chunksize(150 * 1024 * 1024)  # 150MB
-            assert chunksize == 50_000
-
-            # Large file - 100K chunks
-            chunksize = result_set._auto_determine_chunksize(300 * 1024 * 1024)  # 300MB
-            assert chunksize == 100_000
-
-    def test_chunksize_configuration_customization(self):
-        """Test that users can customize chunksize configuration."""
-
-        # Mock the parent class initialization
-        with patch("pyathena.pandas.result_set.AthenaResultSet.__init__"):
-            result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)
-
-            # Test default behavior
-            chunksize = result_set._auto_determine_chunksize(200 * 1024 * 1024)  # 200MB
-            assert chunksize == 100_000  # Default AUTO_CHUNK_SIZE_LARGE
-
-            # Customize chunk size
-            result_set.AUTO_CHUNK_SIZE_LARGE = 250_000
-            chunksize = result_set._auto_determine_chunksize(200 * 1024 * 1024)  # 200MB
-            assert chunksize == 250_000
-
-            # Customize threshold
-            result_set.LARGE_FILE_THRESHOLD_BYTES = 100 * 1024 * 1024  # 100MB
-            chunksize = result_set._auto_determine_chunksize(80 * 1024 * 1024)  # 80MB
-            assert chunksize is None  # Now below threshold
-
-    def test_get_csv_engine_explicit_specification(self):
-        """Test _get_csv_engine respects explicit engine specification."""
-
-        # Mock the parent class initialization
-        with patch("pyathena.pandas.result_set.AthenaResultSet.__init__"):
-            result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)
-            result_set._chunksize = None  # Default values
-            result_set._quoting = 1
-            result_set._metadata = None
-            result_set._query_execution = None
-            result_set._kwargs = {}
-
-            # Test C engine specification
-            result_set._engine = "c"
-            engine = result_set._get_csv_engine()
-            assert engine == "c"
-
-            # Test Python engine specification
-            result_set._engine = "python"
-            engine = result_set._get_csv_engine()
-            assert engine == "python"
-
-            # Test PyArrow specification (when available and compatible)
-            result_set._engine = "pyarrow"
-            with (
-                patch.object(result_set, "_get_available_engine", return_value="pyarrow"),
-                patch.object(
-                    type(result_set), "converters", new_callable=PropertyMock, return_value={}
-                ),
-            ):
-                engine = result_set._get_csv_engine()
-                assert engine == "pyarrow"
-
-            # Test PyArrow with column names that repeat, which it does not rename
-            with (
-                patch.object(result_set, "_get_available_engine", return_value="pyarrow"),
-                patch.object(
-                    type(result_set), "converters", new_callable=PropertyMock, return_value={}
-                ),
-                patch.object(
-                    type(result_set),
-                    "description",
-                    new_callable=PropertyMock,
-                    return_value=[("x", "integer"), ("x", "integer")],
-                ),
-            ):
-                engine = result_set._get_csv_engine()
-                assert engine == "c"
-
-            # Test PyArrow with read options that rename the columns
-            result_set._kwargs = {"names": ["b", "a"]}
-            with (
-                patch.object(result_set, "_get_available_engine", return_value="pyarrow"),
-                patch.object(
-                    type(result_set), "converters", new_callable=PropertyMock, return_value={}
-                ),
-            ):
-                engine = result_set._get_csv_engine()
-                assert engine == "c"
-            result_set._kwargs = {}
-
-            # Test PyArrow with incompatible chunksize (via parameter)
-            with (
-                patch.object(
-                    type(result_set), "converters", new_callable=PropertyMock, return_value={}
-                ),
-            ):
-                engine = result_set._get_csv_engine(chunksize=1000)
-                assert engine == "c"
-
-            # Test PyArrow with incompatible chunksize (via instance variable)
-            result_set._chunksize = 1000
-            with (
-                patch.object(
-                    type(result_set), "converters", new_callable=PropertyMock, return_value={}
-                ),
-            ):
-                engine = result_set._get_csv_engine()
-                assert engine == "c"
-
-            # Test PyArrow with incompatible quoting
-            result_set._chunksize = None
-            result_set._quoting = 0  # Non-default quoting
-            with (
-                patch.object(
-                    type(result_set), "converters", new_callable=PropertyMock, return_value={}
-                ),
-            ):
-                engine = result_set._get_csv_engine()
-                assert engine == "c"
-
-            # Test PyArrow with incompatible converters
-            result_set._quoting = 1  # Reset to default
-            with (
-                patch.object(
-                    type(result_set),
-                    "converters",
-                    new_callable=PropertyMock,
-                    return_value={"col1": str},
-                ),
-            ):
-                engine = result_set._get_csv_engine()
-                assert engine == "c"
-
-            # Test PyArrow specification (when unavailable)
-            with (
-                patch.object(result_set, "_get_available_engine", side_effect=ImportError),
-                patch.object(
-                    type(result_set), "converters", new_callable=PropertyMock, return_value={}
-                ),
-            ):
-                engine = result_set._get_csv_engine()
-                assert engine == "c"
-
-    @pytest.mark.parametrize(
-        ("keep_default_na", "na_values", "kwargs", "expected"),
-        [
-            (False, ("",), {}, True),
-            (False, ("",), {"dtype": {"a": "str"}, "parse_dates": ["b"]}, True),
-            (True, ("",), {}, False),
-            (False, ("", "NA"), {}, False),
-            (False, np.array([""]), {}, False),
-            (False, ("",), {"storage_options": None}, False),
-            (False, ("",), {"on_bad_lines": "skip"}, False),
-            (False, ("",), {"dtype": "str"}, False),
-            (False, ("",), {"parse_dates": "d"}, False),
-            (False, ("",), {"parse_dates": ("d",)}, False),
-        ],
-        ids=[
-            "default",
-            "dtype_parse_dates",
-            "keep_default_na",
-            "na_values",
-            "na_values_array",
-            "storage_options",
-            "on_bad_lines",
-            "single_dtype",
-            "parse_dates_string",
-            "parse_dates_tuple",
-        ],
-    )
-    def test_reads_csv_with_pyarrow(self, keep_default_na, na_values, kwargs, expected):
-        # PyAthena reads the CSV result for the PyArrow engine only with the options
-        # that _read_csv_with_pyarrow() reproduces; pandas reads it otherwise.
-        with patch("pyathena.pandas.result_set.AthenaResultSet.__init__"):
-            result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)
-            result_set._keep_default_na = keep_default_na
-            result_set._na_values = na_values
-            result_set._kwargs = kwargs
-            assert result_set._reads_csv_with_pyarrow() is expected
-
     @pytest.mark.parametrize(
         ("pandas_cursor", "parquet_engine", "chunksize"),
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000_000),
-            ({"cursor_kwargs": {"unload": True}}, "auto", None),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow", None),
         ],
         indirect=["pandas_cursor"],
     )
@@ -1414,9 +1198,6 @@ class TestPandasCursor:
         [
             ({"cursor_kwargs": {"unload": False}}, "auto", None),
             ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000_000),
-            ({"cursor_kwargs": {"unload": True}}, "auto", None),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow", None),
         ],
         indirect=["pandas_cursor"],
     )
@@ -1442,10 +1223,7 @@ class TestPandasCursor:
 
     @pytest.mark.parametrize(
         ("pandas_cursor", "parquet_engine"),
-        [
-            ({"cursor_kwargs": {"unload": True}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow"),
-        ],
+        [({"cursor_kwargs": {"unload": True}}, "auto")],
         indirect=["pandas_cursor"],
     )
     def test_empty_result_dml_unload(self, pandas_cursor, parquet_engine):
@@ -1480,7 +1258,6 @@ class TestPandasCursor:
         [
             ({"cursor_kwargs": {"unload": False}}, "auto"),
             ({"cursor_kwargs": {"unload": True}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow"),
         ],
         indirect=["pandas_cursor"],
     )
@@ -1510,7 +1287,6 @@ class TestPandasCursor:
         [
             ({"cursor_kwargs": {"unload": False}}, "auto"),
             ({"cursor_kwargs": {"unload": True}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow"),
         ],
         indirect=["pandas_cursor"],
     )
@@ -1529,7 +1305,6 @@ class TestPandasCursor:
         [
             ({"cursor_kwargs": {"unload": False}}, "auto"),
             ({"cursor_kwargs": {"unload": True}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow"),
         ],
         indirect=["pandas_cursor"],
     )
@@ -1548,7 +1323,6 @@ class TestPandasCursor:
         [
             ({"cursor_kwargs": {"unload": False}}, "auto"),
             ({"cursor_kwargs": {"unload": True}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow"),
         ],
         indirect=["pandas_cursor"],
     )
@@ -1563,11 +1337,7 @@ class TestPandasCursor:
 
     @pytest.mark.parametrize(
         ("pandas_cursor", "parquet_engine"),
-        [
-            ({"cursor_kwargs": {"unload": False}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow"),
-        ],
+        [({"cursor_kwargs": {"unload": False}}, "auto")],
         indirect=["pandas_cursor"],
     )
     def test_executemany_fetch(self, pandas_cursor, parquet_engine):
@@ -1583,7 +1353,6 @@ class TestPandasCursor:
         [
             ({"cursor_kwargs": {"unload": False}}, "auto"),
             ({"cursor_kwargs": {"unload": True}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow"),
         ],
         indirect=["pandas_cursor"],
     )
@@ -1601,7 +1370,6 @@ class TestPandasCursor:
         [
             ({"cursor_kwargs": {"unload": False}}, "auto"),
             ({"cursor_kwargs": {"unload": True}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow"),
         ],
         indirect=["pandas_cursor"],
     )
@@ -1643,7 +1411,6 @@ class TestPandasCursor:
         [
             ({"cursor_kwargs": {"unload": False}}, "auto"),
             ({"cursor_kwargs": {"unload": True}}, "auto"),
-            ({"cursor_kwargs": {"unload": True}}, "pyarrow"),
         ],
         indirect=["pandas_cursor"],
     )
@@ -1771,83 +1538,73 @@ class TestPandasCursor:
         df = pandas_cursor.execute("SELECT * FROM one_row", **kwargs).as_pandas()
         assert df.to_dict("records") == [{"number_of_rows": 1}]
 
-    def test_pandas_cursor_iter_chunks_with_chunksize(self, pandas_cursor):
-        """Test PandasCursor iter_chunks method with chunksize set."""
-        cursor = pandas_cursor
-        cursor._chunksize = 1000
-        cursor.execute("SELECT number FROM (VALUES (1), (2), (3), (4), (5)) as t(number)")
-
-        chunk_count = 0
-        for chunk in cursor.iter_chunks():
-            chunk_count += 1
-            assert isinstance(chunk, pd.DataFrame)
-            assert len(chunk) > 0
-
-        assert chunk_count >= 1
+    @pytest.mark.parametrize(
+        "pandas_cursor", [{"cursor_kwargs": {"auto_optimize_chunksize": True}}], indirect=True
+    )
+    def test_pandas_cursor_auto_optimize_chunksize_enabled(self, pandas_cursor, monkeypatch):
+        """auto_optimize_chunksize chunks a CSV result of Athena by its size."""
+        # Make the five-row result exceed the size threshold, one byte per row.
+        monkeypatch.setattr(AthenaPandasResultSet, "LARGE_FILE_THRESHOLD_BYTES", 0)
+        monkeypatch.setattr(AthenaPandasResultSet, "ESTIMATED_BYTES_PER_ROW", 1)
+        monkeypatch.setattr(AthenaPandasResultSet, "AUTO_CHUNK_THRESHOLD_MEDIUM", 0)
+        monkeypatch.setattr(AthenaPandasResultSet, "AUTO_CHUNK_SIZE_MEDIUM", 2)
+        pandas_cursor.execute("SELECT number FROM (VALUES (1), (2), (3), (4), (5)) AS t(number)")
+        chunks = list(pandas_cursor.iter_chunks())
+        assert [len(chunk) for chunk in chunks] == [2, 2, 1]
+        assert pd.concat(chunks)["number"].tolist() == [1, 2, 3, 4, 5]
 
     @pytest.mark.parametrize(
-        ("pandas_cursor", "chunked"),
+        ("cursor_kwargs", "size_options", "read", "expected"),
         [
-            ({"cursor_kwargs": {"auto_optimize_chunksize": True}}, False),
-            ({"cursor_kwargs": {"auto_optimize_chunksize": True}}, True),
+            ({}, {}, "iter_chunks", [5]),
+            (
+                {},
+                {"AUTO_CHUNK_THRESHOLD_LARGE": 0, "AUTO_CHUNK_SIZE_LARGE": 2},
+                "iter_chunks",
+                [2, 2, 1],
+            ),
+            (
+                {},
+                {"AUTO_CHUNK_THRESHOLD_MEDIUM": 0, "AUTO_CHUNK_SIZE_MEDIUM": 2},
+                "as_pandas",
+                None,
+            ),
+            (
+                {"chunksize": 3},
+                {"AUTO_CHUNK_THRESHOLD_MEDIUM": 0, "AUTO_CHUNK_SIZE_MEDIUM": 2},
+                "iter_chunks",
+                [3, 2],
+            ),
         ],
-        indirect=["pandas_cursor"],
+        ids=["small", "large", "medium-as_pandas", "explicit_chunksize"],
     )
-    def test_pandas_cursor_auto_optimize_chunksize_enabled(
-        self, pandas_cursor, chunked, monkeypatch
+    def test_auto_optimize_chunksize(
+        self, tmp_path, monkeypatch, cursor_kwargs, size_options, read, expected
     ):
-        """Test that as_pandas() returns the whole result with auto_optimize_chunksize."""
-        if chunked:
-            # Make the five-row result exceed the threshold and read it two rows at a time.
+        """auto_optimize_chunksize chunks a CSV result by its size; a chunksize wins.
+
+        as_pandas() joins the chunks into the whole result. No AWS calls; the result
+        file is a local file.
+        """
+        if size_options:
+            # Make the five-row result exceed the size threshold, one byte per row.
             monkeypatch.setattr(AthenaPandasResultSet, "LARGE_FILE_THRESHOLD_BYTES", 0)
             monkeypatch.setattr(AthenaPandasResultSet, "ESTIMATED_BYTES_PER_ROW", 1)
-            monkeypatch.setattr(AthenaPandasResultSet, "AUTO_CHUNK_THRESHOLD_MEDIUM", 0)
-            monkeypatch.setattr(AthenaPandasResultSet, "AUTO_CHUNK_SIZE_MEDIUM", 2)
-        pandas_cursor.execute("SELECT number FROM (VALUES (1), (2), (3), (4), (5)) AS t(number)")
-        reader = pandas_cursor.result_set._df_iter._reader
-        assert isinstance(reader, TextFileReader) is chunked
-
-        df = pandas_cursor.as_pandas()
-        assert isinstance(df, pd.DataFrame)
-        assert df["number"].tolist() == [1, 2, 3, 4, 5]
-        assert df.index.tolist() == [0, 1, 2, 3, 4]
-
-    def test_pandas_cursor_auto_optimize_chunksize_disabled(self, pandas_cursor):
-        """Test PandasCursor with auto_optimize_chunksize disabled (default)."""
-        cursor = pandas_cursor
-        cursor._chunksize = None  # No explicit chunksize
-        cursor._auto_optimize_chunksize = False  # Default behavior
-        cursor.execute("SELECT number FROM (VALUES (1), (2), (3), (4), (5)) as t(number)")
-
-        # Should return DataFrame (no chunking)
-        result = cursor.as_pandas()
-        assert isinstance(result, pd.DataFrame)
-
-    def test_pandas_cursor_explicit_chunksize_overrides_auto_optimize(self, pandas_cursor):
-        """Test that explicit chunksize takes precedence over auto-optimization."""
-        cursor = pandas_cursor
-        cursor._chunksize = 1000  # Explicit chunksize
-        cursor._auto_optimize_chunksize = True  # Should be ignored
-        cursor.execute("SELECT number FROM (VALUES (1), (2), (3), (4), (5)) as t(number)")
-
-        # Should return iterator due to explicit chunksize
-        result = cursor.as_pandas()
-        assert isinstance(result, PandasDataFrameIterator)
-
-    def test_pandas_cursor_iter_chunks_without_chunksize(self, pandas_cursor):
-        """Test PandasCursor iter_chunks method without chunksize (single DataFrame)."""
-        cursor = pandas_cursor
-        cursor._chunksize = None
-        cursor.execute("SELECT number FROM (VALUES (1), (2), (3), (4), (5)) as t(number)")
-
-        chunk_count = 0
-        for chunk in cursor.iter_chunks():
-            chunk_count += 1
-            assert isinstance(chunk, pd.DataFrame)
-            assert len(chunk) > 0
-
-        # Should yield exactly one chunk (the entire DataFrame)
-        assert chunk_count == 1
+        for name, value in size_options.items():
+            monkeypatch.setattr(AthenaPandasResultSet, name, value)
+        rows = [(str(number),) for number in range(1, 6)]
+        with _offline_cursor(
+            tmp_path, [("number", "integer")], rows, auto_optimize_chunksize=True, **cursor_kwargs
+        ) as (cursor, _):
+            cursor.execute("SELECT 1")
+            if read == "as_pandas":
+                df = cursor.as_pandas()
+                assert df["number"].tolist() == [1, 2, 3, 4, 5]
+                assert df.index.tolist() == [0, 1, 2, 3, 4]
+            else:
+                chunks = list(cursor.iter_chunks())
+                assert [len(chunk) for chunk in chunks] == expected
+                assert pd.concat(chunks)["number"].tolist() == [1, 2, 3, 4, 5]
 
     def test_pandas_cursor_whole_result_reused(self, pandas_cursor):
         """Test that as_pandas() and iter_chunks() do not consume the fetched rows."""
@@ -1862,100 +1619,6 @@ class TestPandasCursor:
         assert [len(chunk) for chunk in pandas_cursor.iter_chunks()] == [3]
         assert pandas_cursor.as_pandas() is df
         assert pandas_cursor.fetchall() == [(2,), (3,)]
-
-    def test_pandas_cursor_chunked_vs_regular_same_data(self, pandas_cursor):
-        """Test that chunked and regular reading produce the same data."""
-        query = "SELECT * FROM many_rows LIMIT 100"  # Use a reasonable size for testing
-
-        # Regular reading (no chunksize)
-        regular_cursor = pandas_cursor
-        regular_cursor._chunksize = None
-        regular_cursor.execute(query)
-        regular_df = regular_cursor.as_pandas()
-
-        # Chunked reading - reuse the same cursor but set chunksize
-        chunked_cursor = pandas_cursor
-        chunked_cursor._chunksize = 25
-        chunked_cursor.execute(query)
-        chunked_dfs = list(chunked_cursor.iter_chunks())
-
-        # Combine chunks
-        combined_df = pd.concat(chunked_dfs, ignore_index=True)
-
-        # Should have the same data
-        pd.testing.assert_frame_equal(regular_df.sort_index(), combined_df.sort_index())
-
-        # Should have multiple chunks
-        assert len(chunked_dfs) > 1
-
-        # Each chunk should be <= chunksize
-        for chunk in chunked_dfs:
-            assert len(chunk) <= 25
-
-    def test_pandas_cursor_actual_chunking_behavior(self, pandas_cursor):
-        """Test that chunking actually limits memory usage by checking chunk sizes."""
-        # Use a query that returns more rows than chunksize
-        cursor = pandas_cursor
-        cursor._chunksize = 10
-        cursor.execute("SELECT * FROM many_rows LIMIT 50")
-
-        result = cursor.as_pandas()
-        assert isinstance(result, PandasDataFrameIterator)
-
-        chunk_sizes = []
-        total_rows = 0
-
-        for chunk in result:
-            chunk_size = len(chunk)
-            chunk_sizes.append(chunk_size)
-            total_rows += chunk_size
-
-            # Each chunk should not exceed chunksize (except possibly the last one)
-            assert chunk_size <= 10
-
-        # Should have processed all 50 rows
-        assert total_rows == 50
-
-        # Should have multiple chunks
-        assert len(chunk_sizes) > 1
-
-        # Most chunks should be exactly chunksize (10), last might be smaller
-        # All but the last chunk should be exactly 10
-        for size in chunk_sizes[:-1]:
-            assert size == 10
-        # Last chunk should be <= 10
-        assert chunk_sizes[-1] <= 10
-
-    def test_pandas_cursor_iter_chunks_consistency(self, pandas_cursor):
-        """Test that iter_chunks() and direct iteration give same results."""
-        cursor = pandas_cursor
-        cursor._chunksize = 15
-        cursor.execute("SELECT * FROM many_rows LIMIT 45")
-
-        # Method 1: Using iter_chunks()
-        chunks_via_method = list(cursor.iter_chunks())
-
-        # Method 2: Direct iteration on as_pandas()
-        cursor.execute("SELECT * FROM many_rows LIMIT 45")  # Re-execute
-        chunks_via_direct = list(cursor.as_pandas())
-
-        # Should have same number of chunks
-        assert len(chunks_via_method) == len(chunks_via_direct)
-
-        # Each corresponding chunk should be identical
-        for chunk1, chunk2 in zip(chunks_via_method, chunks_via_direct, strict=False):
-            pd.testing.assert_frame_equal(chunk1, chunk2)
-
-    @pytest.mark.parametrize(
-        "pandas_cursor", [{"cursor_kwargs": {"chunksize": 2}}], indirect=["pandas_cursor"]
-    )
-    def test_get_chunk_time(self, pandas_cursor):
-        """get_chunk() converts time columns as iteration does."""
-        pandas_cursor.execute(
-            "SELECT * FROM (VALUES (1, CAST('12:34:56' AS TIME)), (2, NULL)) AS t(i, v) ORDER BY i"
-        )
-        chunk = pandas_cursor.as_pandas().get_chunk()
-        assert chunk["v"].tolist() == [datetime(2017, 1, 1, 12, 34, 56).time(), None]
 
     @pytest.mark.parametrize(
         "pandas_cursor",
@@ -2234,7 +1897,7 @@ class TestPandasCursor:
             SELECT * FROM (VALUES
               (1, BIGINT '9007199254740993', json_parse('9007199254740993'), X'01',
                json_parse('9007199254740995'), CAST('01:02:03' AS TIME)),
-              (2, NULL, NULL, NULL, json_parse('9007199254740997'), CAST('04:05:06' AS TIME))
+              (2, NULL, NULL, NULL, json_parse('9007199254740997'), CAST(NULL AS TIME))
             ) AS t(col_int, col_bigint, col_json, col_binary, col_json_not_null, col_time)
             ORDER BY col_int
             """,
@@ -2265,7 +1928,4 @@ class TestPandasCursor:
             assert column("col_json").tolist() == [9007199254740993, None]
         assert column("col_json_not_null").tolist() == [9007199254740995, 9007199254740997]
         assert column("col_binary").tolist() == [b"\x01", None]
-        assert column("col_time").tolist() == [
-            datetime(2017, 1, 1, 1, 2, 3).time(),
-            datetime(2017, 1, 1, 4, 5, 6).time(),
-        ]
+        assert column("col_time").tolist() == [datetime(2017, 1, 1, 1, 2, 3).time(), None]

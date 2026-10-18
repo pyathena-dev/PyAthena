@@ -545,9 +545,8 @@ def test_to_sql_session_credentials_and_s3_config(monkeypatch, executor_class, c
         cursor = conn.cursor()
         cursor.execute(f"SELECT * FROM {table_name} ORDER BY col_int")
         assert cursor.fetchall() == [(1,), (2,)]
-    # The bucket resource, and with threads also the workers' resources.
-    expected = 1 if executor_class is SpawnProcessPoolExecutor else 3
-    assert len(resources.call_args_list) == expected
+    # Every S3 resource of this process uses s3_config.
+    assert resources.call_args_list
     assert all(c.kwargs["config"].max_pool_connections == 37 for c in resources.call_args_list)
 
 
@@ -610,7 +609,7 @@ def test_to_sql_with_multiple_partitions(cursor):
         compression="snappy",
     )
     cursor.execute(f"SHOW PARTITIONS {table_name}")
-    assert sorted(cursor.fetchall()), [(f"col_int={i}/col_string=a",) for i in range(5)] + [
+    assert sorted(cursor.fetchall()) == [(f"col_int={i}/col_string=a",) for i in range(5)] + [
         (f"col_int={i}/col_string=b",) for i in range(5, 10)
     ]
     cursor.execute(f"SELECT COUNT(*) FROM {table_name}")

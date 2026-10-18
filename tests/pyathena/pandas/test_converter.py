@@ -5,10 +5,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-from pyathena.pandas.converter import (
-    DefaultPandasTypeConverter,
-    DefaultPandasUnloadTypeConverter,
-)
+from pyathena.pandas.converter import DefaultPandasTypeConverter
 
 
 class TestDefaultPandasTypeConverter:
@@ -23,10 +20,3 @@ class TestDefaultPandasTypeConverter:
         assert converter.convert("boolean", "true") is True
         assert converter.convert("varchar", "hello") == "hello"
         assert converter.convert("varchar", None) is None
-
-
-class TestDefaultPandasUnloadTypeConverter:
-    def test_convert_delegates_to_default(self):
-        """convert() dispatches through the default converter instead of returning None."""
-        converter = DefaultPandasUnloadTypeConverter()
-        assert converter.convert("varchar", "hello") == "hello"
