@@ -15,7 +15,12 @@ from pyathena.aio.util import async_retry_api_call
 from pyathena.converter import Converter
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
-from pyathena.result_set import _FETCH_FAILED_MESSAGE, AthenaDictResultSet, AthenaResultSet
+from pyathena.result_set import (
+    _CLOSED_MESSAGE,
+    _FETCH_FAILED_MESSAGE,
+    AthenaDictResultSet,
+    AthenaResultSet,
+)
 from pyathena.util import RetryConfig, override
 
 if TYPE_CHECKING:
@@ -187,8 +192,12 @@ class AthenaAioResultSet(AthenaResultSet):
             None if no more rows.
 
         Raises:
-            ProgrammingError: If an earlier fetch failed or was cancelled.
+            ProgrammingError: If the result set is closed, or an earlier fetch
+                failed or was cancelled.
         """
+        # As is_closed does, inline on the per-row path.
+        if self._connection is None:
+            raise ProgrammingError(_CLOSED_MESSAGE)
         if self._fetch_failed:
             raise ProgrammingError(_FETCH_FAILED_MESSAGE)
         try:
@@ -221,11 +230,13 @@ class AthenaAioResultSet(AthenaResultSet):
 
         Raises:
             TypeError: If ``size`` is not an integer and not replaced with ``arraysize``.
-            ProgrammingError: If an earlier fetch failed or was cancelled.
+            ProgrammingError: If the result set is closed, or an earlier fetch
+                failed or was cancelled.
         """
         if not size or size <= 0:
             size = self._arraysize
         size = operator.index(size)
+        self._ensure_open()
         if self._fetch_failed:
             raise ProgrammingError(_FETCH_FAILED_MESSAGE)
         try:
@@ -244,8 +255,10 @@ class AthenaAioResultSet(AthenaResultSet):
             The remaining rows.
 
         Raises:
-            ProgrammingError: If an earlier fetch failed or was cancelled.
+            ProgrammingError: If the result set is closed, or an earlier fetch
+                failed or was cancelled.
         """
+        self._ensure_open()
         if self._fetch_failed:
             raise ProgrammingError(_FETCH_FAILED_MESSAGE)
         try:
@@ -285,6 +298,17 @@ class AthenaAioResultSet(AthenaResultSet):
             TypeError: Always, because the fetch methods are coroutines.
         """
         raise TypeError(f"'{type(self).__name__}' object is not iterable; use 'async for' instead.")
+
+    @override
+    def __next__(self) -> NoReturn:
+        """Reject synchronous iteration with ``next()``; use ``async for`` instead.
+
+        Raises:
+            TypeError: Always, because the fetch methods are coroutines.
+        """
+        raise TypeError(
+            f"'{type(self).__name__}' object is not an iterator; use 'async for' instead."
+        )
 
     def __aiter__(self):
         return self

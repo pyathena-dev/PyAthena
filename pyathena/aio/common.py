@@ -872,7 +872,6 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
         Raises:
             ProgrammingError: If the cursor is closed or has no result set.
         """
-        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaResultSet, self.result_set)
@@ -891,6 +890,17 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
             TypeError: Always, because the fetch methods are coroutines.
         """
         raise TypeError(f"'{type(self).__name__}' object is not iterable; use 'async for' instead.")
+
+    @override
+    def __next__(self) -> NoReturn:
+        """Reject synchronous iteration with ``next()``; use ``async for`` instead.
+
+        Raises:
+            TypeError: Always, because the fetch methods are coroutines.
+        """
+        raise TypeError(
+            f"'{type(self).__name__}' object is not an iterator; use 'async for' instead."
+        )
 
     def __aiter__(self):
         return self

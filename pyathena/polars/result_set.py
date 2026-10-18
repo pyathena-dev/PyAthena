@@ -36,7 +36,7 @@ from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.model import AthenaQueryExecution
 from pyathena.polars.converter import _to_datetimes
 from pyathena.polars.util import to_column_info, to_microseconds
-from pyathena.result_set import _FETCH_FAILED_MESSAGE, AthenaResultSet
+from pyathena.result_set import _CLOSED_MESSAGE, _FETCH_FAILED_MESSAGE, AthenaResultSet
 from pyathena.util import RetryConfig, override
 
 if TYPE_CHECKING:
@@ -631,6 +631,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
     def fetchone(
         self,
     ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
+        # As is_closed does, inline on the per-row path.
+        if self._connection is None:
+            raise ProgrammingError(_CLOSED_MESSAGE)
         if self._fetch_failed:
             raise ProgrammingError(_FETCH_FAILED_MESSAGE)
         try:
@@ -982,6 +985,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
             Polars DataFrame containing all query results. When the result is not
             read in chunks, it is the same DataFrame on every call.
 
+        Raises:
+            ProgrammingError: If the result set is closed.
+
         Example:
             >>> cursor = connection.cursor(PolarsCursor)
             >>> cursor.execute("SELECT * FROM my_table")
@@ -989,6 +995,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             >>> print(f"DataFrame has {df.height} rows")
             >>> filtered = df.filter(pl.col("value") > 100)
         """
+        self._ensure_open()
         if self._df is not None:
             return self._df
         return self._df_iter.as_polars()
@@ -1006,6 +1013,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
 
         Raises:
             ImportError: If pyarrow is not installed.
+            ProgrammingError: If the result set is closed.
 
         Example:
             >>> cursor = connection.cursor(PolarsCursor)
@@ -1240,6 +1248,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
             PolarsDataFrameIterator that yields Polars DataFrames for each chunk
             of rows, or the entire DataFrame if chunksize was not specified.
 
+        Raises:
+            ProgrammingError: If the result set is closed.
+
         Example:
             >>> # With chunking for large datasets
             >>> cursor = connection.cursor(PolarsCursor, chunksize=50000)
@@ -1253,6 +1264,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             >>> for df in cursor.iter_chunks():
             ...     process(df)  # Single DataFrame with all data
         """
+        self._ensure_open()
         if self._df is not None:
             return PolarsDataFrameIterator(
                 self._df, self._df_converters, self._get_frame_column_names()

@@ -200,7 +200,6 @@ class AioCursor(WithAsyncFetch):
             ProgrammingError: If the cursor is closed, or if called before
                 executing a query that returns results.
         """
-        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaAioResultSet, self.result_set)
@@ -221,7 +220,6 @@ class AioCursor(WithAsyncFetch):
             ProgrammingError: If the cursor is closed, or if called before
                 executing a query that returns results.
         """
-        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaAioResultSet, self.result_set)
@@ -240,7 +238,6 @@ class AioCursor(WithAsyncFetch):
             ProgrammingError: If the cursor is closed, or if called before
                 executing a query that returns results.
         """
-        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaAioResultSet, self.result_set)

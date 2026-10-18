@@ -7,7 +7,7 @@
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -68,6 +68,9 @@ class TestWithAsyncFetch:
             TypeError, match=rf"'{cursor_class.__name__}' object is not iterable; use 'async for'"
         ):
             iter(cursor)
+        # GH-1207: next() called directly returned an un-awaited fetchone() coroutine.
+        with pytest.raises(TypeError):
+            next(cursor)
 
     @pytest.mark.parametrize(
         "cursor_class",
@@ -111,24 +114,6 @@ class TestWithAsyncFetch:
         for name in _WHOLE_RESULT_METHODS.get(cursor_class, ()):
             with pytest.raises(ProgrammingError):
                 getattr(cursor, name)()
-
-    @pytest.mark.parametrize("cursor_class", _ALL_CURSOR_CLASSES)
-    async def test_fetch_on_closed_cursor(self, cursor_class):
-        """GH-1207: the fetches of a closed cursor raise without reading the result set."""
-        cursor = cursor_class(
-            connection=MagicMock(), converter=None, formatter=None, retry_config=None
-        )
-        result_set = cursor.result_set = MagicMock(is_closed=False)
-        cursor.close()
-
-        for fetch in (cursor.fetchone, cursor.fetchmany, cursor.fetchall):
-            with pytest.raises(ProgrammingError):
-                await fetch()
-        # The Arrow and Polars cursors also convert the whole result.
-        for name in _WHOLE_RESULT_METHODS.get(cursor_class, ()):
-            with pytest.raises(ProgrammingError):
-                getattr(cursor, name)()
-        assert result_set.method_calls == [call.close()]
 
     @pytest.mark.parametrize("cursor_class", _ALL_CURSOR_CLASSES)
     async def test_cancel_without_query(self, cursor_class):

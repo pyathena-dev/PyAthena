@@ -210,7 +210,6 @@ class AioArrowCursor(WithAsyncFetch):
         Raises:
             ProgrammingError: If the cursor is closed or has no result set.
         """
-        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaArrowResultSet, self.result_set)
@@ -225,7 +224,6 @@ class AioArrowCursor(WithAsyncFetch):
         Raises:
             ProgrammingError: If the cursor is closed or has no result set.
         """
-        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaArrowResultSet, self.result_set)

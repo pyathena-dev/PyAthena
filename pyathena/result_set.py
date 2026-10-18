@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 _FETCH_FAILED_MESSAGE = "The result set cannot be fetched after a failed fetch."
+_CLOSED_MESSAGE = "AthenaResultSet is closed."
 
 
 class AthenaResultSet(CursorIterator):
@@ -398,8 +399,7 @@ class AthenaResultSet(CursorIterator):
     @property
     def connection(self) -> Connection[Any]:
         """The connection of the result set; raises ``ProgrammingError`` if closed."""
-        if self.is_closed:
-            raise ProgrammingError("AthenaResultSet is closed.")
+        self._ensure_open()
         return cast("Connection[Any]", self._connection)
 
     def _build_get_query_results_request(
@@ -445,8 +445,7 @@ class AthenaResultSet(CursorIterator):
                 succeeded, or the result set is closed.
             OperationalError: If the request fails.
         """
-        if self.is_closed:
-            raise ProgrammingError("AthenaResultSet is closed.")
+        self._ensure_open()
         request = self._build_get_query_results_request(max_results, next_token)
         try:
             response = retry_api_call(
@@ -465,7 +464,7 @@ class AthenaResultSet(CursorIterator):
         """Fetch the next rows, if any, into the buffer.
 
         The default result set fetches the next page; it fetches nothing when no
-        page remains, as after ``close()``.
+        page remains.
 
         Raises:
             ProgrammingError: If the next page is requested and the query ID is
@@ -497,6 +496,9 @@ class AthenaResultSet(CursorIterator):
     def fetchone(
         self,
     ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
+        # As is_closed does, inline on the per-row path.
+        if self._connection is None:
+            raise ProgrammingError(_CLOSED_MESSAGE)
         if self._fetch_failed:
             raise ProgrammingError(_FETCH_FAILED_MESSAGE)
         try:
@@ -529,11 +531,12 @@ class AthenaResultSet(CursorIterator):
 
         Raises:
             TypeError: If ``size`` is not an integer and not replaced with ``arraysize``.
-            ProgrammingError: If an earlier fetch failed.
+            ProgrammingError: If the result set is closed or an earlier fetch failed.
         """
         if not size or size <= 0:
             size = self._arraysize
         size = operator.index(size)
+        self._ensure_open()
         if self._fetch_failed:
             raise ProgrammingError(_FETCH_FAILED_MESSAGE)
         try:
@@ -552,8 +555,9 @@ class AthenaResultSet(CursorIterator):
             The remaining rows.
 
         Raises:
-            ProgrammingError: If an earlier fetch failed.
+            ProgrammingError: If the result set is closed or an earlier fetch failed.
         """
+        self._ensure_open()
         if self._fetch_failed:
             raise ProgrammingError(_FETCH_FAILED_MESSAGE)
         try:
@@ -892,8 +896,21 @@ class AthenaResultSet(CursorIterator):
         """Whether the result set is closed."""
         return self._connection is None
 
+    def _ensure_open(self) -> None:
+        """Reject an operation on a closed result set.
+
+        Raises:
+            ProgrammingError: If the result set is closed.
+        """
+        if self._connection is None:
+            raise ProgrammingError(_CLOSED_MESSAGE)
+
     def close(self) -> None:
-        """Close the result set and discard its query execution, metadata, and rows."""
+        """Close the result set and discard its query execution, metadata, and rows.
+
+        Later fetches raise ``ProgrammingError``. Closing a closed result set does
+        nothing.
+        """
         self._connection = None
         self._query_execution = None
         self._metadata = None
@@ -1384,7 +1401,6 @@ class WithFetch(WithResultSet, BaseCursor, CursorIterator):
         Raises:
             ProgrammingError: If the cursor is closed or has no result set.
         """
-        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaResultSet, self.result_set)
@@ -1406,7 +1422,6 @@ class WithFetch(WithResultSet, BaseCursor, CursorIterator):
         Raises:
             ProgrammingError: If the cursor is closed or has no result set.
         """
-        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaResultSet, self.result_set)
@@ -1424,7 +1439,6 @@ class WithFetch(WithResultSet, BaseCursor, CursorIterator):
         Raises:
             ProgrammingError: If the cursor is closed or has no result set.
         """
-        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaResultSet, self.result_set)

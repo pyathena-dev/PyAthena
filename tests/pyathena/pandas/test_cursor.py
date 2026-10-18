@@ -188,8 +188,9 @@ class TestPandasCursor:
             with pytest.raises(StopIteration):
                 dataframe_iterator.get_chunk()
             if close_method == "cursor":
-                # A closed cursor rejects fetches, so read its result set directly.
-                assert cursor.result_set.fetchone() is None
+                # A closed cursor and its closed result set reject fetches.
+                with pytest.raises(ProgrammingError):
+                    cursor.fetchone()
             elif close_method != "execute":
                 assert cursor.fetchone() is None
 

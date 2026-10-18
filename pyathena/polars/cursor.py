@@ -271,7 +271,6 @@ class PolarsCursor(WithFetch):
             >>> print(f"DataFrame has {df.height} rows and {df.width} columns")
             >>> filtered = df.filter(pl.col("value") > 100)
         """
-        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaPolarsResultSet, self.result_set)
@@ -296,7 +295,6 @@ class PolarsCursor(WithFetch):
             >>> table = cursor.as_arrow()
             >>> print(f"Table has {table.num_rows} rows and {table.num_columns} columns")
         """
-        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaPolarsResultSet, self.result_set)
@@ -332,7 +330,6 @@ class PolarsCursor(WithFetch):
             >>> for df in cursor.iter_chunks():
             ...     process(df)  # Single DataFrame with all data
         """
-        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaPolarsResultSet, self.result_set)

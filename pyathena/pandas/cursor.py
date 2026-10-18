@@ -276,7 +276,6 @@ class PandasCursor(WithFetch):
         Raises:
             ProgrammingError: If the cursor is closed or has no result set.
         """
-        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaPandasResultSet, self.result_set)
@@ -322,7 +321,6 @@ class PandasCursor(WithFetch):
             for chunk in cursor.iter_chunks():
                 process_chunk(chunk)  # Single DataFrame regardless of size
         """
-        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaPandasResultSet, self.result_set)

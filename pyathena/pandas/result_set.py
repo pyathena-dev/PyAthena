@@ -33,7 +33,7 @@ from pyathena.error import ProgrammingError
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.model import AthenaQueryExecution
 from pyathena.pandas.reader import _BINARY_NULL, BinaryCSVReader
-from pyathena.result_set import _FETCH_FAILED_MESSAGE, AthenaResultSet
+from pyathena.result_set import _CLOSED_MESSAGE, _FETCH_FAILED_MESSAGE, AthenaResultSet
 from pyathena.util import RetryConfig, override, parse_output_location
 
 if TYPE_CHECKING:
@@ -974,6 +974,9 @@ class AthenaPandasResultSet(AthenaResultSet):
     def fetchone(
         self,
     ) -> tuple[Any | None, ...] | dict[Any, Any | None] | None:
+        # As is_closed does, inline on the per-row path.
+        if self._connection is None:
+            raise ProgrammingError(_CLOSED_MESSAGE)
         if self._fetch_failed:
             raise ProgrammingError(_FETCH_FAILED_MESSAGE)
         try:
@@ -1755,7 +1758,11 @@ class AthenaPandasResultSet(AthenaResultSet):
             ``iter_chunks()`` read from it before, and a later call returns an empty
             DataFrame. If ``chunksize`` is set, the iterator that ``iter_chunks()``
             returns.
+
+        Raises:
+            ProgrammingError: If the result set is closed.
         """
+        self._ensure_open()
         if self._chunksize is None:
             if self._df is not None:
                 return self._df
@@ -1781,6 +1788,9 @@ class AthenaPandasResultSet(AthenaResultSet):
             PandasDataFrameIterator that yields pandas DataFrames for each chunk
             of rows, or the entire DataFrame if the result was not read in chunks.
 
+        Raises:
+            ProgrammingError: If the result set is closed.
+
         Example:
             >>> # With chunking for large datasets
             >>> cursor = connection.cursor(PandasCursor, chunksize=50000)
@@ -1794,6 +1804,7 @@ class AthenaPandasResultSet(AthenaResultSet):
             >>> for df in cursor.iter_chunks():
             ...     process(df)  # Single DataFrame with all data
         """
+        self._ensure_open()
         if self._df is not None:
             return PandasDataFrameIterator(self._df, _no_trunc_date)
         return self._df_iter

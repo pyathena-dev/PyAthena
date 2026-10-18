@@ -245,7 +245,6 @@ class ArrowCursor(WithFetch):
             >>> table = cursor.as_arrow()
             >>> print(f"Table has {table.num_rows} rows and {table.num_columns} columns")
         """
-        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaArrowResultSet, self.result_set)
@@ -270,7 +269,6 @@ class ArrowCursor(WithFetch):
             >>> df = cursor.as_polars()
             >>> print(f"DataFrame has {df.height} rows and {df.width} columns")
         """
-        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaArrowResultSet, self.result_set)
