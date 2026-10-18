@@ -525,12 +525,19 @@ class TestPandasCursor:
     )
     def test_unload_int96_unit_none(self, pandas_cursor):
         """coerce_int96_timestamp_unit=None, pyarrow's default, keeps microseconds."""
+        value = datetime(1600, 1, 2, 3, 4, 5, 123000)
         pandas_cursor.execute(
-            "SELECT TIMESTAMP '1600-01-02 03:04:05.123' AS ts", coerce_int96_timestamp_unit=None
+            "SELECT ts FROM (VALUES TIMESTAMP '1600-01-02 03:04:05.123', "
+            "TIMESTAMP '1600-01-02 03:04:05.123') AS t (ts)",
+            coerce_int96_timestamp_unit=None,
         )
+        row = pandas_cursor.fetchone()
+        assert row == (value,)
+        assert type(row[0]) is datetime
+        # The chunks left after fetchone(), or the whole result without chunksize.
         df = pd.concat(pandas_cursor.iter_chunks())
         assert df["ts"].dtype == "datetime64[us]"
-        assert df["ts"].tolist() == [pd.Timestamp(1600, 1, 2, 3, 4, 5, 123000)]
+        assert set(df["ts"]) == {pd.Timestamp(value)}
 
     @pytest.mark.parametrize(
         ("pandas_cursor", "chunksize"),

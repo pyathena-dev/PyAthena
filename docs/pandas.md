@@ -112,7 +112,8 @@ print(cursor.fetchall())
 `to_sql` writes the data as Parquet with pyarrow, so it requires `pip install PyAthena[Pandas,Arrow]`.
 With the default `flavor="spark"`, timestamps are written as INT96.
 Athena reads them correctly.
-With pyarrow 22, readers other than Athena, such as pyarrow, read the written timestamps before 1970 as wrong values; pyarrow 23.0.0 or later is recommended.
+pyarrow, of any version, reads the timestamps before 1970 in files that pyarrow 22 wrote as wrong values.
+pyarrow 23.0.0 and later write them correctly and are recommended.
 Conversion to Parquet and upload to S3 use [ThreadPoolExecutor](https://docs.python.org/3/library/concurrent.futures.html#threadpoolexecutor) by default.
 It is also possible to use [ProcessPoolExecutor](https://docs.python.org/3/library/concurrent.futures.html#processpoolexecutor).
 The S3 requests use the connection's `s3_config` (see "S3 client" in [Usage](usage.md)) and credentials.

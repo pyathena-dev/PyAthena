@@ -961,11 +961,9 @@ class AthenaPandasResultSet(AthenaResultSet):
         # coerce_int96_timestamp_unit=None is pyarrow's default, nanoseconds, and the
         # same as no coerce_int96_timestamp_unit for an UNLOAD result, whose timestamps
         # are still read at microseconds. pandas.read_csv() still rejects it.
-        self._kwargs = {
-            k: v
-            for k, v in kwargs.items()
-            if k != "coerce_int96_timestamp_unit" or v is not None or not self.is_unload
-        }
+        if self.is_unload and kwargs.get("coerce_int96_timestamp_unit", "us") is None:
+            del kwargs["coerce_int96_timestamp_unit"]
+        self._kwargs = kwargs
         self._fs = self._create_s3_file_system()
         self._csv_stream: IOBase | None = None
         # The converters of the json columns that _read_csv() reads as text, keyed by label.
