@@ -72,7 +72,7 @@ The fetch methods of the cursors other than `PandasCursor` return a value with a
 Athena writes a value with a zone name as the local time in that zone.
 A local time that a change of the zone's UTC offset, such as daylight saving time, repeats or skips does not identify one instant.
 For such a value, and for a zone name that Python's time zone database does not know, the cursors raise `DataError` naming the column when they convert the value.
-Depending on the cursor and the read, that is in `execute()`, such as for the first page of `Cursor` and `DictCursor` results, in the fetch methods, or, for chunked `PandasCursor` reads, when the chunk with the value is read, such as by `iter_chunks()`.
+Some reads convert values before the fetch methods are called, for example `execute()` for the first page of `Cursor` and `DictCursor` results and the chunk reads of `PandasCursor`, so the error is raised there.
 
 ```text
 DataError: Column 'col': '2020-11-01 01:30:00.000 America/New_York' is ambiguous: the local time occurs twice in America/New_York. Convert the value to UTC in SQL, for example with AT TIME ZONE 'UTC'.
