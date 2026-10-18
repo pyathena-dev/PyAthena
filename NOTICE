@@ -28,10 +28,14 @@ Parts that remain recognizable in PyAthena:
   (pyhive/sqlalchemy_presto.py).
 - tests/pyathena/test_cursor.py: test cases including the escaping input of
   `test_escape`, the Unicode input of `test_unicode`, and the NULL patterns of
-  `test_null` follow PyHive's pyhive/tests/dbapi_test_case.py.
+  `test_null` follow PyHive's pyhive/tests/dbapi_test_case.py. The cursor
+  tests of the other cursor classes under tests/pyathena/ repeat some of
+  these test cases, such as `test_arraysize` and `test_fetchone`.
 - tests/pyathena/sqlalchemy/test_base.py: test cases including
   `test_unicode`, `test_char_length`, and `test_reflect_no_such_table` follow
   PyHive's pyhive/tests/sqlalchemy_test_case.py.
+  tests/pyathena/aio/sqlalchemy/test_base.py ports `test_basic_query` and
+  `test_reflect_schemas` to the asynchronous dialect.
 
 Parts that have since been replaced:
 

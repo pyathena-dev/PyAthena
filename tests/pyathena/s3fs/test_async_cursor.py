@@ -24,9 +24,10 @@ from tests.pyathena.conftest import connect
 class TestAsyncS3FSCursor:
     def test_arraysize(self, async_s3fs_cursor):
         async_s3fs_cursor.arraysize = 5
-        query_id, future = async_s3fs_cursor.execute("SELECT * FROM many_rows LIMIT 20")
+        query_id, future = async_s3fs_cursor.execute("SELECT a FROM many_rows ORDER BY a LIMIT 20")
         result_set = future.result()
-        assert len(result_set.fetchmany()) == 5
+        # The values check that the cursor passes its converter to the result set too.
+        assert result_set.fetchmany() == [(i,) for i in range(5)]
 
     def test_arraysize_default(self, async_s3fs_cursor):
         assert async_s3fs_cursor.arraysize == AthenaS3FSResultSet.DEFAULT_FETCH_SIZE
