@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from contextvars import copy_context
-from datetime import timezone
+from datetime import datetime, timezone
 from functools import partial
 from io import BufferedReader, BytesIO, IOBase, StringIO, TextIOWrapper
 from itertools import chain, islice
@@ -38,7 +38,7 @@ from pyathena.result_set import _FETCH_FAILED_MESSAGE, AthenaResultSet
 from pyathena.util import RetryConfig, override, parse_output_location
 
 if TYPE_CHECKING:
-    from pandas import DataFrame, Index, Series
+    from pandas import DataFrame, Series
     from pandas.io.parsers import TextFileReader
     from pyarrow import Table
     from pyarrow.parquet import FileMetaData
@@ -202,6 +202,32 @@ def _read_csv_with_pyarrow(source: str | IOBase, read_csv_kwargs: dict[str, Any]
     return df
 
 
+def _replace_by_label(df: DataFrame, name: Any, convert: Callable[[Series], Series]) -> None:
+    """Replace the values of a column or an index level of a DataFrame, given its label.
+
+    Args:
+        df: The DataFrame, updated in place.
+        name: The label of a column, or the name of an index level or of the index. A
+            partial label of MultiIndex columns is not replaced.
+        convert: Returns the new values of the given values, with their index.
+    """
+    import pandas as pd
+
+    index = df.index
+    if name in df.columns:
+        values = df[name]
+        if isinstance(values, pd.Series):
+            # Not a partial label of MultiIndex columns.
+            df[name] = convert(values)
+    elif isinstance(index, pd.MultiIndex) and name in index.names:
+        levels = [index.get_level_values(i) for i in range(index.nlevels)]
+        i = index.names.index(name)
+        levels[i] = pd.Index(convert(pd.Series(levels[i])), name=name)
+        df.index = pd.MultiIndex.from_arrays(levels, names=index.names)
+    elif index.name == name:
+        df.index = pd.Index(convert(pd.Series(index)), name=name)
+
+
 class _JSONConverter:
     """A json converter for the text of a json column that ``pandas.read_csv()`` read.
 
@@ -242,29 +268,14 @@ class _JSONConverter:
             df: The DataFrame or chunk, updated in place.
             name: The label of the json column, which can also be an index level.
         """
-        import pandas as pd
+        _replace_by_label(df, name, self._convert_values)
 
-        index = df.index
-        if name in df.columns:
-            values = df[name]
-            if isinstance(values, pd.Series):
-                # Not a partial label of MultiIndex columns.
-                df[name] = self._convert_values(values, index)
-        elif isinstance(index, pd.MultiIndex) and name in index.names:
-            levels = [index.get_level_values(i) for i in range(index.nlevels)]
-            i = index.names.index(name)
-            levels[i] = pd.Index(self._convert_values(levels[i]), name=name)
-            df.index = pd.MultiIndex.from_arrays(levels, names=index.names)
-        elif index.name == name:
-            df.index = pd.Index(self._convert_values(index), name=name)
-
-    def _convert_values(self, values: Series | Index, index: Index | None = None) -> Series:
+    def _convert_values(self, values: Series) -> Series:
         """Convert json text values.
 
         Args:
             values: The text values, with NaN for a value that pandas read as missing.
                 Values that pandas already parsed, such as an index or dates, are kept.
-            index: The index of the returned values, or None for a default index.
 
         Returns:
             The converted values: objects with None if there is NULL, as a NULL would
@@ -274,7 +285,7 @@ class _JSONConverter:
 
         if values.dtype.kind in "mM":
             # pandas parsed the text as dates, as parse_dates given to execute() asks.
-            return pd.Series(values.array, index=index)
+            return pd.Series(values.array, index=values.index)
         # Each value is one of three kinds:
         # - text, which pandas kept as read: the JSON text, converted here;
         # - a missing value: NULL, converted from an empty string, as pandas passes
@@ -288,7 +299,7 @@ class _JSONConverter:
                 else (self._converter("") if pd.isna(v) else v)
                 for v in values.to_numpy()
             ],
-            index=index,
+            index=values.index,
             dtype=object,
         )
         return converted if converted.isna().any() else converted.infer_objects()
@@ -328,27 +339,13 @@ class _TemporalConverter:
             name: The label of the column, which can also be an index level.
 
         Raises:
-            DataError: If a ``timestamp with time zone`` value has an unknown zone or a
-                local time without one instant in its zone. The message names the
-                column.
+            DataError: If a value fails to convert, such as a ``timestamp with time
+                zone`` value with an unknown zone or a local time without one instant in
+                its zone. The message names the column.
         """
-        import pandas as pd
-
         try:
-            index = df.index
-            if name in df.columns:
-                values = df[name]
-                if isinstance(values, pd.Series):
-                    # Not a partial label of MultiIndex columns.
-                    df[name] = self._convert_values(values)
-            elif isinstance(index, pd.MultiIndex) and name in index.names:
-                levels = [index.get_level_values(i) for i in range(index.nlevels)]
-                i = index.names.index(name)
-                levels[i] = pd.Index(self._convert_values(pd.Series(levels[i])), name=name)
-                df.index = pd.MultiIndex.from_arrays(levels, names=index.names)
-            elif index.name == name:
-                df.index = pd.Index(self._convert_values(pd.Series(index)), name=name)
-        except DataError as e:
+            _replace_by_label(df, name, self._convert_values)
+        except Exception as e:
             raise DataError(f"Column {name!r}: {e}") from e
 
     def _convert_values(self, values: Series) -> Series:
@@ -430,26 +427,31 @@ def _to_utc_timestamps(values: Series) -> Series:
     local = _to_timestamps(text.str.replace(r" [^ ]*$", "", regex=True)).to_numpy(
         dtype="datetime64[us]"
     )
-    # Integer codes of the zones, -1 for NULL.
+    # Integer codes of the zones, -1 for NULL, and the positions of each zone's values,
+    # grouped once by a stable sort of the codes.
     codes, zone_names = pd.factorize(text.str.replace(r"^.* ", "", regex=True))
+    order = np.argsort(codes, kind="stable")
+    bounds = np.searchsorted(codes[order], np.arange(-1, len(zone_names) + 1))
     utc = np.full(len(values), np.datetime64("NaT", "us"))
     for code, zone_name in enumerate(zone_names):
-        mask = codes == code
+        positions = order[bounds[code + 1] : bounds[code + 2]]
         zone = _parse_time_zone(zone_name)
         if isinstance(zone, timezone):
-            offset = np.timedelta64(zone.utcoffset(None), "us")
-            utc[mask] = local[mask] - offset
+            utc[positions] = local[positions] - np.timedelta64(zone.utcoffset(None), "us")
             continue
         try:
-            localized = pd.Series(local[mask]).dt.tz_localize(
+            localized = pd.Series(local[positions]).dt.tz_localize(
                 zone, ambiguous="raise", nonexistent="raise"
             )
         except ValueError:
-            # Raise the DataError of the first value without one instant.
-            for value in text.to_numpy(dtype=object)[mask]:
-                _to_datetime_with_tz(value)
-            raise
-        utc[mask] = (
+            # pandas reports local times before a zone's first transition as
+            # nonexistent, so the values are converted one at a time, which raises the
+            # DataError of a value without one instant.
+            texts = text.to_numpy(dtype=object)[positions]
+            offsets = [cast(datetime, _to_datetime_with_tz(value)).utcoffset() for value in texts]
+            utc[positions] = local[positions] - np.array(offsets, dtype="timedelta64[us]")
+            continue
+        utc[positions] = (
             localized.dt.tz_convert("UTC").dt.tz_localize(None).to_numpy(dtype="datetime64[us]")
         )
     return pd.Series(utc, index=values.index).dt.tz_localize("UTC")
@@ -639,7 +641,7 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
             series = df.iloc[:, i]
             array = series.array
             fetch_type = self._fetch_types.get(df.columns[i])
-            if fetch_type is not None and series.dtype.kind == "M":
+            if fetch_type is not None and isinstance(array, pd.arrays.DatetimeArray):
                 columns.append((array, fetch_type))
             elif isinstance(array.dtype, pd.StringDtype):
                 columns.append((array, "list"))
@@ -997,12 +999,13 @@ class AthenaPandasResultSet(AthenaResultSet):
             is_compatible = (
                 effective_chunksize is None
                 and self._quoting == 1
-                # The default timestamp with time zone conversion runs after reading.
-                and not {
-                    name
-                    for name, converter in self.converters.items()
-                    if converter is not _to_datetime_with_tz
-                }
+                # pandas' PyArrow engine takes no converters. Those of the temporal
+                # columns that are converted after reading are not used.
+                and "converters" not in self._kwargs
+                and not self.converters.keys()
+                - self._get_csv_temporal_converters(
+                    [(d[0], d) for d in self.description or []]
+                ).keys()
                 # The pyarrow engine does not rename columns with the same name, and
                 # the column labels cannot be resolved for it (see
                 # _get_csv_column_labels()).
@@ -1215,11 +1218,11 @@ class AthenaPandasResultSet(AthenaResultSet):
 
         PyAthena converts the ``timestamp``, ``date``, and ``timestamp with time zone``
         columns after reading, unless options given to ``execute()`` or the converter
-        decide how they are read: ``parse_dates`` (for ``timestamp`` and ``date``), a
-        ``dtype`` that names the column or is not a plain mapping, ``converters`` that
-        name the column (or any ``converters``, for ``timestamp with time zone``), or a
-        conversion function that the converter maps to the type, other than the
-        default ``timestamp with time zone`` one.
+        decide how they are read: ``parse_dates``, with which PyAthena converts none of
+        them, a ``dtype`` that is not a plain mapping, which applies to every column, a
+        ``dtype`` or ``converters`` entry that names the column, or a conversion
+        function that the converter maps to the type, other than the default
+        ``timestamp with time zone`` one.
 
         Args:
             columns: The label and the description of each column that is read.
@@ -1227,8 +1230,10 @@ class AthenaPandasResultSet(AthenaResultSet):
         Returns:
             The converters keyed by column label.
         """
+        if "parse_dates" in self._kwargs:
+            return {}
         dtype = self._kwargs.get("dtype")
-        converters = self._kwargs.get("converters")
+        converters = self._kwargs.get("converters") or {}
         mappings = self._converter.mappings
         temporal_converters = {}
         for label, d in columns:
@@ -1236,13 +1241,13 @@ class AthenaPandasResultSet(AthenaResultSet):
             if type_ not in _CSV_TEMPORAL_TYPES:
                 continue
             if type_ == "timestamp with time zone":
-                if mappings.get(type_) is not _to_datetime_with_tz or "converters" in self._kwargs:
+                if mappings.get(type_) is not _to_datetime_with_tz:
                     continue
-            elif type_ in mappings or "parse_dates" in self._kwargs:
+            elif type_ in mappings:
                 continue
             if "dtype" in self._kwargs and (type(dtype) is not dict or label in dtype):
                 continue
-            if converters and label in converters:
+            if label in converters:
                 continue
             temporal_converters[label] = _TemporalConverter(type_)
         return temporal_converters
