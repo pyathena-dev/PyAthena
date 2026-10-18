@@ -219,7 +219,9 @@ class AthenaArrowResultSet(AthenaResultSet):
             if convert is _to_default:
                 continue
             try:
-                columns[i] = [convert(v) for v in columns[i]]
+                # Unlike a list comprehension, a generator turns a StopIteration from the
+                # converter into a RuntimeError instead of ending an iteration of the rows.
+                columns[i] = list(convert(v) for v in columns[i])  # noqa: C400
             except DataError as e:
                 raise DataError(f"Column {d[0]!r}: {e}") from e
         self._rows.extend(zip(*columns, strict=False))

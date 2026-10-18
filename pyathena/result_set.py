@@ -693,7 +693,7 @@ class AthenaResultSet(CursorIterator):
             tuple(
                 self._convert_values(
                     conv,
-                    (data.get("VarCharValue") for data in rows[i].get("Data", [])),
+                    [data.get("VarCharValue") for data in rows[i].get("Data", [])],
                     names,
                     types,
                     hints,
@@ -747,6 +747,8 @@ class AthenaResultSet(CursorIterator):
                 zone`` value with an unknown zone or a local time without one instant in
                 its zone. The message names the column.
         """
+        # Unlike a loop that returns the values, a generator turns a StopIteration from
+        # the converter into a RuntimeError instead of ending an iteration of the rows.
         for name, type_, hint, value in zip(names, types, hints, values, strict=False):
             try:
                 converted = (
@@ -1005,7 +1007,7 @@ class AthenaDictResultSet(AthenaResultSet):
                     names,
                     self._convert_values(
                         conv,
-                        (data.get("VarCharValue") for data in rows[i].get("Data", [])),
+                        [data.get("VarCharValue") for data in rows[i].get("Data", [])],
                         names,
                         types,
                         hints,
