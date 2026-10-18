@@ -11,7 +11,7 @@ import time
 import traceback
 import uuid
 import weakref
-from concurrent.futures import Future, ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest import mock
 
@@ -2529,10 +2529,12 @@ class TestAioS3StreamedFile:
 
         fs.core.complete_multipart_upload.assert_not_called()
 
+    @pytest.mark.parametrize("max_workers", [1, 2])
     @pytest.mark.asyncio
-    async def test_append_failed_part_copy(self, fs):
-        # A part copy of an append found failed before a part is submitted
-        # stops the write with its error, as with S3File (GH-1178).
+    async def test_append_failed_part_copy(self, fs, max_workers):
+        # A failed part copy of an append stops the write before it uploads
+        # another part, whether or not the write waits for the copy, as with
+        # S3File (GH-1178). GH-1211: the part copies count toward max_workers.
         block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
         info = S3Object(
             init={"Key": "key"},
@@ -2542,60 +2544,125 @@ class TestAioS3StreamedFile:
         )
         info.size = block_size
         fs._sync_fs.info = mock.MagicMock(return_value=info)
-        release = threading.Event()
+        # The part uploaded while the copy is in flight, which throttles until
+        # the abort stops its retries; their backoff wait would take at least
+        # EVENT_TIMEOUT seconds.
+        operation = ThrottledOperation(operation_name="UploadPart")
+        fs.core.upload_part = mock.MagicMock(
+            side_effect=retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
+        )
 
         def upload_part_copy(**kwargs):
-            # Held until the first write returns, so that it does not see
-            # the failure.
-            release.wait(EVENT_TIMEOUT)
+            if max_workers > 1:
+                # Failing once the part is in flight.
+                assert operation.started.wait(EVENT_TIMEOUT)
             raise PermissionError("Access Denied")
 
         fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
-        f = await fs.open_async("s3://bucket/key", "ab", block_size=block_size)
-        try:
+        f = await fs.open_async(
+            "s3://bucket/key", "ab", block_size=block_size, max_workers=max_workers
+        )
+        started = time.monotonic()
+        if max_workers > 1:
+            # The write uploads a part while the copy is in flight, and the
+            # next one waits for the copy or the part to finish.
             await f.write(b"a" * block_size)
-        finally:
-            release.set()
-        # The copy has failed before the next write submits a part.
-        await asyncio.to_thread(wait, f._parts[:1], EVENT_TIMEOUT)
-
         with pytest.raises(PermissionError, match="Access Denied"):
             await f.write(b"a" * block_size)
 
+        assert time.monotonic() - started < EVENT_TIMEOUT
+        assert [c.kwargs["part_number"] for c in fs.core.upload_part.call_args_list] == (
+            [] if max_workers == 1 else [2]
+        )
+        assert operation.calls == (0 if max_workers == 1 else 1)
         assert f.closed
-        assert fs.core.upload_part.call_count == 1
         fs.core.abort_multipart_upload.assert_called_once()
         fs.core.complete_multipart_upload.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_commit_failed_part_first(self, fs):
         # The commit raises a failed part without waiting for the parts
-        # before it, and cancels those that have not started, as S3File does.
-        f = await fs.open_async("s3://bucket/key", "wb")
-        await f.write(b"a")
-        f._writer.upload = S3MultipartUpload(
-            {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
+        # before it, and stops the retries of the running ones before the
+        # abort, as S3File does (GH-1178). The parts before and after it
+        # throttle, and their backoff wait would take at least EVENT_TIMEOUT
+        # seconds.
+        block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
+        events = []
+        operations = {
+            part_number: ThrottledOperation(operation_name="UploadPart") for part_number in (1, 3)
+        }
+        throttled = {
+            part_number: retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
+            for part_number, operation in operations.items()
+        }
+
+        queued = threading.Event()
+        submit = S3AioThreadPool.submit
+
+        def record_commit(pool, fn, *args, **kwargs):
+            if getattr(fn, "__name__", None) == "_complete_upload":
+                queued.set()
+            return submit(pool, fn, *args, **kwargs)
+
+        def upload_part(part_number, **kwargs):
+            try:
+                if part_number == 2:
+                    # Failing once the parts before and after it are running,
+                    # and the commit waits for the thread of this part.
+                    for operation in operations.values():
+                        assert operation.started.wait(EVENT_TIMEOUT)
+                    assert queued.wait(EVENT_TIMEOUT)
+                    raise PermissionError("Access Denied")
+                return throttled[part_number]()
+            finally:
+                events.append(f"part {part_number} ended")
+
+        fs.core.upload_part = mock.MagicMock(side_effect=upload_part)
+        fs.core.abort_multipart_upload = mock.MagicMock(
+            side_effect=lambda *args, **kwargs: events.append("abort")
         )
-        failed: Future[S3MultipartUploadPart] = Future()
-        failed.set_exception(PermissionError("Access Denied"))
-        pending: list[Future[S3MultipartUploadPart]] = [Future(), Future()]
-        f._parts = [pending[0], failed, pending[1]]
+        f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size, max_workers=3)
+        await f.write(b"a" * block_size * 3)
+        started = time.monotonic()
+        with (
+            mock.patch.object(S3AioThreadPool, "submit", autospec=True, side_effect=record_commit),
+            pytest.raises(PermissionError, match="Access Denied"),
+        ):
+            await f.close()
 
-        try:
-            with pytest.raises(PermissionError, match="Access Denied"):
-                await asyncio.wait_for(asyncio.to_thread(f._complete_upload), 5)
-        finally:
-            # Releases a commit that waits for the parts in order.
-            for part in pending:
-                if not part.done():
-                    part.set_result(S3MultipartUploadPart(1, {"ETag": '"e"'}))
+        assert time.monotonic() - started < EVENT_TIMEOUT
+        assert {part_number: op.calls for part_number, op in operations.items()} == {1: 1, 3: 1}
+        assert sorted(events) == ["abort", "part 1 ended", "part 2 ended", "part 3 ended"]
+        assert events[-1] == "abort"
+        fs.core.complete_multipart_upload.assert_not_called()
 
-        assert all(part.cancelled() for part in pending)
+    @pytest.mark.asyncio
+    async def test_write_after_failed_part(self, fs):
+        # GH-1211: a write raises the failure of a part that failed since the
+        # last write before it buffers more data, and closes the file without
+        # committing it, as S3File does. The failure used to be found only by
+        # a write that waited for a part in flight, or by the commit.
+        block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
+        fs.core.upload_part = mock.MagicMock(side_effect=PermissionError("Access Denied"))
+        f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size, max_workers=1)
+        await f.write(b"a" * block_size)
+        # Resolves once the part has failed, with max_workers=1; no public
+        # object observes it.
+        await asyncio.wrap_future(f._session.ready())
+        buffer = f.buffer
+
+        with pytest.raises(PermissionError, match="Access Denied"):
+            await f.write(b"a")
+
+        assert buffer.getvalue() == b""
+        assert f.tell() == block_size
+        assert f.closed
+        with pytest.raises(ValueError, match="closed"):
+            await f.write(b"a")
+        fs.core.upload_part.assert_called_once()
         fs.core.abort_multipart_upload.assert_called_once()
         fs.core.complete_multipart_upload.assert_not_called()
-        # Closed without committing again.
-        f.closed = True
-        f._pool.shutdown()
+        fs.core.put_object.assert_not_called()
 
     @pytest.mark.parametrize("cancellations", [1, 2])
     @pytest.mark.asyncio
@@ -2718,23 +2785,113 @@ class TestAioS3StreamedFile:
         fs.core.complete_multipart_upload.assert_called_once()
         fs.core.abort_multipart_upload.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_flush_cancelled_while_queued_then_exit_with_exception(self, fs):
+        # GH-1211: the final flush reserves the commit before it is queued, so
+        # leaving the block with an exception after the flush is cancelled
+        # while its commit waits for a thread does not abort the upload.
+        block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
+        started = threading.Event()
+        release = threading.Event()
+        respond = fs.core.upload_part.side_effect
+
+        def upload_part(**kwargs):
+            started.set()
+            # The finally block of the test always releases it.
+            release.wait()
+            return respond(**kwargs)
+
+        fs.core.upload_part = mock.MagicMock(side_effect=upload_part)
+        queued = threading.Event()
+        submit = S3AioThreadPool.submit
+
+        def record_commit(pool, fn, *args, **kwargs):
+            if getattr(fn, "__name__", None) == "_complete_upload":
+                queued.set()
+            return submit(pool, fn, *args, **kwargs)
+
+        # The part holds the only thread, for which the commit waits.
+        f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size, max_workers=1)
+
+        async def flush_and_exit():
+            async with f:
+                await f.write(b"a" * block_size)
+                assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+                flush = asyncio.ensure_future(f.flush(force=True))
+                await wait_until(queued.is_set)
+                flush.cancel()
+                await flush
+
+        try:
+            with (
+                mock.patch.object(
+                    S3AioThreadPool, "submit", autospec=True, side_effect=record_commit
+                ),
+                pytest.raises(asyncio.CancelledError),
+            ):
+                await flush_and_exit()
+        finally:
+            release.set()
+        # Waits for the commit, and for an abort queued after it.
+        await asyncio.to_thread(f._pool.shutdown, True)
+
+        assert f.closed
+        fs.core.complete_multipart_upload.assert_called_once()
+        fs.core.abort_multipart_upload.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_flush_cancelled_then_exit_joins_abort(self, fs):
+        # GH-1211: leaving the block with an exception after a cancelled final
+        # flush whose commit failed waits for the abort that the commit runs,
+        # instead of returning before it or sending another one.
+        block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
+        events = []
+        aborting = threading.Event()
+        fs.core.complete_multipart_upload = mock.MagicMock(
+            side_effect=PermissionError("Access Denied")
+        )
+
+        def abort_multipart_upload(*args, **kwargs):
+            aborting.set()
+            # Running until the exit has closed the file, and then long enough
+            # for the exit to wait for it.
+            deadline = time.monotonic() + EVENT_TIMEOUT
+            while not f.closed and time.monotonic() < deadline:
+                time.sleep(0.01)
+            time.sleep(0.1)
+            events.append("aborted")
+
+        fs.core.abort_multipart_upload = mock.MagicMock(side_effect=abort_multipart_upload)
+        f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size)
+
+        async def flush_and_exit():
+            async with f:
+                await f.write(b"a" * block_size * 2)
+                flush = asyncio.ensure_future(f.flush(force=True))
+                # The commit has failed and runs the abort.
+                assert await asyncio.to_thread(aborting.wait, EVENT_TIMEOUT)
+                flush.cancel()
+                await flush
+
+        with pytest.raises(asyncio.CancelledError):
+            await flush_and_exit()
+        events.append("exited")
+
+        assert events == ["aborted", "exited"]
+        fs.core.complete_multipart_upload.assert_called_once()
+        fs.core.abort_multipart_upload.assert_called_once()
+
     @pytest.mark.parametrize("data", [b"", b"abc"])
     @pytest.mark.asyncio
     async def test_close_small(self, fs, data):
         # Data smaller than a block is uploaded with PutObject, and no data
         # creates an empty object.
-        fs._sync_fs.touch = mock.MagicMock()
         async with await fs.open_async("s3://bucket/key", "wb", ContentType="text/plain") as f:
             await f.write(data)
 
-        if data:
-            fs.core.put_object.assert_called_once_with(
-                S3Path("bucket", "key"), data, ContentType="text/plain"
-            )
-            fs._sync_fs.touch.assert_not_called()
-        else:
-            fs._sync_fs.touch.assert_called_once_with("bucket/key", ContentType="text/plain")
-            fs.core.put_object.assert_not_called()
+        fs.core.put_object.assert_called_once_with(
+            S3Path("bucket", "key"), data or None, ContentType="text/plain"
+        )
         fs.core.create_multipart_upload.assert_not_called()
 
     @pytest.mark.asyncio

@@ -17,7 +17,7 @@ import os
 import threading
 import traceback
 import warnings
-from concurrent.futures import FIRST_EXCEPTION, Future, wait
+from concurrent.futures import Future, wait
 from io import BytesIO
 from multiprocessing import cpu_count
 from typing import TYPE_CHECKING, Any, cast
@@ -47,7 +47,7 @@ from pyathena.filesystem.s3_object import (
 )
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_path_pairing import S3PathPairing
-from pyathena.filesystem.s3_writer import S3MultipartWriter
+from pyathena.filesystem.s3_writer import _S3WriteSession, _S3WriteState
 from pyathena.util import stop_retries_on
 
 if TYPE_CHECKING:
@@ -1213,10 +1213,10 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
       conditional on the ETag of the object, and on its version when the
       filesystem is version-aware.
     - A write buffers the data, and uploads each full block as a part of a
-      multipart upload, with at most ``max_workers`` parts in flight. A write
-      that would submit another part waits for one of them to finish first,
-      and a part found failed by that wait, or a part copy of an append
-      found failed before a part is submitted, stops the write with its
+      multipart upload, with at most ``max_workers`` parts, including the
+      part copies of an append, in flight. A write that would submit another
+      part waits for one of them to finish first. A request found failed by
+      the next write, or before a part is submitted, stops the write with its
       error.
       An append copies an existing object with ``UploadPartCopy``, or
       rewrites one smaller than a part from the buffer, as ``S3File`` does.
@@ -1319,25 +1319,17 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         self.append_block = False
         # The size of the appended object, as looked up when opening.
         self._append_size = 0
-        self._writer: S3MultipartWriter | None = None
+        # The requests and the state of the write; None when reading.
+        self._session: _S3WriteSession | None = None
         if mode != "rb":
-            self._writer = S3MultipartWriter(
-                fs.core, S3Path(self.bucket, self.key), block_size=block_size
+            self._session = _S3WriteSession(
+                fs.core,
+                S3Path(self.bucket, self.key),
+                self._pool,
+                block_size=block_size,
+                max_workers=self.max_workers,
+                request_kwargs=self.s3_additional_kwargs,
             )
-        self._creation: Future[S3MultipartUpload] | None = None
-        # Set when the commit is submitted, after which it completes the
-        # upload, or aborts it if it fails, and nothing else aborts it.
-        self._committing = False
-        # The futures of the part uploads and copies, in part-number order.
-        self._parts: list[Future[S3MultipartUploadPart]] = []
-        # Set by _discard(), so that the creation and the running part uploads
-        # and copies make no further attempt before the abort.
-        self._parts_stop = threading.Event()
-        # The parts uploaded from the buffer that may not have finished. The
-        # part copies of an append hold no data and are not counted.
-        self._uploads_in_flight: set[asyncio.Future[S3MultipartUploadPart]] = set()
-        # The part copies of an append that may not have finished.
-        self._copies_in_flight: set[Future[S3MultipartUploadPart]] = set()
         if target.appended is not None:
             if target.append_data is not None:
                 cast(BytesIO, self.buffer).write(target.append_data)
@@ -1353,10 +1345,11 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         pool = getattr(self, "_pool", None)
         if pool is None:
             return
+        session = getattr(self, "_session", None)
         if (
             not getattr(self, "closed", True)
-            and self.mode != "rb"
-            and not getattr(self, "_committing", False)
+            and session is not None
+            and session.state not in (_S3WriteState.COMPLETING, _S3WriteState.COMPLETED)
         ):
             warnings.warn(
                 f"s3://{self.bucket}/{self.key} was not closed, and the written data "
@@ -1400,9 +1393,9 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         Raises:
             ValueError: If the file is not open for writing, is closed, or
                 has been force-flushed.
-            BaseException: The error of a part that the write found failed
-                while it waited for a part in flight, or of a part copy of an
-                append found failed before a part is submitted.
+            BaseException: The error of a request of the write that failed
+                since the last write, or before a part is submitted, after
+                which the file is closed without committing it.
         """
         if self.mode not in {"wb", "ab", "xb"}:
             raise ValueError("File not in write mode")
@@ -1410,6 +1403,11 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             raise ValueError("I/O operation on closed file.")
         if self.forced:
             raise ValueError("This file has been force-flushed, can only close")
+        try:
+            cast(_S3WriteSession, self._session).check()
+        except BaseException:
+            await self._close_without_commit()
+            raise
         buffer = cast(BytesIO, self.buffer)
         out = buffer.write(data)
         self.loc += out
@@ -1468,66 +1466,43 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
     async def _close_without_commit(self) -> None:
         """Close the file without uploading the written data.
 
-        Drops the buffered data, and aborts the multipart upload, if any,
-        once its started requests have ended (see :meth:`_discard`).
+        Drops the buffered data, and discards the write (see
+        :meth:`_discard`), unless its commit has been reserved, which runs
+        on. An abort that another call is running is waited for.
         """
         if self.closed:
             return
         self.closed = True
-        if self._committing:
-            # A cancelled commit runs on; an abort would race its completion.
-            self._pool.shutdown(wait=False)
-            return
         self.buffer = None
         # Here, so that the creation and the running parts stop even while
-        # they hold every thread of the file, ahead of _discard(). The
-        # requests that have not started are cancelled before the stop, which
-        # would let a thread that it frees take one of them.
-        if self._creation is not None:
-            self._creation.cancel()
-        for part in self._parts:
-            part.cancel()
-        self._parts_stop.set()
+        # they hold every thread of the file, ahead of _discard().
+        aborting = cast(_S3WriteSession, self._session).begin_abort()
         try:
-            await self._pool.run_shielded(self._discard)
+            if aborting:
+                await self._pool.run_shielded(self._discard)
         finally:
             self._pool.shutdown(wait=False)
 
     async def _initiate_upload(self) -> None:
         if not self.append_block and self.tell() < self.blocksize:
             return
-        writer = cast(S3MultipartWriter, self._writer)
-        # Tracked before it is scheduled, so that an interrupt while it is
-        # being scheduled still lets the cleanup cancel it or wait for it.
-        self._creation = Future()
+        session = cast(_S3WriteSession, self._session)
         try:
-            with stop_retries_on(self._parts_stop):
-                self._pool.submit_to(
-                    self._creation,
-                    writer.initiate,
-                    **self._get_request_kwargs("create_multipart_upload"),
-                )
-            await asyncio.wrap_future(self._creation)
+            session.start()
+            await self._wait_ready()
+            # Raises the failure of the creation.
+            session.check()
             if self.append_block:
                 size = self._append_size
                 whole_source = size <= self.fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE
                 source = S3Path(self.bucket, self.key)
-                copy_kwargs = self._get_request_kwargs("upload_part_copy")
-                for part_number, range_ in writer.iter_copy_parts(size):
-                    # Tracked before it is scheduled; see the creation.
-                    copy: Future[S3MultipartUploadPart] = Future()
-                    self._parts.append(copy)
-                    self._copies_in_flight.add(copy)
-                    with stop_retries_on(self._parts_stop):
-                        self._pool.submit_to(
-                            copy,
-                            writer.upload_part_copy,
-                            part_number=part_number,
-                            source=source,
-                            range_=None if whole_source else range_,
-                            **copy_kwargs,
-                        )
+                for part_number, range_ in session.iter_copy_parts(size):
+                    # The part copies count toward max_workers, as the parts do.
+                    await self._wait_ready()
+                    session.submit_copy(part_number, source, None if whole_source else range_)
         except BaseException:
+            # A creation that has started may still create an upload, which
+            # the abort waits for.
             await self._close_without_commit()
             raise
 
@@ -1545,10 +1520,8 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             Whether the buffer is reset afterwards.
 
         Raises:
-            BaseException: The error of an uploaded part that the write found
-                failed while it waited for a part in flight, or of a part copy
-                of an append found failed before a part is submitted.
-            RuntimeError: If no multipart upload is initialized.
+            BaseException: The error of a request of the write that failed
+                before a part is submitted.
             ValueError: If the data needs more parts than a multipart upload
                 allows.
         """
@@ -1557,48 +1530,14 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             if final:
                 await self._commit()
             return not final
-        writer = cast(S3MultipartWriter, self._writer)
-        if writer.upload is None:
-            raise RuntimeError("Multipart upload is not initialized.")
+        session = cast(_S3WriteSession, self._session)
         buffer = cast(BytesIO, self.buffer)
         buffer.seek(0)
-        upload_kwargs = self._get_request_kwargs("upload_part")
         try:
-            for part_number, data in writer.iter_parts(
-                buffer, first_part_number=len(self._parts) + 1
-            ):
-                if self._copies_in_flight:
-                    copied = {copy for copy in self._copies_in_flight if copy.done()}
-                    self._copies_in_flight -= copied
-                    for copy in copied:
-                        # Otherwise the rest of the data is uploaded after a
-                        # failed part copy, as S3File does.
-                        copy.result()
-                if len(self._uploads_in_flight) >= self.max_workers:
-                    # Otherwise the parts waiting for a thread pile up in memory.
-                    done, self._uploads_in_flight = await asyncio.wait(
-                        self._uploads_in_flight, return_when=asyncio.FIRST_COMPLETED
-                    )
-                    for upload in done:
-                        # A failed part would otherwise keep its data until
-                        # the commit while the rest of the data is uploaded.
-                        upload.result()
-                # Tracked before it is scheduled; see _initiate_upload().
-                part: Future[S3MultipartUploadPart] = Future()
-                self._parts.append(part)
-                waiter = asyncio.wrap_future(part)
-                # The commit reports a failure that no wait found; retrieved
-                # here so that asyncio does not log it as never retrieved.
-                waiter.add_done_callback(lambda w: w.cancelled() or w.exception())
-                self._uploads_in_flight.add(waiter)
-                with stop_retries_on(self._parts_stop):
-                    self._pool.submit_to(
-                        part,
-                        writer.upload_part,
-                        part_number=part_number,
-                        body=data,
-                        **upload_kwargs,
-                    )
+            for part_number, data in session.iter_parts(buffer):
+                # Otherwise the parts waiting for a thread pile up in memory.
+                await self._wait_ready()
+                session.submit_part(part_number, data)
         except BaseException:
             await self._close_without_commit()
             raise
@@ -1606,83 +1545,83 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             await self._commit()
         return not final
 
+    async def _wait_ready(self) -> None:
+        """Wait until another part may be submitted, without blocking the event loop.
+
+        A cancellation of the waiting task cancels only its own wait. See
+        :meth:`_S3WriteSession.ready`.
+        """
+        waiter = cast(_S3WriteSession, self._session).ready()
+        if not waiter.done():
+            await asyncio.wrap_future(waiter)
+
     async def _commit(self) -> None:
         """Commit the written data in a thread of the file.
 
-        See :meth:`_complete_upload`.
-        """
-        if self.buffer is None:
-            return
-        self._committing = True
-        await self._pool.run_shielded(self._complete_upload)
+        The commit is reserved before it is queued, so that a cancellation
+        of the waiting task, also while the commit waits for a thread, does
+        not abort it. See :meth:`_complete_upload`.
 
-    def _complete_upload(self) -> None:
+        Raises:
+            BaseException: The error of a request of the write that failed
+                before the commit is reserved, after which the file is closed
+                without committing it.
+        """
+        try:
+            cast(_S3WriteSession, self._session).begin_complete()
+        except BaseException:
+            await self._close_without_commit()
+            raise
+        # Passed, as closing the file without committing it drops the buffer.
+        await self._pool.run_shielded(self._complete_upload, cast(BytesIO, self.buffer))
+
+    def _complete_upload(self, buffer: BytesIO) -> None:
         """Upload or complete the written data; blocks, and runs in a thread.
 
         Creates an empty object if nothing was written, uploads the buffered
-        data with PutObject if no part was uploaded, and otherwise completes
-        the multipart upload once its parts have ended, aborting it if a
-        part or the completion fails. A failed part is found as soon as it
-        fails, without waiting for the parts before it, and the parts that
-        have not started are cancelled; the running ones are waited for
-        before the abort. Invalidates the cache of the path afterwards.
+        data with PutObject if no multipart upload was started, and otherwise
+        completes the multipart upload once its parts have been uploaded,
+        aborting it if a part or the completion fails (see :meth:`_discard`).
+        A failed part is raised as soon as it fails, without waiting for the
+        parts before it. Invalidates the cache of the path afterwards.
+
+        Args:
+            buffer: The buffered data that no part has uploaded.
 
         Raises:
             FileExistsError: If an object was created at the path after the
                 file was opened in exclusive-create mode.
         """
-        buffer = cast(BytesIO, self.buffer)
-        writer = cast(S3MultipartWriter, self._writer)
-        if self.tell() == 0:
-            self.fs._sync_fs.touch(self.path, **self._get_request_kwargs("put_object"))
-        elif not self._parts:
-            buffer.seek(0)
-            self.fs.core.put_object(
-                S3Path(self.bucket, self.key),
-                buffer.read(),
-                **self._get_request_kwargs("put_object"),
-            )
+        session = cast(_S3WriteSession, self._session)
+        if not session.multipart:
+            body = None
+            if self.tell():
+                buffer.seek(0)
+                body = buffer.read()
+            # None writes an empty object.
+            session.put(body)
         else:
             try:
-                # The parts were submitted before this call, so they have
-                # all started. A failed part is raised without waiting for
-                # the parts before it, as S3File does.
-                done, _ = wait(self._parts, return_when=FIRST_EXCEPTION)
-                for part in done:
-                    if not part.cancelled() and part.exception() is not None:
-                        part.result()
-                parts = [part.result() for part in self._parts]
-                writer.complete(parts, **self._get_request_kwargs("complete_multipart_upload"))
+                session.complete()
             except BaseException:
                 self._discard()
                 raise
         self.fs.invalidate_cache(self.path)
 
     def _discard(self) -> None:
-        """Abort the multipart upload, if any; blocks, and runs in a thread.
+        """Discard the write, and abort its multipart upload, if any; blocks.
 
-        The requests that have not started are cancelled, and the running
-        ones make no further attempt and are waited for first, since a part
-        that is still uploading when the upload is aborted may be stored
-        after the abort. The abort's own retries are not stopped. A failure is
+        Runs in a thread. See :meth:`_S3WriteSession.abort`. A failure is
         logged instead of raised, so that it does not mask the error that the
         caller is handling, also when no task waits for the abort any more.
         """
-        # The requests that have not started are cancelled before the stop,
-        # which would let a thread that it frees take one of them, and the
-        # creation and the running parts make no further attempt.
-        creating = self._creation is not None and not self._creation.cancel()
-        running = [part for part in self._parts if not part.cancel()]
-        self._parts_stop.set()
+        session = cast(_S3WriteSession, self._session)
         try:
-            if creating:
-                wait([cast(Future[S3MultipartUpload], self._creation)])
-            if self._writer is not None and self._writer.upload is not None:
-                wait(running)
-                self._writer.abort(**self._get_request_kwargs("abort_multipart_upload"))
+            session.abort()
         except Exception:
+            upload_id = cast(S3MultipartUpload, session.upload).upload_id
             _logger.exception(
-                f"Failed to abort the multipart upload to s3://{self.bucket}/{self.key}."
+                f"Failed to abort multipart upload {upload_id} to s3://{self.bucket}/{self.key}."
             )
 
     async def _fetch_range(self, start: int, end: int) -> bytes:
