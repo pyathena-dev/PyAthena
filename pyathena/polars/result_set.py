@@ -367,8 +367,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
         self._cache_type = cache_type
         self._max_workers = max_workers
         self._chunksize = chunksize
-        # schema=None, Polars' default, reads the schema of the files, as the result set
-        # does without a schema, such as with the timestamps of UNLOAD at microseconds.
+        # schema=None is Polars' default and the same as no schema, so that the result
+        # set still reads, for example, the timestamps of UNLOAD at microseconds.
         self._kwargs = {k: v for k, v in kwargs.items() if k != "schema" or v is not None}
         # The Parquet files of an UNLOAD result, from its data manifest.
         self._data_manifest: list[str] = []
