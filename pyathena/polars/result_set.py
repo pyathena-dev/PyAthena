@@ -552,7 +552,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 ``with_column_names`` function given to ``execute()``, Polars does not
                 name the columns by the header; ``schema_overrides`` given to
                 ``execute()`` replaces these types; and with ``schema``, Polars ignores
-                ``schema_overrides``. In these cases the columns are not read as text.
+                ``schema_overrides``. In these cases the result set does not read the
+                timestamp columns as text and convert them.
 
         Returns:
             Tuple of (schema_overrides, timestamp_dtypes): the data types to read the
