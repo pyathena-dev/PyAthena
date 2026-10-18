@@ -33,7 +33,7 @@ FILESYSTEM_FAMILY = "s3"
 FILESYSTEM_OPERATIONS = ("read", "write", "copy")
 ALL_FAMILIES = (*FAMILIES, "wrangler", *SQLALCHEMY_FAMILIES, FILESYSTEM_FAMILY)
 SUITES = ("single", "concurrent", "init", "filesystem")
-SHAPES = ("flat", "nested", "json")
+SHAPES = ("flat", "nested", "json", "temporal")
 
 
 @dataclass(frozen=True)
@@ -100,6 +100,11 @@ def matrix(settings: Settings, suite: str, shape: str) -> list[Case]:
     ``json`` type; the initialization suite, which prepares UNLOAD fixtures too,
     has no json cases.
 
+    The ``temporal`` shape adds temporal columns to the flat projection and
+    covers every family in the single-query suite, UNLOAD and CTAS reads
+    included (see ``select_sql()``). Like json, it has no cases in the other
+    suites.
+
     The ``filesystem`` suite does not query Athena and has no shape; its cases
     belong to the ``flat`` shape.
 
@@ -107,7 +112,7 @@ def matrix(settings: Settings, suite: str, shape: str) -> list[Case]:
         settings: Configuration with the arraysizes, chunk sizes, and concurrency,
             and the filesystem suite's max_workers and connection pools.
         suite: ``single``, ``concurrent``, ``init``, or ``filesystem``.
-        shape: ``flat``, ``nested``, or ``json``.
+        shape: ``flat``, ``nested``, ``json``, or ``temporal``.
 
     Returns:
         The cases in a stable order.
@@ -135,7 +140,7 @@ def matrix(settings: Settings, suite: str, shape: str) -> list[Case]:
             for workers in settings.filesystem_max_workers
             for pool in settings.filesystem_pool_connections
         ]
-    if shape == "json" and suite != "single":
+    if shape in {"json", "temporal"} and suite != "single":
         return []
     cases: list[Case] = []
     arraysizes = settings.arraysizes if suite == "single" else [1000]

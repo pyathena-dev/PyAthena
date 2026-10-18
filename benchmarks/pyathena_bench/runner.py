@@ -532,6 +532,7 @@ def run(
                             resources["ScratchDatabase"],
                             manifest["scales"][scale]["table"],
                             case.shape,
+                            case.transport,
                         ),
                         expected_rows=manifest["scales"][scale]["rows"],
                         fixture=manifest["fixtures"].get(f"{scale}-{case.shape}-{case.transport}"),

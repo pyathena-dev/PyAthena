@@ -246,6 +246,25 @@ def test_unload_trials_record_their_output_files(monkeypatch, tmp_path, run_stub
     )
 
 
+def test_temporal_trials_query_the_projection_of_their_transport(monkeypatch, tmp_path, run_stubs):
+    payloads = []
+    monkeypatch.setattr(
+        "pyathena_bench.runner.supervise",
+        lambda payload, events, settings: payloads.append(payload) or {"status": "ok"},
+    )
+    monkeypatch.setattr("pyathena_bench.runner.output_files", lambda *args: {})
+    cases = [
+        Case("arrow", transport=transport, output="native", shape="temporal")
+        for transport in ("csv", "unload")
+    ]
+    settings = replace(Settings(), warmups=0, repetitions=1)
+    assert run(settings, RUN_MANIFEST, cases, ["small"], tmp_path / "run")
+    csv, unload = (p["sql"] for p in payloads)
+    assert "AS event_time_utc" in csv
+    assert "AS event_date" in unload
+    assert "AS event_time_utc" not in unload
+
+
 def test_filesystem_trials_transfer_the_prepared_object_within_the_scratch_bucket(
     monkeypatch, tmp_path, run_stubs
 ):

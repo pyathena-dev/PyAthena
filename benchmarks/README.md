@@ -31,6 +31,8 @@ The Athena timings describe queries against these smaller snapshots, not a scan 
 The flat workload projects scalar fields from `file`, `details`, and `http` alongside the top-level scalar columns.
 The nested workload preserves those structures.
 The json workload adds `CAST(details AS JSON) AS details_json` to the flat projection; it covers native pandas and Wrangler reads in the single-query suite, with their UNLOAD and CTAS reads marked unsupported, because Parquet cannot hold the `json` type.
+The temporal workload adds columns derived from `"timestamp"` with `from_unixtime()` to the flat projection: `event_time` (`timestamp(3)`), `event_date` (`date`), `event_time_utc`, `event_time_zone`, and `event_time_offset` (`timestamp(3) with time zone` in `UTC`, `Asia/Tokyo`, and `+09:00`), and `event_clock` (`time(3)`).
+It covers every family in the single-query suite; its UNLOAD and CTAS reads add only `event_time` and `event_date`, because UNLOAD and CTAS cannot write `time` or `with time zone` types.
 No workload converts every library's output into a common Python object representation.
 
 ## Dependencies and local checks
@@ -176,6 +178,9 @@ uv run --no-sync python -m pyathena_bench run \
 uv run --no-sync python -m pyathena_bench run \
   --manifest results/input.json --out results/nested-small \
   --suite single --scale small --shape nested --output-kind native
+uv run --no-sync python -m pyathena_bench run \
+  --manifest results/input.json --out results/temporal-small \
+  --suite single --scale small --shape temporal
 ```
 
 The concurrency suite compares ThreadPool and native asyncio APIs at 1, 10, 50, and 100 simultaneous queries by default.
@@ -300,7 +305,7 @@ When the temporary directory is a tmpfs, as `/tmp` is on Amazon Linux 2023, file
 | Arrow CSV and UNLOAD | Eager table loading; arraysize changes row extraction, not S3 streaming |
 | Polars CSV and UNLOAD | Full result or chunk iterator |
 | SQLAlchemy (`sqla_*`) | `pandas.read_sql_query()` through an engine of each PyAthena driver, whole or with `chunksize` |
-| Wrangler CSV | Scalar projections and the json workload; nested cases are marked unsupported |
+| Wrangler CSV | Scalar projections, including the json and temporal workloads; nested cases are marked unsupported |
 | Wrangler CTAS and UNLOAD | Full DataFrame or chunks, including nested workloads |
 | S3 filesystem (`s3`) | Read, write, and multipart copy of one object with `S3FileSystem` and `AioS3FileSystem` |
 
@@ -310,7 +315,7 @@ As a cursor is, the engine's connection is opened during setup, outside `total_s
 `pandas.read_sql_query()` builds DataFrames from the rows of `fetchall()` or `fetchmany()`, so these cases include the driver's row output; `sqla_rest` pages through GetQueryResults like Cursor.
 
 The [Wrangler API documentation](https://aws-sdk-pandas.readthedocs.io/en/stable/stubs/awswrangler.athena.read_sql_query.html) describes its CSV nested-type restriction.
-CTAS and UNLOAD have separate limitations, including timestamp-with-time-zone columns; the supplied timestamp is a bigint.
+CTAS and UNLOAD have separate limitations, including `time` and timestamp-with-time-zone columns, which the temporal workload leaves out of its CTAS and UNLOAD reads.
 Unsupported combinations are included in the plan and report with reasons.
 An attempted operation that fails is recorded as a failure, not silently reclassified as unsupported.
 Row-count validation detects incomplete consumption; it is not a proof that different libraries produce identical dtypes or nested Python objects.

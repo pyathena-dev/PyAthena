@@ -30,6 +30,23 @@ NESTED_COLUMNS = (
 )
 # The flat projection with one column of Athena's json type, NULL where details is NULL.
 JSON_COLUMNS = f"{FLAT_COLUMNS}, CAST(details AS JSON) AS details_json"
+# The flat projection with temporal columns derived from the epoch microseconds of
+# "timestamp"; from_unixtime() returns timestamp(3). UNLOAD and CTAS write Parquet
+# through Hive, which has no time or with time zone types, so their reads project
+# the timestamp and date columns only. The zone has no daylight saving time, whose
+# ambiguous local times PyAthena rejects.
+_SECONDS = '"timestamp" / 1e6'
+PARQUET_TEMPORAL_COLUMNS = (
+    f"{FLAT_COLUMNS}, from_unixtime({_SECONDS}) AS event_time, "
+    f"CAST(from_unixtime({_SECONDS}) AS date) AS event_date"
+)
+TEMPORAL_COLUMNS = (
+    f"{PARQUET_TEMPORAL_COLUMNS}, "
+    f"from_unixtime({_SECONDS}, 'UTC') AS event_time_utc, "
+    f"from_unixtime({_SECONDS}, 'Asia/Tokyo') AS event_time_zone, "
+    f"from_unixtime({_SECONDS}, '+09:00') AS event_time_offset, "
+    f"CAST(from_unixtime({_SECONDS}) AS time(3)) AS event_clock"
+)
 
 
 def identifier(value: str) -> str:
@@ -139,23 +156,35 @@ class Settings:
         )
 
 
-def select_sql(database: str, table: str, shape: str) -> str:
+def select_sql(database: str, table: str, shape: str, transport: str) -> str:
     """Return the measured query of a shape over a snapshot table.
 
     Args:
         database: Database of the snapshot.
         table: Snapshot table.
-        shape: ``flat``, ``nested``, or ``json``.
+        shape: ``flat``, ``nested``, ``json``, or ``temporal``.
+        transport: ``csv``, ``unload``, or ``ctas``. The ``temporal`` shape
+            projects only the columns that Parquet can hold for ``unload`` and
+            ``ctas``.
 
     Returns:
         The SELECT statement without a ``LIMIT``.
 
     Raises:
-        ValueError: If the shape is unknown.
+        ValueError: If the shape or transport is unknown.
     """
-    columns = {"flat": FLAT_COLUMNS, "nested": NESTED_COLUMNS, "json": JSON_COLUMNS}.get(shape)
+    columns = {
+        "flat": FLAT_COLUMNS,
+        "nested": NESTED_COLUMNS,
+        "json": JSON_COLUMNS,
+        "temporal": TEMPORAL_COLUMNS,
+    }.get(shape)
     if columns is None:
         raise ValueError(f"Unknown shape: {shape}")
+    if transport not in {"csv", "unload", "ctas"}:
+        raise ValueError(f"Unknown transport: {transport}")
+    if shape == "temporal" and transport != "csv":
+        columns = PARQUET_TEMPORAL_COLUMNS
     return f'SELECT {columns} FROM "{identifier(database)}"."{identifier(table)}"'
 
 

@@ -90,6 +90,15 @@ def test_json_shape_covers_pandas_and_wrangler_reads():
     assert matrix(Settings(), "concurrent", "json") == []
 
 
+def test_temporal_shape_covers_every_flat_case_in_the_single_query_suite():
+    # UNLOAD and CTAS read a Parquet projection instead of being unsupported.
+    assert matrix(Settings(), "single", "temporal") == [
+        replace(c, shape="temporal") for c in matrix(Settings(), "single", "flat")
+    ]
+    assert matrix(Settings(), "init", "temporal") == []
+    assert matrix(Settings(), "concurrent", "temporal") == []
+
+
 def test_concurrency_and_init_matrices_are_bounded():
     cases = matrix(Settings(), "concurrent", "flat")
     assert {c.concurrency for c in cases} == {1, 10, 50, 100}
@@ -127,17 +136,46 @@ def test_filesystem_section_is_loaded_with_its_own_scales(tmp_path):
 
 
 def test_flat_projection_and_nested_projection_share_the_snapshot():
-    flat = select_sql("scratch", "b_run_small", "flat")
-    nested = select_sql("scratch", "b_run_small", "nested")
+    flat = select_sql("scratch", "b_run_small", "flat", "csv")
+    nested = select_sql("scratch", "b_run_small", "nested", "csv")
     assert flat.endswith('FROM "scratch"."b_run_small"')
     assert nested.endswith('FROM "scratch"."b_run_small"')
     assert "file.filename AS filename" in flat
     assert "project, file, details, http" in nested
     assert "LIMIT" not in flat
-    json = select_sql("scratch", "b_run_small", "json")
+    json = select_sql("scratch", "b_run_small", "json", "csv")
     assert json == flat.replace(
         ' FROM "scratch"', ', CAST(details AS JSON) AS details_json FROM "scratch"'
     )
+    # The other shapes read the same projection with every transport.
+    for shape in ("flat", "nested", "json"):
+        for transport in ("unload", "ctas"):
+            assert select_sql("scratch", "b_run_small", shape, transport) == select_sql(
+                "scratch", "b_run_small", shape, "csv"
+            )
+
+
+def test_temporal_projection_of_parquet_reads_has_no_time_or_time_zone_types():
+    flat = select_sql("scratch", "b_run_small", "flat", "csv")
+    parquet = flat.replace(
+        ' FROM "scratch"',
+        ', from_unixtime("timestamp" / 1e6) AS event_time, '
+        'CAST(from_unixtime("timestamp" / 1e6) AS date) AS event_date FROM "scratch"',
+    )
+    # Athena's UNLOAD and CTAS fail with "Unsupported Hive type" for time and with
+    # time zone columns.
+    assert select_sql("scratch", "b_run_small", "temporal", "unload") == parquet
+    assert select_sql("scratch", "b_run_small", "temporal", "ctas") == parquet
+    assert select_sql("scratch", "b_run_small", "temporal", "csv") == parquet.replace(
+        ' FROM "scratch"',
+        ", from_unixtime(\"timestamp\" / 1e6, 'UTC') AS event_time_utc, "
+        "from_unixtime(\"timestamp\" / 1e6, 'Asia/Tokyo') AS event_time_zone, "
+        "from_unixtime(\"timestamp\" / 1e6, '+09:00') AS event_time_offset, "
+        'CAST(from_unixtime("timestamp" / 1e6) AS time(3)) AS event_clock FROM "scratch"',
+    )
+    # A misspelled transport fails instead of reading the projection of CSV results.
+    with pytest.raises(ValueError, match="Unknown transport"):
+        select_sql("scratch", "b_run_small", "temporal", "UNLOAD")
 
 
 @pytest.mark.parametrize("family", ["cursor", "dict", "arrow"])
