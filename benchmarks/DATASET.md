@@ -235,7 +235,7 @@ The flat projection selects 15 scalar columns, including selected fields from `f
 The nested projection selects nine top-level columns and preserves all three structures.
 The json projection adds `details` as a column of Athena's `json` type to the flat projection.
 The temporal projection adds six columns derived from `from_unixtime("timestamp" / 1e6)` to the flat projection, at millisecond precision: a `timestamp(3)`, a `date`, `timestamp(3) with time zone` columns in `UTC`, `Asia/Tokyo`, and `+09:00`, and a `time(3)`.
-Its UNLOAD and CTAS reads add only the `timestamp(3)` and `date` columns, because Athena cannot write the other types to Parquet.
+Its UNLOAD and CTAS reads add only the `timestamp(3)` and `date` columns, because UNLOAD and CTAS cannot write the other types.
 All projections omit `download_date` from the measured result and read the same prepared table without a further `LIMIT`; their definitions are in [config.py](pyathena_bench/config.py).
 Full cleanup removes these scratch tables and their data, while `cleanup --trials-only` preserves them for another run.
 Neither mode deletes the original source table or its S3 partition.

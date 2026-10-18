@@ -32,7 +32,7 @@ The flat workload projects scalar fields from `file`, `details`, and `http` alon
 The nested workload preserves those structures.
 The json workload adds `CAST(details AS JSON) AS details_json` to the flat projection; it covers native pandas and Wrangler reads in the single-query suite, with their UNLOAD and CTAS reads marked unsupported, because Parquet cannot hold the `json` type.
 The temporal workload adds columns derived from `"timestamp"` with `from_unixtime()` to the flat projection: `event_time` (`timestamp(3)`), `event_date` (`date`), `event_time_utc`, `event_time_zone`, and `event_time_offset` (`timestamp(3) with time zone` in `UTC`, `Asia/Tokyo`, and `+09:00`), and `event_clock` (`time(3)`).
-It covers every family in the single-query suite; its UNLOAD and CTAS reads add only `event_time` and `event_date`, because Athena cannot write `time` or `with time zone` types to Parquet.
+It covers every family in the single-query suite; its UNLOAD and CTAS reads add only `event_time` and `event_date`, because UNLOAD and CTAS cannot write `time` or `with time zone` types.
 No workload converts every library's output into a common Python object representation.
 
 ## Dependencies and local checks
