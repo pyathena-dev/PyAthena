@@ -197,21 +197,24 @@ class TestAioS3FileSystem:
             )
         )
         events = []
-        started = threading.Event()
-        failed = threading.Event()
+        # Part 1 retries until the failure of part 2 stops it, so that it
+        # runs until the copy handles the failure.
+        operation = ThrottledOperation(operation_name="UploadPartCopy")
+        throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
 
         def upload_part_copy(**kw):
             part_number = kw["part_number"]
             events.append(f"start {part_number}")
             if part_number == 1:
-                started.set()
-                failed.wait(EVENT_TIMEOUT)
-                time.sleep(0.05)
-                events.append("end 1")
-                return SimpleNamespace(etag='"e"', part_number=part_number)
+                try:
+                    return throttled()
+                finally:
+                    # Ends a little after the stop, so that an abort that
+                    # does not wait for it is recorded first.
+                    time.sleep(0.05)
+                    events.append("end 1")
             # Fails once part 1 is running, which the copy cannot cancel.
-            assert started.wait(EVENT_TIMEOUT)
-            failed.set()
+            assert operation.started.wait(EVENT_TIMEOUT)
             raise OSError("part failed")
 
         sync_fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
@@ -237,6 +240,7 @@ class TestAioS3FileSystem:
         # Part 3 waits for a worker and is not started after the failure.
         assert sorted(events[:2]) == ["start 1", "start 2"]
         assert events[2:] == ["end 1", "abort"]
+        assert operation.calls == 1
         sync_fs.core.complete_multipart_upload.assert_not_called()
 
     @pytest.mark.asyncio
@@ -2654,8 +2658,8 @@ class TestAioS3StreamedFile:
 
         def complete_multipart_upload(*args, **kwargs):
             started.set()
-            # The finally block of the test always releases it.
-            release.wait()
+            # The finally block of the test releases it.
+            release.wait(EVENT_TIMEOUT)
             completed.set()
 
         fs.core.complete_multipart_upload = mock.MagicMock(side_effect=complete_multipart_upload)
