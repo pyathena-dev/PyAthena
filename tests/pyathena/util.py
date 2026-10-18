@@ -433,6 +433,56 @@ def placeholder_connection(connection_class=Connection):
     )
 
 
+class _ClosableResultSet:
+    """A result set that records whether it was closed."""
+
+    description = None
+
+    def __init__(self):
+        self.closed = threading.Event()
+
+    def close(self):
+        self.closed.set()
+
+
+def assert_closes_result_sets_after_close(cursor_class):
+    """Check that an AsyncCursor closes only the result sets created after it closes.
+
+    The cursor sends no request to AWS: its queries start without one, and
+    its result sets are created, one at a time, when the test releases them.
+
+    Args:
+        cursor_class: The AsyncCursor class.
+    """
+    cursor = placeholder_connection().cursor(cursor_class, max_workers=1)
+    release = threading.Event()
+    result_sets = []
+
+    def collect(*args, **kwargs):
+        assert release.wait(EVENT_TIMEOUT)
+        result_sets.append(_ClosableResultSet())
+        return result_sets[-1]
+
+    with (
+        patch.object(cursor, "_execute", return_value="query_id"),
+        patch.object(cursor, "_collect_result_set", side_effect=collect),
+    ):
+        try:
+            _, before = cursor.execute("SELECT 1")
+            release.set()
+            taken = before.result(EVENT_TIMEOUT)
+            release.clear()
+            _, after = cursor.execute("SELECT 1")
+            cursor.close()
+            release.set()
+            assert after.result(EVENT_TIMEOUT) is result_sets[1]
+        finally:
+            release.set()
+            cursor.close(wait=True)
+    assert result_sets[1].closed.is_set()
+    assert not taken.closed.is_set()
+
+
 def offline_spark_cursor(cursor_class):
     """Build a Spark cursor on a connection that sends no request to AWS on its own.
 
