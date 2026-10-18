@@ -225,7 +225,7 @@ See {ref}`arrow-unload-options` for more information.
 
 Timestamps of UNLOAD results are read at microseconds, as `Datetime("us")`.
 Polars 2.0 and later read them with Polars.
-Polars 1.x reads them at nanoseconds, which gives wrong values outside 1677-09-21 to 2262-04-11; they are cast to microseconds, and a warning is logged.
+Polars 1.x reads them at nanoseconds, which gives wrong values outside 1677-09-21 to 2262-04-11 ([pola-rs/polars#29184](https://github.com/pola-rs/polars/issues/29184), fixed in Polars 2.0.0); they are cast to microseconds, and a warning is logged.
 The exception is a read with the chunksize option, with pyarrow installed and without Polars read options given to `execute()`: the chunks are read with pyarrow at microseconds, without the cast or the warning.
 A `schema` given to `execute()` is passed to Polars as given, and the timestamps that it reads are not converted.
 

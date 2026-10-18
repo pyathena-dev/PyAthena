@@ -838,9 +838,11 @@ class AthenaPolarsResultSet(AthenaResultSet):
 
         Polars reads INT96 at nanoseconds by default, which gives wrong values outside
         1677-09-21 to 2262-04-11. Polars 2.0 and later read INT96 at the time unit of
-        the read schema, except in a Map, which the read schema therefore makes a List
-        of Structs; ``_output_dtypes()`` restores it. Polars 1.x reads INT96 at
-        nanoseconds whatever the schema.
+        the read schema (https://github.com/pola-rs/polars/pull/29208), except in a Map
+        (https://github.com/pola-rs/polars/issues/30031), which the read schema
+        therefore makes a List of Structs; ``_output_dtypes()`` restores it. Polars 1.x
+        reads INT96 at nanoseconds whatever the schema
+        (https://github.com/pola-rs/polars/issues/29184).
 
         Args:
             schema: The schema of the Parquet files.
@@ -906,7 +908,11 @@ class AthenaPolarsResultSet(AthenaResultSet):
 
     @staticmethod
     def _warn_nanosecond_read() -> None:
-        """Warn that Polars 1.x reads the timestamps of UNLOAD at nanoseconds."""
+        """Warn that Polars 1.x reads the timestamps of UNLOAD at nanoseconds.
+
+        Polars 1.x reads INT96 at nanoseconds whatever the read schema
+        (https://github.com/pola-rs/polars/issues/29184), which Polars 2.0.0 fixed.
+        """
         import polars as pl
 
         _logger.warning(
