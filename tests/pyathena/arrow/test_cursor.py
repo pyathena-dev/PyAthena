@@ -907,7 +907,7 @@ class TestArrowCursor:
         The table keeps the text, as for every TIMESTAMP WITH TIME ZONE value.
         """
         arrow_cursor.execute(AMBIGUOUS_TIME_ZONE_QUERY)
-        with pytest.raises(DataError, match=r"Column 'col_timestamp_tz': .* is ambiguous"):
+        with pytest.raises(DataError, match=r"^Column 'col_timestamp_tz': .* is ambiguous"):
             arrow_cursor.fetchall()
 
     @pytest.mark.skipif(not ENV.managed_work_group, reason="AWS_ATHENA_MANAGED_WORKGROUP not set")

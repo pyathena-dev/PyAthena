@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -214,17 +214,25 @@ class AthenaArrowResultSet(AthenaResultSet):
         # converters property keep one column per name.
         columns = [column.to_pylist() for column in rows.columns]
         description = self.description if self.description else []
-        for i, d in enumerate(description):
-            convert = self._converter.get(d[1])
-            if convert is _to_default:
-                continue
-            try:
-                # Unlike a list comprehension, a generator turns a StopIteration from the
-                # converter into a RuntimeError instead of ending an iteration of the rows.
-                columns[i] = list(convert(v) for v in columns[i])  # noqa: C400
-            except DataError as e:
-                raise DataError(f"Column {d[0]!r}: {e}") from e
-        self._rows.extend(zip(*columns, strict=False))
+        names = [d[0] for d in description]
+        converters = [self._converter.get(d[1]) for d in description]
+
+        def convert(row: tuple[Any, ...]) -> Iterator[Any]:
+            # Unlike a loop that returns the values, a generator turns a StopIteration
+            # from the converter into a RuntimeError instead of ending an iteration of
+            # the rows.
+            for name, converter, value in zip(names, converters, row, strict=False):
+                try:
+                    converted = converter(value)
+                except DataError as e:
+                    raise DataError(f"Column {name!r}: {e}") from e
+                yield converted
+
+        if any(converter is not _to_default for converter in converters):
+            processed_rows = [tuple(convert(row)) for row in zip(*columns, strict=False)]
+        else:
+            processed_rows = list(zip(*columns, strict=False))
+        self._rows.extend(processed_rows)
 
     def _open_csv(self, location: str) -> Any:
         """Open the CSV result file for ``pyarrow.csv.read_csv()``.

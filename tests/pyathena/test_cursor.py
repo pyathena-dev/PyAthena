@@ -1682,7 +1682,7 @@ class TestCursor:
 
         The first page of rows is converted by execute().
         """
-        with pytest.raises(DataError, match=r"Column 'col_timestamp_tz': .* is ambiguous"):
+        with pytest.raises(DataError, match=r"^Column 'col_timestamp_tz': .* is ambiguous"):
             cursor.execute(AMBIGUOUS_TIME_ZONE_QUERY)
 
     @pytest.mark.parametrize(
@@ -1952,7 +1952,7 @@ class TestDictCursor:
 
     def test_ambiguous_time_zone_value(self, dict_cursor):
         """A local time that its zone repeats raises DataError naming the column."""
-        with pytest.raises(DataError, match=r"Column 'col_timestamp_tz': .* is ambiguous"):
+        with pytest.raises(DataError, match=r"^Column 'col_timestamp_tz': .* is ambiguous"):
             dict_cursor.execute(AMBIGUOUS_TIME_ZONE_QUERY)
 
     def test_null_vs_empty_string(self, dict_cursor):
