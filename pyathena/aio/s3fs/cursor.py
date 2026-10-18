@@ -156,7 +156,11 @@ class AioS3FSCursor(WithAsyncFetch):
 
         Returns:
             Self reference for method chaining.
+
+        Raises:
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         self._validate_execute_kwargs(kwargs, ("block_size", "csv_reader"))
         await self._async_reset_state()
         options = ExecuteOptions.resolve(

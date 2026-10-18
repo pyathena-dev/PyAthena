@@ -71,6 +71,7 @@ def _offline_cursor(kill_on_interrupt, cursor_class=Cursor):
         The cursor and the mock of its cancellation request.
     """
     cursor = cursor_class.__new__(cursor_class)  # bypass __init__ to avoid AWS calls
+    cursor._closed = False
     cursor._rowcount = -1
     cursor._result_set = None
     cursor._query_id = None
@@ -715,6 +716,36 @@ class TestCursor:
         with contextlib.closing(connect()) as conn, conn.cursor():
             pass
 
+    def test_closed(self, cursor):
+        """GH-1207: a closed cursor rejects operations and keeps the last query ID."""
+        cursor.execute("SELECT * FROM one_row")
+        query_id = cursor.query_id
+        cursor.close()
+        cursor.close()
+
+        assert cursor.is_closed
+        with pytest.raises(ProgrammingError):
+            cursor.execute("SELECT * FROM one_row")
+        with pytest.raises(ProgrammingError):
+            cursor.executemany("SELECT %(x)d FROM one_row", [{"x": 1}])
+        with pytest.raises(ProgrammingError):
+            cursor.fetchone()
+        with pytest.raises(ProgrammingError):
+            cursor.fetchmany()
+        with pytest.raises(ProgrammingError):
+            cursor.fetchall()
+        with pytest.raises(ProgrammingError):
+            next(cursor)
+        with pytest.raises(ProgrammingError):
+            cursor.cancel()
+        with pytest.raises(ProgrammingError):
+            cursor.list_databases(None)
+        with pytest.raises(ProgrammingError):
+            cursor.get_table_metadata("one_row")
+        with pytest.raises(ProgrammingError):
+            cursor.list_table_metadata()
+        assert cursor.query_id == query_id
+
     def test_unicode(self, cursor):
         unicode_str = "王兢"
         cursor.execute("SELECT %(param)s FROM one_row", {"param": unicode_str})
@@ -1071,9 +1102,9 @@ class TestCursor:
         cursor.close()
         assert cursor.rowcount == -1
 
-        cursor.execute(f"SELECT id, value FROM {executemany_table} ORDER BY id")
-        assert cursor.rowcount == -1
-        assert cursor.fetchall() == expected
+        with cursor.connection.cursor() as check_cursor:
+            check_cursor.execute(f"SELECT id, value FROM {executemany_table} ORDER BY id")
+            assert check_cursor.fetchall() == expected
 
     @pytest.mark.parametrize("failure_index", [0, 1])
     def test_executemany_failure(self, cursor, executemany_table, failure_index):
@@ -1415,6 +1446,30 @@ class TestCursor:
 
         assert exc_info.value.__cause__ is error
         cancel.assert_called_once_with("query_id")
+
+    @pytest.mark.parametrize("kill_on_interrupt", [True, False])
+    def test_execute_interrupted_in_start_callback(self, kill_on_interrupt):
+        """GH-1207: an interrupt in on_start_query_execution stops the query (no AWS)."""
+        cursor, cancel = _offline_cursor(kill_on_interrupt=kill_on_interrupt)
+        cursor._get_query_execution = MagicMock(
+            return_value=MagicMock(state=AthenaQueryExecution.STATE_CANCELLED)
+        )
+        reported = []
+
+        def on_start_query_execution(query_id):
+            reported.append(query_id)
+            raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            cursor.execute("SELECT 1", on_start_query_execution=on_start_query_execution)
+
+        assert reported == ["query_id"]
+        if kill_on_interrupt:
+            cancel.assert_called_once_with("query_id")
+        else:
+            cancel.assert_not_called()
+        assert cursor.query_id == "query_id"
+        assert cursor.result_set is None
 
     def test_execute_without_kill_on_interrupt(self):
         """Without kill_on_interrupt, an interrupt propagates without cancellation (no AWS)."""

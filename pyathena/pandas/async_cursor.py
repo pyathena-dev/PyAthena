@@ -251,7 +251,11 @@ class AsyncPandasCursor(AsyncCursor):
 
         Returns:
             Tuple of (query_id, future) where future resolves to AthenaPandasResultSet.
+
+        Raises:
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         options = ExecuteOptions.resolve(
             options,
             work_group=work_group,

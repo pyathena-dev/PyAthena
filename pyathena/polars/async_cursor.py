@@ -247,11 +247,15 @@ class AsyncPolarsCursor(AsyncCursor):
         Returns:
             Tuple of (query_id, future) where future resolves to AthenaPolarsResultSet.
 
+        Raises:
+            ProgrammingError: If the cursor is closed.
+
         Example:
             >>> query_id, future = cursor.execute("SELECT * FROM sales")
             >>> result_set = future.result()
             >>> df = result_set.as_polars()  # Returns Polars DataFrame
         """
+        self._ensure_open()
         options = ExecuteOptions.resolve(
             options,
             work_group=work_group,

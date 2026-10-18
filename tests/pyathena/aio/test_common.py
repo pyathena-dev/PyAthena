@@ -112,6 +112,25 @@ class TestWithAsyncFetch:
             with pytest.raises(ProgrammingError):
                 getattr(cursor, name)()
 
+    @pytest.mark.parametrize(
+        "cursor_class",
+        [AioArrowCursor, AioPandasCursor, AioPolarsCursor, AioS3FSCursor],
+    )
+    async def test_fetch_on_closed_cursor(self, cursor_class):
+        """GH-1207: the fetches of a closed cursor raise without reading the result set."""
+        cursor = cursor_class(
+            connection=MagicMock(), converter=None, formatter=None, retry_config=None
+        )
+        result_set = cursor.result_set = MagicMock(is_closed=False)
+        cursor.close()
+
+        for fetch in (cursor.fetchone, cursor.fetchmany, cursor.fetchall):
+            with pytest.raises(ProgrammingError):
+                await fetch()
+        result_set.fetchone.assert_not_called()
+        result_set.fetchmany.assert_not_called()
+        result_set.fetchall.assert_not_called()
+
     @pytest.mark.parametrize("cursor_class", _ALL_CURSOR_CLASSES)
     async def test_cancel_without_query(self, cursor_class):
         cursor = cursor_class(

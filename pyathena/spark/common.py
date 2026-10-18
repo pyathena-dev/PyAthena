@@ -232,14 +232,19 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
     def _start_session(self) -> str:
         """Start a Spark session with ``StartSession`` and wait until it is idle.
 
-        If waiting for the new session raises, including ``KeyboardInterrupt``,
-        the session is terminated on a best-effort basis before the exception is
-        re-raised.
+        The request is sent with ``_start_in_thread()`` regardless of
+        ``kill_on_interrupt``, because the caller receives no cursor to close: a
+        ``KeyboardInterrupt`` after the request has begun terminates the session
+        it starts. If waiting for the new session raises, including
+        ``KeyboardInterrupt``, the session is terminated on a best-effort basis
+        before the exception is re-raised.
 
         Returns:
             The ID of the new session.
 
         Raises:
+            KeyboardInterrupt: If interrupted while starting the session; see
+                ``_start_in_thread()``.
             OperationalError: If the session cannot be started or does not
                 become idle.
         """
@@ -253,26 +258,32 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             request.update({"NotebookVersion": self._notebook_version})
         if self._session_idle_timeout_minutes:
             request.update({"SessionIdleTimeoutInMinutes": self._session_idle_timeout_minutes})
-        try:
-            session_id: str = retry_api_call(
-                self._connection.client.start_session,
-                config=self._retry_config,
-                logger=_logger,
-                **request,
-            )["SessionId"]
-        except Exception as e:
-            _logger.exception("Failed to start session.")
-            raise OperationalError(*e.args) from e
 
+        def start() -> str:
+            try:
+                session_id: str = retry_api_call(
+                    self._connection.client.start_session,
+                    config=self._retry_config,
+                    logger=_logger,
+                    **request,
+                )["SessionId"]
+            except Exception as e:
+                _logger.exception("Failed to start session.")
+                raise OperationalError(*e.args) from e
+            return session_id
+
+        started: str | None = None
         try:
-            self._wait_for_idle_session(session_id)
+            started = self._start_in_thread(start, self._terminate_session_by_id)
+            self._wait_for_idle_session(started)
         except BaseException:
             # The caller receives no cursor to close, so the session is released here.
-            with contextlib.suppress(OperationalError):
-                # Already logged with the session ID; the original error takes precedence.
-                self._terminate_session_by_id(session_id)
+            if started is not None:
+                with contextlib.suppress(OperationalError):
+                    # Already logged with the session ID; the original error takes precedence.
+                    self._terminate_session_by_id(started)
             raise
-        return session_id
+        return started
 
     def _terminate_session(self) -> None:
         """Terminate the cursor's Spark session with ``TerminateSession``.
@@ -463,9 +474,12 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         further calls do not terminate the session again; after a failed one,
         calling this method again retries it.
 
+        Later operations on the cursor raise ``ProgrammingError``.
+
         Raises:
             OperationalError: If terminating the session fails.
         """
+        self._closed = True
         if self._terminate_session_on_close:
             self._terminate_session()
             # Terminated; later calls do nothing.

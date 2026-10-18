@@ -15,12 +15,13 @@ import pytest
 from botocore.exceptions import ClientError
 
 from pyathena.aio.spark.cursor import AioSparkCursor
-from pyathena.error import DatabaseError, NotSupportedError, OperationalError
+from pyathena.error import DatabaseError, NotSupportedError, OperationalError, ProgrammingError
 from pyathena.model import AthenaCalculationExecutionStatus
 from pyathena.util import RetryConfig
 from tests.pyathena.util import (
     CANCELABLE_SPARK_JOB,
     COMPLETED_CALCULATION_RESPONSES,
+    COMPLETED_CALCULATION_WITH_OUTPUT_RESPONSES,
     answered_requests,
     offline_spark_cursor,
     wait_for_spark_job,
@@ -47,6 +48,7 @@ def _offline_cursor(kill_on_interrupt, final_state):
         return MagicMock(state=final_state)
 
     cursor = AioSparkCursor.__new__(AioSparkCursor)  # bypass __init__ to avoid AWS calls
+    cursor._closed = False
     cursor._session_id = "session_id"
     cursor._poll_interval = 0
     cursor._kill_on_interrupt = kill_on_interrupt
@@ -85,6 +87,7 @@ def _starting_cursor(kill_on_interrupt=True, response=None):
         return {"CalculationExecutionId": "calculation_id"}
 
     cursor = AioSparkCursor.__new__(AioSparkCursor)  # bypass __init__ to avoid AWS calls
+    cursor._closed = False
     cursor._session_id = "session_id"
     cursor._connection = MagicMock()
     cursor._connection.client.start_calculation_execution.side_effect = start_calculation_execution
@@ -397,6 +400,7 @@ class TestAioSparkCursor:
     async def test_execute_rejects_parameters(self, parameters):
         """Any parameters other than None raise before a calculation starts (no AWS)."""
         cursor = AioSparkCursor.__new__(AioSparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._closed = False
         cursor._calculation_id = "previous"
         cursor._calculate = AsyncMock()
 
@@ -409,6 +413,7 @@ class TestAioSparkCursor:
     async def test_execute_rejects_work_group(self):
         """work_group is not an execute() argument, even when None (no AWS)."""
         cursor = AioSparkCursor.__new__(AioSparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._closed = False
         cursor._calculation_id = "previous"
         cursor._calculate = AsyncMock()
 
@@ -438,3 +443,22 @@ class TestAioSparkCursor:
         cursor = AioSparkCursor.__new__(AioSparkCursor)  # bypass __init__ to avoid AWS calls
         with pytest.raises(NotSupportedError):
             await cursor.executemany("SELECT 1", [])
+
+    async def test_closed(self):
+        """GH-1207: a closed cursor rejects operations without requests (no AWS)."""
+        cursor = offline_spark_cursor(AioSparkCursor)
+        client = cursor.connection.client
+        with answered_requests(client, COMPLETED_CALCULATION_WITH_OUTPUT_RESPONSES):
+            await cursor.execute("code")
+        await cursor.close()
+
+        with answered_requests(client) as requests:
+            with pytest.raises(ProgrammingError):
+                await cursor.execute("code")
+            with pytest.raises(ProgrammingError):
+                await cursor.cancel()
+            with pytest.raises(ProgrammingError):
+                await cursor.get_std_out()
+            with pytest.raises(ProgrammingError):
+                await cursor.get_std_error()
+        assert requests == []

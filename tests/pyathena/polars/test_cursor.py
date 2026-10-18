@@ -494,6 +494,39 @@ class TestPolarsCursor:
     def test_cancel_initial(self, polars_cursor):
         pytest.raises(ProgrammingError, polars_cursor.cancel)
 
+    def test_closed(self, polars_cursor):
+        """GH-1207: a closed cursor rejects operations."""
+        polars_cursor.execute("SELECT * FROM one_row")
+        polars_cursor.close()
+
+        with pytest.raises(ProgrammingError):
+            polars_cursor.execute("SELECT * FROM one_row")
+        with pytest.raises(ProgrammingError):
+            polars_cursor.as_polars()
+        with pytest.raises(ProgrammingError):
+            polars_cursor.as_arrow()
+        with pytest.raises(ProgrammingError):
+            next(polars_cursor.iter_chunks())
+
+    def test_execute_interrupted_in_start_callback(self, polars_cursor):
+        """GH-1207: an interrupt in on_start_query_execution stops the query."""
+        client = polars_cursor.connection.client
+        reported = []
+
+        def on_start_query_execution(query_id):
+            reported.append(query_id)
+            raise KeyboardInterrupt
+
+        with (
+            patch.object(client, "stop_query_execution", wraps=client.stop_query_execution) as stop,
+            pytest.raises(KeyboardInterrupt),
+        ):
+            polars_cursor.execute(
+                "SELECT * FROM one_row", on_start_query_execution=on_start_query_execution
+            )
+
+        stop.assert_called_once_with(QueryExecutionId=reported[0])
+
     def test_no_ops(self):
         conn = connect()
         cursor = conn.cursor(PolarsCursor)

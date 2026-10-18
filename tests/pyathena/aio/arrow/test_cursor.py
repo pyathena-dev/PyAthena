@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from pyathena.aio.arrow.cursor import AioArrowCursor
+from pyathena.error import ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
 
@@ -69,3 +70,15 @@ class TestAioArrowCursor:
         kwargs = result_set_class.call_args.kwargs
         expected = {**cursor_kwargs, **execute_kwargs}
         assert {key: kwargs[key] for key in expected} == expected
+
+    async def test_closed(self, aio_arrow_cursor):
+        """GH-1207: a closed cursor rejects operations."""
+        await aio_arrow_cursor.execute("SELECT * FROM one_row")
+        aio_arrow_cursor.close()
+
+        with pytest.raises(ProgrammingError):
+            await aio_arrow_cursor.execute("SELECT * FROM one_row")
+        with pytest.raises(ProgrammingError):
+            aio_arrow_cursor.as_arrow()
+        with pytest.raises(ProgrammingError):
+            aio_arrow_cursor.as_polars()

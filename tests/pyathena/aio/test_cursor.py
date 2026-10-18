@@ -12,7 +12,7 @@ from pyathena import ExecuteOptions
 from pyathena.aio.connection import AioConnection
 from pyathena.aio.cursor import AioCursor, AioDictCursor
 from pyathena.aio.result_set import AthenaAioDictResultSet
-from pyathena.error import DatabaseError, OperationalError
+from pyathena.error import DatabaseError, OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
 from tests import ENV
@@ -53,6 +53,7 @@ def _offline_cursor(kill_on_interrupt, final_state):
         return MagicMock(state=next(states))
 
     cursor = AioCursor.__new__(AioCursor)  # bypass __init__ to avoid AWS calls
+    cursor._closed = False
     cursor._rowcount = -1
     cursor._result_set = None
     cursor._poll_interval = 0
@@ -552,9 +553,9 @@ class TestAioCursor:
         aio_cursor.close()
         assert aio_cursor.rowcount == -1
 
-        await aio_cursor.execute(f"SELECT id, value FROM {executemany_table} ORDER BY id")
-        assert aio_cursor.rowcount == -1
-        assert await aio_cursor.fetchall() == expected
+        async with aio_cursor.connection.cursor() as check_cursor:
+            await check_cursor.execute(f"SELECT id, value FROM {executemany_table} ORDER BY id")
+            assert await check_cursor.fetchall() == expected
 
     # A failure of the first statement reaches the same code; this case also shows
     # that the statements before the failure are not rolled back.
@@ -674,6 +675,32 @@ class TestAioCursor:
         # Glue reports each table as Athena does, and nothing is retried first.
         assert await read() == expected
         assert sorted(calls) == ["get_table_metadata", "list_databases", "list_table_metadata"]
+
+    async def test_closed(self, aio_cursor):
+        """GH-1207: a closed cursor rejects operations."""
+        await aio_cursor.execute("SELECT * FROM one_row")
+        aio_cursor.close()
+
+        with pytest.raises(ProgrammingError):
+            await aio_cursor.execute("SELECT * FROM one_row")
+        with pytest.raises(ProgrammingError):
+            await aio_cursor.executemany("SELECT %(x)d FROM one_row", [{"x": 1}])
+        with pytest.raises(ProgrammingError):
+            await aio_cursor.fetchone()
+        with pytest.raises(ProgrammingError):
+            await aio_cursor.fetchmany()
+        with pytest.raises(ProgrammingError):
+            await aio_cursor.fetchall()
+        with pytest.raises(ProgrammingError):
+            await anext(aio_cursor)
+        with pytest.raises(ProgrammingError):
+            await aio_cursor.cancel()
+        with pytest.raises(ProgrammingError):
+            await aio_cursor.list_databases(None)
+        with pytest.raises(ProgrammingError):
+            await aio_cursor.get_table_metadata("one_row")
+        with pytest.raises(ProgrammingError):
+            await aio_cursor.list_table_metadata()
 
 
 class TestAioDictCursor:

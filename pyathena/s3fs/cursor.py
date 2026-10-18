@@ -175,10 +175,14 @@ class S3FSCursor(WithFetch):
         Returns:
             Self reference for method chaining.
 
+        Raises:
+            ProgrammingError: If the cursor is closed.
+
         Example:
             >>> cursor.execute("SELECT * FROM my_table WHERE id = %(id)s", {"id": 123})
             >>> rows = cursor.fetchall()
         """
+        self._ensure_open()
         self._validate_execute_kwargs(kwargs, ("block_size", "csv_reader", "filesystem_class"))
         self._reset_state()
         options = ExecuteOptions.resolve(
@@ -199,10 +203,7 @@ class S3FSCursor(WithFetch):
             options=options,
         )
 
-        # Call user callbacks immediately after start_query_execution
-        self._call_on_start_query_execution(self.query_id, options)
-
-        query_execution = cast(AthenaQueryExecution, self._poll(self.query_id))
+        query_execution = cast(AthenaQueryExecution, self._poll(self.query_id, options))
         if query_execution.state == AthenaQueryExecution.STATE_SUCCEEDED:
             self.result_set = AthenaS3FSResultSet(
                 connection=self._connection,

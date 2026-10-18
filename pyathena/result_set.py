@@ -1015,11 +1015,20 @@ class WithResultSet:
         self._result_set: AthenaResultSet | None = None
 
     def _reset_state(self) -> None:
+        """Reset the execution state, closing the result set."""
         self._rowcount = -1
         self.query_id = None
-        if self.result_set and not self.result_set.is_closed:
-            self.result_set.close()
-        self.result_set = None
+        self._close_result_set()
+
+    def _close_result_set(self) -> None:
+        """Detach the result set from the cursor and close it.
+
+        The cursor drops the result set before the close starts, so a failed
+        close leaves a cursor without it.
+        """
+        result_set, self.result_set = self.result_set, None
+        if result_set is not None and not result_set.is_closed:
+            result_set.close()
 
     @property
     def result_set(self) -> AthenaResultSet | None:
@@ -1341,7 +1350,12 @@ class WithResultSet:
         return self.result_set.rownumber if self.result_set else None
 
     def close(self) -> None:
-        """Close the cursor and release associated resources."""
+        """Close the cursor and its result set.
+
+        Later operations on the cursor raise ``ProgrammingError``, and ``query_id``
+        keeps the ID of the last query. Closing a closed cursor does nothing.
+        """
+        self._closed = True
         self._rowcount = -1
         if self.result_set and not self.result_set.is_closed:
             self.result_set.close()
@@ -1368,8 +1382,9 @@ class WithFetch(WithResultSet, BaseCursor, CursorIterator):
             more rows.
 
         Raises:
-            ProgrammingError: If no result set is available.
+            ProgrammingError: If the cursor is closed or has no result set.
         """
+        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaResultSet, self.result_set)
@@ -1389,8 +1404,9 @@ class WithFetch(WithResultSet, BaseCursor, CursorIterator):
             The fetched rows.
 
         Raises:
-            ProgrammingError: If no result set is available.
+            ProgrammingError: If the cursor is closed or has no result set.
         """
+        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaResultSet, self.result_set)
@@ -1406,8 +1422,9 @@ class WithFetch(WithResultSet, BaseCursor, CursorIterator):
             The remaining rows.
 
         Raises:
-            ProgrammingError: If no result set is available.
+            ProgrammingError: If the cursor is closed or has no result set.
         """
+        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaResultSet, self.result_set)
@@ -1437,7 +1454,11 @@ class WithFetch(WithResultSet, BaseCursor, CursorIterator):
             **kwargs: Additional keyword arguments passed to each ``execute()``.
                 An empty parameter list makes no ``execute()`` call, so it does
                 not report unsupported keyword names.
+
+        Raises:
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         self._reset_state()
         rowcount = 0
         try:
@@ -1447,8 +1468,8 @@ class WithFetch(WithResultSet, BaseCursor, CursorIterator):
                 rowcount = rowcount + count if rowcount >= 0 and count >= 0 else -1
         except BaseException:
             # Keep the query ID available for diagnostics and explicit cancellation.
-            self.close()
-            self.result_set = None
+            self._rowcount = -1
+            self._close_result_set()
             raise
         self._reset_state()
         self._rowcount = rowcount
@@ -1457,8 +1478,10 @@ class WithFetch(WithResultSet, BaseCursor, CursorIterator):
         """Cancel the currently executing query.
 
         Raises:
-            ProgrammingError: If no query is currently executing.
+            ProgrammingError: If the cursor is closed or no query is currently
+                executing.
         """
+        self._ensure_open()
         if not self.query_id:
             raise ProgrammingError("QueryExecutionId is none or empty.")
         self._cancel(self.query_id)

@@ -70,7 +70,8 @@ class Cursor(WithFetch):
             encryption_option: S3 encryption option (SSE_S3, SSE_KMS, CSE_KMS).
             kms_key: KMS key for encryption.
             kill_on_interrupt: Cancel the query when a ``KeyboardInterrupt`` interrupts
-                ``execute()`` while it starts or waits for the query.
+                ``execute()`` while it starts the query, runs the
+                ``on_start_query_execution`` callbacks, or waits for the query.
             result_reuse_enable: Enable Athena query result reuse.
             result_reuse_minutes: Maximum age in minutes of a reused result.
             **kwargs: Arguments forwarded to ``WithResultSet.__init__`` and
@@ -154,6 +155,9 @@ class Cursor(WithFetch):
         Returns:
             Self reference for method chaining.
 
+        Raises:
+            ProgrammingError: If the cursor is closed.
+
         Example:
             >>> cursor.execute(
             ...     "SELECT * FROM table_with_complex_types",
@@ -163,6 +167,7 @@ class Cursor(WithFetch):
             ...     }
             ... )
         """
+        self._ensure_open()
         self._validate_execute_kwargs(kwargs)
         self._reset_state()
         options = ExecuteOptions.resolve(
@@ -183,10 +188,7 @@ class Cursor(WithFetch):
             options=options,
         )
 
-        # Call user callbacks immediately after start_query_execution
-        self._call_on_start_query_execution(self.query_id, options)
-
-        query_execution = cast(AthenaQueryExecution, self._poll(self.query_id))
+        query_execution = cast(AthenaQueryExecution, self._poll(self.query_id, options))
         if query_execution.state == AthenaQueryExecution.STATE_SUCCEEDED:
             self.result_set = self._result_set_class(
                 self._connection,

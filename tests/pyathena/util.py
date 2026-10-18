@@ -414,6 +414,20 @@ COMPLETED_CALCULATION_RESPONSES = {
 }
 
 
+# Athena's answers to a calculation that completes at its first status request
+# and writes standard output and error files.
+COMPLETED_CALCULATION_WITH_OUTPUT_RESPONSES = {
+    **COMPLETED_CALCULATION_RESPONSES,
+    "GetCalculationExecution": {
+        **COMPLETED_CALCULATION_RESPONSES["GetCalculationExecution"],
+        "Result": {
+            "StdOutS3Uri": "s3://bucket/stdout.txt",
+            "StdErrorS3Uri": "s3://bucket/stderr.txt",
+        },
+    },
+}
+
+
 def placeholder_connection(connection_class=Connection):
     """Build a connection with placeholder settings and credentials.
 

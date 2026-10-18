@@ -187,7 +187,10 @@ class TestPandasCursor:
                 next(dataframe_iterator)
             with pytest.raises(StopIteration):
                 dataframe_iterator.get_chunk()
-            if close_method != "execute":
+            if close_method == "cursor":
+                # A closed cursor rejects fetches, so read its result set directly.
+                assert cursor.result_set.fetchone() is None
+            elif close_method != "execute":
                 assert cursor.fetchone() is None
 
     @pytest.mark.parametrize("engine", ["c", "python"])
@@ -1106,6 +1109,37 @@ class TestPandasCursor:
 
     def test_cancel_initial(self, pandas_cursor):
         pytest.raises(ProgrammingError, pandas_cursor.cancel)
+
+    def test_closed(self, pandas_cursor):
+        """GH-1207: a closed cursor rejects operations."""
+        pandas_cursor.execute("SELECT * FROM one_row")
+        pandas_cursor.close()
+
+        with pytest.raises(ProgrammingError):
+            pandas_cursor.execute("SELECT * FROM one_row")
+        with pytest.raises(ProgrammingError):
+            pandas_cursor.as_pandas()
+        with pytest.raises(ProgrammingError):
+            next(pandas_cursor.iter_chunks())
+
+    def test_execute_interrupted_in_start_callback(self, pandas_cursor):
+        """GH-1207: an interrupt in on_start_query_execution stops the query."""
+        client = pandas_cursor.connection.client
+        reported = []
+
+        def on_start_query_execution(query_id):
+            reported.append(query_id)
+            raise KeyboardInterrupt
+
+        with (
+            patch.object(client, "stop_query_execution", wraps=client.stop_query_execution) as stop,
+            pytest.raises(KeyboardInterrupt),
+        ):
+            pandas_cursor.execute(
+                "SELECT * FROM one_row", on_start_query_execution=on_start_query_execution
+            )
+
+        stop.assert_called_once_with(QueryExecutionId=reported[0])
 
     def test_no_ops(self):
         conn = connect()

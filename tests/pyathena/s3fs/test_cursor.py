@@ -154,6 +154,32 @@ class TestS3FSCursor:
     def test_cancel_initial(self, s3fs_cursor):
         pytest.raises(ProgrammingError, s3fs_cursor.cancel)
 
+    def test_closed(self, s3fs_cursor):
+        """GH-1207: a closed cursor rejects execute()."""
+        s3fs_cursor.close()
+
+        with pytest.raises(ProgrammingError):
+            s3fs_cursor.execute("SELECT * FROM one_row")
+
+    def test_execute_interrupted_in_start_callback(self, s3fs_cursor):
+        """GH-1207: an interrupt in on_start_query_execution stops the query."""
+        client = s3fs_cursor.connection.client
+        reported = []
+
+        def on_start_query_execution(query_id):
+            reported.append(query_id)
+            raise KeyboardInterrupt
+
+        with (
+            patch.object(client, "stop_query_execution", wraps=client.stop_query_execution) as stop,
+            pytest.raises(KeyboardInterrupt),
+        ):
+            s3fs_cursor.execute(
+                "SELECT * FROM one_row", on_start_query_execution=on_start_query_execution
+            )
+
+        stop.assert_called_once_with(QueryExecutionId=reported[0])
+
     def test_no_ops(self):
         conn = connect(schema_name=ENV.schema)
         cursor = conn.cursor(S3FSCursor)

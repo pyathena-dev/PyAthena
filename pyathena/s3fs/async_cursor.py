@@ -225,11 +225,15 @@ class AsyncS3FSCursor(AsyncCursor):
         Returns:
             Tuple of (query_id, Future[AthenaS3FSResultSet]).
 
+        Raises:
+            ProgrammingError: If the cursor is closed.
+
         Example:
             >>> query_id, future = cursor.execute("SELECT * FROM my_table")
             >>> result_set = future.result()
             >>> rows = result_set.fetchall()
         """
+        self._ensure_open()
         self._validate_execute_kwargs(kwargs, ("block_size", "csv_reader", "filesystem_class"))
         options = ExecuteOptions.resolve(
             options,

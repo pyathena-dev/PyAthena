@@ -165,7 +165,11 @@ class AioPolarsCursor(WithAsyncFetch):
 
         Returns:
             Self reference for method chaining.
+
+        Raises:
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         await self._async_reset_state()
         options = ExecuteOptions.resolve(
             options,
@@ -216,7 +220,11 @@ class AioPolarsCursor(WithAsyncFetch):
 
         Returns:
             Polars DataFrame containing all query results.
+
+        Raises:
+            ProgrammingError: If the cursor is closed or has no result set.
         """
+        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaPolarsResultSet, self.result_set)
@@ -227,7 +235,11 @@ class AioPolarsCursor(WithAsyncFetch):
 
         Returns:
             Apache Arrow Table containing all query results.
+
+        Raises:
+            ProgrammingError: If the cursor is closed or has no result set.
         """
+        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaPolarsResultSet, self.result_set)

@@ -14,6 +14,10 @@ print(cursor.description)
 print(cursor.fetchall())
 ```
 
+Closing a cursor, for example at the end of a `with` block, also closes its result set.
+After that, `execute()`, `executemany()`, the fetch methods, and the other methods of the cursor raise `ProgrammingError`, as DB API 2.0 requires.
+The `query_id` property keeps the ID of the last query.
+
 ## Keyword arguments in PyAthena 4.0
 
 Starting with PyAthena 4.0, connection settings and cursor constructor settings must be passed as keyword arguments.
@@ -501,6 +505,7 @@ return the query ID immediately through their different execution model.
 
 With `kill_on_interrupt` enabled, which is the default, a `KeyboardInterrupt` while `execute()` waits for the query
 requests cancellation, waits until the query reaches a terminal state, and then propagates.
+A `KeyboardInterrupt` raised in an `on_start_query_execution` callback cancels the query in the same way.
 Cancellation is a best-effort request, so the query can still end as `SUCCEEDED` or `FAILED`.
 The `query_id` property keeps the ID of the interrupted query.
 If the cancellation request or that wait fails, the `KeyboardInterrupt` propagates with the error as its cause.

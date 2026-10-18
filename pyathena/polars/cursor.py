@@ -203,10 +203,14 @@ class PolarsCursor(WithFetch):
         Returns:
             Self reference for method chaining.
 
+        Raises:
+            ProgrammingError: If the cursor is closed.
+
         Example:
             >>> cursor.execute("SELECT * FROM sales WHERE year = 2023")
             >>> df = cursor.as_polars()  # Returns Polars DataFrame
         """
+        self._ensure_open()
         self._reset_state()
         options = ExecuteOptions.resolve(
             options,
@@ -227,9 +231,7 @@ class PolarsCursor(WithFetch):
             options=options,
         )
 
-        # Call user callbacks immediately after start_query_execution
-        self._call_on_start_query_execution(self.query_id, options)
-        query_execution = cast(AthenaQueryExecution, self._poll(self.query_id))
+        query_execution = cast(AthenaQueryExecution, self._poll(self.query_id, options))
         if query_execution.state == AthenaQueryExecution.STATE_SUCCEEDED:
             self.result_set = AthenaPolarsResultSet(
                 connection=self._connection,
@@ -260,7 +262,7 @@ class PolarsCursor(WithFetch):
             Polars DataFrame containing all query results.
 
         Raises:
-            ProgrammingError: If no query has been executed or no results are available.
+            ProgrammingError: If the cursor is closed or has no result set.
 
         Example:
             >>> cursor = connection.cursor(PolarsCursor)
@@ -269,6 +271,7 @@ class PolarsCursor(WithFetch):
             >>> print(f"DataFrame has {df.height} rows and {df.width} columns")
             >>> filtered = df.filter(pl.col("value") > 100)
         """
+        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaPolarsResultSet, self.result_set)
@@ -284,7 +287,7 @@ class PolarsCursor(WithFetch):
             Apache Arrow Table containing all query results.
 
         Raises:
-            ProgrammingError: If no query has been executed or no results are available.
+            ProgrammingError: If the cursor is closed or has no result set.
             ImportError: If pyarrow is not installed.
 
         Example:
@@ -293,6 +296,7 @@ class PolarsCursor(WithFetch):
             >>> table = cursor.as_arrow()
             >>> print(f"Table has {table.num_rows} rows and {table.num_columns} columns")
         """
+        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaPolarsResultSet, self.result_set)
@@ -312,7 +316,7 @@ class PolarsCursor(WithFetch):
             if chunksize was not specified.
 
         Raises:
-            ProgrammingError: If no result set is available.
+            ProgrammingError: If the cursor is closed or has no result set.
 
         Example:
             >>> # With chunking for large datasets
@@ -327,6 +331,7 @@ class PolarsCursor(WithFetch):
             >>> for df in cursor.iter_chunks():
             ...     process(df)  # Single DataFrame with all data
         """
+        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaPolarsResultSet, self.result_set)

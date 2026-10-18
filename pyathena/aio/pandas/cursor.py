@@ -183,7 +183,11 @@ class AioPandasCursor(WithAsyncFetch):
 
         Returns:
             Self reference for method chaining.
+
+        Raises:
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         await self._async_reset_state()
         options = ExecuteOptions.resolve(
             options,
@@ -241,7 +245,11 @@ class AioPandasCursor(WithAsyncFetch):
 
         Returns:
             DataFrame when chunksize is None, PandasDataFrameIterator when chunksize is set.
+
+        Raises:
+            ProgrammingError: If the cursor is closed or has no result set.
         """
+        self._ensure_open()
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaPandasResultSet, self.result_set)

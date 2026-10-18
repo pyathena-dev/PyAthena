@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from pyathena.aio.polars.cursor import AioPolarsCursor
+from pyathena.error import ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
 
@@ -75,3 +76,15 @@ class TestAioPolarsCursor:
         expected = {**cursor_kwargs, **execute_kwargs}
         expected["max_workers"] = expected.pop("s3_max_workers")
         assert {key: kwargs[key] for key in expected} == expected
+
+    async def test_closed(self, aio_polars_cursor):
+        """GH-1207: a closed cursor rejects operations."""
+        await aio_polars_cursor.execute("SELECT * FROM one_row")
+        aio_polars_cursor.close()
+
+        with pytest.raises(ProgrammingError):
+            await aio_polars_cursor.execute("SELECT * FROM one_row")
+        with pytest.raises(ProgrammingError):
+            aio_polars_cursor.as_polars()
+        with pytest.raises(ProgrammingError):
+            aio_polars_cursor.as_arrow()

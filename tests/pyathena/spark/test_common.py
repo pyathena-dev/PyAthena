@@ -52,6 +52,7 @@ def _calculation_cursor(cursor_class, kill_on_interrupt=True):
         ``CANCELED``.
     """
     cursor = cursor_class.__new__(cursor_class)  # bypass __init__ to avoid AWS calls
+    cursor._closed = False
     cursor._session_id = "session_id"
     cursor._connection = MagicMock()
     cursor._connection.client.start_calculation_execution.return_value = {
@@ -98,7 +99,7 @@ def _block_start(cursor, response=None):
     return started, release
 
 
-def _init_cursor(cursor_class, connection, **kwargs):
+def _init_cursor(cursor_class, connection, kill_on_interrupt=False, **kwargs):
     return cursor_class(
         connection=connection,
         converter=MagicMock(),
@@ -111,7 +112,7 @@ def _init_cursor(cursor_class, connection, **kwargs):
         poll_interval=0,
         encryption_option=None,
         kms_key=None,
-        kill_on_interrupt=False,
+        kill_on_interrupt=kill_on_interrupt,
         result_reuse_enable=False,
         result_reuse_minutes=60,
         **kwargs,
@@ -359,6 +360,29 @@ class TestSparkBaseCursor:
 
         connection.client.terminate_session.assert_called_once_with(SessionId="new-session")
 
+    @pytest.mark.parametrize("cursor_class", SPARK_CURSOR_CLASSES)
+    @pytest.mark.parametrize("kill_on_interrupt", [True, False])
+    def test_init_interrupted_while_starting_session(self, cursor_class, kill_on_interrupt):
+        """GH-1207: an interrupt during StartSession terminates the session (no AWS)."""
+        connection = _connection()
+        started = threading.Event()
+        release = threading.Event()
+
+        def start_session(**kwargs):
+            started.set()
+            assert release.wait(_TIMEOUT)
+            return {"SessionId": "new-session"}
+
+        connection.client.start_session.side_effect = start_session
+        waits, raised = interrupt_start_waits(started, release)
+
+        with waits, pytest.raises(KeyboardInterrupt) as exc_info:
+            _init_cursor(cursor_class, connection, kill_on_interrupt=kill_on_interrupt)
+
+        assert exc_info.value is raised[0]
+        assert exc_info.value.__cause__ is None
+        connection.client.terminate_session.assert_called_once_with(SessionId="new-session")
+
     @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
     def test_init_keeps_original_error_when_cleanup_fails(self, cursor_class):
         connection = _connection()
@@ -475,4 +499,4 @@ class TestSparkBaseCursor:
 
         connection.client.terminate_session.assert_not_called()
         with pytest.raises(RuntimeError):
-            cursor.calculation_execution("calculation_id")
+            cursor._executor.submit(lambda: None)

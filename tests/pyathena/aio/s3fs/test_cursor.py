@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from pyathena.aio.s3fs.cursor import AioS3FSCursor
+from pyathena.error import ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.s3fs.reader import AthenaCSVReader, EmptyStringAsNullCSVReader
 from pyathena.util import RetryConfig
@@ -47,3 +48,10 @@ class TestAioS3FSCursor:
         kwargs = result_set_class.call_args.kwargs
         expected = {**cursor_kwargs, **execute_kwargs}
         assert {key: kwargs[key] for key in expected} == expected
+
+    async def test_closed(self, aio_s3fs_cursor):
+        """GH-1207: a closed cursor rejects execute()."""
+        aio_s3fs_cursor.close()
+
+        with pytest.raises(ProgrammingError):
+            await aio_s3fs_cursor.execute("SELECT * FROM one_row")
