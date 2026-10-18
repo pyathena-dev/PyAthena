@@ -582,7 +582,7 @@ PyAthena converts `date`, `timestamp`, and `timestamp with time zone` columns af
 
 - With `parse_dates`, PyAthena converts none of them.
 - A `dtype` that is not a mapping, or a `defaultdict`, applies to every column.
-- A `dtype` or `converters` entry that names a column, by its label or its position, applies to that column only.
+- A `dtype` or `converters` entry applies to the columns that pandas applies it to: the column with its label, and for `dtype`, the columns that pandas renames from duplicates of that name, such as `ts.1`. The C engine also takes an integer key as a position in the file, and the Python engine, if no column has that label, as a position among the columns read.
 - A conversion function that the converter maps to one of these types, other than the default `timestamp with time zone` one, applies to the columns of that type.
 
 pandas reads these columns as the options say, and the fetch methods return their values as pandas holds them.

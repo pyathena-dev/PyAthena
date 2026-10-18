@@ -25,7 +25,6 @@ from botocore.response import StreamingBody
 from pandas.testing import assert_frame_equal
 from pyarrow import csv as pyarrow_csv
 
-from pyathena.converter import _to_datetime_with_tz
 from pyathena.error import DataError, OperationalError, ProgrammingError
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.model import AthenaQueryExecution
@@ -49,6 +48,12 @@ from tests.pyathena.util import (
 _PADDING = "x" * 120
 # A CSV result file of two rows.
 _TEXT_CSV = '"v"\n"a"\n"b"\n'
+
+
+# A timestamp with nanoseconds, as PyAthena converts it and as pandas parses it.
+_TIMESTAMP_TEXT = "2020-01-02 03:04:05.123456789"
+_CONVERTED = datetime(2020, 1, 2, 3, 4, 5, 123456)
+_PARSED = pd.Timestamp(_TIMESTAMP_TEXT)
 
 
 def _typed_values(rows):
@@ -1119,56 +1124,114 @@ class TestAthenaPandasResultSet:
         assert type(result_set.as_pandas()["ts"].iloc[0]) is type(expected)
 
     @pytest.mark.parametrize(
-        ("kwargs", "expected"),
+        ("engine", "kwargs", "expected"),
         [
-            # pandas takes positions as converters and dtype keys.
+            # The C engine takes an integer key as a position in the file.
             pytest.param(
+                "c",
                 {"converters": {1: lambda value: "converted"}},
-                (datetime(2020, 1, 2, 3, 4, 5, 123456), "converted"),
-                id="converters_position",
+                (_CONVERTED, "converted"),
+                id="c-converters_position",
             ),
-            # pandas parses the dates of PyAthena's parse_dates after the dtype.
+            pytest.param("c", {"dtype": {1: "str"}}, (_CONVERTED, _PARSED), id="c-dtype_position"),
+            # The Python engine takes it as a position among the columns that are read,
+            # and parses the dates of parse_dates without the column's converter.
             pytest.param(
-                {"dtype": {1: "str"}},
-                (
-                    datetime(2020, 1, 2, 3, 4, 5, 123456),
-                    pd.Timestamp("2020-01-02 03:04:05.123456789"),
-                ),
-                id="dtype_position",
+                "python",
+                {"converters": {1: lambda value: "converted"}},
+                (_CONVERTED, _PARSED),
+                id="python-converters_position",
+            ),
+            # The C engine takes an integer key as a label and a position, the Python
+            # engine as a label only, if a column has that label.
+            pytest.param(
+                "c",
+                {"names": [1, 0], "dtype": {0: "str"}},
+                (_PARSED, _PARSED),
+                id="c-dtype_label_and_position",
             ),
             pytest.param(
+                "python",
+                {"names": [1, 0], "dtype": {0: "str"}},
+                (_CONVERTED, _PARSED),
+                id="python-dtype_label",
+            ),
+            # A dtype key also names the columns that pandas renamed from its duplicates,
+            # and a converters key does not.
+            pytest.param(
+                "c", {"dtype": OrderedDict(ts="str")}, (_PARSED, _PARSED), id="c-dtype_duplicates"
+            ),
+            pytest.param(
+                "python",
+                {"dtype": OrderedDict(ts="str")},
+                (_PARSED, _PARSED),
+                id="python-dtype_duplicates",
+            ),
+            pytest.param(
+                "c",
+                {"converters": {"ts": lambda value: "converted"}},
+                ("converted", _CONVERTED),
+                id="c-converters_duplicates",
+            ),
+            # A dtype mapping that names no temporal column keeps their conversion.
+            pytest.param(
+                "c",
                 {"dtype": OrderedDict(n="Int64")},
-                (datetime(2020, 1, 2, 3, 4, 5, 123456),) * 2,
-                id="dtype_mapping",
+                (_CONVERTED, _CONVERTED),
+                id="c-dtype_mapping",
             ),
             # pandas applies the default to the columns that a defaultdict does not name.
             pytest.param(
+                "c",
                 {"dtype": defaultdict(lambda: "str", n="Int64")},
-                (pd.Timestamp("2020-01-02 03:04:05.123456789"),) * 2,
-                id="dtype_defaultdict",
+                (_PARSED, _PARSED),
+                id="c-dtype_defaultdict",
             ),
         ],
     )
-    def test_temporal_options_by_position_and_mapping(self, tmp_path, kwargs, expected):
-        """dtype and converters entries name columns by label or position, as in pandas.
+    def test_temporal_options_by_key(self, tmp_path, engine, kwargs, expected):
+        """dtype and converters entries apply to temporal columns as pandas applies them.
 
-        A dtype mapping that names no temporal column keeps their conversion, and a
-        defaultdict applies to every column. The columns have the same name.
+        pandas parses the dates of PyAthena's parse_dates after the dtype, without
+        PyAthena's truncation. The columns have the same name.
         """
         result_set = _local_result_set(
             LocalBucketFileSystem(tmp_path),
             [("ts", "timestamp"), ("ts", "timestamp")],
-            '"ts","ts"\n"2020-01-02 03:04:05.123456789","2020-01-02 03:04:05.123456789"\n',
+            f'"ts","ts"\n"{_TIMESTAMP_TEXT}","{_TIMESTAMP_TEXT}"\n',
+            engine=engine,
             **kwargs,
         )
         assert result_set.fetchone() == expected
+
+    @pytest.mark.parametrize(
+        ("engine", "position", "expected"),
+        [
+            # The C engine takes positions in the file, where ts is the second column.
+            pytest.param("c", 1, "converted", id="c-file_position"),
+            pytest.param("c", 0, _CONVERTED, id="c-unread_position"),
+            # The Python engine takes positions among the columns that are read, and
+            # parses the dates of parse_dates without the column's converter.
+            pytest.param("python", 0, _PARSED, id="python-read_position"),
+        ],
+    )
+    def test_temporal_converters_position_with_usecols(self, tmp_path, engine, position, expected):
+        """A converters position names a column of the file or of the columns read, by engine."""
+        result_set = _local_result_set(
+            LocalBucketFileSystem(tmp_path),
+            [("n", "integer"), ("ts", "timestamp")],
+            f'"n","ts"\n"1","{_TIMESTAMP_TEXT}"\n',
+            engine=engine,
+            usecols=["ts"],
+            converters={position: lambda value: "converted"},
+        )
+        assert result_set.fetchone() == (expected,)
 
     def test_time_zone_before_first_transition(self, tmp_path):
         """Local times before a zone's first transition convert by the zone's offset then.
 
         pandas reports them as nonexistent; the zone's local mean time gives their
-        instant. Only these values are converted one at a time, by the converter's
-        function, and the other values of their zones are localized together.
+        instant. The other values of their zones keep the zones' later offsets.
         """
         data = (
             '"tstz"\n'
@@ -1177,18 +1240,11 @@ class TestAthenaPandasResultSet:
             '"0001-01-01 00:00:00.000 Asia/Tokyo"\n'
             '"2020-01-02 03:04:05.000 Asia/Tokyo"\n'
         )
-        # The spy is the converter's function, which keeps the default conversion.
-        spy = MagicMock(wraps=_to_datetime_with_tz)
-        converter = DefaultPandasTypeConverter()
-        converter.set("timestamp with time zone", spy)
-        with patch("pyathena.pandas.result_set._to_datetime_with_tz", spy):
-            result_set = _local_result_set(
-                LocalBucketFileSystem(tmp_path),
-                [("tstz", "timestamp with time zone")],
-                data,
-                converter=converter,
-            )
-            df = result_set.as_pandas()
+        result_set = _local_result_set(
+            LocalBucketFileSystem(tmp_path), [("tstz", "timestamp with time zone")], data
+        )
+        df = result_set.as_pandas()
+        assert str(df["tstz"].dtype) == "datetime64[us, UTC]"
         values = df["tstz"].dt.tz_localize(None).to_numpy()
         # America/New_York's local mean time is -04:56:02 and Asia/Tokyo's +09:18:59.
         expected = [
@@ -1198,10 +1254,6 @@ class TestAthenaPandasResultSet:
             "2020-01-01T18:04:05",
         ]
         np.testing.assert_array_equal(values, np.array(expected, dtype="datetime64[us]"))
-        assert [c.args for c in spy.call_args_list] == [
-            ("1500-01-01 00:00:00.000 America/New_York",),
-            ("0001-01-01 00:00:00.000 Asia/Tokyo",),
-        ]
 
     @pytest.mark.parametrize("infer_string", [True, False])
     @pytest.mark.parametrize("type_", ["timestamp", "date", "timestamp with time zone"])
