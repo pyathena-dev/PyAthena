@@ -2596,12 +2596,22 @@ class TestAioS3StreamedFile:
             for part_number, operation in operations.items()
         }
 
+        queued = threading.Event()
+        submit = S3AioThreadPool.submit
+
+        def record_commit(pool, fn, *args, **kwargs):
+            if getattr(fn, "__name__", None) == "_complete_upload":
+                queued.set()
+            return submit(pool, fn, *args, **kwargs)
+
         def upload_part(part_number, **kwargs):
             try:
                 if part_number == 2:
-                    # Failing once the parts before and after it are running.
+                    # Failing once the parts before and after it are running,
+                    # and the commit waits for the thread of this part.
                     for operation in operations.values():
                         assert operation.started.wait(EVENT_TIMEOUT)
+                    assert queued.wait(EVENT_TIMEOUT)
                     raise PermissionError("Access Denied")
                 return throttled[part_number]()
             finally:
@@ -2614,7 +2624,10 @@ class TestAioS3StreamedFile:
         f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size, max_workers=3)
         await f.write(b"a" * block_size * 3)
         started = time.monotonic()
-        with pytest.raises(PermissionError, match="Access Denied"):
+        with (
+            mock.patch.object(S3AioThreadPool, "submit", autospec=True, side_effect=record_commit),
+            pytest.raises(PermissionError, match="Access Denied"),
+        ):
             await f.close()
 
         assert time.monotonic() - started < EVENT_TIMEOUT
@@ -2640,6 +2653,7 @@ class TestAioS3StreamedFile:
         with pytest.raises(PermissionError, match="Access Denied"):
             await f.write(b"a")
 
+        assert f.tell() == block_size
         assert f.closed
         with pytest.raises(ValueError, match="closed"):
             await f.write(b"a")
