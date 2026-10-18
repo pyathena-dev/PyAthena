@@ -82,6 +82,7 @@ class SparkCursor(SparkBaseCursor, WithCalculationExecution):
 
         Raises:
             ProgrammingError: If the cursor is closed.
+            OperationalError: If reading the file from S3 fails.
         """
         self._ensure_open()
         if not self._calculation_execution or not self._calculation_execution.std_out_s3_uri:
@@ -101,6 +102,7 @@ class SparkCursor(SparkBaseCursor, WithCalculationExecution):
 
         Raises:
             ProgrammingError: If the cursor is closed.
+            OperationalError: If reading the file from S3 fails.
         """
         self._ensure_open()
         if not self._calculation_execution or not self._calculation_execution.std_error_s3_uri:
