@@ -10,9 +10,10 @@ import inspect
 import io
 import re
 import threading
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 from datetime import UTC, date, datetime
 from unittest.mock import MagicMock, PropertyMock, patch
+from zoneinfo import ZoneInfo
 
 import boto3
 import numpy as np
@@ -50,10 +51,12 @@ _PADDING = "x" * 120
 _TEXT_CSV = '"v"\n"a"\n"b"\n'
 
 
-# A timestamp with nanoseconds, as PyAthena converts it and as pandas parses it.
+# Temporal values as pandas reads them with PyAthena's parse_dates and converters.
 _TIMESTAMP_TEXT = "2020-01-02 03:04:05.123456789"
-_CONVERTED = datetime(2020, 1, 2, 3, 4, 5, 123456)
 _PARSED = pd.Timestamp(_TIMESTAMP_TEXT)
+_DATE = pd.Timestamp("2020-01-02")
+_TOKYO_TEXT = "2020-01-02 03:04:05.000 Asia/Tokyo"
+_TOKYO = datetime(2020, 1, 2, 3, 4, 5, tzinfo=ZoneInfo("Asia/Tokyo"))
 
 
 def _typed_values(rows):
@@ -1123,123 +1126,6 @@ class TestAthenaPandasResultSet:
         assert result_set.fetchone() == (expected,)
         assert type(result_set.as_pandas()["ts"].iloc[0]) is type(expected)
 
-    @pytest.mark.parametrize(
-        ("engine", "kwargs", "expected"),
-        [
-            # The C engine takes an integer key as a position in the file.
-            pytest.param(
-                "c",
-                {"converters": {1: lambda value: "converted"}},
-                (_CONVERTED, "converted"),
-                id="c-converters_position",
-            ),
-            pytest.param("c", {"dtype": {1: "str"}}, (_CONVERTED, _PARSED), id="c-dtype_position"),
-            # The Python engine takes it as a position among the columns that are read,
-            # and parses the dates of parse_dates without the column's converter.
-            pytest.param(
-                "python",
-                {"converters": {1: lambda value: "converted"}},
-                (_CONVERTED, _PARSED),
-                id="python-converters_position",
-            ),
-            # The C engine takes an integer key as a label and a position, the Python
-            # engine as a label only, if a column has that label.
-            pytest.param(
-                "c",
-                {"names": [1, 0], "dtype": {0: "str"}},
-                (_PARSED, _PARSED),
-                id="c-dtype_label_and_position",
-            ),
-            pytest.param(
-                "python",
-                {"names": [1, 0], "dtype": {0: "str"}},
-                (_CONVERTED, _PARSED),
-                id="python-dtype_label",
-            ),
-            # A dtype key also names the columns that pandas renamed from its duplicates,
-            # and a converters key does not.
-            pytest.param(
-                "c", {"dtype": OrderedDict(ts="str")}, (_PARSED, _PARSED), id="c-dtype_duplicates"
-            ),
-            pytest.param(
-                "python",
-                {"dtype": OrderedDict(ts="str")},
-                (_PARSED, _PARSED),
-                id="python-dtype_duplicates",
-            ),
-            pytest.param(
-                "c",
-                {"converters": {"ts": lambda value: "converted"}},
-                ("converted", _CONVERTED),
-                id="c-converters_duplicates",
-            ),
-            # A dtype mapping that names no temporal column keeps their conversion.
-            pytest.param(
-                "c",
-                {"dtype": OrderedDict(n="Int64")},
-                (_CONVERTED, _CONVERTED),
-                id="c-dtype_mapping",
-            ),
-            # pandas applies the default to the columns that a defaultdict does not name.
-            pytest.param(
-                "c",
-                {"dtype": defaultdict(lambda: "str", n="Int64")},
-                (_PARSED, _PARSED),
-                id="c-dtype_defaultdict",
-            ),
-        ],
-    )
-    def test_temporal_options_by_key(self, tmp_path, engine, kwargs, expected):
-        """dtype and converters entries apply to temporal columns as pandas applies them.
-
-        pandas parses the dates of PyAthena's parse_dates after the dtype, without
-        PyAthena's truncation. The columns have the same name.
-        """
-        result_set = _local_result_set(
-            LocalBucketFileSystem(tmp_path),
-            [("ts", "timestamp"), ("ts", "timestamp")],
-            f'"ts","ts"\n"{_TIMESTAMP_TEXT}","{_TIMESTAMP_TEXT}"\n',
-            engine=engine,
-            **kwargs,
-        )
-        assert result_set.fetchone() == expected
-
-    def test_temporal_dtype_position_with_pyarrow(self, tmp_path):
-        """The PyArrow engine takes no dtype positions, so the columns are converted."""
-        data = '"a","b"\n' + f'"{_TIMESTAMP_TEXT}","{_TIMESTAMP_TEXT}"\n' * 3
-        assert len(data) >= AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES
-        result_set = _local_result_set(
-            LocalBucketFileSystem(tmp_path),
-            [("a", "timestamp"), ("b", "timestamp")],
-            data,
-            engine="pyarrow",
-            dtype={1: "str"},
-        )
-        assert result_set.fetchone() == (_CONVERTED, _CONVERTED)
-
-    @pytest.mark.parametrize(
-        ("engine", "position", "expected"),
-        [
-            # The C engine takes positions in the file, where ts is the second column.
-            pytest.param("c", 1, "converted", id="c-file_position"),
-            pytest.param("c", 0, _CONVERTED, id="c-unread_position"),
-            # The Python engine takes positions among the columns that are read, and
-            # parses the dates of parse_dates without the column's converter.
-            pytest.param("python", 0, _PARSED, id="python-read_position"),
-        ],
-    )
-    def test_temporal_converters_position_with_usecols(self, tmp_path, engine, position, expected):
-        """A converters position names a column of the file or of the columns read, by engine."""
-        result_set = _local_result_set(
-            LocalBucketFileSystem(tmp_path),
-            [("n", "integer"), ("ts", "timestamp")],
-            f'"n","ts"\n"1","{_TIMESTAMP_TEXT}"\n',
-            engine=engine,
-            usecols=["ts"],
-            converters={position: lambda value: "converted"},
-        )
-        assert result_set.fetchone() == (expected,)
-
     def test_time_zone_before_first_transition(self, tmp_path):
         """Local times before a zone's first transition convert by the zone's offset then.
 
@@ -1307,26 +1193,70 @@ class TestAthenaPandasResultSet:
         assert_frame_equal(frames[1], frames[0])
         assert rows[1] == rows[0]
 
+    @pytest.mark.parametrize("engine", ["c", "python", "pyarrow"])
     @pytest.mark.parametrize(
         ("kwargs", "expected"),
         [
-            # parse_dates keeps PyAthena from converting any temporal column: the
-            # converter's function gives the value in its zone.
-            pytest.param({"parse_dates": ["ts"]}, "+09:00", id="parse_dates"),
-            # converters that do not name the column keep its conversion, to UTC.
-            pytest.param({"converters": {}}, "+00:00", id="converters"),
-            pytest.param({"converters": {"ts": str}}, "+00:00", id="converters_of_other"),
+            # PyAthena's parse_dates and converters read the temporal columns.
+            pytest.param({"dtype": {"n": "Int64"}}, (_PARSED, _DATE, _TOKYO, 1), id="dtype"),
+            # The converters replace the timestamp with time zone conversion.
+            pytest.param({"converters": {}}, (_PARSED, _DATE, _TOKYO_TEXT, 1), id="converters"),
+            # parse_dates replaces PyAthena's.
+            pytest.param(
+                {"parse_dates": ["ts"]},
+                (_PARSED, "2020-01-02", _TOKYO, 1),
+                id="parse_dates",
+            ),
         ],
     )
-    def test_time_zone_options_take_precedence(self, tmp_path, kwargs, expected):
-        """Options apply to timestamp with time zone columns as to the other temporal ones."""
+    def test_temporal_options_read_by_pandas(self, tmp_path, engine, kwargs, expected):
+        """With parse_dates, dtype, or converters, pandas reads every temporal column.
+
+        PyAthena's own options read them as before its conversion, and the fetch
+        methods return the values as pandas holds them, with any engine.
+        """
+        data = '"ts","d","tstz","n"\n' + (
+            f'"{_TIMESTAMP_TEXT}","2020-01-02","{_TOKYO_TEXT}","1"\n' * 2
+        )
+        assert len(data) >= AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES
         result_set = _local_result_set(
             LocalBucketFileSystem(tmp_path),
-            [("ts", "timestamp"), ("tstz", "timestamp with time zone")],
-            '"ts","tstz"\n"2020-01-02 03:04:05.000","2020-01-02 03:04:05.000 Asia/Tokyo"\n',
+            [
+                ("ts", "timestamp"),
+                ("d", "date"),
+                ("tstz", "timestamp with time zone"),
+                ("n", "integer"),
+            ],
+            data,
+            engine=engine,
             **kwargs,
         )
-        assert result_set.fetchone()[1].isoformat().endswith(expected)
+        assert result_set.fetchone() == expected
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            pytest.param({"dtype": {"n": "Int64"}}, id="dtype"),
+            # pyarrow reads the dates of a column that parse_dates does not name as date
+            # objects, as pandas' PyArrow engine does.
+            pytest.param({"parse_dates": ["ts", "d"]}, id="parse_dates"),
+        ],
+    )
+    def test_temporal_options_read_by_pandas_with_pyarrow(self, tmp_path, kwargs):
+        """The PyArrow engine reads temporal columns given these options as the C engine."""
+        data = '"ts","d","n"\n' + f'"{_TIMESTAMP_TEXT}","2020-01-02","1"\n' * 3
+        types = [("ts", "timestamp"), ("d", "date"), ("n", "integer")]
+        frames, rows = [], []
+        with patch("pyarrow.csv.read_csv", wraps=pyarrow_csv.read_csv) as pyarrow_read:
+            for engine in ("c", "pyarrow"):
+                result_set = _local_result_set(
+                    LocalBucketFileSystem(tmp_path / engine), types, data, engine=engine, **kwargs
+                )
+                frames.append(result_set.as_pandas())
+                rows.append(result_set.fetchall())
+        assert pyarrow_read.called
+        assert_frame_equal(frames[1], frames[0])
+        assert rows[1] == rows[0]
 
     def test_custom_time_zone_converter(self, tmp_path):
         """A conversion function that the converter maps to timestamp with time zone wins."""

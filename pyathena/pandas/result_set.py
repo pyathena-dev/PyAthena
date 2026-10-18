@@ -6,7 +6,7 @@ import csv
 import importlib
 import logging
 import sys
-from collections import abc, defaultdict
+from collections import abc
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
@@ -1005,7 +1005,7 @@ class AthenaPandasResultSet(AthenaResultSet):
                 and "converters" not in self._kwargs
                 and not self.converters.keys()
                 - self._get_csv_temporal_converters(
-                    [(i, d[0], d) for i, d in enumerate(self.description or [])], "pyarrow"
+                    [(d[0], d) for d in self.description or []]
                 ).keys()
                 # The pyarrow engine does not rename columns with the same name, and
                 # the column labels cannot be resolved for it (see
@@ -1213,67 +1213,27 @@ class AthenaPandasResultSet(AthenaResultSet):
         }
 
     def _get_csv_temporal_converters(
-        self, columns: list[tuple[int, Any, tuple[Any, ...]]], csv_engine: str
+        self, columns: list[tuple[Any, tuple[Any, ...]]]
     ) -> dict[Any, _TemporalConverter]:
         """Get the converters of the temporal columns that are converted after reading.
 
         PyAthena converts the ``timestamp``, ``date``, and ``timestamp with time zone``
-        columns after reading, unless options given to ``execute()`` or the converter
-        decide how they are read: ``parse_dates``, with which PyAthena converts none of
-        them, a ``dtype`` that is not a mapping or is a ``defaultdict``, which applies
-        to every column, a ``dtype`` or ``converters`` entry that pandas applies to the
-        column, or a conversion function that the converter maps to the type, other
-        than the default ``timestamp with time zone`` one.
-
-        The entries apply to columns as in ``pandas.read_csv()``: a key names the
-        column with that label, and a ``dtype`` key also the columns that pandas
-        renamed from a duplicate of that name, such as ``ts.1``. The C engine also
-        takes an integer key as the position of a column in the file, and the Python
-        engine, if no column has that label, as its position among the columns that
-        are read. The PyArrow engine takes no positions.
+        columns after reading, unless ``parse_dates``, ``dtype``, or ``converters`` is
+        given to ``execute()``, with which pandas reads them, or the converter maps the
+        type to a conversion function other than the default ``timestamp with time
+        zone`` one.
 
         Args:
-            columns: The position in the result file, the label, and the description
-                of each column that is read, in the order of the file.
-            csv_engine: The CSV engine that reads the file.
+            columns: The label and the description of each column that is read.
 
         Returns:
             The converters keyed by column label.
         """
-        if "parse_dates" in self._kwargs:
+        if self._kwargs.keys() & {"parse_dates", "dtype", "converters"}:
             return {}
-        dtype = self._kwargs.get("dtype")
-        converters = self._kwargs.get("converters") or {}
         mappings = self._converter.mappings
-        labels = {label for _, label, _ in columns}
-        # Without names given to execute(), pandas renames duplicates of a name, and
-        # applies the name's dtype to them.
-        renamed = "names" not in self._kwargs
-        read_positions = {position: i for i, (position, _, _) in enumerate(columns)}
-
-        def applies(options: Mapping[Any, Any], position: int, label: Any, name: Any) -> bool:
-            """Whether pandas applies an entry of the options to a column.
-
-            Args:
-                options: The ``dtype`` or ``converters`` mapping.
-                position: The position of the column in the file.
-                label: The label of the column.
-                name: The name of the column, which a ``dtype`` key also names.
-
-            Returns:
-                True if an entry names the column.
-            """
-            if label in options or (options is dtype and renamed and name in options):
-                return True
-            if csv_engine == "c":
-                return position in options
-            if csv_engine == "python":
-                output_position = read_positions[position]
-                return output_position not in labels and output_position in options
-            return False
-
         temporal_converters = {}
-        for position, label, d in columns:
+        for label, d in columns:
             type_ = d[1]
             if type_ not in _CSV_TEMPORAL_TYPES:
                 continue
@@ -1281,16 +1241,6 @@ class AthenaPandasResultSet(AthenaResultSet):
                 if mappings.get(type_) is not _to_datetime_with_tz:
                     continue
             elif type_ in mappings:
-                continue
-            if "dtype" in self._kwargs and (
-                # pandas applies the default of a defaultdict to the columns it does not
-                # name.
-                not isinstance(dtype, Mapping)
-                or isinstance(dtype, defaultdict)
-                or applies(dtype, position, label, d[0])
-            ):
-                continue
-            if applies(converters, position, label, d[0]):
                 continue
             temporal_converters[label] = _TemporalConverter(type_)
         return temporal_converters
@@ -1551,13 +1501,13 @@ class AthenaPandasResultSet(AthenaResultSet):
 
         description = self.description or []
         self._csv_temporal_converters = self._get_csv_temporal_converters(
-            [(i, d[0], d) for i, d in enumerate(description)], csv_engine
+            [(d[0], d) for d in description]
         )
-        # The temporal columns are read as text, unless a dtype given to execute()
-        # replaces PyAthena's, with which pandas parses them first. pandas' PyArrow
-        # engine turns NULL into "None" with the NumPy str dtype, which str means
-        # without future.infer_string, so the PyArrow engine reads pyarrow strings.
-        temporal = {} if "dtype" in self._kwargs else self._csv_temporal_converters
+        # The temporal columns that are converted after reading are read as text.
+        # pandas' PyArrow engine turns NULL into "None" with the NumPy str dtype, which
+        # str means without future.infer_string, so the PyArrow engine reads pyarrow
+        # strings.
+        temporal = self._csv_temporal_converters
         text_dtype = "string[pyarrow]" if csv_engine == "pyarrow" else "str"
         read_csv_kwargs: dict[str, Any] = {
             "sep": sep,
@@ -1723,16 +1673,8 @@ class AthenaPandasResultSet(AthenaResultSet):
         columns = [
             (label, d) for label, d in zip(labels, description, strict=True) if label is not None
         ]
-        self._csv_temporal_converters = self._get_csv_temporal_converters(
-            [
-                (i, label, d)
-                for i, (label, d) in enumerate(zip(labels, description, strict=True))
-                if label is not None
-            ],
-            read_csv_kwargs["engine"],
-        )
-        # See _get_csv_read_options().
-        temporal = {} if "dtype" in self._kwargs else self._csv_temporal_converters
+        self._csv_temporal_converters = self._get_csv_temporal_converters(columns)
+        temporal = self._csv_temporal_converters
         if "dtype" not in self._kwargs:
             read_csv_kwargs["dtype"] = {
                 **{
