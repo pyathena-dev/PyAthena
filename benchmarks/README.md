@@ -44,7 +44,7 @@ On the EC2 instance, the dedicated checkout's root `/opt/pyathena/.venv` holds t
 The `polars1` and `polars2` dependency groups select Polars 1.x or 2.x, which PolarsCursor reads with different code paths.
 The environments above have `polars1`; a second environment beside each, `benchmarks/.venv-polars2` or `/opt/pyathena/.venv-polars2`, has `polars2`.
 The root `pyproject.toml` declares both groups and the root `dev` group as conflicting, so `uv.lock` resolves each of them separately.
-Select one of the two groups in every sync: without either, the environment gets whichever Polars version the lock resolves.
+The benchmark's default dependency groups include `polars1`; a sync with `--no-default-groups` needs `--group polars1` or `--group polars2`, or it installs whichever Polars version the lock resolves without them.
 The root `uv build -v` still builds only PyAthena, including a wheel built from its sdist.
 Benchmark dependencies do not become PyAthena runtime dependencies, and `uv sync --group dev` at the root does not install them.
 
