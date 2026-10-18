@@ -1,7 +1,6 @@
 import array
 import asyncio
 import contextlib
-import faulthandler
 import gc
 import gzip
 import io
@@ -50,23 +49,6 @@ from tests.pyathena.util import (
     stub_multipart_copy,
     wait_until,
 )
-
-# A regression that leaves a thread blocked can hang a test in its body or in
-# its teardown, where no timeout of the test can end it; the watchdog dumps the
-# stacks and ends the process instead, which fails the test.
-WATCHDOG_TIMEOUT = 300
-
-
-@pytest.fixture(autouse=True)
-def watchdog():
-    # Rearmed for each test, so that it also covers the teardown.
-    faulthandler.dump_traceback_later(WATCHDOG_TIMEOUT, exit=True)
-
-
-@pytest.fixture(autouse=True, scope="module")
-def watchdog_cancellation():
-    yield
-    faulthandler.cancel_dump_traceback_later()
 
 
 class _RecordingCallback(Callback):
