@@ -657,8 +657,8 @@ class _S3WriteSession:
                 return
             state = _S3WriteState.ACTIVE if self._multipart else _S3WriteState.IDLE
             self._refuse_unless(state, operation="commit")
-            # Set first, so that an interrupt right after the state changes
-            # leaves a reservation that the commit takes.
+            # Set first, so that a COMPLETING state that this sets always has
+            # its reservation for the commit to take.
             self._reservation = state
             self._state = _S3WriteState.COMPLETING
 
@@ -686,8 +686,8 @@ class _S3WriteSession:
                 return False
             if self._state is _S3WriteState.ABORTING:
                 return True
-            # Set first, so that an interrupt right after the state changes
-            # leaves the abort for abort() to take over.
+            # Set first, so that an ABORTING state that this sets is always
+            # left for abort() to take over, even after an interrupt.
             self._abort_pending = True
             self._state = _S3WriteState.ABORTING
             waiters = self._take_waiters()
