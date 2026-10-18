@@ -1303,7 +1303,8 @@ class AthenaPandasResultSet(AthenaResultSet):
             label: The label of the column.
 
         Returns:
-            The conversion function, or the ``_JSONConverter`` of a json column.
+            The conversion function, the ``_JSONConverter`` of a json column, or the
+            ``_TimeZoneConverter`` of a ``timestamp with time zone`` column.
         """
         converter = self._converter.get(type_)
         if type_ == "json":
