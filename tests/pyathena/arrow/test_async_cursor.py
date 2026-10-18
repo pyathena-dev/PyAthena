@@ -87,7 +87,9 @@ class TestAsyncArrowCursor:
             "SELECT CAST(1 AS INT) AS foobar FROM one_row WHERE false"
         )
         result_set = future.result()
-        assert async_arrow_cursor.description(query_id).result() == result_set.description
+        assert result_set.state == AthenaQueryExecution.STATE_SUCCEEDED
+        assert result_set.description == []
+        assert async_arrow_cursor.description(query_id).result() == []
 
     @pytest.mark.parametrize(
         "async_arrow_cursor",

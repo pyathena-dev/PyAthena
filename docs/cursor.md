@@ -159,7 +159,7 @@ query_id, future = cursor.execute("SELECT * FROM many_rows")
 The return value of the [future object](https://docs.python.org/3/library/concurrent.futures.html#future-objects) is an `AthenaResultSet` object.
 This object has an interface that can fetch and iterate query results similar to synchronous cursors.
 It also has information on the result of query execution.
-A future that is still running when the cursor closes resolves with a closed result set, unless it was just finishing; a result set whose future resolved before the close stays open until you close it.
+A future that still waits for its query when the cursor closes raises `ProgrammingError`, and one that is reading its result resolves with a closed result set (see "Basic usage" in [Usage](usage.md)); a result set whose future resolved before the close stays open until you close it.
 
 ```python
 from pyathena import connect

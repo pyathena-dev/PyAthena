@@ -64,28 +64,33 @@ class TestAsyncPolarsCursor:
         assert result_set.description == description
 
     @pytest.mark.parametrize(
-        ("async_polars_cursor", "query"),
+        ("async_polars_cursor", "query", "expected"),
         [
             (
                 {"cursor_kwargs": {"unload": True, "chunksize": 1_000}},
                 "SELECT CAST(1 AS INT) AS foobar FROM one_row",
+                [("foobar", "integer", None, None, 10, 0, "NULLABLE")],
             ),
             (
                 {"cursor_kwargs": {"unload": True}},
                 "SELECT CAST(1 AS INT) AS foobar FROM one_row WHERE false",
+                [],
             ),
             (
                 {"cursor_kwargs": {"unload": True, "chunksize": 1_000}},
                 "SELECT CAST(1 AS INT) AS foobar FROM one_row WHERE false",
+                [],
             ),
         ],
         indirect=["async_polars_cursor"],
     )
-    def test_description_unload(self, async_polars_cursor, query):
+    def test_description_unload(self, async_polars_cursor, query, expected):
         """GH-1281: description() reads the metadata of an UNLOAD result as execute() does."""
         query_id, future = async_polars_cursor.execute(query)
         result_set = future.result()
-        assert async_polars_cursor.description(query_id).result() == result_set.description
+        assert result_set.state == AthenaQueryExecution.STATE_SUCCEEDED
+        assert result_set.description == expected
+        assert async_polars_cursor.description(query_id).result() == expected
 
     @pytest.mark.parametrize(
         "async_polars_cursor",
