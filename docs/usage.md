@@ -15,12 +15,13 @@ print(cursor.fetchall())
 ```
 
 Closing a cursor, for example at the end of a `with` block, also closes its result set.
-A result set that an `AsyncCursor` future returned from `result()` belongs to the caller, and closing the cursor does not close it; close it yourself.
-Closing an `AsyncCursor` closes the result sets that were not taken from their futures, including those of queries that finish after the close.
 After that, `execute()`, `executemany()`, the fetch methods, and the other methods of the cursor raise `ProgrammingError`, as DB API 2.0 requires.
 The `query_id` property keeps the ID of the last query.
 A closed result set, such as one that an `AsyncCursor` future returned, also raises `ProgrammingError` from its fetch methods and from `as_pandas()`, `as_arrow()`, `as_polars()`, and `iter_chunks()`.
 An iterator that `iter_chunks()` returned before the close and that reads the result in chunks yields no more chunks.
+
+Closing an `AsyncCursor` or one of its variants closes the result sets that were not taken from its futures with `result()`, including those of queries that finish after the close.
+A result set taken before the close belongs to the caller, and closing the cursor leaves it open; close it yourself.
 
 ## Keyword arguments in PyAthena 4.0
 
