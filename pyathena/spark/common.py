@@ -163,7 +163,8 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
                 Bucket=bucket,
                 Key=key,
             )
-            return cast(str, response["Body"].read().decode("utf-8").strip())
+            with contextlib.closing(response["Body"]) as body:
+                return cast(str, body.read().decode("utf-8").strip())
         except Exception as e:
             _logger.exception(f"Failed to read {bucket}/{key}.")
             raise OperationalError(*e.args) from e

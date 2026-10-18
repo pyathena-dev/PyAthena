@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import collections
+import contextlib
 import logging
 import operator
 from datetime import datetime
@@ -876,7 +877,8 @@ class AthenaResultSet(CursorIterator):
         """Read the paths of the result files of an UNLOAD query from its data manifest.
 
         Returns:
-            The S3 paths of the result files, or an empty list without any.
+            The S3 paths of the result files, or an empty list if the manifest lists
+            no files.
 
         Raises:
             ProgrammingError: If the query execution has no data manifest location.
@@ -893,7 +895,8 @@ class AthenaResultSet(CursorIterator):
                 Bucket=bucket,
                 Key=key,
             )
-            manifest: str = response["Body"].read().decode("utf-8").strip()
+            with contextlib.closing(response["Body"]) as body:
+                manifest: str = body.read().decode("utf-8").strip()
         except Exception as e:
             _logger.exception(f"Failed to read {bucket}/{key}.")
             raise OperationalError(*e.args) from e

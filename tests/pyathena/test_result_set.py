@@ -113,14 +113,13 @@ class TestAthenaResultSet:
         assert client.get_query_results.call_count == 1
 
     def test_read_data_manifest_body_read_failure(self):
-        """GH-1235: a failure while reading the data manifest body raises OperationalError.
+        """GH-1235: a failed data manifest read raises OperationalError and closes the body.
 
         No AWS calls; the S3 client is mocked.
         """
+        body = MagicMock(read=MagicMock(side_effect=ReadTimeoutError(endpoint_url="s3")))
         connection = MagicMock()
-        connection.s3_client.get_object.return_value = {
-            "Body": MagicMock(read=MagicMock(side_effect=ReadTimeoutError(endpoint_url="s3")))
-        }
+        connection.s3_client.get_object.return_value = {"Body": body}
         result_set = AthenaResultSet(
             connection=connection,
             converter=DefaultTypeConverter(),
@@ -134,6 +133,7 @@ class TestAthenaResultSet:
         )
         with pytest.raises(OperationalError):
             result_set._read_data_manifest()
+        body.close.assert_called_once_with()
 
     def test_fetchone_across_pages(self):
         result_set = _fetching_result_set(("1", "2"), ("3",))
