@@ -512,6 +512,12 @@ def test_to_json(input_value, expected):
         ("row(a json, b json)", '{"a": "x", "b": {"c": 1}}', {"a": "x", "b": {"c": 1}}),
         ("row(a json, b json)", '{"a": "", "b": true}', {"a": "", "b": True}),
         ("array(varchar)", '["a", "123"]', ["a", "123"]),
+        # JSON leaves the dates strings; only the hints make them dates. Athena
+        # renders the dates of array, map, and row columns without quotes, so the
+        # cursor cannot produce these values.
+        ("array(date)", '["2024-01-01", null]', [date(2024, 1, 1), None]),
+        ("map(varchar,date)", '{"d": "2024-01-01"}', {"d": date(2024, 1, 1)}),
+        ("row(d date)", '{"d": "2024-01-01"}', {"d": date(2024, 1, 1)}),
     ],
 )
 def test_typed_json_elements(type_hint, value, expected):

@@ -929,27 +929,6 @@ class TestCursor:
         # == does not tell 123 from 123.0.
         assert _types(row) == _types(expected)
 
-    def test_json_with_type_hints(self, cursor):
-        # JSON leaves the dates strings; only the hints make them dates.
-        cursor.execute(
-            """
-            SELECT
-              CAST(ARRAY[DATE '2024-01-01', NULL] AS JSON) AS col_array
-              ,CAST(MAP(ARRAY['d'], ARRAY[DATE '2024-01-01']) AS JSON) AS col_map
-              ,CAST(MAP(ARRAY['d'], ARRAY[DATE '2024-01-01']) AS JSON) AS col_row
-            """,
-            result_set_type_hints={
-                "col_array": "array(date)",
-                "col_map": "map(varchar, date)",
-                "col_row": "row(d date)",
-            },
-        )
-        assert cursor.fetchone() == (
-            [date(2024, 1, 1), None],
-            {"d": date(2024, 1, 1)},
-            {"d": date(2024, 1, 1)},
-        )
-
     def test_cancel(self, cursor):
         def cancel(c):
             time.sleep(randint(5, 10))
@@ -1500,19 +1479,18 @@ class TestCursor:
     def test_execute_interrupted_while_starting_without_kill_on_interrupt(self):
         """Without kill_on_interrupt, the request runs on the caller's thread (no AWS)."""
         cursor, cancel = _offline_cursor(kill_on_interrupt=False)
-        cursor._connection.client.start_query_execution.side_effect = KeyboardInterrupt()
+        threads = []
 
-        # A helper thread fails the test at once; the patched one would never run,
-        # and the cursor would wait for it without a bound.
-        with (
-            patch(
-                "pyathena.common.threading.Thread",
-                side_effect=AssertionError("started a helper thread"),
-            ),
-            pytest.raises(KeyboardInterrupt),
-        ):
+        def start_query_execution(**kwargs):
+            threads.append(threading.current_thread())
+            raise KeyboardInterrupt
+
+        cursor._connection.client.start_query_execution.side_effect = start_query_execution
+
+        with pytest.raises(KeyboardInterrupt):
             cursor.execute("SELECT 1")
 
+        assert threads == [threading.current_thread()]
         cancel.assert_not_called()
         assert cursor.query_id is None
 
