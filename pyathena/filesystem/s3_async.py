@@ -579,16 +579,15 @@ class AioS3FileSystem(AsyncFileSystem):
         See :meth:`S3FileSystem._copy_object_with_multipart_upload`. The part
         copies run in the threads of the filesystem, which bound the requests
         of all its copies together, with at most ``max_workers`` of them in
-        flight; each one is sent once an earlier one has finished. The
-        completion waits for them in a thread of the filesystem. The
-        annotation copies then run in parallel as asyncio tasks, at most
-        ``max_workers`` at once, in the same threads. On a cancellation, the
-        requests that have not started are cancelled, a completion whose
-        request has not been sent is not sent, the running requests are
-        waited for in a thread of the filesystem, the upload is aborted if it
-        was created and has not completed, and the cancellation is re-raised.
-        On a failure or cancellation, the running part copies make no further
-        attempt. This also holds when the shutdown of the event loop, such as
+        flight; each one is sent once an earlier one has finished, and the
+        upload is completed once all of them have. The annotation copies then
+        run in parallel as asyncio tasks, at most ``max_workers`` at once, in
+        the same threads. On a cancellation, the requests that have not
+        started, including the completion, are cancelled, the running ones
+        are waited for in a thread of the filesystem, the upload is aborted
+        if it was created and has not completed, and the cancellation is
+        re-raised. On a failure or cancellation, the running part copies make
+        no further attempt. This also holds when the shutdown of the event loop, such as
         at the end of ``asyncio.run()``, cancels the copy, also after its
         cleanup has started. A repeated cancellation returns without stopping
         this cleanup. A failed abort is logged with the upload ID.
@@ -633,7 +632,9 @@ class AioS3FileSystem(AsyncFileSystem):
                 "abort_multipart_upload": plan.abort_params,
             },
         )
-        completion: Future[S3CompleteMultipartUpload] | None = None
+        # Created before it is scheduled, so that an interrupt while it is
+        # being scheduled still lets the cleanup cancel it or wait for it.
+        completion: Future[S3CompleteMultipartUpload] = Future()
 
         def _abort() -> None:
             """Abort the upload, if any, once its requests have ended.
@@ -643,11 +644,9 @@ class AioS3FileSystem(AsyncFileSystem):
             :meth:`_S3WriteSession.abort`. A failure is logged instead of
             raised, so that the error that made the copy fail is raised.
             """
-            if completion is not None:
-                # Queued before this cleanup, so it has started. A withdrawn
-                # completion fails without a request; one whose request was
-                # sent runs to its end, and the upload is aborted only if it
-                # failed.
+            if not completion.cancelled():
+                # A completion that has started runs to its end, and the
+                # upload is aborted only if it failed.
                 wait([completion])
             try:
                 session.abort()
@@ -662,23 +661,25 @@ class AioS3FileSystem(AsyncFileSystem):
             session.start()
             for part_number, range_ in enumerate(plan.ranges, 1):
                 # A cancellation of this task cancels only its wait.
-                ready = session.ready()
-                if not ready.done():
-                    await asyncio.wrap_future(ready)
+                await asyncio.wrap_future(session.ready())
                 session.submit_copy(part_number, plan.source, range_)
-            # Reserved before it is queued, so that the cleanup can withdraw
-            # a completion whose request has not been sent.
+            # Here, not in the thread of the completion, which may wait for
+            # a thread behind the part copies, so that a failed part stops
+            # the others at once.
+            await asyncio.wrap_future(session.settled())
+            # Reserved before it is queued, so that a cancellation of this
+            # task can still cancel a completion that has not started.
             session.begin_complete()
-            completion = self._thread_pool.submit(session.complete)
+            self._thread_pool.submit_to(completion, session.complete)
             # A cancellation of this task leaves the completion to the
             # cleanup, which waits for a started completion.
             completed = await self._thread_pool.wait_shielded(completion)
         except BaseException:
             # Also on cancellation, as S3FileSystem._copy_object_with_multipart_upload
-            # does on an interrupt. A completion whose request has not been
-            # sent, also one that an interrupt kept from being queued or that
-            # waits for the parts, is withdrawn; one that has been sent runs on.
-            session.withdraw_complete()
+            # does on an interrupt. A completion that never runs, as it has
+            # not started or was never scheduled, gives back its reservation.
+            if completion.cancel():
+                session.withdraw_complete()
             # Here, so that the creation and the running parts stop even
             # while they hold every thread that the cleanup waits for.
             session.begin_abort()

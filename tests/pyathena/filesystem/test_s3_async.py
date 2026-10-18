@@ -822,10 +822,9 @@ class TestAioS3FileSystem:
 
     @pytest.mark.asyncio
     async def test_copy_object_with_multipart_upload_cancelled_queued_completion(self):
-        # GH-1186: a cancellation keeps a CompleteMultipartUpload request that
-        # waits for a thread of the filesystem from being sent, and aborts the
-        # upload. The request used to run after the cancellation and complete
-        # the copy.
+        # GH-1186: a cancellation cancels a CompleteMultipartUpload request
+        # that waits for a thread of the filesystem, and aborts the upload. The
+        # request used to run after the cancellation and complete the copy.
         fs = AioS3FileSystem(connection=mock.MagicMock(), max_workers=1, skip_instance_cache=True)
         sync_fs = fs._sync_fs
         sync_fs.core.create_multipart_upload = mock.MagicMock(
@@ -841,9 +840,9 @@ class TestAioS3FileSystem:
             release.wait()
 
         def upload_part_copy(**kw):
-            if kw["part_number"] == 1:
-                # Holds the only thread of the filesystem, so that part 2 and
-                # the completion wait for it.
+            if kw["part_number"] == 2:
+                # Holds the only thread of the filesystem, so that the
+                # completion waits for it.
                 fs._thread_pool.submit(block)
             return SimpleNamespace(etag='"e"', part_number=kw["part_number"])
 
@@ -858,16 +857,15 @@ class TestAioS3FileSystem:
             side_effect=lambda upload, **params: events.append("abort")
         )
 
-        submit = fs._thread_pool.submit
+        submit_to = fs._thread_pool.submit_to
         completion_queued = threading.Event()
 
-        def record_completion(fn, *args, **kwargs):
-            future = submit(fn, *args, **kwargs)
+        def record_completion(future, fn, *args, **kwargs):
+            submit_to(future, fn, *args, **kwargs)
             if getattr(fn, "__func__", None) is _S3WriteSession.complete:
                 completion_queued.set()
-            return future
 
-        fs._thread_pool.submit = record_completion
+        fs._thread_pool.submit_to = record_completion
         task = asyncio.ensure_future(
             fs._copy_object_with_multipart_upload(
                 S3Path("bucket", "src"),
@@ -894,11 +892,15 @@ class TestAioS3FileSystem:
 
         assert events == ["abort"]
 
-    def test_copy_object_with_multipart_upload_interrupted_while_queuing_completion(self):
-        # GH-1230: an interrupt, such as a repeated SIGINT, after the
-        # completion is reserved and before it is queued aborts the upload,
-        # instead of leaving it incomplete with a completion that nothing sends.
-        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+    @pytest.mark.parametrize("queued", [False, True])
+    def test_copy_object_with_multipart_upload_interrupted_while_scheduling_completion(
+        self, queued
+    ):
+        # GH-1230: an interrupt, such as a repeated SIGINT, while the reserved
+        # completion is being scheduled, before or after it is queued, keeps it
+        # from running and aborts the upload, instead of leaving the upload
+        # incomplete with a completion that nothing sends.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), max_workers=1, skip_instance_cache=True)
         sync_fs = fs._sync_fs
         sync_fs.core.create_multipart_upload = mock.MagicMock(
             return_value=S3MultipartUpload(
@@ -913,30 +915,91 @@ class TestAioS3FileSystem:
         # The HeadObject of the source, with 2 parts of the default block size.
         size = 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE
         sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
-        submit = S3AioThreadPool.submit
+        submit_to = S3AioThreadPool.submit_to
 
-        def interrupt_completion(pool, fn, *args, **kwargs):
+        def interrupt_completion(pool, future, fn, *args, **kwargs):
             if getattr(fn, "__func__", None) is _S3WriteSession.complete:
+                if queued:
+                    # Holds the only thread of the filesystem until the
+                    # completion queued behind it is done, which a cleanup that
+                    # does not cancel it waits for in vain.
+                    done = threading.Event()
+                    future.add_done_callback(lambda _: done.set())
+                    pool.submit(done.wait, EVENT_TIMEOUT)
+                    submit_to(pool, future, fn, *args, **kwargs)
                 raise KeyboardInterrupt
-            return submit(pool, fn, *args, **kwargs)
+            submit_to(pool, future, fn, *args, **kwargs)
 
         with (
             mock.patch.object(
-                S3AioThreadPool, "submit", autospec=True, side_effect=interrupt_completion
+                S3AioThreadPool, "submit_to", autospec=True, side_effect=interrupt_completion
             ),
             pytest.raises(KeyboardInterrupt),
         ):
             # In an event loop of its own, which the interrupt stops.
             asyncio.run(
-                fs._copy_object_with_multipart_upload(
-                    S3Path("bucket", "src"),
-                    S3Path("bucket", "dst"),
-                    MetadataDirective="REPLACE",
-                    TaggingDirective="REPLACE",
-                    AnnotationDirective="EXCLUDE",
+                await_bounded(
+                    fs._copy_object_with_multipart_upload(
+                        S3Path("bucket", "src"),
+                        S3Path("bucket", "dst"),
+                        MetadataDirective="REPLACE",
+                        TaggingDirective="REPLACE",
+                        AnnotationDirective="EXCLUDE",
+                    )
                 )
             )
 
+        sync_fs.core.complete_multipart_upload.assert_not_called()
+        sync_fs.core.abort_multipart_upload.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_copy_object_with_multipart_upload_failed_part_with_threads_taken(self):
+        # GH-1230: a part copy that fails after the last one was submitted
+        # stops the copy at once, also when a part copy that it frees the only
+        # thread of the filesystem for retries; a completion queued behind it
+        # would notice the failure only after its backoff wait of at least
+        # EVENT_TIMEOUT seconds.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), max_workers=1, skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        plan = S3MultipartCopyPlan(
+            source=S3Path("bucket", "src"),
+            destination=S3Path("bucket", "dst"),
+            size=2,
+            ranges=((0, 1), (1, 2)),
+        )
+        sync_fs.core.plan_multipart_copy = mock.MagicMock(return_value=plan)
+        sync_fs.core.create_multipart_upload = mock.MagicMock(
+            return_value=S3MultipartUpload({"Bucket": "bucket", "Key": "dst", "UploadId": "id"})
+        )
+        sync_fs.core.complete_multipart_upload = mock.MagicMock()
+        sync_fs.core.abort_multipart_upload = mock.MagicMock()
+        operation = ThrottledOperation(operation_name="UploadPartCopy")
+        throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
+        submitted = threading.Event()
+        submit_to = S3AioThreadPool.submit_to
+
+        def record_part(pool, future, fn, *args, **kwargs):
+            submit_to(pool, future, fn, *args, **kwargs)
+            if kwargs.get("part_number") == 2:
+                submitted.set()
+
+        def upload_part_copy(part_number, **kwargs):
+            if part_number == 1:
+                # Fails once part 2 waits for the only thread.
+                assert submitted.wait(EVENT_TIMEOUT)
+                raise PermissionError("Access Denied")
+            return throttled()
+
+        sync_fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
+        with (
+            mock.patch.object(S3AioThreadPool, "submit_to", autospec=True, side_effect=record_part),
+            pytest.raises(PermissionError, match="Access Denied"),
+        ):
+            # The retries stop, or part 2 is cancelled, before the bound.
+            await await_bounded(
+                fs._copy_object_with_multipart_upload(plan.source, plan.destination, max_workers=2)
+            )
+        assert operation.calls <= 1
         sync_fs.core.complete_multipart_upload.assert_not_called()
         sync_fs.core.abort_multipart_upload.assert_called_once()
 
@@ -2913,7 +2976,7 @@ class TestAioS3StreamedFile:
         closed = []
         with pytest.raises(KeyboardInterrupt):
             # In an event loop of its own, which the interrupt stops.
-            asyncio.run(write_and_close())
+            asyncio.run(await_bounded(write_and_close()))
 
         assert closed == [True]
         fs.core.complete_multipart_upload.assert_not_called()
