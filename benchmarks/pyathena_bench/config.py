@@ -183,7 +183,7 @@ def select_sql(database: str, table: str, shape: str, transport: str) -> str:
         raise ValueError(f"Unknown shape: {shape}")
     if transport not in {"csv", "unload", "ctas"}:
         raise ValueError(f"Unknown transport: {transport}")
-    if shape == "temporal" and transport in {"unload", "ctas"}:
+    if shape == "temporal" and transport != "csv":
         columns = PARQUET_TEMPORAL_COLUMNS
     return f'SELECT {columns} FROM "{identifier(database)}"."{identifier(table)}"'
 
