@@ -269,11 +269,24 @@ def shutdown_bounded(pool, timeout=EVENT_TIMEOUT):
     Args:
         pool: The executor, such as an ``S3AioThreadPool``.
         timeout: The longest wait, in seconds.
+
+    Raises:
+        BaseException: The error that the shutdown raised.
     """
-    waiter = threading.Thread(target=pool.shutdown, kwargs={"wait": True}, daemon=True)
+    errors = []
+
+    def shutdown():
+        try:
+            pool.shutdown(wait=True)
+        except BaseException as e:
+            errors.append(e)
+
+    waiter = threading.Thread(target=shutdown, daemon=True)
     waiter.start()
     waiter.join(timeout)
     assert not waiter.is_alive(), f"the calls of the executor did not end within {timeout} s"
+    if errors:
+        raise errors[0]
 
 
 def overlapping_calls(calls, timeout=5, grace=0.5):

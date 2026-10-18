@@ -85,27 +85,32 @@ def release_blocked_waits():
     filesystem for the completion, which it cancels if the completion never
     runs. Without that cancellation, the thread would wait forever, and the
     interpreter would not exit after the test fails. The futures that the
-    cleanup waits for are recorded, and those still pending at teardown are
-    cancelled and their waiters notified.
+    cleanup waits for are tracked without keeping them alive, and the
+    fixture's value, also called at teardown, cancels those still pending and
+    notifies their waiters. A test whose stub answers the cleanup's requests
+    calls it before the stub is removed.
     """
-    waited = []
+    waited: weakref.WeakSet[Future] = weakref.WeakSet()
 
     def recording_wait(futures, *args, **kwargs):
         futures = list(futures)
-        waited.extend(futures)
+        waited.update(futures)
         return wait(futures, *args, **kwargs)
 
-    with mock.patch("pyathena.filesystem.s3_async.wait", side_effect=recording_wait):
-        yield
-    for future in waited:
-        if not future.done() and future.cancel():
-            future.set_running_or_notify_cancel()
+    def release():
+        for future in list(waited):
+            if not future.done() and future.cancel():
+                future.set_running_or_notify_cancel()
+
+    with mock.patch("pyathena.filesystem.s3_async.wait", new=recording_wait):
+        yield release
+    release()
 
 
 @pytest.mark.usefixtures("register_async_filesystem", "release_blocked_waits")
 class TestAioS3FileSystem:
     @staticmethod
-    async def _multipart_copy(fs=None, **kwargs):
+    async def _multipart_copy(release, fs=None, **kwargs):
         # max_workers=1 runs the stubbed requests in a deterministic order.
         fs = fs or AioS3FileSystem(
             key="dummy",
@@ -126,6 +131,10 @@ class TestAioS3FileSystem:
                     )
                 )
             finally:
+                # A cleanup that a regression blocks ends while the stub still
+                # answers its requests.
+                release()
+                await asyncio.to_thread(shutdown_bounded, fs._thread_pool)
                 stubber.assert_no_pending_responses()
 
     @pytest.mark.parametrize("size", [0, 10])
@@ -160,19 +169,19 @@ class TestAioS3FileSystem:
             stubber.assert_no_pending_responses()
 
     @pytest.mark.asyncio
-    async def test_copy_object_with_multipart_upload_copies_source(self):
+    async def test_copy_object_with_multipart_upload_copies_source(self, release_blocked_waits):
         # GH-973: the same requests as S3FileSystem; see
         # TestS3FileSystem.test_copy_object_with_multipart_upload_copies_source.
-        await self._multipart_copy()
+        await self._multipart_copy(release_blocked_waits)
 
     @pytest.mark.asyncio
-    async def test_copy_object_with_multipart_upload_failed_part(self):
+    async def test_copy_object_with_multipart_upload_failed_part(self, release_blocked_waits):
         # GH-973: a failed part copy aborts the upload, as in S3FileSystem.
         with pytest.raises(OSError, match="part failed"):
-            await self._multipart_copy(fail_part=True)
+            await self._multipart_copy(release_blocked_waits, fail_part=True)
 
     @pytest.mark.asyncio
-    async def test_copy_object_with_multipart_upload_failed_annotation(self):
+    async def test_copy_object_with_multipart_upload_failed_annotation(self, release_blocked_waits):
         # GH-973: a failed annotation copy is raised; the completed
         # destination is neither aborted nor deleted, and no other
         # annotation is copied.
@@ -190,7 +199,7 @@ class TestAioS3FileSystem:
             ) as copy_annotation,
             pytest.raises(PermissionError),
         ):
-            await self._multipart_copy(fs, fail_annotation=True)
+            await self._multipart_copy(release_blocked_waits, fs, fail_annotation=True)
         assert [c.args[0] for c in copy_annotation.call_args_list] == ["a1"]
 
     @pytest.mark.asyncio
