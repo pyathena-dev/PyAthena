@@ -244,8 +244,11 @@ class TestS3AioThreadPool:
 
         # Pending while its callback is added, which the future then keeps.
         future = pool.submit(call)
+        # Runs after the callback of the pool, which has then returned.
+        ended = threading.Event()
+        future.add_done_callback(lambda _: ended.set())
         release.set()
-        future.result(timeout=EVENT_TIMEOUT)
+        assert ended.wait(EVENT_TIMEOUT)
         collected = weakref.ref(pool)
         del pool
         gc.collect()
