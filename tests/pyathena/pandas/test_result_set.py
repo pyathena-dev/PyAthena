@@ -1193,6 +1193,22 @@ class TestAthenaPandasResultSet:
         assert_frame_equal(frames[1], frames[0])
         assert rows[1] == rows[0]
 
+    @pytest.mark.parametrize("engine", ["c", "pyarrow"])
+    @pytest.mark.parametrize("key", ["parse_dates", "dtype", "converters"])
+    def test_temporal_options_none(self, tmp_path, engine, key):
+        """parse_dates, dtype, or converters of None, their default, is as if not given."""
+        data = '"d","n"\n' + '"2020-01-02","1"\n' * 10
+        assert len(data) >= AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES
+        result_set = _local_result_set(
+            LocalBucketFileSystem(tmp_path),
+            [("d", "date"), ("n", "integer")],
+            data,
+            engine=engine,
+            **{key: None},
+        )
+        assert str(result_set.as_pandas()["d"].dtype) == "datetime64[us]"
+        assert result_set.fetchone() == (date(2020, 1, 2), 1)
+
     @pytest.mark.parametrize("engine", ["c", "python", "pyarrow"])
     @pytest.mark.parametrize(
         ("kwargs", "expected"),
@@ -1231,7 +1247,12 @@ class TestAthenaPandasResultSet:
             engine=engine,
             **kwargs,
         )
-        assert result_set.fetchone() == expected
+        row = result_set.fetchone()
+        assert row == expected
+        # pandas keeps the zone of the time zone values.
+        assert [v.utcoffset() for v in row if isinstance(v, datetime) and v.tzinfo] == [
+            v.utcoffset() for v in expected if isinstance(v, datetime) and v.tzinfo
+        ]
 
     @pytest.mark.parametrize(
         "kwargs",

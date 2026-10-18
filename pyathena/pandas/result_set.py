@@ -1002,7 +1002,7 @@ class AthenaPandasResultSet(AthenaResultSet):
                 and self._quoting == 1
                 # pandas' PyArrow engine takes no converters. Those of the temporal
                 # columns that are converted after reading are not used.
-                and "converters" not in self._kwargs
+                and self._kwargs.get("converters") is None
                 and not self.converters.keys()
                 - self._get_csv_temporal_converters(
                     [(d[0], d) for d in self.description or []]
@@ -1229,7 +1229,8 @@ class AthenaPandasResultSet(AthenaResultSet):
         Returns:
             The converters keyed by column label.
         """
-        if self._kwargs.keys() & {"parse_dates", "dtype", "converters"}:
+        # None is the default of each option, as if it were not given.
+        if any(self._kwargs.get(key) is not None for key in ("parse_dates", "dtype", "converters")):
             return {}
         mappings = self._converter.mappings
         temporal_converters = {}
