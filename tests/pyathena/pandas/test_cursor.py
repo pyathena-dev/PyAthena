@@ -518,6 +518,21 @@ class TestPandasCursor:
         assert df["ts"].tolist() == [pd.Timestamp(2020, 1, 2, 3, 4, 5, 123000)]
 
     @pytest.mark.parametrize(
+        "pandas_cursor",
+        [{"cursor_kwargs": {"unload": True}}, {"cursor_kwargs": {"unload": True, "chunksize": 1}}],
+        indirect=["pandas_cursor"],
+        ids=["whole", "chunks"],
+    )
+    def test_unload_int96_unit_none(self, pandas_cursor):
+        """coerce_int96_timestamp_unit=None, pyarrow's default, keeps microseconds."""
+        pandas_cursor.execute(
+            "SELECT TIMESTAMP '1600-01-02 03:04:05.123' AS ts", coerce_int96_timestamp_unit=None
+        )
+        df = pd.concat(pandas_cursor.iter_chunks())
+        assert df["ts"].dtype == "datetime64[us]"
+        assert df["ts"].tolist() == [pd.Timestamp(1600, 1, 2, 3, 4, 5, 123000)]
+
+    @pytest.mark.parametrize(
         ("pandas_cursor", "chunksize"),
         [
             ({}, None),

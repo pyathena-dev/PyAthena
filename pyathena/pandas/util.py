@@ -168,7 +168,8 @@ def to_parquet(
         session_kwargs: Arguments for creating a boto3 Session.
         client_kwargs: Arguments for creating the S3 client.
         compression: Parquet compression codec (e.g., "snappy", "gzip").
-        flavor: Parquet flavor for compatibility ("spark" or "hive").
+        flavor: The pyarrow Parquet flavor. ``"spark"`` writes timestamps as INT96 and
+            replaces the characters in column names that Spark does not accept.
 
     Returns:
         The S3 URI of the written Parquet file.
@@ -232,7 +233,8 @@ def to_sql(
         chunksize: Number of rows per Parquet file. None for single file.
         if_exists: Action if table exists: "fail", "replace", or "append".
         compression: Parquet compression codec (e.g., "snappy", "gzip").
-        flavor: Parquet flavor for compatibility ("spark" or "hive").
+        flavor: The pyarrow Parquet flavor. ``"spark"`` writes timestamps as INT96 and
+            replaces the characters in column names that Spark does not accept.
         type_mappings: Function to map pandas types to SQL types.
         executor_class: Executor class for parallel uploads.
         max_workers: Maximum number of parallel upload workers.

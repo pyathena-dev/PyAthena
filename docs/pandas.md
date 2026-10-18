@@ -110,6 +110,9 @@ print(cursor.fetchall())
 ```
 
 `to_sql` writes the data as Parquet with pyarrow, so it requires `pip install PyAthena[Pandas,Arrow]`.
+With the default `flavor="spark"`, timestamps are written as INT96.
+Athena reads them correctly.
+With pyarrow 22, readers other than Athena, such as pyarrow, read the written timestamps before 1970 as wrong values; pyarrow 23.0.0 or later is recommended.
 Conversion to Parquet and upload to S3 use [ThreadPoolExecutor](https://docs.python.org/3/library/concurrent.futures.html#threadpoolexecutor) by default.
 It is also possible to use [ProcessPoolExecutor](https://docs.python.org/3/library/concurrent.futures.html#processpoolexecutor).
 The S3 requests use the connection's `s3_config` (see "S3 client" in [Usage](usage.md)) and credentials.
@@ -610,6 +613,7 @@ PandasCursor also supports the unload option, as does {ref}`arrow-cursor`.
 Reading the unloaded Parquet files requires pyarrow (`pip install PyAthena[Pandas,Arrow]`), and `engine` must be `auto` or `pyarrow`.
 Timestamps are read at microseconds, as `datetime64[us]`, and dates as `datetime64[us]`, as from CSV results.
 With `coerce_int96_timestamp_unit` or `dtype_backend` given to `execute()`, the columns have the dtypes that these options give, and the fetch methods return their values as pandas holds them.
+`coerce_int96_timestamp_unit=None` is the same as no `coerce_int96_timestamp_unit`.
 
 See {ref}`arrow-unload-options` for more information.
 

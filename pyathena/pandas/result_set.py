@@ -927,6 +927,8 @@ class AthenaPandasResultSet(AthenaResultSet):
             result_set_type_hints: Athena type signatures for complex-type columns,
                 keyed by column name (case-insensitive) or zero-based column index.
             **kwargs: Additional arguments passed to pandas.read_csv/read_parquet.
+                ``coerce_int96_timestamp_unit=None`` is the same as no
+                ``coerce_int96_timestamp_unit`` for an UNLOAD result.
                 A given ``storage_options``, even None, replaces PyAthena's S3 filesystem
                 for reading the result files, and so does ``filesystem`` for UNLOAD results.
                 The UNLOAD manifest is still read with the connection's S3 client, and the
@@ -956,7 +958,14 @@ class AthenaPandasResultSet(AthenaResultSet):
         self._data_manifest: list[str] = []
         # The whole-result dtypes of the columns of a chunked UNLOAD result that hold NULL.
         self._parquet_null_dtypes: dict[str, Any] = {}
-        self._kwargs = kwargs
+        # coerce_int96_timestamp_unit=None is pyarrow's default, nanoseconds, and the
+        # same as no coerce_int96_timestamp_unit for an UNLOAD result, whose timestamps
+        # are still read at microseconds. pandas.read_csv() still rejects it.
+        self._kwargs = {
+            k: v
+            for k, v in kwargs.items()
+            if k != "coerce_int96_timestamp_unit" or v is not None or not self.is_unload
+        }
         self._fs = self._create_s3_file_system()
         self._csv_stream: IOBase | None = None
         # The converters of the json columns that _read_csv() reads as text, keyed by label.
