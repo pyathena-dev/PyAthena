@@ -6,6 +6,7 @@ import csv
 import importlib
 import logging
 import sys
+import threading
 from collections import abc
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -538,6 +539,7 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         trunc_date: Callable[[DataFrame], DataFrame],
         csv_stream: IOBase | None = None,
         fetch_types: Mapping[Any, str] | None = None,
+        closed: threading.Event | None = None,
     ) -> None:
         """Initialize the iterator.
 
@@ -549,6 +551,8 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
             fetch_types: The labels of the datetime columns whose values the row
                 iterators return as ``"datetime"`` or ``"date"`` objects, with None
                 for NaT, instead of pandas ``Timestamp`` values.
+            closed: Set when the result set that created the iterator is closed,
+                after which reads raise ``ProgrammingError``.
         """
         from pandas import DataFrame
 
@@ -559,6 +563,7 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         self._trunc_date = trunc_date
         self._csv_stream = csv_stream
         self._fetch_types: dict[Any, str] = dict(fetch_types or {})
+        self._closed = closed
         # Whether a read raised, after which the position of the next chunk is unknown.
         self._read_failed = False
 
@@ -571,7 +576,8 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
 
         Raises:
             StopIteration: When no more chunks are available.
-            ProgrammingError: If an earlier read failed.
+            ProgrammingError: If an earlier read failed, or the result set that
+                created the iterator is closed.
         """
         return self._read_chunk(next)
 
@@ -589,8 +595,11 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
 
         Raises:
             StopIteration: When no more chunks are available.
-            ProgrammingError: If an earlier read failed.
+            ProgrammingError: If an earlier read failed, or the result set that
+                created the iterator is closed.
         """
+        if self._closed is not None and self._closed.is_set():
+            raise ProgrammingError(_CLOSED_MESSAGE)
         if self._read_failed:
             raise ProgrammingError(_READ_FAILED_MESSAGE)
         try:
@@ -932,6 +941,8 @@ class AthenaPandasResultSet(AthenaResultSet):
                 The UNLOAD manifest is still read with the connection's S3 client, and the
                 schema with PyAthena's filesystem.
         """
+        # Set by close(), so that the chunk iterators of the result set raise.
+        self._closed_event = threading.Event()
         super().__init__(
             connection=connection,
             converter=converter,
@@ -991,7 +1002,7 @@ class AthenaPandasResultSet(AthenaResultSet):
                 self._df = trunc_date(result)
             else:
                 self._df_iter = PandasDataFrameIterator(
-                    result, trunc_date, self._csv_stream, self._fetch_types
+                    result, trunc_date, self._csv_stream, self._fetch_types, self._closed_event
                 )
         else:
             self._fetch_types = {}
@@ -1001,7 +1012,10 @@ class AthenaPandasResultSet(AthenaResultSet):
             # out of the rows that the fetch methods return. Mutable values in its
             # cells, such as lists from JSON columns, are still shared.
             self._df_iter = PandasDataFrameIterator(
-                self._df.copy(deep=False), _no_trunc_date, fetch_types=self._fetch_types
+                self._df.copy(deep=False),
+                _no_trunc_date,
+                fetch_types=self._fetch_types,
+                closed=self._closed_event,
             )
         self._row_iter: Iterator[tuple[Any, ...]] = self._df_iter.itertuples()
 
@@ -2180,6 +2194,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         Returns:
             PandasDataFrameIterator that yields pandas DataFrames for each chunk
             of rows, or the entire DataFrame if the result was not read in chunks.
+            Its reads raise ``ProgrammingError`` once the result set is closed.
 
         Raises:
             ProgrammingError: If the result set is closed.
@@ -2199,7 +2214,9 @@ class AthenaPandasResultSet(AthenaResultSet):
         """
         self._ensure_open()
         if self._df is not None:
-            return PandasDataFrameIterator(self._df, _no_trunc_date, fetch_types=self._fetch_types)
+            return PandasDataFrameIterator(
+                self._df, _no_trunc_date, fetch_types=self._fetch_types, closed=self._closed_event
+            )
         return self._df_iter
 
     @override
@@ -2207,6 +2224,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         import pandas as pd
 
         super().close()
+        self._closed_event.set()
         self._df_iter.close()
         self._df = pd.DataFrame()
         self._df_iter = PandasDataFrameIterator(self._df, _no_trunc_date)

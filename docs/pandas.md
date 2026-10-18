@@ -844,14 +844,14 @@ async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor(AioPandasCursor)
     await cursor.execute("SELECT * FROM many_rows")
-    df = await cursor.read_pandas()
+    df = await cursor.as_pandas()
     print(df.describe())
     print(df.head())
 ```
 
-`read_pandas()` reads the DataFrame that `as_pandas()` returns in a thread.
-When `as_pandas()` returns an iterator, `read_pandas()` joins the chunks that have not yet been read, as
-the iterator's `as_pandas()` does.
+`as_pandas()` is a coroutine that reads the result in a thread and always returns a DataFrame.
+When the result is read in chunks, it joins the chunks that have not yet been read, as the iterator that
+`PandasCursor.as_pandas()` returns does with its `as_pandas()`.
 `iter_chunks()` returns an async iterator of the chunks of `PandasCursor.iter_chunks()`, read in threads:
 
 ```python
@@ -903,5 +903,5 @@ async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor(AioPandasCursor, unload=True)
     await cursor.execute("SELECT * FROM many_rows")
-    df = await cursor.read_pandas()
+    df = await cursor.as_pandas()
 ```

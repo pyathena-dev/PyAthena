@@ -914,10 +914,10 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
 
             Raises:
                 ProgrammingError: If the result set is closed before a chunk is
-                    read, such as by another query of the cursor.
+                    read, such as by another query of the cursor, as the chunk
+                    iterators of the result sets raise then.
             """
             while True:
-                result_set._ensure_open()
                 chunk = await self._run_in_thread_or_detach(
                     result_set, next, iterator, _END_OF_CHUNKS
                 )

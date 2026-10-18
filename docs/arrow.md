@@ -496,7 +496,7 @@ from pyathena.aio.arrow.cursor import AioArrowCursor
 async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor(AioArrowCursor)
-    table = (await cursor.execute("SELECT * FROM many_rows")).as_arrow()
+    table = await (await cursor.execute("SELECT * FROM many_rows")).as_arrow()
     print(table)
     print(table.column_names)
     print(table.num_rows)
@@ -530,7 +530,7 @@ async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
         print(row)
 ```
 
-The `as_polars()` method converts the result to a Polars DataFrame:
+The `as_polars()` coroutine converts the result to a Polars DataFrame in a thread:
 
 ```python
 from pyathena import aio_connect
@@ -540,7 +540,7 @@ async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor(AioArrowCursor)
     await cursor.execute("SELECT * FROM many_rows")
-    df = cursor.as_polars()
+    df = await cursor.as_polars()
 ```
 
 The unload option is also available:
@@ -553,7 +553,7 @@ async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor(AioArrowCursor, unload=True)
     await cursor.execute("SELECT * FROM many_rows")
-    table = cursor.as_arrow()
+    table = await cursor.as_arrow()
 ```
 
 AioArrowCursor also supports S3 timeout configuration:

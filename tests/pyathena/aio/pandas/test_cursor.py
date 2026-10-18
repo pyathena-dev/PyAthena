@@ -46,7 +46,7 @@ class TestAioPandasCursor:
 
     async def test_as_pandas(self, aio_pandas_cursor):
         await aio_pandas_cursor.execute("SELECT * FROM one_row")
-        df = aio_pandas_cursor.as_pandas()
+        df = await aio_pandas_cursor.as_pandas()
         assert len(df) == 1
         assert df.columns.tolist() == ["number_of_rows"]
         assert df["number_of_rows"].iloc[0] == 1
@@ -59,7 +59,7 @@ class TestAioPandasCursor:
         with pytest.raises(ProgrammingError):
             await aio_pandas_cursor.fetchall()
         with pytest.raises(ProgrammingError):
-            aio_pandas_cursor.as_pandas()
+            await aio_pandas_cursor.as_pandas()
 
     @pytest.mark.parametrize(
         "aio_pandas_cursor",
@@ -68,7 +68,7 @@ class TestAioPandasCursor:
     )
     async def test_fetchone_unload(self, aio_pandas_cursor):
         await aio_pandas_cursor.execute("SELECT * FROM one_row")
-        assert aio_pandas_cursor.as_pandas()["number_of_rows"].tolist() == [1]
+        assert (await aio_pandas_cursor.as_pandas())["number_of_rows"].tolist() == [1]
         assert await aio_pandas_cursor.fetchone() == (1,)
         assert await aio_pandas_cursor.fetchone() is None
 
@@ -122,17 +122,17 @@ class TestAioPandasCursor:
         with pytest.raises(ProgrammingError):
             await aio_pandas_cursor.execute("SELECT * FROM one_row")
         with pytest.raises(ProgrammingError):
-            aio_pandas_cursor.as_pandas()
+            await aio_pandas_cursor.as_pandas()
 
     @pytest.mark.parametrize(("chunksize", "sizes"), [(None, [5]), (2, [2, 2, 1])])
     async def test_iter_chunks(self, aio_pandas_cursor, chunksize, sizes):
-        """GH-1209: iter_chunks() yields the chunks, and read_pandas() the whole result."""
+        """GH-1209: iter_chunks() yields the chunks, and as_pandas() the whole result."""
         await aio_pandas_cursor.execute(_FIVE_ROWS, chunksize=chunksize)
         chunks = [chunk async for chunk in aio_pandas_cursor.iter_chunks()]
         assert [len(chunk) for chunk in chunks] == sizes
         assert pd.concat(chunks)["number"].tolist() == [1, 2, 3, 4, 5]
         await aio_pandas_cursor.execute(_FIVE_ROWS, chunksize=chunksize)
-        assert (await aio_pandas_cursor.read_pandas())["number"].tolist() == [1, 2, 3, 4, 5]
+        assert (await aio_pandas_cursor.as_pandas())["number"].tolist() == [1, 2, 3, 4, 5]
 
     async def test_iter_chunks_after_execute(self, aio_pandas_cursor):
         """GH-1209: iter_chunks() reads the result set of its call, and raises once replaced."""

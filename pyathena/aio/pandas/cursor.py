@@ -16,7 +16,7 @@ from typing import (
 from pyathena.aio.common import WithAsyncFetch
 from pyathena.aio.util import create_in_thread
 from pyathena.common import CursorIterator
-from pyathena.error import OperationalError, ProgrammingError
+from pyathena.error import OperationalError
 from pyathena.model import AthenaQueryExecution
 from pyathena.options import ExecuteOptions
 from pyathena.pandas.converter import (
@@ -40,13 +40,13 @@ class AioPandasCursor(WithAsyncFetch):
     :func:`~pyathena.aio.util.create_in_thread`) and fetch operations in
     threads, keeping the event loop free. This is especially important
     when ``chunksize`` is set, as fetch calls trigger lazy S3 reads.
-    :meth:`read_pandas` and :meth:`iter_chunks` also read in threads.
+    :meth:`as_pandas` and :meth:`iter_chunks` also read in threads.
 
     Example:
         >>> async with await pyathena.aio_connect(...) as conn:
         ...     cursor = conn.cursor(AioPandasCursor)
         ...     await cursor.execute("SELECT * FROM my_table")
-        ...     df = await cursor.read_pandas()
+        ...     df = await cursor.as_pandas()
     """
 
     def __init__(
@@ -246,31 +246,17 @@ class AioPandasCursor(WithAsyncFetch):
             raise OperationalError(query_execution.state_change_reason)
         return self
 
-    def as_pandas(self) -> DataFrame | PandasDataFrameIterator:
-        """Return DataFrame or PandasDataFrameIterator based on chunksize setting.
+    async def as_pandas(self) -> DataFrame:
+        """Return the query results as one DataFrame, reading them in a thread.
 
-        The returned iterator, and this method when ``auto_optimize_chunksize``
-        chose a chunk size, read S3 on the calling thread and block the event
-        loop; use :meth:`iter_chunks` or :meth:`read_pandas` instead.
-
-        Returns:
-            DataFrame when chunksize is None, PandasDataFrameIterator when chunksize is set.
-
-        Raises:
-            ProgrammingError: If the cursor is closed or has no result set.
-        """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaPandasResultSet, self.result_set)
-        return result_set.as_pandas()
-
-    async def read_pandas(self) -> DataFrame:
-        """Read the query results into one DataFrame in a thread.
-
-        Returns the DataFrame that :meth:`as_pandas` returns. When ``as_pandas()``
-        returns an iterator, it returns the DataFrame that the iterator's
-        ``as_pandas()`` joins from the chunks that have not yet been read. A
-        cancellation detaches and closes the result set, as one of a fetch does.
+        Unlike :meth:`PandasCursor.as_pandas()
+        <pyathena.pandas.cursor.PandasCursor.as_pandas>`, this method always
+        returns a DataFrame. When the result is read in chunks, it joins the
+        chunks that have not yet been read, as ``PandasDataFrameIterator.as_pandas()``
+        does, and a later call returns an empty DataFrame; :meth:`iter_chunks`
+        reads them one at a time. Otherwise, it returns the same DataFrame on
+        every call. A cancellation detaches and closes the result set, as one of
+        a fetch does.
 
         Returns:
             The DataFrame of the query results.

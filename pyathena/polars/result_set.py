@@ -13,6 +13,7 @@ import csv
 import importlib.util
 import logging
 import sys
+import threading
 from collections import abc
 from collections.abc import Callable, Iterable, Iterator
 from io import BytesIO, StringIO
@@ -83,6 +84,7 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         reader: Iterator[pl.DataFrame] | pl.DataFrame,
         converters: dict[str, Callable[[str | None], Any | None]],
         column_names: list[str],
+        closed: threading.Event | None = None,
     ) -> None:
         """Initialize the iterator.
 
@@ -90,6 +92,8 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
             reader: Either a DataFrame iterator (for chunked) or a single DataFrame.
             converters: Dictionary mapping column names to converter functions.
             column_names: List of column names in order.
+            closed: Set when the result set that created the iterator is closed,
+                after which reads raise ``ProgrammingError``.
         """
         import polars as pl
 
@@ -99,6 +103,7 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
             self._reader = reader
         self._converters = converters
         self._column_names = column_names
+        self._closed = closed
         # Whether a read raised, after which the position of the next chunk is unknown.
         self._read_failed = False
 
@@ -114,8 +119,11 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
 
         Raises:
             StopIteration: When no more chunks are available.
-            ProgrammingError: If an earlier read failed.
+            ProgrammingError: If an earlier read failed, or the result set that
+                created the iterator is closed.
         """
+        if self._closed is not None and self._closed.is_set():
+            raise ProgrammingError(_CLOSED_MESSAGE)
         if self._read_failed:
             raise ProgrammingError(_READ_FAILED_MESSAGE)
         try:
@@ -351,6 +359,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 given as ``schema_overrides``; Polars' deprecated alias ``dtypes`` is not
                 supported.
         """
+        # Set by close(), so that the chunk iterators of the result set raise.
+        self._closed_event = threading.Event()
         super().__init__(
             connection=connection,
             converter=converter,
@@ -396,7 +406,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
             # A clone keeps assignments to the DataFrame from as_polars()
             # out of the rows that the fetch methods return.
             self._df_iter = PolarsDataFrameIterator(
-                self._df.clone(), self._df_converters, self._get_frame_column_names()
+                self._df.clone(),
+                self._df_converters,
+                self._get_frame_column_names(),
+                self._closed_event,
             )
         self._row_iter: Iterator[tuple[Any, ...]] = self._df_iter.itertuples()
 
@@ -634,7 +647,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
             self._metadata = ()
             reader = iter(())
         column_names = self._get_frame_column_names()
-        return PolarsDataFrameIterator(reader, self._get_converters(column_names), column_names)
+        return PolarsDataFrameIterator(
+            reader, self._get_converters(column_names), column_names, self._closed_event
+        )
 
     @override
     def fetchone(
@@ -1211,6 +1226,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         Returns:
             PolarsDataFrameIterator that yields Polars DataFrames for each chunk
             of rows, or the entire DataFrame if chunksize was not specified.
+            Its reads raise ``ProgrammingError`` once the result set is closed.
 
         Raises:
             ProgrammingError: If the result set is closed.
@@ -1231,7 +1247,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
         self._ensure_open()
         if self._df is not None:
             return PolarsDataFrameIterator(
-                self._df, self._df_converters, self._get_frame_column_names()
+                self._df,
+                self._df_converters,
+                self._get_frame_column_names(),
+                self._closed_event,
             )
         return self._df_iter
 
@@ -1241,6 +1260,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         import polars as pl
 
         super().close()
+        self._closed_event.set()
         self._df_iter.close()
         self._df = pl.DataFrame()
         self._df_iter = PolarsDataFrameIterator(self._df, {}, [])

@@ -626,12 +626,12 @@ async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor(AioPolarsCursor)
     await cursor.execute("SELECT * FROM many_rows")
-    df = await cursor.read_polars()
+    df = await cursor.as_polars()
     print(df.describe())
     print(df.head())
 ```
 
-`read_polars()` and `read_arrow()` read the results that `as_polars()` and `as_arrow()` return in a thread.
+`as_polars()` and `as_arrow()` are coroutines that read the result in a thread.
 `iter_chunks()` returns an async iterator of the chunks of `PolarsCursor.iter_chunks()`, read in threads:
 
 ```python
@@ -673,7 +673,7 @@ async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
         print(row)
 ```
 
-The `read_arrow()` method reads the result as an Apache Arrow Table:
+The `as_arrow()` method returns the result as an Apache Arrow Table:
 
 ```python
 from pyathena import aio_connect
@@ -683,7 +683,7 @@ async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor(AioPolarsCursor)
     await cursor.execute("SELECT * FROM many_rows")
-    table = await cursor.read_arrow()
+    table = await cursor.as_arrow()
 ```
 
 The unload option is also available:
@@ -696,5 +696,5 @@ async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor(AioPolarsCursor, unload=True)
     await cursor.execute("SELECT * FROM many_rows")
-    df = await cursor.read_polars()
+    df = await cursor.as_polars()
 ```

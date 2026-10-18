@@ -7,12 +7,12 @@ import logging
 import operator
 from collections.abc import AsyncGenerator, Callable
 from multiprocessing import cpu_count
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from pyathena.aio.common import WithAsyncFetch
 from pyathena.aio.util import create_in_thread
 from pyathena.common import CursorIterator
-from pyathena.error import OperationalError, ProgrammingError
+from pyathena.error import OperationalError
 from pyathena.model import AthenaQueryExecution
 from pyathena.options import ExecuteOptions
 from pyathena.polars.converter import (
@@ -36,14 +36,14 @@ class AioPolarsCursor(WithAsyncFetch):
     :func:`~pyathena.aio.util.create_in_thread`) and fetch operations in
     threads, keeping the event loop free. This is especially important
     when ``chunksize`` is set, as fetch calls trigger lazy S3 reads.
-    :meth:`read_polars`, :meth:`read_arrow`, and :meth:`iter_chunks` also
-    read in threads.
+    :meth:`as_polars`, :meth:`as_arrow`, and :meth:`iter_chunks` also read in
+    threads.
 
     Example:
         >>> async with await pyathena.aio_connect(...) as conn:
         ...     cursor = conn.cursor(AioPolarsCursor)
         ...     await cursor.execute("SELECT * FROM my_table")
-        ...     df = await cursor.read_polars()
+        ...     df = await cursor.as_polars()
     """
 
     def __init__(
@@ -221,47 +221,14 @@ class AioPolarsCursor(WithAsyncFetch):
             raise OperationalError(query_execution.state_change_reason)
         return self
 
-    def as_polars(self) -> pl.DataFrame:
-        """Return query results as a Polars DataFrame.
+    async def as_polars(self) -> pl.DataFrame:
+        """Return the query results as a Polars DataFrame, reading them in a thread.
 
-        When the result is read in chunks, this method reads S3 on the calling
-        thread and blocks the event loop; use :meth:`read_polars` or
-        :meth:`iter_chunks` instead.
-
-        Returns:
-            Polars DataFrame containing all query results.
-
-        Raises:
-            ProgrammingError: If the cursor is closed or has no result set.
-        """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaPolarsResultSet, self.result_set)
-        return result_set.as_polars()
-
-    def as_arrow(self) -> Table:
-        """Return query results as an Apache Arrow Table.
-
-        This method converts on the calling thread and, when the result is read in
-        chunks, reads S3 there, blocking the event loop; use :meth:`read_arrow`
-        instead.
-
-        Returns:
-            Apache Arrow Table containing all query results.
-
-        Raises:
-            ProgrammingError: If the cursor is closed or has no result set.
-        """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaPolarsResultSet, self.result_set)
-        return result_set.as_arrow()
-
-    async def read_polars(self) -> pl.DataFrame:
-        """Read the query results into one Polars DataFrame in a thread.
-
-        Returns the DataFrame that :meth:`as_polars` returns. A cancellation
-        detaches and closes the result set, as one of a fetch does.
+        When the result is read in chunks, the DataFrame joins the chunks that
+        have not yet been read, and a later call returns an empty DataFrame;
+        :meth:`iter_chunks` reads them one at a time. Otherwise, it is the same
+        DataFrame on every call. A cancellation detaches and closes the result
+        set, as one of a fetch does.
 
         Returns:
             The DataFrame of the query results.
@@ -271,11 +238,11 @@ class AioPolarsCursor(WithAsyncFetch):
         """
         return await self._fetch_in_thread(operator.methodcaller("as_polars"))
 
-    async def read_arrow(self) -> Table:
-        """Read the query results into one Apache Arrow Table in a thread.
+    async def as_arrow(self) -> Table:
+        """Return the query results as an Apache Arrow Table, converting them in a thread.
 
-        Returns the Table that :meth:`as_arrow` returns. A cancellation detaches
-        and closes the result set, as one of a fetch does.
+        The Table holds the data that :meth:`as_polars` returns. A cancellation
+        detaches and closes the result set, as one of a fetch does.
 
         Returns:
             The Table of the query results.

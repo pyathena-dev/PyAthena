@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import operator
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
@@ -38,7 +39,7 @@ class AioArrowCursor(WithAsyncFetch):
         >>> async with await pyathena.aio_connect(...) as conn:
         ...     cursor = conn.cursor(AioArrowCursor)
         ...     await cursor.execute("SELECT * FROM my_table")
-        ...     table = cursor.as_arrow()
+        ...     table = await cursor.as_arrow()
     """
 
     def __init__(
@@ -204,8 +205,10 @@ class AioArrowCursor(WithAsyncFetch):
             raise OperationalError(query_execution.state_change_reason)
         return self
 
-    def as_arrow(self) -> Table:
-        """Return query results as an Apache Arrow Table.
+    async def as_arrow(self) -> Table:
+        """Return the query results as an Apache Arrow Table.
+
+        ``execute()`` has read the Table, so this method does not read S3.
 
         Returns:
             Apache Arrow Table containing all query results.
@@ -218,16 +221,16 @@ class AioArrowCursor(WithAsyncFetch):
         result_set = cast(AthenaArrowResultSet, self.result_set)
         return result_set.as_arrow()
 
-    def as_polars(self) -> pl.DataFrame:
-        """Return query results as a Polars DataFrame.
+    async def as_polars(self) -> pl.DataFrame:
+        """Return the query results as a Polars DataFrame, converting them in a thread.
+
+        A cancellation detaches and closes the result set, as one of a fetch does.
 
         Returns:
             Polars DataFrame containing all query results.
 
         Raises:
+            ImportError: If polars is not installed.
             ProgrammingError: If the cursor is closed or has no result set.
         """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaArrowResultSet, self.result_set)
-        return result_set.as_polars()
+        return await self._fetch_in_thread(operator.methodcaller("as_polars"))

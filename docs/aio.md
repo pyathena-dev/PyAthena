@@ -243,13 +243,14 @@ row = await cursor.fetchone()
 rows = await cursor.fetchall()
 
 await cursor.execute("SELECT * FROM many_rows")
-df = await cursor.read_pandas()
+df = await cursor.as_pandas()
 ```
 
-`AioPandasCursor.read_pandas()`, `AioPolarsCursor.read_polars()`, and `AioPolarsCursor.read_arrow()`
-return, from a thread, the data of the synchronous `as_pandas()`, `as_polars()`, and `as_arrow()` methods.
-When the result is read in chunks, that data is the chunks that have not yet been read; `read_pandas()`
-joins them as the iterator's `as_pandas()` does.
+The `as_pandas()`, `as_arrow()`, and `as_polars()` methods of the aio cursors are coroutines.
+The pandas and Polars cursors read the result in a thread, and the Arrow cursor converts it to Polars in a thread.
+When the result is read in chunks, `AioPandasCursor.as_pandas()` and `AioPolarsCursor.as_polars()` join the
+chunks that have not yet been read, and a later call returns an empty DataFrame.
+Unlike `PandasCursor.as_pandas()`, `AioPandasCursor.as_pandas()` always returns a DataFrame.
 `AioPandasCursor.iter_chunks()` and `AioPolarsCursor.iter_chunks()` return async iterators that read each
 chunk of the synchronous `iter_chunks()` in a thread:
 
@@ -263,14 +264,7 @@ The iterator reads the result of the query that the cursor has when `iter_chunks
 Leaving the loop early keeps the chunks that have not been read for the fetch methods and a later
 `iter_chunks()`; closing the cursor or running another query releases them.
 After the cursor runs another query or closes, the iterator raises `ProgrammingError`.
-Cancelling `read_*()` or a chunk read drops the result, as cancelling a fetch does.
-
-The `as_pandas()`, `as_arrow()`, and `as_polars()` convenience methods are synchronous.
-When `execute()` has loaded the whole result, they return that data.
-When the result is read in chunks, they read S3 on the calling thread and block the event loop.
-With `chunksize` on CSV results, `as_pandas()` returns an iterator that reads each chunk as it is iterated, and
-`as_polars()` reads every remaining chunk.
-With a chunk size chosen by `auto_optimize_chunksize`, `as_pandas()` reads every remaining chunk.
+Cancelling `as_*()` or a chunk read drops the result, as cancelling a fetch does.
 
 See each cursor's documentation page for detailed usage examples.
 

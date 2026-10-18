@@ -33,6 +33,7 @@ _ALL_CURSOR_CLASSES = [
 
 _WHOLE_RESULT_METHODS = {
     AioArrowCursor: ("as_arrow", "as_polars"),
+    AioPandasCursor: ("as_pandas",),
     AioPolarsCursor: ("as_polars", "as_arrow"),
 }
 
@@ -138,10 +139,10 @@ class TestWithAsyncFetch:
         for fetch in (cursor.fetchone, cursor.fetchmany, cursor.fetchall):
             with pytest.raises(ProgrammingError, match=r"No result set\."):
                 await fetch()
-        # The Arrow and Polars cursors also convert the whole result.
+        # The Arrow, pandas, and Polars cursors also return the whole result.
         for name in _WHOLE_RESULT_METHODS.get(cursor_class, ()):
             with pytest.raises(ProgrammingError):
-                getattr(cursor, name)()
+                await getattr(cursor, name)()
 
     @pytest.mark.parametrize("cursor_class", _ALL_CURSOR_CLASSES)
     async def test_cancel_without_query(self, cursor_class):
@@ -423,15 +424,16 @@ class TestWithAsyncFetch:
         assert operation.calls == 1
 
     @pytest.mark.parametrize(
-        ("cursor_class", "method", "read"),
+        ("cursor_class", "method"),
         [
-            (AioPandasCursor, "read_pandas", "as_pandas"),
-            (AioPolarsCursor, "read_polars", "as_polars"),
-            (AioPolarsCursor, "read_arrow", "as_arrow"),
+            (AioPandasCursor, "as_pandas"),
+            (AioPolarsCursor, "as_polars"),
+            (AioPolarsCursor, "as_arrow"),
+            (AioArrowCursor, "as_polars"),
         ],
     )
-    async def test_read_runs_off_event_loop(self, cursor_class, method, read):
-        """GH-1209: the read_* methods read the whole result in a thread."""
+    async def test_whole_result_off_event_loop(self, cursor_class, method):
+        """GH-1209: the as_* coroutines read or convert the whole result in a thread."""
         cursor = cursor_class(
             connection=MagicMock(), converter=None, formatter=None, retry_config=None
         )
@@ -443,14 +445,14 @@ class TestWithAsyncFetch:
             return result
 
         cursor.result_set = MagicMock()
-        getattr(cursor.result_set, read).side_effect = whole_result
+        getattr(cursor.result_set, method).side_effect = whole_result
 
         assert await getattr(cursor, method)() is result
         assert len(threads) == 1
         assert threading.get_ident() not in threads
 
-    async def test_read_pandas_joins_chunks_off_event_loop(self):
-        """GH-1209: read_pandas() joins the chunks of a chunk iterator in a thread."""
+    async def test_as_pandas_joins_chunks_off_event_loop(self):
+        """GH-1209: as_pandas() joins the chunks of a chunk iterator in a thread."""
         cursor = AioPandasCursor(
             connection=MagicMock(), converter=None, formatter=None, retry_config=None
         )
@@ -466,6 +468,6 @@ class TestWithAsyncFetch:
         cursor.result_set = MagicMock()
         cursor.result_set.as_pandas.return_value = chunks
 
-        assert await cursor.read_pandas() is result
+        assert await cursor.as_pandas() is result
         assert len(threads) == 1
         assert threading.get_ident() not in threads

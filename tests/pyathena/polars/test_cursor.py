@@ -688,16 +688,19 @@ class TestPolarsCursor:
         assert polars_cursor.fetchall() == [(2,), (3,)]
 
     @pytest.mark.parametrize(
-        "polars_cursor", [{"cursor_kwargs": {"chunksize": 5}}], indirect=["polars_cursor"]
+        ("polars_cursor", "height"),
+        [({"cursor_kwargs": {"chunksize": 5}}, 5), ({}, 15)],
+        indirect=["polars_cursor"],
     )
-    def test_close_stops_chunks(self, polars_cursor):
-        """Test that closing the result set closes the chunk iterator it returned."""
+    def test_close_stops_chunks(self, polars_cursor, height):
+        """GH-1209: the chunk iterator of a closed result set raises instead of ending."""
         polars_cursor.execute("SELECT * FROM many_rows LIMIT 15")
         result_set = polars_cursor.result_set
         chunks = result_set.iter_chunks()
-        assert next(chunks).height == 5
+        assert next(chunks).height == height
         result_set.close()
-        assert list(chunks) == []
+        with pytest.raises(ProgrammingError):
+            next(chunks)
 
     @pytest.mark.parametrize(
         ("polars_cursor", "chunksize", "options", "sizes"),
