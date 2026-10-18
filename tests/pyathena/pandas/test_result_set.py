@@ -1100,7 +1100,7 @@ class TestAthenaPandasResultSet:
 
     @pytest.mark.filterwarnings("ignore:Both a converter and dtype:pandas.errors.ParserWarning")
     def test_converter_data_error(self, tmp_path):
-        """A DataError from a conversion function given in converters is OperationalError.
+        """A whole read raises a converters function's DataError as OperationalError.
 
         Only PyAthena's time zone conversion raises its DataError as it is.
         """
