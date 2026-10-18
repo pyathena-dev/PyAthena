@@ -240,11 +240,16 @@ def test_cursor_unknown_constructor_keyword(offline_connection, cursor_class):
         offline_connection.cursor(cursor_class)
 
 
+@pytest.mark.parametrize("given_by", ["connection", "cursor_kwargs"])
 @pytest.mark.parametrize("cursor_class", CURSOR_CLASSES)
-async def test_cursor_accepts_connection_callbacks(offline_connection, cursor_class):
+async def test_cursor_accepts_connection_callbacks(offline_connection, cursor_class, given_by):
     started, polled = [], []
-    offline_connection.on_start_query_execution = started.append
-    offline_connection.on_poll = polled.append
+    callbacks = {"on_start_query_execution": started.append, "on_poll": polled.append}
+    if given_by == "connection":
+        for name, callback in callbacks.items():
+            setattr(offline_connection, name, callback)
+    else:
+        offline_connection.cursor_kwargs = callbacks
 
     with answered_requests(offline_connection.client):
         async with _opened_cursor(offline_connection, cursor_class) as cursor:
@@ -340,23 +345,16 @@ class TestConnection:
         assert conn.cursor(RecordingCursor).kwargs[key] is configured
 
     def test_cursor_kwargs_override_connection_defaults(self):
-        connection_callback, configured_callback = MagicMock(), MagicMock()
         conn = _connection(
             schema_name="connection",
             kill_on_interrupt=True,
-            on_start_query_execution=connection_callback,
-            cursor_kwargs={
-                "schema_name": "configured",
-                "kill_on_interrupt": False,
-                "on_start_query_execution": configured_callback,
-            },
+            cursor_kwargs={"schema_name": "configured", "kill_on_interrupt": False},
         )
 
         cursor = conn.cursor(RecordingCursor)
 
         assert cursor.kwargs["schema_name"] == "configured"
         assert cursor.kwargs["kill_on_interrupt"] is False
-        assert cursor.kwargs["on_start_query_execution"] is configured_callback
 
     @pytest.mark.parametrize("cursor_class", PAGED_CURSORS + UNCAPPED_CURSORS)
     def test_cursor_arraysize(self, cursor_class):
