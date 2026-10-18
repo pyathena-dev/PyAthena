@@ -1232,7 +1232,7 @@ class TestAioS3FileSystem:
         finally:
             release.set()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            await await_bounded(task)
 
         assert events == ["start 1", "end 1", "abort"]
         sync_fs.core.complete_multipart_upload.assert_not_called()
