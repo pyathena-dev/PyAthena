@@ -604,11 +604,12 @@ class AthenaPolarsResultSet(AthenaResultSet):
         For unload queries, it replaces the metadata with the schema of the Parquet
         files, as ``_as_polars()`` does, before the chunks are read.
 
-        The result set creates the iterator during ``execute()``. The requests that
-        prepare the reads are made then, so ``execute()`` raises their errors: the size
-        check of a CSV result file, and the data manifest and the Parquet schema of an
-        UNLOAD result. The schema is read once, for the metadata and for the chunk
-        reader. The chunks themselves are read lazily.
+        The result set calls this method when it is created, in ``execute()`` or in the
+        future that ``AsyncPolarsCursor.execute()`` returns. The requests that prepare
+        the reads are made then, before the first fetch, and raise their errors there:
+        the size check of a CSV result file, and the data manifest and the Parquet
+        schema of an UNLOAD result. The schema sets the metadata, and the Polars scan
+        of the chunks also uses it. The chunks themselves are read lazily.
 
         Returns:
             PolarsDataFrameIterator that reads each chunk lazily.
