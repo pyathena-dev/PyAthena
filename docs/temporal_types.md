@@ -44,6 +44,9 @@ Typed values cover years 1 to 9999.
 PyAthena does not check for other years.
 For them, the result is whatever Python, pandas, pyarrow, or Polars returns or raises.
 
+`PandasCursor` holds `timestamp with time zone` values in UTC, so for them the range applies to the year in UTC.
+For example, the fetch methods raise an error for `0001-01-01 00:00:00.000 Asia/Tokyo`, which is in year 0 in UTC.
+
 ## Precision
 
 Microseconds are the precision of every typed value.
@@ -68,8 +71,8 @@ The fetch methods of the cursors other than `PandasCursor` return a value with a
 
 Athena writes a value with a zone name as the local time in that zone.
 A local time that a change of the zone's UTC offset, such as daylight saving time, repeats or skips does not identify one instant.
-For such a value, and for a zone name that Python's time zone database does not know, the cursors raise `DataError` naming the column where they convert the value:
-in the fetch methods, in `execute()` for the first page of `Cursor` and `DictCursor` results, and in the reads of `PandasCursor`.
+For such a value, and for a zone name that Python's time zone database does not know, the cursors raise `DataError` naming the column when they convert the value.
+Depending on the cursor and the read, that is in `execute()`, such as for the first page of `Cursor` and `DictCursor` results, or in the fetch methods.
 
 ```text
 DataError: Column 'col': '2020-11-01 01:30:00.000 America/New_York' is ambiguous: the local time occurs twice in America/New_York. Convert the value to UTC in SQL, for example with AT TIME ZONE 'UTC'.
