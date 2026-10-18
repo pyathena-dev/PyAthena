@@ -20,8 +20,10 @@ The `query_id` property keeps the ID of the last query.
 A closed result set, such as one that an `AsyncCursor` future returned, also raises `ProgrammingError` from its fetch methods and from `as_pandas()`, `as_arrow()`, `as_polars()`, and `iter_chunks()`.
 An iterator that `iter_chunks()` returned before the close raises `ProgrammingError` from its next read.
 
-Closing an `AsyncCursor` or one of its variants closes the result sets that its running futures create, so that they resolve with closed result sets.
-A future that is just finishing when the cursor closes can resolve with either an open or a closed result set.
+Closing an `AsyncCursor` or one of its variants stops the futures of `execute()`, `description()`, and `poll()` that still wait for their query.
+They raise `ProgrammingError` at their next status check, without reading the result, and the query itself keeps running.
+The futures of `cancel()` and `query_execution()` still run.
+A future of `execute()` that is already reading its result resolves with a closed result set, and one that is just finishing can resolve with either an open or a closed result set.
 A result set whose future resolved before the close belongs to the caller, and closing the cursor leaves it open; close it yourself.
 
 ## Keyword arguments in PyAthena 4.0

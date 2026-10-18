@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable
 from concurrent.futures import Future
 from concurrent.futures.thread import ThreadPoolExecutor
@@ -55,9 +56,10 @@ class AsyncCursor(BaseCursor):
         resolves to the result set, which provides the column descriptions and
         the fetch methods. ``description(query_id)`` also returns the column
         descriptions as a Future. A result set whose future resolved before
-        the cursor closed belongs to the caller; a future that is still
-        running when the cursor closes resolves with a closed result set,
-        unless it was just finishing (see :meth:`close`).
+        the cursor closed belongs to the caller. A future that still waits for
+        its query when the cursor closes raises ``ProgrammingError``, and one
+        that is building its result set resolves with a closed result set
+        (see :meth:`close`).
     """
 
     def __init__(
@@ -118,6 +120,8 @@ class AsyncCursor(BaseCursor):
         self.arraysize = arraysize
         self._max_workers = max_workers
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
+        # Set by close(), to end the waits between status requests.
+        self._closed_event = threading.Event()
         self._result_set_class = AthenaResultSet
         self._result_set_kwargs: dict[str, Any] = {}
 
@@ -139,17 +143,52 @@ class AsyncCursor(BaseCursor):
     def close(self, wait: bool = False) -> None:
         """Close the cursor and shut down its executor.
 
-        Later operations on the cursor raise ``ProgrammingError``. Futures
-        already returned still run to completion. A future of ``execute()``
-        that is still running resolves with a closed result set, unless it
-        was just finishing; one that resolved before the close is left to the
-        caller.
+        Later operations on the cursor raise ``ProgrammingError``. The futures
+        of ``execute()``, ``description()``, and ``poll()`` that still wait
+        for their query stop at their next status check and raise
+        ``ProgrammingError``; the query itself keeps running. A future of
+        ``execute()`` that is building its result set resolves with a closed
+        result set, and one that is just finishing can resolve with either an
+        open or a closed one. A result set whose future resolved before the
+        close is left to the caller. The futures of ``cancel()`` and
+        ``query_execution()`` still run.
 
         Args:
             wait: Whether to wait for submitted futures to finish before returning.
         """
         self._closed = True
+        self._closed_event.set()
         self._executor.shutdown(wait=wait)
+
+    @override
+    def _poll_until_terminal(self, query_id: str) -> AthenaQueryExecution:
+        """Poll a query execution until it reaches a terminal state, unless the cursor closes.
+
+        Calls ``on_poll`` with every status, and waits ``poll_interval``
+        seconds between requests, or until the cursor closes. The cursor is
+        checked before each request and after the terminal state, so that a
+        future stops waiting, and builds no result set, once the cursor has
+        closed.
+
+        Args:
+            query_id: The query execution ID.
+
+        Returns:
+            The query execution in a terminal state.
+
+        Raises:
+            ProgrammingError: If the cursor closes first.
+            OperationalError: If a status request fails.
+        """
+        while True:
+            self._ensure_open()
+            query_execution = self._get_query_execution(query_id)
+            if self._on_poll:
+                self._on_poll(query_execution)
+            if query_execution.state in AthenaQueryExecution.TERMINAL_STATES:
+                self._ensure_open()
+                return query_execution
+            self._closed_event.wait(self._poll_interval)
 
     def _submit_result_set(
         self, fn: Callable[..., _ResultSetT], /, *args: Any
@@ -186,6 +225,18 @@ class AsyncCursor(BaseCursor):
     def _description(
         self, query_id: str
     ) -> list[tuple[str, str, None, None, int, int, str]] | None:
+        """Wait for the query, then read the column descriptions of its result.
+
+        Args:
+            query_id: The Athena query execution ID.
+
+        Returns:
+            The DB API 2.0 column descriptions, or None.
+
+        Raises:
+            ProgrammingError: If the cursor closes before the query finishes.
+            OperationalError: If a status request or reading the result fails.
+        """
         result_set = self._collect_result_set(query_id)
         try:
             return result_set.description
@@ -197,7 +248,8 @@ class AsyncCursor(BaseCursor):
     ) -> Future[list[tuple[str, str, None, None, int, int, str]] | None]:
         """Get the column descriptions of a query's result set asynchronously.
 
-        The future waits for the query to finish before it reads the result set.
+        The future waits for the query to finish before it reads the result
+        set. If the cursor closes first, the future raises ``ProgrammingError``.
 
         Args:
             query_id: The Athena query execution ID.
@@ -244,7 +296,8 @@ class AsyncCursor(BaseCursor):
 
         Note:
             This method performs polling internally, so it will take time proportional
-            to your query execution duration.
+            to your query execution duration. If the cursor closes first, the future
+            raises ``ProgrammingError``.
 
         Raises:
             ProgrammingError: If the cursor is closed.
@@ -257,6 +310,20 @@ class AsyncCursor(BaseCursor):
         query_id: str,
         result_set_type_hints: dict[str | int, str] | None = None,
     ) -> AthenaResultSet:
+        """Wait for the query, then create its result set.
+
+        Args:
+            query_id: The Athena query execution ID.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
+
+        Returns:
+            The result set.
+
+        Raises:
+            ProgrammingError: If the cursor closes before the query finishes.
+            OperationalError: If a status request or reading the result fails.
+        """
         query_execution = cast(AthenaQueryExecution, self._poll(query_id))
         return self._result_set_class(
             connection=self._connection,
@@ -311,7 +378,9 @@ class AsyncCursor(BaseCursor):
         Returns:
             Tuple of (query_id, future) where:
             - query_id: Athena query execution ID for tracking
-            - future: Future object for result retrieval
+            - future: Future object for result retrieval, which raises
+              ``ProgrammingError`` if the cursor closes before the query finishes
+              (see :meth:`close`)
 
         Raises:
             ProgrammingError: If the cursor is closed.

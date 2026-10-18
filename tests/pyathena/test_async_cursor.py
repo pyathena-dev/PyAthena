@@ -15,6 +15,7 @@ from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
     EVENT_TIMEOUT,
+    assert_close_stops_waiting_futures,
     assert_closes_result_sets_after_close,
     placeholder_connection,
 )
@@ -195,6 +196,10 @@ class TestAsyncCursor:
     def test_close_closes_result_sets_after_close(self):
         """GH-1208: closing the cursor closes the result sets created after it (no AWS)."""
         assert_closes_result_sets_after_close(AsyncCursor)
+
+    def test_close_stops_waiting_futures(self):
+        """GH-1281: closing the cursor stops the futures that wait for a query (no AWS)."""
+        assert_close_stops_waiting_futures(AsyncCursor)
 
     def test_description_closes_result_set(self):
         """GH-1208: description() closes the result set that it reads (no AWS)."""

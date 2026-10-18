@@ -19,7 +19,10 @@ from pyathena.s3fs.result_set import AthenaS3FSResultSet
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
-from tests.pyathena.util import assert_closes_result_sets_after_close
+from tests.pyathena.util import (
+    assert_close_stops_waiting_futures,
+    assert_closes_result_sets_after_close,
+)
 
 
 class TestAsyncS3FSCursor:
@@ -101,6 +104,10 @@ class TestAsyncS3FSCursor:
     def test_close_closes_result_sets_after_close(self):
         """GH-1208: closing the cursor closes the result sets created after it (no AWS)."""
         assert_closes_result_sets_after_close(AsyncS3FSCursor)
+
+    def test_close_stops_waiting_futures(self):
+        """GH-1281: closing the cursor stops the futures that wait for a query (no AWS)."""
+        assert_close_stops_waiting_futures(AsyncS3FSCursor)
 
     def test_closed(self, async_s3fs_cursor):
         """GH-1207: a closed cursor rejects execute()."""
