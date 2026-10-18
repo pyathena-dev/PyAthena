@@ -56,7 +56,8 @@ class AsyncCursor(BaseCursor):
         the fetch methods. ``description(query_id)`` also returns the column
         descriptions as a Future. A result set whose future resolved before
         the cursor closed belongs to the caller; a future that is still
-        running when the cursor closes resolves with a closed result set.
+        running when the cursor closes resolves with a closed result set,
+        unless it was just finishing (see :meth:`close`).
     """
 
     def __init__(
