@@ -23,12 +23,15 @@ dependencies = [
 
 [tool.uv]
 package = false
+default-groups = ["test", "polars1"]
 
 [tool.uv.sources]
 pyathena = { workspace = true }
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-asyncio>=1", "mypy", "types-psutil", "cfn-lint>=1"]
+test = ["pytest>=8", "pytest-asyncio>=1", "mypy", "types-psutil", "cfn-lint>=1"]
+polars1 = ["polars>=1.39.0,<2"]
+polars2 = ["polars>=2,<3"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -37,7 +40,7 @@ asyncio_mode = "auto"
 
 [tool.ruff]
 extend = "../pyproject.toml"
-exclude = [".venv"]
+exclude = [".venv", ".venv-*"]
 target-version = "py312"
 
 [tool.mypy]

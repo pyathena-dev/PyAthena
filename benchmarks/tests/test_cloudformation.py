@@ -187,4 +187,9 @@ def test_hosts_start_the_queue_worker_and_expose_their_tags():
     )
     assert variables["Results"] == template["Outputs"]["Results"]["Value"]
     assert "systemctl enable --now pyathena-bench-worker.service" in user_data
+    # Jobs of the polars2 environment run the interpreter beside the worker's environment.
+    assert (
+        "UV_PROJECT_ENVIRONMENT=/opt/pyathena/.venv-polars2 uv sync --directory "
+        "/opt/pyathena/benchmarks --locked --no-default-groups --group polars2"
+    ) in user_data
     assert template["Parameters"]["QueueName"]["Default"] == ""

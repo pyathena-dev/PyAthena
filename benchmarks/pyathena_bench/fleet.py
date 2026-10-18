@@ -57,6 +57,9 @@ THROTTLING_ERRORS = {"ThrottlingException", "TooManyRequestsException"}
 QUIESCE_RETRIES = 10
 # Times a worker quiesces its own failed job while Athena only throttles it.
 QUIESCE_ROUNDS = 3
+# Virtual environments that a job can name, each synced with the dependency group of
+# the same name beside the default environment, which has the polars1 group.
+ENVIRONMENTS = ("polars2",)
 
 
 @dataclass(frozen=True)
@@ -134,11 +137,14 @@ def merge_jobs(job_lists: Iterable[list[dict[str, Any]]]) -> list[dict[str, Any]
         All jobs, ordered as :func:`expand_jobs` orders one list.
 
     Raises:
-        ValueError: If job IDs are not unique.
+        ValueError: If job IDs are not unique, or a job names an unknown environment.
     """
     jobs = [job for jobs in job_lists for job in jobs]
     if len({j["id"] for j in jobs}) != len(jobs):
         raise ValueError("Job IDs must be unique")
+    unknown = [j["id"] for j in jobs if j.get("environment") not in (None, *ENVIRONMENTS)]
+    if unknown:
+        raise ValueError(f"Jobs name an unknown environment: {', '.join(unknown)}")
     return sorted(jobs, key=job_order)
 
 
@@ -150,6 +156,7 @@ def expand_jobs(
     filters: Filters,
     split_pages: int | None = None,
     explicit_trials: bool = False,
+    environment: str | None = None,
 ) -> list[dict[str, Any]]:
     """Split a selection into independent ``run`` invocations.
 
@@ -172,6 +179,8 @@ def expand_jobs(
         explicit_trials: Whether jobs that are not split carry the warmups and
             repetitions of ``settings`` as arguments, so a queue can mix trial
             counts under one stored configuration.
+        environment: One of ``ENVIRONMENTS`` that runs the jobs, which their IDs
+            name, or None for the default environment.
 
     Returns:
         Job dictionaries ordered with API-heavy jobs first and longer jobs earlier.
@@ -246,7 +255,27 @@ def expand_jobs(
                         )
     if not jobs:
         raise ValueError("No cases match the selected filters")
+    if environment:
+        for job in jobs:
+            job["id"] += f"-{environment}"
+            job["environment"] = environment
     return sorted(jobs, key=job_order)
+
+
+def interpreter(environment: str | None) -> Path:
+    """Return the Python interpreter that runs a job.
+
+    Args:
+        environment: The job's environment, a virtual environment named
+            ``.venv-<environment>`` beside the one of this process, or None for
+            this process's interpreter.
+
+    Returns:
+        Path of the interpreter.
+    """
+    if environment is None:
+        return Path(sys.executable)
+    return Path(sys.prefix).with_name(f".venv-{environment}") / "bin" / "python"
 
 
 def now() -> str:
@@ -666,7 +695,8 @@ def run_job(
     ends, so no trial process outlives it.
 
     Args:
-        job: Job dictionary.
+        job: Job dictionary, whose environment selects the interpreter (see
+            :func:`interpreter`).
         workdir: Directory with the queue's ``config.toml`` and ``manifest.json``.
         output: New output directory for this attempt.
         resume: Output directories of earlier attempts whose completed trials
@@ -679,7 +709,8 @@ def run_job(
     """
     (workdir / "logs").mkdir(parents=True, exist_ok=True)
     command = [
-        sys.executable, "-m", "pyathena_bench", "--config", str(workdir / "config.toml"),
+        str(interpreter(job.get("environment"))), "-m", "pyathena_bench",
+        "--config", str(workdir / "config.toml"),
         "run", "--manifest", str(workdir / "manifest.json"), "--out", str(output),
         "--checkpoint", checkpoint, *job["args"],
     ]  # fmt: skip
@@ -1211,7 +1242,8 @@ def work(
 
     Raises:
         ValueError: If the queue has not been completely published and
-            ``wait`` is false, or a job needs more API slots than ``api_slots``.
+            ``wait`` is false, a job needs more API slots than ``api_slots``,
+            or a job's environment does not exist on this host.
         SpotInterruptionError: After an interruption notice, once the running attempt's
             records are uploaded and its claim is released as interrupted, or
             once the attempt of a failed job ends, if the notice arrived while
@@ -1240,6 +1272,9 @@ def work(
     too_wide = [j["id"] for j in jobs if j["api_heavy"] and j.get("api_weight", 1) > api_slots]
     if too_wide:
         raise ValueError(f"Jobs need more than {api_slots} API slots: {', '.join(too_wide)}")
+    missing = [j["id"] for j in jobs if not interpreter(j.get("environment")).exists()]
+    if missing:
+        raise ValueError(f"Jobs need an environment missing on this host: {', '.join(missing)}")
     if settle is None:
         settings = Settings.load(workdir / "config.toml")
 

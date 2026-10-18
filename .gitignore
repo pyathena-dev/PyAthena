@@ -27,6 +27,7 @@ cover/
 .mypy_cache
 .tmp
 .venv
+.venv-*
 docs/_build
 .mcp.json
 .serena
