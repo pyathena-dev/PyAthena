@@ -3664,13 +3664,29 @@ class TestS3FileSystem:
         fs = self._make_fs()
         events = []
         started = threading.Event()
-        release = threading.Event()
+        waiting = threading.Event()
+        waited_for = []
+
+        class SignallingCondition(threading.Condition):
+            def wait(self, timeout=None):
+                waiting.set()
+                return super().wait(timeout)
+
+        init = _S3WriteSession.__init__
+
+        def init_with_signal(session, *args, **kwargs):
+            init(session, *args, **kwargs)
+            # The wait of the session for its requests; no public seam
+            # observes it.
+            session._changed = SignallingCondition(session._lock)
 
         def upload_part_copy(**kwargs):
             started.set()
             # Copying until the cleanup waits for it.
-            assert release.wait(5)
-            events.append("part stored")
+            try:
+                waited_for.append(waiting.wait(5))
+            finally:
+                events.append("part stored")
             return SimpleNamespace(etag='"e"', part_number=kwargs["part_number"])
 
         fs.core.create_multipart_upload = mock.MagicMock(
@@ -3693,10 +3709,7 @@ class TestS3FileSystem:
             submitted.append(future)
             if len(submitted) == 2:
                 # The first part copy, interrupted once its request started.
-                # The part ends after a delay, which a cleanup that does not
-                # wait for it lets the abort come before.
                 assert started.wait(5)
-                threading.Timer(0.2, release.set).start()
                 raise KeyboardInterrupt
             return future
 
@@ -3704,7 +3717,10 @@ class TestS3FileSystem:
         fs._create_executor = mock.MagicMock(return_value=executor)
 
         try:
-            with pytest.raises(KeyboardInterrupt):
+            with (
+                mock.patch.object(_S3WriteSession, "__init__", init_with_signal),
+                pytest.raises(KeyboardInterrupt),
+            ):
                 fs._copy_object_with_multipart_upload(
                     S3Path("bucket", "src"),
                     S3Path("bucket", "dst"),
@@ -3713,9 +3729,10 @@ class TestS3FileSystem:
                     AnnotationDirective="EXCLUDE",
                 )
         finally:
-            release.set()
+            waiting.set()
             executor.shutdown()
 
+        assert waited_for == [True]
         assert events == ["part stored", "abort"]
         fs.core.upload_part_copy.assert_called_once()
 
