@@ -674,15 +674,16 @@ class _S3WriteSession:
             self._state = _S3WriteState.COMPLETING
 
     def withdraw_complete(self) -> None:
-        """Withdraw the commit reserved by :meth:`begin_complete` until its request is sent.
+        """Withdraw the commit of the write until its request is sent.
 
-        Does not block. For a caller that gives up a commit that it reserved:
-        one whose call was not queued, such as after an interrupt while it was
-        being queued, or one whose call has not sent the request yet, also
-        while :meth:`complete` waits for the part requests. The write then
-        fails: the commit is refused without a request, and :meth:`abort`
-        discards the write. Does nothing if no commit is reserved, or once
-        its request is being sent, which then runs to its end.
+        Does not block. For a caller that gives up a commit that it reserved
+        with :meth:`begin_complete`: one whose call was not queued, such as
+        after an interrupt while it was being queued, or one whose call has
+        not sent the request yet, also while :meth:`complete` waits for the
+        part requests. The write then fails: the commit is refused without a
+        request, and :meth:`abort` discards the write. Does nothing if the
+        write is not being committed, or once the request of its commit is
+        being sent, which then runs to its end.
         """
         with self._update():
             if self._state is not _S3WriteState.COMPLETING or self._commit_sent:
