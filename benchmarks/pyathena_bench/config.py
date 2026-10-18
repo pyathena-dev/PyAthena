@@ -172,17 +172,16 @@ def select_sql(database: str, table: str, shape: str, transport: str) -> str:
     Raises:
         ValueError: If the shape is unknown.
     """
-    if shape == "temporal" and transport in {"unload", "ctas"}:
-        columns: str | None = PARQUET_TEMPORAL_COLUMNS
-    else:
-        columns = {
-            "flat": FLAT_COLUMNS,
-            "nested": NESTED_COLUMNS,
-            "json": JSON_COLUMNS,
-            "temporal": TEMPORAL_COLUMNS,
-        }.get(shape)
+    columns = {
+        "flat": FLAT_COLUMNS,
+        "nested": NESTED_COLUMNS,
+        "json": JSON_COLUMNS,
+        "temporal": TEMPORAL_COLUMNS,
+    }.get(shape)
     if columns is None:
         raise ValueError(f"Unknown shape: {shape}")
+    if shape == "temporal" and transport in {"unload", "ctas"}:
+        columns = PARQUET_TEMPORAL_COLUMNS
     return f'SELECT {columns} FROM "{identifier(database)}"."{identifier(table)}"'
 
 
