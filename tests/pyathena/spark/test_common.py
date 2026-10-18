@@ -11,7 +11,7 @@ import uuid
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ReadTimeoutError
 
 from pyathena import DatabaseError, OperationalError
 from pyathena.aio.spark.cursor import AioSparkCursor
@@ -131,6 +131,21 @@ def _close(cursor) -> None:
 
 
 class TestSparkBaseCursor:
+    def test_get_std_out_read_failure(self):
+        """GH-1235: a failure while reading an output file raises OperationalError.
+
+        No AWS calls; the S3 client is mocked.
+        """
+        cursor = SparkCursor.__new__(SparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._client = MagicMock()
+        cursor._client.get_object.return_value = {
+            "Body": MagicMock(read=MagicMock(side_effect=ReadTimeoutError(endpoint_url="s3")))
+        }
+        cursor._retry_config = RetryConfig()
+        cursor._calculation_execution = MagicMock(std_out_s3_uri="s3://bucket/path/stdout.txt")
+        with pytest.raises(OperationalError):
+            cursor.get_std_out()
+
     def test_wait_for_idle_session_waits_until_idle(self):
         connection = _connection()
         connection.client.get_session_status.side_effect = [

@@ -142,16 +142,31 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             "DefaultExecutorDpuSize": 1,
         }
 
-    def _read_s3_file_as_text(self, uri) -> str:
+    def _read_s3_file_as_text(self, uri: str) -> str:
+        """Read a text file of a calculation, such as its standard output, from S3.
+
+        Args:
+            uri: The S3 URI of the file.
+
+        Returns:
+            The text of the file, without surrounding whitespace.
+
+        Raises:
+            OperationalError: If getting or reading the file fails.
+        """
         bucket, key = parse_output_location(uri)
-        response = retry_api_call(
-            self._client.get_object,
-            config=self._retry_config,
-            logger=_logger,
-            Bucket=bucket,
-            Key=key,
-        )
-        return cast(str, response["Body"].read().decode("utf-8").strip())
+        try:
+            response = retry_api_call(
+                self._client.get_object,
+                config=self._retry_config,
+                logger=_logger,
+                Bucket=bucket,
+                Key=key,
+            )
+            return cast(str, response["Body"].read().decode("utf-8").strip())
+        except Exception as e:
+            _logger.exception(f"Failed to read {bucket}/{key}.")
+            raise OperationalError(*e.args) from e
 
     def _get_session_status(self, session_id: str):
         request: dict[str, Any] = {"SessionId": session_id}

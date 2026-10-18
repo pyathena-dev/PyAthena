@@ -14,7 +14,7 @@ import logging
 import uuid
 from typing import Any, cast
 
-from pyathena.aio.util import async_retry_api_call
+from pyathena.aio.util import async_retry_api_call, run_in_thread
 from pyathena.error import DatabaseError, NotSupportedError, OperationalError, ProgrammingError
 from pyathena.model import (
     AthenaCalculationExecution,
@@ -22,7 +22,7 @@ from pyathena.model import (
     AthenaQueryExecution,
 )
 from pyathena.spark.common import SparkBaseCursor, WithCalculationExecution
-from pyathena.util import override, parse_output_location
+from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
 
@@ -301,16 +301,8 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
             raise OperationalError(*e.args) from e
 
     @override
-    async def _read_s3_file_as_text(self, uri) -> str:  # type: ignore[override]
-        bucket, key = parse_output_location(uri)
-        response = await async_retry_api_call(
-            self._client.get_object,
-            config=self._retry_config,
-            logger=_logger,
-            Bucket=bucket,
-            Key=key,
-        )
-        return cast(str, response["Body"].read().decode("utf-8").strip())
+    async def _read_s3_file_as_text(self, uri: str) -> str:  # type: ignore[override]
+        return await run_in_thread(super()._read_s3_file_as_text, uri)
 
     # --- public API ---
 
@@ -319,6 +311,9 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
 
         Returns:
             The standard output as a string, or None if no output is available.
+
+        Raises:
+            OperationalError: If reading the file from S3 fails.
         """
         if not self._calculation_execution or not self._calculation_execution.std_out_s3_uri:
             return None
@@ -329,6 +324,9 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
 
         Returns:
             The standard error as a string, or None if no error output is available.
+
+        Raises:
+            OperationalError: If reading the file from S3 fails.
         """
         if not self._calculation_execution or not self._calculation_execution.std_error_s3_uri:
             return None

@@ -79,6 +79,9 @@ class SparkCursor(SparkBaseCursor, WithCalculationExecution):
         Returns:
             The standard output as a string, or None if no output is available
             or the calculation has not been executed.
+
+        Raises:
+            OperationalError: If reading the file from S3 fails.
         """
         if not self._calculation_execution or not self._calculation_execution.std_out_s3_uri:
             return None
@@ -94,6 +97,9 @@ class SparkCursor(SparkBaseCursor, WithCalculationExecution):
         Returns:
             The standard error as a string, or None if no error output is available
             or the calculation has not been executed.
+
+        Raises:
+            OperationalError: If reading the file from S3 fails.
         """
         if not self._calculation_execution or not self._calculation_execution.std_error_s3_uri:
             return None
