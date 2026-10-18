@@ -240,7 +240,9 @@ def test_cursor_unknown_constructor_keyword(offline_connection, cursor_class):
         offline_connection.cursor(cursor_class)
 
 
-@pytest.mark.parametrize("given_by", ["connection", "cursor_kwargs"])
+@pytest.mark.parametrize(
+    "given_by", ["connection", "cursor_kwargs", "cursor_kwargs_over_connection"]
+)
 @pytest.mark.parametrize("cursor_class", CURSOR_CLASSES)
 async def test_cursor_accepts_connection_callbacks(offline_connection, cursor_class, given_by):
     """The connection's callbacks, or the ones its cursor_kwargs give over them, run."""
@@ -250,8 +252,9 @@ async def test_cursor_accepts_connection_callbacks(offline_connection, cursor_cl
         for name, callback in callbacks.items():
             setattr(offline_connection, name, callback)
     else:
-        for name in callbacks:
-            setattr(offline_connection, name, overridden.append)
+        if given_by == "cursor_kwargs_over_connection":
+            for name in callbacks:
+                setattr(offline_connection, name, overridden.append)
         offline_connection.cursor_kwargs = callbacks
 
     with answered_requests(offline_connection.client):
