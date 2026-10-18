@@ -917,6 +917,16 @@ class TestAioS3FileSystem:
         sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
         submit_to = S3AioThreadPool.submit_to
 
+        async def copy():
+            async with asyncio.timeout(EVENT_TIMEOUT):
+                await fs._copy_object_with_multipart_upload(
+                    S3Path("bucket", "src"),
+                    S3Path("bucket", "dst"),
+                    MetadataDirective="REPLACE",
+                    TaggingDirective="REPLACE",
+                    AnnotationDirective="EXCLUDE",
+                )
+
         def interrupt_completion(pool, future, fn, *args, **kwargs):
             if getattr(fn, "__func__", None) is _S3WriteSession.complete:
                 if queued:
@@ -936,18 +946,9 @@ class TestAioS3FileSystem:
             ),
             pytest.raises(KeyboardInterrupt),
         ):
-            # In an event loop of its own, which the interrupt stops.
-            asyncio.run(
-                await_bounded(
-                    fs._copy_object_with_multipart_upload(
-                        S3Path("bucket", "src"),
-                        S3Path("bucket", "dst"),
-                        MetadataDirective="REPLACE",
-                        TaggingDirective="REPLACE",
-                        AnnotationDirective="EXCLUDE",
-                    )
-                )
-            )
+            # In an event loop of its own, which the interrupt stops; bounded
+            # in the task that the interrupt stops, whose error is retrieved.
+            asyncio.run(copy())
 
         sync_fs.core.complete_multipart_upload.assert_not_called()
         sync_fs.core.abort_multipart_upload.assert_called_once()
@@ -983,10 +984,14 @@ class TestAioS3FileSystem:
             if kwargs.get("part_number") == 2:
                 submitted.set()
 
+        loop = asyncio.get_running_loop()
+
         def upload_part_copy(part_number, **kwargs):
             if part_number == 1:
-                # Fails once part 2 waits for the only thread.
+                # Fails once part 2 waits for the only thread, and the copy
+                # has gone on from its submission until it waits.
                 assert submitted.wait(EVENT_TIMEOUT)
+                asyncio.run_coroutine_threadsafe(asyncio.sleep(0), loop).result(EVENT_TIMEOUT)
                 raise PermissionError("Access Denied")
             return throttled()
 
@@ -1194,6 +1199,15 @@ class TestAioS3FileSystem:
         sync_fs.core.abort_multipart_upload = mock.MagicMock(
             side_effect=lambda upload, **params: events.append("abort")
         )
+        submit_to = fs._thread_pool.submit_to
+        queued = threading.Event()
+
+        def record_part(future, fn, *args, **kwargs):
+            submit_to(future, fn, *args, **kwargs)
+            if kwargs.get("part_number") == 2:
+                queued.set()
+
+        fs._thread_pool.submit_to = record_part
 
         task = asyncio.ensure_future(
             fs._copy_object_with_multipart_upload(
@@ -1207,6 +1221,8 @@ class TestAioS3FileSystem:
         )
         try:
             assert await asyncio.to_thread(started.wait, 5)
+            # Part 2 waits for the thread that part 1 holds.
+            assert await asyncio.to_thread(queued.wait, 5)
             task.cancel()
             # Gives the cleanup time to cancel the queued part copy.
             await asyncio.sleep(0.1)
@@ -2963,6 +2979,10 @@ class TestAioS3StreamedFile:
             return submit(pool, fn, *args, **kwargs)
 
         async def write_and_close():
+            async with asyncio.timeout(EVENT_TIMEOUT):
+                await write_and_close_file()
+
+        async def write_and_close_file():
             f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size)
             await f.write(b"a" * block_size)
             try:
@@ -2975,8 +2995,9 @@ class TestAioS3StreamedFile:
 
         closed = []
         with pytest.raises(KeyboardInterrupt):
-            # In an event loop of its own, which the interrupt stops.
-            asyncio.run(await_bounded(write_and_close()))
+            # In an event loop of its own, which the interrupt stops; bounded
+            # in the task that the interrupt stops, whose error is retrieved.
+            asyncio.run(write_and_close())
 
         assert closed == [True]
         fs.core.complete_multipart_upload.assert_not_called()
