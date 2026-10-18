@@ -285,7 +285,10 @@ class TestWithAsyncFetch:
 
     @pytest.mark.parametrize("cursor_class", _ALL_CURSOR_CLASSES)
     async def test_executemany_unknown_rowcount(self, cursor_class):
-        """A statement without an update count, such as a SELECT, makes the sum unknown."""
+        """A statement without an update count, such as a SELECT, makes the sum unknown.
+
+        No result set is left to fetch.
+        """
         cursor = cursor_class(
             connection=MagicMock(), converter=None, formatter=None, retry_config=None
         )
@@ -298,6 +301,7 @@ class TestWithAsyncFetch:
         await cursor.executemany("SELECT 1", [None, None, None])
 
         assert cursor.rowcount == -1
+        assert cursor.result_set is None
 
     @pytest.mark.parametrize("cursor_class", _ALL_CURSOR_CLASSES)
     async def test_executemany_failure_closes_result_set_off_event_loop(self, cursor_class):

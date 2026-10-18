@@ -433,6 +433,14 @@ class TestSparkBaseCursor:
         else:
             connection.client.terminate_session.assert_not_called()
 
+    async def test_aio_context_exit_terminates_owned_session(self):
+        """AioSparkCursor closes itself, and so its own session, at the end of async with."""
+        connection = _connection()
+        async with _init_cursor(AioSparkCursor, connection):
+            connection.client.terminate_session.assert_not_called()
+
+        connection.client.terminate_session.assert_called_once_with(SessionId="new-session")
+
     @pytest.mark.parametrize("cursor_class", SPARK_CURSOR_CLASSES)
     def test_close_does_not_terminate_session_twice(self, cursor_class):
         connection = _connection()
