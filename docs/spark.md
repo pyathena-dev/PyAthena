@@ -193,6 +193,7 @@ with conn.cursor() as cursor:
 
 The standard output and standard error of a spark application can be retrieved
 with the `get_std_out()` and `get_std_error()` methods in the cursor class.
+They raise `OperationalError` if reading the file from S3 fails.
 
 ### Spark SQL
 
@@ -409,6 +410,7 @@ with conn.cursor() as cursor:
 
 Standard output and standard error can be retrieved by passing this object to the cursor class.
 `get_std_out()` and `get_std_error()` return None instead of a future when the calculation has no standard output or standard error location.
+The future raises `OperationalError` if reading the file from S3 fails.
 
 ```python
 from pyathena import connect

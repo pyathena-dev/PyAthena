@@ -12,7 +12,7 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ReadTimeoutError
 
 from pyathena.aio.connection import AioConnection
 from pyathena.aio.spark.cursor import AioSparkCursor
@@ -110,6 +110,30 @@ def _starting_cursor(kill_on_interrupt=True, response=None):
 
 
 class TestAioSparkCursor:
+    async def test_get_std_out_read_failure(self):
+        """GH-1235: the output file is read in a thread, and a failed read raises OperationalError.
+
+        No AWS calls; the S3 client is mocked.
+        """
+        threads = []
+
+        def read():
+            threads.append(threading.current_thread())
+            raise ReadTimeoutError(endpoint_url="s3")
+
+        cursor = AioSparkCursor.__new__(AioSparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._closed = False
+        cursor._client = MagicMock()
+        cursor._client.get_object.return_value = {
+            "Body": MagicMock(read=MagicMock(side_effect=read))
+        }
+        cursor._retry_config = RetryConfig()
+        cursor._calculation_execution = MagicMock(std_out_s3_uri="s3://bucket/path/stdout.txt")
+        with pytest.raises(OperationalError):
+            await cursor.get_std_out()
+        assert threads
+        assert threads[0] is not threading.current_thread()
+
     async def test_spark_dataframe(self, aio_spark_cursor):
         # A Spark job, so that the calculation reports its DPU time and progress.
         await aio_spark_cursor.execute(
