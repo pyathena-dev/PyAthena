@@ -2202,6 +2202,29 @@ class TestS3FileSystem:
             )
             stubber.assert_no_pending_responses()
 
+    def test_copy_object_with_multipart_upload_unknown_parameter(self):
+        # GH-1229: a parameter that CopyObject does not accept reaches
+        # CreateMultipartUpload, so that botocore rejects it as it does for
+        # CopyObject, instead of the copy dropping it. Nothing is written.
+        fs = self._stubbed_copy_fs()
+        with Stubber(fs._client) as stubber:
+            stubber.add_response("head_object", {"ContentLength": MULTIPART_COPY_SIZE}, None)
+            # The Stubber checks the parameters before botocore validates
+            # them, which then fails before the response would be returned.
+            stubber.add_response(
+                "create_multipart_upload",
+                {"Bucket": "bucket", "Key": "dst", "UploadId": "u"},
+                {"Bucket": "bucket", "Key": "dst", "ContentTyp": "text/csv"},
+            )
+            with pytest.raises(botocore.exceptions.ParamValidationError, match="ContentTyp"):
+                self._multipart_copy(
+                    fs,
+                    ContentTyp="text/csv",
+                    MetadataDirective="REPLACE",
+                    TaggingDirective="REPLACE",
+                    AnnotationDirective="EXCLUDE",
+                )
+
     @pytest.mark.parametrize(
         "directive",
         [
@@ -3522,8 +3545,10 @@ class TestS3FileSystem:
                 {"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"}
             )
         )
-        fs.core.upload_part_copy = mock.MagicMock()
-        fs._finish_multipart_upload = mock.MagicMock()
+        fs.core.upload_part_copy = mock.MagicMock(
+            side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
+        )
+        fs.core.complete_multipart_upload = mock.MagicMock()
         # The HeadObject of the source.
         fs._call.return_value = {"ContentLength": 5 * 2**30 + 2**20}
 
@@ -3570,23 +3595,14 @@ class TestS3FileSystem:
         fs.core.upload_part_copy = mock.MagicMock()
         # The HeadObject of the source.
         fs._call.return_value = {"ContentLength": 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE}
-        fs._abort_multipart_upload = mock.MagicMock()
-        executor = S3ThreadPoolExecutor(max_workers=2)
-        submit_to = executor.submit_to
+        fs.core.abort_multipart_upload = mock.MagicMock()
+        ready = _S3WriteSession.ready
 
-        def submit_creation(future, fn, *args, **kwargs):
-            submit_to(future, fn, *args, **kwargs)
-            result = future.result
-
-            def wait_for_result(timeout=None):
-                # The interrupt is sent once the copy waits for the creation.
-                waiting.set()
-                return result(timeout)
-
-            future.result = wait_for_result  # type: ignore[method-assign]
-
-        executor.submit_to = submit_creation  # type: ignore[method-assign]
-        fs._create_executor = mock.MagicMock(return_value=executor)
+        def wait_for_ready(session):
+            # The interrupt is sent once the copy waits for the creation.
+            waiter = ready(session)
+            waiting.set()
+            return waiter
 
         handled = []
 
@@ -3614,7 +3630,10 @@ class TestS3FileSystem:
         previous_handler = signal.signal(signal.SIGINT, handle_interrupt)
         try:
             thread.start()
-            with pytest.raises(KeyboardInterrupt):
+            with (
+                mock.patch.object(_S3WriteSession, "ready", wait_for_ready),
+                pytest.raises(KeyboardInterrupt),
+            ):
                 fs._copy_object_with_multipart_upload(
                     S3Path("bucket", "src"),
                     S3Path("bucket", "dst"),
@@ -3632,14 +3651,10 @@ class TestS3FileSystem:
                 thread.join()
             signal.signal(signal.SIGINT, previous_handler)
 
-        fs._abort_multipart_upload.assert_called_once()
-        upload, params = fs._abort_multipart_upload.call_args.args
-        assert (upload.bucket, upload.key, upload.upload_id, params) == (
-            "bucket",
-            "dst",
-            "uploadid",
-            {},
-        )
+        fs.core.abort_multipart_upload.assert_called_once()
+        (upload,) = fs.core.abort_multipart_upload.call_args.args
+        assert (upload.bucket, upload.key, upload.upload_id) == ("bucket", "dst", "uploadid")
+        assert fs.core.abort_multipart_upload.call_args.kwargs == {}
         fs.core.upload_part_copy.assert_not_called()
 
     def test_copy_object_with_multipart_upload_interrupted_part_scheduling(self):
@@ -3649,13 +3664,29 @@ class TestS3FileSystem:
         fs = self._make_fs()
         events = []
         started = threading.Event()
-        release = threading.Event()
+        waiting = threading.Event()
+        waited_for = []
+
+        class SignallingCondition(threading.Condition):
+            def wait(self, timeout=None):
+                waiting.set()
+                return super().wait(timeout)
+
+        init = _S3WriteSession.__init__
+
+        def init_with_signal(session, *args, **kwargs):
+            init(session, *args, **kwargs)
+            # The wait of the session for its requests; no public seam
+            # observes it.
+            session._changed = SignallingCondition(session._lock)
 
         def upload_part_copy(**kwargs):
             started.set()
             # Copying until the cleanup waits for it.
-            assert release.wait(5)
-            events.append("part stored")
+            try:
+                waited_for.append(waiting.wait(5))
+            finally:
+                events.append("part stored")
             return SimpleNamespace(etag='"e"', part_number=kwargs["part_number"])
 
         fs.core.create_multipart_upload = mock.MagicMock(
@@ -3666,7 +3697,9 @@ class TestS3FileSystem:
         fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
         # The HeadObject of the source.
         fs._call.return_value = {"ContentLength": 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE}
-        fs._abort_multipart_upload = mock.MagicMock(side_effect=lambda *_: events.append("abort"))
+        fs.core.abort_multipart_upload = mock.MagicMock(
+            side_effect=lambda *_, **__: events.append("abort")
+        )
         executor = S3ThreadPoolExecutor(max_workers=2)
         submit = executor.submit
         submitted = []
@@ -3683,16 +3716,9 @@ class TestS3FileSystem:
         executor.submit = submit_and_interrupt  # type: ignore[method-assign]
         fs._create_executor = mock.MagicMock(return_value=executor)
 
-        def wait_for_parts(futures):
-            if any(not future.done() for future in futures):
-                release.set()
-            result = wait(futures, timeout=EVENT_TIMEOUT)
-            assert not result.not_done
-            return result
-
         try:
             with (
-                mock.patch("pyathena.filesystem.s3.wait", side_effect=wait_for_parts),
+                mock.patch.object(_S3WriteSession, "__init__", init_with_signal),
                 pytest.raises(KeyboardInterrupt),
             ):
                 fs._copy_object_with_multipart_upload(
@@ -3703,9 +3729,10 @@ class TestS3FileSystem:
                     AnnotationDirective="EXCLUDE",
                 )
         finally:
-            release.set()
+            waiting.set()
             executor.shutdown()
 
+        assert waited_for == [True]
         assert events == ["part stored", "abort"]
         fs.core.upload_part_copy.assert_called_once()
 
@@ -3726,28 +3753,19 @@ class TestS3FileSystem:
         fs.core.upload_part_copy = mock.MagicMock()
         # The HeadObject of the source.
         fs._call.return_value = {"ContentLength": 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE}
-        fs._abort_multipart_upload = mock.MagicMock()
-        executor = S3ThreadPoolExecutor(max_workers=2)
-        submit_to = executor.submit_to
+        fs.core.abort_multipart_upload = mock.MagicMock()
+        ready = _S3WriteSession.ready
 
-        def submit_creation(future, fn, *args, **kwargs):
-            submit_to(future, fn, *args, **kwargs)
-            result = future.result
-            waits = []
+        def interrupt_ready(session):
+            # The wait of the copy for the creation is interrupted.
+            waiter = ready(session)
 
             def interrupt_result(timeout=None):
-                # Only the first wait for the creation is interrupted; the
-                # cleanup reads the result afterwards.
-                waits.append(timeout)
-                if len(waits) == 1:
-                    assert started.wait(5)
-                    raise KeyboardInterrupt("first interrupt")
-                return result(timeout)
+                assert started.wait(5)
+                raise KeyboardInterrupt("first interrupt")
 
-            future.result = interrupt_result  # type: ignore[method-assign]
-
-        executor.submit_to = submit_creation  # type: ignore[method-assign]
-        fs._create_executor = mock.MagicMock(return_value=executor)
+            waiter.result = interrupt_result  # type: ignore[method-assign]
+            return waiter
 
         def interrupt_recovery(futures):
             if not release.is_set():
@@ -3759,7 +3777,8 @@ class TestS3FileSystem:
 
         try:
             with (
-                mock.patch("pyathena.filesystem.s3.wait", side_effect=interrupt_recovery),
+                mock.patch.object(_S3WriteSession, "ready", interrupt_ready),
+                mock.patch("pyathena.filesystem.s3_writer.wait", side_effect=interrupt_recovery),
                 pytest.raises(KeyboardInterrupt, match="first interrupt"),
             ):
                 fs._copy_object_with_multipart_upload(
@@ -3772,14 +3791,14 @@ class TestS3FileSystem:
         finally:
             release.set()
 
-        fs._abort_multipart_upload.assert_called_once()
-        upload, _ = fs._abort_multipart_upload.call_args.args
+        fs.core.abort_multipart_upload.assert_called_once()
+        (upload,) = fs.core.abort_multipart_upload.call_args.args
         assert upload.upload_id == "uploadid"
         fs.core.upload_part_copy.assert_not_called()
 
     def test_copy_object_with_multipart_upload_interrupted_cleanup(self, caplog):
-        # GH-1120: an interrupt while the cleanup waits for the part copies
-        # stops it, and the upload ID is logged for a later abort.
+        # GH-1120: an interrupt of the cleanup stops it, and the upload ID is
+        # logged for a later abort.
         fs = self._make_fs()
         fs.core.create_multipart_upload = mock.MagicMock(
             return_value=S3MultipartUpload(
@@ -3789,12 +3808,9 @@ class TestS3FileSystem:
         fs.core.upload_part_copy = mock.MagicMock(side_effect=RuntimeError("copy failed"))
         # The HeadObject of the source.
         fs._call.return_value = {"ContentLength": 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE}
-        fs._abort_multipart_upload = mock.MagicMock()
+        fs.core.abort_multipart_upload = mock.MagicMock(side_effect=KeyboardInterrupt)
 
-        with (
-            mock.patch("pyathena.filesystem.s3.wait", side_effect=KeyboardInterrupt),
-            pytest.raises(KeyboardInterrupt),
-        ):
+        with pytest.raises(KeyboardInterrupt):
             fs._copy_object_with_multipart_upload(
                 S3Path("bucket", "src"),
                 S3Path("bucket", "dst"),
@@ -3803,7 +3819,7 @@ class TestS3FileSystem:
                 AnnotationDirective="EXCLUDE",
             )
 
-        fs._abort_multipart_upload.assert_not_called()
+        fs.core.abort_multipart_upload.assert_called_once()
         assert any(
             record.levelname == "WARNING" and "uploadid" in record.getMessage()
             for record in caplog.records

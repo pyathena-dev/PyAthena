@@ -365,6 +365,7 @@ class _S3WriteSession:
         block_size: int,
         max_workers: int,
         request_kwargs: Mapping[str, Any] | None = None,
+        prepared_params: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         """Initialize a session without sending any request.
 
@@ -378,6 +379,11 @@ class _S3WriteSession:
             request_kwargs: Parameters inherited by each request that accepts
                 them. The mapping is read when each request is sent, so later
                 changes to it apply to the requests that follow.
+            prepared_params: The parameters of the requests of some
+                operations, by client method name, such as
+                ``create_multipart_upload``. They are sent as given, instead
+                of those selected from ``request_kwargs``, so that botocore
+                rejects one that the operation does not accept.
 
         Raises:
             ValueError: If the destination, the block size, or
@@ -392,6 +398,7 @@ class _S3WriteSession:
         self._request_kwargs: Mapping[str, Any] = (
             request_kwargs if request_kwargs is not None else {}
         )
+        self._prepared_params = dict(prepared_params or {})
         # The requests pass the parameters themselves, as the writer would
         # copy the mapping that they are read from.
         self._writer = S3MultipartWriter(core, path, block_size=block_size)
@@ -489,7 +496,7 @@ class _S3WriteSession:
         try:
             with stop_retries_on(self._stop):
                 self._executor.submit_to(
-                    creation, self._writer.initiate, **self._params("create_multipart_upload")
+                    creation, self._initiate, self._params("create_multipart_upload")
                 )
         except BaseException as e:
             # Recorded before the cancellation, which would record its own.
@@ -757,15 +764,35 @@ class _S3WriteSession:
             raise
 
     def _params(self, method: str) -> dict[str, Any]:
-        """Select the inherited parameters that an S3 operation accepts.
+        """Select the parameters of a request of an S3 operation.
 
         Args:
             method: The name of the client method, such as ``upload_part``.
 
         Returns:
-            The parameters of the request.
+            The prepared parameters of the operation, if any, else the
+            inherited parameters that it accepts.
         """
+        prepared = self._prepared_params.get(method)
+        if prepared is not None:
+            return dict(prepared)
         return self._core.operation_params(method, self._request_kwargs)
+
+    def _initiate(self, params: Mapping[str, Any]) -> S3MultipartUpload:
+        """Create the multipart upload; the request of the creation.
+
+        Sent through the core, as the writer would select the parameters
+        again and drop the prepared ones that the operation does not accept.
+
+        Args:
+            params: The parameters of the request, sent as given.
+
+        Returns:
+            The upload, stored in the writer before this method returns, as
+            :meth:`S3MultipartWriter.initiate` stores it.
+        """
+        self._writer.upload = self._core.create_multipart_upload(self._path, **params)
+        return self._writer.upload
 
     def _submit(self, fn: Callable[..., S3MultipartUploadPart], **kwargs: Any) -> None:
         """Track a part request and schedule it.
