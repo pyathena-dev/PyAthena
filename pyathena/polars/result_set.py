@@ -609,7 +609,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
         the reads are made then, before the first fetch, and raise their errors there:
         the size check of a CSV result file, and the data manifest and the Parquet
         schema of an UNLOAD result. The schema sets the metadata, and the Polars scan
-        of the chunks also uses it. The chunks themselves are read lazily.
+        of the chunks uses it to read timestamps at microseconds unless ``execute()``
+        was given a ``schema``. The chunks themselves are read lazily.
 
         Returns:
             PolarsDataFrameIterator that reads each chunk lazily.
