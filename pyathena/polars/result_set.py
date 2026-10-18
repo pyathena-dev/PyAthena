@@ -158,6 +158,10 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
     def iterrows(self) -> Iterator[tuple[int, dict[str, Any]]]:
         """Iterate over rows as (index, row_dict) tuples.
 
+        Once the result set that created the iterator is closed, the rows of the
+        chunk already read are still returned, and reading the next chunk raises
+        ``ProgrammingError``.
+
         Yields:
             Tuple of (row_index, row_dict) for each row across all chunks.
         """
@@ -172,6 +176,10 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         that a chunk does not have gives None to the name's converter. The next
         chunk is read when the rows of the current one run out. After an exception,
         such as a value that fails to convert, the iteration ends.
+
+        Once the result set that created the iterator is closed, the rows of the
+        chunk already read are still returned, and reading the next chunk raises
+        ``ProgrammingError``.
 
         Yields:
             The rows of all remaining chunks.

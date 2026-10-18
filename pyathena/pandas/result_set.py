@@ -643,6 +643,10 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
 
         Row indices are continuous across all chunks, starting from 0.
 
+        Once the result set that created the iterator is closed, the rows of the
+        chunk already read are still returned, and reading the next chunk raises
+        ``ProgrammingError``.
+
         Yields:
             Tuple of (row_index, row_dict) for each row across all chunks.
         """
@@ -661,6 +665,10 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         with the same name keep their own values. The next chunk is read when the
         rows of the current one run out. After an exception, such as a value that
         fails to convert, the iteration ends.
+
+        Once the result set that created the iterator is closed, the rows of the
+        chunk already read are still returned, and reading the next chunk raises
+        ``ProgrammingError``.
 
         Yields:
             The rows of all remaining chunks.

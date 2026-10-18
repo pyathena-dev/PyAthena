@@ -255,6 +255,21 @@ class S3AioThreadPool(S3Executor):
         # and whether release() waits for them to end.
         self._futures: set[Future[Any]] = set()
         self._releasing = False
+        # A future keeps its callbacks after it has ended, so its callback
+        # refers to the pool weakly, to let a pool whose futures are kept be
+        # collected with its threads.
+        pool = weakref.ref(self)
+
+        def end_call(future: Future[Any]) -> None:
+            """Count the end of a call if the pool still exists.
+
+            Args:
+                future: The future of the call, which has ended.
+            """
+            if (live := pool()) is not None:
+                live._end_call(future)
+
+        self._end_call_callback = end_call
         S3AioThreadPool._instances.add(self)
 
     @override
@@ -281,7 +296,7 @@ class S3AioThreadPool(S3Executor):
         with self._lock:
             future = self._get_executor().submit(context.run, fn, *args, **kwargs)
             self._futures.add(future)
-        future.add_done_callback(self._end_call)
+        future.add_done_callback(self._end_call_callback)
         return future
 
     async def run(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:

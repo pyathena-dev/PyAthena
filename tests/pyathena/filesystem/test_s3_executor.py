@@ -231,6 +231,29 @@ class TestS3AioThreadPool:
         assert not threads[0].is_alive()
         pool.shutdown()
 
+    def test_kept_future_keeps_no_pool(self):
+        # GH-1209: a future that the caller keeps after its call has ended does
+        # not keep the pool, whose threads end once the pool is collected.
+        pool = S3AioThreadPool(1)
+        threads = []
+        release = threading.Event()
+
+        def call():
+            threads.append(threading.current_thread())
+            release.wait(EVENT_TIMEOUT)
+
+        # Pending while its callback is added, which the future then keeps.
+        future = pool.submit(call)
+        release.set()
+        future.result(timeout=EVENT_TIMEOUT)
+        collected = weakref.ref(pool)
+        del pool
+        gc.collect()
+
+        assert collected() is None
+        threads[0].join(EVENT_TIMEOUT)
+        assert not threads[0].is_alive()
+
     def test_release_after_interrupted_submit(self):
         # GH-1209: a call whose submit() an interrupt stopped after scheduling
         # it does not keep release() from ending the threads once it has ended.

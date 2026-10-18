@@ -887,8 +887,9 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
 
         The iterator reads from the result set that the cursor has when this
         method is called. Each chunk is read as a fetch is (see
-        ``_fetch_in_thread()``): a cancellation stops the retries of the read,
-        and detaches and closes the result set. Leaving the iteration early
+        ``_fetch_in_thread()``): a cancellation stops the retries that PyAthena
+        makes for the read, but not those of a reader's own object store, and
+        detaches and closes the result set. Leaving the iteration early
         leaves the chunks that have not been read to the result set, which
         releases their reader when it is closed.
 

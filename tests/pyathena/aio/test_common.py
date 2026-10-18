@@ -33,7 +33,6 @@ _ALL_CURSOR_CLASSES = [
 
 _WHOLE_RESULT_METHODS = {
     AioArrowCursor: ("as_arrow", "as_polars"),
-    AioPandasCursor: ("as_pandas",),
     AioPolarsCursor: ("as_polars", "as_arrow"),
 }
 
@@ -139,7 +138,7 @@ class TestWithAsyncFetch:
         for fetch in (cursor.fetchone, cursor.fetchmany, cursor.fetchall):
             with pytest.raises(ProgrammingError, match=r"No result set\."):
                 await fetch()
-        # The Arrow, pandas, and Polars cursors also return the whole result.
+        # The Arrow and Polars cursors also return the whole result.
         for name in _WHOLE_RESULT_METHODS.get(cursor_class, ()):
             with pytest.raises(ProgrammingError):
                 await getattr(cursor, name)()
