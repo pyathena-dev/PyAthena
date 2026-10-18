@@ -505,7 +505,7 @@ return the query ID immediately through their different execution model.
 
 With `kill_on_interrupt` enabled, which is the default, a `KeyboardInterrupt` while `execute()` waits for the query
 requests cancellation, waits until the query reaches a terminal state, and then propagates.
-A `KeyboardInterrupt` raised in an `on_start_query_execution` callback cancels the query in the same way.
+In the synchronous cursors, a `KeyboardInterrupt` raised in an `on_start_query_execution` callback cancels the query in the same way.
 Cancellation is a best-effort request, so the query can still end as `SUCCEEDED` or `FAILED`.
 The `query_id` property keeps the ID of the interrupted query.
 If the cancellation request or that wait fails, the `KeyboardInterrupt` propagates with the error as its cause.

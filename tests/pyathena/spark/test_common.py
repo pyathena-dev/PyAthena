@@ -19,8 +19,8 @@ from pyathena.model import AthenaCalculationExecutionStatus, AthenaSessionStatus
 from pyathena.spark.async_cursor import AsyncSparkCursor
 from pyathena.spark.common import SparkBaseCursor
 from pyathena.spark.cursor import SparkCursor
-from pyathena.util import RetryConfig
-from tests.pyathena.util import interrupt_start_waits
+from pyathena.util import RetryConfig, stop_retries_on
+from tests.pyathena.util import ThrottledOperation, interrupt_start_waits
 
 SPARK_CURSOR_CLASSES = [SparkCursor, AsyncSparkCursor, AioSparkCursor]
 SYNC_SPARK_CURSOR_CLASSES = [SparkCursor, AsyncSparkCursor]
@@ -382,6 +382,21 @@ class TestSparkBaseCursor:
         assert exc_info.value is raised[0]
         assert exc_info.value.__cause__ is None
         connection.client.terminate_session.assert_called_once_with(SessionId="new-session")
+
+    @pytest.mark.parametrize("cursor_class", SPARK_CURSOR_CLASSES)
+    def test_init_session_start_in_stopped_scope(self, cursor_class):
+        """GH-1207: the caller's stop scope stops the StartSession retries (no AWS)."""
+        connection = _connection()
+        operation = ThrottledOperation(failures=1, operation_name="StartSession")
+        connection.client.start_session.side_effect = operation
+        stop = threading.Event()
+        stop.set()
+
+        with stop_retries_on(stop), pytest.raises(OperationalError):
+            _init_cursor(cursor_class, connection)
+
+        assert operation.calls == 1
+        connection.client.terminate_session.assert_not_called()
 
     @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
     def test_init_keeps_original_error_when_cleanup_fails(self, cursor_class):
