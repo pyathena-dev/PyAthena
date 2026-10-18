@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
@@ -184,18 +185,20 @@ class AioArrowCursor(WithAsyncFetch):
         query_execution = await self._poll(self.query_id)
         if query_execution.state == AthenaQueryExecution.STATE_SUCCEEDED:
             self.result_set = await create_in_thread(
-                AthenaArrowResultSet,
-                connection=self._connection,
-                converter=self._converter,
-                query_execution=query_execution,
-                arraysize=self.arraysize,
-                retry_config=self._retry_config,
-                unload=self._unload,
-                unload_location=unload_location,
-                connect_timeout=kwargs.pop("connect_timeout", self._connect_timeout),
-                request_timeout=kwargs.pop("request_timeout", self._request_timeout),
-                result_set_type_hints=options.result_set_type_hints,
-                **kwargs,
+                functools.partial(
+                    AthenaArrowResultSet,
+                    connection=self._connection,
+                    converter=self._converter,
+                    query_execution=query_execution,
+                    arraysize=self.arraysize,
+                    retry_config=self._retry_config,
+                    unload=self._unload,
+                    unload_location=unload_location,
+                    connect_timeout=kwargs.pop("connect_timeout", self._connect_timeout),
+                    request_timeout=kwargs.pop("request_timeout", self._request_timeout),
+                    result_set_type_hints=options.result_set_type_hints,
+                    **kwargs,
+                )
             )
         else:
             raise OperationalError(query_execution.state_change_reason)

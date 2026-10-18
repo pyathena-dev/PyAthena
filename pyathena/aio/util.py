@@ -131,32 +131,26 @@ async def close_in_thread(close: Callable[[], Any]) -> None:
 
 @overload
 async def create_in_thread(
-    factory: Callable[..., _ClosableT],
-    /,
-    *args: Any,
-    executor: _Executor | None = ...,
-    **kwargs: Any,
+    factory: Callable[[], _ClosableT], /, *, executor: _Executor | None = ...
 ) -> _ClosableT: ...
 
 
 @overload
 async def create_in_thread(
-    factory: Callable[..., T],
+    factory: Callable[[], T],
     /,
-    *args: Any,
+    *,
     release: Callable[[T], Any],
     executor: _Executor | None = ...,
-    **kwargs: Any,
 ) -> T: ...
 
 
 async def create_in_thread(
-    factory: Callable[..., Any],
+    factory: Callable[[], Any],
     /,
-    *args: Any,
-    release: Callable[[Any], Any] | None = None,
+    *,
+    release: Callable[[Any], Any] = _CLOSE,
     executor: _Executor | None = None,
-    **kwargs: Any,
 ) -> Any:
     """Run a blocking constructor of a closable object in the default executor.
 
@@ -171,21 +165,17 @@ async def create_in_thread(
     loop nor its executor, which may be shutting down.
 
     Args:
-        factory: The constructor.
-        *args: Positional arguments for ``factory``.
+        factory: The constructor, which takes no arguments; bind them with
+            ``functools.partial()``.
         release: The blocking function that releases an object constructed for
             a cancelled caller, for an object whose ``close()`` is a coroutine.
             Defaults to calling the object's ``close()``.
         executor: The executor that runs the constructor instead of the
             default executor, such as the thread pool of a filesystem.
-        **kwargs: Keyword arguments for ``factory``. To pass arguments named
-            ``release`` or ``executor``, bind them with ``functools.partial()``.
 
     Returns:
         The constructed object.
     """
-    if release is None:
-        release = _CLOSE
     lock = threading.Lock()
     cancelled = threading.Event()
     constructed: list[Any] = []
@@ -200,7 +190,7 @@ async def create_in_thread(
         if cancelled.is_set():
             return None
         with stop_retries_on(cancelled):
-            obj = factory(*args, **kwargs)
+            obj = factory()
         with lock:
             if not cancelled.is_set():
                 constructed.append(obj)
@@ -280,7 +270,7 @@ async def run_in_thread_or_close(
                 running = False
                 close = cancelled.is_set()
             if close:
-                _release_logging_errors(closable, _CLOSE)
+                _release_logging_errors(closable)
 
     future = asyncio.get_running_loop().run_in_executor(None, contextvars.copy_context().run, call)
     try:
@@ -292,18 +282,19 @@ async def run_in_thread_or_close(
         if close:
             threading.Thread(
                 target=_release_logging_errors,
-                args=(closable, _CLOSE),
+                args=(closable,),
                 name="run_in_thread_or_close-close",
             ).start()
         raise
 
 
-def _release_logging_errors(obj: Any, release: Callable[[Any], Any]) -> None:
+def _release_logging_errors(obj: Any, release: Callable[[Any], Any] = _CLOSE) -> None:
     """Release an object for a cancelled caller, logging an error that nobody else sees.
 
     Args:
         obj: The object to release.
-        release: The blocking function that releases it.
+        release: The blocking function that releases it. Defaults to its
+            ``close()``.
     """
     try:
         with unstoppable_retries():

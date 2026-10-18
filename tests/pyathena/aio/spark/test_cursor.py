@@ -23,6 +23,7 @@ from tests.pyathena.util import (
     CANCELABLE_SPARK_JOB,
     COMPLETED_CALCULATION_RESPONSES,
     answered_requests,
+    cancel_when_started,
     offline_spark_cursor,
     placeholder_connection,
     wait_for_spark_job,
@@ -444,21 +445,18 @@ class TestAioSparkCursor:
         """GH-1208: create() builds the cursor with the connection's cursor() (no AWS)."""
         conn = placeholder_connection(AioConnection)
         conn.cursor_kwargs = {"description": "from connection"}
-        client = conn.client
-        with (
-            patch.object(client, "start_session", return_value={"SessionId": "session"}) as start,
-            patch.object(
-                client,
-                "get_session_status",
-                return_value={"Status": {"State": AthenaSessionStatus.STATE_IDLE}},
-            ),
-        ):
+        responses = {
+            "StartSession": {"SessionId": "session"},
+            "GetSessionStatus": {"Status": {"State": AthenaSessionStatus.STATE_IDLE}},
+        }
+        with answered_requests(conn.client, responses) as requests:
             cursor = await AioSparkCursor.create(conn, notebook_version="Athena notebook version 1")
 
         assert isinstance(cursor, AioSparkCursor)
         assert cursor.session_id == "session"
-        assert start.call_args.kwargs["Description"] == "from connection"
-        assert start.call_args.kwargs["NotebookVersion"] == "Athena notebook version 1"
+        start = dict(requests)["StartSession"]
+        assert start["Description"] == "from connection"
+        assert start["NotebookVersion"] == "Athena notebook version 1"
 
     @pytest.mark.parametrize(
         ("kwargs", "terminated"),
@@ -497,11 +495,7 @@ class TestAioSparkCursor:
             patch.object(client, "terminate_session", side_effect=terminate_session),
         ):
             task = asyncio.create_task(AioSparkCursor.create(conn, **kwargs))
-            assert await asyncio.to_thread(started.wait, _TIMEOUT)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-            release.set()
+            await cancel_when_started(task, started, release)
             assert await asyncio.to_thread(released.wait, _TIMEOUT)
 
         assert requests == terminated

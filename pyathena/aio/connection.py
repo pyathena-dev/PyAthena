@@ -62,7 +62,6 @@ class AioConnection(Connection[AioCursor]):
         Returns:
             A fully initialized ``AioConnection``.
         """
-        # Bound with partial() so that no connection argument is taken by create_in_thread().
         return await create_in_thread(functools.partial(cls, **kwargs))
 
     async def __aenter__(self) -> AioConnection:

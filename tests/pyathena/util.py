@@ -192,6 +192,24 @@ class StoppingOperation:
             self._stopper.join()
 
 
+async def cancel_when_started(task, started, release):
+    """Cancel a task once the blocking call that it waits for has started.
+
+    The call is released after the cancellation has reached the task.
+
+    Args:
+        task: The task.
+        started: The event that the call sets when it starts.
+        release: The event that the call waits for before it returns.
+    """
+    # Polled, since the default executor may have no free thread.
+    await wait_until(started.is_set)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    release.set()
+
+
 async def wait_until(predicate, timeout=EVENT_TIMEOUT):
     """Wait, without blocking the event loop, until a condition holds.
 
@@ -433,18 +451,6 @@ def placeholder_connection(connection_class=Connection):
     )
 
 
-class _ClosableResultSet:
-    """A result set that records whether it was closed."""
-
-    description = None
-
-    def __init__(self):
-        self.closed = threading.Event()
-
-    def close(self):
-        self.closed.set()
-
-
 def assert_closes_result_sets_after_close(cursor_class):
     """Check that an AsyncCursor closes only the result sets created after it closes.
 
@@ -460,7 +466,7 @@ def assert_closes_result_sets_after_close(cursor_class):
 
     def collect(*args, **kwargs):
         assert release.wait(EVENT_TIMEOUT)
-        result_sets.append(_ClosableResultSet())
+        result_sets.append(MagicMock())
         return result_sets[-1]
 
     with (
@@ -479,8 +485,8 @@ def assert_closes_result_sets_after_close(cursor_class):
         finally:
             release.set()
             cursor.close(wait=True)
-    assert result_sets[1].closed.is_set()
-    assert not taken.closed.is_set()
+    result_sets[1].close.assert_called_once_with()
+    taken.close.assert_not_called()
 
 
 def offline_spark_cursor(cursor_class):

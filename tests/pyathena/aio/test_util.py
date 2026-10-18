@@ -20,24 +20,13 @@ from pyathena.aio.util import (
     run_in_thread_or_close,
 )
 from pyathena.util import RetryConfig, retry_api_call, stop_retries_on
-from tests.pyathena.util import EVENT_TIMEOUT, ThrottledOperation, wait_until
+from tests.pyathena.util import (
+    EVENT_TIMEOUT,
+    ThrottledOperation,
+    cancel_when_started,
+)
 
 _VALUE: contextvars.ContextVar[str] = contextvars.ContextVar("_VALUE", default="unset")
-
-
-async def _cancel_once_started(task, operation):
-    """Cancel a task during the first attempt of its operation.
-
-    Args:
-        task: The task that runs the operation in a thread.
-        operation: The blocking ``ThrottledOperation`` of the task.
-    """
-    # Polled, since the default executor may have no free thread.
-    await wait_until(operation.started.is_set)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    operation.release.set()
 
 
 class _Resource:
@@ -103,11 +92,7 @@ async def test_create_in_thread_cancelled_during_construction_release():
         return resource
 
     task = asyncio.create_task(create_in_thread(factory, release=lambda resource: released.set()))
-    assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    release.set()
+    await cancel_when_started(task, started, release)
 
     assert await asyncio.to_thread(released.wait, EVENT_TIMEOUT)
     assert not created[0].closed.is_set()
@@ -361,7 +346,7 @@ async def test_async_retry_api_call_cancelled():
         task = asyncio.create_task(
             async_retry_api_call(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
         )
-        await _cancel_once_started(task, operation)
+        await cancel_when_started(task, operation.started, operation.release)
         started = time.monotonic()
         # Runs once the thread of the cancelled call is free.
         await loop.run_in_executor(None, lambda: None)
@@ -398,7 +383,7 @@ async def test_create_in_thread_cancelled_stops_retries():
 
     task = asyncio.create_task(create_in_thread(factory))
     try:
-        await _cancel_once_started(task, operation)
+        await cancel_when_started(task, operation.started, operation.release)
         started = time.monotonic()
         assert await asyncio.to_thread(finished.wait, EVENT_TIMEOUT)
         assert time.monotonic() - started < EVENT_TIMEOUT

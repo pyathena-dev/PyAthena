@@ -104,8 +104,6 @@ async def aio_s3fs_cursor(request):
 
 @pytest.fixture
 async def aio_spark_cursor(request):
-    import asyncio
-
     from pyathena.aio.spark.cursor import AioSparkCursor
 
     if not hasattr(request, "param"):
@@ -116,7 +114,7 @@ async def aio_spark_cursor(request):
         work_group=ENV.spark_work_group,
         **request.param,
     )
-    cursor = await asyncio.to_thread(conn.cursor)
+    cursor = await AioSparkCursor.create(conn)
     try:
         yield cursor
     finally:

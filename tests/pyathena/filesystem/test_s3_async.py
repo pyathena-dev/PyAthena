@@ -45,6 +45,7 @@ from tests.pyathena.util import (
     MULTIPART_COPY_KWARGS,
     ThrottledOperation,
     await_bounded,
+    cancel_when_started,
     overlapping_calls,
     retried,
     stub_multipart_copy,
@@ -2535,11 +2536,7 @@ class TestAioS3StreamedFile:
 
         with mock.patch.object(AioS3StreamedFile, "__init__", blocking_init):
             task = asyncio.create_task(fs.open_async("s3://bucket/key", mode))
-            assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-            release.set()
+            await cancel_when_started(task, started, release)
             await wait_until(lambda: files[0].closed)
 
         assert files[0]._pool._shutdown

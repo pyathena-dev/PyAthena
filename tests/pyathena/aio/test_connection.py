@@ -20,7 +20,7 @@ from pyathena.aio.polars.cursor import AioPolarsCursor
 from pyathena.aio.s3fs.cursor import AioS3FSCursor
 from pyathena.aio.spark.cursor import AioSparkCursor
 from pyathena.spark.common import SparkBaseCursor
-from tests.pyathena.util import EVENT_TIMEOUT
+from tests.pyathena.util import EVENT_TIMEOUT, cancel_when_started
 
 CURSOR_CLASSES = [
     AioCursor,
@@ -129,9 +129,5 @@ async def test_create_cancelled_closes_connection():
         patch.object(AioConnection, "close", lambda self: closed.set()),
     ):
         task = asyncio.create_task(_connection())
-        assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        release.set()
+        await cancel_when_started(task, started, release)
         assert await asyncio.to_thread(closed.wait, EVENT_TIMEOUT)

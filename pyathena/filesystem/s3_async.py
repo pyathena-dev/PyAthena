@@ -958,7 +958,6 @@ class AioS3FileSystem(AsyncFileSystem):
             **self._sync_fs.s3_additional_kwargs,
             **(s3_additional_kwargs or {}),
         }
-        # Bound with partial() so that no request parameter is taken by create_in_thread().
         return await create_in_thread(
             functools.partial(
                 AioS3StreamedFile,
