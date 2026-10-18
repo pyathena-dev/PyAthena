@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+import asyncio
+import threading
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -18,6 +20,7 @@ from pyathena.aio.polars.cursor import AioPolarsCursor
 from pyathena.aio.s3fs.cursor import AioS3FSCursor
 from pyathena.aio.spark.cursor import AioSparkCursor
 from pyathena.spark.common import SparkBaseCursor
+from tests.pyathena.util import EVENT_TIMEOUT
 
 CURSOR_CLASSES = [
     AioCursor,
@@ -107,3 +110,28 @@ async def test_cursor_execute_supported_keywords(offline_connection, cursor_clas
             pytest.raises(RuntimeError, match="query started"),
         ):
             await cursor.execute("SELECT 1", **kwargs)
+
+
+async def test_create_cancelled_closes_connection():
+    """A connection built after create() is cancelled is closed."""
+    started = threading.Event()
+    release = threading.Event()
+    closed = threading.Event()
+    init = AioConnection.__init__
+
+    def blocking_init(self, **kwargs):
+        init(self, **kwargs)
+        started.set()
+        assert release.wait(EVENT_TIMEOUT)
+
+    with (
+        patch.object(AioConnection, "__init__", blocking_init),
+        patch.object(AioConnection, "close", lambda self: closed.set()),
+    ):
+        task = asyncio.create_task(_connection())
+        assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        assert await asyncio.to_thread(closed.wait, EVENT_TIMEOUT)

@@ -88,6 +88,42 @@ async def test_create_in_thread_cancelled_during_construction():
     assert created[0].closed_in != threading.get_ident()
 
 
+async def test_create_in_thread_cancelled_during_construction_release():
+    """An object constructed after the cancellation is released with ``release``, not closed."""
+    started = threading.Event()
+    release = threading.Event()
+    released = threading.Event()
+    created = []
+
+    def factory():
+        resource = _Resource()
+        created.append(resource)
+        started.set()
+        assert release.wait(EVENT_TIMEOUT)
+        return resource
+
+    task = asyncio.create_task(create_in_thread(factory, release=lambda resource: released.set()))
+    assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    release.set()
+
+    assert await asyncio.to_thread(released.wait, EVENT_TIMEOUT)
+    assert not created[0].closed.is_set()
+
+
+async def test_create_in_thread_executor():
+    """The constructor runs in the given executor with the caller's context."""
+    _VALUE.set("caller")
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="given") as executor:
+        resource = await create_in_thread(
+            lambda: (_Resource(), threading.current_thread().name), executor=executor
+        )
+    assert resource[0].value == "caller"
+    assert resource[1].startswith("given")
+
+
 async def test_create_in_thread_cancelled_construction_error():
     """A construction that fails after the caller was cancelled reports nothing."""
     loop = asyncio.get_running_loop()

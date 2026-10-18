@@ -175,6 +175,7 @@ After a fetch is cancelled, later fetches of its result raise `ProgrammingError`
 The fetch methods of `AioPandasCursor`, `AioArrowCursor`, `AioPolarsCursor`, and `AioS3FSCursor` run in a thread.
 A cancellation skips a fetch that has not started, and a started fetch keeps running in its thread without the retries of its requests.
 The cursor drops the result, which is closed once its fetch is no longer running.
+Cancelling `AioConnection.create()` or `aio_connect()` closes a connection that is created after the cancellation, and cancelling `AioSparkCursor.create()` terminates the session of a cursor created after it, as `close()` does.
 
 (aio-dict-cursor)=
 
@@ -355,6 +356,8 @@ async with await fs.open_async("s3://my-bucket/data/file.bin", "rb") as f:
   block. A file that is garbage collected before it is closed or its commit has begun
   is not committed: it emits a `ResourceWarning`, and its multipart upload is aborted.
   A synchronous `with` block raises `TypeError`.
+- Cancelling `open_async()` closes a file that is opened after the cancellation without
+  committing it.
 - `open_async()` raises `NotImplementedError` for the write modes inside a transaction,
   and for `autocommit=False`, because the file commits when it is closed.
 

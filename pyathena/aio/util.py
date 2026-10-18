@@ -13,9 +13,11 @@ import asyncio
 import contextlib
 import contextvars
 import logging
+import operator
 import threading
 from collections.abc import Callable
-from typing import Any, Protocol, TypeVar, cast
+from concurrent.futures import Future
+from typing import Any, Protocol, TypeVar, cast, overload
 
 from pyathena.util import RetryConfig, retry_api_call, stop_retries_on, unstoppable_retries
 
@@ -29,6 +31,14 @@ class _Closable(Protocol):
 
 
 _ClosableT = TypeVar("_ClosableT", bound=_Closable)
+
+
+class _Executor(Protocol):
+    def submit(self, fn: Callable[..., T], /, *args: Any) -> Future[T]: ...
+
+
+# The default release of create_in_thread(): the blocking close() of the object.
+_CLOSE = operator.methodcaller("close")
 
 
 async def run_in_thread(func: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
@@ -119,39 +129,73 @@ async def close_in_thread(close: Callable[[], Any]) -> None:
     await asyncio.shield(asyncio.get_running_loop().run_in_executor(None, close))
 
 
+@overload
 async def create_in_thread(
-    factory: Callable[..., _ClosableT], *args: Any, **kwargs: Any
-) -> _ClosableT:
+    factory: Callable[..., _ClosableT],
+    /,
+    *args: Any,
+    executor: _Executor | None = ...,
+    **kwargs: Any,
+) -> _ClosableT: ...
+
+
+@overload
+async def create_in_thread(
+    factory: Callable[..., T],
+    /,
+    *args: Any,
+    release: Callable[[T], Any],
+    executor: _Executor | None = ...,
+    **kwargs: Any,
+) -> T: ...
+
+
+async def create_in_thread(
+    factory: Callable[..., Any],
+    /,
+    *args: Any,
+    release: Callable[[Any], Any] | None = None,
+    executor: _Executor | None = None,
+    **kwargs: Any,
+) -> Any:
     """Run a blocking constructor of a closable object in the default executor.
 
     Like ``asyncio.to_thread()``, the constructor runs in the event loop's
-    default executor with the caller's context. If the caller is cancelled, a
-    construction that has not started is skipped, the retries of a running
-    one are stopped as by :func:`run_in_thread`, an object constructed after
-    the cancellation is closed by the constructing thread, and an object
-    constructed just before it is closed in a new thread: nothing else can
-    close it, and a close by the garbage collector could block the event
-    loop's thread. The cleanup needs neither the event loop nor its executor,
-    which may be shutting down.
+    default executor, or in ``executor``, with the caller's context. If the
+    caller is cancelled, a construction that has not started is skipped, the
+    retries of a running one are stopped as by :func:`run_in_thread`, an
+    object constructed after the cancellation is released by the constructing
+    thread, and an object constructed just before it is released in a new
+    thread: nothing else can release it, and a close by the garbage collector
+    could block the event loop's thread. The release needs neither the event
+    loop nor its executor, which may be shutting down.
 
     Args:
         factory: The constructor.
         *args: Positional arguments for ``factory``.
-        **kwargs: Keyword arguments for ``factory``.
+        release: The blocking function that releases an object constructed for
+            a cancelled caller, for an object whose ``close()`` is a coroutine.
+            Defaults to calling the object's ``close()``.
+        executor: The executor that runs the constructor instead of the
+            default executor, such as the thread pool of a filesystem.
+        **kwargs: Keyword arguments for ``factory``. To pass arguments named
+            ``release`` or ``executor``, bind them with ``functools.partial()``.
 
     Returns:
         The constructed object.
     """
+    if release is None:
+        release = _CLOSE
     lock = threading.Lock()
     cancelled = threading.Event()
-    constructed: list[_ClosableT] = []
+    constructed: list[Any] = []
 
-    def construct() -> _ClosableT | None:
+    def construct() -> Any:
         """Construct the object in a scope that the cancellation stops.
 
         Returns:
             The object, or None if the caller was cancelled, after which an
-            object constructed here is closed here.
+            object constructed here is released here.
         """
         if cancelled.is_set():
             return None
@@ -161,11 +205,14 @@ async def create_in_thread(
             if not cancelled.is_set():
                 constructed.append(obj)
                 return obj
-        _close_logging_errors(obj)
+        _release_logging_errors(obj, release)
         return None
 
-    future = asyncio.get_running_loop().run_in_executor(
-        None, contextvars.copy_context().run, construct
+    context = contextvars.copy_context()
+    future = (
+        asyncio.get_running_loop().run_in_executor(None, context.run, construct)
+        if executor is None
+        else asyncio.wrap_future(executor.submit(context.run, construct))
     )
     try:
         # Unlike asyncio.shield(), asyncio.wait() reports nothing when the
@@ -178,10 +225,12 @@ async def create_in_thread(
         future.add_done_callback(lambda f: f.cancelled() or f.exception())
         if constructed:
             threading.Thread(
-                target=_close_logging_errors, args=(constructed[0],), name="create_in_thread-close"
+                target=_release_logging_errors,
+                args=(constructed[0], release),
+                name="create_in_thread-close",
             ).start()
         raise
-    return cast(_ClosableT, future.result())
+    return future.result()
 
 
 async def run_in_thread_or_close(
@@ -231,7 +280,7 @@ async def run_in_thread_or_close(
                 running = False
                 close = cancelled.is_set()
             if close:
-                _close_logging_errors(closable)
+                _release_logging_errors(closable, _CLOSE)
 
     future = asyncio.get_running_loop().run_in_executor(None, contextvars.copy_context().run, call)
     try:
@@ -242,19 +291,22 @@ async def run_in_thread_or_close(
             close = not running
         if close:
             threading.Thread(
-                target=_close_logging_errors, args=(closable,), name="run_in_thread_or_close-close"
+                target=_release_logging_errors,
+                args=(closable, _CLOSE),
+                name="run_in_thread_or_close-close",
             ).start()
         raise
 
 
-def _close_logging_errors(closable: _Closable) -> None:
-    """Close an object for a cancelled caller, logging an error that nobody else sees.
+def _release_logging_errors(obj: Any, release: Callable[[Any], Any]) -> None:
+    """Release an object for a cancelled caller, logging an error that nobody else sees.
 
     Args:
-        closable: The object to close.
+        obj: The object to release.
+        release: The blocking function that releases it.
     """
     try:
         with unstoppable_retries():
-            closable.close()
+            release(obj)
     except Exception:
-        _logger.exception(f"Failed to close {closable!r} after a cancellation.")
+        _logger.exception(f"Failed to close {obj!r} after a cancellation.")

@@ -193,27 +193,29 @@ class AthenaS3FSResultSet(AthenaResultSet):
         bucket, key = parse_output_location(self.output_location)
         path = f"{bucket}/{key}"
 
-        csv_file = None
         try:
             csv_file = self._fs._open(path, mode="rb", **self._get_csv_open_options())
-            text_wrapper = TextIOWrapper(csv_file, encoding="utf-8")
+            try:
+                text_wrapper = TextIOWrapper(csv_file, encoding="utf-8")
 
-            if self.output_location.endswith(".txt"):
-                # Tab-separated format (no header row)
-                csv_reader = self._csv_reader_class(text_wrapper, delimiter="\t")
-            else:
-                # Standard CSV format (has header row, skip it)
-                csv_reader = self._csv_reader_class(text_wrapper, delimiter=",")
-                next(csv_reader)
-            self._csv_reader = csv_reader
-
-        except Exception as e:
-            _logger.exception(f"Failed to open {path}.")
-            if csv_file is not None:
+                if self.output_location.endswith(".txt"):
+                    # Tab-separated format (no header row)
+                    csv_reader = self._csv_reader_class(text_wrapper, delimiter="\t")
+                else:
+                    # Standard CSV format (has header row, skip it)
+                    csv_reader = self._csv_reader_class(text_wrapper, delimiter=",")
+                    next(csv_reader)
+            except BaseException:
+                # Also on KeyboardInterrupt, as nobody else can close the file.
                 try:
                     csv_file.close()
                 except Exception:
                     _logger.exception(f"Failed to close {path}.")
+                raise
+            self._csv_reader = csv_reader
+
+        except Exception as e:
+            _logger.exception(f"Failed to open {path}.")
             raise OperationalError(*e.args) from e
 
     @override

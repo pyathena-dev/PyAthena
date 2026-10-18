@@ -453,17 +453,18 @@ AioSparkCursor is a native asyncio cursor for executing PySpark code on Athena.
 Unlike AsyncSparkCursor which uses `concurrent.futures`, this cursor uses
 native `asyncio` for polling and API calls, keeping the event loop free.
 
-Since `SparkBaseCursor.__init__` performs I/O (session management), cursor creation
-must be wrapped in `asyncio.to_thread`:
+Since `SparkBaseCursor.__init__` performs I/O (session management), create the cursor
+with `AioSparkCursor.create()`, which runs `conn.cursor()` in a thread.
+If the task is cancelled while the cursor is being created, the cursor terminates the
+session it started, as `close()` does:
 
 ```python
-import asyncio
 from pyathena import aio_connect
 from pyathena.aio.spark.cursor import AioSparkCursor
 
 async with await aio_connect(work_group="YOUR_SPARK_WORKGROUP",
                           cursor_class=AioSparkCursor) as conn:
-    cursor = await asyncio.to_thread(conn.cursor)
+    cursor = await AioSparkCursor.create(conn)
     try:
         await cursor.execute("""spark.sql("SELECT 1").show()""")
         print(await cursor.get_std_out())
@@ -475,14 +476,13 @@ The close method follows the rules described in {ref}`spark-session-lifecycle`.
 The cursor supports the async context manager, which calls the close method:
 
 ```python
-import asyncio
 import textwrap
 from pyathena import aio_connect
 from pyathena.aio.spark.cursor import AioSparkCursor
 
 async with await aio_connect(work_group="YOUR_SPARK_WORKGROUP",
                           cursor_class=AioSparkCursor) as conn:
-    cursor = await asyncio.to_thread(conn.cursor)
+    cursor = await AioSparkCursor.create(conn)
     async with cursor:
         await cursor.execute(
             textwrap.dedent(
@@ -513,7 +513,7 @@ from pyathena.error import OperationalError
 
 async with await aio_connect(work_group="YOUR_SPARK_WORKGROUP",
                           cursor_class=AioSparkCursor) as conn:
-    cursor = await asyncio.to_thread(conn.cursor)
+    cursor = await AioSparkCursor.create(conn)
     async with cursor:
         task = asyncio.create_task(cursor.execute("""spark.sql("SELECT * FROM many_rows").show()"""))
         await asyncio.sleep(60)
@@ -540,7 +540,7 @@ from pyathena.aio.spark.cursor import AioSparkCursor
 
 async with await aio_connect(work_group="YOUR_SPARK_WORKGROUP",
                           cursor_class=AioSparkCursor) as conn:
-    cursor = await asyncio.to_thread(conn.cursor)
+    cursor = await AioSparkCursor.create(conn)
     async with cursor:
         try:
             await asyncio.wait_for(
