@@ -518,6 +518,32 @@ class TestPandasCursor:
         assert df["ts"].tolist() == [pd.Timestamp(2020, 1, 2, 3, 4, 5, 123000)]
 
     @pytest.mark.parametrize(
+        ("pandas_cursor", "rows_left"),
+        [
+            ({"cursor_kwargs": {"unload": True}}, 2),
+            ({"cursor_kwargs": {"unload": True, "chunksize": 1}}, 1),
+        ],
+        indirect=["pandas_cursor"],
+        ids=["whole", "chunks"],
+    )
+    def test_unload_int96_unit_none(self, pandas_cursor, rows_left):
+        """coerce_int96_timestamp_unit=None, pyarrow's default, keeps microseconds and chunks."""
+        value = datetime(1600, 1, 2, 3, 4, 5, 123000)
+        pandas_cursor.execute(
+            "SELECT ts FROM (VALUES TIMESTAMP '1600-01-02 03:04:05.123', "
+            "TIMESTAMP '1600-01-02 03:04:05.123') AS t (ts)",
+            coerce_int96_timestamp_unit=None,
+        )
+        row = pandas_cursor.fetchone()
+        assert row == (value,)
+        assert type(row[0]) is datetime
+        # The chunk left after fetchone(), or the whole result when it is not chunked.
+        df = pd.concat(pandas_cursor.iter_chunks())
+        assert len(df) == rows_left
+        assert df["ts"].dtype == "datetime64[us]"
+        assert set(df["ts"]) == {pd.Timestamp(value)}
+
+    @pytest.mark.parametrize(
         ("pandas_cursor", "chunksize"),
         [
             ({}, None),
