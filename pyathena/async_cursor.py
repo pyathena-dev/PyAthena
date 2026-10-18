@@ -54,9 +54,9 @@ class AsyncCursor(BaseCursor):
         Each execute() call returns a ``(query_id, future)`` tuple. The future
         resolves to the result set, which provides the column descriptions and
         the fetch methods. ``description(query_id)`` also returns the column
-        descriptions as a Future. Closing the cursor closes the result sets
-        that its futures create after the close; one created before the
-        close belongs to the caller.
+        descriptions as a Future. A result set whose future resolved before
+        the cursor closed belongs to the caller; a future that is still
+        running when the cursor closes resolves with a closed result set.
     """
 
     def __init__(
@@ -139,10 +139,10 @@ class AsyncCursor(BaseCursor):
         """Close the cursor and shut down its executor.
 
         Later operations on the cursor raise ``ProgrammingError``. Futures
-        already returned still run to completion. A result set that a future
-        of ``execute()`` creates after the close is closed; one created
-        before the close belongs to the caller, even if its future resolves
-        after the close.
+        already returned still run to completion. A future of ``execute()``
+        that is still running resolves with a closed result set, unless it
+        was just finishing; one that resolved before the close is left to the
+        caller.
 
         Args:
             wait: Whether to wait for submitted futures to finish before returning.
@@ -155,8 +155,8 @@ class AsyncCursor(BaseCursor):
     ) -> Future[_ResultSetT]:
         """Create a result set in the executor, closing it if the cursor has closed.
 
-        A result set that is created after the cursor has closed is closed
-        before its future resolves; one created before belongs to the caller.
+        After creating the result set, the worker closes it if the cursor has
+        closed by then, before the future resolves.
 
         Args:
             fn: The function that creates the result set.
