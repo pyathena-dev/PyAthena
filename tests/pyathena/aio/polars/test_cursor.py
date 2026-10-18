@@ -7,12 +7,15 @@
 
 from unittest.mock import MagicMock, patch
 
+import polars as pl
 import pytest
 
 from pyathena.aio.polars.cursor import AioPolarsCursor
 from pyathena.error import ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
+
+_FIVE_ROWS = "SELECT number FROM (VALUES (1), (2), (3), (4), (5)) AS t(number)"
 
 
 class TestAioPolarsCursor:
@@ -83,3 +86,24 @@ class TestAioPolarsCursor:
 
         with pytest.raises(ProgrammingError):
             await aio_polars_cursor.execute("SELECT * FROM one_row")
+
+    @pytest.mark.parametrize(("chunksize", "sizes"), [(None, [5]), (2, [2, 2, 1])])
+    async def test_iter_chunks(self, aio_polars_cursor, chunksize, sizes):
+        """GH-1209: iter_chunks() yields the chunks, and read_polars() the whole result."""
+        await aio_polars_cursor.execute(_FIVE_ROWS, chunksize=chunksize)
+        chunks = [chunk async for chunk in aio_polars_cursor.iter_chunks()]
+        assert [chunk.height for chunk in chunks] == sizes
+        assert pl.concat(chunks)["number"].to_list() == [1, 2, 3, 4, 5]
+        await aio_polars_cursor.execute(_FIVE_ROWS, chunksize=chunksize)
+        assert (await aio_polars_cursor.read_polars())["number"].to_list() == [1, 2, 3, 4, 5]
+        await aio_polars_cursor.execute(_FIVE_ROWS, chunksize=chunksize)
+        assert (await aio_polars_cursor.read_arrow())["number"].to_pylist() == [1, 2, 3, 4, 5]
+
+    async def test_iter_chunks_after_execute(self, aio_polars_cursor):
+        """GH-1209: iter_chunks() raises once another query has replaced its result set."""
+        await aio_polars_cursor.execute(_FIVE_ROWS, chunksize=2)
+        chunks = aio_polars_cursor.iter_chunks()
+        assert (await anext(chunks)).height == 2
+        await aio_polars_cursor.execute("SELECT * FROM one_row")
+        with pytest.raises(ProgrammingError):
+            await anext(chunks)

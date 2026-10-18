@@ -243,8 +243,27 @@ row = await cursor.fetchone()
 rows = await cursor.fetchall()
 
 await cursor.execute("SELECT * FROM many_rows")
-df = cursor.as_pandas()  # In-memory conversion, no await needed
+df = await cursor.read_pandas()
 ```
+
+`AioPandasCursor.read_pandas()`, `AioPolarsCursor.read_polars()`, and `AioPolarsCursor.read_arrow()`
+read the whole remaining result in a thread.
+`AioPandasCursor.iter_chunks()` and `AioPolarsCursor.iter_chunks()` return async iterators that read each
+chunk in a thread:
+
+```python
+import contextlib
+
+await cursor.execute("SELECT * FROM many_rows", chunksize=50_000)
+async with contextlib.aclosing(cursor.iter_chunks()) as chunks:
+    async for df in chunks:
+        process(df)
+```
+
+The chunks and the whole result are those of the synchronous `iter_chunks()` and `as_*()` methods.
+Leaving the loop early releases the chunk reader once the iterator is closed, as `contextlib.aclosing()` does.
+After the cursor runs another query or closes, the iterator raises `ProgrammingError`.
+Cancelling `read_*()` or a chunk read drops the result, as cancelling a fetch does.
 
 The `as_pandas()`, `as_arrow()`, and `as_polars()` convenience methods are synchronous.
 When `execute()` has loaded the whole result, they return that data.
@@ -290,6 +309,21 @@ blocks them:
 The pools create threads as the calls need them, and each call runs with the caller's
 context variables, as with `asyncio.to_thread()`.
 In a forked child process, a pool creates new threads.
+
+`close()` releases the threads of the filesystem once its calls in progress end, and so
+does the end of a `with` or `async with` block. The calls in progress, including the
+cleanup of a multipart copy, run to their end. The filesystem stays usable, also when
+other callers share it through fsspec's instance cache, and later calls create new
+threads. Files opened before keep their own threads. Without `close()`, the threads are
+released when the filesystem is garbage collected, which a filesystem in fsspec's
+instance cache is not until `clear_instance_cache()`.
+
+```python
+from pyathena.filesystem.s3_async import AioS3FileSystem
+
+async with AioS3FileSystem(asynchronous=True) as fs:
+    files = await fs._ls("s3://my-bucket/data/")
+```
 
 Cancelling a coroutine of the filesystem also stops the retries of the S3 requests that
 its call makes in these threads, including the part uploads and range reads that the

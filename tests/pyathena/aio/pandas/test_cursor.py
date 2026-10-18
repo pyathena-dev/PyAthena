@@ -7,12 +7,15 @@
 
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 
 from pyathena.aio.pandas.cursor import AioPandasCursor
 from pyathena.error import ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
+
+_FIVE_ROWS = "SELECT number FROM (VALUES (1), (2), (3), (4), (5)) AS t(number)"
 
 
 class TestAioPandasCursor:
@@ -120,3 +123,22 @@ class TestAioPandasCursor:
             await aio_pandas_cursor.execute("SELECT * FROM one_row")
         with pytest.raises(ProgrammingError):
             aio_pandas_cursor.as_pandas()
+
+    @pytest.mark.parametrize(("chunksize", "sizes"), [(None, [5]), (2, [2, 2, 1])])
+    async def test_iter_chunks(self, aio_pandas_cursor, chunksize, sizes):
+        """GH-1209: iter_chunks() yields the chunks, and read_pandas() the whole result."""
+        await aio_pandas_cursor.execute(_FIVE_ROWS, chunksize=chunksize)
+        chunks = [chunk async for chunk in aio_pandas_cursor.iter_chunks()]
+        assert [len(chunk) for chunk in chunks] == sizes
+        assert pd.concat(chunks)["number"].tolist() == [1, 2, 3, 4, 5]
+        await aio_pandas_cursor.execute(_FIVE_ROWS, chunksize=chunksize)
+        assert (await aio_pandas_cursor.read_pandas())["number"].tolist() == [1, 2, 3, 4, 5]
+
+    async def test_iter_chunks_after_execute(self, aio_pandas_cursor):
+        """GH-1209: iter_chunks() raises once another query has replaced its result set."""
+        await aio_pandas_cursor.execute(_FIVE_ROWS, chunksize=2)
+        chunks = aio_pandas_cursor.iter_chunks()
+        assert len(await anext(chunks)) == 2
+        await aio_pandas_cursor.execute("SELECT * FROM one_row")
+        with pytest.raises(ProgrammingError):
+            await anext(chunks)
