@@ -619,6 +619,55 @@ def assert_close_stops_waiting_futures(cursor_class):
                 future.result(EVENT_TIMEOUT)
 
 
+def assert_description_reads_only_metadata(cursor_class):
+    """Check that ``description()`` of an AsyncCursor reads only the result metadata.
+
+    For a CSV result, the future requests one row of ``GetQueryResults`` and
+    reads no result file: the connection sends no other request, and the
+    placeholder credentials would fail one to S3.
+
+    Args:
+        cursor_class: The AsyncCursor class.
+    """
+    cursor = placeholder_connection().cursor(cursor_class)
+    responses = {
+        **FAILED_EXECUTION_RESPONSES,
+        "GetQueryExecution": {
+            "QueryExecution": {
+                "QueryExecutionId": "query-id",
+                "Query": "SELECT 1",
+                "StatementType": "DML",
+                "Status": {"State": "SUCCEEDED"},
+                "ResultConfiguration": {"OutputLocation": "s3://bucket/path/query-id.csv"},
+            }
+        },
+        "GetQueryResults": {
+            "ResultSet": {
+                "Rows": [{"Data": [{"VarCharValue": "a"}]}, {"Data": [{"VarCharValue": "1"}]}],
+                "ResultSetMetadata": {
+                    "ColumnInfo": [
+                        {
+                            "Name": "a",
+                            "Type": "integer",
+                            "Precision": 10,
+                            "Scale": 0,
+                            "Nullable": "UNKNOWN",
+                        }
+                    ]
+                },
+            }
+        },
+    }
+    try:
+        with answered_requests(cursor.connection.client, responses) as requests:
+            description = cursor.description("query-id").result(EVENT_TIMEOUT)
+    finally:
+        cursor.close(wait=True)
+    assert description == [("a", "integer", None, None, 10, 0, "UNKNOWN")]
+    assert [operation for operation, _ in requests] == ["GetQueryExecution", "GetQueryResults"]
+    assert requests[1][1]["MaxResults"] == 1
+
+
 def offline_spark_cursor(cursor_class):
     """Build a Spark cursor on a connection that sends no request to AWS on its own.
 

@@ -227,6 +227,8 @@ class AsyncCursor(BaseCursor):
     ) -> list[tuple[str, str, None, None, int, int, str]] | None:
         """Wait for the query, then read the column descriptions of its result.
 
+        Only the result metadata is read, not the rows.
+
         Args:
             query_id: The Athena query execution ID.
 
@@ -235,9 +237,9 @@ class AsyncCursor(BaseCursor):
 
         Raises:
             ProgrammingError: If the cursor closes before the query finishes.
-            OperationalError: If a status request or reading the result fails.
+            OperationalError: If a status request or reading the metadata fails.
         """
-        result_set = self._collect_result_set(query_id)
+        result_set = self._collect_result_set(query_id, metadata_only=True)
         try:
             return result_set.description
         finally:
@@ -248,8 +250,11 @@ class AsyncCursor(BaseCursor):
     ) -> Future[list[tuple[str, str, None, None, int, int, str]] | None]:
         """Get the column descriptions of a query's result set asynchronously.
 
-        The future waits for the query to finish before it reads the result
-        set. If the cursor closes first, the future raises ``ProgrammingError``.
+        The future waits for the query to finish, then reads only the result
+        metadata: the first ``GetQueryResults`` page of one row, or for an
+        UNLOAD result of the pandas, Arrow, and Polars cursors, the schema of
+        its Parquet files. If the cursor closes first, the future raises
+        ``ProgrammingError``.
 
         Args:
             query_id: The Athena query execution ID.
@@ -309,6 +314,8 @@ class AsyncCursor(BaseCursor):
         self,
         query_id: str,
         result_set_type_hints: dict[str | int, str] | None = None,
+        *,
+        metadata_only: bool = False,
     ) -> AthenaResultSet:
         """Wait for the query, then create its result set.
 
@@ -316,6 +323,8 @@ class AsyncCursor(BaseCursor):
             query_id: The Athena query execution ID.
             result_set_type_hints: Athena type signatures for complex-type columns,
                 keyed by column name (case-insensitive) or zero-based column index.
+            metadata_only: Whether the result set reads only the result metadata,
+                as for ``description()``.
 
         Returns:
             The result set.
@@ -332,6 +341,7 @@ class AsyncCursor(BaseCursor):
             arraysize=self._arraysize,
             retry_config=self._retry_config,
             result_set_type_hints=result_set_type_hints,
+            _metadata_only=metadata_only,
             **self._result_set_kwargs,
         )
 

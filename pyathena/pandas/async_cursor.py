@@ -174,7 +174,30 @@ class AsyncPandasCursor(AsyncCursor):
         quoting: int = 1,
         unload_location: str | None = None,
         kwargs: dict[str, Any] | None = None,
+        *,
+        metadata_only: bool = False,
     ) -> AthenaPandasResultSet:
+        """Wait for the query, then create its pandas result set.
+
+        Args:
+            query_id: The Athena query execution ID.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
+            keep_default_na: pandas option for handling NA values.
+            na_values: Additional values to recognize as NA.
+            quoting: CSV quoting behavior.
+            unload_location: The S3 location of the ``UNLOAD`` output.
+            kwargs: Options of ``execute()`` for the result set and pandas.
+            metadata_only: Whether the result set reads only the result metadata,
+                as for ``description()``.
+
+        Returns:
+            The result set.
+
+        Raises:
+            ProgrammingError: If the cursor closes before the query finishes.
+            OperationalError: If a status request or reading the result fails.
+        """
         if kwargs is None:
             kwargs = {}
         query_execution = cast(AthenaQueryExecution, self._poll(query_id))
@@ -198,6 +221,7 @@ class AsyncPandasCursor(AsyncCursor):
                 "auto_optimize_chunksize", self._auto_optimize_chunksize
             ),
             result_set_type_hints=result_set_type_hints,
+            _metadata_only=metadata_only,
             **kwargs,
         )
 

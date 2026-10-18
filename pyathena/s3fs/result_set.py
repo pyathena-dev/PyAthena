@@ -79,6 +79,7 @@ class AthenaS3FSResultSet(AthenaResultSet):
         csv_reader: CSVReaderType | None = None,
         filesystem_class: type[AbstractFileSystem] | None = None,
         result_set_type_hints: dict[str | int, str] | None = None,
+        _metadata_only: bool = False,
         **kwargs,
     ) -> None:
         """Initialize the result set and prepare to read the query results.
@@ -101,6 +102,8 @@ class AthenaS3FSResultSet(AthenaResultSet):
                 PyAthena's ``S3FileSystem`` is used.
             result_set_type_hints: Athena type signatures for complex-type columns,
                 keyed by column name (case-insensitive) or zero-based column index.
+            _metadata_only: Whether to read only the result metadata, which sets
+                ``description``; the result set then opens no result file.
             **kwargs: Additional keyword arguments, which are ignored.
 
         Raises:
@@ -114,6 +117,7 @@ class AthenaS3FSResultSet(AthenaResultSet):
             arraysize=1,  # Fetch one row to retrieve metadata
             retry_config=retry_config,
             result_set_type_hints=result_set_type_hints,
+            _metadata_only=_metadata_only,
         )
         # Save pre-fetched rows (from Athena API) in case CSV reading is not available
         pre_fetched_rows = list(self._rows)
@@ -125,13 +129,14 @@ class AthenaS3FSResultSet(AthenaResultSet):
         self._fs = self._create_s3_file_system()
         self._csv_reader: CSVReader | None = None
 
-        if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
-            self._init_csv_reader()
-        elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
-            # Managed query result storage: no output_location, use API.
-            # The converter reads text values, as from the CSV result file.
-            rows = self._fetch_all_rows(self._converter)
-            self._rows.extend(rows)
+        if self.state == AthenaQueryExecution.STATE_SUCCEEDED and not _metadata_only:
+            if self.output_location:
+                self._init_csv_reader()
+            else:
+                # Managed query result storage: no output_location, use API.
+                # The converter reads text values, as from the CSV result file.
+                rows = self._fetch_all_rows(self._converter)
+                self._rows.extend(rows)
 
         # If CSV reader was not initialized (e.g., CTAS, DDL),
         # fall back to pre-fetched data from Athena API

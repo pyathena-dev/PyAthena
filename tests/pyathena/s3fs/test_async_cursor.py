@@ -22,6 +22,7 @@ from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
     assert_close_stops_waiting_futures,
     assert_closes_result_sets_after_close,
+    assert_description_reads_only_metadata,
 )
 
 
@@ -108,6 +109,10 @@ class TestAsyncS3FSCursor:
     def test_close_stops_waiting_futures(self):
         """GH-1281: closing the cursor stops the futures that wait for a query (no AWS)."""
         assert_close_stops_waiting_futures(AsyncS3FSCursor)
+
+    def test_description_reads_only_metadata(self):
+        """GH-1281: description() reads only the metadata of a CSV result (no AWS)."""
+        assert_description_reads_only_metadata(AsyncS3FSCursor)
 
     def test_closed(self, async_s3fs_cursor):
         """GH-1207: a closed cursor rejects execute()."""

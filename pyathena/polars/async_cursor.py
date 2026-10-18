@@ -179,7 +179,27 @@ class AsyncPolarsCursor(AsyncCursor):
         result_set_type_hints: dict[str | int, str] | None = None,
         unload_location: str | None = None,
         kwargs: dict[str, Any] | None = None,
+        *,
+        metadata_only: bool = False,
     ) -> AthenaPolarsResultSet:
+        """Wait for the query, then create its Polars result set.
+
+        Args:
+            query_id: The Athena query execution ID.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
+            unload_location: The S3 location of the ``UNLOAD`` output.
+            kwargs: Options of ``execute()`` for the result set and Polars.
+            metadata_only: Whether the result set reads only the result metadata,
+                as for ``description()``.
+
+        Returns:
+            The result set.
+
+        Raises:
+            ProgrammingError: If the cursor closes before the query finishes.
+            OperationalError: If a status request or reading the result fails.
+        """
         if kwargs is None:
             kwargs = {}
         query_execution = cast(AthenaQueryExecution, self._poll(query_id))
@@ -196,6 +216,7 @@ class AsyncPolarsCursor(AsyncCursor):
             max_workers=kwargs.pop("s3_max_workers", self._s3_max_workers),
             chunksize=kwargs.pop("chunksize", self._chunksize),
             result_set_type_hints=result_set_type_hints,
+            _metadata_only=metadata_only,
             **kwargs,
         )
 

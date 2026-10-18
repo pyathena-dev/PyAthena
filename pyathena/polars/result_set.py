@@ -334,6 +334,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         max_workers: int = (cpu_count() or 1) * 5,
         chunksize: int | None = None,
         result_set_type_hints: dict[str | int, str] | None = None,
+        _metadata_only: bool = False,
         **kwargs,
     ) -> None:
         """Initialize the Polars result set.
@@ -358,6 +359,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
                       access methods including fetchone(), fetchmany(), and iter_chunks().
             result_set_type_hints: Athena type signatures for complex-type columns,
                 keyed by column name (case-insensitive) or zero-based column index.
+            _metadata_only: Whether to read only the result metadata, which sets
+                ``description``; the result set then reads no rows. For an UNLOAD
+                result, the metadata comes from the schema of its Parquet files
+                (see ``_read_parquet_metadata()``).
             **kwargs: Additional arguments passed to Polars read functions.
                 They replace the arguments the result set chooses, such as ``separator``,
                 ``has_header``, ``schema_overrides``, and ``storage_options``. A given
@@ -376,6 +381,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             arraysize=1,  # Fetch one row to retrieve metadata
             retry_config=retry_config,
             result_set_type_hints=result_set_type_hints,
+            _metadata_only=_metadata_only,
         )
         self._rows.clear()  # Clear pre_fetch data
         self._arraysize = arraysize
@@ -399,7 +405,11 @@ class AthenaPolarsResultSet(AthenaResultSet):
         self._df: pl.DataFrame | None = None
         # Converters for the rows of self._df.
         self._df_converters: dict[str, Callable[[str | None], Any | None]] = {}
-        if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
+        if self.state == AthenaQueryExecution.STATE_SUCCEEDED and _metadata_only:
+            if self.output_location and self.is_unload:
+                self._metadata = self._read_parquet_metadata()
+            self._df = pl.DataFrame()
+        elif self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
             if self._chunksize is None:
                 self._df = self._as_polars()
                 self._df_converters = self._get_converters(self._get_frame_column_names())
@@ -838,23 +848,60 @@ class AthenaPolarsResultSet(AthenaResultSet):
             ProgrammingError: If the unload location is not set.
             OperationalError: If reading the schema fails.
         """
-        import polars as pl
-
         if not self._unload_location:
             raise ProgrammingError("UnloadLocation is none or empty.")
 
         try:
             # Use scan_parquet to get schema without reading all data
-            lazy_df = pl.scan_parquet(
-                self._unload_location,
-                storage_options=self._storage_options(
-                    lambda: self._get_parquet_storage_options(self.connection)
-                ),
-            )
-            return lazy_df.collect_schema()
+            return self._scan_parquet().collect_schema()
         except Exception as e:
             _logger.exception(f"Failed to read schema from {self._unload_location}.")
             raise OperationalError(*e.args) from e
+
+    def _scan_parquet(self) -> pl.LazyFrame:
+        """Scan the Parquet files at the unload location, with the result set's storage options.
+
+        Returns:
+            The lazy frame of the files.
+        """
+        import polars as pl
+
+        return pl.scan_parquet(
+            cast(str, self._unload_location),
+            storage_options=self._storage_options(
+                lambda: self._get_parquet_storage_options(self.connection)
+            ),
+        )
+
+    def _read_parquet_metadata(self) -> tuple[dict[str, Any], ...]:
+        """Read the metadata of the UNLOAD result without reading its rows.
+
+        This is the metadata that ``_as_polars()`` or, for a result read in
+        chunks, ``_create_dataframe_iterator()`` sets, from the schema of
+        ``_read_parquet_schema()``: empty without data files, and for a result
+        read whole, also when the files hold no rows, which the footers count.
+
+        Returns:
+            The column metadata.
+
+        Raises:
+            OperationalError: If reading the data manifest, the schema, or the row
+                count fails.
+        """
+        import polars as pl
+
+        if not self._prepare_parquet_location():
+            return ()
+        schema = self._read_parquet_schema()
+        if self._chunksize is None:
+            try:
+                rows = self._scan_parquet().select(pl.len()).collect().item()
+            except Exception as e:
+                _logger.exception(f"Failed to count the rows of {self._unload_location}.")
+                raise OperationalError(*e.args) from e
+            if not rows:
+                return ()
+        return to_column_info(schema)
 
     def _int96_read_options(self, schema: pl.Schema) -> dict[str, Any] | None:
         """Get the Polars read arguments that read the INT96 timestamps of UNLOAD at microseconds.

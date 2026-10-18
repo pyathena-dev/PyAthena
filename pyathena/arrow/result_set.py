@@ -22,6 +22,7 @@ from pyathena.util import RetryConfig, override, parse_output_location
 if TYPE_CHECKING:
     import polars as pl
     from pyarrow import Table
+    from pyarrow.parquet import ParquetDataset
 
     from pyathena.connection import Connection
 
@@ -95,6 +96,7 @@ class AthenaArrowResultSet(AthenaResultSet):
         connect_timeout: float | None = None,
         request_timeout: float | None = None,
         result_set_type_hints: dict[str | int, str] | None = None,
+        _metadata_only: bool = False,
         **kwargs,
     ) -> None:
         """Initialize the result set and load the query results into an Arrow Table.
@@ -116,6 +118,9 @@ class AthenaArrowResultSet(AthenaResultSet):
             request_timeout: The request timeout in seconds for the pyarrow S3 filesystem.
             result_set_type_hints: Athena type signatures for complex-type columns,
                 keyed by column name (case-insensitive) or zero-based column index.
+            _metadata_only: Whether to read only the result metadata, which sets
+                ``description``; the result set then reads no rows. For an UNLOAD
+                result, the metadata comes from the schema of its Parquet files.
             **kwargs: Additional keyword arguments, stored but not used.
 
         Raises:
@@ -129,6 +134,7 @@ class AthenaArrowResultSet(AthenaResultSet):
             arraysize=1,  # Fetch one row to retrieve metadata
             retry_config=retry_config,
             result_set_type_hints=result_set_type_hints,
+            _metadata_only=_metadata_only,
         )
         self._rows.clear()  # Clear pre_fetch data
         self._arraysize = arraysize
@@ -139,7 +145,13 @@ class AthenaArrowResultSet(AthenaResultSet):
         self._request_timeout = request_timeout
         self._kwargs = kwargs
         self._fs = self._create_s3_file_system()
-        if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
+        if self.state == AthenaQueryExecution.STATE_SUCCEEDED and _metadata_only:
+            import pyarrow as pa
+
+            if self.output_location and self.is_unload:
+                self._metadata = self._read_parquet_metadata()
+            self._table = pa.Table.from_pydict({})
+        elif self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
             self._table = self._as_arrow()
         elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
             # Without a result file, as with managed query result storage, the rows from
@@ -393,6 +405,34 @@ class AthenaArrowResultSet(AthenaResultSet):
             _logger.exception(f"Failed to read {location}.")
             raise OperationalError(*e.args) from e
 
+    def _open_parquet_dataset(self) -> ParquetDataset | None:
+        """Open the Parquet files of the UNLOAD result, with timestamps at microseconds.
+
+        Returns:
+            The dataset of the files, or None without data files.
+
+        Raises:
+            OperationalError: If reading the data manifest or opening the files fails.
+        """
+        from pyarrow import parquet
+
+        manifests = self._read_data_manifest()
+        if not manifests:
+            return None
+        if not self._unload_location:
+            self._unload_location = "/".join(manifests[0].split("/")[:-1]) + "/"
+
+        bucket, key = parse_output_location(self._unload_location)
+        try:
+            # Athena writes timestamps as INT96, whose default unit, nanoseconds, cannot
+            # hold years before 1677 or after 2262.
+            return parquet.ParquetDataset(
+                f"{bucket}/{key}", filesystem=self._fs, coerce_int96_timestamp_unit="us"
+            )
+        except Exception as e:
+            _logger.exception(f"Failed to read {bucket}/{key}.")
+            raise OperationalError(*e.args) from e
+
     def _read_parquet(self) -> Table:
         """Read the UNLOAD result, with timestamps at microseconds.
 
@@ -403,24 +443,35 @@ class AthenaArrowResultSet(AthenaResultSet):
             OperationalError: If reading the Parquet files fails.
         """
         import pyarrow as pa
-        from pyarrow import parquet
 
-        manifests = self._read_data_manifest()
-        if not manifests:
+        dataset = self._open_parquet_dataset()
+        if dataset is None:
             return pa.Table.from_pydict({})
-        if not self._unload_location:
-            self._unload_location = "/".join(manifests[0].split("/")[:-1]) + "/"
-
-        bucket, key = parse_output_location(self._unload_location)
         try:
-            # Athena writes timestamps as INT96, whose default unit, nanoseconds, cannot
-            # hold years before 1677 or after 2262.
-            dataset = parquet.ParquetDataset(
-                f"{bucket}/{key}", filesystem=self._fs, coerce_int96_timestamp_unit="us"
-            )
             return dataset.read(use_threads=True)
         except Exception as e:
-            _logger.exception(f"Failed to read {bucket}/{key}.")
+            _logger.exception(f"Failed to read {self._unload_location}.")
+            raise OperationalError(*e.args) from e
+
+    def _read_parquet_metadata(self) -> tuple[dict[str, Any], ...]:
+        """Read the metadata of the UNLOAD result without reading its rows.
+
+        This is the metadata that ``_as_arrow()`` sets, from the schema of the
+        dataset that ``_read_parquet()`` reads: empty without data files.
+
+        Returns:
+            The column metadata.
+
+        Raises:
+            OperationalError: If reading the data manifest or the schema fails.
+        """
+        dataset = self._open_parquet_dataset()
+        if dataset is None:
+            return ()
+        try:
+            return to_column_info(dataset.schema)
+        except Exception as e:
+            _logger.exception(f"Failed to read schema {self._unload_location}.")
             raise OperationalError(*e.args) from e
 
     def _as_arrow(self) -> Table:

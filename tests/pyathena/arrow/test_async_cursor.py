@@ -17,6 +17,7 @@ from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
     assert_close_stops_waiting_futures,
     assert_closes_result_sets_after_close,
+    assert_description_reads_only_metadata,
 )
 
 
@@ -76,6 +77,17 @@ class TestAsyncArrowCursor:
         future = async_arrow_cursor.description(query_id)
         description = future.result()
         assert result_set.description == description
+
+    @pytest.mark.parametrize(
+        "async_arrow_cursor", [{"cursor_kwargs": {"unload": True}}], indirect=True
+    )
+    def test_description_unload_empty(self, async_arrow_cursor):
+        """GH-1281: description() reads the metadata of an empty UNLOAD result as execute() does."""
+        query_id, future = async_arrow_cursor.execute(
+            "SELECT CAST(1 AS INT) AS foobar FROM one_row WHERE false"
+        )
+        result_set = future.result()
+        assert async_arrow_cursor.description(query_id).result() == result_set.description
 
     @pytest.mark.parametrize(
         "async_arrow_cursor",
@@ -309,6 +321,10 @@ class TestAsyncArrowCursor:
     def test_close_stops_waiting_futures(self):
         """GH-1281: closing the cursor stops the futures that wait for a query (no AWS)."""
         assert_close_stops_waiting_futures(AsyncArrowCursor)
+
+    def test_description_reads_only_metadata(self):
+        """GH-1281: description() reads only the metadata of a CSV result (no AWS)."""
+        assert_description_reads_only_metadata(AsyncArrowCursor)
 
     def test_closed(self, async_arrow_cursor):
         """GH-1207: a closed cursor rejects execute()."""

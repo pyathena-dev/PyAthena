@@ -16,6 +16,7 @@ from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
     assert_close_stops_waiting_futures,
     assert_closes_result_sets_after_close,
+    assert_description_reads_only_metadata,
 )
 
 
@@ -109,6 +110,27 @@ class TestAsyncPandasCursor:
         future = async_pandas_cursor.description(query_id)
         description = future.result()
         assert result_set.description == description
+
+    @pytest.mark.parametrize(
+        ("async_pandas_cursor", "query"),
+        [
+            (
+                {"cursor_kwargs": {"unload": True, "chunksize": 1_000}},
+                "SELECT 1 AS foobar FROM one_row",
+            ),
+            ({"cursor_kwargs": {"unload": True}}, "SELECT 1 AS foobar FROM one_row WHERE false"),
+            (
+                {"cursor_kwargs": {"unload": True, "chunksize": 1_000}},
+                "SELECT 1 AS foobar FROM one_row WHERE false",
+            ),
+        ],
+        indirect=["async_pandas_cursor"],
+    )
+    def test_description_unload(self, async_pandas_cursor, query):
+        """GH-1281: description() reads the metadata of an UNLOAD result as execute() does."""
+        query_id, future = async_pandas_cursor.execute(query)
+        result_set = future.result()
+        assert async_pandas_cursor.description(query_id).result() == result_set.description
 
     @pytest.mark.parametrize(
         ("async_pandas_cursor", "parquet_engine", "chunksize"),
@@ -336,6 +358,10 @@ class TestAsyncPandasCursor:
     def test_close_stops_waiting_futures(self):
         """GH-1281: closing the cursor stops the futures that wait for a query (no AWS)."""
         assert_close_stops_waiting_futures(AsyncPandasCursor)
+
+    def test_description_reads_only_metadata(self):
+        """GH-1281: description() reads only the metadata of a CSV result (no AWS)."""
+        assert_description_reads_only_metadata(AsyncPandasCursor)
 
     def test_closed(self, async_pandas_cursor):
         """GH-1207: a closed cursor rejects execute()."""

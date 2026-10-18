@@ -17,6 +17,7 @@ from tests.pyathena.util import (
     EVENT_TIMEOUT,
     assert_close_stops_waiting_futures,
     assert_closes_result_sets_after_close,
+    assert_description_reads_only_metadata,
     placeholder_connection,
 )
 
@@ -200,6 +201,10 @@ class TestAsyncCursor:
     def test_close_stops_waiting_futures(self):
         """GH-1281: closing the cursor stops the futures that wait for a query (no AWS)."""
         assert_close_stops_waiting_futures(AsyncCursor)
+
+    def test_description_reads_only_metadata(self):
+        """GH-1281: description() reads only the metadata of a CSV result (no AWS)."""
+        assert_description_reads_only_metadata(AsyncCursor)
 
     def test_description_closes_result_set(self):
         """GH-1208: description() closes the result set that it reads (no AWS)."""

@@ -160,7 +160,27 @@ class AsyncArrowCursor(AsyncCursor):
         result_set_type_hints: dict[str | int, str] | None = None,
         unload_location: str | None = None,
         kwargs: dict[str, Any] | None = None,
+        *,
+        metadata_only: bool = False,
     ) -> AthenaArrowResultSet:
+        """Wait for the query, then create its Arrow result set.
+
+        Args:
+            query_id: The Athena query execution ID.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
+            unload_location: The S3 location of the ``UNLOAD`` output.
+            kwargs: Options of ``execute()`` for the result set.
+            metadata_only: Whether the result set reads only the result metadata,
+                as for ``description()``.
+
+        Returns:
+            The result set.
+
+        Raises:
+            ProgrammingError: If the cursor closes before the query finishes.
+            OperationalError: If a status request or reading the result fails.
+        """
         if kwargs is None:
             kwargs = {}
         query_execution = cast(AthenaQueryExecution, self._poll(query_id))
@@ -175,6 +195,7 @@ class AsyncArrowCursor(AsyncCursor):
             connect_timeout=kwargs.pop("connect_timeout", self._connect_timeout),
             request_timeout=kwargs.pop("request_timeout", self._request_timeout),
             result_set_type_hints=result_set_type_hints,
+            _metadata_only=metadata_only,
             **kwargs,
         )
 

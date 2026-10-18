@@ -910,6 +910,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         max_workers: int = (cpu_count() or 1) * 5,
         auto_optimize_chunksize: bool = False,
         result_set_type_hints: dict[str | int, str] | None = None,
+        _metadata_only: bool = False,
         **kwargs,
     ) -> None:
         """Initialize AthenaPandasResultSet with pandas-specific configurations.
@@ -944,6 +945,10 @@ class AthenaPandasResultSet(AthenaResultSet):
                                    for large files when chunksize is None.
             result_set_type_hints: Athena type signatures for complex-type columns,
                 keyed by column name (case-insensitive) or zero-based column index.
+            _metadata_only: Whether to read only the result metadata, which sets
+                ``description``; the result set then reads no rows. For an UNLOAD
+                result, the metadata comes from the footers of its Parquet files
+                (see ``_read_parquet_metadata()``).
             **kwargs: Additional arguments passed to pandas.read_csv/read_parquet.
                 ``coerce_int96_timestamp_unit=None`` is the same as no
                 ``coerce_int96_timestamp_unit`` for an UNLOAD result.
@@ -961,6 +966,7 @@ class AthenaPandasResultSet(AthenaResultSet):
             arraysize=1,  # Fetch one row to retrieve metadata
             retry_config=retry_config,
             result_set_type_hints=result_set_type_hints,
+            _metadata_only=_metadata_only,
         )
         self._rows.clear()  # Clear pre_fetch data
         self._arraysize = arraysize
@@ -1001,7 +1007,12 @@ class AthenaPandasResultSet(AthenaResultSet):
 
         # The whole result when it was not read in chunks.
         self._df: DataFrame | None = None
-        if self.state == AthenaQueryExecution.STATE_SUCCEEDED:
+        if self.state == AthenaQueryExecution.STATE_SUCCEEDED and _metadata_only:
+            if self.output_location and self.is_unload:
+                self._metadata = self._read_parquet_metadata()
+            self._fetch_types = {}
+            self._df = pd.DataFrame()
+        elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
             if self.output_location:
                 result = self._as_pandas()
                 trunc_date = (
@@ -2090,6 +2101,33 @@ class AthenaPandasResultSet(AthenaResultSet):
         for footer in footers:
             self._parquet_null_dtypes.update(self._get_parquet_null_dtypes(footer))
         return footers
+
+    def _read_parquet_metadata(self) -> tuple[dict[str, Any], ...]:
+        """Read the metadata of the UNLOAD result without reading its rows.
+
+        This is the metadata that ``_as_pandas()`` sets: empty if the footers of
+        the Parquet files count no rows, and otherwise the columns of the schema
+        that the read uses, from the footers for a result read in chunks, and
+        from ``_read_parquet_schema()`` for one read whole.
+
+        Returns:
+            The column metadata.
+
+        Raises:
+            OperationalError: If reading the data manifest, the footers, or the
+                schema fails.
+            ProgrammingError: If the engine is not ``"pyarrow"``.
+        """
+        engine = self._get_parquet_engine()
+        if engine != "pyarrow":
+            raise ProgrammingError("Engine must be `pyarrow`.")
+        footers = self._read_parquet_footers()
+        if not any(footer.num_rows for footer in footers):
+            return ()
+        if self._reads_parquet_in_chunks():
+            # The files of one UNLOAD query have the same schema.
+            return to_column_info(footers[0].schema.to_arrow_schema())
+        return self._read_parquet_schema(engine)
 
     def _read_parquet_footer(self, path: str) -> FileMetaData:
         """Read the footer of a Parquet file.

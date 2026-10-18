@@ -76,6 +76,7 @@ class AthenaResultSet(CursorIterator):
         retry_config: RetryConfig,
         _pre_fetch: bool = True,
         result_set_type_hints: dict[str | int, str] | None = None,
+        _metadata_only: bool = False,
     ) -> None:
         """Initialize the result set and fetch the first page if the query succeeded.
 
@@ -90,6 +91,10 @@ class AthenaResultSet(CursorIterator):
                 The async result set passes False and fetches it itself.
             result_set_type_hints: Athena type signatures for complex-type columns,
                 keyed by column name (case-insensitive) or zero-based column index.
+            _metadata_only: Whether to read only the result metadata, which sets
+                ``description``, instead of the first page; see
+                :meth:`_fetch_metadata`. The result set then has no rows. The
+                thread-based asynchronous cursors pass True for ``description()``.
 
         Raises:
             ProgrammingError: If ``query_execution`` is not given.
@@ -124,7 +129,9 @@ class AthenaResultSet(CursorIterator):
 
         if self.state == AthenaQueryExecution.STATE_SUCCEEDED:
             self._rownumber = 0
-            if _pre_fetch:
+            if _metadata_only:
+                self._fetch_metadata()
+            elif _pre_fetch:
                 self._pre_fetch()
 
     @property
@@ -477,6 +484,18 @@ class AthenaResultSet(CursorIterator):
         response = self._get_query_results(self._arraysize, self._next_token)
         rows, self._next_token = self._parse_result_rows(response)
         self._process_rows(rows)
+
+    def _fetch_metadata(self) -> None:
+        """Fetch the result metadata with a ``GetQueryResults`` request of one row.
+
+        The rows of the response are not processed.
+
+        Raises:
+            ProgrammingError: If the query ID is missing, the query has not
+                succeeded, or the result set is closed.
+            OperationalError: If the request fails.
+        """
+        self._process_metadata(self._get_query_results(1))
 
     def _pre_fetch(self) -> None:
         """Fetch the first page of rows along with the result metadata.
