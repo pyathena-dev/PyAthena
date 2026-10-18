@@ -446,11 +446,8 @@ def test_wait_with_retry_stop_unstoppable():
     # The work ends once the wait checks the scope opened in the block, which is never stopped.
     probe = _CheckedEvent()
 
-    def work():
-        assert probe.checked.wait(EVENT_TIMEOUT)
-        return stop.is_set()
-
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(work)
+        future = executor.submit(probe.checked.wait, EVENT_TIMEOUT)
         with stop_retries_on(event), unstoppable_retries(), stop_retries_on(probe):
-            assert wait_with_retry_stop(future, stop=stop) is False
+            assert wait_with_retry_stop(future, stop=stop) is True
+    assert not stop.is_set()
