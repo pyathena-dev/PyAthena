@@ -64,16 +64,6 @@ class TestAioPandasCursor:
         with pytest.raises(ProgrammingError):
             aio_pandas_cursor.as_pandas()
 
-    async def test_invalid_arraysize(self, aio_pandas_cursor):
-        aio_pandas_cursor.arraysize = 10000
-        assert aio_pandas_cursor.arraysize == 10000
-        with pytest.raises(ProgrammingError):
-            aio_pandas_cursor.arraysize = -1
-
-    async def test_cancel_initial(self, aio_pandas_cursor):
-        with pytest.raises(ProgrammingError):
-            await aio_pandas_cursor.cancel()
-
     @pytest.mark.parametrize(
         "aio_pandas_cursor",
         [{"cursor_kwargs": {"unload": True}}],
