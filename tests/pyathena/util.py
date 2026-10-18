@@ -12,6 +12,7 @@ import time
 from concurrent.futures import Future, wait
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -20,12 +21,13 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 from botocore.response import StreamingBody
 from jinja2 import Environment, FileSystemLoader
-from sqlalchemy import types
+from sqlalchemy import cast, create_engine, engine_from_config, literal, types
 
 from pyathena.error import ProgrammingError
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.filesystem.s3_async import AioS3FileSystem
 from pyathena.filesystem.s3_core import S3Core
+from pyathena.formatter import DefaultParameterFormatter
 from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaCalculationExecutionStatus, AthenaQueryExecution
 from pyathena.util import retry_api_call
@@ -411,6 +413,130 @@ def decorated(impl):
         A TypeDecorator instance whose implementation is ``impl``.
     """
     return type("Decorated", (types.TypeDecorator,), {"impl": impl, "cache_ok": True})()
+
+
+def recording_engine(rowcounts=None, query="", config=None, rows=None, **kwargs):
+    """Create an engine whose DB API connection records statements offline.
+
+    Args:
+        rowcounts: Row counts reported by successive cursor calls. By default,
+            a call reports the number of rows it inserted.
+        query: The query string of the connection URL, without ``?``.
+        config: String engine options to pass through ``engine_from_config``
+            instead of calling ``create_engine`` directly.
+        rows: Result rows that each ``execute()`` returns, as tuples of the
+            values Athena returns. By default, a statement returns no rows.
+        **kwargs: Additional keyword arguments for ``create_engine``.
+
+    Returns:
+        A tuple of the engine and the list of recorded
+        ``(method, operation, parameters)`` calls.
+    """
+    calls = []
+    counts = iter(rowcounts or ())
+
+    class RecordingCursor:
+        description = None
+        rowcount = -1
+
+        def execute(self, operation, parameters=None, **_):
+            calls.append(("execute", operation, parameters))
+            inserted = sum(1 for key in parameters if key.startswith("id"))
+            self.rowcount = next(counts, inserted)
+            if rows is not None:
+                self.description = [
+                    (f"col_{i}", "varchar", None, None, None, None, True)
+                    for i in range(len(rows[0]))
+                ]
+                self._rows = iter(rows)
+
+        def executemany(self, operation, seq_of_parameters, **_):
+            calls.append(("executemany", operation, seq_of_parameters))
+            self.rowcount = next(counts, len(seq_of_parameters))
+
+        def fetchone(self):
+            return next(self._rows, None)
+
+        def close(self):
+            pass
+
+    connection = SimpleNamespace(
+        cursor=RecordingCursor, close=lambda: None, commit=lambda: None, rollback=lambda: None
+    )
+    url = f"awsathena+rest://athena.us-west-2.amazonaws.com/default?{query}"
+    if config is not None:
+        configuration = {"sqlalchemy.url": url}
+        configuration.update({f"sqlalchemy.{key}": value for key, value in config.items()})
+        engine = engine_from_config(configuration, creator=lambda: connection, **kwargs)
+    else:
+        engine = create_engine(url, creator=lambda: connection, **kwargs)
+    return engine, calls
+
+
+def executed_sql(statement, parameters=None):
+    """Execute a statement through ``recording_engine`` and format what the cursor receives.
+
+    Bind processors and SQLAlchemy's bind name escaping apply as in a real
+    execution, and ``DefaultParameterFormatter`` renders the parameters as
+    ``Cursor.execute()`` would.
+
+    Args:
+        statement: SQLAlchemy statement to execute.
+        parameters: Execution parameters for the statement.
+
+    Returns:
+        The formatted SQL of the single recorded call.
+    """
+    engine, calls = recording_engine()
+    with engine.connect() as conn:
+        conn.execute(statement, parameters)
+    ((_, operation, formatted_parameters),) = calls
+    return DefaultParameterFormatter().format(operation, formatted_parameters)
+
+
+def fetched_scalar(statement, value):
+    """Execute a statement through ``recording_engine`` and return its processed result.
+
+    Args:
+        statement: SQLAlchemy statement that selects one column.
+        value: The value that the cursor returns for that column, as Athena returns it.
+
+    Returns:
+        The value after SQLAlchemy's result processing.
+    """
+    engine, _ = recording_engine(rows=[(value,)])
+    with engine.connect() as conn:
+        return conn.execute(statement).scalar_one()
+
+
+BINARY_VALUES = (
+    None,
+    b"",
+    b"\x00\xff'\\%",
+    bytes(range(256)),
+    bytearray(b"\x00\xff"),
+    memoryview(b"\x00\xff"),
+)
+
+
+def binary_columns():
+    """Cast each binary value to each binary type, as a bound and as a literal-execute parameter.
+
+    Returns:
+        A tuple of the column expressions to select and the row that Athena returns for them.
+    """
+    cases = [
+        (type_, value, literal_execute)
+        for type_ in (types.LargeBinary, types.BINARY, types.VARBINARY)
+        for value in BINARY_VALUES
+        for literal_execute in (False, True)
+    ]
+    columns = [
+        cast(literal(value, type_=type_, literal_execute=literal_execute), type_)
+        for type_, value, literal_execute in cases
+    ]
+    expected = tuple(None if value is None else bytes(value) for _, value, _ in cases)
+    return columns, expected
 
 
 def wait_for_spark_session_state(client, session_id, state, timeout=120):
