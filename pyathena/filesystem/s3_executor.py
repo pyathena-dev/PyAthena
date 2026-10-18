@@ -395,10 +395,8 @@ class S3AioThreadPool(S3Executor):
         This method does not block.
         """
         with self._lock:
-            if self._calls:
-                self._releasing = True
-                return
-            executor, self._executor = self._executor, None
+            self._releasing = True
+            executor = self._take_idle_executor()
         if executor is not None:
             executor.shutdown(wait=False)
 
@@ -410,12 +408,23 @@ class S3AioThreadPool(S3Executor):
         """
         with self._lock:
             self._calls -= 1
-            if self._calls or not self._releasing:
-                return
-            self._releasing = False
-            executor, self._executor = self._executor, None
+            executor = self._take_idle_executor()
         if executor is not None:
             executor.shutdown(wait=False)
+
+    def _take_idle_executor(self) -> ThreadPoolExecutor | None:
+        """Take the executor to shut down if a release waits and no call runs or waits.
+
+        The caller holds the lock of the pool.
+
+        Returns:
+            The executor, or None if there is none to shut down yet.
+        """
+        if self._calls or not self._releasing:
+            return None
+        self._releasing = False
+        executor, self._executor = self._executor, None
+        return executor
 
     @classmethod
     def _reset_after_fork(cls) -> None:

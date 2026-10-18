@@ -170,14 +170,11 @@ class AioS3FileSystem(AsyncFileSystem):
         return self._sync_fs.core
 
     def close(self) -> None:
-        """Release the threads of the filesystem once no call runs or waits in them.
+        """Release the threads of the filesystem, which stays usable, once they are idle.
 
-        The filesystem stays usable, also when it is cached and shared: until
-        then, calls run in its threads as before, at most ``max_workers`` at
-        once, and a call after the release creates new threads. The calls in
-        progress run to their end, including the cleanup of their multipart
-        uploads. Files opened before have threads of their own and are not
-        affected. This method does not block.
+        See :meth:`S3AioThreadPool.release()
+        <pyathena.filesystem.s3_executor.S3AioThreadPool.release>`. Files opened
+        before have threads of their own and are not affected.
         """
         self._thread_pool.release()
 
@@ -194,7 +191,7 @@ class AioS3FileSystem(AsyncFileSystem):
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        """Release the threads with :meth:`close`, without waiting for calls in progress."""
+        """Release the threads with :meth:`close`."""
         self.close()
 
     async def _info(self, path: str, **kwargs) -> S3Object:

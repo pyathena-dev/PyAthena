@@ -40,7 +40,7 @@ _CHUNKED_CURSOR_CLASSES = [AioPandasCursor, AioPolarsCursor]
 
 
 class _Chunks:
-    """A chunk iterator that records the threads of its reads and closes."""
+    """A chunk iterator that records the threads of its reads, and ends once closed."""
 
     def __init__(self, read):
         """Initialize the iterator.
@@ -50,16 +50,16 @@ class _Chunks:
         """
         self._read = read
         self.reads = []
-        self.closes = []
+        self.closed = False
 
     def __next__(self):
         self.reads.append(threading.get_ident())
-        if self.closes:
+        if self.closed:
             raise StopIteration
         return self._read()
 
     def close(self):
-        self.closes.append(threading.get_ident())
+        self.closed = True
 
 
 def _result_set_closing_after_loop_responds() -> tuple[MagicMock, list[bool]]:
@@ -388,7 +388,7 @@ class TestWithAsyncFetch:
                 assert chunk == "a"
                 break
         assert [chunk async for chunk in cursor.iter_chunks()] == ["b"]
-        assert not chunks.closes
+        assert not chunks.closed
 
     @pytest.mark.parametrize("cursor_class", _CHUNKED_CURSOR_CLASSES)
     async def test_cancelled_iter_chunks_detaches_result_set(self, cursor_class):
@@ -414,7 +414,7 @@ class TestWithAsyncFetch:
             with pytest.raises(asyncio.CancelledError):
                 await task
             assert cursor.result_set is None
-            assert not chunks.closes
+            assert not chunks.closed
             assert not closed.is_set()
         finally:
             operation.release.set()
