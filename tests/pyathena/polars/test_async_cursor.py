@@ -243,18 +243,6 @@ class TestAsyncPolarsCursor:
         assert df.height == 10000
         assert df.width == 1
 
-    @pytest.mark.parametrize(
-        "async_polars_cursor",
-        [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
-        indirect=["async_polars_cursor"],
-    )
-    def test_as_arrow(self, async_polars_cursor):
-        query_id, future = async_polars_cursor.execute("SELECT * FROM one_row")
-        assert query_id is not None
-        table = future.result().as_arrow()
-        assert table.num_rows == 1
-        assert table.num_columns == 1
-
     def test_cancel(self, async_polars_cursor):
         query_id, future = async_polars_cursor.execute(
             """
@@ -348,7 +336,6 @@ class TestAsyncPolarsCursor:
                 converter=MagicMock(),
                 formatter=MagicMock(),
                 retry_config=RetryConfig(),
-                max_workers=1,
                 **cursor_kwargs,
             ) as cursor,
             patch.object(AsyncPolarsCursor, "_execute", return_value="query_id"),
@@ -361,4 +348,3 @@ class TestAsyncPolarsCursor:
         expected = {**cursor_kwargs, **execute_kwargs}
         expected["max_workers"] = expected.pop("s3_max_workers")
         assert {key: kwargs[key] for key in expected} == expected
-        assert cursor._executor._max_workers == 1

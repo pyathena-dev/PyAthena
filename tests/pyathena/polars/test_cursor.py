@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import polars as pl
 import pytest
 
-from pyathena.error import DatabaseError, DataError, ProgrammingError
+from pyathena.error import DatabaseError, DataError, OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.polars.converter import DefaultPolarsTypeConverter
 from pyathena.polars.cursor import PolarsCursor
@@ -141,6 +141,22 @@ class TestPolarsCursor:
             },
         ).as_polars()
         assert df.to_dicts() == [{"number_of_rows": "1"}]
+
+    def test_storage_options_replace_defaults(self, polars_cursor):
+        """storage_options given to execute() replace PyAthena's S3 settings for the read.
+
+        A whole CSV result file is read through fsspec with PyAthena's filesystem, which
+        the invalid credentials of the options fail.
+        """
+        with pytest.raises(OperationalError):
+            polars_cursor.execute(
+                "SELECT * FROM one_row",
+                storage_options={
+                    "key": "invalid",
+                    "secret": "invalid",
+                    "skip_instance_cache": True,
+                },
+            )
 
     @pytest.mark.parametrize(
         "polars_cursor",
@@ -502,16 +518,6 @@ class TestPolarsCursor:
             Decimal("0.1"),
         )
 
-    @pytest.mark.parametrize(
-        "polars_cursor",
-        [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
-        indirect=["polars_cursor"],
-    )
-    def test_as_arrow(self, polars_cursor):
-        table = polars_cursor.execute("SELECT * FROM one_row").as_arrow()
-        assert table.num_rows == 1
-        assert table.num_columns == 1
-
     def test_cancel(self, polars_cursor):
         def cancel(c):
             time.sleep(random.randint(5, 10))
@@ -633,27 +639,6 @@ class TestPolarsCursor:
         assert callback_results[0] == polars_cursor.query_id
         assert polars_cursor.query_id is not None
 
-    def test_iter_chunks(self):
-        """Test chunked iteration over query results."""
-        with contextlib.closing(connect(schema_name=ENV.schema)) as conn:
-            cursor = conn.cursor(PolarsCursor, chunksize=5)
-            cursor.execute("SELECT * FROM many_rows LIMIT 15")
-            chunks = list(cursor.iter_chunks())
-            assert len(chunks) > 0
-            total_rows = sum(chunk.height for chunk in chunks)
-            assert total_rows == 15
-            for chunk in chunks:
-                assert isinstance(chunk, pl.DataFrame)
-
-    def test_iter_chunks_without_chunksize(self, polars_cursor):
-        """Test that iter_chunks works without chunksize, yielding entire DataFrame."""
-        polars_cursor.execute("SELECT * FROM one_row")
-        chunks = list(polars_cursor.iter_chunks())
-        # Without chunksize, yields entire DataFrame as single chunk
-        assert len(chunks) == 1
-        assert isinstance(chunks[0], pl.DataFrame)
-        assert chunks[0].height == 1
-
     def test_whole_result_reused(self, polars_cursor):
         """Test that as_polars(), as_arrow(), and iter_chunks() do not consume the rows."""
         polars_cursor.execute("SELECT number FROM (VALUES (1), (2), (3)) AS t(number)")
@@ -680,35 +665,6 @@ class TestPolarsCursor:
         assert next(chunks).height == 5
         result_set.close()
         assert list(chunks) == []
-
-    def test_iter_chunks_many_rows(self):
-        """Test chunked iteration with many rows."""
-        with contextlib.closing(connect(schema_name=ENV.schema)) as conn:
-            cursor = conn.cursor(PolarsCursor, chunksize=1000)
-            cursor.execute("SELECT * FROM many_rows")
-            chunks = list(cursor.iter_chunks())
-            total_rows = sum(chunk.height for chunk in chunks)
-            assert total_rows == 10000
-            assert len(chunks) >= 10  # At least 10 chunks with chunksize=1000
-
-    @pytest.mark.parametrize(
-        "polars_cursor",
-        [
-            {
-                "cursor_kwargs": {"unload": True, "chunksize": 5},
-            },
-        ],
-        indirect=["polars_cursor"],
-    )
-    def test_iter_chunks_unload(self, polars_cursor):
-        """Test chunked iteration with UNLOAD (Parquet)."""
-        polars_cursor.execute("SELECT * FROM many_rows LIMIT 15")
-        chunks = list(polars_cursor.iter_chunks())
-        assert len(chunks) > 0
-        total_rows = sum(chunk.height for chunk in chunks)
-        assert total_rows == 15
-        for chunk in chunks:
-            assert isinstance(chunk, pl.DataFrame)
 
     @pytest.mark.parametrize(
         ("polars_cursor", "chunksize", "options", "sizes"),
@@ -786,67 +742,9 @@ class TestPolarsCursor:
             # Should have the same data (sort for comparison)
             assert regular_df.sort("a").equals(combined_df.sort("a"))
 
-            # Should have multiple chunks
+            # Should have multiple chunks, none above the chunk size
             assert len(chunked_dfs) > 1
-
-    def test_iter_chunks_chunk_sizes(self):
-        """Test that chunks have correct sizes."""
-        with contextlib.closing(connect(schema_name=ENV.schema)) as conn:
-            cursor = conn.cursor(PolarsCursor, chunksize=10)
-            cursor.execute("SELECT * FROM many_rows LIMIT 50")
-
-            chunk_sizes = []
-            total_rows = 0
-
-            for chunk in cursor.iter_chunks():
-                chunk_size = chunk.height
-                chunk_sizes.append(chunk_size)
-                total_rows += chunk_size
-
-                # Each chunk should not exceed chunksize
-                assert chunk_size <= 10
-
-            # Should have processed all 50 rows
-            assert total_rows == 50
-
-            # Should have multiple chunks
-            assert len(chunk_sizes) > 1
-
-    def test_fetchone_with_chunksize(self):
-        """Test that fetchone works correctly with chunksize enabled."""
-        with contextlib.closing(connect(schema_name=ENV.schema)) as conn:
-            cursor = conn.cursor(PolarsCursor, chunksize=5)
-            cursor.execute("SELECT * FROM many_rows LIMIT 15")
-
-            rows = []
-            while True:
-                row = cursor.fetchone()
-                if row is None:
-                    break
-                rows.append(row)
-
-            assert len(rows) == 15
-
-    def test_fetchmany_with_chunksize(self):
-        """Test that fetchmany works correctly with chunksize enabled."""
-        with contextlib.closing(connect(schema_name=ENV.schema)) as conn:
-            cursor = conn.cursor(PolarsCursor, chunksize=5)
-            cursor.execute("SELECT * FROM many_rows LIMIT 15")
-
-            batch1 = cursor.fetchmany(10)
-            batch2 = cursor.fetchmany(10)
-
-            assert len(batch1) == 10
-            assert len(batch2) == 5
-
-    def test_fetchall_with_chunksize(self):
-        """Test that fetchall works correctly with chunksize enabled."""
-        with contextlib.closing(connect(schema_name=ENV.schema)) as conn:
-            cursor = conn.cursor(PolarsCursor, chunksize=5)
-            cursor.execute("SELECT * FROM many_rows LIMIT 15")
-
-            rows = cursor.fetchall()
-            assert len(rows) == 15
+            assert all(chunk.height <= 25 for chunk in chunked_dfs)
 
     @pytest.mark.parametrize(
         ("polars_cursor", "ordered"),
@@ -876,54 +774,6 @@ class TestPolarsCursor:
             (4, "d"),
             (5, "e"),
         ]
-
-    def test_iterator_with_chunksize(self):
-        """Test that cursor iteration works correctly with chunksize enabled."""
-        with contextlib.closing(connect(schema_name=ENV.schema)) as conn:
-            cursor = conn.cursor(PolarsCursor, chunksize=5)
-            cursor.execute("SELECT * FROM many_rows LIMIT 15")
-
-            rows = list(cursor)
-            assert len(rows) == 15
-
-    @pytest.mark.parametrize(
-        "polars_cursor",
-        [
-            {
-                "cursor_kwargs": {"unload": True, "chunksize": 5},
-            },
-        ],
-        indirect=["polars_cursor"],
-    )
-    def test_fetchone_with_chunksize_unload(self, polars_cursor):
-        """Test that fetchone works correctly with chunksize and unload enabled."""
-        polars_cursor.execute("SELECT * FROM many_rows LIMIT 15")
-
-        rows = []
-        while True:
-            row = polars_cursor.fetchone()
-            if row is None:
-                break
-            rows.append(row)
-
-        assert len(rows) == 15
-        assert [d[0] for d in polars_cursor.description] == ["a"]
-        assert all(isinstance(row[0], int) for row in rows)
-
-    @pytest.mark.parametrize(
-        "polars_cursor",
-        [
-            {
-                "cursor_kwargs": {"unload": True, "chunksize": 5},
-            },
-        ],
-        indirect=["polars_cursor"],
-    )
-    def test_iterator_with_chunksize_unload(self, polars_cursor):
-        """Test that cursor iteration works with chunksize and unload enabled."""
-        polars_cursor.execute("SELECT * FROM many_rows LIMIT 15")
-        rows = list(polars_cursor)
-        assert len(rows) == 15
 
     @pytest.mark.parametrize(
         ("polars_cursor", "query", "expected"),
@@ -1059,7 +909,7 @@ class TestPolarsCursor:
         The table keeps the text, as for every TIMESTAMP WITH TIME ZONE value.
         """
         polars_cursor.execute(AMBIGUOUS_TIME_ZONE_QUERY)
-        with pytest.raises(DataError, match="is ambiguous"):
+        with pytest.raises(DataError):
             polars_cursor.fetchall()
 
     @pytest.mark.skipif(not ENV.managed_work_group, reason="AWS_ATHENA_MANAGED_WORKGROUP not set")

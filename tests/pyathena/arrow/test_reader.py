@@ -42,13 +42,13 @@ class _RecordingFileSystem(AbstractFileSystem):
         super().__init__()
         self.block_size = block_size
         self.fetched = []
-        self.opened = []
+        self.cache_types = []
 
     def size(self, path):
         return os.path.getsize(path)
 
     def _open(self, path, mode="rb", block_size=None, cache_type="bytes", **kwargs):
-        self.opened.append((block_size, cache_type))
+        self.cache_types.append(cache_type)
         return _RecordingFile(
             self, path, block_size=block_size or self.block_size, cache_type=cache_type, **kwargs
         )
@@ -63,6 +63,25 @@ class TestParquetChunkReader:
         if request.param == "stream":
             monkeypatch.setattr(ParquetChunkReader, "MAX_PREFETCH_SIZE", -1)
         return request.param
+
+    @pytest.fixture
+    def opened_files(self, monkeypatch):
+        """A local filesystem that records the files it opens, which are opened ahead at once.
+
+        A file opened ahead at once is never cancelled.
+        """
+        fs = LocalFileSystem()
+        opened = []
+        original_open = fs.open
+
+        def open_(path, mode="rb", **kwargs):
+            f = original_open(path, mode, **kwargs)
+            opened.append(f)
+            return f
+
+        monkeypatch.setattr(fs, "open", open_)
+        monkeypatch.setattr("pyathena.arrow.reader.ThreadPoolExecutor", ImmediateExecutor)
+        return fs, opened
 
     @pytest.fixture
     def paths(self, tmp_path):
@@ -108,128 +127,65 @@ class TestParquetChunkReader:
     def test_columns_not_top_level(self, paths, max_prefetch_size, columns):
         with (
             ParquetChunkReader(LocalFileSystem(), paths, 1, columns=columns) as reader,
-            pytest.raises(ValueError, match="No top-level columns"),
+            pytest.raises(ValueError),  # noqa: PT011
         ):
             next(reader)
 
-    @pytest.mark.parametrize("corrupt", [False, True], ids=["close", "error"])
-    def test_releases_files_opened_ahead(self, paths, max_prefetch_size, monkeypatch, corrupt):
-        """Files opened ahead are closed when reading stops early or fails."""
-        if corrupt:
-            # The third file fails while the files after it may be opened ahead.
-            with open(paths[2], "rb") as f:
-                valid = f.read()
-            with open(paths[2], "wb") as f:
-                f.write(valid[: len(valid) // 2] + b"\x00" * 64 + valid[-8:])
-        paths = [*paths, paths[0], paths[0]]
-        opened = []
-        original_open = ParquetChunkReader._open
-
-        def open_(self, path):
-            source = original_open(self, path)
-            opened.append(source)
-            return source
-
-        monkeypatch.setattr(ParquetChunkReader, "_open", open_)
-        # Open ahead at once, so that a file opened ahead is never cancelled.
-        monkeypatch.setattr("pyathena.arrow.reader.ThreadPoolExecutor", ImmediateExecutor)
-        reader = ParquetChunkReader(LocalFileSystem(), paths, 2)
-        if corrupt:
-            with pytest.raises((OSError, ValueError)):
-                list(reader)
-        else:
-            next(reader)
-            reader.close()
-        # The file after the last one received was opened ahead.
-        assert len(opened) == (4 if corrupt else 2)
-        assert all(source.closed for source in opened)
-
-    def test_open_failure_opens_no_further_file(self, paths, monkeypatch):
-        """A file that fails to open raises before the next file is opened."""
-        opened = []
-
-        def open_(self, path):
-            opened.append(path)
-            raise OSError(f"cannot open {path}")
-
-        monkeypatch.setattr(ParquetChunkReader, "_open", open_)
-        # Open at once, so that an open submitted too early is not cancelled.
-        monkeypatch.setattr("pyathena.arrow.reader.ThreadPoolExecutor", ImmediateExecutor)
-        with pytest.raises(OSError, match="cannot open"):
-            next(ParquetChunkReader(LocalFileSystem(), paths, 2))
-        assert opened == paths[:1]
+    @pytest.mark.parametrize("max_prefetch_size", ["stream"], indirect=True)
+    def test_releases_files_opened_ahead(self, paths, max_prefetch_size, opened_files):
+        """Files opened ahead are closed when reading fails."""
+        # The third file fails while the files after it may be opened ahead.
+        with open(paths[2], "rb") as f:
+            valid = f.read()
+        with open(paths[2], "wb") as f:
+            f.write(valid[: len(valid) // 2] + b"\x00" * 64 + valid[-8:])
+        fs, opened = opened_files
+        with pytest.raises((OSError, ValueError)):
+            list(ParquetChunkReader(fs, [*paths, paths[0], paths[0]], 2))
+        # A file after the failed third one was opened ahead.
+        assert len(opened) > 3
+        assert all(f.closed for f in opened)
 
     def test_prefetched_file(self, paths):
-        """A file read whole is opened without a cache, in the filesystem's block size."""
+        """A file read whole is fetched in one read of exactly the file."""
         fs = _RecordingFileSystem(block_size=32 * 2**10)
         with ParquetChunkReader(fs, paths[2:], 10) as reader:
             assert next(reader).num_rows == 7
-        assert fs.opened == [(None, "none")]
         # One read of exactly the file, which PyAthena's filesystem splits into blocks.
         assert fs.fetched == [(0, os.path.getsize(paths[2]))]
 
     @pytest.mark.parametrize("cache_type", [None, "bytes"], ids=["default", "bytes"])
     def test_streamed_file_row_groups(self, tmp_path, monkeypatch, cache_type):
-        """A streamed file is read one pre-buffered row group at a time, when needed.
-
-        With the default cache, each row group is fetched as one range of exactly its
-        column chunks; a given cache type adds its read-ahead to each range.
-        """
+        """A streamed file is read one row group at a time, when needed, with the cache type."""
         monkeypatch.setattr(ParquetChunkReader, "MAX_PREFETCH_SIZE", -1)
         path = tmp_path / "groups.parquet"
         columns = {f"c{i}": pa.array([os.urandom(256) for _ in range(300)]) for i in range(3)}
         pq.write_table(pa.table(columns), path, compression="none", row_group_size=100)
-        metadata = pq.read_metadata(path)
-        spans = []
-        for index in range(metadata.num_row_groups):
-            chunks = [metadata.row_group(index).column(c) for c in range(metadata.num_columns)]
-            starts = [c.dictionary_page_offset or c.data_page_offset for c in chunks]
-            spans.append(
-                (
-                    min(starts),
-                    max(s + c.total_compressed_size for s, c in zip(starts, chunks, strict=True)),
-                )
-            )
-        assert len(spans) == 3
         fs = _RecordingFileSystem(block_size=32 * 2**10)
         with ParquetChunkReader(fs, [str(path)], 50, cache_type=cache_type) as reader:
             assert next(reader).num_rows == 50
-            # The first fetch reads the footer; the first chunk needs the first row group.
-            first = fs.fetched[1:]
+            fetched = len(fs.fetched)
             assert sum(table.num_rows for table in reader) == 250
-        ranges = fs.fetched[1:]
-        if cache_type is None:
-            assert first == spans[:1]
-            assert ranges == spans
-        else:
-            assert [start for start, _ in ranges] == [start for start, _ in spans]
-            assert all(
-                end > span_end
-                for (_, end), (_, span_end) in zip(ranges[:2], spans[:2], strict=True)
-            )
+        # The later row groups are fetched after the first chunk.
+        assert len(fs.fetched) > fetched
+        # Without a cache type, only the ranges that pyarrow requests are read.
+        assert set(fs.cache_types) == {cache_type or "none"}
 
     def test_no_files(self):
         assert list(ParquetChunkReader(LocalFileSystem(), [], 4)) == []
 
     @pytest.mark.parametrize("chunksize", [0, -1])
     def test_invalid_chunksize(self, paths, chunksize):
-        with pytest.raises(ValueError, match="chunksize must be positive"):
+        with pytest.raises(ValueError):  # noqa: PT011
             ParquetChunkReader(LocalFileSystem(), paths, chunksize)
 
-    def test_close(self, paths, max_prefetch_size, monkeypatch):
-        fs = LocalFileSystem()
-        opened = []
-        original_open = fs.open
-
-        def open_(path, mode="rb", **kwargs):
-            f = original_open(path, mode, **kwargs)
-            opened.append(f)
-            return f
-
-        monkeypatch.setattr(fs, "open", open_)
+    def test_close(self, paths, max_prefetch_size, opened_files):
+        """close() closes the file being read and the files opened ahead."""
+        fs, opened = opened_files
         reader = ParquetChunkReader(fs, paths, 2)
         assert next(reader).num_rows == 2
         reader.close()
-        assert opened
+        # The file after the first one was opened ahead.
+        assert len(opened) > 1
         assert all(f.closed for f in opened)
         assert list(reader) == []

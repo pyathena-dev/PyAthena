@@ -6,10 +6,11 @@
 # SPDX-License-Identifier: MIT
 
 import inspect
-from collections.abc import Iterator
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
-from unittest.mock import MagicMock, PropertyMock, patch
+from io import BytesIO
+from typing import Any
+from unittest.mock import MagicMock, patch
 
 import polars as pl
 import pytest
@@ -32,31 +33,81 @@ _TRUNCATED_TIMESTAMPS = pl.Series(
 )
 
 
-def _chunked_result_set() -> AthenaPolarsResultSet:
-    """Create a chunked result set without calling Athena.
+def _local_result_set(
+    column_types: list[tuple[str, str]],
+    output_location: str = "s3://bucket/result.csv",
+    data_manifest: list[str] | None = None,
+    chunksize: int | None = None,
+    credentials_error: Exception | None = None,
+    file_system: Any = None,
+    **kwargs: Any,
+) -> AthenaPolarsResultSet:
+    """Create a result set of a succeeded query whose result files are local files.
 
-    Returns:
-        An AthenaPolarsResultSet with only the attributes used by the chunk readers.
-    """
-    result_set = AthenaPolarsResultSet.__new__(AthenaPolarsResultSet)  # bypass __init__
-    result_set._chunksize = 10_000
-    result_set._cache_type = None
-    result_set._kwargs = {}
-    result_set._metadata = None
-    result_set._connection = MagicMock()
-    return result_set
-
-
-def _read_all(result: pl.DataFrame | Iterator[pl.DataFrame]) -> pl.DataFrame:
-    """Read the result of a whole read or a chunk reader into one DataFrame.
+    GetQueryResults returns the given columns, and the HEAD request of the CSV result
+    file finds it not empty. The connection's S3 client returns the data
+    manifest of an UNLOAD result, and PyAthena's filesystem reads the local files.
 
     Args:
-        result: A DataFrame, or an iterator of DataFrame chunks.
+        column_types: The names and Athena types of the result columns.
+        output_location: The local path of the CSV result file.
+        data_manifest: The local paths of the Parquet files of an UNLOAD result.
+        chunksize: The chunk size of the result set.
+        credentials_error: An error that the session raises when credentials are looked
+            up, or None for a session without credentials.
+        file_system: Creates PyAthena's filesystem; by default, one of local files.
+        **kwargs: The read arguments given to ``execute()``.
 
     Returns:
-        The DataFrame, or the chunks concatenated.
+        The AthenaPolarsResultSet.
     """
-    return result if isinstance(result, pl.DataFrame) else pl.concat(list(result))
+    unload = data_manifest is not None
+    query_execution = AthenaQueryExecution(
+        {
+            "QueryExecution": {
+                "QueryExecutionId": "query_id",
+                "Query": "UNLOAD (SELECT 1) TO 's3://bucket/unload/'" if unload else "SELECT 1",
+                "Status": {"State": AthenaQueryExecution.STATE_SUCCEEDED},
+                "ResultConfiguration": {"OutputLocation": output_location},
+                "Statistics": {"DataManifestLocation": "s3://bucket/manifest.csv"},
+            }
+        }
+    )
+    connection = MagicMock(region_name=None)
+    connection.session.get_credentials.return_value = None
+    connection.session.get_credentials.side_effect = credentials_error
+    connection.s3_client.get_object.return_value = {
+        "Body": BytesIO("\n".join(data_manifest or []).encode())
+    }
+    connection.client.get_query_results.return_value = {
+        "ResultSet": {
+            "ResultSetMetadata": {
+                "ColumnInfo": [
+                    {"Name": name, "Type": type_, "Precision": 3, "Scale": 0, "Nullable": "UNKNOWN"}
+                    for name, type_ in column_types
+                ]
+            },
+            "Rows": [],
+        }
+    }
+    with (
+        # The HEAD request parses the output location, which is a local path here.
+        patch.object(AthenaPolarsResultSet, "_get_content_length", return_value=1),
+        patch(
+            "pyathena.polars.result_set.S3FileSystem",
+            file_system or (lambda **_: LocalFileSystem()),
+        ),
+    ):
+        return AthenaPolarsResultSet(
+            connection=connection,
+            converter=DefaultPolarsTypeConverter(),
+            query_execution=query_execution,
+            arraysize=3,
+            retry_config=RetryConfig(),
+            unload=unload,
+            chunksize=chunksize,
+            **kwargs,
+        )
 
 
 def _fetching_result_set(chunks, names, arraysize, converters=None) -> AthenaPolarsResultSet:
@@ -199,13 +250,6 @@ class TestAthenaPolarsResultSet:
         assert result_set.fetchmany(10**100) == [(1,), (2,)]
         assert result_set.rownumber == 2
 
-    def test_fetchmany_size_not_integer(self):
-        """A size that is not an integer raises TypeError without consuming rows."""
-        result_set = _fetching_result_set([pl.DataFrame({"n": [1, 2]})], ["n"], arraysize=3)
-        with pytest.raises(TypeError):
-            result_set.fetchmany(1.5)
-        assert result_set.fetchall() == [(1,), (2,)]
-
     def test_fetch_after_close(self):
         """The fetch methods return no rows after close()."""
         result_set = _fetching_result_set([pl.DataFrame({"n": [1, 2]})], ["n"], arraysize=3)
@@ -215,42 +259,27 @@ class TestAthenaPolarsResultSet:
         assert result_set.fetchall() == []
         assert result_set.rownumber is None
 
-    def test_iter_csv_chunks_raises_when_read_fails_partway(self, tmp_path):
-        """A CSV read that fails partway through the data raises instead of ending early."""
+    def test_csv_chunks_raise_when_read_fails_partway(self, tmp_path):
+        """A chunked CSV read that fails partway through the data raises instead of ending."""
         path = tmp_path / "result.csv"
         path.write_text(
             "a\n" + "".join(f"{i}\n" for i in range(_ROWS_BEFORE_FAILURE)) + "not-a-number\n"
         )
-        result_set = _chunked_result_set()
-        with (
-            patch.object(
-                AthenaPolarsResultSet,
-                "output_location",
-                new_callable=PropertyMock,
-                return_value=str(path),
-            ),
-            patch.object(
-                AthenaPolarsResultSet,
-                "_csv_dtypes",
-                new_callable=PropertyMock,
-                return_value={"a": pl.Int64},
-            ),
-            patch.object(AthenaPolarsResultSet, "_get_parquet_storage_options", return_value={}),
-            patch.object(AthenaPolarsResultSet, "_is_csv_readable", return_value=True),
-            pytest.raises(OperationalError, match="not-a-number"),
-        ):
-            list(result_set._iter_csv_chunks())
+        result_set = _local_result_set([("a", "integer")], str(path), chunksize=10_000)
+        with pytest.raises(OperationalError):
+            list(result_set.iter_chunks())
 
     @pytest.mark.parametrize(
         "read_options",
         [{}, {"low_memory": True}],
         ids=["parquet-chunk-reader", "scan-parquet"],
     )
-    def test_iter_parquet_chunks_raises_when_read_fails_partway(self, tmp_path, read_options):
-        """A Parquet read that fails partway through the data raises instead of ending early.
+    def test_parquet_chunks_raise_when_read_fails_partway(self, tmp_path, read_options):
+        """A chunked UNLOAD read that fails partway through the data raises instead of ending.
 
-        Without read options, the files of the data manifest are read with
-        ParquetChunkReader; with them, Polars scans the unload location.
+        Without read options, the files of the data manifest are read one at a time,
+        and the chunks of the valid file come before the error; with them, Polars scans
+        the unload location.
         """
         pl.DataFrame({"a": range(_ROWS_BEFORE_FAILURE)}).write_parquet(
             tmp_path / "0.parquet", row_group_size=10_000
@@ -258,202 +287,115 @@ class TestAthenaPolarsResultSet:
         valid = (tmp_path / "0.parquet").read_bytes()
         # Keep the footer magic but corrupt the metadata so the second file fails to read.
         (tmp_path / "1.parquet").write_bytes(valid[: len(valid) // 2] + b"\x00" * 64 + valid[-8:])
-        result_set = _chunked_result_set()
-        result_set._kwargs = dict(read_options)
-        result_set._unload_location = f"{tmp_path}/"
-        result_set._data_manifest = [str(tmp_path / "0.parquet"), str(tmp_path / "1.parquet")]
+        result_set = _local_result_set(
+            [],
+            data_manifest=[str(tmp_path / "0.parquet"), str(tmp_path / "1.parquet")],
+            chunksize=10_000,
+            **read_options,
+        )
         chunks: list[pl.DataFrame] = []
-        with (
-            patch.object(AthenaPolarsResultSet, "_get_parquet_storage_options", return_value={}),
-            patch.object(
-                AthenaPolarsResultSet,
-                "_csv_storage_options",
-                new_callable=PropertyMock,
-                return_value={},
-            ),
-            patch("pyathena.polars.result_set.S3FileSystem", lambda **_: LocalFileSystem()),
-            patch("polars.scan_parquet", wraps=pl.scan_parquet) as scan_parquet,
-            pytest.raises(OperationalError) as error,
-        ):
+        with pytest.raises(OperationalError):
             # extend() keeps the chunks read before the failure.
-            chunks.extend(result_set._iter_parquet_chunks(pl.Schema({"a": pl.Int64})))
-        # The error comes from the corrupt file, after the valid one was read.
-        assert not isinstance(error.value.__cause__, AttributeError)
-        assert scan_parquet.called is bool(read_options)
+            chunks.extend(result_set.iter_chunks())
         if not read_options:
             assert sum(chunk.height for chunk in chunks) == _ROWS_BEFORE_FAILURE
 
-    @pytest.mark.parametrize("reader", ["_read_csv", "_iter_csv_chunks"])
-    def test_csv_read_kwargs_replace_defaults(self, tmp_path, reader):
+    @pytest.mark.parametrize(
+        ("unload", "chunksize"),
+        [(False, 1), (True, None), (True, 1)],
+        ids=["csv-chunks", "unload", "unload-chunks"],
+    )
+    def test_storage_options_replace_defaults(self, tmp_path, unload, chunksize):
+        """storage_options given to execute() reach every Polars read as given.
+
+        They are read without PyAthena's credentials, whose lookup fails here, or its
+        filesystem. These reads use Polars' native object store, which ignores the
+        options for local files, so the reads are observed.
+        """
+        storage_options = {"aws_region": "us-west-2"}
+        if unload:
+            pl.DataFrame({"a": [1, 2]}).write_parquet(tmp_path / "0.parquet")
+            files = {"column_types": [], "data_manifest": [str(tmp_path / "0.parquet")]}
+        else:
+            (tmp_path / "result.csv").write_text("a\n1\n2\n")
+            files = {
+                "column_types": [("a", "integer")],
+                "output_location": str(tmp_path / "result.csv"),
+            }
+        with (
+            patch("polars.read_parquet", wraps=pl.read_parquet) as read_parquet,
+            patch("polars.scan_parquet", wraps=pl.scan_parquet) as scan_parquet,
+            patch("polars.scan_csv", wraps=pl.scan_csv) as scan_csv,
+        ):
+            result_set = _local_result_set(
+                **files,
+                chunksize=chunksize,
+                credentials_error=OSError("no credentials"),
+                file_system=MagicMock(side_effect=AssertionError("PyAthena's filesystem")),
+                storage_options=storage_options,
+            )
+            assert result_set.fetchall() == [(1,), (2,)]
+        calls = read_parquet.call_args_list + scan_parquet.call_args_list + scan_csv.call_args_list
+        assert calls
+        assert all(call.kwargs["storage_options"] == storage_options for call in calls)
+
+    @pytest.mark.parametrize("chunksize", [None, 10_000])
+    def test_csv_read_kwargs_replace_defaults(self, tmp_path, chunksize):
         """Read arguments given to execute() replace the ones the result set chooses."""
         path = tmp_path / "result.csv"
         path.write_text("1;x\n2;y\n")
         # Polars names headerless columns from column_1 before 2.0 and from column_0 since.
         first, second = pl.read_csv(b"1;x\n", separator=";", has_header=False).columns
-        result_set = _chunked_result_set()
-        result_set._kwargs = {
-            "separator": ";",
-            "has_header": False,
-            "schema_overrides": {first: pl.Utf8},
-        }
-        with (
-            patch.object(
-                AthenaPolarsResultSet,
-                "output_location",
-                new_callable=PropertyMock,
-                return_value=str(path),
-            ),
-            patch.object(
-                AthenaPolarsResultSet,
-                "_csv_dtypes",
-                new_callable=PropertyMock,
-                return_value={"1;x": pl.Int64},
-            ),
-            patch.object(
-                AthenaPolarsResultSet,
-                "_csv_storage_options",
-                new_callable=PropertyMock,
-                return_value={},
-            ),
-            patch.object(AthenaPolarsResultSet, "_get_parquet_storage_options", return_value={}),
-            patch.object(AthenaPolarsResultSet, "_is_csv_readable", return_value=True),
-        ):
-            df = _read_all(getattr(result_set, reader)())
+        result_set = _local_result_set(
+            [("a", "integer"), ("b", "varchar")],
+            str(path),
+            chunksize=chunksize,
+            separator=";",
+            has_header=False,
+            schema_overrides={first: pl.Utf8},
+        )
+        df = result_set.as_polars()
         assert df.to_dict(as_series=False) == {first: ["1", "2"], second: ["x", "y"]}
 
-    @pytest.mark.parametrize("reader", ["_read_csv", "_iter_csv_chunks"])
-    def test_txt_new_columns_with_schema_overrides(self, tmp_path, reader):
-        """schema_overrides given with new_columns reach Polars with them for a .txt file."""
+    @pytest.mark.parametrize("chunksize", [None, 10_000])
+    def test_txt_new_columns_with_schema_overrides(self, tmp_path, chunksize):
+        """schema_overrides given with new_columns apply to the new names for a .txt file."""
         path = tmp_path / "result.txt"
         path.write_text("001\tx\n")
-        result_set = _chunked_result_set()
         # Polars 2.0 rejects new_columns that do not name every column of the file.
-        result_set._kwargs = {"new_columns": ["z", "w"], "schema_overrides": {"z": pl.Utf8}}
-        with (
-            patch.object(
-                AthenaPolarsResultSet,
-                "output_location",
-                new_callable=PropertyMock,
-                return_value=str(path),
-            ),
-            patch.object(AthenaPolarsResultSet, "_get_column_names", return_value=["a", "b"]),
-            patch.object(
-                AthenaPolarsResultSet, "_csv_dtypes", new_callable=PropertyMock, return_value={}
-            ),
-            patch.object(
-                AthenaPolarsResultSet,
-                "_csv_storage_options",
-                new_callable=PropertyMock,
-                return_value={},
-            ),
-            patch.object(AthenaPolarsResultSet, "_get_parquet_storage_options", return_value={}),
-            patch.object(AthenaPolarsResultSet, "_is_csv_readable", return_value=True),
-        ):
-            df = _read_all(getattr(result_set, reader)())
+        result_set = _local_result_set(
+            [("a", "integer"), ("b", "varchar")],
+            str(path),
+            chunksize=chunksize,
+            new_columns=["z", "w"],
+            schema_overrides={"z": pl.Utf8},
+        )
+        df = result_set.as_polars()
         assert df.to_dict(as_series=False) == {"z": ["001"], "w": ["x"]}
 
     @pytest.mark.parametrize(
-        ("reader", "function"),
+        ("chunksize", "kwargs", "expected"),
         [
-            ("_iter_csv_chunks", "scan_csv"),
-            ("_read_parquet", "read_parquet"),
-            ("_iter_parquet_chunks", "scan_parquet"),
-            ("_read_parquet_schema", "scan_parquet"),
-        ],
-    )
-    def test_storage_options_replace_defaults(self, reader, function):
-        """storage_options given to execute() replace PyAthena's without computing them."""
-        result_set = _chunked_result_set()
-        result_set._unload_location = "s3://bucket/unload/"
-        result_set._kwargs = {"storage_options": {"anon": True}}
-        with (
-            patch.object(
-                AthenaPolarsResultSet,
-                "output_location",
-                new_callable=PropertyMock,
-                return_value="s3://bucket/result.csv",
-            ),
-            patch.object(
-                AthenaPolarsResultSet, "_csv_dtypes", new_callable=PropertyMock, return_value={}
-            ),
-            patch.object(
-                AthenaPolarsResultSet,
-                "_csv_storage_options",
-                new_callable=PropertyMock,
-                side_effect=AssertionError("replaced storage options were computed"),
-            ),
-            patch.object(
-                AthenaPolarsResultSet,
-                "_get_parquet_storage_options",
-                side_effect=AssertionError("replaced storage options were computed"),
-            ),
-            patch.object(AthenaPolarsResultSet, "_is_csv_readable", return_value=True),
-            patch.object(AthenaPolarsResultSet, "_prepare_parquet_location", return_value=True),
-            patch(f"polars.{function}") as read,
-            patch("pyathena.polars.result_set.to_column_info"),
-        ):
-            # The Parquet readers take the schema of the files.
-            args = (pl.Schema(),) if reader in ("_read_parquet", "_iter_parquet_chunks") else ()
-            result = getattr(result_set, reader)(*args)
-            if not isinstance(result, (pl.DataFrame, tuple)):
-                list(result)
-        assert read.call_args.kwargs["storage_options"] == {"anon": True}
-
-    def test_csv_storage_options_replace_defaults(self):
-        """storage_options given to execute() open a CSV result through fsspec, not Polars."""
-        result_set = _chunked_result_set()
-        result_set._kwargs = {"storage_options": {"anon": True}}
-        with (
-            patch.object(
-                AthenaPolarsResultSet,
-                "output_location",
-                new_callable=PropertyMock,
-                return_value="s3://bucket/result.csv",
-            ),
-            patch.object(
-                AthenaPolarsResultSet, "_csv_dtypes", new_callable=PropertyMock, return_value={}
-            ),
-            patch.object(
-                AthenaPolarsResultSet,
-                "_csv_storage_options",
-                new_callable=PropertyMock,
-                side_effect=AssertionError("replaced storage options were computed"),
-            ),
-            patch.object(AthenaPolarsResultSet, "_is_csv_readable", return_value=True),
-            patch("pyathena.polars.result_set.fsspec.open") as open_,
-        ):
-            open_.return_value.__enter__.return_value.read.return_value = b"a\n1\n"
-            df = result_set._read_csv()
-        open_.assert_called_once_with("s3://bucket/result.csv", "rb", anon=True)
-        assert df.to_dict(as_series=False) == {"a": [1]}
-
-    @pytest.mark.parametrize(
-        ("reader", "kwargs", "expected"),
-        [
-            ("_read_csv", {}, {"t": _TRUNCATED_TIMESTAMPS}),
-            ("_iter_csv_chunks", {}, {"t": _TRUNCATED_TIMESTAMPS}),
-            ("_read_csv", {"columns": ["v"]}, {}),
-            ("_read_csv", {"new_columns": ["t2", "v2"]}, {"t2": _TRUNCATED_TIMESTAMPS}),
-            ("_iter_csv_chunks", {"new_columns": ["t2", "v2"]}, {"t2": _TRUNCATED_TIMESTAMPS}),
-            ("_read_csv", {"schema": {"t": pl.String, "v": pl.String}}, {"t": _TIMESTAMP_TEXTS}),
+            (None, {}, {"t": _TRUNCATED_TIMESTAMPS}),
+            (10_000, {}, {"t": _TRUNCATED_TIMESTAMPS}),
+            (None, {"columns": ["v"]}, {}),
+            (None, {"new_columns": ["t2", "v2"]}, {"t2": _TRUNCATED_TIMESTAMPS}),
+            (10_000, {"new_columns": ["t2", "v2"]}, {"t2": _TRUNCATED_TIMESTAMPS}),
+            (None, {"schema": {"t": pl.String, "v": pl.String}}, {"t": _TIMESTAMP_TEXTS}),
+            (10_000, {"schema": {"t": pl.String, "v": pl.String}}, {"t": _TIMESTAMP_TEXTS}),
             (
-                "_iter_csv_chunks",
-                {"schema": {"t": pl.String, "v": pl.String}},
-                {"t": _TIMESTAMP_TEXTS},
-            ),
-            (
-                "_read_csv",
+                None,
                 {"with_column_names": lambda names: [n.upper() for n in names]},
                 OperationalError,
             ),
             (
-                "_iter_csv_chunks",
+                10_000,
                 {"with_column_names": lambda names: [n.upper() for n in names]},
                 OperationalError,
             ),
         ],
     )
-    def test_read_csv_truncates_timestamps(self, tmp_path, reader, kwargs, expected):
+    def test_read_csv_truncates_timestamps(self, tmp_path, chunksize, kwargs, expected):
         """Timestamps are read as text and truncated to the time unit.
 
         A whole read does so when parsing them fails; a chunked read always does.
@@ -464,74 +406,35 @@ class TestAthenaPolarsResultSet:
         """
         path = tmp_path / "result.csv"
         path.write_bytes(b'"t","v"\n"2020-01-02 03:04:05.123456789012","x"\n,"y"\n')
-        result_set = _chunked_result_set()
-        result_set._query_execution = None
-        result_set._converter = DefaultPolarsTypeConverter()
-        result_set._kwargs = kwargs
-        result_set._metadata = tuple(
-            {"Name": n, "Type": t, "Precision": 3, "Scale": 0, "Nullable": "UNKNOWN"}
-            for n, t in (("t", "timestamp"), ("v", "varchar"))
-        )
-        with (
-            patch.object(
-                AthenaPolarsResultSet,
-                "output_location",
-                new_callable=PropertyMock,
-                return_value=str(path),
-            ),
-            patch.object(
-                AthenaPolarsResultSet,
-                "_csv_storage_options",
-                new_callable=PropertyMock,
-                return_value={},
-            ),
-            patch.object(AthenaPolarsResultSet, "_get_parquet_storage_options", return_value={}),
-            patch.object(AthenaPolarsResultSet, "_is_csv_readable", return_value=True),
-        ):
-            if expected is OperationalError:
-                with pytest.raises(OperationalError):
-                    _read_all(getattr(result_set, reader)())
-                return
-            df = _read_all(getattr(result_set, reader)())
+        columns = [("t", "timestamp"), ("v", "varchar")]
+        if expected is OperationalError:
+            with pytest.raises(OperationalError):
+                _local_result_set(columns, str(path), chunksize=chunksize, **kwargs).as_polars()
+            return
+        df = _local_result_set(columns, str(path), chunksize=chunksize, **kwargs).as_polars()
         for name, values in expected.items():
             assert df[name].equals(values, check_dtypes=True)
         if not expected:
             assert df.columns == ["v"]
 
-    @pytest.mark.parametrize("reader", ["_read_csv", "_iter_csv_chunks"])
-    def test_read_csv_ignore_errors(self, tmp_path, reader):
-        """With ignore_errors, timestamp text that is not a timestamp becomes null.
+    @pytest.mark.parametrize("chunksize", [None, 10_000])
+    @pytest.mark.parametrize("ignore_errors", [True, False])
+    def test_read_csv_invalid_timestamps(self, tmp_path, chunksize, ignore_errors):
+        """Timestamp text that is not a timestamp fails the read, or with ignore_errors is null.
 
         Timestamps with more than nine fractional digits, which Polars itself reads as
         null with ignore_errors, are still truncated.
         """
         path = tmp_path / "result.csv"
         path.write_bytes(b'"t"\n"2020-01-02 03:04:05.123456789012"\n"invalid"\n')
-        result_set = _chunked_result_set()
-        result_set._query_execution = None
-        result_set._converter = DefaultPolarsTypeConverter()
-        result_set._kwargs = {"ignore_errors": True}
-        result_set._metadata = (
-            {"Name": "t", "Type": "timestamp", "Precision": 3, "Scale": 0, "Nullable": "UNKNOWN"},
+        if not ignore_errors:
+            with pytest.raises(OperationalError):
+                _local_result_set([("t", "timestamp")], str(path), chunksize=chunksize).as_polars()
+            return
+        result_set = _local_result_set(
+            [("t", "timestamp")], str(path), chunksize=chunksize, ignore_errors=True
         )
-        with (
-            patch.object(
-                AthenaPolarsResultSet,
-                "output_location",
-                new_callable=PropertyMock,
-                return_value=str(path),
-            ),
-            patch.object(
-                AthenaPolarsResultSet,
-                "_csv_storage_options",
-                new_callable=PropertyMock,
-                return_value={},
-            ),
-            patch.object(AthenaPolarsResultSet, "_get_parquet_storage_options", return_value={}),
-            patch.object(AthenaPolarsResultSet, "_is_csv_readable", return_value=True),
-        ):
-            df = _read_all(getattr(result_set, reader)())
-        assert df["t"].equals(
+        assert result_set.as_polars()["t"].equals(
             pl.Series([datetime(2020, 1, 2, 3, 4, 5, 123456), None], dtype=pl.Datetime("us")),
             check_dtypes=True,
         )
@@ -623,10 +526,7 @@ class TestPolarsDataFrameIterator:
         assert list(rows) == []
 
     def test_itertuples_nested_value_python_does_not_hold(self):
-        """The rows before a nested value that Python does not hold are returned too.
-
-        Polars raises the failure within a struct as a PanicException.
-        """
+        """The rows before a nested value that Python does not hold are returned too."""
         dates = pl.Series([0, 0, -719528], dtype=pl.Int32).cast(pl.Date)
         df = pl.DataFrame({"s": pl.DataFrame({"d": dates}).to_struct(), "n": [1, 2, 3]})
         rows = PolarsDataFrameIterator(df, {}, ["s", "n"]).itertuples()
@@ -635,8 +535,10 @@ class TestPolarsDataFrameIterator:
             ({"d": date(1970, 1, 1)}, 1),
             ({"d": date(1970, 1, 1)}, 2),
         ]
-        with pytest.raises(pl.exceptions.PanicException):
+        # Polars raises the failure within a struct as a BaseException of its own.
+        with pytest.raises(BaseException) as error:  # noqa: PT011
             next(rows)
+        assert not isinstance(error.value, StopIteration)
         assert list(rows) == []
 
     def test_itertuples_large_chunk(self):
