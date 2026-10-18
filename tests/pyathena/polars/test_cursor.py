@@ -113,6 +113,31 @@ class TestPolarsCursor:
             )
 
     @pytest.mark.parametrize(
+        "polars_cursor", [{"cursor_kwargs": {"unload": True}}], indirect=["polars_cursor"]
+    )
+    def test_unload_use_pyarrow_storage_options(self, polars_cursor):
+        """GH-1235: with use_pyarrow=True, the files of an UNLOAD result are opened through
+        fsspec with the storage_options given to execute(), as Polars opens a file.
+        """
+        query = "SELECT 1 AS id, 'a' AS s"
+        df = polars_cursor.execute(
+            query,
+            use_pyarrow=True,
+            storage_options={"connection": polars_cursor.connection, "skip_instance_cache": True},
+        ).as_polars()
+        assert df.to_dicts() == [{"id": 1, "s": "a"}]
+        with pytest.raises(OperationalError):
+            polars_cursor.execute(
+                query,
+                use_pyarrow=True,
+                storage_options={
+                    "key": "invalid",
+                    "secret": "invalid",
+                    "skip_instance_cache": True,
+                },
+            )
+
+    @pytest.mark.parametrize(
         "polars_cursor",
         [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
         indirect=["polars_cursor"],
@@ -174,9 +199,10 @@ class TestPolarsCursor:
                 {"low_memory": True},
                 marks=pytest.mark.skipif(not _POLARS_2, reason="Polars 1.x scans at nanoseconds."),
             ),
+            ({"cursor_kwargs": {"unload": True}}, {"use_pyarrow": True}),
         ],
         indirect=["polars_cursor"],
-        ids=["whole", "chunks", "scanned-chunks"],
+        ids=["whole", "chunks", "scanned-chunks", "pyarrow"],
     )
     def test_unload_nested_timestamps(self, polars_cursor, kwargs):
         """UNLOAD timestamps, alone and inside arrays, rows, and maps, are microseconds."""
@@ -624,6 +650,17 @@ class TestPolarsCursor:
             ({"cursor_kwargs": {"unload": True}}, 10, {}, [3]),
             # Read options given to execute() keep Polars' own scan.
             ({"cursor_kwargs": {"unload": True}}, 2, {"low_memory": True}, [2, 1]),
+            # GH-1235: options of read_parquet() that scan_parquet() does not take.
+            ({"cursor_kwargs": {"unload": True}}, 2, {"columns": ["s", "k"]}, [2, 1]),
+            ({"cursor_kwargs": {"unload": True}}, 2, {"columns": [3, 0]}, [2, 1]),
+            (
+                {"cursor_kwargs": {"unload": True}},
+                2,
+                {"use_pyarrow": False, "memory_map": False, "pyarrow_options": {}},
+                [2, 1],
+            ),
+            # With use_pyarrow=True, the result is read whole.
+            ({"cursor_kwargs": {"unload": True}}, 2, {"use_pyarrow": True}, [3]),
         ],
         indirect=["polars_cursor"],
     )
@@ -640,6 +677,38 @@ class TestPolarsCursor:
         for chunk in chunks:
             assert chunk.schema == whole.schema
         assert pl.concat(chunks).sort("k").equals(whole.sort("k"))
+
+    @pytest.mark.parametrize(
+        ("options", "sizes"),
+        [
+            ({"columns": ["s", "k"]}, [2, 1]),
+            ({"columns": [3, 0]}, [2, 1]),
+            ({"use_pyarrow": False}, [2, 1]),
+            pytest.param(
+                {"n_threads": 1, "batch_size": 2},
+                [2, 1],
+                marks=pytest.mark.skipif(_POLARS_2, reason="Polars 2.0 removed the options."),
+            ),
+            # With use_pyarrow=True, the result is read whole.
+            ({"use_pyarrow": True, "schema_overrides": None}, [3]),
+        ],
+    )
+    def test_csv_chunks_with_read_csv_options(self, polars_cursor, options, sizes):
+        """GH-1235: chunked CSV results match the whole result under read_csv() options.
+
+        The options are ones that scan_csv() does not take.
+        """
+        query = """
+            SELECT * FROM (
+              VALUES (1, 1, true, 'a'), (2, NULL, NULL, NULL), (3, 3, false, 'c')
+            ) AS t(k, i, b, s)
+            """
+        whole = polars_cursor.execute(query, **options).as_polars()
+        chunks = list(polars_cursor.execute(query, chunksize=2, **options).iter_chunks())
+        assert [chunk.height for chunk in chunks] == sizes
+        for chunk in chunks:
+            assert chunk.schema == whole.schema
+        assert pl.concat(chunks).equals(whole)
 
     @pytest.mark.parametrize(
         "polars_cursor", [{"cursor_kwargs": {"unload": True}}], indirect=["polars_cursor"]

@@ -15,6 +15,7 @@ import logging
 import sys
 from collections import abc
 from collections.abc import Callable, Iterable, Iterator
+from contextlib import ExitStack
 from io import BytesIO, StringIO
 from itertools import islice, repeat
 from multiprocessing import cpu_count
@@ -41,6 +42,7 @@ from pyathena.util import RetryConfig, override
 
 if TYPE_CHECKING:
     import polars as pl
+    from fsspec import AbstractFileSystem
     from pyarrow import Table
 
     from pyathena.connection import Connection
@@ -295,6 +297,20 @@ class AthenaPolarsResultSet(AthenaResultSet):
         PyArrow is optional and only needed for as_arrow() functionality.
     """
 
+    # The options of polars.read_parquet() that polars.scan_parquet() does not take;
+    # see _scan_kwargs().
+    _PARQUET_READ_ONLY_OPTIONS: ClassVar[frozenset[str]] = frozenset(
+        {"columns", "use_pyarrow", "pyarrow_options", "memory_map"}
+    )
+    # The options of polars.read_csv() that polars.scan_csv() does not take; see
+    # _scan_kwargs(). Polars 2.0 removed the others of Polars 1.x from read_csv().
+    _CSV_READ_ONLY_OPTIONS: ClassVar[frozenset[str]] = frozenset({"columns", "use_pyarrow"})
+    _POLARS_1_CSV_READ_ONLY_OPTIONS: ClassVar[frozenset[str]] = _CSV_READ_ONLY_OPTIONS | {
+        "n_threads",
+        "batch_size",
+        "sample_size",
+    }
+
     def __init__(
         self,
         connection: Connection[Any],
@@ -330,17 +346,18 @@ class AthenaPolarsResultSet(AthenaResultSet):
             max_workers: Maximum number of worker threads.
             chunksize: Number of rows per chunk for memory-efficient processing.
                       If specified, data is loaded lazily in chunks for all data
-                      access methods including fetchone(), fetchmany(), and iter_chunks().
+                      access methods including fetchone(), fetchmany(), and iter_chunks(),
+                      unless ``use_pyarrow=True`` is given; see ``_reads_in_chunks()``.
             result_set_type_hints: Athena type signatures for complex-type columns,
                 keyed by column name (case-insensitive) or zero-based column index.
             **kwargs: Additional arguments passed to Polars read functions.
                 They replace the arguments the result set chooses, such as ``separator``,
                 ``has_header``, ``schema_overrides``, and ``storage_options``. A given
                 ``storage_options`` replaces PyAthena's S3 settings as a whole: non-chunked
-                CSV results are read through fsspec, and chunked CSV and UNLOAD results
-                through Polars' native object store. Column types for a CSV result are
-                given as ``schema_overrides``; Polars' deprecated alias ``dtypes`` is not
-                supported.
+                CSV results and UNLOAD results read with ``use_pyarrow=True`` are read
+                through fsspec, and other chunked CSV and UNLOAD results through Polars'
+                native object store. Column types for a CSV result are given as
+                ``schema_overrides``; Polars' deprecated alias ``dtypes`` is not supported.
         """
         super().__init__(
             connection=connection,
@@ -371,7 +388,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         # Converters for the rows of self._df.
         self._df_converters: dict[str, Callable[[str | None], Any | None]] = {}
         if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
-            if self._chunksize is None:
+            if not self._reads_in_chunks():
                 self._df = self._as_polars()
                 self._df_converters = self._get_converters(self._get_frame_column_names())
             else:
@@ -426,6 +443,74 @@ class AthenaPolarsResultSet(AthenaResultSet):
             **self._kwargs,
             "storage_options": self._storage_options(storage_options),
         }
+
+    def _scan_kwargs(
+        self,
+        read_only: frozenset[str],
+        storage_options: Callable[[], dict[str, Any]],
+        **defaults: Any,
+    ) -> dict[str, Any]:
+        """Get the arguments of a Polars scan function that reads the result in chunks.
+
+        They are the arguments of ``_read_kwargs()`` without the options of the read
+        function that the scan function does not take. ``_select_columns()`` applies
+        ``columns`` to the scan. The others do not change the result of a scan:
+        ``use_pyarrow=True`` makes ``_reads_in_chunks()`` read the result whole,
+        Polars uses ``pyarrow_options`` only with it, and the rest tune the read.
+
+        Args:
+            read_only: The options of the read function that the scan function does
+                not take.
+            storage_options: See ``_read_kwargs()``.
+            **defaults: See ``_read_kwargs()``.
+
+        Returns:
+            The arguments for the scan function.
+        """
+        kwargs = self._read_kwargs(storage_options, **defaults)
+        return {key: value for key, value in kwargs.items() if key not in read_only}
+
+    def _reads_in_chunks(self) -> bool:
+        """Whether the result is read in chunks.
+
+        It is with the chunksize option, unless ``execute()`` was given
+        ``use_pyarrow=True``, which reads the result with pyarrow, whole, as Polars'
+        read functions do.
+
+        Returns:
+            True if the result is read in chunks.
+        """
+        return self._chunksize is not None and not self._kwargs.get("use_pyarrow")
+
+    def _select_columns(self, lazy_df: pl.LazyFrame, in_file_order: bool = False) -> pl.LazyFrame:
+        """Select the ``columns`` given to ``execute()`` as Polars' read functions do.
+
+        ``polars.read_parquet()`` selects them from a scan by name, or by position
+        when they are integers, in the given order, and so does ``polars.read_csv()``
+        in Polars 2.0 and later. ``polars.read_csv()`` of Polars 1.x reads them in the
+        order of the file.
+
+        Args:
+            lazy_df: The scan of the result.
+            in_file_order: Whether the columns are selected in the order of the file.
+
+        Returns:
+            The scan with the columns selected, or the scan without ``columns``.
+        """
+        import polars as pl
+
+        columns = self._kwargs.get("columns")
+        if columns is None:
+            return lazy_df
+        if columns and all(isinstance(column, int) for column in columns):
+            return lazy_df.select(pl.nth(sorted(columns) if in_file_order else columns))
+        if in_file_order:
+            names = lazy_df.collect_schema().names()
+            selected = set(columns)
+            # A missing column is left to select(), which raises ColumnNotFoundError.
+            if selected <= set(names):
+                columns = [name for name in names if name in selected]
+        return lazy_df.select(columns)
 
     @property
     def _csv_storage_options(self) -> dict[str, Any]:
@@ -758,7 +843,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
         Timestamps are read at microseconds; see ``_int96_read_options()``. Polars 1.x
         cannot read them so; when ``_reads_with_pyarrow()``, a result with timestamps
         is read with pyarrow instead, and otherwise Polars 1.x reads them at
-        nanoseconds, and they are cast to microseconds.
+        nanoseconds, and they are cast to microseconds. With ``use_pyarrow=True``
+        given to ``execute()``, see ``_read_parquet_files_with_polars()``.
 
         ``_prepare_parquet_location()`` must have found the unload location first.
 
@@ -776,6 +862,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
         if self._unload_location is None:
             raise ProgrammingError("unload_location is not available.")
 
+        if self._kwargs.get("use_pyarrow"):
+            return self._read_parquet_files_with_polars()
         options = self._int96_read_options(schema)
         if options is None and self._reads_with_pyarrow():
             self._warn_nanosecond_read(
@@ -820,8 +908,56 @@ class AthenaPolarsResultSet(AthenaResultSet):
             _logger.exception(f"Failed to read {self._unload_location}.")
             raise OperationalError(*e.args) from e
 
+    def _read_parquet_files_with_polars(self) -> pl.DataFrame:
+        """Read the files of the data manifest with ``polars.read_parquet(use_pyarrow=True)``.
+
+        Polars' pyarrow read opens a remote path with fsspec as a single file, so it
+        cannot read the unload location, a prefix, or a list of remote paths. The
+        files are opened through ``_get_parquet_filesystem()`` and given to Polars,
+        which reads each with pyarrow and the options given to ``execute()``. INT96
+        timestamps are read at microseconds, unless ``pyarrow_options`` sets
+        ``coerce_int96_timestamp_unit``.
+
+        Returns:
+            Polars DataFrame containing the Parquet data.
+
+        Raises:
+            OperationalError: If reading the Parquet files fails.
+        """
+        import polars as pl
+
+        kwargs = {key: value for key, value in self._kwargs.items() if key != "storage_options"}
+        kwargs["pyarrow_options"] = {
+            "coerce_int96_timestamp_unit": "us",
+            **(kwargs.get("pyarrow_options") or {}),
+        }
+        try:
+            fs = self._get_parquet_filesystem()
+            with ExitStack() as stack:
+                files = [stack.enter_context(fs.open(path, "rb")) for path in self._data_manifest]
+                return pl.read_parquet(files, **kwargs)
+        except Exception as e:
+            _logger.exception(f"Failed to read {self._unload_location}.")
+            raise OperationalError(*e.args) from e
+
+    def _get_parquet_filesystem(self) -> AbstractFileSystem:
+        """Get the filesystem that opens the Parquet files read with ``use_pyarrow=True``.
+
+        Returns:
+            An fsspec S3 filesystem with the ``storage_options`` given to
+            ``execute()``, as Polars opens a file with them, or else PyAthena's
+            S3FileSystem with the result set's settings.
+        """
+        if "storage_options" in self._kwargs:
+            return fsspec.filesystem("s3", **(self._kwargs["storage_options"] or {}))
+        return S3FileSystem(**self._csv_storage_options)
+
     def _read_parquet_schema(self) -> pl.Schema:
         """Read the schema of the Parquet files.
+
+        With ``use_pyarrow=True`` given to ``execute()``, the schema of the first file
+        of the data manifest is read with pyarrow through ``_get_parquet_filesystem()``,
+        as the files are read; otherwise Polars scans the unload location.
 
         Returns:
             The schema, with INT96 timestamps as nanosecond Datetimes.
@@ -835,6 +971,16 @@ class AthenaPolarsResultSet(AthenaResultSet):
         if not self._unload_location:
             raise ProgrammingError("UnloadLocation is none or empty.")
 
+        if self._kwargs.get("use_pyarrow"):
+            from pyarrow import parquet
+
+            try:
+                with self._get_parquet_filesystem().open(self._data_manifest[0], "rb") as file:
+                    arrow_schema = parquet.read_schema(file)
+                return cast("pl.DataFrame", pl.from_arrow(arrow_schema.empty_table())).schema
+            except Exception as e:
+                _logger.exception(f"Failed to read schema from {self._unload_location}.")
+                raise OperationalError(*e.args) from e
         try:
             # Use scan_parquet to get schema without reading all data
             lazy_df = pl.scan_parquet(
@@ -1104,14 +1250,17 @@ class AthenaPolarsResultSet(AthenaResultSet):
         try:
             # scan_csv uses Rust's native object_store (like scan_parquet),
             # not fsspec, so we use the same storage options as Parquet
-            read_kwargs = self._read_kwargs(
-                lambda: self._get_parquet_storage_options(connection), **defaults
+            polars_1 = int(pl.__version__.split(".")[0]) < 2
+            read_kwargs = self._scan_kwargs(
+                self._POLARS_1_CSV_READ_ONLY_OPTIONS if polars_1 else self._CSV_READ_ONLY_OPTIONS,
+                lambda: self._get_parquet_storage_options(connection),
+                **defaults,
             )
             if "schema_overrides" not in self._kwargs:
                 # Renamed after reading, so that Polars matches the types to the header.
                 read_kwargs.pop("new_columns", None)
             lazy_df = _to_datetimes(
-                pl.scan_csv(location, **read_kwargs),
+                self._select_columns(pl.scan_csv(location, **read_kwargs), in_file_order=polars_1),
                 timestamp_dtypes,
                 # As Polars reads a value it cannot parse as null with ignore_errors.
                 strict=not read_kwargs.get("ignore_errors", False),
@@ -1213,11 +1362,13 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 self._warn_nanosecond_read(_NANOSECOND_READ_CONSEQUENCE)
             lazy_df = pl.scan_parquet(
                 location,
-                **self._read_kwargs(
+                **self._scan_kwargs(
+                    self._PARQUET_READ_ONLY_OPTIONS,
                     lambda: self._get_parquet_storage_options(connection),
                     **(options or {}),
                 ),
             )
+            lazy_df = self._select_columns(lazy_df)
             for batch in lazy_df.collect_batches(chunk_size=self._chunksize):
                 yield self._cast(batch, dtypes)
         except Exception as e:
@@ -1231,10 +1382,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
         When chunksize is specified, it yields DataFrames in chunks using lazy
         evaluation for memory-efficient processing. These chunks come from the same
         iterator as the fetch methods, so a chunk that one of them reads is not
-        available to the other. When chunksize is not specified, or the result has
-        no result file to read in chunks, each call returns a new iterator that
-        yields the entire result as a single DataFrame, and the fetch methods keep
-        their position.
+        available to the other. When chunksize is not specified, ``execute()`` was
+        given ``use_pyarrow=True``, or the result has no result file to read in
+        chunks, each call returns a new iterator that yields the entire result as a
+        single DataFrame, and the fetch methods keep their position.
 
         Returns:
             PolarsDataFrameIterator that yields Polars DataFrames for each chunk
