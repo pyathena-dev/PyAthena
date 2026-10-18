@@ -54,9 +54,9 @@ class AsyncCursor(BaseCursor):
         Each execute() call returns a ``(query_id, future)`` tuple. The future
         resolves to the result set, which provides the column descriptions and
         the fetch methods. ``description(query_id)`` also returns the column
-        descriptions as a Future. A result set whose future completed
-        before the cursor closed belongs to the caller; closing the cursor
-        closes the result sets that complete after it.
+        descriptions as a Future. Closing the cursor closes the result sets
+        that its futures create after the close; one created before the
+        close belongs to the caller.
     """
 
     def __init__(
@@ -139,9 +139,10 @@ class AsyncCursor(BaseCursor):
         """Close the cursor and shut down its executor.
 
         Later operations on the cursor raise ``ProgrammingError``. Futures
-        already returned still run to completion. The result sets of the
-        futures of ``execute()`` that complete after the close are closed;
-        those that completed before belong to the caller.
+        already returned still run to completion. A result set that a future
+        of ``execute()`` creates after the close is closed; one created
+        before the close belongs to the caller, even if its future resolves
+        after the close.
 
         Args:
             wait: Whether to wait for submitted futures to finish before returning.

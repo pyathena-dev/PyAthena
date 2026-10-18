@@ -2537,9 +2537,10 @@ class TestAioS3StreamedFile:
         with mock.patch.object(AioS3StreamedFile, "__init__", blocking_init):
             task = asyncio.create_task(fs.open_async("s3://bucket/key", mode))
             await cancel_when_started(task, started, release)
-            await wait_until(lambda: files[0].closed)
+            # The pool is shut down last.
+            await wait_until(lambda: files[0]._pool._shutdown)
 
-        assert files[0]._pool._shutdown
+        assert files[0].closed
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             files.clear()

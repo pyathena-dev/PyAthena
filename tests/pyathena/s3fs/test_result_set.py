@@ -178,14 +178,18 @@ class TestAthenaS3FSResultSet:
     def test_reader_interrupt_closes_file(self):
         """GH-1208: an interrupt while reading the header row closes the file.
 
-        ``pytest.raises()`` keeps the traceback, which references the file,
-        so that the garbage collector does not close it before the check.
+        The check runs while the exception is handled, as its traceback
+        references the file, so that the garbage collector cannot close it
+        instead.
         """
         data = "null_col,empty_col,value_col\n"
         stream = BytesIO(data.encode())
-        with pytest.raises(KeyboardInterrupt):
+        try:
             _result_set(data, _InterruptedCSVReader, stream=stream)
-        assert stream.closed
+        except KeyboardInterrupt:
+            assert stream.closed
+        else:
+            pytest.fail("KeyboardInterrupt was not raised")
 
     @pytest.mark.parametrize(
         ("csv_reader", "expected_empty"),
