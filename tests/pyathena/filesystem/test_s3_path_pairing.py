@@ -134,32 +134,32 @@ class TestS3PathPairing:
         with pytest.raises(ValueError, match="sources"):
             S3PathPairing("s3://bucket/a/", "s3://bucket/b/").copy_pairs()
 
-    def test_move_pairs(self):
-        # The "null" version of a key moved onto the key stays in place.
-        pairs = [("s3://bucket/b?versionId=null", "s3://bucket/b"), ("bucket/d/a", "s3://bucket/z")]
-
-        assert _pairing(pairs).conflict_candidates(pairs) == []
-        assert _pairing(pairs).move_pairs(pairs) == [("bucket/d/a", "s3://bucket/z")]
-
     @pytest.mark.parametrize(
         ("enabled_buckets", "expected"),
         [
+            # The "null" version of a key moved onto the key stays in place.
             ((), []),
             (("enabled",), [("enabled/key?versionId=null", "enabled/key")]),
             (("other",), [("other/key?versionId=null", "other/key")]),
         ],
     )
     def test_move_pairs_null_version_bucket_state(self, enabled_buckets, expected):
+        moved = ("enabled/d/a", "s3://enabled/z")
         pairs = [
             ("enabled/key?versionId=null", "enabled/key"),
             ("other/key?versionId=null", "other/key"),
             ("enabled/unchanged?versionId=null", "s3://enabled/unchanged?versionID=null"),
+            # An ordinary move.
+            moved,
         ]
         pairing = _pairing(pairs)
 
         assert pairing.conflict_candidates(pairs, versioning_enabled_buckets=enabled_buckets) == []
-        assert pairing.move_pairs(pairs, versioning_enabled_buckets=enabled_buckets) == expected
-        assert pairing.move_pairs(pairs) == []
+        assert pairing.move_pairs(pairs, versioning_enabled_buckets=enabled_buckets) == [
+            *expected,
+            moved,
+        ]
+        assert pairing.move_pairs(pairs) == [moved]
 
     def test_move_pairs_distinguishes_null_version_source(self):
         pairs = [

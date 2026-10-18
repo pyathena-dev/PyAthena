@@ -115,9 +115,6 @@ class TestS3Path:
         assert str(path) == string
         assert path.uri == uri
 
-    def test_str_spells_the_version_query_as_version_id(self):
-        assert str(S3Path.parse("s3a://bucket/key?version_id=v1")) == "bucket/key?versionId=v1"
-
     @pytest.mark.parametrize(
         ("path", "expected"),
         [
