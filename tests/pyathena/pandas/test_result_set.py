@@ -1136,6 +1136,7 @@ class TestAthenaPandasResultSet:
             _local_result_set(LocalBucketFileSystem(tmp_path), [("x", type_)], f'"x"\n"{value}"\n')
         assert str(error.value).startswith("Column 'x': ")
 
+    @pytest.mark.filterwarnings("ignore:Both a converter and dtype:pandas.errors.ParserWarning")
     @pytest.mark.parametrize(
         "kwargs",
         [
