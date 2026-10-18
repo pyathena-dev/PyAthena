@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import functools
 import logging
-from collections.abc import Callable
+import operator
+from collections.abc import AsyncGenerator, Callable
 from multiprocessing import cpu_count
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from pyathena.aio.common import WithAsyncFetch
 from pyathena.aio.util import create_in_thread
 from pyathena.common import CursorIterator
-from pyathena.error import OperationalError, ProgrammingError
+from pyathena.error import OperationalError
 from pyathena.model import AthenaQueryExecution
 from pyathena.options import ExecuteOptions
 from pyathena.polars.converter import (
@@ -35,12 +36,14 @@ class AioPolarsCursor(WithAsyncFetch):
     :func:`~pyathena.aio.util.create_in_thread`) and fetch operations in
     threads, keeping the event loop free. This is especially important
     when ``chunksize`` is set, as fetch calls trigger lazy S3 reads.
+    :meth:`as_polars`, :meth:`as_arrow`, and :meth:`iter_chunks` also read in
+    threads.
 
     Example:
         >>> async with await pyathena.aio_connect(...) as conn:
         ...     cursor = conn.cursor(AioPolarsCursor)
         ...     await cursor.execute("SELECT * FROM my_table")
-        ...     df = cursor.as_polars()
+        ...     df = await cursor.as_polars()
     """
 
     def __init__(
@@ -218,30 +221,58 @@ class AioPolarsCursor(WithAsyncFetch):
             raise OperationalError(query_execution.state_change_reason)
         return self
 
-    def as_polars(self) -> pl.DataFrame:
-        """Return query results as a Polars DataFrame.
+    async def as_polars(self) -> pl.DataFrame:
+        """Return the query results as a Polars DataFrame, reading them in a thread.
+
+        When the result is read in chunks, the DataFrame joins the chunks that
+        have not yet been read, and a later call returns an empty DataFrame;
+        :meth:`iter_chunks` reads them one at a time. Otherwise, it is the same
+        DataFrame on every call. A cancellation detaches and closes the result
+        set, as one of a fetch does.
 
         Returns:
-            Polars DataFrame containing all query results.
+            The DataFrame of the query results.
 
         Raises:
             ProgrammingError: If the cursor is closed or has no result set.
         """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaPolarsResultSet, self.result_set)
-        return result_set.as_polars()
+        return await self._fetch_in_thread(operator.methodcaller("as_polars"))
 
-    def as_arrow(self) -> Table:
-        """Return query results as an Apache Arrow Table.
+    async def as_arrow(self) -> Table:
+        """Return the query results as an Apache Arrow Table, converting them in a thread.
+
+        The Table holds the data that :meth:`as_polars` returns. A cancellation
+        detaches and closes the result set, as one of a fetch does.
 
         Returns:
-            Apache Arrow Table containing all query results.
+            The Table of the query results.
+
+        Raises:
+            ImportError: If pyarrow is not installed.
+            ProgrammingError: If the cursor is closed or has no result set.
+        """
+        return await self._fetch_in_thread(operator.methodcaller("as_arrow"))
+
+    def iter_chunks(self) -> AsyncGenerator[pl.DataFrame, None]:
+        """Iterate over the Polars DataFrame chunks of the query results, reading each in a thread.
+
+        The chunks are those of :meth:`AthenaPolarsResultSet.iter_chunks()
+        <pyathena.polars.result_set.AthenaPolarsResultSet.iter_chunks>`, read from the result
+        set that the cursor has when this method is called. A cancellation of a read
+        detaches and closes the result set, as one of a fetch does. Leaving the
+        loop early keeps the chunks that have not been read, which the fetch
+        methods and a later ``iter_chunks()`` read.
+
+        Returns:
+            An async iterator of the DataFrame chunks. It raises
+            ``ProgrammingError`` once the result set is closed, such as by another
+            query of the cursor.
 
         Raises:
             ProgrammingError: If the cursor is closed or has no result set.
+
+        Example:
+            >>> async for chunk in cursor.iter_chunks():
+            ...     process_chunk(chunk)
         """
-        if not self.has_result_set:
-            raise ProgrammingError("No result set.")
-        result_set = cast(AthenaPolarsResultSet, self.result_set)
-        return result_set.as_arrow()
+        return self._iter_chunks_in_thread(operator.methodcaller("iter_chunks"))

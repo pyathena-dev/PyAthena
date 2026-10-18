@@ -300,7 +300,8 @@ class PandasCursor(WithFetch):
 
         Raises:
             ProgrammingError: If the cursor is closed or has no result set when
-                the iteration starts.
+                the iteration starts, or its result set is closed during the
+                iteration, such as by another query of the cursor.
 
         Examples:
             # Explicit chunksize

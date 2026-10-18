@@ -78,6 +78,8 @@ class AioS3FileSystem(AsyncFileSystem):
     with ``asynchronous=True`` has no event loop of its own, so its file handles
     use a ``ThreadPoolExecutor``. :meth:`open_async` returns an
     ``AioS3StreamedFile``, whose reads and writes are coroutines.
+    :meth:`close`, or the end of a ``with`` or ``async with`` block, releases
+    the threads of the filesystem, which stays usable.
 
     Attributes:
         _sync_fs: The internal synchronous S3FileSystem instance.
@@ -166,6 +168,31 @@ class AioS3FileSystem(AsyncFileSystem):
     def core(self) -> S3Core:
         """The typed S3 operations of the wrapped ``S3FileSystem``."""
         return self._sync_fs.core
+
+    def close(self) -> None:
+        """Release the threads of the filesystem, which stays usable, once they are idle.
+
+        See :meth:`S3AioThreadPool.release()
+        <pyathena.filesystem.s3_executor.S3AioThreadPool.release>`. Files opened
+        before have threads of their own and are not affected.
+        """
+        self._thread_pool.release()
+
+    def __enter__(self) -> AioS3FileSystem:
+        """Return the filesystem, whose threads the end of the block releases."""
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Release the threads with :meth:`close`."""
+        self.close()
+
+    async def __aenter__(self) -> AioS3FileSystem:
+        """Return the filesystem, whose threads the end of the block releases."""
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Release the threads with :meth:`close`."""
+        self.close()
 
     async def _info(self, path: str, **kwargs) -> S3Object:
         return await self._thread_pool.run(self._sync_fs.info, path, **kwargs)

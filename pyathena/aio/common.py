@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import operator
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Iterator
 from typing import Any, NoReturn, TypeVar, cast
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -22,6 +22,9 @@ from pyathena.util import _is_throttling_error, override
 _logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
+# Returned by next() at the end of the chunks, since StopIteration cannot pass
+# through a future.
+_END_OF_CHUNKS = object()
 
 
 class AioBaseCursor(BaseCursor):
@@ -875,8 +878,75 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
         result_set = cast(AthenaResultSet, self.result_set)
+        return await self._run_in_thread_or_detach(result_set, fetch, result_set)
+
+    def _iter_chunks_in_thread(
+        self, chunks: Callable[[Any], Iterator[_T]]
+    ) -> AsyncGenerator[_T, None]:
+        """Return an async iterator that reads each chunk of the result set in a thread.
+
+        The iterator reads from the result set that the cursor has when this
+        method is called. Each chunk is read as a fetch is (see
+        ``_fetch_in_thread()``): a cancellation detaches the result set and
+        closes it once the read has ended. Leaving the iteration early
+        leaves the chunks that have not been read to the result set, which
+        releases their reader when it is closed.
+
+        Args:
+            chunks: The function that returns the chunk iterator of the result set.
+
+        Returns:
+            The async iterator of the chunks.
+
+        Raises:
+            ProgrammingError: If the cursor is closed or has no result set.
+        """
+        if not self.has_result_set:
+            raise ProgrammingError("No result set.")
+        result_set = cast(AthenaResultSet, self.result_set)
+        iterator = chunks(result_set)
+
+        async def read() -> AsyncGenerator[_T, None]:
+            """Read the chunks one at a time in threads.
+
+            Yields:
+                The chunks.
+
+            Raises:
+                ProgrammingError: If the result set is closed before a chunk is
+                    read, such as by another query of the cursor, as the chunk
+                    iterators of the result sets raise then.
+            """
+            while True:
+                chunk = await self._run_in_thread_or_detach(
+                    result_set, next, iterator, _END_OF_CHUNKS
+                )
+                if chunk is _END_OF_CHUNKS:
+                    return
+                yield cast(_T, chunk)
+
+        return read()
+
+    async def _run_in_thread_or_detach(
+        self, result_set: AthenaResultSet, func: Callable[..., _T], /, *args: Any
+    ) -> _T:
+        """Run a blocking function that uses a result set in a thread.
+
+        As with :func:`~pyathena.aio.util.run_in_thread_or_close`, a
+        cancellation stops the retries of the AWS API calls of the function and
+        closes the result set once the function is no longer running. The
+        cancellation also detaches the result set if the cursor still has it.
+
+        Args:
+            result_set: The result set that the function uses.
+            func: The blocking function.
+            *args: Positional arguments for ``func``.
+
+        Returns:
+            The return value of ``func``.
+        """
         try:
-            return await run_in_thread_or_close(result_set, fetch, result_set)
+            return await run_in_thread_or_close(result_set, func, *args)
         except asyncio.CancelledError:
             if self.result_set is result_set:
                 self.result_set = None

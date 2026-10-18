@@ -146,8 +146,9 @@ class TestPandasCursor:
     def test_binary_csv_stream_close(self, tmp_path, engine, close_method):
         """The binary CSV stream of a chunked read is closed however the reading ends.
 
-        Later reads get no chunks, and the fetch methods no rows. No AWS calls; the
-        result file is a local file larger than pandas' read buffer.
+        Later reads get no chunks, or raise once the result set is closed, and the
+        fetch methods return no rows. No AWS calls; the result file is a local file
+        larger than pandas' read buffer.
         """
         with _offline_cursor(
             tmp_path,
@@ -183,9 +184,11 @@ class TestPandasCursor:
 
             assert all(file.closed for file in opened)
             chunks.close()
-            with pytest.raises(StopIteration):
+            # GH-1209: closing the result set makes its chunk iterator raise.
+            ended = ProgrammingError if close_method in ("cursor", "execute") else StopIteration
+            with pytest.raises(ended):
                 next(dataframe_iterator)
-            with pytest.raises(StopIteration):
+            with pytest.raises(ended):
                 dataframe_iterator.get_chunk()
             if close_method == "cursor":
                 # A closed cursor and its closed result set reject fetches.
@@ -1592,6 +1595,15 @@ class TestPandasCursor:
                 chunks = list(cursor.iter_chunks())
                 assert [len(chunk) for chunk in chunks] == expected
                 assert pd.concat(chunks)["number"].tolist() == [1, 2, 3, 4, 5]
+
+    def test_whole_result_chunks_after_close(self, pandas_cursor):
+        """GH-1209: an iterator of the whole result raises once its result set is closed."""
+        pandas_cursor.execute("SELECT number FROM (VALUES (1), (2), (3)) AS t(number)")
+        result_set = pandas_cursor.result_set
+        chunks = result_set.iter_chunks()
+        result_set.close()
+        with pytest.raises(ProgrammingError):
+            next(chunks)
 
     def test_pandas_cursor_whole_result_reused(self, pandas_cursor):
         """Test that as_pandas() and iter_chunks() do not consume the fetched rows."""

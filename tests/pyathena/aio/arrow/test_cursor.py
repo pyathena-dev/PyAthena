@@ -25,11 +25,11 @@ class TestAioArrowCursor:
 
     async def test_as_arrow(self, aio_arrow_cursor):
         await aio_arrow_cursor.execute("SELECT * FROM one_row")
-        table = aio_arrow_cursor.as_arrow()
+        table = await aio_arrow_cursor.as_arrow()
         assert table.num_rows == 1
         assert table.num_columns == 1
         assert table.column_names == ["number_of_rows"]
-        df = aio_arrow_cursor.as_polars()
+        df = await aio_arrow_cursor.as_polars()
         assert df.height == 1
         assert df.width == 1
 
@@ -40,7 +40,7 @@ class TestAioArrowCursor:
     )
     async def test_fetchone_unload(self, aio_arrow_cursor):
         await aio_arrow_cursor.execute("SELECT * FROM one_row")
-        assert aio_arrow_cursor.as_arrow().num_rows == 1
+        assert (await aio_arrow_cursor.as_arrow()).num_rows == 1
         assert await aio_arrow_cursor.fetchone() == (1,)
         assert await aio_arrow_cursor.fetchone() is None
 

@@ -243,15 +243,29 @@ row = await cursor.fetchone()
 rows = await cursor.fetchall()
 
 await cursor.execute("SELECT * FROM many_rows")
-df = cursor.as_pandas()  # In-memory conversion, no await needed
+df = await cursor.as_pandas()
 ```
 
-The `as_pandas()`, `as_arrow()`, and `as_polars()` convenience methods are synchronous.
-When `execute()` has loaded the whole result, they return that data.
-When the result is read in chunks, they read S3 on the calling thread and block the event loop.
-With `chunksize` on CSV results, `as_pandas()` returns an iterator that reads each chunk as it is iterated, and
-`as_polars()` reads every remaining chunk.
-With a chunk size chosen by `auto_optimize_chunksize`, `as_pandas()` reads every remaining chunk.
+The `as_pandas()`, `as_arrow()`, and `as_polars()` methods of the aio cursors are coroutines.
+The pandas and Polars cursors read the result in a thread, and the Arrow cursor converts it to Polars in a thread.
+When the result is read in chunks, `AioPandasCursor.as_pandas()` and `AioPolarsCursor.as_polars()` join the
+chunks that have not yet been read, and a later call returns an empty DataFrame.
+Unlike `PandasCursor.as_pandas()`, `AioPandasCursor.as_pandas()` always returns a DataFrame.
+`AioPandasCursor.iter_chunks()` and `AioPolarsCursor.iter_chunks()` return async iterators that read each
+chunk of the synchronous `iter_chunks()` in a thread:
+
+```python
+await cursor.execute("SELECT * FROM many_rows", chunksize=50_000)
+async for df in cursor.iter_chunks():
+    process(df)
+```
+
+The iterator reads the result of the query that the cursor has when `iter_chunks()` is called.
+Leaving the loop early keeps the chunks that have not been read for the fetch methods and a later
+`iter_chunks()`; closing the cursor or running another query releases them.
+After the cursor runs another query or closes, the iterator raises `ProgrammingError`.
+Cancelling a chunk read, or an `as_*()` call that reads or converts in a thread, drops the result, as
+cancelling a fetch does.
 
 See each cursor's documentation page for detailed usage examples.
 
@@ -290,6 +304,22 @@ blocks them:
 The pools create threads as the calls need them, and each call runs with the caller's
 context variables, as with `asyncio.to_thread()`.
 In a forked child process, a pool creates new threads.
+
+`close()` releases the threads of the filesystem once no call runs or waits in them, and
+so does the end of a `with` or `async with` block. Until then, calls, including those made
+after `close()`, run in those threads within `max_workers`, and the calls in progress,
+including the cleanup of a multipart copy, run to their end. The filesystem stays usable,
+also when other callers share it through fsspec's instance cache: a call after the release
+creates new threads. Files opened before keep their own threads. Without `close()`, the
+threads are released when the filesystem is garbage collected, which a filesystem in
+fsspec's instance cache is not until `clear_instance_cache()`.
+
+```python
+from pyathena.filesystem.s3_async import AioS3FileSystem
+
+async with AioS3FileSystem(asynchronous=True) as fs:
+    files = await fs._ls("s3://my-bucket/data/")
+```
 
 Cancelling a coroutine of the filesystem also stops the retries of the S3 requests that
 its call makes in these threads, including the part uploads and range reads that the

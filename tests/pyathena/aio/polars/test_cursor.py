@@ -7,12 +7,15 @@
 
 from unittest.mock import MagicMock, patch
 
+import polars as pl
 import pytest
 
 from pyathena.aio.polars.cursor import AioPolarsCursor
 from pyathena.error import ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
+
+_FIVE_ROWS = "SELECT number FROM (VALUES (1), (2), (3), (4), (5)) AS t(number)"
 
 
 class TestAioPolarsCursor:
@@ -25,10 +28,10 @@ class TestAioPolarsCursor:
 
     async def test_as_polars(self, aio_polars_cursor):
         await aio_polars_cursor.execute("SELECT * FROM one_row")
-        df = aio_polars_cursor.as_polars()
+        df = await aio_polars_cursor.as_polars()
         assert df.height == 1
         assert df.width == 1
-        table = aio_polars_cursor.as_arrow()
+        table = await aio_polars_cursor.as_arrow()
         assert table.num_rows == 1
         assert table.num_columns == 1
 
@@ -39,7 +42,7 @@ class TestAioPolarsCursor:
     )
     async def test_fetchone_unload(self, aio_polars_cursor):
         await aio_polars_cursor.execute("SELECT * FROM one_row")
-        assert aio_polars_cursor.as_polars().height == 1
+        assert (await aio_polars_cursor.as_polars()).height == 1
         assert await aio_polars_cursor.fetchone() == (1,)
         assert await aio_polars_cursor.fetchone() is None
 
@@ -83,3 +86,23 @@ class TestAioPolarsCursor:
 
         with pytest.raises(ProgrammingError):
             await aio_polars_cursor.execute("SELECT * FROM one_row")
+
+    @pytest.mark.parametrize(("chunksize", "sizes"), [(None, [5]), (2, [2, 2, 1])])
+    async def test_iter_chunks(self, aio_polars_cursor, chunksize, sizes):
+        """GH-1209: iter_chunks() yields the chunks, and as_polars() the whole result."""
+        await aio_polars_cursor.execute(_FIVE_ROWS, chunksize=chunksize)
+        chunks = [chunk async for chunk in aio_polars_cursor.iter_chunks()]
+        assert [chunk.height for chunk in chunks] == sizes
+        assert pl.concat(chunks)["number"].to_list() == [1, 2, 3, 4, 5]
+        await aio_polars_cursor.execute(_FIVE_ROWS, chunksize=chunksize)
+        assert (await aio_polars_cursor.as_polars())["number"].to_list() == [1, 2, 3, 4, 5]
+        await aio_polars_cursor.execute(_FIVE_ROWS, chunksize=chunksize)
+        assert (await aio_polars_cursor.as_arrow())["number"].to_pylist() == [1, 2, 3, 4, 5]
+
+    async def test_iter_chunks_after_execute(self, aio_polars_cursor):
+        """GH-1209: iter_chunks() reads the result set of its call, and raises once replaced."""
+        await aio_polars_cursor.execute(_FIVE_ROWS, chunksize=2)
+        chunks = aio_polars_cursor.iter_chunks()
+        await aio_polars_cursor.execute("SELECT * FROM one_row")
+        with pytest.raises(ProgrammingError):
+            await anext(chunks)

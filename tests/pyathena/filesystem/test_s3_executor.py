@@ -206,6 +206,75 @@ class TestS3AioThreadPool:
 
         assert events == ["pending finished"]
 
+    def test_release_after_calls(self):
+        # GH-1209: release() keeps the threads, and the max_workers bound,
+        # until no call runs or waits, and then ends them.
+        pool = S3AioThreadPool(1)
+        threads = []
+        started, release = threading.Event(), threading.Event()
+
+        def block():
+            threads.append(threading.current_thread())
+            started.set()
+            release.wait(EVENT_TIMEOUT)
+
+        first = pool.submit(block)
+        assert started.wait(EVENT_TIMEOUT)
+        pool.release()
+        second = pool.submit(lambda: threads.append(threading.current_thread()))
+        release.set()
+        first.result(timeout=EVENT_TIMEOUT)
+        second.result(timeout=EVENT_TIMEOUT)
+
+        assert threads[1] is threads[0]
+        threads[0].join(EVENT_TIMEOUT)
+        assert not threads[0].is_alive()
+        pool.shutdown()
+
+    def test_kept_future_keeps_no_pool(self):
+        # GH-1209: a future that the caller keeps after its call has ended does
+        # not keep the pool, whose threads end once the pool is collected.
+        pool = S3AioThreadPool(1)
+        threads = []
+        release = threading.Event()
+
+        def call():
+            threads.append(threading.current_thread())
+            release.wait(EVENT_TIMEOUT)
+
+        # Pending while its callback is added, which the future then keeps.
+        future = pool.submit(call)
+        # Runs after the callback of the pool, which has then returned.
+        ended = threading.Event()
+        future.add_done_callback(lambda _: ended.set())
+        release.set()
+        assert ended.wait(EVENT_TIMEOUT)
+        collected = weakref.ref(pool)
+        del pool
+        gc.collect()
+
+        assert collected() is None
+        threads[0].join(EVENT_TIMEOUT)
+        assert not threads[0].is_alive()
+
+    def test_release_after_interrupted_submit(self):
+        # GH-1209: a call whose submit() an interrupt stopped after scheduling
+        # it does not keep release() from ending the threads once it has ended.
+        pool = S3AioThreadPool(1)
+        threads = []
+        with (
+            mock.patch.object(Future, "add_done_callback", side_effect=KeyboardInterrupt),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            pool.submit(lambda: threads.append(threading.current_thread()))
+        # The calls start in order, so the interrupted one has ended.
+        pool.submit(sum, [1, 2]).result(timeout=EVENT_TIMEOUT)
+        pool.release()
+
+        threads[0].join(EVENT_TIMEOUT)
+        assert not threads[0].is_alive()
+        pool.shutdown()
+
     @pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork() is not available.")
     @pytest.mark.filterwarnings("ignore:.*fork\\(\\) may lead to deadlocks:DeprecationWarning")
     def test_fork(self):

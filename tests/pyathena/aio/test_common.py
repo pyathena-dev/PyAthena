@@ -5,6 +5,7 @@
 #
 # SPDX-License-Identifier: MIT
 import asyncio
+import contextlib
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock, MagicMock
@@ -17,6 +18,7 @@ from pyathena.aio.pandas.cursor import AioPandasCursor
 from pyathena.aio.polars.cursor import AioPolarsCursor
 from pyathena.aio.s3fs.cursor import AioS3FSCursor
 from pyathena.error import OperationalError, ProgrammingError
+from pyathena.pandas.result_set import PandasDataFrameIterator
 from pyathena.util import RetryConfig
 from tests.pyathena.util import EVENT_TIMEOUT, ThrottledOperation, retried
 
@@ -33,6 +35,32 @@ _WHOLE_RESULT_METHODS = {
     AioArrowCursor: ("as_arrow", "as_polars"),
     AioPolarsCursor: ("as_polars", "as_arrow"),
 }
+
+
+_CHUNKED_CURSOR_CLASSES = [AioPandasCursor, AioPolarsCursor]
+
+
+class _Chunks:
+    """A chunk iterator that records the threads of its reads, and ends once closed."""
+
+    def __init__(self, read):
+        """Initialize the iterator.
+
+        Args:
+            read: The function that returns the next chunk or raises StopIteration.
+        """
+        self._read = read
+        self.reads = []
+        self.closed = False
+
+    def __next__(self):
+        self.reads.append(threading.get_ident())
+        if self.closed:
+            raise StopIteration
+        return self._read()
+
+    def close(self):
+        self.closed = True
 
 
 def _result_set_closing_after_loop_responds() -> tuple[MagicMock, list[bool]]:
@@ -110,10 +138,10 @@ class TestWithAsyncFetch:
         for fetch in (cursor.fetchone, cursor.fetchmany, cursor.fetchall):
             with pytest.raises(ProgrammingError, match=r"No result set\."):
                 await fetch()
-        # The Arrow and Polars cursors also convert the whole result.
+        # The Arrow and Polars cursors also return the whole result.
         for name in _WHOLE_RESULT_METHODS.get(cursor_class, ()):
             with pytest.raises(ProgrammingError):
-                getattr(cursor, name)()
+                await getattr(cursor, name)()
 
     @pytest.mark.parametrize("cursor_class", _ALL_CURSOR_CLASSES)
     async def test_cancel_without_query(self, cursor_class):
@@ -331,3 +359,114 @@ class TestWithAsyncFetch:
         assert cursor.rowcount == -1
         # The query ID of the last execution is kept.
         assert cursor.query_id == "query_id"
+
+    @pytest.mark.parametrize("cursor_class", _CHUNKED_CURSOR_CLASSES)
+    async def test_iter_chunks_reads_off_event_loop(self, cursor_class):
+        """GH-1209: iter_chunks() reads each chunk in a thread."""
+        cursor = cursor_class(
+            connection=MagicMock(), converter=None, formatter=None, retry_config=None
+        )
+        chunks = _Chunks(iter(["a", "b"]).__next__)
+        cursor.result_set = MagicMock()
+        cursor.result_set.iter_chunks.return_value = chunks
+
+        assert [chunk async for chunk in cursor.iter_chunks()] == ["a", "b"]
+        assert len(chunks.reads) == 3
+        assert threading.get_ident() not in chunks.reads
+
+    @pytest.mark.parametrize("cursor_class", _CHUNKED_CURSOR_CLASSES)
+    async def test_iter_chunks_left_early_keeps_chunks(self, cursor_class):
+        """GH-1209: leaving iter_chunks() early keeps the chunks that were not read."""
+        cursor = cursor_class(
+            connection=MagicMock(), converter=None, formatter=None, retry_config=None
+        )
+        chunks = _Chunks(iter(["a", "b"]).__next__)
+        cursor.result_set = MagicMock()
+        cursor.result_set.iter_chunks.return_value = chunks
+
+        async with contextlib.aclosing(cursor.iter_chunks()) as iterator:
+            async for chunk in iterator:
+                assert chunk == "a"
+                break
+        assert [chunk async for chunk in cursor.iter_chunks()] == ["b"]
+        assert not chunks.closed
+
+    @pytest.mark.parametrize("cursor_class", _CHUNKED_CURSOR_CLASSES)
+    async def test_cancelled_iter_chunks_detaches_result_set(self, cursor_class):
+        """GH-1209: a cancelled chunk read detaches and closes the result set, as a fetch does.
+
+        The chunk iterator is not closed while the cancelled read still runs; the
+        result set is closed in a thread once the read has ended in its thread.
+        """
+        cursor = cursor_class(
+            connection=MagicMock(), converter=None, formatter=None, retry_config=None
+        )
+        operation = ThrottledOperation(block=True)
+        chunks = _Chunks(retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT)))
+        closed = threading.Event()
+        result_set = MagicMock(is_closed=False)
+        result_set.close.side_effect = closed.set
+        result_set.iter_chunks.return_value = chunks
+        cursor.result_set = result_set
+        task = asyncio.create_task(anext(cursor.iter_chunks()))
+        try:
+            assert await asyncio.to_thread(operation.started.wait, EVENT_TIMEOUT)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert cursor.result_set is None
+            assert not chunks.closed
+            assert not closed.is_set()
+        finally:
+            operation.release.set()
+        assert await asyncio.to_thread(closed.wait, EVENT_TIMEOUT)
+        assert operation.calls == 1
+
+    @pytest.mark.parametrize(
+        ("cursor_class", "method"),
+        [
+            (AioPandasCursor, "as_pandas"),
+            (AioPolarsCursor, "as_polars"),
+            (AioPolarsCursor, "as_arrow"),
+            (AioArrowCursor, "as_polars"),
+        ],
+    )
+    async def test_whole_result_off_event_loop(self, cursor_class, method):
+        """GH-1209: the as_* coroutines read or convert the whole result in a thread."""
+        cursor = cursor_class(
+            connection=MagicMock(), converter=None, formatter=None, retry_config=None
+        )
+        threads = []
+        result = object()
+
+        def whole_result():
+            threads.append(threading.get_ident())
+            return result
+
+        cursor.result_set = MagicMock()
+        getattr(cursor.result_set, method).side_effect = whole_result
+
+        assert await getattr(cursor, method)() is result
+        assert len(threads) == 1
+        assert threading.get_ident() not in threads
+
+    async def test_as_pandas_joins_chunks_off_event_loop(self):
+        """GH-1209: as_pandas() joins the chunks of a chunk iterator in a thread."""
+        cursor = AioPandasCursor(
+            connection=MagicMock(), converter=None, formatter=None, retry_config=None
+        )
+        threads = []
+        result = object()
+
+        def join():
+            threads.append(threading.get_ident())
+            return result
+
+        chunks = MagicMock(spec=PandasDataFrameIterator)
+        chunks.as_pandas.side_effect = join
+        cursor.result_set = MagicMock()
+        cursor.result_set.as_pandas.return_value = chunks
+
+        assert await cursor.as_pandas() is result
+        assert len(threads) == 1
+        assert threading.get_ident() not in threads

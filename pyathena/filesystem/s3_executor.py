@@ -211,8 +211,9 @@ class S3AioThreadPool(S3Executor):
     executor limits or blocks them. The threads are created as the calls need
     them, and each call runs with a copy of the caller's context variables,
     as with ``asyncio.to_thread()``. In a forked child process, whose copy
-    has no threads, the pool creates new ones. The pool can be shared by
-    several event loops and threads.
+    has no threads, the pool creates new ones, as it does after
+    :meth:`release`. The pool can be shared by several event loops and
+    threads.
 
     Args:
         max_workers: The maximum number of calls that run at once.
@@ -250,6 +251,25 @@ class S3AioThreadPool(S3Executor):
         self._lock = threading.Lock()
         self._executor: ThreadPoolExecutor | None = None
         self._shutdown = False
+        # The futures of the calls that were submitted and have not ended,
+        # and whether release() waits for them to end.
+        self._futures: set[Future[Any]] = set()
+        self._releasing = False
+        # A future keeps its callbacks after it has ended, so its callback
+        # refers to the pool weakly, to let a pool whose futures are kept be
+        # collected with its threads.
+        pool = weakref.ref(self)
+
+        def end_call(future: Future[Any]) -> None:
+            """Count the end of a call if the pool still exists.
+
+            Args:
+                future: The future of the call, which has ended.
+            """
+            if (live := pool()) is not None:
+                live._end_call(future)
+
+        self._end_call_callback = end_call
         S3AioThreadPool._instances.add(self)
 
     @override
@@ -273,7 +293,11 @@ class S3AioThreadPool(S3Executor):
             RuntimeError: If the pool has been shut down.
         """
         context = contextvars.copy_context()
-        return self._get_executor().submit(context.run, fn, *args, **kwargs)
+        with self._lock:
+            future = self._get_executor().submit(context.run, fn, *args, **kwargs)
+            self._futures.add(future)
+        future.add_done_callback(self._end_call_callback)
+        return future
 
     async def run(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         """Run a blocking call in a thread of the pool and wait for it.
@@ -377,6 +401,50 @@ class S3AioThreadPool(S3Executor):
         if executor is not None:
             executor.shutdown(wait=wait)
 
+    def release(self) -> None:
+        """Release the threads once no call runs or waits, keeping the pool usable.
+
+        Until then, the calls, including those submitted after this method,
+        run in the threads of the pool, at most ``max_workers`` at once. A
+        call submitted after the threads have been released creates new ones.
+        This method does not block.
+        """
+        with self._lock:
+            self._releasing = True
+            # An interrupt can keep submit() from adding the callback of a
+            # call, whose future then ends without leaving the set until here.
+            self._futures = {future for future in self._futures if not future.done()}
+            executor = self._take_idle_executor()
+        if executor is not None:
+            executor.shutdown(wait=False)
+
+    def _end_call(self, future: Future[Any]) -> None:
+        """Count the end of a call, releasing the threads after the last one if requested.
+
+        Args:
+            future: The future of the call, which has ended.
+        """
+        with self._lock:
+            # A future of the parent of a forked child is not in the set.
+            self._futures.discard(future)
+            executor = self._take_idle_executor()
+        if executor is not None:
+            executor.shutdown(wait=False)
+
+    def _take_idle_executor(self) -> ThreadPoolExecutor | None:
+        """Take the executor to shut down if a release waits and no call runs or waits.
+
+        The caller holds the lock of the pool.
+
+        Returns:
+            The executor, or None if there is none to shut down yet.
+        """
+        if not self._releasing or self._futures:
+            return None
+        self._releasing = False
+        executor, self._executor = self._executor, None
+        return executor
+
     @classmethod
     def _reset_after_fork(cls) -> None:
         """Drop the threads and locks that a forked child copied from its parent.
@@ -389,9 +457,13 @@ class S3AioThreadPool(S3Executor):
                 cls._forked_executors.append(pool._executor)
             pool._lock = threading.Lock()
             pool._executor = None
+            pool._futures = set()
+            pool._releasing = False
 
     def _get_executor(self) -> ThreadPoolExecutor:
         """Return the thread pool of this process, creating it if needed.
+
+        The caller holds the lock of the pool.
 
         Returns:
             The thread pool.
@@ -399,15 +471,11 @@ class S3AioThreadPool(S3Executor):
         Raises:
             RuntimeError: If the pool has been shut down.
         """
-        if (executor := self._executor) is not None:
-            # Its submit() raises after the shutdown.
-            return executor
-        with self._lock:
-            if self._shutdown:
-                raise RuntimeError("cannot schedule new futures after shutdown")
-            if self._executor is None:
-                self._executor = ThreadPoolExecutor(max_workers=self.max_workers)
-            return self._executor
+        if self._shutdown:
+            raise RuntimeError("cannot schedule new futures after shutdown")
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=self.max_workers)
+        return self._executor
 
 
 if hasattr(os, "register_at_fork"):

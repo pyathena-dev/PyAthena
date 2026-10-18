@@ -849,9 +849,26 @@ async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor(AioPandasCursor)
     await cursor.execute("SELECT * FROM many_rows")
-    df = cursor.as_pandas()
+    df = await cursor.as_pandas()
     print(df.describe())
     print(df.head())
+```
+
+`as_pandas()` is a coroutine that reads the result in a thread and always returns a DataFrame.
+When the result is read in chunks, it joins the chunks that have not yet been read, as the iterator that
+`PandasCursor.as_pandas()` returns does with its `as_pandas()`.
+`iter_chunks()` returns an async iterator of the chunks of `PandasCursor.iter_chunks()`, read in threads:
+
+```python
+from pyathena import aio_connect
+from pyathena.aio.pandas.cursor import AioPandasCursor
+
+async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+                          region_name="us-west-2") as conn:
+    cursor = conn.cursor(AioPandasCursor, chunksize=50_000)
+    await cursor.execute("SELECT * FROM many_rows")
+    async for df in cursor.iter_chunks():
+        print(df.describe())
 ```
 
 Support fetch and iterate query results:
@@ -891,5 +908,5 @@ async with await aio_connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                           region_name="us-west-2") as conn:
     cursor = conn.cursor(AioPandasCursor, unload=True)
     await cursor.execute("SELECT * FROM many_rows")
-    df = cursor.as_pandas()
+    df = await cursor.as_pandas()
 ```
