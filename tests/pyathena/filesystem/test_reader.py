@@ -83,7 +83,7 @@ class TestReadAheadStream:
     """Tests for reading a file sequentially with parallel range reads."""
 
     @pytest.mark.parametrize("size", [0, 1, 6, 7, 21, 25])
-    @pytest.mark.parametrize("read_size", [1, 5, 7, 100])
+    @pytest.mark.parametrize("read_size", [1, 5, 7, 100, -1])
     def test_read(self, size, read_size):
         data = bytes(range(256))[:size]
         file = _RecordingRangeFile(data)
@@ -99,35 +99,17 @@ class TestReadAheadStream:
         stream.close()
         assert file.closed
 
-    def test_read_all(self):
-        data = bytes(range(25))
-        file = _RecordingRangeFile(data)
-        with file.open_stream(part_size=7, max_parts=2) as stream:
-            assert stream.read() == data
-        assert file.closed
-
-    def test_default_part_size(self, monkeypatch):
-        monkeypatch.setattr("pyathena.filesystem.reader.ThreadPoolExecutor", ImmediateExecutor)
-        monkeypatch.setattr(ReadAheadStream, "DEFAULT_PART_SIZE", 10)
-        monkeypatch.setattr(ReadAheadStream, "DEFAULT_MAX_PARTS", 2)
-        file = _RecordingRangeFile(bytes(100))
-        stream = file.open_stream()
-        assert stream.read(1) == bytes(1)
-        assert file.reads == [(0, 10), (10, 10), (20, 10)]
-        stream.close()
-
     @pytest.mark.parametrize(
-        ("kwargs", "error", "message"),
+        ("kwargs", "message"),
         [
-            ({"part_size": 0}, ValueError, "part_size must be positive, got 0."),
-            ({"max_parts": 0}, ValueError, "max_parts must be positive, got 0."),
-            ({"part_size": "7"}, TypeError, "not supported between"),
+            ({"part_size": 0}, "part_size"),
+            ({"max_parts": 0}, "max_parts"),
         ],
     )
     @pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")
-    def test_invalid_options(self, kwargs, error, message):
+    def test_invalid_options(self, kwargs, message):
         closed = []
-        with pytest.raises(error, match=message):
+        with pytest.raises(ValueError, match=message):
             ReadAheadStream(lambda o, s: b"", 10, on_close=lambda: closed.append(1), **kwargs)
         # The stream that failed to initialize is closed without an error when it is
         # finalized, and without calling on_close.

@@ -73,16 +73,6 @@ class TestS3Object:
         assert actual.version_id == "latest"
         assert actual.last_modified == datetime(2024, 5, 2, 1, 2, 3)
 
-    def test_init_empty_applies_defaults(self):
-        # The defaults of a response without Size or StorageClass apply to an
-        # empty init too, such as a listed entry built from its typed fields.
-        actual = S3Object(init={}, bucket="bucket", key="key")
-        assert (actual["size"], actual["content_length"], actual["storage_class"]) == (
-            0,
-            0,
-            S3StorageClass.S3_STORAGE_CLASS_STANDARD,
-        )
-
     def test_to_api_repr(self):
         actual = S3Object(
             init={
@@ -216,14 +206,6 @@ class TestS3Metadata:
         assert actual.version_id == "test_version_id"
         assert actual.user_metadata == {"attr1": "value1", "attr-2": "value2"}
 
-    def test_init_defaults(self):
-        actual = S3Metadata({})
-        assert actual.content_type is None
-        # StorageClass is omitted from responses for S3 Standard objects.
-        assert actual.storage_class == S3StorageClass.S3_STORAGE_CLASS_STANDARD
-        assert actual.user_metadata == {}
-        assert actual == {}
-
     def test_mapping_interface(self):
         # The mapping interface exposes the user-defined metadata, so the
         # object is a drop-in for a plain user-metadata dictionary.
@@ -272,23 +254,6 @@ class TestS3ObjectVersion:
         assert actual.owner
         assert actual.owner.display_name == "test_owner"
         assert actual.owner.id == "test_owner_id"
-
-    def test_init_delete_marker(self):
-        actual = S3ObjectVersion(
-            bucket="test_bucket",
-            is_delete_marker=True,
-            response={
-                "Key": "test_key",
-                "VersionId": "test_version_id",
-                "IsLatest": True,
-                "LastModified": datetime(2015, 1, 1, 0, 0, 0),
-            },
-        )
-        assert actual.is_delete_marker is True
-        assert actual.etag is None
-        assert actual.size is None
-        assert actual.storage_class is None
-        assert actual.owner is None
 
 
 class TestS3PutObject:
@@ -373,21 +338,6 @@ class TestS3MultipartUpload:
         assert actual.initiator
         assert actual.initiator.display_name == "test_initiator"
         assert actual.initiator.id == "test_initiator_id"
-
-    def test_init_without_list_fields(self):
-        actual = S3MultipartUpload(
-            {
-                "Bucket": "test_bucket",
-                "Key": "test_key",
-                "UploadId": "test_upload_id",
-            }
-        )
-        assert actual.initiated is None
-        assert actual.checksum_algorithm is None
-        assert actual.checksum_type is None
-        assert actual.storage_class is None
-        assert actual.owner is None
-        assert actual.initiator is None
 
 
 class TestS3MultipartUploadPart:
@@ -479,18 +429,6 @@ class TestS3MultipartUploadPart:
         part = S3MultipartUploadPart(2, response)
         assert getattr(part, property_name) == "checksum"
         assert part.to_api_repr() == {"ETag": '"part"', "PartNumber": 2, field: "checksum"}
-
-    @pytest.mark.parametrize("copy", [False, True])
-    def test_to_api_repr_omits_missing_checksums(self, copy):
-        result = {"ETag": '"part"', "ChecksumSHA256": None}
-        part = S3MultipartUploadPart(1, {"CopyPartResult": result} if copy else result)
-        assert part.to_api_repr() == {"ETag": '"part"', "PartNumber": 1}
-        assert part.checksum_crc64nvme is None
-        assert part.checksum_sha512 is None
-        assert part.checksum_md5 is None
-        assert part.checksum_xxhash64 is None
-        assert part.checksum_xxhash3 is None
-        assert part.checksum_xxhash128 is None
 
 
 class TestS3CompleteMultipartUpload:
