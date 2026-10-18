@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections import abc
 from collections.abc import Generator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -16,7 +17,7 @@ from contextlib import closing
 from contextvars import copy_context
 from typing import TYPE_CHECKING, Any, cast
 
-from pyathena.util import override
+from pyathena.util import override, stop_retries_on, wait_with_retry_stop
 
 if TYPE_CHECKING:
     from fsspec import AbstractFileSystem
@@ -188,6 +189,12 @@ class ParquetChunkReader(abc.Iterator):  # type: ignore[type-arg]
         The receiver closes each file it receives. A file opened ahead and not
         received, because reading stopped or failed, is closed here.
 
+        Each file is opened in a copy of the context of the read that opens it
+        ahead, and a stop of the retries of the read that receives it (see
+        :func:`~pyathena.util.stop_retries_on`) stops those of the open too. The
+        retries of an open not received are stopped when the files stop being
+        read.
+
         Yields:
             The files, as ``_open()`` opens them.
         """
@@ -196,31 +203,45 @@ class ParquetChunkReader(abc.Iterator):  # type: ignore[type-arg]
         # One worker opens the one file read ahead: at most the file being decoded and
         # the next one are held, which bounds memory to two files.
         with ThreadPoolExecutor(max_workers=1) as executor:
-            # Each file is opened in a copy of the context of the read that requests it,
-            # so that a stop of the retries of that read (see stop_retries_on()) stops
-            # those of the open too.
-            ahead: Future[Any] | None = executor.submit(
-                copy_context().run, self._open, self._paths[0]
+            ahead: tuple[Future[Any], threading.Event] | None = self._open_ahead(
+                executor, self._paths[0]
             )
             try:
                 for next_path in [*self._paths[1:], None]:
                     # Open the next file only after this one opened.
-                    source = cast("Future[Any]", ahead).result()
-                    ahead = (
-                        None
-                        if next_path is None
-                        else executor.submit(copy_context().run, self._open, next_path)
-                    )
+                    future, stop = cast("tuple[Future[Any], threading.Event]", ahead)
+                    source = wait_with_retry_stop(future, stop=stop)
+                    ahead = None if next_path is None else self._open_ahead(executor, next_path)
                     yield source
             finally:
-                if ahead is not None and not ahead.cancel() and ahead.exception() is None:
-                    ahead.result().close()
+                if ahead is not None:
+                    future, stop = ahead
+                    stop.set()
+                    if not future.cancel() and future.exception() is None:
+                        future.result().close()
 
-    def _open(self, path: str) -> Any:
+    def _open_ahead(
+        self, executor: ThreadPoolExecutor, path: str
+    ) -> tuple[Future[Any], threading.Event]:
+        """Start opening a file in the background, in a copy of this context.
+
+        Args:
+            executor: The executor that opens the file.
+            path: The path of the file.
+
+        Returns:
+            The future of ``_open()``, and the event that stops the retries of
+            its requests.
+        """
+        stop = threading.Event()
+        return executor.submit(copy_context().run, self._open, path, stop), stop
+
+    def _open(self, path: str, stop: threading.Event) -> Any:
         """Open a file for ``ParquetFile``.
 
         Args:
             path: The path of the file.
+            stop: The event that stops the retries of the requests.
 
         Returns:
             A buffer of the whole file if it has at most ``MAX_PREFETCH_SIZE``
@@ -228,7 +249,8 @@ class ParquetChunkReader(abc.Iterator):  # type: ignore[type-arg]
         """
         import pyarrow as pa
 
-        if self._fs.size(path) <= self.MAX_PREFETCH_SIZE:
-            with self._fs.open(path, "rb", cache_type="none") as f:
-                return pa.BufferReader(f.read())
-        return self._fs.open(path, "rb", cache_type=self._cache_type)
+        with stop_retries_on(stop):
+            if self._fs.size(path) <= self.MAX_PREFETCH_SIZE:
+                with self._fs.open(path, "rb", cache_type="none") as f:
+                    return pa.BufferReader(f.read())
+            return self._fs.open(path, "rb", cache_type=self._cache_type)

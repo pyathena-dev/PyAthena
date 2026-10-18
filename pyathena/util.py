@@ -7,10 +7,11 @@ import re
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import Future, wait
 from contextlib import contextmanager
 from contextvars import ContextVar
 from re import Pattern
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import tenacity
 from tenacity import (
@@ -23,6 +24,8 @@ from tenacity import (
 )
 
 from pyathena import DataError
+
+_T = TypeVar("_T")
 
 # Replace with ``from typing import override`` when Python 3.11 support ends.
 if TYPE_CHECKING:
@@ -323,6 +326,35 @@ def unstoppable_retries() -> Iterator[None]:
         yield
     finally:
         _RETRY_STOP_EVENTS.reset(token)
+
+
+def wait_with_retry_stop(future: Future[_T], *, stop: threading.Event) -> _T:
+    """Wait for work whose retries an event stops, relaying the stop of this context.
+
+    The work of the future runs in a :func:`stop_retries_on` scope of
+    ``stop``, typically in another thread that another caller started. Once an
+    event of the enclosing stop scopes of this context is set while the work
+    runs, ``stop`` is set, and the wait continues until the work ends. Without
+    an enclosing scope, the function only waits.
+
+    Args:
+        future: The future of the work.
+        stop: The event of the stop scope of the work.
+
+    Returns:
+        The result of the work.
+
+    Raises:
+        BaseException: The exception of the work, such as the error of the last
+            attempt of a call whose retries were stopped.
+    """
+    events = _RETRY_STOP_EVENTS.get()
+    while events and not future.done():
+        if any(event.is_set() for event in events):
+            stop.set()
+            break
+        wait((future,), _STOP_POLL_INTERVAL)
+    return future.result()
 
 
 def retry_api_call(

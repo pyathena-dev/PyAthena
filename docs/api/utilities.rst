@@ -28,6 +28,8 @@ Utility Functions
 
 .. autofunction:: pyathena.util.unstoppable_retries
 
+.. autofunction:: pyathena.util.wait_with_retry_stop
+
 .. autofunction:: pyathena.util.is_retryable_error
 
 .. autofunction:: pyathena.util.parse_output_location

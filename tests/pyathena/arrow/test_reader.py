@@ -7,6 +7,7 @@
 
 import os
 import threading
+import time
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -17,8 +18,8 @@ from fsspec.implementations.local import LocalFileSystem
 from fsspec.spec import AbstractBufferedFile
 
 from pyathena.arrow.reader import ParquetChunkReader
-from pyathena.util import RetryConfig, retry_api_call, stop_retries_on
-from tests.pyathena.util import ImmediateExecutor, StoppingOperation
+from pyathena.util import RetryConfig, stop_retries_on
+from tests.pyathena.util import EVENT_TIMEOUT, ImmediateExecutor, ThrottledOperation, retried
 
 
 class _RecordingFile(AbstractBufferedFile):
@@ -58,17 +59,20 @@ class _RecordingFileSystem(AbstractFileSystem):
 
 
 class _ThrottledFileSystem:
-    """Local files and one throttled file, whose requests are retried as PyAthena retries them."""
+    """Local files and one throttled file, whose requests are retried as PyAthena retries them.
+
+    The backoff wait after the first attempt takes at least ``EVENT_TIMEOUT`` seconds.
+    """
 
     THROTTLED_PATH = "s3://bucket/throttled.parquet"
 
     def __init__(self, operation):
-        self.operation = operation
         self.local = LocalFileSystem()
+        self.request = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
 
     def size(self, path):
         if path == self.THROTTLED_PATH:
-            return retry_api_call(self.operation, RetryConfig(attempt=3, multiplier=0, max_delay=0))
+            return self.request()
         return self.local.size(path)
 
     def open(self, path, mode="rb", **kwargs):
@@ -211,15 +215,34 @@ class TestParquetChunkReader:
         assert all(f.closed for f in opened)
         assert list(reader) == []
 
-    @pytest.mark.parametrize("throttled", [0, 1], ids=["first", "ahead"])
-    def test_open_stopped_with_read(self, paths, throttled):
-        """GH-1296: a stop of the retries of the read stops those of opening its files."""
-        event = threading.Event()
-        operation = StoppingOperation(event.set, "request", "HeadObject")
-        files = [paths[0]]
-        files.insert(throttled, _ThrottledFileSystem.THROTTLED_PATH)
-        reader = ParquetChunkReader(_ThrottledFileSystem(operation), files, 2)
-        with stop_retries_on(event), pytest.raises(ClientError) as caught:
-            list(reader)
-        assert caught.value is operation.error
+    @pytest.mark.parametrize("stopped", ["opening", "receiving"])
+    def test_open_ahead_stopped(self, paths, stopped):
+        """GH-1296: a stop of the read that opens or receives a file opened ahead stops the open."""
+        operation = ThrottledOperation(operation_name="HeadObject")
+        opening, receiving = threading.Event(), threading.Event()
+        reader = ParquetChunkReader(
+            _ThrottledFileSystem(operation), [paths[0], _ThrottledFileSystem.THROTTLED_PATH], 2
+        )
+        started = time.monotonic()
+        with stop_retries_on(opening):
+            assert next(reader).num_rows == 2
+        assert operation.started.wait(EVENT_TIMEOUT)
+        (opening if stopped == "opening" else receiving).set()
+        with stop_retries_on(receiving), pytest.raises(ClientError) as caught:
+            next(reader)
+        assert time.monotonic() - started < EVENT_TIMEOUT
+        assert caught.value.operation_name == "HeadObject"
+        assert operation.calls == 1
+
+    def test_close_stops_open_ahead(self, paths):
+        """GH-1296: close() stops the retries of a file being opened ahead."""
+        operation = ThrottledOperation(operation_name="HeadObject")
+        reader = ParquetChunkReader(
+            _ThrottledFileSystem(operation), [paths[0], _ThrottledFileSystem.THROTTLED_PATH], 2
+        )
+        started = time.monotonic()
+        assert next(reader).num_rows == 2
+        assert operation.started.wait(EVENT_TIMEOUT)
+        reader.close()
+        assert time.monotonic() - started < EVENT_TIMEOUT
         assert operation.calls == 1
