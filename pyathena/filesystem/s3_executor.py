@@ -396,6 +396,9 @@ class S3AioThreadPool(S3Executor):
         """
         with self._lock:
             self._releasing = True
+            # An interrupt can keep submit() from adding the callback of a
+            # call, whose future then ends without leaving the set until here.
+            self._futures = {future for future in self._futures if not future.done()}
             executor = self._take_idle_executor()
         if executor is not None:
             executor.shutdown(wait=False)
@@ -421,13 +424,7 @@ class S3AioThreadPool(S3Executor):
         Returns:
             The executor, or None if there is none to shut down yet.
         """
-        if not self._releasing:
-            return None
-        # An interrupt can keep submit() from adding the callback of a call,
-        # whose future then ends without leaving the set. It is dropped here,
-        # when another call ends or release() is called again.
-        self._futures = {future for future in self._futures if not future.done()}
-        if self._futures:
+        if not self._releasing or self._futures:
             return None
         self._releasing = False
         executor, self._executor = self._executor, None

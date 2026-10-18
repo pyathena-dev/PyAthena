@@ -747,7 +747,8 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
 
         Raises:
             StopIteration: When no more chunks are available.
-            ProgrammingError: If an earlier read failed.
+            ProgrammingError: If an earlier read failed, or the result set that
+                created the iterator is closed.
         """
         from pandas.io.parsers import TextFileReader
 

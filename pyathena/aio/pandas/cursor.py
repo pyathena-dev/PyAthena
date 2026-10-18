@@ -275,9 +275,9 @@ class AioPandasCursor(WithAsyncFetch):
     def iter_chunks(self) -> AsyncGenerator[DataFrame, None]:
         """Iterate over the DataFrame chunks of the query results, reading each in a thread.
 
-        The chunks are those of :meth:`PandasCursor.iter_chunks()
-        <pyathena.pandas.cursor.PandasCursor.iter_chunks>`, read from the result set
-        that the cursor has when this method is called. A cancellation of a read
+        The chunks are those of :meth:`AthenaPandasResultSet.iter_chunks()
+        <pyathena.pandas.result_set.AthenaPandasResultSet.iter_chunks>`, read from the result
+        set that the cursor has when this method is called. A cancellation of a read
         detaches and closes the result set, as one of a fetch does. Leaving the
         loop early keeps the chunks that have not been read, which the fetch
         methods and a later ``iter_chunks()`` read.

@@ -264,7 +264,8 @@ The iterator reads the result of the query that the cursor has when `iter_chunks
 Leaving the loop early keeps the chunks that have not been read for the fetch methods and a later
 `iter_chunks()`; closing the cursor or running another query releases them.
 After the cursor runs another query or closes, the iterator raises `ProgrammingError`.
-Cancelling `as_*()` or a chunk read drops the result, as cancelling a fetch does.
+Cancelling a chunk read, or an `as_*()` call that reads or converts in a thread, drops the result, as
+cancelling a fetch does.
 
 See each cursor's documentation page for detailed usage examples.
 
