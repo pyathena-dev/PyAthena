@@ -741,8 +741,8 @@ class TestAioS3FileSystem:
     @pytest.mark.parametrize("cancel", [False, True])
     @pytest.mark.asyncio
     async def test_close_during_multipart_copy(self, cancel):
-        # GH-1209: a copy that runs at close() schedules its remaining
-        # requests, and its completion or abort, in new threads.
+        # GH-1209: a copy that runs at close() still schedules its remaining
+        # requests and its completion or abort.
         fs = AioS3FileSystem(connection=mock.MagicMock(), max_workers=1, skip_instance_cache=True)
         sync_fs = fs._sync_fs
         sync_fs.core.create_multipart_upload = mock.MagicMock(
@@ -754,8 +754,8 @@ class TestAioS3FileSystem:
 
         def upload_part_copy(**kw):
             started.set()
-            # The finally block of the test always releases it.
-            release.wait()
+            # Bounded, so that a close() that waits for this part fails the test.
+            release.wait(EVENT_TIMEOUT)
             return SimpleNamespace(etag='"e"', part_number=kw["part_number"])
 
         sync_fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)

@@ -231,6 +231,24 @@ class TestS3AioThreadPool:
         assert not threads[0].is_alive()
         pool.shutdown()
 
+    def test_release_after_interrupted_submit(self):
+        # GH-1209: a call whose submit() an interrupt stopped after scheduling
+        # it does not keep release() from ending the threads once it has ended.
+        pool = S3AioThreadPool(1)
+        threads = []
+        with (
+            mock.patch.object(Future, "add_done_callback", side_effect=KeyboardInterrupt),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            pool.submit(lambda: threads.append(threading.current_thread()))
+        # The calls start in order, so the interrupted one has ended.
+        pool.submit(sum, [1, 2]).result(timeout=EVENT_TIMEOUT)
+        pool.release()
+
+        threads[0].join(EVENT_TIMEOUT)
+        assert not threads[0].is_alive()
+        pool.shutdown()
+
     @pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork() is not available.")
     @pytest.mark.filterwarnings("ignore:.*fork\\(\\) may lead to deadlocks:DeprecationWarning")
     def test_fork(self):

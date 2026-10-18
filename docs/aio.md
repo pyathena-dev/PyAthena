@@ -247,9 +247,11 @@ df = await cursor.read_pandas()
 ```
 
 `AioPandasCursor.read_pandas()`, `AioPolarsCursor.read_polars()`, and `AioPolarsCursor.read_arrow()`
-read the whole remaining result in a thread.
+return, from a thread, the data of the synchronous `as_pandas()`, `as_polars()`, and `as_arrow()` methods.
+When the result is read in chunks, that data is the chunks that have not yet been read; `read_pandas()`
+joins them as the iterator's `as_pandas()` does.
 `AioPandasCursor.iter_chunks()` and `AioPolarsCursor.iter_chunks()` return async iterators that read each
-chunk in a thread:
+chunk of the synchronous `iter_chunks()` in a thread:
 
 ```python
 await cursor.execute("SELECT * FROM many_rows", chunksize=50_000)
@@ -257,12 +259,10 @@ async for df in cursor.iter_chunks():
     process(df)
 ```
 
-The chunks and the whole result are those of the synchronous `iter_chunks()` and `as_*()` methods.
-`iter_chunks()` reads the result of the query that the cursor has when it is called.
-Unlike the synchronous method, leaving the loop early keeps the chunks that have not been read for the fetch
-methods and a later `iter_chunks()`; closing the cursor or running another query releases them.
-After the cursor runs another query or closes, the iterator raises `ProgrammingError`, where the synchronous
-iterator ends.
+The iterator reads the result of the query that the cursor has when `iter_chunks()` is called.
+Leaving the loop early keeps the chunks that have not been read for the fetch methods and a later
+`iter_chunks()`; closing the cursor or running another query releases them.
+After the cursor runs another query or closes, the iterator raises `ProgrammingError`.
 Cancelling `read_*()` or a chunk read drops the result, as cancelling a fetch does.
 
 The `as_pandas()`, `as_arrow()`, and `as_polars()` convenience methods are synchronous.

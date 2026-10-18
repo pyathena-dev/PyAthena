@@ -292,9 +292,9 @@ class AioPolarsCursor(WithAsyncFetch):
         The chunks are those of :meth:`PolarsCursor.iter_chunks()
         <pyathena.polars.cursor.PolarsCursor.iter_chunks>`, read from the result set
         that the cursor has when this method is called. A cancellation of a read
-        detaches and closes the result set, as one of a fetch does. Unlike the
-        synchronous method, leaving the loop early keeps the chunks that have not
-        been read, which the fetch methods and a later ``iter_chunks()`` read.
+        detaches and closes the result set, as one of a fetch does. Leaving the
+        loop early keeps the chunks that have not been read, which the fetch
+        methods and a later ``iter_chunks()`` read.
 
         Returns:
             An async iterator of the DataFrame chunks. It raises

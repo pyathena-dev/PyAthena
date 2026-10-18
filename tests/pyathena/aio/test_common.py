@@ -18,6 +18,7 @@ from pyathena.aio.pandas.cursor import AioPandasCursor
 from pyathena.aio.polars.cursor import AioPolarsCursor
 from pyathena.aio.s3fs.cursor import AioS3FSCursor
 from pyathena.error import OperationalError, ProgrammingError
+from pyathena.pandas.result_set import PandasDataFrameIterator
 from pyathena.util import RetryConfig
 from tests.pyathena.util import EVENT_TIMEOUT, ThrottledOperation, retried
 
@@ -445,5 +446,26 @@ class TestWithAsyncFetch:
         getattr(cursor.result_set, read).side_effect = whole_result
 
         assert await getattr(cursor, method)() is result
+        assert len(threads) == 1
+        assert threading.get_ident() not in threads
+
+    async def test_read_pandas_joins_chunks_off_event_loop(self):
+        """GH-1209: read_pandas() joins the chunks of a chunk iterator in a thread."""
+        cursor = AioPandasCursor(
+            connection=MagicMock(), converter=None, formatter=None, retry_config=None
+        )
+        threads = []
+        result = object()
+
+        def join():
+            threads.append(threading.get_ident())
+            return result
+
+        chunks = MagicMock(spec=PandasDataFrameIterator)
+        chunks.as_pandas.side_effect = join
+        cursor.result_set = MagicMock()
+        cursor.result_set.as_pandas.return_value = chunks
+
+        assert await cursor.read_pandas() is result
         assert len(threads) == 1
         assert threading.get_ident() not in threads

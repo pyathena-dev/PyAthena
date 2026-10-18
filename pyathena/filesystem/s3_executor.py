@@ -251,9 +251,9 @@ class S3AioThreadPool(S3Executor):
         self._lock = threading.Lock()
         self._executor: ThreadPoolExecutor | None = None
         self._shutdown = False
-        # The calls that were submitted and have not ended, and whether
-        # release() waits for them to end.
-        self._calls = 0
+        # The futures of the calls that were submitted and have not ended,
+        # and whether release() waits for them to end.
+        self._futures: set[Future[Any]] = set()
         self._releasing = False
         S3AioThreadPool._instances.add(self)
 
@@ -280,7 +280,7 @@ class S3AioThreadPool(S3Executor):
         context = contextvars.copy_context()
         with self._lock:
             future = self._get_executor().submit(context.run, fn, *args, **kwargs)
-            self._calls += 1
+            self._futures.add(future)
         future.add_done_callback(self._end_call)
         return future
 
@@ -407,7 +407,8 @@ class S3AioThreadPool(S3Executor):
             future: The future of the call, which has ended.
         """
         with self._lock:
-            self._calls -= 1
+            # A future of the parent of a forked child is not in the set.
+            self._futures.discard(future)
             executor = self._take_idle_executor()
         if executor is not None:
             executor.shutdown(wait=False)
@@ -420,7 +421,12 @@ class S3AioThreadPool(S3Executor):
         Returns:
             The executor, or None if there is none to shut down yet.
         """
-        if self._calls or not self._releasing:
+        if not self._releasing:
+            return None
+        # An interrupt can keep submit() from adding the callback of a call,
+        # whose future then ends without leaving the set.
+        self._futures = {future for future in self._futures if not future.done()}
+        if self._futures:
             return None
         self._releasing = False
         executor, self._executor = self._executor, None
@@ -438,7 +444,7 @@ class S3AioThreadPool(S3Executor):
                 cls._forked_executors.append(pool._executor)
             pool._lock = threading.Lock()
             pool._executor = None
-            pool._calls = 0
+            pool._futures = set()
             pool._releasing = False
 
     def _get_executor(self) -> ThreadPoolExecutor:
