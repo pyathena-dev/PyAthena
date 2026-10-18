@@ -31,7 +31,8 @@ if TYPE_CHECKING:
     from pyathena.cursor import Cursor
 
 _logger = logging.getLogger(__name__)
-# The characters that pyarrow's Spark flavor replaces with "_" in column names.
+# The characters that pyarrow's Spark flavor replaces with "_" in column names, as
+# pyarrow.parquet.core._SPARK_DISALLOWED_CHARS, which is private.
 _SPARK_DISALLOWED_CHARS = re.compile("[ ,;{}()\n\t=]")
 
 
@@ -445,7 +446,8 @@ def generate_ddl(
         flavor: The pyarrow Parquet flavor of the files. With ``"spark"``, the
             columns other than the partition keys are declared with the names that
             the flavor writes, in which spaces, tabs, newlines, and ``,;{}()=`` are
-            replaced with ``_``.
+            replaced with ``_``. Pass the flavor that ``to_parquet()`` wrote the files
+            with; without one, the DataFrame's names are declared.
 
     Returns:
         The CREATE EXTERNAL TABLE DDL statement as a string.
@@ -453,16 +455,14 @@ def generate_ddl(
     if partitions is None:
         partitions = []
     column_names_and_types = get_column_names_and_types(df, type_mappings)
-    # The flavor renames the columns of the files, which do not hold the partition keys.
-    spark = flavor is not None and "spark" in flavor
+    columns = [
+        (col, type_) for col, type_ in column_names_and_types.items() if col not in partitions
+    ]
+    # The partition keys are not in the files, so they keep their names.
+    if flavor is not None and "spark" in flavor:
+        columns = [(_SPARK_DISALLOWED_CHARS.sub("_", col), type_) for col, type_ in columns]
     ddl = f"CREATE EXTERNAL TABLE IF NOT EXISTS `{schema}`.`{name}` (\n"
-    ddl += ",\n".join(
-        [
-            f"`{_SPARK_DISALLOWED_CHARS.sub('_', col) if spark else col}` {type_}"
-            for col, type_ in column_names_and_types.items()
-            if col not in partitions
-        ]
-    )
+    ddl += ",\n".join([f"`{col}` {type_}" for col, type_ in columns])
     ddl += "\n)\n"
     if partitions:
         ddl += "PARTITIONED BY (\n"

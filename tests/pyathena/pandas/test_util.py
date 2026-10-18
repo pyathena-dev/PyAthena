@@ -322,6 +322,29 @@ def test_generate_ddl():
         generate_ddl(df, "test_table", "s3://bucket/path/to/")
 
 
+def test_generate_ddl_spark_flavor():
+    """The Spark flavor renames the columns in the files, but not the partition keys."""
+    df = pd.DataFrame({"col a": np.int64([1]), "part (b)": ["x"]})
+    actual = generate_ddl(
+        df, "test_table", "s3://bucket/path/to/", "test_schema", ["part (b)"], flavor="spark"
+    )
+    assert (
+        actual.strip()
+        == textwrap.dedent(
+            """
+        CREATE EXTERNAL TABLE IF NOT EXISTS `test_schema`.`test_table` (
+        `col_a` BIGINT
+        )
+        PARTITIONED BY (
+        `part (b)` STRING
+        )
+        STORED AS PARQUET
+        LOCATION 's3://bucket/path/to/'
+        """
+        ).strip()
+    )
+
+
 def test_to_sql(cursor):
     df = pd.DataFrame(
         {
