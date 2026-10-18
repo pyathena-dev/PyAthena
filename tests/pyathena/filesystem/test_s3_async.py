@@ -1,6 +1,7 @@
 import array
 import asyncio
 import contextlib
+import faulthandler
 import gc
 import gzip
 import io
@@ -19,12 +20,14 @@ import boto3
 import fsspec
 import pytest
 from botocore.stub import Stubber
+from fsspec.callbacks import Callback
 
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.filesystem.s3_async import AioS3File, AioS3FileSystem, AioS3StreamedFile
 from pyathena.filesystem.s3_core import S3Core, S3MultipartCopyPlan
 from pyathena.filesystem.s3_executor import S3AioThreadPool, S3Executor
 from pyathena.filesystem.s3_object import (
+    S3Metadata,
     S3MultipartUpload,
     S3MultipartUploadPart,
     S3Object,
@@ -47,6 +50,37 @@ from tests.pyathena.util import (
     stub_multipart_copy,
     wait_until,
 )
+
+# A regression that leaves a thread blocked can hang a test in its body or in
+# its teardown, where no timeout of the test can end it; the watchdog dumps the
+# stacks and ends the process instead, which fails the test.
+WATCHDOG_TIMEOUT = 300
+
+
+@pytest.fixture(autouse=True)
+def watchdog():
+    # Rearmed for each test, so that it also covers the teardown.
+    faulthandler.dump_traceback_later(WATCHDOG_TIMEOUT, exit=True)
+
+
+@pytest.fixture(autouse=True, scope="module")
+def watchdog_cancellation():
+    yield
+    faulthandler.cancel_dump_traceback_later()
+
+
+class _RecordingCallback(Callback):
+    """A progress callback that records its updates."""
+
+    def __init__(self):
+        super().__init__()
+        self.events = []
+
+    def set_size(self, size):
+        self.events.append(("size", size))
+
+    def relative_update(self, inc=1):
+        self.events.append(("update", inc))
 
 
 @pytest.fixture(scope="class")
@@ -430,15 +464,17 @@ class TestAioS3FileSystem:
                 "_put_file",
                 "put_file",
                 ("local-source", "s3://bucket/new"),
-                {"mode": "create", "ContentType": "text/csv"},
+                {"mode": "create", "callback": "recording", "ContentType": "text/csv"},
             ),
             (
                 "_get_file",
                 "get_file",
                 ("s3://bucket/key?versionId=v1", "local-destination"),
-                {"ExpectedBucketOwner": "111122223333"},
+                {"callback": "recording", "ExpectedBucketOwner": "111122223333"},
             ),
             ("_touch", "touch", ("s3://bucket/new",), {"ContentType": "text/csv"}),
+            # An existing object is not replaced.
+            ("_touch", "touch", ("s3://bucket/key",), {"truncate": False}),
             ("_find", "find", ("s3://bucket/dir",), {"maxdepth": 1, "withdirs": True}),
             (
                 "_mv",
@@ -475,11 +511,14 @@ class TestAioS3FileSystem:
         source.write_bytes(b"a")
 
         def comparable(value):
-            # The listed versions have no equality of their own.
+            # The metadata and the listed versions compare by their public
+            # properties.
             if isinstance(value, list):
                 return [comparable(v) for v in value]
-            if isinstance(value, S3ObjectVersion):
-                return vars(value)
+            if isinstance(value, (S3Metadata, S3ObjectVersion)):
+                cls = type(value)
+                properties = [n for n in dir(cls) if isinstance(getattr(cls, n), property)]
+                return cls, {n: getattr(value, n) for n in properties}
             return value
 
         outcomes = []
@@ -488,15 +527,33 @@ class TestAioS3FileSystem:
                 key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
             )
             store, requests = self._serve_keys(fs, keys)
-            local = {"local-source": str(source), "local-destination": str(tmp_path / run)}
+            (tmp_path / run).mkdir()
+            local = {
+                "local-source": str(source),
+                "local-destination": str(tmp_path / run / "downloaded"),
+            }
             call_args = [local.get(a, a) if isinstance(a, str) else a for a in args]
-            if run == "sync":
-                result = getattr(fs._sync_fs, name)(*call_args, **kwargs)
-            else:
-                result = getattr(fs, name)(*call_args, **kwargs)
-                if asyncio.iscoroutine(result):
-                    result = await await_bounded(result)
-            outcomes.append((comparable(result), sorted(map(repr, requests)), sorted(store)))
+            callback = _RecordingCallback()
+            call_kwargs = {k: callback if v == "recording" else v for k, v in kwargs.items()}
+            try:
+                if run == "sync":
+                    result = getattr(fs._sync_fs, name)(*call_args, **call_kwargs)
+                else:
+                    result = getattr(fs, name)(*call_args, **call_kwargs)
+                    if asyncio.iscoroutine(result):
+                        result = await await_bounded(result)
+            except Exception as e:
+                result = type(e)
+            downloaded = {p.name: p.read_bytes() for p in (tmp_path / run).iterdir()}
+            outcomes.append(
+                (
+                    comparable(result),
+                    sorted(map(repr, requests)),
+                    sorted(store),
+                    downloaded,
+                    callback.events,
+                )
+            )
         assert outcomes[0][1], "no request was sent"
         assert outcomes[1] == outcomes[0]
 
