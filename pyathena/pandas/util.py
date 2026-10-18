@@ -443,8 +443,9 @@ def generate_ddl(
             table property.
         type_mappings: Function to map pandas types to SQL types.
         flavor: The pyarrow Parquet flavor of the files. With ``"spark"``, the
-            columns other than the partition keys are declared with the characters
-            that the flavor replaces in the files' column names replaced with ``_``.
+            columns other than the partition keys are declared with the names that
+            the flavor writes, in which spaces, tabs, newlines, and ``,;{}()=`` are
+            replaced with ``_``.
 
     Returns:
         The CREATE EXTERNAL TABLE DDL statement as a string.
