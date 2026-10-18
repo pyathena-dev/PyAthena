@@ -1706,9 +1706,7 @@ class S3FileSystem(AbstractFileSystem):
                 completed = self._finish_multipart_upload(
                     upload=multipart_upload,
                     futures=futures,
-                    # Filtered again for the completion, which leaves the
-                    # plan's parameters unchanged.
-                    request_kwargs=plan.complete_params,
+                    complete_params=plan.complete_params,
                 )
             except BaseException:
                 # The requests that have not started are cancelled before the
@@ -1834,24 +1832,26 @@ class S3FileSystem(AbstractFileSystem):
         self,
         upload: S3MultipartUpload,
         futures: list[Future[S3MultipartUploadPart]],
-        request_kwargs: Mapping[str, Any] | None = None,
+        complete_params: Mapping[str, Any],
     ) -> S3CompleteMultipartUpload:
         """Collect the uploaded parts and complete the multipart upload.
 
-        A failed part is raised as soon as it fails, without waiting for the
-        parts before it, so that the caller can cancel the parts queued after
-        it. The caller also aborts the upload when a part or the completion
-        fails or the wait is interrupted.
+        When a part fails, its error, or that of another part that has failed
+        by then, is raised without waiting for the parts that are still
+        running, so that the caller can cancel the parts queued after them.
+        The caller aborts the upload when this method raises.
 
         Args:
             upload: The multipart upload returned by creation.
             futures: Futures of the part uploads, in part-number order.
-            request_kwargs: Parameters of the upload, such as
-                ``RequestPayer`` or the SSE-C parameters; the completion
-                receives those that it accepts.
+            complete_params: The CompleteMultipartUpload parameters, as
+                ``S3MultipartCopyPlan.complete_params`` selects them.
 
         Returns:
             S3CompleteMultipartUpload of the completed upload.
+
+        Raises:
+            Exception: The error of a failed part or of the completion.
         """
         done, _ = wait(futures, return_when=FIRST_EXCEPTION)
         for future in done:
@@ -1859,11 +1859,7 @@ class S3FileSystem(AbstractFileSystem):
                 future.result()
         # The futures are in part-number order.
         parts = [future.result() for future in futures]
-        return self.core.complete_multipart_upload(
-            upload,
-            parts,
-            **self.core.operation_params("complete_multipart_upload", request_kwargs or {}),
-        )
+        return self.core.complete_multipart_upload(upload, parts, **complete_params)
 
     def _abort_multipart_upload(
         self, upload: S3MultipartUpload, request_kwargs: Mapping[str, Any]
