@@ -6,7 +6,7 @@ import csv
 import importlib
 import logging
 import sys
-from collections import abc
+from collections import abc, defaultdict
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
@@ -439,21 +439,22 @@ def _to_utc_timestamps(values: Series) -> Series:
         if isinstance(zone, timezone):
             utc[positions] = local[positions] - np.timedelta64(zone.utcoffset(None), "us")
             continue
-        try:
-            localized = pd.Series(local[positions]).dt.tz_localize(
-                zone, ambiguous="raise", nonexistent="raise"
-            )
-        except ValueError:
-            # pandas reports local times before a zone's first transition as
-            # nonexistent, so the values are converted one at a time, which raises the
-            # DataError of a value without one instant.
-            texts = text.to_numpy(dtype=object)[positions]
-            offsets = [cast(datetime, _to_datetime_with_tz(value)).utcoffset() for value in texts]
-            utc[positions] = local[positions] - np.array(offsets, dtype="timedelta64[us]")
-            continue
+        localized = pd.Series(local[positions]).dt.tz_localize(
+            zone, ambiguous="NaT", nonexistent="NaT"
+        )
         utc[positions] = (
             localized.dt.tz_convert("UTC").dt.tz_localize(None).to_numpy(dtype="datetime64[us]")
         )
+        # pandas also reports local times before a zone's first transition as
+        # nonexistent, so the values that it does not localize are converted one at a
+        # time, which raises the DataError of a value without one instant.
+        failed = positions[np.isnat(utc[positions])]
+        if len(failed):
+            offsets = [
+                cast(datetime, _to_datetime_with_tz(value)).utcoffset()
+                for value in text.iloc[failed]
+            ]
+            utc[failed] = local[failed] - np.array(offsets, dtype="timedelta64[us]")
     return pd.Series(utc, index=values.index).dt.tz_localize("UTC")
 
 
@@ -1004,7 +1005,7 @@ class AthenaPandasResultSet(AthenaResultSet):
                 and "converters" not in self._kwargs
                 and not self.converters.keys()
                 - self._get_csv_temporal_converters(
-                    [(d[0], d) for d in self.description or []]
+                    [(i, d[0], d) for i, d in enumerate(self.description or [])]
                 ).keys()
                 # The pyarrow engine does not rename columns with the same name, and
                 # the column labels cannot be resolved for it (see
@@ -1212,20 +1213,21 @@ class AthenaPandasResultSet(AthenaResultSet):
         }
 
     def _get_csv_temporal_converters(
-        self, columns: list[tuple[Any, tuple[Any, ...]]]
+        self, columns: list[tuple[int, Any, tuple[Any, ...]]]
     ) -> dict[Any, _TemporalConverter]:
         """Get the converters of the temporal columns that are converted after reading.
 
         PyAthena converts the ``timestamp``, ``date``, and ``timestamp with time zone``
         columns after reading, unless options given to ``execute()`` or the converter
         decide how they are read: ``parse_dates``, with which PyAthena converts none of
-        them, a ``dtype`` that is not a plain mapping, which applies to every column, a
-        ``dtype`` or ``converters`` entry that names the column, or a conversion
-        function that the converter maps to the type, other than the default
-        ``timestamp with time zone`` one.
+        them, a ``dtype`` that is not a mapping or is a ``defaultdict``, which applies
+        to every column, a ``dtype`` or ``converters`` entry that names the column by
+        its label or its position, or a conversion function that the converter maps to
+        the type, other than the default ``timestamp with time zone`` one.
 
         Args:
-            columns: The label and the description of each column that is read.
+            columns: The position in the result file, the label, and the description
+                of each column that is read.
 
         Returns:
             The converters keyed by column label.
@@ -1236,7 +1238,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         converters = self._kwargs.get("converters") or {}
         mappings = self._converter.mappings
         temporal_converters = {}
-        for label, d in columns:
+        for position, label, d in columns:
             type_ = d[1]
             if type_ not in _CSV_TEMPORAL_TYPES:
                 continue
@@ -1245,9 +1247,16 @@ class AthenaPandasResultSet(AthenaResultSet):
                     continue
             elif type_ in mappings:
                 continue
-            if "dtype" in self._kwargs and (type(dtype) is not dict or label in dtype):
+            if "dtype" in self._kwargs and (
+                # pandas applies the default of a defaultdict to the columns it does not
+                # name.
+                not isinstance(dtype, Mapping)
+                or isinstance(dtype, defaultdict)
+                or label in dtype
+                or position in dtype
+            ):
                 continue
-            if label in converters:
+            if label in converters or position in converters:
                 continue
             temporal_converters[label] = _TemporalConverter(type_)
         return temporal_converters
@@ -1508,16 +1517,19 @@ class AthenaPandasResultSet(AthenaResultSet):
 
         description = self.description or []
         self._csv_temporal_converters = self._get_csv_temporal_converters(
-            [(d[0], d) for d in description]
+            [(i, d[0], d) for i, d in enumerate(description)]
         )
         # The temporal columns are read as text, unless a dtype given to execute()
-        # replaces PyAthena's, with which pandas parses them first.
+        # replaces PyAthena's, with which pandas parses them first. pandas' PyArrow
+        # engine turns NULL into "None" with the NumPy str dtype, which str means
+        # without future.infer_string, so the PyArrow engine reads pyarrow strings.
         temporal = {} if "dtype" in self._kwargs else self._csv_temporal_converters
+        text_dtype = "string[pyarrow]" if csv_engine == "pyarrow" else "str"
         read_csv_kwargs: dict[str, Any] = {
             "sep": sep,
             "header": header,
             "names": names,
-            "dtype": {**self.dtypes, **dict.fromkeys(temporal, "str")},
+            "dtype": {**self.dtypes, **dict.fromkeys(temporal, text_dtype)},
             "converters": {
                 d[0]: self._get_csv_converter(d[1])
                 for d in description
@@ -1677,7 +1689,13 @@ class AthenaPandasResultSet(AthenaResultSet):
         columns = [
             (label, d) for label, d in zip(labels, description, strict=True) if label is not None
         ]
-        self._csv_temporal_converters = self._get_csv_temporal_converters(columns)
+        self._csv_temporal_converters = self._get_csv_temporal_converters(
+            [
+                (i, label, d)
+                for i, (label, d) in enumerate(zip(labels, description, strict=True))
+                if label is not None
+            ]
+        )
         # See _get_csv_read_options().
         temporal = {} if "dtype" in self._kwargs else self._csv_temporal_converters
         if "dtype" not in self._kwargs:
