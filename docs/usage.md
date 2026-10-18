@@ -862,6 +862,8 @@ cursor = connect(profile_name="YOUR_PROFILE_NAME",
                  region_name="us-west-2").cursor()
 ```
 
+(assume-role-provider)=
+
 #### Assume role provider
 
 ```python

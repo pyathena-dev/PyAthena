@@ -737,6 +737,8 @@ engine_arrow = create_engine(
 )
 ```
 
+(ddl-and-cast-types)=
+
 ## DDL and CAST types
 
 Athena parses DDL statements such as `CREATE TABLE` with Hive type syntax, and queries with Trino type syntax.
