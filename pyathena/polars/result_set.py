@@ -15,7 +15,6 @@ import logging
 import sys
 from collections import abc
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import ExitStack
 from io import BytesIO, StringIO
 from itertools import islice, repeat
 from multiprocessing import cpu_count
@@ -912,9 +911,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """Read the files of the data manifest with ``polars.read_parquet(use_pyarrow=True)``.
 
         Polars' pyarrow read opens a remote path with fsspec as a single file, so it
-        cannot read the unload location, a prefix, or a list of remote paths. The
-        files are opened through ``_get_parquet_filesystem()`` and given to Polars,
-        which reads each with pyarrow and the options given to ``execute()``. INT96
+        cannot read the unload location, a prefix, or a list of remote paths. Each
+        file is opened through ``_get_parquet_filesystem()`` and given to Polars,
+        which reads it with pyarrow and the options given to ``execute()``, and the
+        DataFrames are concatenated, as Polars reads a list of open files. INT96
         timestamps are read at microseconds, unless ``pyarrow_options`` sets
         ``coerce_int96_timestamp_unit``.
 
@@ -933,9 +933,11 @@ class AthenaPolarsResultSet(AthenaResultSet):
         }
         try:
             fs = self._get_parquet_filesystem()
-            with ExitStack() as stack:
-                files = [stack.enter_context(fs.open(path, "rb")) for path in self._data_manifest]
-                return pl.read_parquet(files, **kwargs)
+            dfs = []
+            for path in self._data_manifest:
+                with fs.open(path, "rb") as file:
+                    dfs.append(pl.read_parquet(file, **kwargs))
+            return dfs[0] if len(dfs) == 1 else pl.concat(dfs)
         except Exception as e:
             _logger.exception(f"Failed to read {self._unload_location}.")
             raise OperationalError(*e.args) from e
