@@ -114,6 +114,8 @@ With the default `flavor="spark"`, timestamps are written as INT96.
 Athena reads them correctly.
 pyarrow, of any version, reads the timestamps before 1970 in files that pyarrow 22 wrote as wrong values.
 pyarrow 23.0.0 and later write them correctly and are recommended.
+The Spark flavor also replaces spaces, tabs, newlines, and the characters `,;{}()=` in column names with `_`, and the table declares the replaced names.
+The partition keys keep their names.
 Conversion to Parquet and upload to S3 use [ThreadPoolExecutor](https://docs.python.org/3/library/concurrent.futures.html#threadpoolexecutor) by default.
 It is also possible to use [ProcessPoolExecutor](https://docs.python.org/3/library/concurrent.futures.html#processpoolexecutor).
 The S3 requests use the connection's `s3_config` (see "S3 client" in [Usage](usage.md)) and credentials.

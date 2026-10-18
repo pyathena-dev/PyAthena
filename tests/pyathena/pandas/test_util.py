@@ -322,6 +322,29 @@ def test_generate_ddl():
         generate_ddl(df, "test_table", "s3://bucket/path/to/")
 
 
+def test_generate_ddl_spark_flavor():
+    """The Spark flavor renames the columns in the files, but not the partition keys."""
+    df = pd.DataFrame({"col a": np.int64([1]), "part (b)": ["x"]})
+    actual = generate_ddl(
+        df, "test_table", "s3://bucket/path/to/", "test_schema", ["part (b)"], flavor="spark"
+    )
+    assert (
+        actual.strip()
+        == textwrap.dedent(
+            """
+        CREATE EXTERNAL TABLE IF NOT EXISTS `test_schema`.`test_table` (
+        `col_a` BIGINT
+        )
+        PARTITIONED BY (
+        `part (b)` STRING
+        )
+        STORED AS PARQUET
+        LOCATION 's3://bucket/path/to/'
+        """
+        ).strip()
+    )
+
+
 def test_to_sql(cursor):
     df = pd.DataFrame(
         {
@@ -469,6 +492,17 @@ def test_to_sql_with_index(cursor):
         ("col_index", "bigint"),
         ("col_int", "integer"),
     ]
+
+
+def test_to_sql_spark_column_names(cursor):
+    """The table declares the column names that the Spark flavor writes."""
+    df = pd.DataFrame({"col a": np.int32([1]), "col(b)=c": ["x"]})
+    table_name = f"to_sql_{uuid.uuid4().hex}"
+    location = f"{ENV.s3_staging_dir}{ENV.schema}/{table_name}/"
+    to_sql(df, table_name, cursor._connection, location, schema=ENV.schema)
+    cursor.execute(f"SELECT * FROM {table_name}")
+    assert cursor.fetchall() == [(1, "x")]
+    assert [d[0] for d in cursor.description] == ["col_a", "col_b__c"]
 
 
 @pytest.mark.parametrize(
