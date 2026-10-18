@@ -108,7 +108,8 @@ class PolarsCursor(WithFetch):
             s3_max_workers: Maximum worker threads for parallel S3 operations.
             chunksize: Number of rows per chunk for memory-efficient processing.
                       If specified, data is loaded lazily in chunks for all data
-                      access methods including fetchone(), fetchmany(), and iter_chunks().
+                      access methods including fetchone(), fetchmany(), and iter_chunks(),
+                      unless ``use_pyarrow=True`` is given to ``execute()``.
             **kwargs: Additional connection parameters.
 
         Example:

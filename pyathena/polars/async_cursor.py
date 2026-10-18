@@ -105,7 +105,8 @@ class AsyncPolarsCursor(AsyncCursor):
                 32 MiB without a cache.
             chunksize: Number of rows per chunk for memory-efficient processing.
                       If specified, data is loaded lazily in chunks for all data
-                      access methods including fetchone(), fetchmany(), and iter_chunks().
+                      access methods including fetchone(), fetchmany(), and iter_chunks(),
+                      unless ``use_pyarrow=True`` is given to ``execute()``.
             s3_max_workers: Maximum worker threads per S3 file reader.
             **kwargs: Additional connection parameters.
 

@@ -24,7 +24,7 @@ Polars' deprecated alias `dtypes` is not supported: a CSV result read with it fa
 That read raises an error or returns wrong values when a quoted value containing a newline crosses one of pyarrow's read blocks.
 The default Polars CSV reader reads such values.
 
-With the chunksize option, the result is read with `pl.scan_csv()` or `pl.scan_parquet()`, which do not take some options of `pl.read_csv()` and `pl.read_parquet()`.
+With the chunksize option and Polars read options, the result is read with `pl.scan_csv()` or `pl.scan_parquet()`, which do not take some options of `pl.read_csv()` and `pl.read_parquet()`.
 `columns` is applied to the scan as the read function applies it, and the other such options, which do not change the result of the scan, are not passed to it.
 With `use_pyarrow=True`, the result is read whole, as without the chunksize option.
 

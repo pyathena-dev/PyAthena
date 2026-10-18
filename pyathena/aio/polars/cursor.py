@@ -85,7 +85,8 @@ class AioPolarsCursor(WithAsyncFetch):
                 32 MiB without a cache.
             s3_max_workers: Maximum number of workers of the S3 filesystem.
             chunksize: Number of rows per chunk. If set, result files in S3 are read
-                lazily in chunks of this size.
+                lazily in chunks of this size, unless ``use_pyarrow=True`` is given to
+                ``execute()``.
             **kwargs: Other cursor arguments, such as ``connection`` and ``arraysize``,
                 passed to the parent ``__init__``.
         """
