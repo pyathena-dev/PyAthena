@@ -71,11 +71,14 @@ class TestAioS3FileSystem:
         with Stubber(fs._sync_fs._client) as stubber:
             stub_multipart_copy(stubber, **kwargs)
             try:
-                await fs._copy_object_with_multipart_upload(
-                    S3Path("bucket", "src"),
-                    S3Path("bucket", "dst"),
-                    block_size=MULTIPART_COPY_BLOCK_SIZE,
-                    **MULTIPART_COPY_KWARGS,
+                await asyncio.wait_for(
+                    fs._copy_object_with_multipart_upload(
+                        S3Path("bucket", "src"),
+                        S3Path("bucket", "dst"),
+                        block_size=MULTIPART_COPY_BLOCK_SIZE,
+                        **MULTIPART_COPY_KWARGS,
+                    ),
+                    EVENT_TIMEOUT,
                 )
             finally:
                 stubber.assert_no_pending_responses()
@@ -199,12 +202,15 @@ class TestAioS3FileSystem:
         )
 
         with pytest.raises(OSError, match="part failed"):
-            await fs._copy_object_with_multipart_upload(
-                S3Path("bucket", "src"),
-                S3Path("bucket", "dst"),
-                MetadataDirective="REPLACE",
-                TaggingDirective="REPLACE",
-                AnnotationDirective="EXCLUDE",
+            await asyncio.wait_for(
+                fs._copy_object_with_multipart_upload(
+                    S3Path("bucket", "src"),
+                    S3Path("bucket", "dst"),
+                    MetadataDirective="REPLACE",
+                    TaggingDirective="REPLACE",
+                    AnnotationDirective="EXCLUDE",
+                ),
+                EVENT_TIMEOUT,
             )
 
         # Part 3 waits for a worker and is not started after the failure.
@@ -707,8 +713,9 @@ class TestAioS3FileSystem:
         sync_fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
         started = time.monotonic()
         with pytest.raises(PermissionError, match="Access Denied"):
-            await fs._copy_object_with_multipart_upload(
-                plan.source, plan.destination, max_workers=2
+            await asyncio.wait_for(
+                fs._copy_object_with_multipart_upload(plan.source, plan.destination, max_workers=2),
+                EVENT_TIMEOUT,
             )
         assert time.monotonic() - started < EVENT_TIMEOUT
         assert operation.calls == 1
@@ -788,7 +795,9 @@ class TestAioS3FileSystem:
         sync_fs.core.copy_object_annotation = mock.MagicMock(side_effect=copy_object_annotation)
         started = time.monotonic()
         with pytest.raises(PermissionError, match="Access Denied"):
-            await fs._copy_object_with_multipart_upload(plan.source, plan.destination)
+            await asyncio.wait_for(
+                fs._copy_object_with_multipart_upload(plan.source, plan.destination), EVENT_TIMEOUT
+            )
         assert time.monotonic() - started < EVENT_TIMEOUT
         assert operation.calls == 1
 
@@ -828,8 +837,9 @@ class TestAioS3FileSystem:
 
         sync_fs.core.copy_object_annotation = mock.MagicMock(side_effect=copy_object_annotation)
         with pytest.raises(PermissionError, match="Access Denied"):
-            await fs._copy_object_with_multipart_upload(
-                plan.source, plan.destination, max_workers=3
+            await asyncio.wait_for(
+                fs._copy_object_with_multipart_upload(plan.source, plan.destination, max_workers=3),
+                EVENT_TIMEOUT,
             )
         sync_fs.core.copy_object_annotation.assert_called_once()
 
@@ -1500,16 +1510,19 @@ class TestAioS3FileSystem:
             "AnnotationDirective": "EXCLUDE",
         }
 
-        await fs._cp_file(
-            "s3://bucket/src",
-            "s3://bucket/dst",
-            block_size=S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE // 2,
-            max_workers=1,
-            RequestPayer="requester",
-            ContentType="text/csv",
-            # Copy without reading the metadata, tags and annotations of the
-            # source (GH-973).
-            **directives,
+        await asyncio.wait_for(
+            fs._cp_file(
+                "s3://bucket/src",
+                "s3://bucket/dst",
+                block_size=S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE // 2,
+                max_workers=1,
+                RequestPayer="requester",
+                ContentType="text/csv",
+                # Copy without reading the metadata, tags and annotations of the
+                # source (GH-973).
+                **directives,
+            ),
+            EVENT_TIMEOUT,
         )
 
         if size <= S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE:
@@ -1624,7 +1637,7 @@ class TestAioS3FileSystem:
                 "AnnotationDirective": "EXCLUDE",
                 **checksum_kwargs,
             }
-            await fs._copy_object_with_multipart_upload(**kwargs)
+            await asyncio.wait_for(fs._copy_object_with_multipart_upload(**kwargs), EVENT_TIMEOUT)
             stubber.assert_no_pending_responses()
 
     @pytest.fixture(scope="class")

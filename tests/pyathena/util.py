@@ -201,14 +201,18 @@ async def wait_until(predicate, timeout=EVENT_TIMEOUT):
         await asyncio.sleep(0.01)
 
 
-def overlapping_calls(calls, timeout=5):
+def overlapping_calls(calls, timeout=5, grace=0.5):
     """Return a callable that records the peak number of its overlapping calls.
 
-    Each call waits until ``calls`` calls overlap, or until the timeout.
+    Each call waits until ``calls`` calls overlap, or until the timeout. Once
+    they do, it waits up to ``grace`` seconds more for another overlapping
+    call, which only a caller that runs more than ``calls`` at once makes, so
+    that the peak also shows an exceeded bound.
 
     Args:
         calls: The number of calls to wait for.
-        timeout: The longest wait of a call, in seconds.
+        timeout: The longest wait of a call for the overlap, in seconds.
+        grace: The longest wait of a call for one more, in seconds.
 
     Returns:
         The callable, which accepts and ignores any arguments, and a
@@ -222,7 +226,10 @@ def overlapping_calls(calls, timeout=5):
             state["active"] += 1
             state["peak"] = max(state["peak"], state["active"])
             condition.notify_all()
-            condition.wait_for(lambda: state["active"] >= calls, timeout=timeout)
+            # The peak, unlike the active calls, stays reached when the last
+            # call returns before the others wake up.
+            if condition.wait_for(lambda: state["peak"] >= calls, timeout=timeout):
+                condition.wait_for(lambda: state["peak"] > calls, timeout=grace)
         with condition:
             state["active"] -= 1
 
