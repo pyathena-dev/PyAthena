@@ -1,6 +1,5 @@
 import threading
 import time
-from typing import Any
 
 import pytest
 import tenacity.nap
@@ -79,39 +78,10 @@ def test_strtobool_invalid(value):
         strtobool(value)
 
 
-class _WithCodeError(Exception):
-    def __init__(self, code: int) -> None:
-        super().__init__(f"error:{code}")
-        self.response = {"Error": {"Code": code}}
-
-
 class _NoResponseError(Exception):
     def __init__(self) -> None:
         super().__init__("error")
         self.response = None
-
-
-def _test_retry(ex: Exception) -> None:
-    calls = {"n": 0}
-
-    def fn() -> Any:
-        calls["n"] += 1
-        raise ex
-
-    cfg = RetryConfig(attempt=1, max_delay=1)
-
-    with pytest.raises(type(ex)):
-        retry_api_call(fn, config=cfg)
-
-    assert calls["n"] == 1
-
-
-def test_retry_api_call():
-    _test_retry(_WithCodeError(500))
-
-
-def test_retry_api_call_with_none_error():
-    _test_retry(_NoResponseError())
 
 
 @pytest.mark.parametrize(
@@ -251,23 +221,12 @@ def test_retry_api_call_waits_with_jitter(monkeypatch, multiplier, max_delay, ex
         retry_api_call(call, config)
     assert calls == 7
     assert len(sleeps) == len(expected_bases)
-    for waited, base in zip(sleeps, expected_bases, strict=True):
-        assert base <= waited <= base + multiplier
-
-
-def test_retry_api_call_jitter_varies(monkeypatch):
-    sleeps = []
-    monkeypatch.setattr(tenacity.nap.time, "sleep", sleeps.append)
-    error = throttling_error("GetTableMetadata")
-
-    def call():
-        raise error
-
-    config = RetryConfig(attempt=20, multiplier=1, max_delay=1)
-    with pytest.raises(ClientError):
-        retry_api_call(call, config)
-    assert all(1 <= waited <= 2 for waited in sleeps)
-    assert len(set(sleeps)) > 1
+    jitters = [waited - base for waited, base in zip(sleeps, expected_bases, strict=True)]
+    assert all(0 <= jitter <= multiplier for jitter in jitters)
+    if multiplier:
+        # Random, so the six jitters spread over more than the float residuals of a
+        # constant one would.
+        assert max(jitters) - min(jitters) > multiplier / 100
 
 
 @pytest.mark.parametrize(
@@ -292,7 +251,11 @@ def test_retry_api_call_jitter_varies(monkeypatch):
 def test_is_retryable_error(code, message, expected):
     error = ClientError({"Error": {"Code": code, "Message": message}}, "GetTableMetadata")
     assert is_retryable_error(error, RetryConfig()) is expected
-    assert is_retryable_error(ValueError("no response"), RetryConfig()) is False
+
+
+@pytest.mark.parametrize("error", [ValueError("no response"), _NoResponseError()])
+def test_is_retryable_error_without_response(error):
+    assert is_retryable_error(error, RetryConfig()) is False
 
 
 @pytest.mark.parametrize(

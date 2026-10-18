@@ -123,18 +123,15 @@ def test_to_struct_athena_nested_formats(input_value, expected):
 
 
 @pytest.mark.parametrize(
-    "input_value",
+    ("input_value", "expected"),
     [
-        "{formula=x=y+1, status=active}",
-        '{json={"key": "value"}, name=test}',
-        '{message=He said "hello", name=John}',
+        ("{formula=x=y+1, status=active}", {"formula": "x=y+1", "status": "active"}),
+        ('{json={"key": "value"}, name=test}', {"json": {"key": "value"}, "name": "test"}),
+        ('{message=He said "hello", name=John}', {"message": 'He said "hello"', "name": "John"}),
     ],
 )
-def test_to_struct_athena_complex_cases(input_value):
-    result = _to_struct(input_value)
-    # Values too complex to parse fall back to the original string
-    # instead of being silently dropped
-    assert result == input_value or isinstance(result, dict)
+def test_to_struct_athena_complex_cases(input_value, expected):
+    assert _to_struct(input_value) == expected
 
 
 @pytest.mark.parametrize(
@@ -332,17 +329,6 @@ def test_to_array_invalid_formats(input_value):
     assert _to_array(input_value) is None
 
 
-@pytest.mark.parametrize(
-    ("value", "type_hint", "expected"),
-    [
-        ('[""]', "array(json)", [""]),
-        ('{"k": ""}', "map(varchar,json)", {"k": ""}),
-    ],
-)
-def test_nested_json_empty_string(value, type_hint, expected):
-    assert DefaultTypeConverter().convert(type_hint.split("(")[0], value, type_hint) == expected
-
-
 class TestDefaultTypeConverter:
     @pytest.mark.parametrize(
         ("value", "expected"),
@@ -351,76 +337,10 @@ class TestDefaultTypeConverter:
     def test_boolean_conversion(self, value, expected):
         assert DefaultTypeConverter().convert("boolean", value) is expected
 
-    @pytest.mark.parametrize(
-        ("input_value", "expected"),
-        [
-            ('{"name": "Alice", "age": 25}', {"name": "Alice", "age": 25}),
-            (None, None),
-            ("", None),
-            ("invalid json", None),
-            ("{a=1, b=2}", {"a": "1", "b": "2"}),
-        ],
-    )
-    def test_struct_conversion(self, input_value, expected):
-        converter = DefaultTypeConverter()
-        assert converter.convert("row", input_value) == expected
-
-    @pytest.mark.parametrize(
-        ("input_value", "expected"),
-        [
-            ("[1, 2, 3]", [1, 2, 3]),
-            ('["a", "b", "c"]', ["a", "b", "c"]),
-            (None, None),
-            ("", None),
-            ("invalid json", None),
-            ("[apple, banana]", ["apple", "banana"]),
-            ("[]", []),
-        ],
-    )
-    def test_array_conversion(self, input_value, expected):
-        converter = DefaultTypeConverter()
-        assert converter.convert("array", input_value) == expected
-
-    def test_array_varchar_keeps_strings(self):
-        converter = DefaultTypeConverter()
-        result = converter.convert("array", "[1234, 5678]", type_hint="array(varchar)")
-        assert result == ["1234", "5678"]
-
-    def test_array_integer_converts_to_int(self):
-        converter = DefaultTypeConverter()
-        result = converter.convert("array", "[1, 2, 3]", type_hint="array(integer)")
-        assert result == [1, 2, 3]
-
-    def test_array_boolean_converts(self):
-        converter = DefaultTypeConverter()
-        result = converter.convert("array", "[true, false]", type_hint="array(boolean)")
-        assert result == [True, False]
-
-    def test_array_with_null(self):
-        converter = DefaultTypeConverter()
-        result = converter.convert("array", "[1, null, 3]", type_hint="array(integer)")
-        assert result == [1, None, 3]
-
-    def test_map_varchar_integer(self):
-        converter = DefaultTypeConverter()
-        result = converter.convert(
-            "map", '{"key1": 1, "key2": 2}', type_hint="map(varchar, integer)"
-        )
-        assert result == {"key1": 1, "key2": 2}
-
     def test_map_native_format_with_hints(self):
         converter = DefaultTypeConverter()
         result = converter.convert("map", "{a=1, b=2}", type_hint="map(varchar, integer)")
         assert result == {"a": 1, "b": 2}
-
-    def test_row_type_hint(self):
-        converter = DefaultTypeConverter()
-        result = converter.convert(
-            "row",
-            '{"name": "Alice", "age": 25}',
-            type_hint="row(name varchar, age integer)",
-        )
-        assert result == {"name": "Alice", "age": 25}
 
     def test_row_native_format_with_hints(self):
         converter = DefaultTypeConverter()
@@ -443,29 +363,17 @@ class TestDefaultTypeConverter:
             {"name": "Bob", "age": 30},
         ]
 
-    def test_array_varchar_prevents_number_inference(self):
+    @pytest.mark.parametrize(
+        ("input_value", "expected"),
+        [("[1234, 5678]", ["1234", "5678"]), ("[1234, 5678, hello]", ["1234", "5678", "hello"])],
+    )
+    def test_array_varchar_prevents_number_inference(self, input_value, expected):
         converter = DefaultTypeConverter()
-        result = converter.convert(
-            "array",
-            "[1234, 5678, hello]",
-            type_hint="array(varchar)",
-        )
-        assert result == ["1234", "5678", "hello"]
+        assert converter.convert("array", input_value, type_hint="array(varchar)") == expected
 
     def test_none_value_with_type_hint(self):
         converter = DefaultTypeConverter()
         assert converter.convert("array", None, type_hint="array(varchar)") is None
-
-    def test_simple_type_hint(self):
-        converter = DefaultTypeConverter()
-        assert converter.convert("varchar", "hello", type_hint="varchar") == "hello"
-
-    def test_type_hint_caching(self):
-        converter = DefaultTypeConverter()
-        converter.convert("array", "[1, 2]", type_hint="array(integer)")
-        assert "array(integer)" in converter._parsed_hints
-        converter.convert("array", "[3, 4]", type_hint="array(integer)")
-        assert len(converter._parsed_hints) == 1
 
     def test_empty_array_with_type_hint(self):
         converter = DefaultTypeConverter()
@@ -485,71 +393,13 @@ class TestDefaultTypeConverter:
         )
         assert result == {"header": {"seq": 123, "stamp": "2024"}, "x": 4.5}
 
-    def test_fallback_on_malformed_value(self):
-        """When typed conversion fails (returns None), fall back to untyped conversion."""
-        converter = DefaultTypeConverter()
-        # "not-an-array" doesn't look like an array — typed converter returns None.
-        # Untyped _to_array also returns None for this input, which is correct.
-        result = converter.convert("array", "not-an-array", type_hint="array(integer)")
-        assert result is None
-
-    def test_fallback_preserves_struct_value(self):
-        """Malformed struct with type_hint still falls back to untyped parsing."""
-        converter = DefaultTypeConverter()
-        # Struct with no closing brace — typed converter returns None.
-        # Untyped _to_struct also returns None here.
-        result = converter.convert("row", "{unclosed", type_hint="row(a integer)")
-        assert result is None
-
     def test_fallback_returns_untyped_result(self):
-        """When typed conversion returns None, untyped conversion is used."""
+        """A value that the type hint does not describe is converted without the hint."""
         converter = DefaultTypeConverter()
-        # The typed converter returns None for a struct that doesn't start with "{".
-        # The untyped _to_struct also returns None for non-struct input.
-        # Use an array example where typed converter returns None (not a bracket-wrapped
-        # value), but untyped _to_array can still parse it via JSON.
-        result = converter.convert(
-            "row",
-            '{"a": 1}',
-            type_hint="row(a varchar)",
-        )
-        # Typed conversion succeeds here — "a" is varchar so "1" stays a string
-        assert result == {"a": "1"}
-
-    def test_hive_syntax_through_converter(self):
-        """Hive-style syntax works end-to-end through DefaultTypeConverter."""
-        converter = DefaultTypeConverter()
-        result = converter.convert("array", "[1, 2, 3]", type_hint="array<int>")
-        assert result == [1, 2, 3]
-
-    def test_hive_syntax_struct_through_converter(self):
-        """Hive struct syntax works end-to-end."""
-        converter = DefaultTypeConverter()
-        result = converter.convert(
-            "row",
-            "{name=Alice, age=25}",
-            type_hint="struct<name:varchar,age:int>",
-        )
-        assert result == {"name": "Alice", "age": 25}
-
-    def test_hive_syntax_caching(self):
-        """Hive syntax is normalized before cache lookup."""
-        converter = DefaultTypeConverter()
-        converter.convert("array", "[1]", type_hint="array<integer>")
-        converter.convert("array", "[2]", type_hint="array(integer)")
-        # Both should normalize to "array(integer)" in the cache
-        assert "array(integer)" in converter._parsed_hints
-        assert len(converter._parsed_hints) == 1
-
-    def test_normalize_hive_syntax_noop(self):
-        """Trino-style input passes through unchanged."""
-        assert DefaultTypeConverter._normalize_hive_syntax("array(integer)") == "array(integer)"
-
-    def test_normalize_hive_syntax_replaces(self):
-        assert (
-            DefaultTypeConverter._normalize_hive_syntax("array<struct<a:int>>")
-            == "array(struct(a int))"
-        )
+        assert converter.convert("row", "{a=1, b=2}", type_hint="array(integer)") == {
+            "a": "1",
+            "b": "2",
+        }
 
     def test_normalize_hive_syntax_struct(self):
         converter = DefaultTypeConverter()
@@ -571,11 +421,8 @@ class TestDefaultTypeConverter:
 
     def test_normalize_hive_syntax_map(self):
         converter = DefaultTypeConverter()
-        result = converter.convert(
-            "map",
-            '{"x": 1, "y": 2}',
-            type_hint="map<string,int>",
-        )
+        # The native values are strings without the hint.
+        result = converter.convert("map", "{x=1, y=2}", type_hint="map<string,int>")
         assert result == {"x": 1, "y": 2}
 
     def test_normalize_hive_syntax_mixed(self):

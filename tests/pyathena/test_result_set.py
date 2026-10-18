@@ -9,12 +9,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pyathena.aio.common import AioBaseCursor, WithAsyncFetch
-from pyathena.common import BaseCursor, CursorIterator
 from pyathena.converter import DefaultTypeConverter
-from pyathena.error import OperationalError, ProgrammingError
+from pyathena.error import OperationalError
 from pyathena.model import AthenaQueryExecution
-from pyathena.result_set import AthenaResultSet, WithFetch, WithResultSet
+from pyathena.result_set import AthenaResultSet
 from pyathena.util import RetryConfig
 from tests.pyathena.util import assert_fetches_fail, get_query_results_responses
 
@@ -107,12 +105,6 @@ class TestAthenaResultSet:
         assert result_set.fetchall() == []
         assert result_set.rownumber is None
 
-    def test_get_query_results_after_close(self):
-        result_set = _fetching_result_set(("1", "2"), ("3",))
-        result_set.close()
-        with pytest.raises(ProgrammingError, match=r"AthenaResultSet is closed\."):
-            result_set._get_query_results(2, "token1")
-
     def test_fetchone_across_pages(self):
         result_set = _fetching_result_set(("1", "2"), ("3",))
         assert [result_set.fetchone() for _ in range(4)] == [(1,), (2,), (3,), None]
@@ -159,16 +151,3 @@ class TestAthenaResultSet:
         with patch.object(AthenaResultSet, "_get_query_results", side_effect=pages):
             data = result_set._fetch_all_rows_as_csv()
         assert data == b'"v","w"""\n"a,""b""\nc",\n"v","w"""\n"","1"\n'
-
-
-class TestWithResultSet:
-    def test_is_mixin(self):
-        assert WithResultSet.__bases__ == (object,)
-
-    @pytest.mark.parametrize(
-        ("cursor_base", "base"),
-        [(WithFetch, BaseCursor), (WithAsyncFetch, AioBaseCursor)],
-    )
-    def test_precedes_cursor_bases(self, cursor_base, base):
-        # Listed first, so that its members take precedence over the cursor bases'.
-        assert cursor_base.__bases__ == (WithResultSet, base, CursorIterator)

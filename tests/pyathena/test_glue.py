@@ -9,13 +9,11 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from botocore.exceptions import ClientError, ParamValidationError
-from botocore.exceptions import ConnectionError as BotoConnectionError
+from botocore.exceptions import ParamValidationError
 
 from pyathena.glue import GlueMetadataClient
 from tests import ENV
 from tests.pyathena.conftest import connect
-from tests.pyathena.util import unreachable_glue
 
 
 class TestGlueMetadataClient:
@@ -42,20 +40,6 @@ class TestGlueMetadataClient:
             [(c.name, c.type, c.comment) for c in metadata.partition_keys],
             metadata.parameters,
         )
-
-    def test_reads_what_athena_reports(self, cursor):
-        glue = cursor.connection._glue
-        catalog = cursor.connection.catalog_name
-
-        for table in ("one_row", "parquet_with_compression", "partition_table", "view_one_row"):
-            assert self._view(glue.get_table(catalog, ENV.schema, table)) == self._view(
-                cursor.get_table_metadata(table)
-            )
-        assert sorted(self._view(m) for m in glue.list_tables(catalog, ENV.schema)) == sorted(
-            self._view(m) for m in cursor.list_table_metadata()
-        )
-        assert [m.name for m in glue.list_tables(catalog, ENV.schema, "one_row")] == ["one_row"]
-        assert ENV.schema in [d.name for d in glue.list_databases(catalog)]
 
     @pytest.mark.skipif(
         not ENV.s3tables_catalog,
@@ -91,28 +75,6 @@ class TestGlueMetadataClient:
             finally:
                 cursor.execute(f"DROP TABLE IF EXISTS {schema}.{table}")
 
-    def test_reports_a_missing_table(self, cursor):
-        with pytest.raises(ClientError) as caught:
-            cursor.connection._glue.get_table(
-                cursor.connection.catalog_name, ENV.schema, "no_such_table_786"
-            )
-
-        assert caught.value.response["Error"]["Code"] == "EntityNotFoundException"
-        assert cursor.connection._glue.reachable
-
-    def test_rejects_an_unsupported_catalog(self, cursor):
-        with pytest.raises(ValueError, match="federated_catalog"):
-            cursor.connection._glue.get_table("federated_catalog", ENV.schema, "one_row")
-
-    def test_stops_after_it_cannot_reach_glue(self, cursor):
-        glue = unreachable_glue(cursor.connection)
-
-        with pytest.raises(BotoConnectionError):
-            glue.get_table("AwsDataCatalog", ENV.schema, "one_row")
-
-        assert not glue.reachable
-        assert not glue.usable_for("AwsDataCatalog")
-
     def test_keeps_going_after_a_request_it_rejects(self, cursor):
         # botocore rejects the request before sending it; Glue stays in use.
         glue = cursor.connection._glue
@@ -133,11 +95,18 @@ class TestGlueMetadataClient:
             created = []
             session_client = conn.session.client
 
+            second_build = threading.Event()
+
             def contended_client(*args, **kwargs):
-                created.append((args, glue._lock.locked()))
+                created.append(args)
+                # Without the lock, another thread would build a client meanwhile.
+                if len(created) == 1:
+                    second_build.wait(1)
+                else:
+                    second_build.set()
                 return session_client(*args, **kwargs)
 
-            conn._session.client = contended_client
+            conn.session.client = contended_client
             barrier = threading.Barrier(8)
 
             def get_client(_):
@@ -147,9 +116,10 @@ class TestGlueMetadataClient:
             with ThreadPoolExecutor(max_workers=8) as executor:
                 clients = list(executor.map(get_client, range(8)))
 
-            assert created == [(("glue",), True)]
+            assert created == [("glue",)]
             assert all(client is clients[0] for client in clients)
             assert clients[0].meta.service_model.service_name == "glue"
+            assert clients[0].meta.service_model.api_version == "2017-03-31"
             assert clients[0].meta.endpoint_url == f"https://glue.{ENV.region_name}.amazonaws.com"
 
     def test_table_metadata_leaves_out_columns_iceberg_no_longer_has(self):

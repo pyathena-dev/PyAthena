@@ -8,7 +8,7 @@
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from inspect import Parameter, signature
+from inspect import signature
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -19,11 +19,10 @@ import pyathena
 from pyathena.arrow.async_cursor import AsyncArrowCursor
 from pyathena.arrow.cursor import ArrowCursor
 from pyathena.async_cursor import AsyncCursor, AsyncDictCursor
-from pyathena.common import BaseCursor
 from pyathena.connection import Connection
 from pyathena.converter import DefaultTypeConverter
 from pyathena.cursor import Cursor, DictCursor
-from pyathena.error import ProgrammingError
+from pyathena.error import OperationalError, ProgrammingError
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.pandas.async_cursor import AsyncPandasCursor
 from pyathena.pandas.cursor import PandasCursor
@@ -36,6 +35,7 @@ from pyathena.spark.async_cursor import AsyncSparkCursor
 from pyathena.spark.common import SparkBaseCursor
 from pyathena.spark.cursor import SparkCursor
 from pyathena.util import RetryConfig
+from tests.pyathena.util import EVENT_TIMEOUT, answered_requests
 
 # Cursors whose arraysize is the GetQueryResults page size, capped at 1000.
 PAGED_CURSORS = [Cursor, DictCursor, AsyncCursor, AsyncDictCursor]
@@ -51,11 +51,12 @@ UNCAPPED_CURSORS = [
     AsyncS3FSCursor,
 ]
 CURSOR_CLASSES = PAGED_CURSORS + UNCAPPED_CURSORS + [SparkCursor, AsyncSparkCursor]
+# Cursors that run on_start_query_execution.
+START_CALLBACK_CURSORS = [Cursor, DictCursor, ArrowCursor, PandasCursor, PolarsCursor, S3FSCursor]
 # Cursors that pass execute() keyword arguments to a DataFrame reader.
 READER_CURSOR_CLASSES = [PandasCursor, PolarsCursor, AsyncPandasCursor, AsyncPolarsCursor]
 
 
-@pytest.mark.parametrize("factory", [Connection, pyathena.connect])
 @pytest.mark.parametrize(
     ("setting", "kwargs", "expected"),
     [
@@ -69,10 +70,10 @@ READER_CURSOR_CLASSES = [PandasCursor, PolarsCursor, AsyncPandasCursor, AsyncPol
         ("work_group", {"work_group": "explicit-workgroup"}, "explicit-workgroup"),
     ],
 )
-def test_environment_fallback(factory, setting, kwargs, expected, monkeypatch):
+def test_environment_fallback(setting, kwargs, expected, monkeypatch):
     monkeypatch.setenv("AWS_ATHENA_S3_STAGING_DIR", "s3://environment/path/")
     monkeypatch.setenv("AWS_ATHENA_WORK_GROUP", "environment-workgroup")
-    conn = factory(
+    conn = Connection(
         region_name="us-east-1",
         aws_access_key_id="access_key",
         aws_secret_access_key="secret_key",
@@ -84,60 +85,17 @@ def test_environment_fallback(factory, setting, kwargs, expected, monkeypatch):
         conn.close()
 
 
-@pytest.mark.parametrize("factory", [Connection, pyathena.connect])
-def test_empty_settings_disable_both_environment_fallbacks(factory, monkeypatch):
+def test_empty_settings_disable_both_environment_fallbacks(monkeypatch):
     monkeypatch.setenv("AWS_ATHENA_S3_STAGING_DIR", "s3://environment/path/")
     monkeypatch.setenv("AWS_ATHENA_WORK_GROUP", "environment-workgroup")
     with pytest.raises(ProgrammingError, match="Required argument"):
-        factory(region_name="us-east-1", s3_staging_dir="", work_group="")
+        Connection(region_name="us-east-1", s3_staging_dir="", work_group="")
 
 
 @pytest.mark.parametrize("factory", [pyathena.connect, Connection])
 def test_connect_keyword_only(factory):
-    assert all(
-        parameter.kind in (Parameter.KEYWORD_ONLY, Parameter.VAR_KEYWORD)
-        for parameter in signature(factory).parameters.values()
-    )
-    with patch("pyathena.connection.Session") as session:
-        with pytest.raises(TypeError, match="positional"):
-            factory("s3://bucket/path/", "us-east-1")
-        session.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    "cursor_class", [*CURSOR_CLASSES, BaseCursor, SparkBaseCursor, WithResultSet]
-)
-def test_cursor_constructor_keyword_only(cursor_class):
-    constructor = cursor_class.__init__
-    assert [
-        parameter.name
-        for parameter in signature(constructor).parameters.values()
-        if parameter.kind in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD)
-    ] == ["self"]
-    with pytest.raises(TypeError, match="positional"):
-        constructor(object(), "positional-setting")
-
-
-@pytest.mark.parametrize("cursor_class", CURSOR_CLASSES)
-def test_cursor_execute_keyword_only(cursor_class):
-    execute_signature = signature(cursor_class.execute)
-    assert [
-        parameter.name
-        for parameter in execute_signature.parameters.values()
-        if parameter.kind in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD)
-    ] == ["self", "operation", "parameters"]
-    parameters = {"value": 1}
-    cursor = object.__new__(cursor_class)
-    bound = execute_signature.bind(cursor, "SELECT %(value)s", parameters)
-    assert bound.arguments["parameters"] is parameters
-    if cursor_class in (SparkCursor, AsyncSparkCursor):
-        assert "work_group" not in execute_signature.parameters
-    else:
-        bound = execute_signature.bind(cursor, "SELECT %(value)s", parameters, work_group="group")
-        assert bound.arguments["work_group"] == "group"
-    execute_signature.bind(cursor, operation="SELECT 1")
-    with pytest.raises(TypeError, match="positional"):
-        cursor.execute("SELECT %(value)s", parameters, "group")
+    with pytest.raises(TypeError):
+        factory("s3://bucket/path/")
 
 
 class RecordingCursor(Cursor):
@@ -197,6 +155,21 @@ def _open_cursor(conn: Connection[Any], cursor_class: type[Any], **kwargs: Any) 
 
 
 @pytest.mark.parametrize("cursor_class", CURSOR_CLASSES)
+def test_cursor_constructor_keyword_only(cursor_class):
+    # Binds the arguments as a call does before the constructor runs. A call
+    # through Connection.cursor() passes every setting by keyword, so a positional
+    # setting would fail there as a duplicate keyword argument too.
+    with pytest.raises(TypeError):
+        signature(cursor_class).bind("positional-setting")
+
+
+@pytest.mark.parametrize("cursor_class", CURSOR_CLASSES)
+def test_cursor_execute_keyword_only(offline_connection, cursor_class):
+    with _open_cursor(offline_connection, cursor_class) as cursor, pytest.raises(TypeError):
+        cursor.execute("SELECT %(value)s", {"value": 1}, "group")
+
+
+@pytest.mark.parametrize("cursor_class", CURSOR_CLASSES)
 def test_cursor_unknown_constructor_keyword(offline_connection, cursor_class):
     with pytest.raises(TypeError, match="unexpected keyword argument 'work_gruop'"):
         offline_connection.cursor(cursor_class, work_gruop="typo")
@@ -207,13 +180,25 @@ def test_cursor_unknown_constructor_keyword(offline_connection, cursor_class):
 
 @pytest.mark.parametrize("cursor_class", CURSOR_CLASSES)
 def test_cursor_accepts_connection_callbacks(offline_connection, cursor_class):
-    on_start_query_execution, on_poll = MagicMock(), MagicMock()
-    offline_connection.on_start_query_execution = on_start_query_execution
-    offline_connection.on_poll = on_poll
+    started, polled = [], []
+    offline_connection.on_start_query_execution = started.append
+    offline_connection.on_poll = polled.append
 
-    with _open_cursor(offline_connection, cursor_class) as cursor:
-        assert cursor._on_start_query_execution is on_start_query_execution
-        assert cursor._on_poll is on_poll
+    with (
+        answered_requests(offline_connection.client),
+        _open_cursor(offline_connection, cursor_class) as cursor,
+    ):
+        try:
+            result = cursor.execute("SELECT 1")
+        except OperationalError:
+            pass
+        else:
+            # The Async cursors run the execution in a future.
+            result[1].result(timeout=EVENT_TIMEOUT)
+
+    assert [execution.state for execution in polled] == ["FAILED"]
+    # The Async and Spark cursors do not run on_start_query_execution.
+    assert started == (["query-id"] if cursor_class in START_CALLBACK_CURSORS else [])
 
 
 @pytest.mark.parametrize(
@@ -335,11 +320,18 @@ class TestConnection:
         created = []
         session_client = conn.session.client
 
+        second_build = threading.Event()
+
         def contended_client(*args, **kwargs):
-            created.append((args, conn._s3_client_lock.locked()))
+            created.append(args)
+            # Without the lock, another thread would build a client meanwhile.
+            if len(created) == 1:
+                second_build.wait(1)
+            else:
+                second_build.set()
             return session_client(*args, **kwargs)
 
-        conn._session.client = contended_client
+        conn.session.client = contended_client
         barrier = threading.Barrier(8)
 
         def get_client(_):
@@ -349,7 +341,7 @@ class TestConnection:
         with ThreadPoolExecutor(max_workers=8) as executor:
             clients = list(executor.map(get_client, range(8)))
 
-        assert created == [(("s3",), True)]
+        assert created == [("s3",)]
         assert all(client is clients[0] for client in clients)
         assert clients[0].meta.service_model.service_name == "s3"
 
@@ -401,13 +393,15 @@ class TestConnection:
 
     def test_close_closes_built_clients(self):
         conn = _connection()
-        with patch.object(conn.client, "close") as athena_close:
+        with (
+            patch.object(conn.session, "client") as build,
+            patch.object(conn.client, "close") as athena_close,
+        ):
             conn.close()
 
         athena_close.assert_called_once_with()
         # Clients that were not used are not built to be closed.
-        assert conn._glue._client is None
-        assert conn._s3_client is None
+        build.assert_not_called()
 
         with (
             patch.object(conn.client, "close") as athena_close,

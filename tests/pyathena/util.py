@@ -10,6 +10,7 @@ import io
 import threading
 import time
 from concurrent.futures import Future, wait
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -268,6 +269,30 @@ def throttle_metadata_api(
     return calls
 
 
+def succeeded_query_execution_data(query_id, query, completion_date_time, schema="this_schema"):
+    """Build a succeeded DML query execution as ``BatchGetQueryExecution`` returns it.
+
+    Args:
+        query_id: The query execution ID.
+        query: The query string.
+        completion_date_time: The completion time.
+        schema: The database the query ran against.
+
+    Returns:
+        The ``QueryExecution`` dictionary.
+    """
+    return {
+        "QueryExecutionId": query_id,
+        "Query": query,
+        "StatementType": AthenaQueryExecution.STATEMENT_TYPE_DML,
+        "QueryExecutionContext": {"Database": schema},
+        "Status": {
+            "State": AthenaQueryExecution.STATE_SUCCEEDED,
+            "CompletionDateTime": completion_date_time,
+        },
+    }
+
+
 def succeeded_query_execution(query_id, query, completion_date_time, schema="this_schema"):
     """Build a succeeded DML query execution, as the result cache search lists it.
 
@@ -282,18 +307,127 @@ def succeeded_query_execution(query_id, query, completion_date_time, schema="thi
     """
     return AthenaQueryExecution(
         {
-            "QueryExecution": {
-                "QueryExecutionId": query_id,
-                "Query": query,
-                "StatementType": AthenaQueryExecution.STATEMENT_TYPE_DML,
-                "QueryExecutionContext": {"Database": schema},
-                "Status": {
-                    "State": AthenaQueryExecution.STATE_SUCCEEDED,
-                    "CompletionDateTime": completion_date_time,
-                },
-            }
+            "QueryExecution": succeeded_query_execution_data(
+                query_id, query, completion_date_time, schema
+            )
         }
     )
+
+
+# Athena's answers to a query or calculation that fails at its first status request.
+FAILED_EXECUTION_RESPONSES = {
+    "StartQueryExecution": {"QueryExecutionId": "query-id"},
+    "GetQueryExecution": {
+        "QueryExecution": {
+            "QueryExecutionId": "query-id",
+            "Query": "SELECT 1",
+            "StatementType": "DML",
+            "Status": {"State": "FAILED", "StateChangeReason": "failed"},
+        }
+    },
+    "StartCalculationExecution": {"CalculationExecutionId": "calculation-id", "State": "CREATING"},
+    "GetCalculationExecutionStatus": {
+        "Status": {"State": "FAILED"},
+        "Statistics": {"DpuExecutionInMillis": 0},
+    },
+    "GetCalculationExecution": {
+        "CalculationExecutionId": "calculation-id",
+        "SessionId": "session",
+        "Status": {"State": "FAILED", "StateChangeReason": "failed"},
+        "Statistics": {"DpuExecutionInMillis": 0},
+        "Result": {},
+    },
+}
+
+
+@contextmanager
+def answered_requests(client, responses=FAILED_EXECUTION_RESPONSES):
+    """Answer each request of a boto3 client once, without AWS, and record them.
+
+    A repeated request raises ``AssertionError``, so that a cursor that keeps
+    polling stops instead of waiting for ever, and the block then raises it too,
+    also when the cursor caught it.
+
+    Args:
+        client: The boto3 client.
+        responses: The response to each operation name.
+
+    Yields:
+        The operation name and parameters of each request, in order.
+    """
+    requests = []
+    repeated = []
+
+    def answer(operation, parameters):
+        if any(operation == requested for requested, _ in requests):
+            repeated.append(operation)
+            raise AssertionError(f"repeated {operation} request")
+        requests.append((operation, parameters))
+        return responses[operation]
+
+    with patch.object(client, "_make_api_call", side_effect=answer):
+        yield requests
+    assert not repeated, f"repeated requests: {repeated}"
+
+
+class QueryExecutionHistory:
+    """An Athena client stand-in that lists the query executions of a work group.
+
+    ``ListQueryExecutions`` returns up to ``MaxResults`` IDs per page in the given
+    order, latest first as Athena lists them, and ``BatchGetQueryExecution``
+    returns their executions.
+
+    Attributes:
+        executions: The ``QueryExecution`` dictionaries, latest first.
+        list_requests: The parameters of each ``ListQueryExecutions`` request.
+    """
+
+    def __init__(self, executions):
+        """Initialize the history.
+
+        Args:
+            executions: The ``QueryExecution`` dictionaries, latest first.
+        """
+        self.executions = executions
+        self.list_requests = []
+
+    def list_query_executions(self, **request):
+        """List a page of query execution IDs.
+
+        Args:
+            **request: The request parameters: ``MaxResults``, the ``NextToken``
+                of a later page, and others such as ``WorkGroup``.
+
+        Returns:
+            The response, with a ``NextToken`` unless the page is the last.
+        """
+        self.list_requests.append(request)
+        # ListQueryExecutions rejects a MaxResults above 50.
+        if request["MaxResults"] > 50:
+            raise ClientError(
+                {"Error": {"Code": "InvalidRequestException", "Message": "MaxResults"}},
+                "ListQueryExecutions",
+            )
+        start = int(request.get("NextToken", 0))
+        end = start + request["MaxResults"]
+        response = {
+            "QueryExecutionIds": [e["QueryExecutionId"] for e in self.executions[start:end]]
+        }
+        if end < len(self.executions):
+            response["NextToken"] = str(end)
+        return response
+
+    def batch_get_query_execution(self, **request):
+        """Get the executions of query execution IDs.
+
+        Args:
+            **request: The request parameters, with ``QueryExecutionIds``.
+
+        Returns:
+            The response.
+        """
+        executions = {e["QueryExecutionId"]: e for e in self.executions}
+        return {"QueryExecutions": [executions[i] for i in request["QueryExecutionIds"]]}
 
 
 def unreachable_glue(connection):
