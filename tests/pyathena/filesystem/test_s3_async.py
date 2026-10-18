@@ -709,6 +709,94 @@ class TestAioS3FileSystem:
         assert events[4:] == ["abort"]
         sync_fs.core.complete_multipart_upload.assert_not_called()
 
+    @pytest.mark.parametrize("exit_with", ["close", "with", "async with"])
+    @pytest.mark.asyncio
+    async def test_close_releases_threads(self, exit_with):
+        # GH-1209: close(), also at the end of a with block, ends the threads
+        # of the filesystem, which stays usable with new ones.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        threads = []
+
+        def exists(path, **kwargs):
+            threads.append(threading.current_thread())
+            return True
+
+        fs._sync_fs.exists = mock.MagicMock(side_effect=exists)
+        if exit_with == "close":
+            assert await fs._exists("s3://bucket/key")
+            fs.close()
+        elif exit_with == "with":
+            with fs:
+                assert await fs._exists("s3://bucket/key")
+        else:
+            async with fs:
+                assert await fs._exists("s3://bucket/key")
+        await asyncio.to_thread(threads[0].join, EVENT_TIMEOUT)
+        assert not threads[0].is_alive()
+
+        assert await fs._exists("s3://bucket/key")
+        assert threads[1] is not threads[0]
+        fs.close()
+
+    @pytest.mark.parametrize("cancel", [False, True])
+    @pytest.mark.asyncio
+    async def test_close_during_multipart_copy(self, cancel):
+        # GH-1209: a copy that runs at close() schedules its remaining
+        # requests, and its completion or abort, in new threads.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), max_workers=1, skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        sync_fs.core.create_multipart_upload = mock.MagicMock(
+            return_value=S3MultipartUpload(
+                {"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"}
+            )
+        )
+        started, release = threading.Event(), threading.Event()
+
+        def upload_part_copy(**kw):
+            started.set()
+            # The finally block of the test always releases it.
+            release.wait()
+            return SimpleNamespace(etag='"e"', part_number=kw["part_number"])
+
+        sync_fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
+        sync_fs.core.complete_multipart_upload = mock.MagicMock()
+        sync_fs.core.abort_multipart_upload = mock.MagicMock()
+        # The HeadObject of the source, with 2 parts of the default block size.
+        size = 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE
+        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
+        task = asyncio.ensure_future(
+            fs._copy_object_with_multipart_upload(
+                S3Path("bucket", "src"),
+                S3Path("bucket", "dst"),
+                MetadataDirective="REPLACE",
+                TaggingDirective="REPLACE",
+                AnnotationDirective="EXCLUDE",
+            )
+        )
+        try:
+            assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+            fs.close()
+            if cancel:
+                task.cancel()
+                # Lets the copy enter its cleanup.
+                await asyncio.sleep(0)
+        except BaseException:
+            task.cancel()
+            raise
+        finally:
+            release.set()
+        if cancel:
+            with pytest.raises(asyncio.CancelledError):
+                await await_bounded(task)
+            sync_fs.core.abort_multipart_upload.assert_called_once()
+            sync_fs.core.complete_multipart_upload.assert_not_called()
+        else:
+            await await_bounded(task)
+            assert sync_fs.core.upload_part_copy.call_count == 2
+            sync_fs.core.complete_multipart_upload.assert_called_once()
+            sync_fs.core.abort_multipart_upload.assert_not_called()
+        fs.close()
+
     @pytest.mark.parametrize("completion_fails", [False, True])
     @pytest.mark.asyncio
     async def test_copy_object_with_multipart_upload_cancelled_completion(self, completion_fails):

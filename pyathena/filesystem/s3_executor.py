@@ -211,8 +211,9 @@ class S3AioThreadPool(S3Executor):
     executor limits or blocks them. The threads are created as the calls need
     them, and each call runs with a copy of the caller's context variables,
     as with ``asyncio.to_thread()``. In a forked child process, whose copy
-    has no threads, the pool creates new ones. The pool can be shared by
-    several event loops and threads.
+    has no threads, the pool creates new ones, as it does after
+    :meth:`release`. The pool can be shared by several event loops and
+    threads.
 
     Args:
         max_workers: The maximum number of calls that run at once.
@@ -273,7 +274,15 @@ class S3AioThreadPool(S3Executor):
             RuntimeError: If the pool has been shut down.
         """
         context = contextvars.copy_context()
-        return self._get_executor().submit(context.run, fn, *args, **kwargs)
+        while True:
+            executor = self._get_executor()
+            try:
+                return executor.submit(context.run, fn, *args, **kwargs)
+            except RuntimeError:
+                # A release() from another thread shut down the executor
+                # after it was taken; the next one takes the call.
+                if self._executor is executor or self._shutdown:
+                    raise
 
     async def run(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         """Run a blocking call in a thread of the pool and wait for it.
@@ -376,6 +385,19 @@ class S3AioThreadPool(S3Executor):
             executor = self._executor
         if executor is not None:
             executor.shutdown(wait=wait)
+
+    def release(self) -> None:
+        """Release the threads once they are idle, keeping the pool usable.
+
+        The calls that were submitted before still run in their threads, which
+        end once those calls are done. A later call creates new threads, so
+        until the earlier calls end, more than ``max_workers`` calls can run at
+        once.
+        """
+        with self._lock:
+            executor, self._executor = self._executor, None
+        if executor is not None:
+            executor.shutdown(wait=False)
 
     @classmethod
     def _reset_after_fork(cls) -> None:

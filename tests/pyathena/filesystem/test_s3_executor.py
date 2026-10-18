@@ -206,6 +206,25 @@ class TestS3AioThreadPool:
 
         assert events == ["pending finished"]
 
+    def test_submit_during_release(self):
+        # GH-1209: a call whose executor a release() from another thread shuts
+        # down before the call reaches it runs in a new one.
+        pool = S3AioThreadPool(1)
+        get_executor = pool._get_executor
+        released = []
+
+        def get_executor_then_release():
+            executor = get_executor()
+            if not released:
+                pool.release()
+                released.append(executor)
+            return executor
+
+        with mock.patch.object(pool, "_get_executor", side_effect=get_executor_then_release):
+            assert pool.submit(sum, [1, 2]).result(timeout=EVENT_TIMEOUT) == 3
+        assert pool._executor is not released[0]
+        pool.shutdown()
+
     @pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork() is not available.")
     @pytest.mark.filterwarnings("ignore:.*fork\\(\\) may lead to deadlocks:DeprecationWarning")
     def test_fork(self):
