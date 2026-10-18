@@ -103,7 +103,7 @@ def matrix(settings: Settings, suite: str, shape: str) -> list[Case]:
     The ``temporal`` shape adds temporal columns to the flat projection and
     covers every family in the single-query suite. Its UNLOAD and CTAS reads
     project the ``timestamp(3)`` and ``date`` columns only, which Parquet can
-    hold (see ``select_sql()``).
+    hold (see ``select_sql()``). Like json, it has no cases in the other suites.
 
     The ``filesystem`` suite does not query Athena and has no shape; its cases
     belong to the ``flat`` shape.

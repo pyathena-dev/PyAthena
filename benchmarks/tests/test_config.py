@@ -168,10 +168,13 @@ def test_temporal_projection_of_parquet_reads_has_no_time_or_time_zone_types():
     assert select_sql("scratch", "b_run_small", "temporal", "csv") == parquet.replace(
         ' FROM "scratch"',
         ", from_unixtime(\"timestamp\" / 1e6, 'UTC') AS event_time_utc, "
-        "from_unixtime(\"timestamp\" / 1e6, 'America/New_York') AS event_time_zone, "
+        "from_unixtime(\"timestamp\" / 1e6, 'Asia/Tokyo') AS event_time_zone, "
         "from_unixtime(\"timestamp\" / 1e6, '+09:00') AS event_time_offset, "
         'CAST(from_unixtime("timestamp" / 1e6) AS time(3)) AS event_clock FROM "scratch"',
     )
+    # A misspelled transport fails instead of reading the projection of CSV results.
+    with pytest.raises(ValueError, match="Unknown transport"):
+        select_sql("scratch", "b_run_small", "temporal", "UNLOAD")
 
 
 @pytest.mark.parametrize("family", ["cursor", "dict", "arrow"])

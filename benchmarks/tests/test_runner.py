@@ -246,7 +246,7 @@ def test_unload_trials_record_their_output_files(monkeypatch, tmp_path, run_stub
     )
 
 
-def test_temporal_unload_trials_query_no_time_zone_columns(monkeypatch, tmp_path, run_stubs):
+def test_temporal_trials_query_the_projection_of_their_transport(monkeypatch, tmp_path, run_stubs):
     payloads = []
     monkeypatch.setattr(
         "pyathena_bench.runner.supervise",
