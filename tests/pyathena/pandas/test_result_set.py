@@ -1261,6 +1261,8 @@ class TestAthenaPandasResultSet:
             # pyarrow reads the dates of a column that parse_dates does not name as date
             # objects, as pandas' PyArrow engine does.
             pytest.param({"parse_dates": ["ts", "d"]}, id="parse_dates"),
+            # converters of None, their default, do not rule out the PyArrow engine.
+            pytest.param({"parse_dates": ["ts", "d"], "converters": None}, id="converters_none"),
         ],
     )
     def test_temporal_options_read_by_pandas_with_pyarrow(self, tmp_path, kwargs):
