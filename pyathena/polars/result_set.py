@@ -349,7 +349,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 CSV results are read through fsspec, and chunked CSV and UNLOAD results
                 through Polars' native object store. Column types for a CSV result are
                 given as ``schema_overrides``; Polars' deprecated alias ``dtypes`` is not
-                supported.
+                supported. ``schema=None`` is the same as no ``schema``.
         """
         super().__init__(
             connection=connection,
@@ -367,7 +367,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
         self._cache_type = cache_type
         self._max_workers = max_workers
         self._chunksize = chunksize
-        self._kwargs = kwargs
+        # schema=None, Polars' default, reads the schema of the files, as the result set
+        # does without a schema, such as with the timestamps of UNLOAD at microseconds.
+        self._kwargs = {k: v for k, v in kwargs.items() if k != "schema" or v is not None}
         # The Parquet files of an UNLOAD result, from its data manifest.
         self._data_manifest: list[str] = []
 
@@ -547,9 +549,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
 
         Args:
             has_header: Whether the CSV data has a header. Without one, or with
-                ``schema_overrides`` or ``with_column_names`` given to ``execute()``,
-                Polars does not name the columns by the header, and with ``schema``,
-                Polars ignores ``schema_overrides``, so the columns are not read as text.
+                ``schema_overrides`` or a ``with_column_names`` function given to
+                ``execute()``, Polars does not name the columns by the header, and with
+                ``schema``, Polars ignores ``schema_overrides``, so the columns are not
+                read as text.
 
         Returns:
             Tuple of (schema_overrides, timestamp_dtypes): the data types to read the
@@ -559,11 +562,11 @@ class AthenaPolarsResultSet(AthenaResultSet):
         import polars as pl
 
         dtypes = self._csv_dtypes
-        if not has_header or self._kwargs.keys() & {
-            "schema",
-            "schema_overrides",
-            "with_column_names",
-        }:
+        if (
+            not has_header
+            or self._kwargs.keys() & {"schema", "schema_overrides"}
+            or self._kwargs.get("with_column_names") is not None
+        ):
             return dtypes, {}
         timestamp_dtypes = {
             name: dtype

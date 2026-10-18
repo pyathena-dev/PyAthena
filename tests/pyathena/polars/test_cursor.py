@@ -173,6 +173,28 @@ class TestPolarsCursor:
     @pytest.mark.parametrize(
         ("polars_cursor", "kwargs"),
         [
+            ({"cursor_kwargs": {"unload": False}}, {"schema": None}),
+            ({"cursor_kwargs": {"unload": False, "chunksize": 1}}, {"with_column_names": None}),
+        ],
+        indirect=["polars_cursor"],
+        ids=["whole-schema-none", "chunks-with-column-names-none"],
+    )
+    def test_csv_timestamps_with_default_options(self, polars_cursor, kwargs):
+        """Polars' default schema and with_column_names keep the CSV timestamp read (#1283).
+
+        Polars does not parse more than nine fractional digits into a Datetime, so the
+        timestamps are read as text and converted.
+        """
+        polars_cursor.execute(
+            "SELECT CAST('2020-01-02 03:04:05.123456789012' AS TIMESTAMP(12)) AS ts", **kwargs
+        )
+        df = pl.concat(polars_cursor.iter_chunks())
+        assert df.schema == pl.Schema({"ts": pl.Datetime("us")})
+        assert df["ts"].to_list() == [datetime(2020, 1, 2, 3, 4, 5, 123456)]
+
+    @pytest.mark.parametrize(
+        ("polars_cursor", "kwargs"),
+        [
             pytest.param(
                 {"cursor_kwargs": {"unload": True}},
                 {},
@@ -184,12 +206,21 @@ class TestPolarsCursor:
                 {"low_memory": True},
                 marks=pytest.mark.skipif(not _POLARS_2, reason="Polars 1.x scans at nanoseconds."),
             ),
+            pytest.param(
+                {"cursor_kwargs": {"unload": True}},
+                {"schema": None},
+                marks=pytest.mark.skipif(not _POLARS_2, reason="Polars 1.x reads at nanoseconds."),
+            ),
+            ({"cursor_kwargs": {"unload": True, "chunksize": 1}}, {"schema": None}),
         ],
         indirect=["polars_cursor"],
-        ids=["whole", "chunks", "scanned-chunks"],
+        ids=["whole", "chunks", "scanned-chunks", "whole-schema-none", "chunks-schema-none"],
     )
     def test_unload_nested_timestamps(self, polars_cursor, kwargs):
-        """UNLOAD timestamps, alone and inside arrays, rows, and maps, are microseconds."""
+        """UNLOAD timestamps, alone and inside arrays, rows, and maps, are microseconds.
+
+        ``schema=None`` is the same as no ``schema`` (#1283).
+        """
         polars_cursor.execute(temporal.nested_query(), **kwargs)
         df = pl.concat(polars_cursor.iter_chunks()).sort("id")
         us = pl.Datetime("us")
