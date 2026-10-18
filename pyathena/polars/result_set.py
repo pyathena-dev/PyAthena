@@ -228,9 +228,10 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
             # RuntimeError instead of ending the rows early.
             for value in values:
                 try:
-                    yield converter(value)
+                    converted = converter(value)
                 except DataError as e:
                     raise DataError(f"Column {name!r}: {e}") from e
+                yield converted
 
         size = self._ROW_BLOCK_SIZE
         for start in range(0, df.height, size):

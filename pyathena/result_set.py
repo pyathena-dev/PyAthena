@@ -749,13 +749,14 @@ class AthenaResultSet(CursorIterator):
         """
         for name, type_, hint, value in zip(names, types, hints, values, strict=False):
             try:
-                yield (
+                converted = (
                     converter.convert(type_, value, type_hint=hint)
                     if hint
                     else converter.convert(type_, value)
                 )
             except DataError as e:
                 raise DataError(f"Column {name!r}: {e}") from e
+            yield converted
 
     def _parse_result_rows(
         self, response: dict[str, Any]
