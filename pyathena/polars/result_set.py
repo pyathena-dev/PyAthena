@@ -480,8 +480,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """Whether the result is read in chunks.
 
         It is with the chunksize option, unless ``execute()`` was given
-        ``use_pyarrow=True``, which reads the result with pyarrow, whole, as Polars'
-        read functions do.
+        ``use_pyarrow=True``, which the scan functions do not take. The result is then
+        read whole with the read functions, as without the chunksize option.
 
         Returns:
             True if the result is read in chunks.
