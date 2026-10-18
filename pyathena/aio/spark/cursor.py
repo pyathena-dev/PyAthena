@@ -78,22 +78,9 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
         """
         return await create_in_thread(
             functools.partial(connection.cursor, cls, **kwargs),
-            release=cls._close_blocking,
+            # The blocking close of the base class, for a cursor that nobody awaits.
+            release=SparkBaseCursor.close,
         )
-
-    def _close_blocking(self) -> None:
-        """Close the cursor in a thread, terminating its session if configured to.
-
-        This is the blocking counterpart of :meth:`close` for a cursor that
-        nobody awaits, such as one built for a cancelled :meth:`create`.
-
-        Raises:
-            OperationalError: If terminating the session fails.
-        """
-        self._closed = True
-        if self._terminate_session_on_close:
-            self._terminate_session_by_id(self._session_id)
-            self._terminate_session_on_close = False
 
     @property
     @override
@@ -329,8 +316,15 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
             _logger.exception("Failed to cancel calculation.")
             raise OperationalError(*e.args) from e
 
-    @override
-    async def _terminate_session(self) -> None:  # type: ignore[override]
+    async def _terminate_session(self) -> None:
+        """Terminate the cursor's Spark session with ``TerminateSession``.
+
+        The asyncio counterpart of ``_terminate_session_by_id()``, which the
+        blocking close uses. Cancellation does not stop its retries.
+
+        Raises:
+            OperationalError: If the request fails.
+        """
         request: dict[str, Any] = {"SessionId": self._session_id}
         try:
             await async_retry_api_call(

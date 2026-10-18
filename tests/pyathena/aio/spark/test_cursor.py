@@ -18,6 +18,7 @@ from pyathena.aio.connection import AioConnection
 from pyathena.aio.spark.cursor import AioSparkCursor
 from pyathena.error import DatabaseError, NotSupportedError, OperationalError, ProgrammingError
 from pyathena.model import AthenaCalculationExecutionStatus, AthenaSessionStatus
+from pyathena.spark.common import SparkBaseCursor
 from pyathena.util import RetryConfig
 from tests.pyathena.util import (
     CANCELABLE_SPARK_JOB,
@@ -501,7 +502,7 @@ class TestAioSparkCursor:
             return {"SessionId": "supplied", "Status": {"State": AthenaSessionStatus.STATE_IDLE}}
 
         released = threading.Event()
-        close_blocking = AioSparkCursor._close_blocking
+        close_blocking = SparkBaseCursor.close
 
         def terminate_session(**request):
             requests.append(request["SessionId"])
@@ -512,7 +513,7 @@ class TestAioSparkCursor:
             released.set()
 
         with (
-            patch.object(AioSparkCursor, "_close_blocking", release_cursor),
+            patch.object(SparkBaseCursor, "close", release_cursor),
             patch.object(client, "start_session", return_value={"SessionId": "session"}),
             patch.object(client, "get_session_status", side_effect=session_request),
             patch.object(client, "get_session", side_effect=session_request),
