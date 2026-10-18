@@ -240,11 +240,22 @@ def test_cursor_unknown_constructor_keyword(offline_connection, cursor_class):
         offline_connection.cursor(cursor_class)
 
 
+@pytest.mark.parametrize(
+    "given_by", ["connection", "cursor_kwargs", "cursor_kwargs_over_connection"]
+)
 @pytest.mark.parametrize("cursor_class", CURSOR_CLASSES)
-async def test_cursor_accepts_connection_callbacks(offline_connection, cursor_class):
-    started, polled = [], []
-    offline_connection.on_start_query_execution = started.append
-    offline_connection.on_poll = polled.append
+async def test_cursor_accepts_connection_callbacks(offline_connection, cursor_class, given_by):
+    """The connection's callbacks, or the ones its cursor_kwargs give over them, run."""
+    started, polled, overridden = [], [], []
+    callbacks = {"on_start_query_execution": started.append, "on_poll": polled.append}
+    if given_by == "connection":
+        for name, callback in callbacks.items():
+            setattr(offline_connection, name, callback)
+    else:
+        if given_by == "cursor_kwargs_over_connection":
+            for name in callbacks:
+                setattr(offline_connection, name, overridden.append)
+        offline_connection.cursor_kwargs = callbacks
 
     with answered_requests(offline_connection.client):
         async with _opened_cursor(offline_connection, cursor_class) as cursor:
@@ -260,6 +271,7 @@ async def test_cursor_accepts_connection_callbacks(offline_connection, cursor_cl
     assert [execution.state for execution in polled] == ["FAILED"]
     # The Async and Spark cursors do not run on_start_query_execution.
     assert started == (["query-id"] if cursor_class in START_CALLBACK_CURSORS else [])
+    assert overridden == []
 
 
 # aio/test_connection.py tests the native asyncio cursors.
