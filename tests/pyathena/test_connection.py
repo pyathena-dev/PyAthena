@@ -243,12 +243,15 @@ def test_cursor_unknown_constructor_keyword(offline_connection, cursor_class):
 @pytest.mark.parametrize("given_by", ["connection", "cursor_kwargs"])
 @pytest.mark.parametrize("cursor_class", CURSOR_CLASSES)
 async def test_cursor_accepts_connection_callbacks(offline_connection, cursor_class, given_by):
-    started, polled = [], []
+    """The connection's callbacks, or the ones its cursor_kwargs give over them, run."""
+    started, polled, overridden = [], [], []
     callbacks = {"on_start_query_execution": started.append, "on_poll": polled.append}
     if given_by == "connection":
         for name, callback in callbacks.items():
             setattr(offline_connection, name, callback)
     else:
+        for name in callbacks:
+            setattr(offline_connection, name, overridden.append)
         offline_connection.cursor_kwargs = callbacks
 
     with answered_requests(offline_connection.client):
@@ -265,6 +268,7 @@ async def test_cursor_accepts_connection_callbacks(offline_connection, cursor_cl
     assert [execution.state for execution in polled] == ["FAILED"]
     # The Async and Spark cursors do not run on_start_query_execution.
     assert started == (["query-id"] if cursor_class in START_CALLBACK_CURSORS else [])
+    assert overridden == []
 
 
 # aio/test_connection.py tests the native asyncio cursors.
