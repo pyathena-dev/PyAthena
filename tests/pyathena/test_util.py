@@ -427,19 +427,30 @@ def test_wait_with_retry_stop_relays_stop(scope):
     assert time.monotonic() - started < EVENT_TIMEOUT
 
 
+class _CheckedEvent(threading.Event):
+    """An event that records each check of whether it is set."""
+
+    def __init__(self):
+        super().__init__()
+        self.checked = threading.Event()
+
+    def is_set(self):
+        self.checked.set()
+        return super().is_set()
+
+
 def test_wait_with_retry_stop_unstoppable():
     """A wait in an unstoppable block does not relay the stops of the enclosing scopes."""
-    event, stop, release = threading.Event(), threading.Event(), threading.Event()
+    event, stop = threading.Event(), threading.Event()
     event.set()
+    # The work ends once the wait checks the scope opened in the block, which is never stopped.
+    probe = _CheckedEvent()
 
     def work():
-        assert release.wait(EVENT_TIMEOUT)
+        assert probe.checked.wait(EVENT_TIMEOUT)
         return stop.is_set()
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(work)
-        timer = threading.Timer(0.3, release.set)
-        timer.start()
-        with stop_retries_on(event), unstoppable_retries():
+        with stop_retries_on(event), unstoppable_retries(), stop_retries_on(probe):
             assert wait_with_retry_stop(future, stop=stop) is False
-        timer.join()
