@@ -127,7 +127,11 @@ class TestPolarsCursor:
         ("polars_cursor", "unload"),
         [
             ({"cursor_kwargs": {"unload": False}}, False),
-            ({"cursor_kwargs": {"unload": True}}, True),
+            pytest.param(
+                {"cursor_kwargs": {"unload": True}},
+                True,
+                marks=pytest.mark.skipif(not _POLARS_2, reason="Polars 1.x reads at nanoseconds."),
+            ),
         ],
         indirect=["polars_cursor"],
         ids=["csv", "unload"],
@@ -135,7 +139,9 @@ class TestPolarsCursor:
     def test_temporal_types(self, polars_cursor, unload):
         """Temporal values convert as the contract of #1212 defines.
 
-        Types that Polars cannot represent stay Athena's text.
+        Types that Polars cannot represent stay Athena's text. Polars 1.x reads the
+        UNLOAD timestamps at nanoseconds, which the years outside 1677-2262 of the
+        query exceed; see test_unload_timestamps_polars_1 for its read.
         """
         types = {"timestamp": pl.Datetime("us"), "date": pl.Date()}
         columns = temporal.columns(unload)
@@ -167,7 +173,11 @@ class TestPolarsCursor:
     @pytest.mark.parametrize(
         ("polars_cursor", "kwargs"),
         [
-            ({"cursor_kwargs": {"unload": True}}, {}),
+            pytest.param(
+                {"cursor_kwargs": {"unload": True}},
+                {},
+                marks=pytest.mark.skipif(not _POLARS_2, reason="Polars 1.x reads at nanoseconds."),
+            ),
             ({"cursor_kwargs": {"unload": True, "chunksize": 1}}, {}),
             pytest.param(
                 {"cursor_kwargs": {"unload": True, "chunksize": 1}},
@@ -209,6 +219,7 @@ class TestPolarsCursor:
     @pytest.mark.parametrize(
         ("polars_cursor", "kwargs", "columns", "warned"),
         [
+            ({"cursor_kwargs": {"unload": True}}, {}, ["id", "ts"], True),
             ({"cursor_kwargs": {"unload": True}}, {"columns": ["ts"]}, ["ts"], True),
             (
                 {"cursor_kwargs": {"unload": True, "chunksize": 1}},
@@ -219,15 +230,14 @@ class TestPolarsCursor:
             ({"cursor_kwargs": {"unload": True}}, {"columns": ["id"]}, ["id"], False),
         ],
         indirect=["polars_cursor"],
-        ids=["whole", "scanned-chunks", "no-timestamps"],
+        ids=["whole", "whole-read-options", "scanned-chunks", "no-timestamps"],
     )
-    def test_unload_timestamps_with_read_options_polars_1(
-        self, polars_cursor, caplog, kwargs, columns, warned
-    ):
-        """With read options, Polars 1.x reads the timestamps itself and a warning is logged.
+    def test_unload_timestamps_polars_1(self, polars_cursor, caplog, kwargs, columns, warned):
+        """Polars 1.x reads the timestamps itself at nanoseconds, and a warning is logged.
 
-        The timestamps are cast to microseconds; the warning is logged only when the read
-        has timestamps.
+        The timestamps are cast to microseconds; the warning, which says that values
+        outside 1677-09-21 to 2262-04-11 are wrong, is logged only when the read has
+        timestamps.
         """
         query = "SELECT 1 AS id, TIMESTAMP '2020-01-02 03:04:05.123' AS ts"
         with caplog.at_level(logging.WARNING, logger="pyathena.polars.result_set"):
@@ -243,6 +253,7 @@ class TestPolarsCursor:
             if r.name == "pyathena.polars.result_set" and r.levelno == logging.WARNING
         ]
         assert bool(warnings) is warned
+        assert all("outside 1677-09-21 to 2262-04-11 are wrong" in r.getMessage() for r in warnings)
 
     @pytest.mark.skipif(not _POLARS_2, reason="Polars 1.x reads INT96 at nanoseconds.")
     @pytest.mark.parametrize(
