@@ -209,11 +209,15 @@ class PandasCursor(WithFetch):
         Returns:
             Self reference for method chaining.
 
+        Raises:
+            ProgrammingError: If the cursor is closed.
+
         Example:
             >>> cursor.execute("SELECT * FROM sales WHERE year = %(year)s",
             ...                {"year": 2023})
             >>> df = cursor.as_pandas()  # Returns pandas DataFrame
         """
+        self._ensure_open()
         self._reset_state()
         options = ExecuteOptions.resolve(
             options,
@@ -234,9 +238,7 @@ class PandasCursor(WithFetch):
             options=options,
         )
 
-        # Call user callbacks immediately after start_query_execution
-        self._call_on_start_query_execution(self.query_id, options)
-        query_execution = cast(AthenaQueryExecution, self._poll(self.query_id))
+        query_execution = cast(AthenaQueryExecution, self._poll(self.query_id, options))
         if query_execution.state == AthenaQueryExecution.STATE_SUCCEEDED:
             self.result_set = AthenaPandasResultSet(
                 connection=self._connection,
@@ -272,7 +274,7 @@ class PandasCursor(WithFetch):
             DataFrame when chunksize is None, PandasDataFrameIterator when chunksize is set.
 
         Raises:
-            ProgrammingError: If no result set is available.
+            ProgrammingError: If the cursor is closed or has no result set.
         """
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
@@ -295,6 +297,10 @@ class PandasCursor(WithFetch):
         Yields:
             DataFrame: Individual chunks of the result set when chunking is enabled,
                       or the entire DataFrame as a single chunk when chunking is disabled.
+
+        Raises:
+            ProgrammingError: If the cursor is closed or has no result set when
+                the iteration starts.
 
         Examples:
             # Explicit chunksize

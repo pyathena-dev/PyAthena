@@ -96,3 +96,10 @@ class TestAsyncS3FSCursor:
         kwargs = result_set_class.call_args.kwargs
         expected = {**cursor_kwargs, **execute_kwargs}
         assert {key: kwargs[key] for key in expected} == expected
+
+    def test_closed(self, async_s3fs_cursor):
+        """GH-1207: a closed cursor rejects execute()."""
+        async_s3fs_cursor.close()
+
+        with pytest.raises(ProgrammingError):
+            async_s3fs_cursor.execute("SELECT * FROM one_row")

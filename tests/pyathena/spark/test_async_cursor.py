@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pyathena import NotSupportedError, OperationalError
+from pyathena import NotSupportedError, OperationalError, ProgrammingError
 from pyathena.model import AthenaCalculationExecutionStatus
 from pyathena.spark.async_cursor import AsyncSparkCursor
 from tests import ENV
@@ -231,6 +231,7 @@ class TestAsyncSparkCursor:
     def test_execute_rejects_parameters(self, parameters):
         """Any parameters other than None raise before a calculation starts (no AWS)."""
         cursor = AsyncSparkCursor.__new__(AsyncSparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._closed = False
         cursor._calculation_id = "previous"
         cursor._executor = MagicMock()
 
@@ -247,6 +248,7 @@ class TestAsyncSparkCursor:
     def test_execute_rejects_work_group(self):
         """work_group is not an execute() argument, even when None (no AWS)."""
         cursor = AsyncSparkCursor.__new__(AsyncSparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._closed = False
         cursor._calculation_id = "previous"
         cursor._executor = MagicMock()
 
@@ -277,3 +279,29 @@ class TestAsyncSparkCursor:
         assert (start["SessionId"], start["CodeBlock"]) == ("session", "code")
         assert calculation_id == "calculation-id"
         assert calculation_execution.state == AthenaCalculationExecutionStatus.STATE_COMPLETED
+
+    def test_closed(self):
+        """GH-1207: a closed cursor rejects operations without requests (no AWS)."""
+        cursor = offline_spark_cursor(AsyncSparkCursor)
+        client = cursor.connection.client
+        with answered_requests(client, COMPLETED_CALCULATION_RESPONSES):
+            calculation_id, future = cursor.execute("code")
+            calculation_execution = future.result(_TIMEOUT)
+        cursor.close()
+
+        with answered_requests(client) as requests:
+            with pytest.raises(ProgrammingError):
+                cursor.execute("code")
+            with pytest.raises(ProgrammingError):
+                cursor.executemany("code", [])
+            with pytest.raises(ProgrammingError):
+                cursor.cancel(calculation_id)
+            with pytest.raises(ProgrammingError):
+                cursor.calculation_execution(calculation_id)
+            with pytest.raises(ProgrammingError):
+                cursor.poll(calculation_id)
+            with pytest.raises(ProgrammingError):
+                cursor.get_std_out(calculation_execution)
+            with pytest.raises(ProgrammingError):
+                cursor.get_std_error(calculation_execution)
+        assert requests == []

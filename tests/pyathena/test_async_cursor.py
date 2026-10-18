@@ -169,6 +169,23 @@ class TestAsyncCursor:
         cursor.close()
         conn.close()
 
+    def test_closed(self, async_cursor):
+        """GH-1207: a closed cursor rejects operations."""
+        async_cursor.close()
+
+        with pytest.raises(ProgrammingError):
+            async_cursor.execute("SELECT * FROM one_row")
+        with pytest.raises(ProgrammingError):
+            async_cursor.executemany("SELECT * FROM one_row", [])
+        with pytest.raises(ProgrammingError):
+            async_cursor.description("query_id")
+        with pytest.raises(ProgrammingError):
+            async_cursor.query_execution("query_id")
+        with pytest.raises(ProgrammingError):
+            async_cursor.poll("query_id")
+        with pytest.raises(ProgrammingError):
+            async_cursor.cancel("query_id")
+
 
 class TestAsyncDictCursor:
     def test_dict_type(self, async_dict_cursor):

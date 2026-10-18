@@ -292,11 +292,18 @@ class TestAthenaPandasResultSet:
         assert result_set.fetchall() == [(1,), (2,)]
 
     def test_fetch_after_close(self):
+        """GH-1207: the fetches and DataFrame methods of a closed result set raise."""
         result_set = _fetching_result_set(pd.DataFrame({"n": [1, 2]}), arraysize=3)
         result_set.close()
-        assert result_set.fetchone() is None
-        assert result_set.fetchmany() == []
-        assert result_set.fetchall() == []
+        for fetch in (
+            result_set.fetchone,
+            result_set.fetchmany,
+            result_set.fetchall,
+            result_set.as_pandas,
+            result_set.iter_chunks,
+        ):
+            with pytest.raises(ProgrammingError):
+                fetch()
         assert result_set.rownumber is None
 
     @pytest.mark.parametrize("infer_string", [True, False])

@@ -14,14 +14,14 @@ import pytest
 from pyathena.arrow.converter import DefaultArrowTypeConverter
 from pyathena.arrow.result_set import AthenaArrowResultSet
 from pyathena.connection import Connection
-from pyathena.error import OperationalError
+from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig
 
 
 class TestAthenaArrowResultSet:
     def test_fetch_after_close(self):
-        """close() discards the rows that are not fetched yet.
+        """GH-1207: the fetches and table methods of a closed result set raise.
 
         No AWS calls; the first page request and the result table are mocked.
         """
@@ -44,9 +44,15 @@ class TestAthenaArrowResultSet:
             )
         assert result_set.fetchone() == (1,)
         result_set.close()
-        assert result_set.fetchone() is None
-        assert result_set.fetchmany() == []
-        assert result_set.fetchall() == []
+        for fetch in (
+            result_set.fetchone,
+            result_set.fetchmany,
+            result_set.fetchall,
+            result_set.as_arrow,
+            result_set.as_polars,
+        ):
+            with pytest.raises(ProgrammingError):
+                fetch()
 
     def test_csv_file_closed_when_stream_fails(self):
         """The CSV result file is closed when reading it cannot start, as when HEAD fails.

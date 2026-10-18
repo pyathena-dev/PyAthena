@@ -14,6 +14,13 @@ print(cursor.description)
 print(cursor.fetchall())
 ```
 
+Closing a cursor, for example at the end of a `with` block, also closes its result set.
+`AsyncCursor` and its variants do not close the result sets that their futures returned; close them yourself.
+After that, `execute()`, `executemany()`, the fetch methods, and the other methods of the cursor raise `ProgrammingError`, as DB API 2.0 requires.
+The `query_id` property keeps the ID of the last query.
+A closed result set, such as one that an `AsyncCursor` future returned, also raises `ProgrammingError` from its fetch methods and from `as_pandas()`, `as_arrow()`, `as_polars()`, and `iter_chunks()`.
+An iterator that `iter_chunks()` returned before the close and that reads the result in chunks yields no more chunks.
+
 ## Keyword arguments in PyAthena 4.0
 
 Starting with PyAthena 4.0, connection settings and cursor constructor settings must be passed as keyword arguments.
@@ -501,6 +508,7 @@ return the query ID immediately through their different execution model.
 
 With `kill_on_interrupt` enabled, which is the default, a `KeyboardInterrupt` while `execute()` waits for the query
 requests cancellation, waits until the query reaches a terminal state, and then propagates.
+In the synchronous cursors, a `KeyboardInterrupt` raised in an `on_start_query_execution` callback cancels the query in the same way.
 Cancellation is a best-effort request, so the query can still end as `SUCCEEDED` or `FAILED`.
 The `query_id` property keeps the ID of the interrupted query.
 If the cancellation request or that wait fails, the `KeyboardInterrupt` propagates with the error as its cause.

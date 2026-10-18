@@ -480,7 +480,9 @@ class AioBaseCursor(BaseCursor):
 
         Raises:
             OperationalError: If the request fails.
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         databases: list[AthenaDatabase] = []
         next_token = None
 
@@ -574,7 +576,9 @@ class AioBaseCursor(BaseCursor):
         Raises:
             OperationalError: If the request fails, including when the table does
                 not exist.
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         schema_name = schema_name if schema_name else self._schema_name
         return await self._async_with_glue_fallback(
             catalog_name,
@@ -671,7 +675,9 @@ class AioBaseCursor(BaseCursor):
 
         Raises:
             OperationalError: If the request fails.
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         schema_name = schema_name if schema_name else self._schema_name
         # Pages already read are kept, so a retried request resumes after them.
         metadata: list[AthenaTableMetadata] = []
@@ -745,7 +751,11 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
             **kwargs: Additional keyword arguments passed to each ``execute()``.
                 An empty parameter list makes no ``execute()`` call, so it does
                 not report unsupported keyword names.
+
+        Raises:
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         await self._async_reset_state()
         rowcount = 0
         try:
@@ -782,8 +792,10 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
         """Cancel the currently executing query.
 
         Raises:
-            ProgrammingError: If no query is currently executing.
+            ProgrammingError: If the cursor is closed or no query is currently
+                executing.
         """
+        self._ensure_open()
         if not self.query_id:
             raise ProgrammingError("QueryExecutionId is none or empty.")
         await self._cancel(self.query_id)
@@ -801,7 +813,7 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
             A tuple representing the next row, or None if no more rows.
 
         Raises:
-            ProgrammingError: If no result set is available.
+            ProgrammingError: If the cursor is closed or has no result set.
         """
         return await self._fetch_in_thread(operator.methodcaller("fetchone"))
 
@@ -822,7 +834,7 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
             List of tuples representing the fetched rows.
 
         Raises:
-            ProgrammingError: If no result set is available.
+            ProgrammingError: If the cursor is closed or has no result set.
         """
         return await self._fetch_in_thread(operator.methodcaller("fetchmany", size))
 
@@ -839,7 +851,7 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
             List of tuples representing all remaining rows.
 
         Raises:
-            ProgrammingError: If no result set is available.
+            ProgrammingError: If the cursor is closed or has no result set.
         """
         return await self._fetch_in_thread(operator.methodcaller("fetchall"))
 
@@ -858,7 +870,7 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
             The return value of ``fetch``.
 
         Raises:
-            ProgrammingError: If no result set is available.
+            ProgrammingError: If the cursor is closed or has no result set.
         """
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
@@ -878,6 +890,17 @@ class WithAsyncFetch(WithResultSet, AioBaseCursor, CursorIterator):
             TypeError: Always, because the fetch methods are coroutines.
         """
         raise TypeError(f"'{type(self).__name__}' object is not iterable; use 'async for' instead.")
+
+    @override
+    def __next__(self) -> NoReturn:
+        """Reject synchronous iteration with ``next()``; use ``async for`` instead.
+
+        Raises:
+            TypeError: Always, because the fetch methods are coroutines.
+        """
+        raise TypeError(
+            f"'{type(self).__name__}' object is not an iterator; use 'async for' instead."
+        )
 
     def __aiter__(self):
         return self

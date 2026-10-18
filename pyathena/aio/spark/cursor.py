@@ -319,7 +319,11 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
 
         Returns:
             The standard output as a string, or None if no output is available.
+
+        Raises:
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         if not self._calculation_execution or not self._calculation_execution.std_out_s3_uri:
             return None
         return await self._read_s3_file_as_text(self._calculation_execution.std_out_s3_uri)
@@ -329,7 +333,11 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
 
         Returns:
             The standard error as a string, or None if no error output is available.
+
+        Raises:
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         if not self._calculation_execution or not self._calculation_execution.std_error_s3_uri:
             return None
         return await self._read_s3_file_as_text(self._calculation_execution.std_error_s3_uri)
@@ -362,7 +370,9 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
             TypeError: If an unknown keyword argument is given.
             NotSupportedError: If ``parameters`` is not None.
             OperationalError: If the calculation does not complete successfully.
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         self._validate_execute_kwargs(kwargs)
         if parameters is not None:
             raise NotSupportedError("Spark cursors do not support parameters.")
@@ -387,8 +397,9 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
         """Cancel the currently running calculation.
 
         Raises:
-            ProgrammingError: If no calculation is running.
+            ProgrammingError: If the cursor is closed or no calculation is running.
         """
+        self._ensure_open()
         if not self.calculation_id:
             raise ProgrammingError("CalculationExecutionId is none or empty.")
         await self._cancel(self.calculation_id)
@@ -401,9 +412,12 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
         further calls do not terminate the session again; after a failed one,
         calling this method again retries it.
 
+        Later operations on the cursor raise ``ProgrammingError``.
+
         Raises:
             OperationalError: If terminating the session fails.
         """
+        self._closed = True
         if self._terminate_session_on_close:
             await self._terminate_session()
             # Terminated; later calls do nothing.
@@ -416,12 +430,25 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
         seq_of_parameters: list[dict[str, Any] | list[str] | None],
         **kwargs,
     ) -> None:
+        """Reject ``executemany()``, which Spark cursors do not support.
+
+        Args:
+            operation: The code to run.
+            seq_of_parameters: Sequence of parameter sets.
+            **kwargs: Additional arguments.
+
+        Raises:
+            NotSupportedError: If the cursor is open.
+            ProgrammingError: If the cursor is closed.
+        """
+        self._ensure_open()
         raise NotSupportedError
 
     def __aiter__(self):
         return self
 
     async def __anext__(self):
+        self._ensure_open()
         raise StopAsyncIteration
 
     async def __aenter__(self):

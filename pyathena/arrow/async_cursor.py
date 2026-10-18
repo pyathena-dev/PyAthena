@@ -219,7 +219,11 @@ class AsyncArrowCursor(AsyncCursor):
 
         Returns:
             Tuple of (query_id, future) where future resolves to AthenaArrowResultSet.
+
+        Raises:
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         self._validate_execute_kwargs(kwargs, ("block_size", "connect_timeout", "request_timeout"))
         options = ExecuteOptions.resolve(
             options,

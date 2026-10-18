@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from pyathena.converter import DefaultTypeConverter
-from pyathena.error import OperationalError
+from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet
 from pyathena.util import RetryConfig
@@ -99,11 +99,17 @@ class TestAthenaResultSet:
         assert result_set.connection.client.get_query_results.call_count == 2
 
     def test_fetch_after_close(self):
+        """GH-1207: the fetches of a closed result set raise without a request."""
         result_set = _fetching_result_set(("1", "2"), ("3",))
+        client = result_set._connection.client
         result_set.close()
-        assert result_set.fetchmany() == []
-        assert result_set.fetchall() == []
+        for fetch in (result_set.fetchone, result_set.fetchmany, result_set.fetchall):
+            with pytest.raises(ProgrammingError):
+                fetch()
+        with pytest.raises(ProgrammingError):
+            next(result_set)
         assert result_set.rownumber is None
+        assert client.get_query_results.call_count == 1
 
     def test_fetchone_across_pages(self):
         result_set = _fetching_result_set(("1", "2"), ("3",))

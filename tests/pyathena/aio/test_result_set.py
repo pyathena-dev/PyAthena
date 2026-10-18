@@ -66,6 +66,9 @@ class TestAthenaAioResultSet:
             match=rf"'{result_set_class.__name__}' object is not iterable; use 'async for'",
         ):
             iter(result_set)
+        # GH-1207: next() called directly returned an un-awaited fetchone() coroutine.
+        with pytest.raises(TypeError):
+            next(result_set)
 
     @pytest.mark.parametrize(
         ("result_set_class", "expected"),
@@ -151,9 +154,12 @@ class TestAthenaAioResultSet:
         assert result_set.connection.client.get_query_results.call_count == 2
 
     async def test_fetch_after_close(self):
+        """GH-1207: the fetches of a closed result set raise."""
         result_set = await _create_result_set(AthenaAioResultSet, [("1", "2"), ("3",)])
         result_set.close()
-        assert await result_set.fetchone() is None
-        assert await result_set.fetchmany() == []
-        assert await result_set.fetchall() == []
+        for fetch in (result_set.fetchone, result_set.fetchmany, result_set.fetchall):
+            with pytest.raises(ProgrammingError):
+                await fetch()
+        with pytest.raises(ProgrammingError):
+            await anext(result_set)
         assert result_set.rownumber is None

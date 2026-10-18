@@ -178,10 +178,14 @@ class ArrowCursor(WithFetch):
         Returns:
             Self reference for method chaining.
 
+        Raises:
+            ProgrammingError: If the cursor is closed.
+
         Example:
             >>> cursor.execute("SELECT * FROM sales WHERE year = 2023")
             >>> table = cursor.as_arrow()  # Returns Apache Arrow Table
         """
+        self._ensure_open()
         self._validate_execute_kwargs(kwargs, ("block_size", "connect_timeout", "request_timeout"))
         self._reset_state()
         options = ExecuteOptions.resolve(
@@ -203,9 +207,7 @@ class ArrowCursor(WithFetch):
             options=options,
         )
 
-        # Call user callbacks immediately after start_query_execution
-        self._call_on_start_query_execution(self.query_id, options)
-        query_execution = cast(AthenaQueryExecution, self._poll(self.query_id))
+        query_execution = cast(AthenaQueryExecution, self._poll(self.query_id, options))
         if query_execution.state == AthenaQueryExecution.STATE_SUCCEEDED:
             self.result_set = AthenaArrowResultSet(
                 connection=self._connection,
@@ -235,7 +237,7 @@ class ArrowCursor(WithFetch):
             Apache Arrow Table containing all query results.
 
         Raises:
-            ProgrammingError: If no query has been executed or no results are available.
+            ProgrammingError: If the cursor is closed or has no result set.
 
         Example:
             >>> cursor = connection.cursor(ArrowCursor)
@@ -258,7 +260,7 @@ class ArrowCursor(WithFetch):
             Polars DataFrame containing all query results.
 
         Raises:
-            ProgrammingError: If no query has been executed or no results are available.
+            ProgrammingError: If the cursor is closed or has no result set.
             ImportError: If polars is not installed.
 
         Example:

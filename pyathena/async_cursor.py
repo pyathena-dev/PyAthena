@@ -131,6 +131,15 @@ class AsyncCursor(BaseCursor):
 
     @override
     def close(self, wait: bool = False) -> None:
+        """Close the cursor and shut down its executor.
+
+        Later operations on the cursor raise ``ProgrammingError``. Futures
+        already returned still run to completion.
+
+        Args:
+            wait: Whether to wait for submitted futures to finish before returning.
+        """
+        self._closed = True
         self._executor.shutdown(wait=wait)
 
     def _description(
@@ -151,7 +160,11 @@ class AsyncCursor(BaseCursor):
 
         Returns:
             Future object containing the DB API 2.0 column descriptions, or None.
+
+        Raises:
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         return self._executor.submit(self._description, query_id)
 
     def query_execution(self, query_id: str) -> Future[AthenaQueryExecution]:
@@ -165,7 +178,11 @@ class AsyncCursor(BaseCursor):
 
         Returns:
             Future object containing AthenaQueryExecution with query details.
+
+        Raises:
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         return self._executor.submit(self._get_query_execution, query_id)
 
     def poll(self, query_id: str) -> Future[AthenaQueryExecution]:
@@ -184,7 +201,11 @@ class AsyncCursor(BaseCursor):
         Note:
             This method performs polling internally, so it will take time proportional
             to your query execution duration.
+
+        Raises:
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         return cast("Future[AthenaQueryExecution]", self._executor.submit(self._poll, query_id))
 
     def _collect_result_set(
@@ -248,12 +269,16 @@ class AsyncCursor(BaseCursor):
             - query_id: Athena query execution ID for tracking
             - future: Future object for result retrieval
 
+        Raises:
+            ProgrammingError: If the cursor is closed.
+
         Example:
             >>> query_id, future = cursor.execute("SELECT * FROM large_table")
             >>> print(f"Query started: {query_id}")
             >>> # Do other work while query runs...
             >>> result_set = future.result()  # Wait for completion
         """
+        self._ensure_open()
         self._validate_execute_kwargs(kwargs)
         options = ExecuteOptions.resolve(
             options,
@@ -294,11 +319,13 @@ class AsyncCursor(BaseCursor):
 
         Raises:
             NotSupportedError: Always raised as this operation is not supported.
+            ProgrammingError: If the cursor is closed.
 
         Note:
             For bulk operations, consider using execute() with parameterized
             queries or batch processing patterns instead.
         """
+        self._ensure_open()
         raise NotSupportedError
 
     def cancel(self, query_id: str) -> Future[None]:
@@ -318,7 +345,11 @@ class AsyncCursor(BaseCursor):
             >>> # Later, cancel the query
             >>> cancel_future = cursor.cancel(query_id)
             >>> cancel_future.result()  # Wait for cancellation to complete
+
+        Raises:
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         return self._executor.submit(self._cancel, query_id)
 
 

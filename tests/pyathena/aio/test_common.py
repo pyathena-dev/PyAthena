@@ -68,6 +68,9 @@ class TestWithAsyncFetch:
             TypeError, match=rf"'{cursor_class.__name__}' object is not iterable; use 'async for'"
         ):
             iter(cursor)
+        # GH-1207: next() called directly returned an un-awaited fetchone() coroutine.
+        with pytest.raises(TypeError):
+            next(cursor)
 
     @pytest.mark.parametrize(
         "cursor_class",

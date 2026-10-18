@@ -147,7 +147,11 @@ class AsyncSparkCursor(SparkBaseCursor):
 
         Returns:
             Future object containing the ``AthenaCalculationExecution``.
+
+        Raises:
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         return self._executor.submit(self._get_calculation_execution, query_id)
 
     def get_std_out(
@@ -162,7 +166,11 @@ class AsyncSparkCursor(SparkBaseCursor):
         Returns:
             Future object containing the output text with leading and trailing
             whitespace removed, or None if the calculation has no ``std_out_s3_uri``.
+
+        Raises:
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         if not calculation_execution.std_out_s3_uri:
             return None
         return self._executor.submit(
@@ -181,7 +189,11 @@ class AsyncSparkCursor(SparkBaseCursor):
         Returns:
             Future object containing the error output text with leading and trailing
             whitespace removed, or None if the calculation has no ``std_error_s3_uri``.
+
+        Raises:
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         if not calculation_execution.std_error_s3_uri:
             return None
         return self._executor.submit(
@@ -196,7 +208,11 @@ class AsyncSparkCursor(SparkBaseCursor):
 
         Returns:
             Future object containing the calculation execution in a terminal state.
+
+        Raises:
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         return cast(
             "Future[AthenaCalculationExecution]", self._executor.submit(self._poll, query_id)
         )
@@ -228,7 +244,9 @@ class AsyncSparkCursor(SparkBaseCursor):
         Raises:
             TypeError: If an unknown keyword argument is given.
             NotSupportedError: If ``parameters`` is not None.
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         self._validate_execute_kwargs(kwargs)
         if parameters is not None:
             raise NotSupportedError("Spark cursors do not support parameters.")
@@ -249,5 +267,9 @@ class AsyncSparkCursor(SparkBaseCursor):
         Returns:
             Future object that completes when the ``StopCalculationExecution``
             request has been sent.
+
+        Raises:
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         return self._executor.submit(self._cancel, query_id)

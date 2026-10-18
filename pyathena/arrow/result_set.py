@@ -421,7 +421,11 @@ class AthenaArrowResultSet(AthenaResultSet):
 
         Returns:
             The Arrow Table that holds the query results.
+
+        Raises:
+            ProgrammingError: If the result set is closed.
         """
+        self._ensure_open()
         return self._table
 
     def as_polars(self) -> pl.DataFrame:
@@ -435,6 +439,7 @@ class AthenaArrowResultSet(AthenaResultSet):
 
         Raises:
             ImportError: If polars is not installed.
+            ProgrammingError: If the result set is closed.
 
         Example:
             >>> cursor = connection.cursor(ArrowCursor)
@@ -442,6 +447,7 @@ class AthenaArrowResultSet(AthenaResultSet):
             >>> df = cursor.as_polars()
             >>> # Use with Polars operations
         """
+        self._ensure_open()
         try:
             import polars as pl
 

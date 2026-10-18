@@ -547,6 +547,37 @@ class TestArrowCursor:
     def test_cancel_initial(self, arrow_cursor):
         pytest.raises(ProgrammingError, arrow_cursor.cancel)
 
+    def test_closed(self, arrow_cursor):
+        """GH-1207: a closed cursor rejects operations."""
+        arrow_cursor.execute("SELECT * FROM one_row")
+        arrow_cursor.close()
+
+        with pytest.raises(ProgrammingError):
+            arrow_cursor.execute("SELECT * FROM one_row")
+        with pytest.raises(ProgrammingError):
+            arrow_cursor.as_arrow()
+        with pytest.raises(ProgrammingError):
+            arrow_cursor.as_polars()
+
+    def test_execute_interrupted_in_start_callback(self, arrow_cursor):
+        """GH-1207: an interrupt in on_start_query_execution stops the query."""
+        client = arrow_cursor.connection.client
+        reported = []
+
+        def on_start_query_execution(query_id):
+            reported.append(query_id)
+            raise KeyboardInterrupt
+
+        with (
+            patch.object(client, "stop_query_execution", wraps=client.stop_query_execution) as stop,
+            pytest.raises(KeyboardInterrupt),
+        ):
+            arrow_cursor.execute(
+                "SELECT * FROM one_row", on_start_query_execution=on_start_query_execution
+            )
+
+        stop.assert_called_once_with(QueryExecutionId=reported[0])
+
     def test_no_ops(self):
         conn = connect()
         cursor = conn.cursor(ArrowCursor)

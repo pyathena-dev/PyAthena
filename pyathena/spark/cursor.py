@@ -79,7 +79,11 @@ class SparkCursor(SparkBaseCursor, WithCalculationExecution):
         Returns:
             The standard output as a string, or None if no output is available
             or the calculation has not been executed.
+
+        Raises:
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         if not self._calculation_execution or not self._calculation_execution.std_out_s3_uri:
             return None
         return self._read_s3_file_as_text(self._calculation_execution.std_out_s3_uri)
@@ -94,7 +98,11 @@ class SparkCursor(SparkBaseCursor, WithCalculationExecution):
         Returns:
             The standard error as a string, or None if no error output is available
             or the calculation has not been executed.
+
+        Raises:
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         if not self._calculation_execution or not self._calculation_execution.std_error_s3_uri:
             return None
         return self._read_s3_file_as_text(self._calculation_execution.std_error_s3_uri)
@@ -127,7 +135,9 @@ class SparkCursor(SparkBaseCursor, WithCalculationExecution):
             TypeError: If an unknown keyword argument is given.
             NotSupportedError: If ``parameters`` is not None.
             OperationalError: If the calculation does not complete successfully.
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         self._validate_execute_kwargs(kwargs)
         if parameters is not None:
             raise NotSupportedError("Spark cursors do not support parameters.")
@@ -152,9 +162,10 @@ class SparkCursor(SparkBaseCursor, WithCalculationExecution):
         """Stop the calculation that ``execute()`` last started.
 
         Raises:
-            ProgrammingError: If no calculation ID is set.
+            ProgrammingError: If the cursor is closed or no calculation ID is set.
             OperationalError: If the ``StopCalculationExecution`` request fails.
         """
+        self._ensure_open()
         if not self.calculation_id:
             raise ProgrammingError("CalculationExecutionId is none or empty.")
         self._cancel(self.calculation_id)

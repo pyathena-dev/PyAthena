@@ -9,6 +9,7 @@ import time
 from abc import ABCMeta, abstractmethod
 from collections.abc import Callable, Collection
 from concurrent.futures import Future, wait
+from contextvars import copy_context
 from datetime import UTC, datetime, timedelta
 from inspect import Parameter, signature
 from typing import TYPE_CHECKING, Any, TypeVar, cast
@@ -258,6 +259,7 @@ class BaseCursor(metaclass=ABCMeta):
         # the query id immediately through their execution model and do not invoke it.
         self._on_start_query_execution = on_start_query_execution
         self._on_poll = on_poll
+        self._closed = False
 
     @staticmethod
     def get_default_converter(unload: bool = False) -> DefaultTypeConverter | Any:
@@ -295,6 +297,20 @@ class BaseCursor(metaclass=ABCMeta):
     def connection(self) -> Connection[Any]:
         """The connection that created this cursor."""
         return self._connection
+
+    @property
+    def is_closed(self) -> bool:
+        """Whether ``close()`` has been called on this cursor."""
+        return self._closed
+
+    def _ensure_open(self) -> None:
+        """Reject an operation on a closed cursor, as DB API 2.0 requires.
+
+        Raises:
+            ProgrammingError: If the cursor is closed.
+        """
+        if self._closed:
+            raise ProgrammingError("Cursor is closed.")
 
     def _validate_execute_kwargs(
         self, kwargs: dict[str, Any], allowed: Collection[str] = ()
@@ -595,7 +611,9 @@ class BaseCursor(metaclass=ABCMeta):
 
         Raises:
             OperationalError: If the request fails.
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         databases: list[AthenaDatabase] = []
         next_token = None
 
@@ -702,7 +720,9 @@ class BaseCursor(metaclass=ABCMeta):
         Raises:
             OperationalError: If the request fails, including when the table does
                 not exist.
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         schema_name = schema_name if schema_name else self._schema_name
         return self._with_glue_fallback(
             catalog_name,
@@ -797,7 +817,9 @@ class BaseCursor(metaclass=ABCMeta):
 
         Raises:
             OperationalError: If the request fails.
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         schema_name = schema_name if schema_name else self._schema_name
         # Pages already read are kept, so a retried request resumes after them.
         metadata: list[AthenaTableMetadata] = []
@@ -975,7 +997,9 @@ class BaseCursor(metaclass=ABCMeta):
                 return query_execution
             time.sleep(self._poll_interval)
 
-    def _poll(self, query_id: str) -> AthenaQueryExecution | AthenaCalculationExecution:
+    def _poll(
+        self, query_id: str, options: ExecuteOptions | None = None
+    ) -> AthenaQueryExecution | AthenaCalculationExecution:
         """Wait for an execution to reach a terminal state.
 
         On ``KeyboardInterrupt`` with ``kill_on_interrupt`` enabled, requests
@@ -985,6 +1009,10 @@ class BaseCursor(metaclass=ABCMeta):
 
         Args:
             query_id: The execution ID.
+            options: The options of the query that ``execute()`` started. If
+                given, the query-start callbacks run first (see
+                ``_call_on_start_query_execution()``), so that an interrupt in
+                them also cancels the query.
 
         Returns:
             The execution in a terminal state.
@@ -995,6 +1023,8 @@ class BaseCursor(metaclass=ABCMeta):
             OperationalError: If a status request fails.
         """
         try:
+            if options is not None:
+                self._call_on_start_query_execution(query_id, options)
             return self._poll_until_terminal(query_id)
         except KeyboardInterrupt as interrupt:
             if not self._kill_on_interrupt:
@@ -1021,14 +1051,10 @@ class BaseCursor(metaclass=ABCMeta):
     def _start_execution(self, start: Callable[[], str]) -> str:
         """Send a start request so that an interrupt stops the execution it starts.
 
-        With ``kill_on_interrupt`` enabled, the request runs on a helper thread.
-        On ``KeyboardInterrupt``, the cursor first tries to abandon the request.
-        This succeeds only if the helper has not begun the request by then; the
-        helper then never sends it, and the interrupt propagates. Otherwise the
-        cursor waits for the request to finish, records the execution ID with
-        ``_set_interrupted_execution_id()``, requests cancellation with
-        ``_cancel_and_wait()``, and re-raises the interrupt. Another
-        ``KeyboardInterrupt`` during that wait propagates at once.
+        With ``kill_on_interrupt`` enabled, the request is sent with
+        ``_start_in_thread()``. If it is interrupted after the request has begun,
+        the cursor records the execution ID with ``_set_interrupted_execution_id()``
+        and requests cancellation with ``_cancel_and_wait()``.
 
         Args:
             start: Sends the start request and returns the execution ID.
@@ -1044,14 +1070,46 @@ class BaseCursor(metaclass=ABCMeta):
         if not self._kill_on_interrupt:
             return start()
 
+        def stop(execution_id: str) -> None:
+            _logger.warning("Query canceled by user.")
+            self._set_interrupted_execution_id(execution_id)
+            self._cancel_and_wait(execution_id)
+
+        return self._start_in_thread(start, stop)
+
+    def _start_in_thread(self, start: Callable[[], str], release: Callable[[str], None]) -> str:
+        """Send a start request on a helper thread so that an interrupt releases what it starts.
+
+        The helper runs the request in a copy of the caller's context, so that the
+        caller's retry stop scope applies to it. On ``KeyboardInterrupt``, the
+        cursor first tries to abandon the request. This succeeds only if the
+        helper has not begun the request by then; the helper then never sends it,
+        and the interrupt propagates. Otherwise the cursor waits for the request
+        to finish, passes the ID it returns to ``release``, and re-raises the
+        interrupt. Another ``KeyboardInterrupt`` during that wait propagates at
+        once.
+
+        Args:
+            start: Sends the start request and returns the ID of what it starts.
+            release: Stops or releases what an interrupted request started.
+
+        Returns:
+            The ID that ``start`` returns.
+
+        Raises:
+            KeyboardInterrupt: If interrupted while starting. A failure to start
+                or of ``release`` becomes its ``__cause__``.
+            DatabaseError: If the request fails.
+        """
         future: Future[str] = Future()
+        context = copy_context()
 
         def run() -> None:
             # Begin the request only if no interrupt has given up on it yet.
             if not future.set_running_or_notify_cancel():
                 return
             try:
-                future.set_result(start())
+                future.set_result(context.run(start))
             except BaseException as e:
                 future.set_exception(e)
 
@@ -1062,11 +1120,8 @@ class BaseCursor(metaclass=ABCMeta):
             if future.cancel():
                 # The helper has not begun the request and never will.
                 raise
-            _logger.warning("Query canceled by user.")
             try:
-                execution_id = self._wait_for_start(future)
-                self._set_interrupted_execution_id(execution_id)
-                self._cancel_and_wait(execution_id)
+                release(self._wait_for_start(future))
             except Exception as e:
                 raise interrupt from e
             raise
@@ -1266,6 +1321,11 @@ class BaseCursor(metaclass=ABCMeta):
         model supports early access to the query ID (the synchronous and aio
         cursors) once ``_execute()`` returns it: after the StartQueryExecution
         API call, or with a reusable query ID found through ``cache_size``.
+        The synchronous cursors call it through ``_poll()``.
+
+        Args:
+            query_id: The query execution ID.
+            options: The options of the query.
         """
         if self._on_start_query_execution:
             self._on_start_query_execution(query_id)
@@ -1430,21 +1490,29 @@ class BaseCursor(metaclass=ABCMeta):
             _logger.exception("Failed to cancel query.")
             raise OperationalError(*e.args) from e
 
-    def setinputsizes(self, sizes):  # noqa: B027
+    def setinputsizes(self, sizes):
         """Accept input sizes as DB API 2.0 requires, and ignore them.
 
         Args:
             sizes: Sequence of parameter types or sizes.
-        """
 
-    def setoutputsize(self, size, column=None):  # noqa: B027
+        Raises:
+            ProgrammingError: If the cursor is closed.
+        """
+        self._ensure_open()
+
+    def setoutputsize(self, size, column=None):
         """Accept a column buffer size as DB API 2.0 requires, and ignore it.
 
         Args:
             size: Buffer size for large columns.
             column: Index of the column the size applies to, or None for all
                 large columns.
+
+        Raises:
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
 
     def __enter__(self):
         return self

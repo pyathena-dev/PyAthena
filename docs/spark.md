@@ -83,6 +83,9 @@ The calculation runs in the Spark session selected by the cursor's `session_id` 
 
 When a Spark cursor is created, it starts a new session and waits until the session is idle.
 If `session_id` is specified, the cursor uses that existing session instead, after waiting until it is idle.
+If starting the session or waiting for it fails, or a `KeyboardInterrupt` interrupts it, the cursor terminates the session it started on a best-effort basis before the error propagates, regardless of `kill_on_interrupt`.
+If that termination fails too, the original error propagates, and the session can keep running until its idle timeout.
+A second `KeyboardInterrupt` while the cursor waits for the start request to finish propagates at once and leaves the session running until its idle timeout.
 
 The session idle timeout minutes can be specified with the `session_idle_timeout_minutes` argument when creating
 the cursor and the engine DPU and Spark properties can also be specified with the `engine_configuration` argument.
@@ -118,6 +121,7 @@ The `terminate_session_on_close` argument changes which sessions the close metho
 
 Once the close method has terminated the session, calling it again does not terminate the session again.
 If termination fails, the close method raises `OperationalError`, and calling it again retries the termination.
+After the close method is called, the other methods of the cursor raise `ProgrammingError`, even if termination failed.
 
 The following example keeps the session started by the first cursor, runs another calculation on it with a second cursor,
 and terminates it when the second cursor is closed:

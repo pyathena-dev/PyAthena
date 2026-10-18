@@ -143,7 +143,11 @@ class AioCursor(WithAsyncFetch):
 
         Returns:
             Self reference for method chaining.
+
+        Raises:
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
         self._validate_execute_kwargs(kwargs)
         await self._async_reset_state()
         options = ExecuteOptions.resolve(
@@ -193,8 +197,8 @@ class AioCursor(WithAsyncFetch):
             no more rows.
 
         Raises:
-            ProgrammingError: If called before executing a query that
-                returns results.
+            ProgrammingError: If the cursor is closed, or if called before
+                executing a query that returns results.
         """
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
@@ -213,8 +217,8 @@ class AioCursor(WithAsyncFetch):
             The fetched rows.
 
         Raises:
-            ProgrammingError: If called before executing a query that
-                returns results.
+            ProgrammingError: If the cursor is closed, or if called before
+                executing a query that returns results.
         """
         if not self.has_result_set:
             raise ProgrammingError("No result set.")
@@ -231,8 +235,8 @@ class AioCursor(WithAsyncFetch):
             The remaining rows.
 
         Raises:
-            ProgrammingError: If called before executing a query that
-                returns results.
+            ProgrammingError: If the cursor is closed, or if called before
+                executing a query that returns results.
         """
         if not self.has_result_set:
             raise ProgrammingError("No result set.")

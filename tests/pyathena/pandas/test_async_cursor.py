@@ -324,3 +324,10 @@ class TestAsyncPandasCursor:
         expected["max_workers"] = expected.pop("s3_max_workers")
         assert {key: kwargs[key] for key in expected} == expected
         assert cursor._executor._max_workers == 1
+
+    def test_closed(self, async_pandas_cursor):
+        """GH-1207: a closed cursor rejects execute()."""
+        async_pandas_cursor.close()
+
+        with pytest.raises(ProgrammingError):
+            async_pandas_cursor.execute("SELECT * FROM one_row")

@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pyathena import NotSupportedError, OperationalError
+from pyathena import NotSupportedError, OperationalError, ProgrammingError
 from pyathena.model import AthenaCalculationExecutionStatus, AthenaSessionStatus
 from pyathena.spark.cursor import SparkCursor
 from pyathena.util import RetryConfig, stop_retries_on
@@ -211,6 +211,7 @@ class TestSparkCursor:
         """An interrupt cancels the calculation, waits for it, and is re-raised (no AWS)."""
         final_execution = MagicMock(state=final_state)
         cursor = SparkCursor.__new__(SparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._closed = False
         cursor._session_id = "session_id"
         cursor._poll_interval = 0
         cursor._kill_on_interrupt = True
@@ -243,6 +244,7 @@ class TestSparkCursor:
         """A failure to cancel or wait becomes the cause of the interrupt (no AWS)."""
         error = OperationalError("failed")
         cursor = SparkCursor.__new__(SparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._closed = False
         cursor._session_id = "session_id"
         cursor._poll_interval = 0
         cursor._kill_on_interrupt = True
@@ -275,6 +277,7 @@ class TestSparkCursor:
     def test_execute_interrupt_without_kill_on_interrupt(self):
         """Without kill_on_interrupt, an interrupt propagates without cancellation (no AWS)."""
         cursor = SparkCursor.__new__(SparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._closed = False
         cursor._session_id = "session_id"
         cursor._poll_interval = 0
         cursor._kill_on_interrupt = False
@@ -298,6 +301,7 @@ class TestSparkCursor:
     def test_execute_rejects_parameters(self, parameters):
         """Any parameters other than None raise before a calculation starts (no AWS)."""
         cursor = SparkCursor.__new__(SparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._closed = False
         cursor._calculation_id = "previous"
 
         with (
@@ -312,6 +316,7 @@ class TestSparkCursor:
     def test_execute_rejects_work_group(self):
         """work_group is not an execute() argument, even when None (no AWS)."""
         cursor = SparkCursor.__new__(SparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._closed = False
         cursor._calculation_id = "previous"
 
         with (
@@ -338,6 +343,27 @@ class TestSparkCursor:
         assert (start["SessionId"], start["CodeBlock"]) == ("session", "code")
         assert cursor.calculation_id == "calculation-id"
         assert cursor.state == AthenaCalculationExecutionStatus.STATE_COMPLETED
+
+    def test_closed(self):
+        """GH-1207: a closed cursor rejects operations without requests (no AWS)."""
+        cursor = offline_spark_cursor(SparkCursor)
+        client = cursor.connection.client
+        with answered_requests(client, COMPLETED_CALCULATION_RESPONSES):
+            cursor.execute("code")
+        cursor.close()
+
+        with answered_requests(client) as requests:
+            with pytest.raises(ProgrammingError):
+                cursor.execute("code")
+            with pytest.raises(ProgrammingError):
+                cursor.executemany("code", [])
+            with pytest.raises(ProgrammingError):
+                cursor.cancel()
+            with pytest.raises(ProgrammingError):
+                cursor.get_std_out()
+            with pytest.raises(ProgrammingError):
+                cursor.get_std_error()
+        assert requests == []
 
 
 def test_spark_on_poll_invoked_each_iteration():
