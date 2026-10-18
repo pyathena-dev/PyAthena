@@ -23,15 +23,6 @@ def _client_error(code, message="error message", status_code=None, condition=Non
 
 
 class TestS3ClientError:
-    def test_properties(self):
-        error = S3ClientError(_client_error("NoSuchKey", status_code=404))
-        assert error.code == "NoSuchKey"
-        assert error.message == "error message"
-        assert error.http_status_code == 404
-
-        error = S3ClientError(_client_error("NoSuchKey"))
-        assert error.http_status_code is None
-
     @pytest.mark.parametrize(
         ("code", "expected"),
         [
@@ -51,7 +42,9 @@ class TestS3ClientError:
         ],
     )
     def test_os_error_by_error_code(self, code, expected):
-        actual = S3ClientError(_client_error(code)).os_error
+        error = S3ClientError(_client_error(code))
+        assert (error.code, error.message) == (code, "error message")
+        actual = error.os_error
         assert type(actual) is expected
         assert "error message" in str(actual)
 
@@ -63,10 +56,14 @@ class TestS3ClientError:
             ("ServiceUnavailable", errno.EBUSY),
             ("OperationAborted", errno.EBUSY),
             ("InternalError", errno.EIO),
+            # An unknown code without a status code.
+            ("UnknownCode", errno.EIO),
         ],
     )
     def test_os_error_by_error_code_errno(self, code, expected_errno):
-        actual = S3ClientError(_client_error(code)).os_error
+        error = S3ClientError(_client_error(code))
+        assert error.http_status_code is None
+        actual = error.os_error
         # OSError specializes itself into a subclass for some errno values
         # (e.g., EPERM -> PermissionError), so check the errno, not the exact type.
         assert isinstance(actual, OSError)
@@ -87,15 +84,11 @@ class TestS3ClientError:
         ],
     )
     def test_os_error_by_http_status_code(self, status_code, expected_errno):
-        actual = S3ClientError(_client_error("UnknownCode", status_code=status_code)).os_error
+        error = S3ClientError(_client_error("UnknownCode", status_code=status_code))
+        assert error.http_status_code == status_code
+        actual = error.os_error
         assert isinstance(actual, OSError)
         assert actual.errno == expected_errno
-
-    def test_os_error_unknown_code(self):
-        actual = S3ClientError(_client_error("UnknownCode")).os_error
-        assert type(actual) is OSError
-        assert actual.errno == errno.EIO
-        assert "error message" in str(actual)
 
     @pytest.mark.parametrize(
         ("condition", "expected"),

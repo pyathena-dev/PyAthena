@@ -205,28 +205,60 @@ async def wait_until(predicate, timeout=EVENT_TIMEOUT):
         await asyncio.sleep(0.01)
 
 
-def overlapping_calls(calls, timeout=5):
+async def await_bounded(awaitable, timeout=EVENT_TIMEOUT):
+    """Await an awaitable, failing if it is not done within the timeout.
+
+    Unlike ``asyncio.wait_for``, it does not wait for the cancellation of an
+    awaitable that the timeout interrupts, which a regression could also
+    hold, so that the test fails instead of hanging.
+
+    Args:
+        awaitable: The coroutine or future to await.
+        timeout: The longest wait, in seconds.
+
+    Returns:
+        The result of the awaitable.
+    """
+    task = asyncio.ensure_future(awaitable)
+    done, _ = await asyncio.wait({task}, timeout=timeout)
+    assert done, f"not done within {timeout} s"
+    return task.result()
+
+
+def overlapping_calls(calls, timeout=5, grace=0.5):
     """Return a callable that records the peak number of its overlapping calls.
 
-    Each call waits until ``calls`` calls overlap, or until the timeout.
+    Until ``calls`` calls have overlapped, each call waits for that, or until
+    the timeout. The calls of that first overlap then wait up to ``grace``
+    seconds for another overlapping call, which only a caller that runs more
+    than ``calls`` at once makes, so that the peak also shows an exceeded
+    bound. Later calls do not wait.
 
     Args:
         calls: The number of calls to wait for.
-        timeout: The longest wait of a call, in seconds.
+        timeout: The longest wait of a call for the overlap, in seconds.
+        grace: The longest wait of a call of the first overlap for one more,
+            in seconds.
 
     Returns:
         The callable, which accepts and ignores any arguments, and a
         dictionary whose ``peak`` item is the peak number.
     """
     condition = threading.Condition()
-    state = {"active": 0, "peak": 0}
+    state = {"active": 0, "peak": 0, "released": False}
 
     def call(*args, **kwargs):
         with condition:
             state["active"] += 1
             state["peak"] = max(state["peak"], state["active"])
             condition.notify_all()
-            condition.wait_for(lambda: state["active"] >= calls, timeout=timeout)
+            # The peak, unlike the active calls, stays reached when the last
+            # call returns before the others wake up.
+            if not state["released"] and condition.wait_for(
+                lambda: state["peak"] >= calls, timeout=timeout
+            ):
+                condition.wait_for(lambda: state["peak"] > calls, timeout=grace)
+                state["released"] = True
         with condition:
             state["active"] -= 1
 
