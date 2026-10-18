@@ -41,6 +41,7 @@ from tests.pyathena.util import (
     MULTIPART_COPY_BLOCK_SIZE,
     MULTIPART_COPY_KWARGS,
     ThrottledOperation,
+    await_bounded,
     overlapping_calls,
     retried,
     stub_multipart_copy,
@@ -73,14 +74,13 @@ class TestAioS3FileSystem:
         with Stubber(fs._sync_fs._client) as stubber:
             stub_multipart_copy(stubber, **kwargs)
             try:
-                await asyncio.wait_for(
+                await await_bounded(
                     fs._copy_object_with_multipart_upload(
                         S3Path("bucket", "src"),
                         S3Path("bucket", "dst"),
                         block_size=MULTIPART_COPY_BLOCK_SIZE,
                         **MULTIPART_COPY_KWARGS,
-                    ),
-                    EVENT_TIMEOUT,
+                    )
                 )
             finally:
                 stubber.assert_no_pending_responses()
@@ -204,15 +204,14 @@ class TestAioS3FileSystem:
         )
 
         with pytest.raises(OSError, match="part failed"):
-            await asyncio.wait_for(
+            await await_bounded(
                 fs._copy_object_with_multipart_upload(
                     S3Path("bucket", "src"),
                     S3Path("bucket", "dst"),
                     MetadataDirective="REPLACE",
                     TaggingDirective="REPLACE",
                     AnnotationDirective="EXCLUDE",
-                ),
-                EVENT_TIMEOUT,
+                )
             )
 
         # Part 3 waits for a worker and is not started after the failure.
@@ -340,12 +339,17 @@ class TestAioS3FileSystem:
     @staticmethod
     def _serve_keys(fs, keys):
         # Answer the S3 requests of the filesystem from a set of keys of
-        # "bucket", which is returned, and record them by operation name.
+        # "bucket", which is returned, and record them by operation name. The
+        # requests may come from several threads at once.
         store = set(keys)
         requests = []
+        lock = threading.Lock()
 
         def call(method, **request):
-            name = method if isinstance(method, str) else method.__name__
+            with lock:
+                return answer(method if isinstance(method, str) else method.__name__, request)
+
+        def answer(name, request):
             requests.append((name, request))
             key = request.get("Key")
             if name == "head_object":
@@ -356,7 +360,7 @@ class TestAioS3FileSystem:
                 return {"Body": io.BytesIO(b"aa"), "ContentLength": 2, "ETag": '"e"'}
             if name == "list_objects_v2":
                 prefix, delimiter = request.get("Prefix", ""), request.get("Delimiter")
-                listed = sorted(k for k in store if k.startswith(prefix))
+                listed = sorted(k for k in list(store) if k.startswith(prefix))
                 directories = sorted(
                     {
                         prefix + k[len(prefix) :].split(delimiter)[0] + delimiter
@@ -370,6 +374,8 @@ class TestAioS3FileSystem:
                     "CommonPrefixes": [{"Prefix": d} for d in directories],
                     "KeyCount": len(files) + len(directories),
                 }
+            if name == "copy_object" and request["CopySource"]["Key"] not in store:
+                raise FileNotFoundError(request["CopySource"]["Key"])
             if name in {"put_object", "copy_object"}:
                 store.add(key)
                 return {"ETag": '"e"'}
@@ -382,7 +388,10 @@ class TestAioS3FileSystem:
             if name == "get_object_tagging":
                 return {"TagSet": [{"Key": "a", "Value": "1"}]}
             if name == "list_object_versions":
-                return {"Versions": [{"Key": "key", "VersionId": "v1", "IsLatest": True}]}
+                return {
+                    "Versions": [{"Key": "key", "VersionId": "v1", "IsLatest": False}],
+                    "DeleteMarkers": [{"Key": "key", "VersionId": "m1", "IsLatest": True}],
+                }
             return {}
 
         fs._sync_fs._call = fs._sync_fs._core.call = call
@@ -391,10 +400,25 @@ class TestAioS3FileSystem:
     @pytest.mark.parametrize(
         ("method", "sync_method", "args", "kwargs"),
         [
-            ("_info", "info", ("s3://bucket/key?versionId=v1",), {}),
+            (
+                "_info",
+                "info",
+                ("s3://bucket/key?versionId=v1",),
+                {"ExpectedBucketOwner": "111122223333"},
+            ),
             ("_ls", "ls", ("s3://bucket/dir",), {"detail": True}),
-            ("_cat_file", "cat_file", ("s3://bucket/key",), {"start": 1, "end": 2}),
-            ("_exists", "exists", ("s3://bucket/key?versionId=v1",), {}),
+            (
+                "_cat_file",
+                "cat_file",
+                ("s3://bucket/key",),
+                {"start": 1, "end": 2, "ExpectedBucketOwner": "111122223333"},
+            ),
+            (
+                "_exists",
+                "exists",
+                ("s3://bucket/key?versionId=v1",),
+                {"ExpectedBucketOwner": "111122223333"},
+            ),
             ("_rm_file", "rm_file", ("s3://bucket/key?versionId=v1",), {}),
             (
                 "_pipe_file",
@@ -402,21 +426,41 @@ class TestAioS3FileSystem:
                 ("s3://bucket/new", b"a"),
                 {"mode": "create", "ContentType": "text/csv"},
             ),
-            ("_put_file", "put_file", ("local-source", "s3://bucket/new"), {"mode": "create"}),
-            ("_get_file", "get_file", ("s3://bucket/key?versionId=v1", "local-destination"), {}),
+            (
+                "_put_file",
+                "put_file",
+                ("local-source", "s3://bucket/new"),
+                {"mode": "create", "ContentType": "text/csv"},
+            ),
+            (
+                "_get_file",
+                "get_file",
+                ("s3://bucket/key?versionId=v1", "local-destination"),
+                {"ExpectedBucketOwner": "111122223333"},
+            ),
             ("_touch", "touch", ("s3://bucket/new",), {"ContentType": "text/csv"}),
             ("_find", "find", ("s3://bucket/dir",), {"maxdepth": 1, "withdirs": True}),
             (
                 "_mv",
                 "mv",
                 ("s3://bucket/dir", "s3://bucket/out"),
-                {"recursive": True, "maxdepth": 1},
+                {"recursive": True, "maxdepth": 1, "MetadataDirective": "REPLACE"},
             ),
-            ("metadata", "metadata", ("s3://bucket/key?versionId=v1",), {}),
+            (
+                "metadata",
+                "metadata",
+                ("s3://bucket/key?versionId=v1",),
+                {"ExpectedBucketOwner": "111122223333"},
+            ),
             ("get_tags", "get_tags", ("s3://bucket/key?versionId=v1",), {}),
             ("put_tags", "put_tags", ("s3://bucket/key", {"b": "2"}), {"mode": "m"}),
             ("chmod", "chmod", ("s3://bucket/dir", "private"), {"recursive": True}),
-            ("object_version_info", "object_version_info", ("s3://bucket/key",), {}),
+            (
+                "object_version_info",
+                "object_version_info",
+                ("s3://bucket/key",),
+                {"delete_markers": True},
+            ),
         ],
     )
     @pytest.mark.asyncio
@@ -451,7 +495,7 @@ class TestAioS3FileSystem:
             else:
                 result = getattr(fs, name)(*call_args, **kwargs)
                 if asyncio.iscoroutine(result):
-                    result = await asyncio.wait_for(result, EVENT_TIMEOUT)
+                    result = await await_bounded(result)
             outcomes.append((comparable(result), sorted(map(repr, requests)), sorted(store)))
         assert outcomes[0][1], "no request was sent"
         assert outcomes[1] == outcomes[0]
@@ -832,13 +876,11 @@ class TestAioS3FileSystem:
             return SimpleNamespace(etag='"e"', part_number=part_number)
 
         sync_fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
-        started = time.monotonic()
+        # The retries stop before the bound of the wait.
         with pytest.raises(PermissionError, match="Access Denied"):
-            await asyncio.wait_for(
-                fs._copy_object_with_multipart_upload(plan.source, plan.destination, max_workers=2),
-                EVENT_TIMEOUT,
+            await await_bounded(
+                fs._copy_object_with_multipart_upload(plan.source, plan.destination, max_workers=2)
             )
-        assert time.monotonic() - started < EVENT_TIMEOUT
         assert operation.calls == 1
         sync_fs._abort_multipart_upload.assert_called_once()
 
@@ -914,12 +956,11 @@ class TestAioS3FileSystem:
             return throttled()
 
         sync_fs.core.copy_object_annotation = mock.MagicMock(side_effect=copy_object_annotation)
-        started = time.monotonic()
+        # The retries stop before the bound of the wait.
         with pytest.raises(PermissionError, match="Access Denied"):
-            await asyncio.wait_for(
-                fs._copy_object_with_multipart_upload(plan.source, plan.destination), EVENT_TIMEOUT
+            await await_bounded(
+                fs._copy_object_with_multipart_upload(plan.source, plan.destination)
             )
-        assert time.monotonic() - started < EVENT_TIMEOUT
         assert operation.calls == 1
 
     @pytest.mark.asyncio
@@ -958,9 +999,8 @@ class TestAioS3FileSystem:
 
         sync_fs.core.copy_object_annotation = mock.MagicMock(side_effect=copy_object_annotation)
         with pytest.raises(PermissionError, match="Access Denied"):
-            await asyncio.wait_for(
-                fs._copy_object_with_multipart_upload(plan.source, plan.destination, max_workers=3),
-                EVENT_TIMEOUT,
+            await await_bounded(
+                fs._copy_object_with_multipart_upload(plan.source, plan.destination, max_workers=3)
             )
         sync_fs.core.copy_object_annotation.assert_called_once()
 
@@ -1631,7 +1671,7 @@ class TestAioS3FileSystem:
             "AnnotationDirective": "EXCLUDE",
         }
 
-        await asyncio.wait_for(
+        await await_bounded(
             fs._cp_file(
                 "s3://bucket/src",
                 "s3://bucket/dst",
@@ -1642,8 +1682,7 @@ class TestAioS3FileSystem:
                 # Copy without reading the metadata, tags and annotations of the
                 # source (GH-973).
                 **directives,
-            ),
-            EVENT_TIMEOUT,
+            )
         )
 
         if size <= S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE:
@@ -1758,7 +1797,7 @@ class TestAioS3FileSystem:
                 "AnnotationDirective": "EXCLUDE",
                 **checksum_kwargs,
             }
-            await asyncio.wait_for(fs._copy_object_with_multipart_upload(**kwargs), EVENT_TIMEOUT)
+            await await_bounded(fs._copy_object_with_multipart_upload(**kwargs))
             stubber.assert_no_pending_responses()
 
     @pytest.fixture(scope="class")
