@@ -707,7 +707,7 @@ class AioS3FileSystem(AsyncFileSystem):
             # cleanup, which waits for a started completion.
             completed = await self._thread_pool.wait_shielded(completion)
         except BaseException:
-            # Also on cancellation, as S3FileSystem._finish_multipart_upload
+            # Also on cancellation, as S3FileSystem._copy_object_with_multipart_upload
             # does on an interrupt.
             failed = True
             # The requests that have not started are cancelled here, before
