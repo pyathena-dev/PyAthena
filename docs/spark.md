@@ -84,7 +84,7 @@ The calculation runs in the Spark session selected by the cursor's `session_id` 
 When a Spark cursor is created, it starts a new session and waits until the session is idle.
 If `session_id` is specified, the cursor uses that existing session instead, after waiting until it is idle.
 If starting the session or waiting for it fails, or a `KeyboardInterrupt` interrupts it, the cursor terminates the session it started on a best-effort basis before the error propagates, regardless of `kill_on_interrupt`.
-If that termination fails too, the original error propagates, and the session keeps running until its idle timeout.
+If that termination fails too, the original error propagates, and the session can keep running until its idle timeout.
 A second `KeyboardInterrupt` while the cursor waits for the start request to finish propagates at once and leaves the session running until its idle timeout.
 
 The session idle timeout minutes can be specified with the `session_idle_timeout_minutes` argument when creating
