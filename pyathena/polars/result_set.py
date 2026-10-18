@@ -456,9 +456,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         fsspec. The credentials are frozen when the options are created.
 
         Args:
-            connection: The connection whose session and region the reads use. The
-                chunk readers give the connection that they took when they were
-                created, as ``close()`` releases the result set's connection.
+            connection: The connection whose session and region the reads use.
 
         Returns:
             Dictionary with AWS credentials and region for S3 access.
@@ -606,9 +604,11 @@ class AthenaPolarsResultSet(AthenaResultSet):
         For unload queries, it replaces the metadata with the schema of the Parquet
         files, as ``_as_polars()`` does, before the chunks are read.
 
-        The chunk readers take the state that they need, such as the output location,
-        the column names, and the connection, when they are created. The credentials
-        are frozen at the first read.
+        The result set creates the iterator during ``execute()``. The requests that
+        prepare the reads are made then, so ``execute()`` raises their errors: the size
+        check of a CSV result file, and the data manifest and the Parquet schema of an
+        UNLOAD result. The schema is read once, for the metadata and for the chunk
+        reader. The chunks themselves are read lazily.
 
         Returns:
             PolarsDataFrameIterator that reads each chunk lazily.
