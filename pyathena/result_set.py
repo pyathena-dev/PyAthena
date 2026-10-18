@@ -6,7 +6,7 @@ import collections
 import logging
 import operator
 from datetime import datetime
-from itertools import islice
+from itertools import islice, repeat
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -20,7 +20,7 @@ from pyathena.model import AthenaQueryExecution
 from pyathena.util import RetryConfig, override, parse_output_location, retry_api_call
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
 
     from pyathena.connection import Connection
 
@@ -687,35 +687,75 @@ class AthenaResultSet(CursorIterator):
         converter: Converter | None = None,
     ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         conv = converter or self._converter
-        col_types = self._column_types
-        col_hints = self._column_type_hints
-        if col_hints and col_types:
-            return [
-                tuple(
-                    conv.convert(col_type, row.get("VarCharValue"), type_hint=hint)
-                    if hint
-                    else conv.convert(col_type, row.get("VarCharValue"))
-                    for col_type, row, hint in zip(
-                        col_types, rows[i].get("Data", []), col_hints, strict=False
-                    )
-                )
-                for i in range(offset, len(rows))
-            ]
-        if col_types:
-            return [
-                tuple(
-                    conv.convert(col_type, row.get("VarCharValue"))
-                    for col_type, row in zip(col_types, rows[i].get("Data", []), strict=False)
-                )
-                for i in range(offset, len(rows))
-            ]
+        names, types = self._get_column_names_and_types(metadata)
+        hints = self._column_type_hints or repeat(None)
         return [
             tuple(
-                conv.convert(meta.get("Type"), row.get("VarCharValue"))
-                for meta, row in zip(metadata, rows[i].get("Data", []), strict=False)
+                self._convert_values(
+                    conv,
+                    (data.get("VarCharValue") for data in rows[i].get("Data", [])),
+                    names,
+                    types,
+                    hints,
+                )
             )
             for i in range(offset, len(rows))
         ]
+
+    def _get_column_names_and_types(
+        self, metadata: tuple[Any, ...]
+    ) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
+        """Get the names and types of the result columns.
+
+        Args:
+            metadata: The ``ColumnInfo`` of the result, for a result set whose column
+                types are not set.
+
+        Returns:
+            The names and the types, in column order.
+        """
+        if self._column_names and self._column_types:
+            return self._column_names, self._column_types
+        return (
+            tuple(m.get("Name") for m in metadata),
+            tuple(m.get("Type") for m in metadata),
+        )
+
+    def _convert_values(
+        self,
+        converter: Converter,
+        values: Iterable[str | None],
+        names: Iterable[Any],
+        types: Iterable[Any],
+        hints: Iterable[str | None],
+    ) -> Iterator[Any | None]:
+        """Convert the values of a row.
+
+        Args:
+            converter: The converter of the values.
+            values: The values as text, in column order.
+            names: The names of the columns.
+            types: The Athena types of the columns.
+            hints: The type hints of the columns, None for a column without one.
+
+        Yields:
+            The converted values. A row with fewer values than columns, or more, gives
+            as many values as the shorter of the two.
+
+        Raises:
+            DataError: If a value fails to convert, such as a ``timestamp with time
+                zone`` value with an unknown zone or a local time without one instant in
+                its zone. The message names the column.
+        """
+        for name, type_, hint, value in zip(names, types, hints, values, strict=False):
+            try:
+                yield (
+                    converter.convert(type_, value, type_hint=hint)
+                    if hint
+                    else converter.convert(type_, value)
+                )
+            except DataError as e:
+                raise DataError(f"Column {name!r}: {e}") from e
 
     def _parse_result_rows(
         self, response: dict[str, Any]
@@ -956,48 +996,21 @@ class AthenaDictResultSet(AthenaResultSet):
         converter: Converter | None = None,
     ) -> list[tuple[Any | None, ...] | dict[Any, Any | None]]:
         conv = converter or self._converter
-        col_types = self._column_types
-        col_names = self._column_names
-        col_hints = self._column_type_hints
-        if col_hints and col_types and col_names:
-            return [
-                self.dict_type(
-                    (
-                        name,
-                        conv.convert(col_type, row.get("VarCharValue"), type_hint=hint)
-                        if hint
-                        else conv.convert(col_type, row.get("VarCharValue")),
-                    )
-                    for name, col_type, row, hint in zip(
-                        col_names,
-                        col_types,
-                        rows[i].get("Data", []),
-                        col_hints,
-                        strict=False,
-                    )
-                )
-                for i in range(offset, len(rows))
-            ]
-        if col_types and col_names:
-            return [
-                self.dict_type(
-                    (
-                        name,
-                        conv.convert(col_type, row.get("VarCharValue")),
-                    )
-                    for name, col_type, row in zip(
-                        col_names, col_types, rows[i].get("Data", []), strict=False
-                    )
-                )
-                for i in range(offset, len(rows))
-            ]
+        names, types = self._get_column_names_and_types(metadata)
+        hints = self._column_type_hints or repeat(None)
         return [
             self.dict_type(
-                (
-                    meta.get("Name"),
-                    conv.convert(meta.get("Type"), row.get("VarCharValue")),
+                zip(
+                    names,
+                    self._convert_values(
+                        conv,
+                        (data.get("VarCharValue") for data in rows[i].get("Data", [])),
+                        names,
+                        types,
+                        hints,
+                    ),
+                    strict=False,
                 )
-                for meta, row in zip(metadata, rows[i].get("Data", []), strict=False)
             )
             for i in range(offset, len(rows))
         ]

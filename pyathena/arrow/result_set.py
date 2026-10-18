@@ -10,7 +10,7 @@ from typing import (
     ClassVar,
 )
 
-from pyathena import OperationalError
+from pyathena import DataError, OperationalError
 from pyathena.arrow.converter import _to_null, _to_timestamp
 from pyathena.arrow.util import to_column_info
 from pyathena.converter import Converter, _to_default
@@ -201,6 +201,11 @@ class AthenaArrowResultSet(AthenaResultSet):
 
         A table can hold empty record batches between others, such as one of
         an empty result file, which would otherwise end the fetches early.
+
+        Raises:
+            DataError: If a value fails to convert, such as a ``timestamp with time
+                zone`` value with an unknown zone or a local time without one instant in
+                its zone. The message names the column.
         """
         rows = next((batch for batch in self._batches if batch.num_rows), None)
         if rows is None:
@@ -209,15 +214,15 @@ class AthenaArrowResultSet(AthenaResultSet):
         # converters property keep one column per name.
         columns = [column.to_pylist() for column in rows.columns]
         description = self.description if self.description else []
-        converters = [self._converter.get(d[1]) for d in description]
-        if any(convert is not _to_default for convert in converters):
-            processed_rows = [
-                tuple(convert(v) for convert, v in zip(converters, row, strict=False))
-                for row in zip(*columns, strict=False)
-            ]
-        else:
-            processed_rows = list(zip(*columns, strict=False))
-        self._rows.extend(processed_rows)
+        for i, d in enumerate(description):
+            convert = self._converter.get(d[1])
+            if convert is _to_default:
+                continue
+            try:
+                columns[i] = [convert(v) for v in columns[i]]
+            except DataError as e:
+                raise DataError(f"Column {d[0]!r}: {e}") from e
+        self._rows.extend(zip(*columns, strict=False))
 
     def _open_csv(self, location: str) -> Any:
         """Open the CSV result file for ``pyarrow.csv.read_csv()``.

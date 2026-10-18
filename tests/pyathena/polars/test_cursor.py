@@ -892,7 +892,7 @@ class TestPolarsCursor:
         The table keeps the text, as for every TIMESTAMP WITH TIME ZONE value.
         """
         polars_cursor.execute(AMBIGUOUS_TIME_ZONE_QUERY)
-        with pytest.raises(DataError):
+        with pytest.raises(DataError, match=r"Column 'col_timestamp_tz': .* is ambiguous"):
             polars_cursor.fetchall()
 
     @pytest.mark.skipif(not ENV.managed_work_group, reason="AWS_ATHENA_MANAGED_WORKGROUP not set")
