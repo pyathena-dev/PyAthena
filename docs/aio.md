@@ -333,13 +333,14 @@ async with await fs.open_async("s3://my-bucket/data/file.bin", "rb") as f:
   parallel. When a range fails, the reads that have not finished are cancelled, and the
   running ones make no further attempt. The file has no read cache.
 - A write uploads each full block as a part of a multipart upload, with at most
-  `max_workers` parts in flight. A write that would upload another part awaits one of
-  them, so the event loop keeps running. A part found failed by that wait, or a part
-  copied from the existing object in an append that has failed before the write uploads
-  another part, stops the write with its error, and the multipart upload is aborted.
-  A part that fails later raises its error when the file is closed. The commit cancels
-  the parts that have not started as soon as one fails, and waits for the running ones,
-  which make no further attempt, before it aborts the upload and raises the error.
+  `max_workers` parts, including the parts copied from the existing object in an
+  append, in flight. A write that would upload another part awaits one of them, so the
+  event loop keeps running. A part that has failed by the next write, or before the
+  write uploads another part, stops the write with its error, and the multipart upload
+  is aborted. A part that fails after the last write raises its error when the file is
+  closed. The commit cancels the parts that have not started as soon as one fails, and
+  waits for the running ones, which make no further attempt, before it aborts the upload
+  and raises the error.
 - Closing the file commits the written data, as `S3File` does.
 - Leaving an `async with` block with an exception, or cancelling a write, closes the file
   without committing it, and aborts the multipart upload after the running parts, which
@@ -347,7 +348,8 @@ async with await fs.open_async("s3://my-bucket/data/file.bin", "rb") as f:
   The abort completes even if the task is cancelled again.
 - Once closing or the final flush has begun the commit, the commit completes even if
   the task that closes or flushes the file is cancelled, and leaving an `async with`
-  block with an exception afterward does not abort it.
+  block with an exception afterward does not abort it. A commit that fails aborts the
+  upload, and leaving the block while that abort runs waits for it.
 - A file opened for writing must be closed with `await f.close()` or an `async with`
   block. A file that is garbage collected before it is closed or its commit has begun
   is not committed: it emits a `ResourceWarning`, and its multipart upload is aborted.

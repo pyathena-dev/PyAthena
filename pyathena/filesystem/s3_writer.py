@@ -415,6 +415,12 @@ class _S3WriteSession:
         # A description of the first failure, kept after it is raised.
         self._failure_summary: str | None = None
         self._result: S3PutObject | S3CompleteMultipartUpload | None = None
+        # The state that begin_complete() reserved the commit from, IDLE for
+        # PutObject or ACTIVE for the completion, until put() or complete()
+        # takes the reservation.
+        self._reservation: _S3WriteState | None = None
+        # Set by begin_abort() until abort() takes over the abort that it began.
+        self._abort_pending = False
 
     @property
     def state(self) -> _S3WriteState:
@@ -633,6 +639,62 @@ class _S3WriteSession:
         """
         return self._commit(_S3WriteState.ACTIVE, self._complete_parts)
 
+    def begin_complete(self) -> None:
+        """Reserve the commit before the call that sends it is queued.
+
+        Does not block. Afterwards, :meth:`abort` leaves the write to the
+        commit, and the next :meth:`put` or :meth:`complete`, whichever the
+        write allows, sends it. Does nothing for a committed write.
+
+        Raises:
+            BaseException: The first failure of a request, if it has not been
+                raised yet.
+            S3MultipartStateError: If the write failed earlier, or has been
+                discarded.
+        """
+        with self._lock:
+            if self._state is _S3WriteState.COMPLETED:
+                return
+            state = _S3WriteState.ACTIVE if self._multipart else _S3WriteState.IDLE
+            self._refuse_unless(state, operation="commit")
+            # Set first, so that an interrupt right after the state changes
+            # leaves a reservation that the commit takes.
+            self._reservation = state
+            self._state = _S3WriteState.COMPLETING
+
+    def begin_abort(self) -> bool:
+        """Begin discarding the write without blocking.
+
+        Seals the write, cancels the creation and the part requests that have
+        not started, and stops the retries of the running ones, so that they
+        stop even while the call to :meth:`abort`, which waits for them, waits
+        for a thread that they hold.
+
+        Returns:
+            Whether :meth:`abort` has to run to finish the abort, or to wait
+            for one that is running. False if the write is being or has been
+            committed, has been discarded, or never sent a request.
+        """
+        with self._lock:
+            if self._state is _S3WriteState.IDLE:
+                self._state = _S3WriteState.ABORTED
+            if self._state in (
+                _S3WriteState.COMPLETING,
+                _S3WriteState.COMPLETED,
+                _S3WriteState.ABORTED,
+            ):
+                return False
+            if self._state is _S3WriteState.ABORTING:
+                return True
+            # Set first, so that an interrupt right after the state changes
+            # leaves the abort for abort() to take over.
+            self._abort_pending = True
+            self._state = _S3WriteState.ABORTING
+            waiters = self._take_waiters()
+        self._notify(waiters)
+        self._stop_requests()
+        return True
+
     def abort(self) -> None:
         """Discard the write, and abort its multipart upload, if any.
 
@@ -644,7 +706,7 @@ class _S3WriteSession:
         for, KeyboardInterrupts are suppressed, so that its upload is
         recovered and aborted. Does nothing if the write is being or has been
         committed, or has been discarded; another call that is aborting the
-        upload is waited for.
+        upload is waited for. Finishes an abort begun by :meth:`begin_abort`.
 
         Raises:
             BaseException: The failure of the abort request, or an interrupt
@@ -654,7 +716,7 @@ class _S3WriteSession:
         owned = False
         try:
             with self._lock:
-                while self._state is _S3WriteState.ABORTING:
+                while self._state is _S3WriteState.ABORTING and not self._abort_pending:
                     self._changed.wait()
                 if self._state in (
                     _S3WriteState.COMPLETING,
@@ -669,18 +731,12 @@ class _S3WriteSession:
                 # changes leaves the write ABORT_FAILED, not ABORTING, which
                 # a later abort() would wait for.
                 owned = True
+                self._abort_pending = False
                 self._state = _S3WriteState.ABORTING
                 waiters = self._take_waiters()
             self._notify(waiters)
-            # The requests that have not started are cancelled before the
-            # stop, which would let a thread that it frees take one of them;
-            # then the creation and the running parts make no further attempt.
-            with self._lock:
-                creation = self._creation
-            if creation is not None:
-                creation.cancel()
-            self._cancel_requests()
-            self._stop.set()
+            # Again after begin_abort(), which an interrupt may have stopped.
+            self._stop_requests()
             self._settle_creation()
             with self._lock:
                 self._consume_finished()
@@ -768,12 +824,17 @@ class _S3WriteSession:
                     state is _S3WriteState.ACTIVE
                 ):
                     return cast(T, self._result)
-                self._refuse_unless(state, operation="commit")
-                # Set first, so that an interrupt right after the state
-                # changes leaves the write failed, for the caller to abort,
-                # rather than being committed.
-                reserved = True
-                self._state = _S3WriteState.COMPLETING
+                if self._state is _S3WriteState.COMPLETING and self._reservation is state:
+                    # Reserved by begin_complete().
+                    reserved = True
+                    self._reservation = None
+                else:
+                    self._refuse_unless(state, operation="commit")
+                    # Set first, so that an interrupt right after the state
+                    # changes leaves the write failed, for the caller to
+                    # abort, rather than being committed.
+                    reserved = True
+                    self._state = _S3WriteState.COMPLETING
             result = send()
             with self._update():
                 # The result first, as the state publishes it.
@@ -970,16 +1031,22 @@ class _S3WriteSession:
             except KeyboardInterrupt:
                 continue
 
-    def _cancel_requests(self) -> None:
-        """Cancel the part requests that have not started.
+    def _stop_requests(self) -> None:
+        """Cancel the requests that have not started, and stop the retries of the others.
 
-        Their done callbacks, which stop tracking them, run in this thread,
-        so they are cancelled without the lock held.
+        The requests that have not started are cancelled before the stop,
+        which would let a thread that it frees take one of them. Their done
+        callbacks, which stop tracking them, run in this thread, so they are
+        cancelled without the lock held.
         """
         with self._lock:
+            creation = self._creation
             requests = list(self._requests)
+        if creation is not None:
+            creation.cancel()
         for request in requests:
             request.cancel()
+        self._stop.set()
 
     def _is_ready(self) -> bool:
         """Whether another part may be submitted; called with the lock held.
