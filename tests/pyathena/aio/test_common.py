@@ -29,6 +29,11 @@ _ALL_CURSOR_CLASSES = [
     AioS3FSCursor,
 ]
 
+_WHOLE_RESULT_METHODS = {
+    AioArrowCursor: ("as_arrow", "as_polars"),
+    AioPolarsCursor: ("as_polars", "as_arrow"),
+}
+
 
 def _result_set_closing_after_loop_responds() -> tuple[MagicMock, list[bool]]:
     """Return a result set whose ``close()`` waits for a callback on the running loop.
@@ -94,10 +99,7 @@ class TestWithAsyncFetch:
         assert len(threads) == 3
         assert threading.get_ident() not in threads
 
-    @pytest.mark.parametrize(
-        "cursor_class",
-        [AioArrowCursor, AioPandasCursor, AioPolarsCursor, AioS3FSCursor],
-    )
+    @pytest.mark.parametrize("cursor_class", _ALL_CURSOR_CLASSES)
     async def test_fetch_without_result_set(self, cursor_class):
         cursor = cursor_class(
             connection=MagicMock(), converter=None, formatter=None, retry_config=None
@@ -105,6 +107,18 @@ class TestWithAsyncFetch:
         for fetch in (cursor.fetchone, cursor.fetchmany, cursor.fetchall):
             with pytest.raises(ProgrammingError, match=r"No result set\."):
                 await fetch()
+        # The Arrow and Polars cursors also convert the whole result.
+        for name in _WHOLE_RESULT_METHODS.get(cursor_class, ()):
+            with pytest.raises(ProgrammingError):
+                getattr(cursor, name)()
+
+    @pytest.mark.parametrize("cursor_class", _ALL_CURSOR_CLASSES)
+    async def test_cancel_without_query(self, cursor_class):
+        cursor = cursor_class(
+            connection=MagicMock(), converter=None, formatter=None, retry_config=None
+        )
+        with pytest.raises(ProgrammingError):
+            await cursor.cancel()
 
     @pytest.mark.parametrize(
         ("method", "args"), [("fetchone", ()), ("fetchmany", (2,)), ("fetchall", ())]
@@ -270,6 +284,26 @@ class TestWithAsyncFetch:
         assert cursor.rowcount == 0
 
     @pytest.mark.parametrize("cursor_class", _ALL_CURSOR_CLASSES)
+    async def test_executemany_unknown_rowcount(self, cursor_class):
+        """A statement without an update count, such as a SELECT, makes the sum unknown.
+
+        No result set is left to fetch.
+        """
+        cursor = cursor_class(
+            connection=MagicMock(), converter=None, formatter=None, retry_config=None
+        )
+        rowcounts = iter([1, -1, 1])
+
+        async def execute(operation, parameters, **kwargs):
+            cursor.result_set = MagicMock(is_closed=True, rowcount=next(rowcounts))
+
+        cursor.execute = execute
+        await cursor.executemany("SELECT 1", [None, None, None])
+
+        assert cursor.rowcount == -1
+        assert cursor.result_set is None
+
+    @pytest.mark.parametrize("cursor_class", _ALL_CURSOR_CLASSES)
     async def test_executemany_failure_closes_result_set_off_event_loop(self, cursor_class):
         cursor = cursor_class(
             connection=MagicMock(), converter=None, formatter=None, retry_config=None
@@ -278,6 +312,7 @@ class TestWithAsyncFetch:
         result_set.rowcount = 1
 
         async def execute(operation, parameters, **kwargs):
+            cursor.query_id = "query_id"
             cursor.result_set = result_set
 
         def parameters():
@@ -290,3 +325,6 @@ class TestWithAsyncFetch:
 
         assert closes == [True]
         assert cursor.result_set is None
+        assert cursor.rowcount == -1
+        # The query ID of the last execution is kept.
+        assert cursor.query_id == "query_id"

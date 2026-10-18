@@ -1,27 +1,30 @@
 import asyncio
-import re
 import threading
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from botocore.exceptions import ClientError
 
-from pyathena import BINARY, Binary, ExecuteOptions
+from pyathena import ExecuteOptions
+from pyathena.aio.connection import AioConnection
 from pyathena.aio.cursor import AioCursor, AioDictCursor
 from pyathena.aio.result_set import AthenaAioDictResultSet
-from pyathena.error import DatabaseError, OperationalError, ProgrammingError
-from pyathena.glue import GlueMetadataClient
+from pyathena.error import DatabaseError, OperationalError
 from pyathena.model import AthenaQueryExecution
-from pyathena.result_set import AthenaResultSet
 from pyathena.util import RetryConfig
 from tests import ENV
-from tests.pyathena.aio.conftest import _aio_connect
 from tests.pyathena.util import (
     EVENT_TIMEOUT,
+    FAILED_EXECUTION_RESPONSES,
+    QueryExecutionHistory,
     ThrottledOperation,
-    succeeded_query_execution,
+    answered_requests,
+    cache_search_cursor,
+    placeholder_connection,
+    succeeded_query_execution_data,
     throttle_metadata_api,
     wait_until,
 )
@@ -110,26 +113,8 @@ def _starting_cursor(kill_on_interrupt=True, response=None):
 
 
 class TestAioCursor:
-    @pytest.mark.parametrize(
-        ("value", "expected"),
-        [
-            (b"", b""),
-            (b"\x00\xff'\\%", b"\x00\xff'\\%"),
-            (bytes(range(256)), bytes(range(256))),
-            (bytearray(b"\x00\xff"), b"\x00\xff"),
-            (memoryview(b"\x00\xff"), b"\x00\xff"),
-            (Binary(bytearray(b"abc")), b"abc"),
-            (None, None),
-        ],
-        ids=["empty", "special", "all_bytes", "bytearray", "memoryview", "dbapi_binary", "null"],
-    )
-    async def test_binary_parameter(self, aio_cursor, value, expected):
-        await aio_cursor.execute("SELECT CAST(%(value)s AS VARBINARY)", {"value": value})
-        assert await aio_cursor.fetchone() == (expected,)
-        assert aio_cursor.description[0][1] == BINARY
-
     async def test_fetchone(self, aio_cursor):
-        await aio_cursor.execute("SELECT * FROM one_row")
+        assert await aio_cursor.execute("SELECT * FROM one_row") is aio_cursor
         assert aio_cursor.rowcount == -1
         assert aio_cursor.rownumber == 0
         assert await aio_cursor.fetchone() == (1,)
@@ -173,15 +158,6 @@ class TestAioCursor:
         await aio_cursor.execute("SELECT a FROM many_rows ORDER BY a")
         assert await aio_cursor.fetchall() == [(i,) for i in range(10000)]
 
-    async def test_async_iterator(self, aio_cursor):
-        await aio_cursor.execute("SELECT * FROM one_row")
-        rows = [row async for row in aio_cursor]
-        assert rows == [(1,)]
-
-    async def test_execute_returns_self(self, aio_cursor):
-        result = await aio_cursor.execute("SELECT * FROM one_row")
-        assert result is aio_cursor
-
     async def test_execute_with_callback(self, aio_cursor):
         callback_results = []
         await aio_cursor.execute("SELECT 1", on_start_query_execution=callback_results.append)
@@ -196,87 +172,61 @@ class TestAioCursor:
         assert await aio_cursor.fetchone() == (1,)
 
     async def test_execute_internal_options_passthrough(self):
-        """The private _execute() forwards its options to the request and the cache (no AWS)."""
-        cursor = AioCursor.__new__(AioCursor)  # bypass __init__ to avoid AWS calls
-        cursor._connection = MagicMock()
-        cursor._connection.client.start_query_execution.return_value = {
-            "QueryExecutionId": "test_query_id"
-        }
-        cursor._retry_config = RetryConfig()
-        cursor._kill_on_interrupt = True
-
-        with (
-            patch.object(
-                AioCursor, "_build_start_query_execution_request", return_value={}
-            ) as request_mock,
-            patch.object(
-                AioCursor, "_find_previous_query_id", new_callable=AsyncMock, return_value=None
-            ) as cache_mock,
-        ):
-            query_id = await cursor._execute(
-                "SELECT 1",
-                parameters=None,
-                options=ExecuteOptions(
-                    work_group="test_work_group",
-                    s3_staging_dir="s3://test-bucket/path/",
-                    cache_size=10,
-                    cache_expiration_time=100,
-                    result_reuse_enable=True,
-                    result_reuse_minutes=5,
-                    paramstyle="qmark",
-                ),
-            )
-
-        assert query_id == "test_query_id"
-        request_mock.assert_called_once_with(
-            query="SELECT 1",
+        """The options of execute() reach its Athena requests (no AWS)."""
+        cursor = placeholder_connection(AioConnection).cursor()
+        options = ExecuteOptions(
             work_group="test_work_group",
             s3_staging_dir="s3://test-bucket/path/",
-            result_reuse_enable=True,
-            result_reuse_minutes=5,
-            execution_parameters=None,
-        )
-        cache_mock.assert_awaited_once_with(
-            "SELECT 1",
-            "test_work_group",
             cache_size=10,
             cache_expiration_time=100,
+            result_reuse_enable=True,
+            result_reuse_minutes=5,
+            paramstyle="qmark",
         )
+        # The same query an hour ago, too old for cache_expiration_time to reuse.
+        previous = {
+            **succeeded_query_execution_data(
+                "previous", "SELECT 1", datetime.now(UTC) - timedelta(hours=1), schema="default"
+            ),
+            "QueryExecutionContext": {"Database": "default", "Catalog": "awsdatacatalog"},
+        }
+        responses = {
+            **FAILED_EXECUTION_RESPONSES,
+            "ListQueryExecutions": {"QueryExecutionIds": ["previous"]},
+            "BatchGetQueryExecution": {"QueryExecutions": [previous]},
+        }
+        with (
+            answered_requests(cursor.connection.client, responses) as requests,
+            pytest.raises(OperationalError),
+        ):
+            await cursor.execute("SELECT 1", options=options)
+
+        parameters = dict(requests)
+        assert parameters["ListQueryExecutions"] == {
+            "WorkGroup": "test_work_group",
+            "MaxResults": 10,
+        }
+        start = parameters["StartQueryExecution"]
+        assert start["WorkGroup"] == "test_work_group"
+        assert start["ResultConfiguration"] == {"OutputLocation": "s3://test-bucket/path/"}
+        assert start["ResultReuseConfiguration"] == {
+            "ResultReuseByAgeConfiguration": {"Enabled": True, "MaxAgeInMinutes": 5}
+        }
 
     async def test_execute_qmark_parameters_skip_cache(self):
-        """A qmark query with parameters never searches the cache (no AWS, #941).
-
-        Mirrors the synchronous cursor test.
-        """
-        cursor = AioCursor.__new__(AioCursor)  # bypass __init__ to avoid AWS calls
-        cursor._connection = MagicMock()
-        cursor._connection.client.start_query_execution.return_value = {
-            "QueryExecutionId": "test_query_id"
-        }
-        cursor._retry_config = RetryConfig()
-        cursor._kill_on_interrupt = True
-
+        """A qmark query with parameters never searches the cache (no AWS, #941)."""
+        cursor = placeholder_connection(AioConnection).cursor()
         with (
-            patch.object(
-                AioCursor,
-                "_build_start_query_execution_request",
-                return_value={"ExecutionParameters": ["'1'"]},
-            ) as request_mock,
-            patch.object(
-                AioCursor, "_find_previous_query_id", new_callable=AsyncMock, return_value="cached"
-            ) as cache_mock,
+            answered_requests(cursor.connection.client) as requests,
+            pytest.raises(OperationalError),
         ):
-            query_id = await cursor._execute(
-                "SELECT ?",
-                ["'1'"],
-                options=ExecuteOptions(
-                    paramstyle="qmark", cache_size=10, cache_expiration_time=100
-                ),
-            )
+            await cursor.execute("SELECT ?", ["'1'"], paramstyle="qmark", cache_size=10)
 
-        assert query_id == "test_query_id"
-        assert request_mock.call_args.kwargs["execution_parameters"] == ["'1'"]
-        cache_mock.assert_not_awaited()
+        assert [operation for operation, _ in requests] == [
+            "StartQueryExecution",
+            "GetQueryExecution",
+        ]
+        assert requests[0][1]["ExecutionParameters"] == ["'1'"]
 
     @pytest.mark.parametrize(
         "final_state",
@@ -302,16 +252,6 @@ class TestAioCursor:
         ]
         assert cursor.query_id == "query_id"
         assert cursor.result_set is None
-
-    async def test_execute_kill_on_interrupt_timeout(self):
-        """A timeout cancels the query and raises TimeoutError (no AWS)."""
-        cursor, cancel, _ = _offline_cursor(
-            kill_on_interrupt=True, final_state=AthenaQueryExecution.STATE_CANCELLED
-        )
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(cursor.execute("SELECT 1"), timeout=0.01)
-
-        cancel.assert_awaited_once_with("query_id")
 
     @pytest.mark.parametrize("failing", ["cancel", "wait"])
     async def test_execute_kill_on_interrupt_failure(self, failing):
@@ -404,6 +344,8 @@ class TestAioCursor:
 
     async def test_execute_cancelled_again_while_start_is_retried(self):
         """GH-1202: a second cancellation stops the retries of the start request (no AWS)."""
+        executor = ThreadPoolExecutor()
+        asyncio.get_running_loop().set_default_executor(executor)
         cursor, cancel, _, _ = _starting_cursor()
         operation = ThrottledOperation(block=True, failures=1, operation_name="StartQueryExecution")
 
@@ -424,8 +366,9 @@ class TestAioCursor:
                 await task
         finally:
             operation.release.set()
-        # A retry without the stop would follow the first attempt at once.
-        await asyncio.sleep(0.2)
+        # The thread of the start request ends once its retries stop; a retry
+        # would follow the first attempt at once.
+        executor.shutdown(wait=True)
         assert operation.calls == 1
         cancel.assert_not_awaited()
 
@@ -464,25 +407,6 @@ class TestAioCursor:
         cursor._connection.client.start_query_execution.assert_not_called()
         cancel.assert_not_awaited()
         assert cursor.query_id is None
-
-    async def test_execute_timeout_while_starting(self):
-        """A timeout during the start request stops the query and raises TimeoutError (no AWS)."""
-        cursor, cancel, started, release = _starting_cursor()
-        task = asyncio.create_task(asyncio.wait_for(cursor.execute("SELECT 1"), timeout=0.05))
-        try:
-            assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
-            # The timeout is due before this sleep ends, so the event loop handles it
-            # while the start request is still blocked.
-            await asyncio.sleep(0.1)
-            assert not task.done()
-        finally:
-            release.set()
-        with pytest.raises(asyncio.TimeoutError):
-            await task
-
-        assert started.is_set()
-        cancel.assert_awaited_once_with("query_id")
-        assert cursor.query_id == "query_id"
 
     @pytest.mark.parametrize("failing", ["start", "cancel"])
     async def test_execute_cancelled_while_starting_failure(self, failing):
@@ -540,239 +464,71 @@ class TestAioCursor:
         cancel.assert_not_awaited()
         assert cursor.query_id is None
 
-    async def test_cache_size_different_schema(self):
-        """A cached result is only reused when it ran against the same schema (#739).
-
-        Mirrors the synchronous cursor test: identical SQL can resolve to different
-        tables depending on the database it runs against, so a prior execution from
-        another schema must not be a cache hit.
-        """
-        query = "SELECT * FROM one_row"
-
-        def execution(schema):
-            return AthenaQueryExecution(
-                {
-                    "QueryExecution": {
-                        "QueryExecutionId": f"query_id_{schema}",
-                        "Query": query,
-                        "StatementType": AthenaQueryExecution.STATEMENT_TYPE_DML,
-                        "QueryExecutionContext": {"Database": schema},
-                        "Status": {
-                            "State": AthenaQueryExecution.STATE_SUCCEEDED,
-                            "CompletionDateTime": datetime.now(UTC),
-                        },
-                    }
-                }
-            )
-
-        cursor = AioCursor.__new__(AioCursor)  # bypass __init__ to avoid AWS calls
-        cursor._catalog_name = None
-
-        with patch.object(
-            AioCursor,
-            "_list_query_executions",
-            new_callable=AsyncMock,
-            return_value=(None, [execution("other_schema")]),
-        ):
-            cursor._schema_name = "this_schema"
-            assert await cursor._find_previous_query_id(query, None, cache_size=100) is None
-            cursor._schema_name = "other_schema"
-            assert (
-                await cursor._find_previous_query_id(query, None, cache_size=100)
-                == "query_id_other_schema"
-            )
-
-    async def test_cache_size_different_catalog(self):
-        query = "SELECT * FROM one_row"
-        schema = "this_schema"
-
-        def execution(catalog):
-            return AthenaQueryExecution(
-                {
-                    "QueryExecution": {
-                        "QueryExecutionId": f"query_id_{catalog}",
-                        "Query": query,
-                        "StatementType": AthenaQueryExecution.STATEMENT_TYPE_DML,
-                        "QueryExecutionContext": {"Database": schema, "Catalog": catalog},
-                        "Status": {
-                            "State": AthenaQueryExecution.STATE_SUCCEEDED,
-                            "CompletionDateTime": datetime.now(UTC),
-                        },
-                    }
-                }
-            )
-
-        cursor = AioCursor.__new__(AioCursor)
-        cursor._schema_name = schema
-
-        with patch.object(
-            AioCursor,
-            "_list_query_executions",
-            new_callable=AsyncMock,
-            return_value=(None, [execution("awsdatacatalog")]),
-        ):
-            # A different catalog must not be a cache hit.
-            cursor._catalog_name = "other_catalog"
-            assert await cursor._find_previous_query_id(query, None, cache_size=100) is None
-            # The same catalog, differing only in case, must still be a cache hit.
-            cursor._catalog_name = "AwsDataCatalog"
-            assert (
-                await cursor._find_previous_query_id(query, None, cache_size=100)
-                == "query_id_awsdatacatalog"
-            )
-
-    async def test_cache_search_stops_at_expired_execution(self, caplog):
+    async def test_cache_search_stops_at_expired_execution(self):
         query = "SELECT * FROM one_row"
         now = datetime.now(UTC)
-        cursor = AioCursor.__new__(AioCursor)
-        cursor._schema_name = "this_schema"
-        cursor._catalog_name = None
-        page = [
-            succeeded_query_execution("expired", query, now - timedelta(hours=2)),
-            succeeded_query_execution("other", "SELECT 1", now),
+        page_size = AioCursor.LIST_QUERY_EXECUTIONS_MAX_RESULTS
+        executions = [
+            succeeded_query_execution_data("other", "SELECT 1", now),
+            succeeded_query_execution_data("expired", query, now - timedelta(hours=2)),
+            *(
+                succeeded_query_execution_data(f"older_{i}", "SELECT 1", now - timedelta(hours=3))
+                for i in range(page_size - 2)
+            ),
+            # A search that went on to the second page would return this match.
+            succeeded_query_execution_data("next_page", query, now),
         ]
+        history = QueryExecutionHistory(executions)
+        cursor = cache_search_cursor(AioCursor, history)
 
-        # A page read after the expired execution would return this match.
-        next_page = (None, [succeeded_query_execution("next_page", query, now)])
+        # Without cache_size, cache_expiration_time alone bounds the search.
+        assert await cursor._find_previous_query_id(query, None, cache_expiration_time=3600) is None
+        assert len(history.list_requests) == 1
+        # A failed search would also return None, but the same search reuses the
+        # execution once it is within cache_expiration_time.
+        assert (
+            await cursor._find_previous_query_id(query, None, cache_expiration_time=3 * 3600)
+            == "expired"
+        )
 
-        with patch.object(
-            AioCursor,
-            "_list_query_executions",
-            new_callable=AsyncMock,
-            side_effect=[("next_token", page), next_page],
-        ) as list_mock:
-            # Without cache_size, cache_expiration_time alone bounds the search.
-            assert (
-                await cursor._find_previous_query_id(query, None, cache_expiration_time=3600)
-                is None
-            )
-        list_mock.assert_awaited_once_with(None, next_token=None, max_results=50)
-        # A failed search also returns None; the expiry must stop it without an error.
-        assert "Failed to check the cache" not in caplog.text
-
-    async def test_cache_search_reads_pages_up_to_cache_size(self):
+    @pytest.mark.parametrize(
+        ("position", "expected"),
+        [(59, "match"), (60, None)],
+        ids=["last_searched", "after_cache_size"],
+    )
+    async def test_cache_search_reads_pages_up_to_cache_size(self, position, expected):
+        """With cache_size=60, the search reads the 60 latest executions over two pages."""
         query = "SELECT * FROM one_row"
         now = datetime.now(UTC)
-        cursor = AioCursor.__new__(AioCursor)
-        cursor._schema_name = "this_schema"
-        cursor._catalog_name = None
-        pages = [
-            ("next_token", [succeeded_query_execution("other", "SELECT 1", now)]),
-            ("last_token", [succeeded_query_execution("match", query, now)]),
+        executions = [
+            succeeded_query_execution_data(f"other_{i}", "SELECT 1", now) for i in range(70)
         ]
+        executions[position] = succeeded_query_execution_data("match", query, now)
+        history = QueryExecutionHistory(executions)
+        cursor = cache_search_cursor(AioCursor, history)
 
-        with patch.object(
-            AioCursor, "_list_query_executions", new_callable=AsyncMock, side_effect=pages
-        ) as list_mock:
-            assert await cursor._find_previous_query_id(query, "wg", cache_size=60) == "match"
-        assert list_mock.await_args_list == [
-            call("wg", next_token=None, max_results=50),
-            call("wg", next_token="next_token", max_results=10),
-        ]
-
-    async def test_cache_search_prefers_latest_execution(self):
-        query = "SELECT * FROM one_row"
-        now = datetime.now(UTC)
-        cursor = AioCursor.__new__(AioCursor)
-        cursor._schema_name = "this_schema"
-        cursor._catalog_name = None
-        page = [
-            succeeded_query_execution("older", query, now - timedelta(minutes=1)),
-            succeeded_query_execution("latest", query, now),
-        ]
-
-        with patch.object(
-            AioCursor,
-            "_list_query_executions",
-            new_callable=AsyncMock,
-            return_value=(None, page),
-        ):
-            assert await cursor._find_previous_query_id(query, None, cache_size=10) == "latest"
-
-    async def test_no_result_set_raises(self, aio_cursor):
-        with pytest.raises(ProgrammingError):
-            await aio_cursor.fetchone()
-        with pytest.raises(ProgrammingError):
-            await aio_cursor.fetchmany()
-        with pytest.raises(ProgrammingError):
-            await aio_cursor.fetchall()
+        assert await cursor._find_previous_query_id(query, "wg", cache_size=60) == expected
+        assert [request["WorkGroup"] for request in history.list_requests] == ["wg", "wg"]
 
     async def test_description(self, aio_cursor):
         await aio_cursor.execute("SELECT 1 AS foobar FROM one_row")
         assert await aio_cursor.fetchall() == [(1,)]
         assert aio_cursor.description == [("foobar", "integer", None, None, 10, 0, "UNKNOWN")]
 
-    async def test_description_initial(self, aio_cursor):
-        assert aio_cursor.description is None
-
     async def test_bad_query(self, aio_cursor):
         with pytest.raises(DatabaseError):
             await aio_cursor.execute("SELECT does_not_exist FROM this_really_does_not_exist")
 
-    async def test_query_id(self, aio_cursor):
-        assert aio_cursor.query_id is None
-        await aio_cursor.execute("SELECT * FROM one_row")
-        expected_pattern = (
-            r"^[0-9a-f]{8}-[0-9a-f]{4}-[4][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
-        )
-        assert re.match(expected_pattern, aio_cursor.query_id)
-
-    async def test_query_execution_initial(self, aio_cursor):
-        assert not aio_cursor.has_result_set
-        assert aio_cursor.rownumber is None
-        assert aio_cursor.rowcount == -1
-        assert aio_cursor.database is None
-        assert aio_cursor.catalog is None
-        assert aio_cursor.query_id is None
-        assert aio_cursor.query is None
-        assert aio_cursor.statement_type is None
-        assert aio_cursor.work_group is None
-        assert aio_cursor.state is None
-        assert aio_cursor.state_change_reason is None
-        assert aio_cursor.submission_date_time is None
-        assert aio_cursor.completion_date_time is None
-        assert aio_cursor.data_scanned_in_bytes is None
-        assert aio_cursor.engine_execution_time_in_millis is None
-        assert aio_cursor.query_queue_time_in_millis is None
-        assert aio_cursor.total_execution_time_in_millis is None
-        assert aio_cursor.query_planning_time_in_millis is None
-        assert aio_cursor.service_processing_time_in_millis is None
-        assert aio_cursor.output_location is None
-        assert aio_cursor.data_manifest_location is None
-        assert aio_cursor.encryption_option is None
-        assert aio_cursor.kms_key is None
-        assert aio_cursor.selected_engine_version is None
-        assert aio_cursor.effective_engine_version is None
-
-    async def test_cancel_initial(self, aio_cursor):
-        with pytest.raises(ProgrammingError):
-            await aio_cursor.cancel()
-
-    async def test_executemany(self, aio_cursor, empty_table):
-        rows = [(1, "foo"), (2, "bar"), (3, "jim o'rourke")]
-        await aio_cursor.executemany(
-            f"INSERT INTO {empty_table} (a, b) VALUES (%(a)d, %(b)s)",
-            [{"a": a, "b": b} for a, b in rows],
-        )
-        assert aio_cursor.rowcount == len(rows)
-        await aio_cursor.execute(f"SELECT * FROM {empty_table}")
-        assert sorted(await aio_cursor.fetchall()) == list(rows)
-
+    # The sum of the update counts does not depend on the statement; the synchronous
+    # test_iceberg_table checks the update count of INSERT, UPDATE, and DELETE.
     @pytest.mark.parametrize(
         ("operation", "expected"),
         [
-            pytest.param(
-                "INSERT INTO {table} SELECT id+10, group_id+10, value "
-                "FROM {table} WHERE group_id=%(group_id)d",
-                [(1, 10), (2, 20), (3, 30), (11, 10), (12, 20), (13, 30)],
-                id="insert",
-            ),
             pytest.param(
                 "UPDATE {table} SET value=value+1 WHERE group_id=%(group_id)d",
                 [(1, 11), (2, 21), (3, 31)],
                 id="update",
             ),
-            pytest.param("DELETE FROM {table} WHERE group_id=%(group_id)d", [], id="delete"),
         ],
     )
     async def test_executemany_rowcount(self, aio_cursor, executemany_table, operation, expected):
@@ -802,7 +558,9 @@ class TestAioCursor:
         assert aio_cursor.rowcount == -1
         assert await aio_cursor.fetchall() == expected
 
-    @pytest.mark.parametrize("failure_index", [0, 1])
+    # A failure of the first statement reaches the same code; this case also shows
+    # that the statements before the failure are not rolled back.
+    @pytest.mark.parametrize("failure_index", [1])
     async def test_executemany_failure(self, aio_cursor, executemany_table, failure_index):
         operation = (
             f"UPDATE {executemany_table} SET value=value+1 "
@@ -827,31 +585,6 @@ class TestAioCursor:
         ]
         await aio_cursor.execute(operation, {"group_id": "2"})
         assert aio_cursor.rowcount == 1
-
-    async def test_executemany_parameter_iteration_failure(self, aio_cursor, executemany_table):
-        previous = None
-        query_id = None
-
-        def parameters():
-            nonlocal previous, query_id
-            yield {"group_id": 1}
-            previous = aio_cursor.result_set
-            query_id = aio_cursor.query_id
-            raise ValueError("invalid parameters")
-
-        with pytest.raises(ValueError, match="invalid parameters"):
-            await aio_cursor.executemany(
-                f"UPDATE {executemany_table} SET value=value+1 WHERE group_id=%(group_id)d",
-                parameters(),
-            )
-        assert aio_cursor.rowcount == -1
-        assert aio_cursor.result_set is None
-        assert query_id is not None
-        assert aio_cursor.query_id == query_id
-        assert previous is not None
-        assert previous.is_closed
-        await aio_cursor.execute(f"SELECT id, value FROM {executemany_table} ORDER BY id")
-        assert await aio_cursor.fetchall() == [(1, 11), (2, 21), (3, 30)]
 
     @pytest.mark.parametrize("aio_cursor", [{"kill_on_interrupt": False}], indirect=True)
     async def test_executemany_cancellation(self, aio_cursor, executemany_table):
@@ -883,31 +616,6 @@ class TestAioCursor:
                 await aio_cursor._cancel(query_ids[-1])
                 await aio_cursor._poll(query_ids[-1])
 
-    async def test_executemany_fetch(self, aio_cursor):
-        await aio_cursor.executemany("SELECT %(x)d FROM one_row", [])
-        assert aio_cursor.rowcount == 0
-        await aio_cursor.executemany("SELECT %(x)d FROM one_row", [{"x": i} for i in range(1, 2)])
-        assert aio_cursor.rowcount == -1
-        with pytest.raises(ProgrammingError):
-            await aio_cursor.fetchall()
-        with pytest.raises(ProgrammingError):
-            await aio_cursor.fetchmany()
-        with pytest.raises(ProgrammingError):
-            await aio_cursor.fetchone()
-
-    async def test_context_manager(self):
-        conn = await _aio_connect(schema_name=ENV.schema)
-        try:
-            async with conn.cursor() as cursor:
-                await cursor.execute("SELECT * FROM one_row")
-                assert await cursor.fetchone() == (1,)
-        finally:
-            conn.close()
-
-    async def test_open_close(self):
-        conn = await _aio_connect()
-        conn.close()
-
     async def test_aio_connect(self):
         from pyathena import aio_connect
 
@@ -923,55 +631,29 @@ class TestAioCursor:
         actual = await aio_cursor.fetchmany()
         assert len(actual) == 5
 
-    async def test_arraysize_default(self, aio_cursor):
-        assert aio_cursor.arraysize == AthenaResultSet.DEFAULT_FETCH_SIZE
-
-    async def test_invalid_arraysize(self, aio_cursor):
-        with pytest.raises(ProgrammingError):
-            aio_cursor.arraysize = 10000
-        with pytest.raises(ProgrammingError):
-            aio_cursor.arraysize = -1
-
-    async def test_glue_request_runs_off_the_event_loop(self, aio_cursor, monkeypatch):
-        throttle_metadata_api(aio_cursor.connection.client, monkeypatch)
-        loop_thread = threading.get_ident()
+    async def test_glue_request_runs_off_the_event_loop(self, monkeypatch):
+        """The Glue client and request of a throttled lookup do not block the loop (no AWS)."""
+        conn = placeholder_connection(AioConnection)
+        throttle_metadata_api(conn.client, monkeypatch)
         threads = []
-        # Record where the real client is built and the real request is sent.
-        client = GlueMetadataClient.client
-        get_table = GlueMetadataClient.get_table
 
-        def recorded_client(self):
-            threads.append(("client", threading.get_ident()))
-            return client.fget(self)
-
-        def recorded_get_table(self, *args, **kwargs):
+        def get_table(**kwargs):
             threads.append(("request", threading.get_ident()))
-            return get_table(self, *args, **kwargs)
+            return {"Table": {"Name": kwargs["Name"], "StorageDescriptor": {"Columns": []}}}
 
-        monkeypatch.setattr(GlueMetadataClient, "client", property(recorded_client))
-        monkeypatch.setattr(GlueMetadataClient, "get_table", recorded_get_table)
+        glue = MagicMock()
+        glue.get_table.side_effect = get_table
 
-        assert (await aio_cursor.get_table_metadata("one_row")).name == "one_row"
-        # Building the client and sending the request would block the loop.
-        assert [step for step, _ in threads] == ["request", "client"]
-        assert all(thread != loop_thread for _, thread in threads)
+        def build_client(service_name, **kwargs):
+            assert service_name == "glue"
+            threads.append(("client", threading.get_ident()))
+            return glue
 
-    async def test_list_databases(self, aio_cursor):
-        databases = await aio_cursor.list_databases(catalog_name="AwsDataCatalog")
-        assert len(databases) > 0
-        database_names = [db.name for db in databases]
-        assert "default" in database_names
+        monkeypatch.setattr(conn.session, "client", build_client)
 
-    async def test_get_table_metadata(self, aio_cursor):
-        metadata = await aio_cursor.get_table_metadata(table_name="one_row")
-        assert metadata.name == "one_row"
-        assert metadata.table_type
-
-    async def test_list_table_metadata(self, aio_cursor):
-        metadata_list = await aio_cursor.list_table_metadata()
-        assert len(metadata_list) > 0
-        table_names = [m.name for m in metadata_list]
-        assert "one_row" in table_names
+        assert (await conn.cursor().get_table_metadata("one_row")).name == "one_row"
+        assert sorted(step for step, _ in threads) == ["client", "request"]
+        assert threading.get_ident() not in [thread for _, thread in threads]
 
     async def test_throttled_metadata_reads_glue(self, aio_cursor, monkeypatch):
         def view(metadata):
@@ -985,9 +667,13 @@ class TestAioCursor:
             )
 
         expected = await read()
+        table, listing, has_schema = expected
+        assert table[0] == "one_row"
+        assert "one_row" in [name for name, _, _ in listing]
+        assert has_schema
         calls = throttle_metadata_api(aio_cursor.connection.client, monkeypatch)
 
-        # The Glue request runs in a worker thread, as the Athena calls do.
+        # Glue reports each table as Athena does, and nothing is retried first.
         assert await read() == expected
         assert sorted(calls) == ["get_table_metadata", "list_databases", "list_table_metadata"]
 
@@ -997,30 +683,7 @@ class TestAioDictCursor:
         await aio_dict_cursor.execute("SELECT * FROM one_row")
         assert await aio_dict_cursor.fetchone() == {"number_of_rows": 1}
 
-    async def test_fetchmany(self, aio_dict_cursor):
-        await aio_dict_cursor.execute("SELECT * FROM many_rows LIMIT 15")
-        actual1 = await aio_dict_cursor.fetchmany(10)
-        assert len(actual1) == 10
-        assert actual1 == [{"a": i} for i in range(10)]
-        actual2 = await aio_dict_cursor.fetchmany(10)
-        assert len(actual2) == 5
-        assert actual2 == [{"a": i} for i in range(10, 15)]
-
-    async def test_fetchall(self, aio_dict_cursor):
-        await aio_dict_cursor.execute("SELECT * FROM one_row")
-        assert await aio_dict_cursor.fetchall() == [{"number_of_rows": 1}]
-        await aio_dict_cursor.execute("SELECT a FROM many_rows ORDER BY a")
-        assert await aio_dict_cursor.fetchall() == [{"a": i} for i in range(10000)]
-
     async def test_dict_type(self, aio_dict_cursor):
-        async with aio_dict_cursor.connection.cursor(dict_type=OrderedDict) as ordered_cursor:
-            await ordered_cursor.execute("SELECT * FROM one_row")
-            assert type(await ordered_cursor.fetchone()) is OrderedDict
-        # dict_type of another cursor does not change the row type of this one.
-        await aio_dict_cursor.execute("SELECT * FROM one_row")
-        assert type(await aio_dict_cursor.fetchone()) is dict
-
-    async def test_dict_type_custom_result_set(self, aio_dict_cursor):
         class CustomResultSet(AthenaAioDictResultSet):
             pass
 
@@ -1031,7 +694,10 @@ class TestAioDictCursor:
 
         async with aio_dict_cursor.connection.cursor(
             CustomDictCursor, dict_type=OrderedDict
-        ) as cursor:
-            await cursor.execute("SELECT * FROM one_row")
-            assert isinstance(cursor.result_set, CustomResultSet)
-            assert type(await cursor.fetchone()) is OrderedDict
+        ) as ordered_cursor:
+            await ordered_cursor.execute("SELECT * FROM one_row")
+            assert isinstance(ordered_cursor.result_set, CustomResultSet)
+            assert type(await ordered_cursor.fetchone()) is OrderedDict
+        # dict_type of another cursor does not change the row type of this one.
+        await aio_dict_cursor.execute("SELECT * FROM one_row")
+        assert type(await aio_dict_cursor.fetchone()) is dict

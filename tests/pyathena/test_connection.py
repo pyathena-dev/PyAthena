@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+import contextlib
+import inspect
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +18,13 @@ import pytest
 from botocore.config import Config
 
 import pyathena
+from pyathena.aio.arrow.cursor import AioArrowCursor
+from pyathena.aio.connection import AioConnection
+from pyathena.aio.cursor import AioCursor, AioDictCursor
+from pyathena.aio.pandas.cursor import AioPandasCursor
+from pyathena.aio.polars.cursor import AioPolarsCursor
+from pyathena.aio.s3fs.cursor import AioS3FSCursor
+from pyathena.aio.spark.cursor import AioSparkCursor
 from pyathena.arrow.async_cursor import AsyncArrowCursor
 from pyathena.arrow.cursor import ArrowCursor
 from pyathena.async_cursor import AsyncCursor, AsyncDictCursor
@@ -38,7 +47,7 @@ from pyathena.util import RetryConfig
 from tests.pyathena.util import EVENT_TIMEOUT, answered_requests
 
 # Cursors whose arraysize is the GetQueryResults page size, capped at 1000.
-PAGED_CURSORS = [Cursor, DictCursor, AsyncCursor, AsyncDictCursor]
+PAGED_CURSORS = [Cursor, DictCursor, AsyncCursor, AsyncDictCursor, AioCursor, AioDictCursor]
 # Cursors whose arraysize only sets the fetchmany() batch, with no upper limit.
 UNCAPPED_CURSORS = [
     ArrowCursor,
@@ -49,10 +58,37 @@ UNCAPPED_CURSORS = [
     AsyncPandasCursor,
     AsyncPolarsCursor,
     AsyncS3FSCursor,
+    AioArrowCursor,
+    AioPandasCursor,
+    AioPolarsCursor,
+    AioS3FSCursor,
 ]
-CURSOR_CLASSES = PAGED_CURSORS + UNCAPPED_CURSORS + [SparkCursor, AsyncSparkCursor]
+CURSOR_CLASSES = PAGED_CURSORS + UNCAPPED_CURSORS + [SparkCursor, AsyncSparkCursor, AioSparkCursor]
 # Cursors that run on_start_query_execution.
-START_CALLBACK_CURSORS = [Cursor, DictCursor, ArrowCursor, PandasCursor, PolarsCursor, S3FSCursor]
+START_CALLBACK_CURSORS = [
+    Cursor,
+    DictCursor,
+    ArrowCursor,
+    PandasCursor,
+    PolarsCursor,
+    S3FSCursor,
+    AioCursor,
+    AioDictCursor,
+    AioArrowCursor,
+    AioPandasCursor,
+    AioPolarsCursor,
+    AioS3FSCursor,
+]
+# The native asyncio cursors, whose execute() is a coroutine function.
+AIO_CURSOR_CLASSES = [
+    AioCursor,
+    AioDictCursor,
+    AioArrowCursor,
+    AioPandasCursor,
+    AioPolarsCursor,
+    AioS3FSCursor,
+    AioSparkCursor,
+]
 # Cursors that pass execute() keyword arguments to a DataFrame reader.
 READER_CURSOR_CLASSES = [PandasCursor, PolarsCursor, AsyncPandasCursor, AsyncPolarsCursor]
 
@@ -92,8 +128,12 @@ def test_empty_settings_disable_both_environment_fallbacks(monkeypatch):
         Connection(region_name="us-east-1", s3_staging_dir="", work_group="")
 
 
-@pytest.mark.parametrize("factory", [pyathena.connect, Connection])
+@pytest.mark.parametrize(
+    "factory",
+    [pyathena.connect, Connection, pyathena.aio_connect, AioConnection.create, AioConnection],
+)
 def test_connect_keyword_only(factory):
+    # aio_connect() and AioConnection.create() raise when they are called.
     with pytest.raises(TypeError):
         factory("s3://bucket/path/")
 
@@ -154,6 +194,26 @@ def _open_cursor(conn: Connection[Any], cursor_class: type[Any], **kwargs: Any) 
     return conn.cursor(cursor_class, **kwargs)
 
 
+@contextlib.asynccontextmanager
+async def _opened_cursor(conn: Connection[Any], cursor_class: type[Any]) -> Any:
+    """Open a cursor and close it, awaiting the close of an aio cursor.
+
+    Args:
+        conn: The connection.
+        cursor_class: The cursor class.
+
+    Yields:
+        The cursor.
+    """
+    cursor = _open_cursor(conn, cursor_class)
+    try:
+        yield cursor
+    finally:
+        closed = cursor.close()
+        if inspect.isawaitable(closed):
+            await closed
+
+
 @pytest.mark.parametrize("cursor_class", CURSOR_CLASSES)
 def test_cursor_constructor_keyword_only(cursor_class):
     # Binds the arguments as a call does before the constructor runs. A call
@@ -164,9 +224,11 @@ def test_cursor_constructor_keyword_only(cursor_class):
 
 
 @pytest.mark.parametrize("cursor_class", CURSOR_CLASSES)
-def test_cursor_execute_keyword_only(offline_connection, cursor_class):
-    with _open_cursor(offline_connection, cursor_class) as cursor, pytest.raises(TypeError):
-        cursor.execute("SELECT %(value)s", {"value": 1}, "group")
+async def test_cursor_execute_keyword_only(offline_connection, cursor_class):
+    async with _opened_cursor(offline_connection, cursor_class) as cursor:
+        # An aio execute() raises when it is called, before it is awaited.
+        with pytest.raises(TypeError):
+            cursor.execute("SELECT %(value)s", {"value": 1}, "group")
 
 
 @pytest.mark.parametrize("cursor_class", CURSOR_CLASSES)
@@ -179,30 +241,31 @@ def test_cursor_unknown_constructor_keyword(offline_connection, cursor_class):
 
 
 @pytest.mark.parametrize("cursor_class", CURSOR_CLASSES)
-def test_cursor_accepts_connection_callbacks(offline_connection, cursor_class):
+async def test_cursor_accepts_connection_callbacks(offline_connection, cursor_class):
     started, polled = [], []
     offline_connection.on_start_query_execution = started.append
     offline_connection.on_poll = polled.append
 
-    with (
-        answered_requests(offline_connection.client),
-        _open_cursor(offline_connection, cursor_class) as cursor,
-    ):
-        try:
-            result = cursor.execute("SELECT 1")
-        except OperationalError:
-            pass
-        else:
-            # The Async cursors run the execution in a future.
-            result[1].result(timeout=EVENT_TIMEOUT)
+    with answered_requests(offline_connection.client):
+        async with _opened_cursor(offline_connection, cursor_class) as cursor:
+            result = None
+            with contextlib.suppress(OperationalError):
+                result = cursor.execute("SELECT 1")
+                if inspect.isawaitable(result):
+                    await result
+            if isinstance(result, tuple):
+                # The Async cursors run the execution in a future.
+                result[1].result(timeout=EVENT_TIMEOUT)
 
     assert [execution.state for execution in polled] == ["FAILED"]
     # The Async and Spark cursors do not run on_start_query_execution.
     assert started == (["query-id"] if cursor_class in START_CALLBACK_CURSORS else [])
 
 
+# aio/test_connection.py tests the native asyncio cursors.
 @pytest.mark.parametrize(
-    "cursor_class", [c for c in CURSOR_CLASSES if c not in READER_CURSOR_CLASSES]
+    "cursor_class",
+    [c for c in CURSOR_CLASSES if c not in READER_CURSOR_CLASSES + AIO_CURSOR_CLASSES],
 )
 def test_cursor_execute_unknown_keyword(offline_connection, cursor_class):
     with _open_cursor(offline_connection, cursor_class) as cursor:

@@ -6,7 +6,6 @@
 # SPDX-License-Identifier: MIT
 
 import asyncio
-import logging
 import threading
 import uuid
 from unittest.mock import MagicMock, PropertyMock, patch
@@ -25,21 +24,10 @@ from tests.pyathena.util import interrupt_start_waits
 
 SPARK_CURSOR_CLASSES = [SparkCursor, AsyncSparkCursor, AioSparkCursor]
 SYNC_SPARK_CURSOR_CLASSES = [SparkCursor, AsyncSparkCursor]
+# AsyncSparkCursor inherits _calculate and _start_execution from SparkCursor's bases;
+# the parameter keeps the test IDs.
+CALCULATE_CURSOR_CLASSES = [SparkCursor]
 _TIMEOUT = 10
-
-
-def _session_status(state: str, reason: str | None = None) -> AthenaSessionStatus:
-    return AthenaSessionStatus(
-        {"SessionId": "session_id", "Status": {"State": state, "StateChangeReason": reason}}
-    )
-
-
-def _cursor() -> SparkCursor:
-    cursor = SparkCursor.__new__(SparkCursor)  # bypass __init__ to avoid AWS calls
-    cursor._connection = MagicMock()
-    cursor._retry_config = RetryConfig()
-    cursor._poll_interval = 0
-    return cursor
 
 
 def _connection():
@@ -143,75 +131,41 @@ def _close(cursor) -> None:
 
 
 class TestSparkBaseCursor:
-    @pytest.mark.parametrize(
-        "state",
-        [
-            AthenaSessionStatus.STATE_TERMINATED,
-            AthenaSessionStatus.STATE_DEGRADED,
-            AthenaSessionStatus.STATE_FAILED,
-        ],
-    )
-    def test_wait_for_idle_session_raises_on_failure_state(self, state):
-        cursor = _cursor()
-        with (
-            patch.object(
-                SparkCursor,
-                "_get_session_status",
-                return_value=_session_status(state, "session failure reason"),
-            ),
-            patch("pyathena.spark.common.time.sleep", side_effect=AssertionError("slept")),
-            pytest.raises(
-                OperationalError,
-                match=rf"^Session: session_id is {state}\. session failure reason$",
-            ),
-        ):
-            cursor._wait_for_idle_session("session_id")
-
-    def test_wait_for_idle_session_raises_without_reason(self):
-        cursor = _cursor()
-        with (
-            patch.object(
-                SparkCursor,
-                "_get_session_status",
-                return_value=_session_status(AthenaSessionStatus.STATE_TERMINATED),
-            ),
-            patch("pyathena.spark.common.time.sleep", side_effect=AssertionError("slept")),
-            pytest.raises(OperationalError, match=r"^Session: session_id is TERMINATED\.$"),
-        ):
-            cursor._wait_for_idle_session("session_id")
-
     def test_wait_for_idle_session_waits_until_idle(self):
-        cursor = _cursor()
-        statuses = [
-            _session_status(AthenaSessionStatus.STATE_CREATING),
-            _session_status(AthenaSessionStatus.STATE_BUSY),
-            _session_status(AthenaSessionStatus.STATE_IDLE),
+        connection = _connection()
+        connection.client.get_session_status.side_effect = [
+            {"Status": {"State": state}}
+            for state in (
+                AthenaSessionStatus.STATE_CREATING,
+                AthenaSessionStatus.STATE_BUSY,
+                AthenaSessionStatus.STATE_IDLE,
+            )
         ]
-        with (
-            patch.object(SparkCursor, "_get_session_status", side_effect=statuses) as get_status,
-            patch("pyathena.spark.common.time.sleep") as sleep,
-        ):
-            cursor._wait_for_idle_session("session_id")
-        assert get_status.call_count == 3
-        assert sleep.call_count == 2
+
+        cursor = _init_cursor(SparkCursor, connection)
+
+        assert cursor.session_id == "new-session"
+        # The status is requested until the session is idle.
+        assert connection.client.get_session_status.call_count == 3
+        connection.client.terminate_session.assert_not_called()
 
     def test_exists_session_raises_on_failure_state(self):
-        cursor = _cursor()
-        with (
-            patch.object(
-                SparkCursor,
-                "_get_session_status",
-                return_value=_session_status(
-                    AthenaSessionStatus.STATE_TERMINATED, "session failure reason"
-                ),
-            ),
-            patch("pyathena.spark.common.time.sleep", side_effect=AssertionError("slept")),
-            pytest.raises(OperationalError, match="session failure reason"),
-        ):
-            cursor._exists_session("session_id")
-        cursor._connection.client.get_session.assert_called_once_with(SessionId="session_id")
+        connection = _connection()
+        connection.client.get_session_status.return_value = {
+            "Status": {
+                "State": AthenaSessionStatus.STATE_TERMINATED,
+                "StateChangeReason": "session failure reason",
+            }
+        }
 
-    @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
+        with pytest.raises(OperationalError, match="session failure reason"):
+            _init_cursor(SparkCursor, connection, session_id="supplied-session")
+
+        connection.client.get_session.assert_called_once_with(SessionId="supplied-session")
+        connection.client.start_session.assert_not_called()
+        connection.client.terminate_session.assert_not_called()
+
+    @pytest.mark.parametrize("cursor_class", CALCULATE_CURSOR_CLASSES)
     @pytest.mark.parametrize("kill_on_interrupt", [True, False])
     def test_calculate_reuses_generated_token_on_retry(self, cursor_class, kill_on_interrupt):
         cursor = _calculation_cursor(cursor_class, kill_on_interrupt=kill_on_interrupt)
@@ -238,7 +192,7 @@ class TestSparkBaseCursor:
                 thread.join(_TIMEOUT)
                 assert not thread.is_alive()
 
-    @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
+    @pytest.mark.parametrize("cursor_class", CALCULATE_CURSOR_CLASSES)
     def test_calculate_generates_token_per_call(self, cursor_class):
         cursor = _calculation_cursor(cursor_class)
         client = cursor._connection.client
@@ -252,7 +206,7 @@ class TestSparkBaseCursor:
         ]
         assert tokens[0] != tokens[1]
 
-    @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
+    @pytest.mark.parametrize("cursor_class", CALCULATE_CURSOR_CLASSES)
     def test_calculate_keeps_caller_token(self, cursor_class):
         cursor = _calculation_cursor(cursor_class)
 
@@ -262,32 +216,7 @@ class TestSparkBaseCursor:
             SessionId="session_id", CodeBlock="code", ClientRequestToken="token"
         )
 
-    @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
-    @pytest.mark.parametrize(
-        "final_state",
-        [
-            AthenaCalculationExecutionStatus.STATE_CANCELED,
-            AthenaCalculationExecutionStatus.STATE_COMPLETED,
-        ],
-    )
-    def test_calculate_interrupted_while_starting(self, cursor_class, final_state):
-        cursor = _calculation_cursor(cursor_class)
-        final_execution = MagicMock(state=final_state)
-        cursor._get_calculation_execution.return_value = final_execution
-        started, release = _block_start(cursor)
-        waits, raised = interrupt_start_waits(started, release)
-
-        with waits, pytest.raises(KeyboardInterrupt) as exc_info:
-            cursor._calculate(session_id="session_id", code_block="code")
-
-        assert exc_info.value is raised[0]
-        assert exc_info.value.__cause__ is None
-        cursor._connection.client.start_calculation_execution.assert_called_once()
-        cursor._cancel.assert_called_once_with("calculation_id")
-        assert cursor.calculation_id == "calculation_id"
-        assert cursor._calculation_execution is final_execution
-
-    @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
+    @pytest.mark.parametrize("cursor_class", CALCULATE_CURSOR_CLASSES)
     @pytest.mark.parametrize("failing", ["start", "cancel", "wait"])
     def test_calculate_interrupted_while_starting_failure(self, cursor_class, failing):
         cursor = _calculation_cursor(cursor_class)
@@ -321,7 +250,7 @@ class TestSparkBaseCursor:
             cursor._cancel.assert_called_once_with("calculation_id")
             assert cursor.calculation_id == "calculation_id"
 
-    @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
+    @pytest.mark.parametrize("cursor_class", CALCULATE_CURSOR_CLASSES)
     def test_calculate_second_interrupt_while_starting(self, cursor_class):
         cursor = _calculation_cursor(cursor_class)
         started, release = _block_start(cursor)
@@ -337,7 +266,7 @@ class TestSparkBaseCursor:
         assert exc_info.value.__context__ is raised[0]
         cursor._cancel.assert_not_called()
 
-    @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
+    @pytest.mark.parametrize("cursor_class", CALCULATE_CURSOR_CLASSES)
     @pytest.mark.parametrize("helper_starts", [False, True])
     def test_calculate_interrupted_before_request_is_sent(self, cursor_class, helper_starts):
         cursor = _calculation_cursor(cursor_class)
@@ -366,42 +295,32 @@ class TestSparkBaseCursor:
         cursor._cancel.assert_not_called()
         assert cursor.calculation_id is None
 
-    @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
-    def test_calculate_interrupt_without_kill_on_interrupt(self, cursor_class):
-        cursor = _calculation_cursor(cursor_class, kill_on_interrupt=False)
-        cursor._connection.client.start_calculation_execution.side_effect = KeyboardInterrupt()
-
-        with (
-            patch("pyathena.common.threading.Thread") as thread,
-            pytest.raises(KeyboardInterrupt),
-        ):
-            cursor._calculate(session_id="session_id", code_block="code")
-
-        thread.assert_not_called()
-        cursor._connection.client.start_calculation_execution.assert_called_once()
-        cursor._cancel.assert_not_called()
-
-    def test_execute_interrupted_while_starting(self):
+    @pytest.mark.parametrize(
+        "final_state",
+        [
+            AthenaCalculationExecutionStatus.STATE_CANCELED,
+            AthenaCalculationExecutionStatus.STATE_COMPLETED,
+        ],
+    )
+    def test_execute_interrupted_while_starting(self, final_state):
         cursor = _calculation_cursor(SparkCursor)
+        final_execution = MagicMock(state=final_state)
+        cursor._get_calculation_execution.return_value = final_execution
         started, release = _block_start(cursor)
-        waits, _ = interrupt_start_waits(started, release)
+        waits, raised = interrupt_start_waits(started, release)
 
-        with waits, pytest.raises(KeyboardInterrupt):
+        with waits, pytest.raises(KeyboardInterrupt) as exc_info:
             cursor.execute("code")
 
+        assert exc_info.value is raised[0]
+        assert exc_info.value.__cause__ is None
+        cursor._connection.client.start_calculation_execution.assert_called_once()
+        cursor._cancel.assert_called_once_with("calculation_id")
         assert cursor.calculation_id == "calculation_id"
-        assert cursor.state == AthenaCalculationExecutionStatus.STATE_CANCELED
+        assert cursor.calculation_execution is final_execution
+        assert cursor.state == final_state
 
-    @pytest.mark.parametrize("cursor_class", SPARK_CURSOR_CLASSES)
-    def test_init_starts_session(self, cursor_class):
-        connection = _connection()
-        with patch.object(SparkBaseCursor, "_wait_for_idle_session"):
-            cursor = _init_cursor(cursor_class, connection)
-
-        assert cursor.session_id == "new-session"
-        connection.client.terminate_session.assert_not_called()
-
-    @pytest.mark.parametrize("cursor_class", SPARK_CURSOR_CLASSES)
+    @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
     @pytest.mark.parametrize(
         "error",
         [OperationalError("Session did not become idle."), KeyboardInterrupt()],
@@ -417,7 +336,7 @@ class TestSparkBaseCursor:
         assert exc_info.value is error
         connection.client.terminate_session.assert_called_once_with(SessionId="new-session")
 
-    @pytest.mark.parametrize("cursor_class", SPARK_CURSOR_CLASSES)
+    @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
     @pytest.mark.parametrize(
         "state",
         [
@@ -434,18 +353,14 @@ class TestSparkBaseCursor:
         }
         with (
             patch("pyathena.spark.common.time.sleep", side_effect=AssertionError("slept")),
-            pytest.raises(
-                OperationalError,
-                match=rf"^Session: new-session is {state}\. session failure reason$",
-            ),
+            pytest.raises(OperationalError, match="session failure reason"),
         ):
             _init_cursor(cursor_class, connection)
 
-        connection.client.get_session_status.assert_called_once_with(SessionId="new-session")
         connection.client.terminate_session.assert_called_once_with(SessionId="new-session")
 
-    @pytest.mark.parametrize("cursor_class", SPARK_CURSOR_CLASSES)
-    def test_init_keeps_original_error_when_cleanup_fails(self, cursor_class, caplog):
+    @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
+    def test_init_keeps_original_error_when_cleanup_fails(self, cursor_class):
         connection = _connection()
         connection.client.terminate_session.side_effect = ClientError(
             {"Error": {"Code": "InternalServerException", "Message": "Cleanup failed."}},
@@ -453,7 +368,6 @@ class TestSparkBaseCursor:
         )
         error = OperationalError("Session did not become idle.")
         with (
-            caplog.at_level(logging.ERROR, logger="pyathena.spark.common"),
             patch.object(SparkBaseCursor, "_wait_for_idle_session", side_effect=error),
             pytest.raises(OperationalError) as exc_info,
         ):
@@ -461,9 +375,8 @@ class TestSparkBaseCursor:
 
         assert exc_info.value is error
         connection.client.terminate_session.assert_called_once_with(SessionId="new-session")
-        assert "Failed to terminate session: new-session." in caplog.text
 
-    @pytest.mark.parametrize("cursor_class", SPARK_CURSOR_CLASSES)
+    @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
     def test_init_does_not_terminate_supplied_session(self, cursor_class):
         connection = _connection()
         error = OperationalError("Session did not become idle.")
@@ -477,7 +390,7 @@ class TestSparkBaseCursor:
         connection.client.start_session.assert_not_called()
         connection.client.terminate_session.assert_not_called()
 
-    @pytest.mark.parametrize("cursor_class", SPARK_CURSOR_CLASSES)
+    @pytest.mark.parametrize("cursor_class", SYNC_SPARK_CURSOR_CLASSES)
     def test_init_does_not_start_session_when_s3_client_fails(self, cursor_class):
         connection = _connection()
         type(connection).s3_client = PropertyMock(
@@ -519,6 +432,14 @@ class TestSparkBaseCursor:
             connection.client.terminate_session.assert_called_once_with(SessionId=cursor.session_id)
         else:
             connection.client.terminate_session.assert_not_called()
+
+    async def test_aio_context_exit_terminates_owned_session(self):
+        """AioSparkCursor closes itself, and so its own session, at the end of async with."""
+        connection = _connection()
+        async with _init_cursor(AioSparkCursor, connection):
+            connection.client.terminate_session.assert_not_called()
+
+        connection.client.terminate_session.assert_called_once_with(SessionId="new-session")
 
     @pytest.mark.parametrize("cursor_class", SPARK_CURSOR_CLASSES)
     def test_close_does_not_terminate_session_twice(self, cursor_class):

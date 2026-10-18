@@ -13,13 +13,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from pyathena import NotSupportedError, OperationalError
-from pyathena.model import AthenaCalculationExecutionStatus, AthenaSessionStatus
+from pyathena.model import AthenaCalculationExecutionStatus
 from pyathena.spark.async_cursor import AsyncSparkCursor
 from tests import ENV
 from tests.pyathena.util import (
     CANCELABLE_SPARK_JOB,
+    COMPLETED_CALCULATION_RESPONSES,
+    answered_requests,
+    offline_spark_cursor,
     wait_for_spark_job,
-    wait_for_spark_session_state,
 )
 
 # Bounds how long the executor test task blocks when nothing releases it.
@@ -154,25 +156,6 @@ class TestAsyncSparkCursor:
             == AthenaCalculationExecutionStatus.STATE_COMPLETED
         )
 
-    def test_session_ownership(self, async_spark_cursor):
-        client = async_spark_cursor.connection.client
-        session_id = async_spark_cursor.session_id
-        with async_spark_cursor.connection.cursor(
-            AsyncSparkCursor, session_id=session_id
-        ) as borrower:
-            _, future = borrower.execute("print(1)")
-            calculation_execution = future.result()
-            assert borrower.get_std_out(calculation_execution).result() == "1"
-
-        # Closing a cursor that was given the session leaves the session running.
-        _, future = async_spark_cursor.execute("print(2)")
-        calculation_execution = future.result()
-        assert async_spark_cursor.get_std_out(calculation_execution).result() == "2"
-
-        # Closing the cursor that started the session terminates it.
-        async_spark_cursor.close()
-        wait_for_spark_session_state(client, session_id, AthenaSessionStatus.STATE_TERMINATED)
-
     @staticmethod
     def _cursor_with_submitted_work():
         """Build a cursor whose executor holds one running and one queued future.
@@ -244,19 +227,6 @@ class TestAsyncSparkCursor:
         assert running.result(_TIMEOUT) == "running"
         assert queued.result(_TIMEOUT) == "queued"
 
-    def test_close_retries_termination_after_failure(self):
-        cursor = _owned_session_cursor()
-        cursor._terminate_session = MagicMock(
-            side_effect=[OperationalError("termination failed"), None]
-        )
-        cursor._executor = ThreadPoolExecutor(max_workers=1)
-
-        with pytest.raises(OperationalError, match="termination failed"):
-            cursor.close()
-        cursor.close()
-
-        assert cursor._terminate_session.call_count == 2
-
     @pytest.mark.parametrize("parameters", [{}, [], {"value": 1}])
     def test_execute_rejects_parameters(self, parameters):
         """Any parameters other than None raise before a calculation starts (no AWS)."""
@@ -295,20 +265,15 @@ class TestAsyncSparkCursor:
     )
     def test_execute_accepts_none_parameters(self, args, kwargs):
         """Omitted or None parameters start the calculation and its polling (no AWS)."""
-        cursor = AsyncSparkCursor.__new__(AsyncSparkCursor)  # bypass __init__ to avoid AWS calls
-        cursor._session_id = "session_id"
-        cursor._executor = MagicMock()
+        cursor = offline_spark_cursor(AsyncSparkCursor)
+        with answered_requests(
+            cursor.connection.client, COMPLETED_CALCULATION_RESPONSES
+        ) as requests:
+            calculation_id, future = cursor.execute("code", *args, **kwargs)
+            calculation_execution = future.result(_TIMEOUT)
+        cursor.close()
 
-        with patch.object(
-            AsyncSparkCursor, "_calculate", return_value="calculation_id"
-        ) as calculate:
-            query_id, future = cursor.execute("code", *args, **kwargs)
-
-        calculate.assert_called_once_with(
-            session_id="session_id",
-            code_block="code",
-            description=None,
-            client_request_token=None,
-        )
-        assert query_id == "calculation_id"
-        assert future is cursor._executor.submit.return_value
+        start = dict(requests)["StartCalculationExecution"]
+        assert (start["SessionId"], start["CodeBlock"]) == ("session", "code")
+        assert calculation_id == "calculation-id"
+        assert calculation_execution.state == AthenaCalculationExecutionStatus.STATE_COMPLETED

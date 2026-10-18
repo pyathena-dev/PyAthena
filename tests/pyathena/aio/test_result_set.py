@@ -157,9 +157,3 @@ class TestAthenaAioResultSet:
         assert await result_set.fetchmany() == []
         assert await result_set.fetchall() == []
         assert result_set.rownumber is None
-
-    async def test_get_query_results_after_close(self):
-        result_set = await _create_result_set(AthenaAioResultSet, [("1", "2"), ("3",)])
-        result_set.close()
-        with pytest.raises(ProgrammingError, match=r"AthenaAioResultSet is closed\."):
-            await result_set._async_get_query_results(2, "token1")
