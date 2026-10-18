@@ -1,4 +1,5 @@
 import time
+from concurrent.futures import wait
 from datetime import datetime
 from random import randint
 from unittest.mock import MagicMock, patch
@@ -324,6 +325,18 @@ class TestAsyncPandasCursor:
         expected["max_workers"] = expected.pop("s3_max_workers")
         assert {key: kwargs[key] for key in expected} == expected
         assert cursor._executor._max_workers == 1
+
+    def test_close_closes_untaken_result_sets(self, async_pandas_cursor):
+        """GH-1208: closing the cursor closes the result sets not taken from futures."""
+        _, taken = async_pandas_cursor.execute("SELECT * FROM one_row")
+        _, untaken = async_pandas_cursor.execute("SELECT * FROM one_row")
+        result_set = taken.result()
+        wait([untaken])
+        async_pandas_cursor.close()
+
+        assert result_set.fetchall() == [(1,)]
+        with pytest.raises(ProgrammingError):
+            untaken.result().fetchall()
 
     def test_closed(self, async_pandas_cursor):
         """GH-1207: a closed cursor rejects execute()."""

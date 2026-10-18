@@ -1,6 +1,7 @@
 import random
 import string
 import time
+from concurrent.futures import wait
 from datetime import datetime
 from random import randint
 from unittest.mock import MagicMock, patch
@@ -297,6 +298,18 @@ class TestAsyncArrowCursor:
         kwargs = result_set_class.call_args.kwargs
         expected = {**cursor_kwargs, **execute_kwargs}
         assert {key: kwargs[key] for key in expected} == expected
+
+    def test_close_closes_untaken_result_sets(self, async_arrow_cursor):
+        """GH-1208: closing the cursor closes the result sets not taken from futures."""
+        _, taken = async_arrow_cursor.execute("SELECT * FROM one_row")
+        _, untaken = async_arrow_cursor.execute("SELECT * FROM one_row")
+        result_set = taken.result()
+        wait([untaken])
+        async_arrow_cursor.close()
+
+        assert result_set.fetchall() == [(1,)]
+        with pytest.raises(ProgrammingError):
+            untaken.result().fetchall()
 
     def test_closed(self, async_arrow_cursor):
         """GH-1207: a closed cursor rejects execute()."""

@@ -1,8 +1,12 @@
+import asyncio
 import contextlib
+import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import wait
 from datetime import datetime
 from random import randint
+from unittest.mock import patch
 
 import pytest
 
@@ -12,6 +16,47 @@ from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaDictResultSet, AthenaResultSet
 from tests import ENV
 from tests.pyathena.conftest import connect
+from tests.pyathena.util import EVENT_TIMEOUT, placeholder_connection
+
+
+class _ResultSet:
+    """A result set that records whether it was closed."""
+
+    description = None
+
+    def __init__(self):
+        self.closed = threading.Event()
+
+    def close(self):
+        self.closed.set()
+
+
+@contextlib.contextmanager
+def _blocked_cursor():
+    """Yield an AsyncCursor whose result sets wait for an event, without AWS.
+
+    Yields:
+        The cursor, the event that releases the result sets, and the list of
+        the result sets built.
+    """
+    cursor = placeholder_connection().cursor(AsyncCursor, max_workers=1)
+    release = threading.Event()
+    result_sets = []
+
+    def collect(query_id, result_set_type_hints=None):
+        assert release.wait(EVENT_TIMEOUT)
+        result_sets.append(_ResultSet())
+        return result_sets[-1]
+
+    with (
+        patch.object(cursor, "_execute", return_value="query_id"),
+        patch.object(cursor, "_collect_result_set", side_effect=collect),
+    ):
+        try:
+            yield cursor, release, result_sets
+        finally:
+            release.set()
+            cursor.close(wait=True)
 
 
 class TestAsyncCursor:
@@ -185,6 +230,77 @@ class TestAsyncCursor:
             async_cursor.poll("query_id")
         with pytest.raises(ProgrammingError):
             async_cursor.cancel("query_id")
+
+    def test_close_closes_untaken_result_sets(self, async_cursor):
+        """GH-1208: closing the cursor closes the result sets not taken from futures."""
+        _, taken = async_cursor.execute("SELECT * FROM one_row")
+        _, untaken = async_cursor.execute("SELECT * FROM one_row")
+        result_set = taken.result()
+        wait([untaken])
+        async_cursor.close()
+
+        assert result_set.fetchall() == [(1,)]
+        with pytest.raises(ProgrammingError):
+            untaken.result().fetchall()
+
+    def test_result_set_after_close(self):
+        """GH-1208: a result set that arrives after the cursor closes is closed (no AWS)."""
+        with _blocked_cursor() as (cursor, release, result_sets):
+            _, future = cursor.execute("SELECT 1")
+            cursor.close()
+            release.set()
+            assert future.result(EVENT_TIMEOUT) is result_sets[0]
+            assert result_sets[0].closed.is_set()
+
+    def test_done_callback_closes_cursor(self):
+        """GH-1208: a done callback of the future can close the cursor (no AWS)."""
+        with _blocked_cursor() as (cursor, release, result_sets):
+            _, future = cursor.execute("SELECT 1")
+            closed = threading.Event()
+            future.add_done_callback(lambda f: (cursor.close(), closed.set()))
+            release.set()
+            assert closed.wait(EVENT_TIMEOUT)
+            assert result_sets[0].closed.is_set()
+
+    def test_cancel_future(self):
+        """GH-1208: a future that has not started can be cancelled (no AWS)."""
+        with _blocked_cursor() as (cursor, release, result_sets):
+            _, running = cursor.execute("SELECT 1")
+            _, pending = cursor.execute("SELECT 1")
+            assert pending.cancel()
+            assert not running.cancel()
+            assert running.running()
+            done, _ = wait([running, pending], timeout=0)
+            assert done == {pending}
+            release.set()
+            wait([running], timeout=EVENT_TIMEOUT)
+        assert len(result_sets) == 1
+
+    async def test_wrap_future_cancelled(self):
+        """GH-1208: a result set left by a cancelled asyncio task is closed with the cursor.
+
+        The future is still running when the task is cancelled, so the result
+        set arrives after asyncio has dropped it (no AWS).
+        """
+        with _blocked_cursor() as (cursor, release, result_sets):
+            _, future = cursor.execute("SELECT 1")
+            task = asyncio.ensure_future(asyncio.wrap_future(future))
+            await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            release.set()
+            wait([future], timeout=EVENT_TIMEOUT)
+            assert not result_sets[0].closed.is_set()
+            cursor.close()
+            assert result_sets[0].closed.is_set()
+
+    def test_description_closes_result_set(self):
+        """GH-1208: description() closes the result set that it reads (no AWS)."""
+        with _blocked_cursor() as (cursor, release, result_sets):
+            release.set()
+            assert cursor.description("query_id").result(EVENT_TIMEOUT) is None
+            assert result_sets[0].closed.is_set()
 
 
 class TestAsyncDictCursor:
