@@ -255,6 +255,45 @@ class TestPolarsCursor:
         assert bool(warnings) is warned
         assert all("outside 1677-09-21 to 2262-04-11 are wrong" in r.getMessage() for r in warnings)
 
+    @pytest.mark.skipif(_POLARS_2, reason="Polars 2.0 reads INT96 at microseconds.")
+    @pytest.mark.parametrize(
+        ("polars_cursor", "kwargs"),
+        [
+            ({"cursor_kwargs": {"unload": True}}, {}),
+            ({"cursor_kwargs": {"unload": True, "chunksize": 1}}, {"low_memory": True}),
+        ],
+        indirect=["polars_cursor"],
+        ids=["whole", "scanned-chunks"],
+    )
+    def test_unload_nested_timestamps_polars_1(self, polars_cursor, kwargs):
+        """Polars 1.x casts the timestamps inside arrays, rows, and maps to microseconds too.
+
+        The values are within 1677-2262, which Polars 1.x reads correctly; see
+        test_unload_timestamps_polars_1 for the warning.
+        """
+        polars_cursor.execute(
+            "SELECT id, ts, ARRAY[ts] AS arr, CAST(ROW(ts) AS ROW(t TIMESTAMP)) AS st, "
+            "MAP(ARRAY['k'], ARRAY[ts]) AS mp "
+            "FROM (VALUES (1, TIMESTAMP '2020-01-02 03:04:05.123'), "
+            "(2, CAST(NULL AS TIMESTAMP))) AS t (id, ts)",
+            **kwargs,
+        )
+        df = pl.concat(polars_cursor.iter_chunks()).sort("id")
+        us = pl.Datetime("us")
+        assert df.drop("id").schema == pl.Schema(
+            {
+                "ts": us,
+                "arr": pl.List(us),
+                "st": pl.Struct({"t": us}),
+                "mp": pl.List(pl.Struct({"key": pl.String, "value": us})),
+            }
+        )
+        values = [datetime(2020, 1, 2, 3, 4, 5, 123000), None]
+        assert df["ts"].to_list() == values
+        assert df["arr"].to_list() == [[v] for v in values]
+        assert df["st"].to_list() == [{"t": v} for v in values]
+        assert df["mp"].to_list() == [[{"key": "k", "value": v}] for v in values]
+
     @pytest.mark.skipif(not _POLARS_2, reason="Polars 1.x reads INT96 at nanoseconds.")
     @pytest.mark.parametrize(
         ("polars_cursor", "kwargs"),
