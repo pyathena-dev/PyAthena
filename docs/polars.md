@@ -228,7 +228,7 @@ Polars 2.0 and later read them with Polars.
 Polars 1.x reads them at nanoseconds ([pola-rs/polars#29184](https://github.com/pola-rs/polars/issues/29184)), which gives wrong values outside 1677-09-21 to 2262-04-11; they are cast to microseconds, and a warning is logged.
 The exception is a read with the chunksize option, with pyarrow installed and without Polars read options given to `execute()`: the chunks are read with pyarrow at microseconds, without the cast or the warning.
 A `schema` given to `execute()` is passed to Polars as given, and the timestamps that it reads are not converted.
-With such a schema, Polars 2.0.0 reads the timestamps in a map at nanoseconds ([pola-rs/polars#30031](https://github.com/pola-rs/polars/issues/30031)).
+With such a schema, Polars 2.0.0 reads the timestamps in a `Map` dtype at nanoseconds whatever its time unit ([pola-rs/polars#30031](https://github.com/pola-rs/polars/issues/30031)), and those in a map read as a `List` of `Struct`s of its key and value at the schema's time unit.
 
 The unload option can be enabled by specifying it in the `cursor_kwargs` argument of the connect method or as an argument to the cursor method.
 An argument to the cursor method takes precedence over the same key in `cursor_kwargs`.
