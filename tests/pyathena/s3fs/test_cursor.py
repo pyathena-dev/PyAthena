@@ -252,26 +252,6 @@ class TestS3FSCursor:
         s3fs_cursor.execute(f"SELECT * FROM {empty_table}")
         assert sorted(s3fs_cursor.fetchall()) == rows
 
-    def test_on_start_query_execution(self):
-        callback_query_id = None
-
-        def callback(query_id):
-            nonlocal callback_query_id
-            callback_query_id = query_id
-
-        with (
-            contextlib.closing(
-                connect(
-                    schema_name=ENV.schema,
-                    cursor_class=S3FSCursor,
-                    cursor_kwargs={"on_start_query_execution": callback},
-                )
-            ) as conn,
-            conn.cursor() as cursor,
-        ):
-            cursor.execute("SELECT * FROM one_row")
-            assert callback_query_id == cursor.query_id
-
     def test_on_start_query_execution_execute(self):
         callback_query_id = None
 
