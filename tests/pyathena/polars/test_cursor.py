@@ -219,7 +219,6 @@ class TestPolarsCursor:
     @pytest.mark.parametrize(
         ("polars_cursor", "kwargs", "columns", "warned"),
         [
-            ({"cursor_kwargs": {"unload": True}}, {}, ["id", "ts"], True),
             ({"cursor_kwargs": {"unload": True}}, {"columns": ["ts"]}, ["ts"], True),
             (
                 {"cursor_kwargs": {"unload": True, "chunksize": 1}},
@@ -228,9 +227,10 @@ class TestPolarsCursor:
                 True,
             ),
             ({"cursor_kwargs": {"unload": True}}, {"columns": ["id"]}, ["id"], False),
+            ({"cursor_kwargs": {"unload": True}}, {}, ["id", "ts"], True),
         ],
         indirect=["polars_cursor"],
-        ids=["whole", "whole-read-options", "scanned-chunks", "no-timestamps"],
+        ids=["whole", "scanned-chunks", "no-timestamps", "whole-no-options"],
     )
     def test_unload_timestamps_polars_1(self, polars_cursor, caplog, kwargs, columns, warned):
         """Polars 1.x reads the timestamps itself at nanoseconds, and a warning is logged.
