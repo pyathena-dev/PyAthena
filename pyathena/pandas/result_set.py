@@ -1468,8 +1468,9 @@ class AthenaPandasResultSet(AthenaResultSet):
             return result
 
         except Exception as e:
-            converters = read_csv_kwargs.get("converters") or {}
-            if any(
+            # converters given to execute() can be of any type.
+            converters = read_csv_kwargs.get("converters")
+            if isinstance(converters, Mapping) and any(
                 isinstance(converter, _TimeZoneConverter) and converter.error is e
                 for converter in converters.values()
             ):

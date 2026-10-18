@@ -1099,21 +1099,33 @@ class TestAthenaPandasResultSet:
         assert reason in str(error.value)
 
     @pytest.mark.filterwarnings("ignore:Both a converter and dtype:pandas.errors.ParserWarning")
-    def test_converter_data_error(self, tmp_path):
-        """A whole read raises a converters function's DataError as OperationalError.
+    @pytest.mark.parametrize("case", ["mapping", "converters", "invalid_converters"])
+    def test_read_error(self, tmp_path, case):
+        """A whole read raises an error other than the time zone conversion's as OperationalError.
 
-        Only PyAthena's time zone conversion raises its DataError as it is.
+        This includes a DataError from another conversion function, such as one that the
+        converter maps, which pandas applies with the time zone conversion when dtype
+        is given.
         """
 
         def reject(value):
             raise DataError("invalid number")
 
-        with pytest.raises(OperationalError, match="invalid number"):
+        converter = DefaultPandasTypeConverter()
+        if case == "mapping":
+            converter.set("varchar", reject)
+        kwargs = {
+            "mapping": {"dtype": {}},
+            "converters": {"converters": {"n": reject}},
+            "invalid_converters": {"converters": [reject]},
+        }[case]
+        with pytest.raises(OperationalError):
             _local_result_set(
                 LocalBucketFileSystem(tmp_path),
-                [("n", "varchar")],
-                '"n"\n"bad"\n',
-                converters={"n": reject},
+                [("tstz", "timestamp with time zone"), ("n", "varchar")],
+                '"tstz","n"\n"2020-01-02 03:04:05.000 UTC","bad"\n',
+                converter=converter,
+                **kwargs,
             )
 
     @pytest.mark.parametrize(
