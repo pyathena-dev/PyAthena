@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import (
     TYPE_CHECKING,
     Any,
     ClassVar,
 )
 
-from pyathena import OperationalError
+from pyathena import DataError, OperationalError
 from pyathena.arrow.converter import _to_null, _to_timestamp
 from pyathena.arrow.util import to_column_info
 from pyathena.converter import Converter, _to_default
@@ -201,6 +201,11 @@ class AthenaArrowResultSet(AthenaResultSet):
 
         A table can hold empty record batches between others, such as one of
         an empty result file, which would otherwise end the fetches early.
+
+        Raises:
+            DataError: If a value fails to convert, such as a ``timestamp with time
+                zone`` value with an unknown zone or a local time without one instant in
+                its zone. The message names the column.
         """
         rows = next((batch for batch in self._batches if batch.num_rows), None)
         if rows is None:
@@ -209,12 +214,22 @@ class AthenaArrowResultSet(AthenaResultSet):
         # converters property keep one column per name.
         columns = [column.to_pylist() for column in rows.columns]
         description = self.description if self.description else []
+        names = [d[0] for d in description]
         converters = [self._converter.get(d[1]) for d in description]
-        if any(convert is not _to_default for convert in converters):
-            processed_rows = [
-                tuple(convert(v) for convert, v in zip(converters, row, strict=False))
-                for row in zip(*columns, strict=False)
-            ]
+
+        def convert(row: tuple[Any, ...]) -> Iterator[Any]:
+            # Unlike a loop that returns the values, a generator turns a StopIteration
+            # from the converter into a RuntimeError instead of ending an iteration of
+            # the rows.
+            for name, converter, value in zip(names, converters, row, strict=False):
+                try:
+                    converted = converter(value)
+                except DataError as e:
+                    raise DataError(f"Column {name!r}: {e}") from e
+                yield converted
+
+        if any(converter is not _to_default for converter in converters):
+            processed_rows = [tuple(convert(row)) for row in zip(*columns, strict=False)]
         else:
             processed_rows = list(zip(*columns, strict=False))
         self._rows.extend(processed_rows)

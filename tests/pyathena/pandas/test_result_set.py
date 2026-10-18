@@ -1055,6 +1055,16 @@ class TestAthenaPandasResultSet:
         result_set = _local_result_set(LocalBucketFileSystem(tmp_path), tables=tables, **kwargs)
         assert result_set.as_pandas()["d"].dtype != "datetime64[us]"
 
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            pytest.param({}, id="default"),
+            # With dtype given, pandas converts each value as it reads.
+            pytest.param({"dtype": {}}, id="pandas_converts"),
+            # skiprows leaves the column labels to pandas.
+            pytest.param({"dtype": {}, "skiprows": 0}, id="pandas_converts_unlabeled"),
+        ],
+    )
     @pytest.mark.parametrize("chunksize", [None, 1])
     @pytest.mark.parametrize(
         ("value", "reason"),
@@ -1065,11 +1075,11 @@ class TestAthenaPandasResultSet:
         ],
         ids=["ambiguous", "nonexistent", "unknown_zone"],
     )
-    def test_time_zone_errors(self, tmp_path, chunksize, value, reason):
+    def test_time_zone_errors(self, tmp_path, kwargs, chunksize, value, reason):
         """A value without one instant raises DataError naming the column (#1217).
 
         A whole read raises in the constructor, and a chunked read when it reads the
-        chunk with the value.
+        chunk with the value, also when pandas converts the values as it reads.
         """
         data = f'"tstz"\n"2020-01-02 03:04:05.000 UTC"\n"{value}"\n'
 
@@ -1079,6 +1089,7 @@ class TestAthenaPandasResultSet:
                 [("tstz", "timestamp with time zone")],
                 data,
                 chunksize=chunksize,
+                **kwargs,
             )
             return list(result_set.iter_chunks())
 
@@ -1086,6 +1097,36 @@ class TestAthenaPandasResultSet:
             read()
         assert str(error.value).startswith("Column 'tstz': ")
         assert reason in str(error.value)
+
+    @pytest.mark.filterwarnings("ignore:Both a converter and dtype:pandas.errors.ParserWarning")
+    @pytest.mark.parametrize("case", ["mapping", "converters", "invalid_converters"])
+    def test_read_error(self, tmp_path, case):
+        """A whole read raises an error other than the time zone conversion's as OperationalError.
+
+        This includes a DataError from another conversion function, such as one that the
+        converter maps, which pandas applies with the time zone conversion when dtype
+        is given.
+        """
+
+        def reject(value):
+            raise DataError("invalid number")
+
+        converter = DefaultPandasTypeConverter()
+        if case == "mapping":
+            converter.set("varchar", reject)
+        kwargs = {
+            "mapping": {"dtype": {}},
+            "converters": {"converters": {"n": reject}},
+            "invalid_converters": {"converters": [reject]},
+        }[case]
+        with pytest.raises(OperationalError):
+            _local_result_set(
+                LocalBucketFileSystem(tmp_path),
+                [("tstz", "timestamp with time zone"), ("n", "varchar")],
+                '"tstz","n"\n"2020-01-02 03:04:05.000 UTC","bad"\n',
+                converter=converter,
+                **kwargs,
+            )
 
     @pytest.mark.parametrize(
         ("kwargs", "converter_types", "expected"),

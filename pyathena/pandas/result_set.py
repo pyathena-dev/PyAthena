@@ -363,6 +363,51 @@ class _TemporalConverter:
         return _to_timestamps(values, date=self._type == "date")
 
 
+class _TimeZoneConverter:
+    """A converter that ``pandas.read_csv()`` applies to each ``timestamp with time zone`` value.
+
+    With ``parse_dates`` or ``dtype`` given to ``execute()``, or with a conversion
+    function other than the default one, pandas applies the column's conversion
+    function to each value as it reads, unless ``converters`` given to ``execute()``
+    replaces the conversion functions. This names the column in the
+    ``DataError`` of a value that fails to convert, as ``_TemporalConverter`` does.
+    """
+
+    __slots__ = ("_converter", "_label", "error")
+
+    def __init__(self, converter: Callable[[str | None], Any], label: Any) -> None:
+        """Wrap the conversion function of a column.
+
+        Args:
+            converter: The conversion function.
+            label: The label of the column.
+        """
+        self._converter = converter
+        self._label = label
+        # The DataError that the converter raised, which a whole read raises as it is.
+        self.error: DataError | None = None
+
+    def __call__(self, value: str | None) -> Any:
+        """Convert a value.
+
+        Args:
+            value: The text of the value.
+
+        Returns:
+            The converted value.
+
+        Raises:
+            DataError: If the value fails to convert, such as a value with an unknown
+                zone or a local time without one instant in its zone. The message names
+                the column.
+        """
+        try:
+            return self._converter(value)
+        except DataError as e:
+            self.error = DataError(f"Column {self._label!r}: {e}")
+            raise self.error from e
+
+
 def _to_timestamps(values: Series, date: bool = False) -> Series:
     """Convert timestamp or date text to ``datetime64[us]``.
 
@@ -1246,22 +1291,29 @@ class AthenaPandasResultSet(AthenaResultSet):
             temporal_converters[label] = _TemporalConverter(type_)
         return temporal_converters
 
-    def _get_csv_converter(self, type_: str) -> Callable[[str | None], Any] | _JSONConverter:
-        """Get the converter for a column type of the CSV result file.
+    def _get_csv_converter(
+        self, type_: str, label: Any
+    ) -> Callable[[str | None], Any] | _JSONConverter:
+        """Get the converter for a column of the CSV result file.
 
         json columns get a ``_JSONConverter``, which ``_read_json_columns_as_text()``
         replaces in the converters for ``pandas.read_csv()``, and which converts the
-        columns after reading.
+        columns after reading. ``timestamp with time zone`` columns get a
+        ``_TimeZoneConverter``, which names the column in a ``DataError``.
 
         Args:
             type_: The Athena type of the column.
+            label: The label of the column.
 
         Returns:
-            The conversion function, or the ``_JSONConverter`` of a json column.
+            The conversion function, the ``_JSONConverter`` of a json column, or the
+            ``_TimeZoneConverter`` of a ``timestamp with time zone`` column.
         """
         converter = self._converter.get(type_)
         if type_ == "json":
             return _JSONConverter(converter)
+        if type_ == "timestamp with time zone":
+            return _TimeZoneConverter(converter, label)
         return converter
 
     def _trunc_date(self, df: DataFrame) -> DataFrame:
@@ -1317,6 +1369,8 @@ class AthenaPandasResultSet(AthenaResultSet):
             The DataFrame of the results, or a reader of their chunks.
 
         Raises:
+            DataError: If a ``timestamp with time zone`` value that pandas converts as it
+                reads fails to convert, naming the column.
             OperationalError: If reading the results fails.
         """
         import pandas as pd
@@ -1414,6 +1468,13 @@ class AthenaPandasResultSet(AthenaResultSet):
             return result
 
         except Exception as e:
+            # converters given to execute() can be of any type.
+            converters = read_csv_kwargs.get("converters")
+            if isinstance(converters, Mapping) and any(
+                isinstance(converter, _TimeZoneConverter) and converter.error is e
+                for converter in converters.values()
+            ):
+                raise
             _logger.exception(f"Failed to read {location}.")
             raise OperationalError(*e.args) from e
 
@@ -1519,7 +1580,7 @@ class AthenaPandasResultSet(AthenaResultSet):
             "names": names,
             "dtype": {**self.dtypes, **dict.fromkeys(temporal, text_dtype)},
             "converters": {
-                d[0]: self._get_csv_converter(d[1])
+                d[0]: self._get_csv_converter(d[1], d[0])
                 for d in description
                 if d[1] in self._converter.mappings and d[0] not in self._csv_temporal_converters
             },
@@ -1690,7 +1751,7 @@ class AthenaPandasResultSet(AthenaResultSet):
             }
         if "converters" not in self._kwargs:
             read_csv_kwargs["converters"] = {
-                label: self._get_csv_converter(d[1])
+                label: self._get_csv_converter(d[1], label)
                 for label, d in columns
                 if d[1] in self._converter.mappings and label not in self._csv_temporal_converters
             }

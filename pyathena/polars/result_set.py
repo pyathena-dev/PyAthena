@@ -31,7 +31,7 @@ import fsspec
 from pyathena import OperationalError
 from pyathena.arrow.reader import ParquetChunkReader
 from pyathena.converter import Converter, _to_default
-from pyathena.error import ProgrammingError
+from pyathena.error import DataError, ProgrammingError
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.model import AthenaQueryExecution
 from pyathena.polars.converter import _to_datetimes
@@ -192,16 +192,25 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
 
         Yields:
             An iterator of the rows of each block.
+
+        Raises:
+            DataError: While the rows are iterated, if a value fails to convert, such as
+                a ``timestamp with time zone`` value with an unknown zone or a local
+                time without one instant in its zone. The message names the column.
         """
         import polars as pl
 
-        # Each column's Series, or None for a name the chunk does not have, and its
-        # converter, or None for the identity.
-        columns: list[tuple[pl.Series | None, Callable[[Any], Any] | None]] = []
+        # Each column's name, its Series, or None for a name the chunk does not have,
+        # and its converter, or None for the identity.
+        columns: list[tuple[str, pl.Series | None, Callable[[Any], Any] | None]] = []
         for name in self._column_names:
             converter = self._converters.get(name)
             columns.append(
-                (df.get_column(name, default=None), None if converter is _to_default else converter)
+                (
+                    name,
+                    df.get_column(name, default=None),
+                    None if converter is _to_default else converter,
+                )
             )
 
         def take_values(block: pl.Series) -> Iterator[Any]:
@@ -212,17 +221,23 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
             for i in range(block.len()):
                 yield block.slice(i, 1).to_list()[0]
 
-        def convert(converter: Callable[[Any], Any], values: Iterable[Any]) -> Iterator[Any]:
+        def convert(
+            name: str, converter: Callable[[Any], Any], values: Iterable[Any]
+        ) -> Iterator[Any]:
             # Unlike map(), a generator turns a StopIteration from the converter into a
             # RuntimeError instead of ending the rows early.
             for value in values:
-                yield converter(value)
+                try:
+                    converted = converter(value)
+                except DataError as e:
+                    raise DataError(f"Column {name!r}: {e}") from e
+                yield converted
 
         size = self._ROW_BLOCK_SIZE
         for start in range(0, df.height, size):
             length = min(size, df.height - start)
             blocks: list[Iterable[Any]] = []
-            for series, converter in columns:
+            for name, series, converter in columns:
                 values: Iterable[Any]
                 if series is None:
                     values = [None] * length
@@ -232,7 +247,7 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
                         values = block.to_list()
                     except (Exception, pl.exceptions.PanicException):
                         values = take_values(block)
-                blocks.append(values if converter is None else convert(converter, values))
+                blocks.append(values if converter is None else convert(name, converter, values))
             # Without column names, each row is empty, as iter_rows() gave it.
             yield zip(*blocks, strict=True) if blocks else repeat((), length)
 

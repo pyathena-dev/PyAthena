@@ -323,7 +323,7 @@ class TestS3FSCursor:
     def test_ambiguous_time_zone_value(self, s3fs_cursor):
         """A local time that its zone repeats raises DataError instead of choosing one."""
         s3fs_cursor.execute(AMBIGUOUS_TIME_ZONE_QUERY)
-        with pytest.raises(DataError):
+        with pytest.raises(DataError, match=r"^Column 'col_timestamp_tz': .* is ambiguous"):
             s3fs_cursor.fetchall()
 
     @pytest.mark.parametrize(

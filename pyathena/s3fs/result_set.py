@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from io import TextIOWrapper
+from itertools import repeat
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from fsspec import AbstractFileSystem
@@ -222,11 +223,13 @@ class AthenaS3FSResultSet(AthenaResultSet):
         if not self._csv_reader:
             return
 
+        col_names = self._column_names
         col_types = self._column_types
-        if not col_types:
+        if not col_names or not col_types:
             description = self.description if self.description else []
+            col_names = tuple(d[0] for d in description)
             col_types = tuple(d[1] for d in description)
-        col_hints = self._column_type_hints
+        col_hints = self._column_type_hints or repeat(None)
 
         rows_fetched = 0
         while rows_fetched < self._arraysize:
@@ -238,19 +241,9 @@ class AthenaS3FSResultSet(AthenaResultSet):
                 self._csv_reader = None
                 break
 
-            if col_hints:
-                converted_row = tuple(
-                    self._converter.convert(col_type, value, type_hint=hint)
-                    if hint
-                    else self._converter.convert(col_type, value)
-                    for col_type, value, hint in zip(col_types, row, col_hints, strict=False)
-                )
-            else:
-                converted_row = tuple(
-                    self._converter.convert(col_type, value)
-                    for col_type, value in zip(col_types, row, strict=False)
-                )
-            self._rows.append(converted_row)
+            self._rows.append(
+                tuple(self._convert_values(self._converter, row, col_names, col_types, col_hints))
+            )
             rows_fetched += 1
 
     @override
