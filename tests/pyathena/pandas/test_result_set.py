@@ -20,6 +20,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from botocore.exceptions import ClientError
 from botocore.response import StreamingBody
 from pandas.testing import assert_frame_equal
 
@@ -485,11 +486,15 @@ class TestAthenaPandasResultSet:
         )
         chunks = list(result_set.iter_chunks())
         whole = pd.read_parquet(tmp_path / "bucket" / "unload")
-        assert [d[:2] for d in result_set.description] == [("i", "bigint"), ("b", "boolean")]
+        assert result_set.description == [
+            ("i", "bigint", None, None, 19, 0, "NULLABLE"),
+            ("b", "boolean", None, None, 0, 0, "NULLABLE"),
+        ]
         assert [len(chunk) for chunk in chunks] == [1, 1, 1, 1]
         for chunk in chunks:
             assert chunk.dtypes.tolist() == whole.dtypes.tolist()
-        assert_frame_equal(pd.concat(chunks, ignore_index=True), whole, check_exact=True)
+        # The chunks are indexed from their first row, as the whole result is.
+        assert_frame_equal(pd.concat(chunks), whole, check_exact=True)
 
     def test_read_parquet_footers_stopped(self, tmp_path):
         """GH-1202: the footer reads run in the stop scope of their caller.
@@ -513,21 +518,26 @@ class TestAthenaPandasResultSet:
         with (
             patch.object(fs, "open", side_effect=open_),
             stop_retries_on(stop),
-            pytest.raises(OperationalError),
+            pytest.raises(OperationalError) as error,
         ):
             _local_result_set(fs, tables=[pa.table({"i": [1]}), pa.table({"i": [2]})], chunksize=1)
+        # The error of the stopped attempt is raised.
+        assert isinstance(error.value.__cause__, ClientError)
+        assert error.value.__cause__.response["Error"]["Code"] == "ThrottlingException"
         assert operations
         assert [operation.calls for operation in operations] == [1] * len(operations)
 
-    def test_as_pandas_parquet_chunks_engine(self, tmp_path):
+    @pytest.mark.parametrize("engine", ["c", "pyarrow"])
+    def test_as_pandas_parquet_chunks_engine(self, tmp_path, engine):
         """Chunks of an UNLOAD result need the pyarrow engine, as the whole result does."""
-        with pytest.raises(ProgrammingError):
-            _local_result_set(
-                LocalBucketFileSystem(tmp_path),
-                tables=[pa.table({"i": [1]})],
-                chunksize=1,
-                engine="c",
-            )
+        fs = LocalBucketFileSystem(tmp_path)
+        tables = [pa.table({"i": [1]})]
+        if engine == "c":
+            with pytest.raises(ProgrammingError):
+                _local_result_set(fs, tables=tables, chunksize=1, engine=engine)
+            return
+        result_set = _local_result_set(fs, tables=tables, chunksize=1, engine=engine)
+        assert result_set.fetchall() == [(1,)]
 
     @pytest.mark.parametrize(
         ("kwargs", "sizes", "columns"),
@@ -682,6 +692,7 @@ class TestAthenaPandasResultSet:
         assert len(result_set.as_pandas()) == 3000
         sizes = [end - start for start, end in s3_object.ranges]
         if read_in_blocks:
+            # The parts that the filesystem's workers fetch are blocks of block_size.
             assert max(sizes) == kwargs["block_size"]
         else:
             assert len(data) < S3FileSystem.DEFAULT_BLOCK_SIZE
@@ -1003,8 +1014,12 @@ class _InMemoryS3Object:
                 "LastModified": datetime.now(UTC),
             }
         assert operation == "GetObject", operation
-        match = re.fullmatch(r"bytes=(\d+)-(\d+)", params.get("Range", ""))
-        start, end = (int(match[1]), int(match[2]) + 1) if match else (0, len(self.data))
+        assert (params["Bucket"], params["Key"]) == ("bucket", "result.csv"), params
+        # Only the closed ranges that PyAthena's filesystem requests are answered.
+        match = re.fullmatch(r"bytes=(\d+)-(\d+)", params["Range"])
+        assert match, params["Range"]
+        start, end = int(match[1]), int(match[2]) + 1
+        assert start < len(self.data), params["Range"]
         self.ranges.append((start, end))
         body = self.data[start:end]
         return {
