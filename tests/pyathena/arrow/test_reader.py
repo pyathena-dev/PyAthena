@@ -6,16 +6,19 @@
 # SPDX-License-Identifier: MIT
 
 import os
+import threading
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from botocore.exceptions import ClientError
 from fsspec import AbstractFileSystem
 from fsspec.implementations.local import LocalFileSystem
 from fsspec.spec import AbstractBufferedFile
 
 from pyathena.arrow.reader import ParquetChunkReader
-from tests.pyathena.util import ImmediateExecutor
+from pyathena.util import RetryConfig, retry_api_call, stop_retries_on
+from tests.pyathena.util import ImmediateExecutor, StoppingOperation
 
 
 class _RecordingFile(AbstractBufferedFile):
@@ -52,6 +55,24 @@ class _RecordingFileSystem(AbstractFileSystem):
         return _RecordingFile(
             self, path, block_size=block_size or self.block_size, cache_type=cache_type, **kwargs
         )
+
+
+class _ThrottledFileSystem:
+    """Local files and one throttled file, whose requests are retried as PyAthena retries them."""
+
+    THROTTLED_PATH = "s3://bucket/throttled.parquet"
+
+    def __init__(self, operation):
+        self.operation = operation
+        self.local = LocalFileSystem()
+
+    def size(self, path):
+        if path == self.THROTTLED_PATH:
+            return retry_api_call(self.operation, RetryConfig(attempt=3, multiplier=0, max_delay=0))
+        return self.local.size(path)
+
+    def open(self, path, mode="rb", **kwargs):
+        return self.local.open(path, mode, **kwargs)
 
 
 class TestParquetChunkReader:
@@ -189,3 +210,16 @@ class TestParquetChunkReader:
         assert len(opened) > 1
         assert all(f.closed for f in opened)
         assert list(reader) == []
+
+    @pytest.mark.parametrize("throttled", [0, 1], ids=["first", "ahead"])
+    def test_open_stopped_with_read(self, paths, throttled):
+        """GH-1296: a stop of the retries of the read stops those of opening its files."""
+        event = threading.Event()
+        operation = StoppingOperation(event.set, "request", "HeadObject")
+        files = [paths[0]]
+        files.insert(throttled, _ThrottledFileSystem.THROTTLED_PATH)
+        reader = ParquetChunkReader(_ThrottledFileSystem(operation), files, 2)
+        with stop_retries_on(event), pytest.raises(ClientError) as caught:
+            list(reader)
+        assert caught.value is operation.error
+        assert operation.calls == 1

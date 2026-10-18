@@ -13,6 +13,7 @@ from collections import abc
 from collections.abc import Generator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import closing
+from contextvars import copy_context
 from typing import TYPE_CHECKING, Any, cast
 
 from pyathena.util import override
@@ -195,12 +196,21 @@ class ParquetChunkReader(abc.Iterator):  # type: ignore[type-arg]
         # One worker opens the one file read ahead: at most the file being decoded and
         # the next one are held, which bounds memory to two files.
         with ThreadPoolExecutor(max_workers=1) as executor:
-            ahead: Future[Any] | None = executor.submit(self._open, self._paths[0])
+            # Each file is opened in a copy of the context of the read that requests it,
+            # so that a stop of the retries of that read (see stop_retries_on()) stops
+            # those of the open too.
+            ahead: Future[Any] | None = executor.submit(
+                copy_context().run, self._open, self._paths[0]
+            )
             try:
                 for next_path in [*self._paths[1:], None]:
                     # Open the next file only after this one opened.
                     source = cast("Future[Any]", ahead).result()
-                    ahead = None if next_path is None else executor.submit(self._open, next_path)
+                    ahead = (
+                        None
+                        if next_path is None
+                        else executor.submit(copy_context().run, self._open, next_path)
+                    )
                     yield source
             finally:
                 if ahead is not None and not ahead.cancel() and ahead.exception() is None:
