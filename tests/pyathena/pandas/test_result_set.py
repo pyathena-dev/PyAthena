@@ -1098,6 +1098,24 @@ class TestAthenaPandasResultSet:
         assert str(error.value).startswith("Column 'tstz': ")
         assert reason in str(error.value)
 
+    @pytest.mark.filterwarnings("ignore:Both a converter and dtype:pandas.errors.ParserWarning")
+    def test_converter_data_error(self, tmp_path):
+        """A DataError from a conversion function given in converters is OperationalError.
+
+        Only PyAthena's time zone conversion raises its DataError as it is.
+        """
+
+        def reject(value):
+            raise DataError("invalid number")
+
+        with pytest.raises(OperationalError, match="invalid number"):
+            _local_result_set(
+                LocalBucketFileSystem(tmp_path),
+                [("n", "varchar")],
+                '"n"\n"bad"\n',
+                converters={"n": reject},
+            )
+
     @pytest.mark.parametrize(
         ("kwargs", "converter_types", "expected"),
         [

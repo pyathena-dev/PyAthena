@@ -363,6 +363,15 @@ class _TemporalConverter:
         return _to_timestamps(values, date=self._type == "date")
 
 
+class _ColumnDataError(DataError):
+    """The ``DataError`` of a value that ``_TimeZoneConverter`` failed to convert.
+
+    Its message names the column. Unlike an error from a conversion function given in
+    ``converters``, which a whole read raises as ``OperationalError``, a whole read
+    raises it as it is.
+    """
+
+
 class _TimeZoneConverter:
     """A converter that ``pandas.read_csv()`` applies to each ``timestamp with time zone`` value.
 
@@ -395,14 +404,14 @@ class _TimeZoneConverter:
             The converted value.
 
         Raises:
-            DataError: If the value fails to convert, such as a value with an unknown
-                zone or a local time without one instant in its zone. The message names
-                the column.
+            _ColumnDataError: If the value fails to convert, such as a value with an
+                unknown zone or a local time without one instant in its zone. The message
+                names the column.
         """
         try:
             return self._converter(value)
         except DataError as e:
-            raise DataError(f"Column {self._label!r}: {e}") from e
+            raise _ColumnDataError(f"Column {self._label!r}: {e}") from e
 
 
 def _to_timestamps(values: Series, date: bool = False) -> Series:
@@ -1464,8 +1473,7 @@ class AthenaPandasResultSet(AthenaResultSet):
 
             return result
 
-        except DataError:
-            # A value that fails to convert, whose converter names the column.
+        except _ColumnDataError:
             raise
         except Exception as e:
             _logger.exception(f"Failed to read {location}.")
