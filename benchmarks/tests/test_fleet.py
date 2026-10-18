@@ -148,6 +148,26 @@ class TestExpandJobs:
         assert jobs[0]["pages"] >= jobs[-1]["pages"]
         assert jobs[0]["args"][-2:] == ["--arraysize", "100"]
 
+    def test_jobs_of_another_environment_are_named_and_marked_for_it(self):
+        jobs = expand_jobs(
+            SETTINGS,
+            ["single"],
+            ["small"],
+            ["flat"],
+            Filters(family=["polars"], api=["sync"], transport=["unload"], output_kind="native"),
+            environment="polars2",
+        )
+        # The suffix keeps the claims, done markers, and results apart from the default's.
+        assert [(j["id"], j["environment"]) for j in jobs] == [
+            ("single-small-flat-polars-sync-unload-native-polars2", "polars2")
+        ]
+        assert (
+            "environment"
+            not in expand_jobs(
+                SETTINGS, ["single"], ["small"], ["flat"], Filters(family=["polars"])
+            )[0]
+        )
+
     def test_dataframe_chunk_variants_share_one_job(self):
         jobs = expand_jobs(
             SETTINGS,
@@ -491,6 +511,14 @@ class TestCommandLine:
         jobs = json.loads(capsys.readouterr().out)
         assert [j["args"][-4:] for j in jobs] == [["--warmups", "1", "--repetitions", "3"]]
 
+    def test_jobs_command_selects_the_environment(self, tmp_path, capsys):
+        config = tmp_path / "config.toml"
+        config.write_text("[scales]\nsmall = 10000\n")
+        argv = ["--config", str(config), "jobs", "--suite", "single", "--scale", "small"]
+        assert main([*argv, "--family", "polars", "--environment", "polars2"]) == 0
+        jobs = json.loads(capsys.readouterr().out)
+        assert {j["environment"] for j in jobs} == {"polars2"}
+
     def test_plan_honors_arraysize_filter_and_repetition_overrides(self, tmp_path, capsys):
         config = tmp_path / "config.toml"
         config.write_text("[scales]\nsmall = 10000\n")
@@ -609,6 +637,17 @@ class TestQueueSafety:
         with pytest.warns(UserWarning, match="incomplete final record"):
             assert trial_evidence(tmp_path) == ({"a"}, ("s3://b/runs/r/trials/t1/",))
         assert trial_evidence(tmp_path / "missing") == (set(), ())
+
+    def test_jobs_of_a_missing_environment_stop_the_worker_before_claiming(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr("pyathena_bench.fleet.sys.prefix", str(tmp_path / ".venv"))
+        _, queue = queue_with(
+            [job("default"), {**job("other"), "environment": "polars2"}], tmp_path
+        )
+        with pytest.raises(ValueError, match=r"environment missing on this host: other$"):
+            work(queue, tmp_path / "w", api_slots=1, runner=lambda *a: 0, settle=no_queries)
+        assert not queue.names("claims")
 
     def test_jobs_wider_than_the_api_slots_stop_the_worker_before_claiming(self, tmp_path):
         _, queue = queue_with([job("wide", heavy=True, api_weight=11)], tmp_path)
@@ -1188,6 +1227,30 @@ class TestRunJob:
         assert process.start_new_session
         assert killed == [(4321, signal.SIGKILL)]
         assert (tmp_path / "logs" / "a-attempt-2.log").exists()
+
+    def test_a_job_of_another_environment_runs_its_interpreter(self, tmp_path, monkeypatch):
+        processes = []
+
+        def popen(command, stdout, stderr, start_new_session):
+            processes.append(FakeProcess(command, stdout, stderr, start_new_session))
+            return processes[-1]
+
+        monkeypatch.setattr("pyathena_bench.fleet.subprocess.Popen", popen)
+        monkeypatch.setattr("pyathena_bench.fleet.os.killpg", lambda pid, signum: None)
+        monkeypatch.setattr("pyathena_bench.fleet.sys.prefix", str(tmp_path / ".venv"))
+        # A set event stops the fake process at once.
+        stop = threading.Event()
+        stop.set()
+        run_job(
+            {"id": "a", "args": [], "environment": "polars2"},
+            tmp_path,
+            tmp_path / "results" / "a" / "attempt-1",
+            [],
+            stop,
+            "s3://bucket/fleet/q/results/a/attempt-1/",
+        )
+        [process] = processes
+        assert process.command[0] == str(tmp_path / ".venv-polars2" / "bin" / "python")
 
 
 class TestWork:

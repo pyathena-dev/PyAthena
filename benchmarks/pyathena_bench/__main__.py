@@ -33,6 +33,7 @@ from pyathena_bench.cases import ALL_FAMILIES, FILESYSTEM_OPERATIONS, SHAPES, SU
 from pyathena_bench.config import Settings, read_json
 from pyathena_bench.fleet import (
     API_FAMILIES,
+    ENVIRONMENTS,
     Filters,
     Queue,
     SpotInterruptionError,
@@ -84,6 +85,11 @@ def parser() -> argparse.ArgumentParser:
                 type=int,
                 help="Run each repetition as a separate job when one trial needs this many "
                 "GetQueryResults pages",
+            )
+            command.add_argument(
+                "--environment",
+                choices=ENVIRONMENTS,
+                help="Virtual environment beside the default one that runs the jobs",
             )
         else:
             command.add_argument("--suite", choices=SUITES, required=True)
@@ -293,6 +299,7 @@ def main(argv: list[str] | None = None) -> int:
             filters,
             args.split_pages,
             explicit_trials=bool(overrides),
+            environment=args.environment,
         )
         sys.stdout.write(json.dumps(jobs, indent=1) + "\n")
     elif args.command in {"plan", "run"}:

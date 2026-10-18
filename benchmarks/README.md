@@ -41,6 +41,9 @@ The benchmark is a non-packaged member of the repository's uv workspace and runs
 It shares the root `uv.lock` with PyAthena, which it uses from the workspace checkout.
 Locally and in CI, its virtual environment is `benchmarks/.venv`, separate from the root `.venv`.
 On the EC2 instance, the dedicated checkout's root `/opt/pyathena/.venv` holds the benchmark environment.
+The `polars1` and `polars2` dependency groups select Polars 1.x or 2.x, which PolarsCursor reads with different code paths.
+The environments above have `polars1`; a second environment beside each, `benchmarks/.venv-polars2` or `/opt/pyathena/.venv-polars2`, has `polars2`.
+The root `pyproject.toml` declares both groups and the root `dev` group as conflicting, so `uv.lock` resolves each of them separately.
 The root `uv build -v` still builds only PyAthena, including a wheel built from its sdist.
 Benchmark dependencies do not become PyAthena runtime dependencies, and `uv sync --group dev` at the root does not install them.
 
@@ -51,7 +54,7 @@ just benchmark lint
 just benchmark test
 ```
 
-The recipes select `benchmarks/.venv` and Python 3.12, and sync that environment from the locked workspace.
+The recipes select `benchmarks/.venv` and Python 3.12, and sync that environment from the locked workspace; `just benchmark test` also runs the tests in `benchmarks/.venv-polars2`.
 The tests use local data, fake AWS clients, and child processes.
 They do not execute Athena queries or create AWS resources.
 `just benchmark format` formats the benchmark separately from the parent project.
@@ -65,6 +68,13 @@ Set the environment variables first; without them, uv uses the root `.venv`.
 cd benchmarks
 export UV_PROJECT_ENVIRONMENT="$PWD/.venv" UV_PYTHON=3.12
 uv run --locked python -m pyathena_bench plan --suite single --scale small
+```
+
+To run a command with Polars 2.x, select the second environment and its group:
+
+```bash
+UV_PROJECT_ENVIRONMENT="$PWD/.venv-polars2" uv run --locked --no-group polars1 --group polars2 \
+  python -m pyathena_bench plan --suite single --scale small --family polars
 ```
 
 For local AWS access, configure the profile and region in the repository root's gitignored `.env` file:
@@ -117,7 +127,7 @@ As the results location, it removes leftovers by itself, but reports must be rec
 
 The deployment identity needs permission to create these resources and pass the instance role.
 Use an immutable, remotely accessible commit that contains this directory and the root `uv.lock`.
-Bootstrap checks out that commit, installs pinned uv and Python versions, and runs `uv sync --locked --no-dev` for the benchmark into `/opt/pyathena/.venv`.
+Bootstrap checks out that commit, installs pinned uv and Python versions, and syncs the benchmark with `uv sync --locked`: with the `polars1` group into `/opt/pyathena/.venv`, and with the `polars2` group into `/opt/pyathena/.venv-polars2`.
 It signals setup completion to CloudFormation but does not prepare data or start measurements.
 The EC2 commands use `--no-sync` to reuse this verified environment; they do not revalidate the lockfile on every invocation.
 
@@ -365,6 +375,9 @@ With `--split-pages`, a job whose single trial needs at least that many pages be
 `--chunksize` keeps only the given chunk sizes, with 0 for reads without chunks, in `plan`, `run`, and `jobs`; `jobs` passes it to each job and adds it to the job ID.
 `jobs` accepts `--warmups` and `--repetitions` too; with either option, every job that is not split carries both values as arguments, so one queue can combine jobs with different trial counts under one stored configuration.
 `queue --jobs` accepts several job files, rejects duplicate job IDs, and orders the combined jobs as `jobs` orders one selection.
+`jobs --environment polars2` runs the selected jobs with Polars 2.x: each job names the environment, and its ID ends with `-polars2`, so one queue can hold the same cases for both Polars versions.
+A worker runs such a job with the interpreter of `.venv-polars2` beside its own environment, and refuses to start if a job's environment is missing on its host.
+Select the families that use Polars, `polars` and `sqla_polars`, for this environment.
 
 Deploy a new stack with the fleet size under its own name; changing `FleetSize` on an existing stack does not wait for the added hosts to finish bootstrap.
 `QueueName` names the queue that every host consumes: after bootstrap, each host starts a worker with the stack's results location from its user data, also written to `results-location.txt` next to `stack-id.txt`, and the worker waits until a queue of that name is published; this includes the hosts that the group launches later to replace interrupted Spot Instances.

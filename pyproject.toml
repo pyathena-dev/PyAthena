@@ -140,6 +140,17 @@ source = "vcs"
 [tool.hatch.build.hooks.vcs]
 version-file = "pyathena/_version.py"
 
+[tool.uv]
+# The benchmark measures PolarsCursor in one environment per Polars major version;
+# the root development group pins Polars by Python version instead.
+conflicts = [
+    [
+        { package = "pyathena", group = "dev" },
+        { package = "pyathena-benchmarks", group = "polars1" },
+        { package = "pyathena-benchmarks", group = "polars2" },
+    ],
+]
+
 [tool.uv.workspace]
 members = ["benchmarks"]
 

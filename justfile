@@ -85,8 +85,10 @@ _docs-lint:
 _docs-format:
     mise exec -- markdownlint-cli2 --fix
 
-# Benchmark workspace member with its own Python 3.12 environment
+# Benchmark workspace member with its own Python 3.12 environment, with Polars 1.x
 BENCHMARK_UV := "UV_PROJECT_ENVIRONMENT='" + justfile_directory() + "/benchmarks/.venv' UV_PYTHON=3.12 uv run --directory benchmarks --locked"
+# The benchmark's second environment, with Polars 2.x
+BENCHMARK_UV_POLARS2 := "UV_PROJECT_ENVIRONMENT='" + justfile_directory() + "/benchmarks/.venv-polars2' UV_PYTHON=3.12 uv run --directory benchmarks --locked --no-group polars1 --group polars2"
 
 # Standalone benchmark checks; these do not execute Athena queries
 benchmark target="lint":
@@ -104,6 +106,7 @@ _benchmark-lint:
 
 _benchmark-test: _benchmark-lint
     {{BENCHMARK_UV}} pytest
+    {{BENCHMARK_UV_POLARS2}} pytest
 
 # Install development tools
 tool:

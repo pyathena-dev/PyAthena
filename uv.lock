@@ -1,23 +1,52 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
-    "python_full_version >= '3.15' and sys_platform == 'win32'",
-    "python_full_version == '3.14.*' and sys_platform == 'win32'",
-    "python_full_version >= '3.15' and sys_platform == 'emscripten'",
-    "python_full_version == '3.14.*' and sys_platform == 'emscripten'",
-    "python_full_version >= '3.15' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-    "python_full_version == '3.14.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-    "python_full_version == '3.13.*' and sys_platform == 'win32'",
-    "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
-    "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-    "python_full_version == '3.12.*' and sys_platform == 'win32'",
-    "python_full_version == '3.12.*' and sys_platform == 'emscripten'",
-    "python_full_version == '3.12.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-    "python_full_version < '3.12' and sys_platform == 'win32'",
-    "python_full_version < '3.12' and sys_platform == 'emscripten'",
-    "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version >= '3.14' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform == 'win32' and extra == 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform == 'emscripten' and extra == 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'win32' and extra == 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra == 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten' and extra == 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra == 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.15' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version >= '3.15' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version >= '3.15' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version == '3.14.*' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version == '3.14.*' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version == '3.14.*' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
 ]
+conflicts = [[
+    { package = "pyathena", group = "dev" },
+    { package = "pyathena-benchmarks", group = "polars1" },
+    { package = "pyathena-benchmarks", group = "polars2" },
+]]
 
 [manifest]
 members = [
@@ -51,15 +80,15 @@ name = "awswrangler"
 version = "3.17.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "boto3" },
-    { name = "botocore" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or python_full_version >= '3.15'" },
-    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' and python_full_version < '3.15'" },
-    { name = "packaging" },
-    { name = "pandas" },
-    { name = "pyarrow", version = "25.0.1", source = { registry = "https://pypi.org/simple" } },
-    { name = "setuptools", marker = "python_full_version >= '3.12' and python_full_version < '3.15'" },
-    { name = "typing-extensions" },
+    { name = "boto3", marker = "python_full_version < '3.15' or extra == 'group-19-pyathena-benchmarks-polars1' or extra == 'group-19-pyathena-benchmarks-polars2' or extra != 'group-8-pyathena-dev'" },
+    { name = "botocore", marker = "python_full_version < '3.15' or extra == 'group-19-pyathena-benchmarks-polars1' or extra == 'group-19-pyathena-benchmarks-polars2' or extra != 'group-8-pyathena-dev'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2') or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-8-pyathena-dev') or (extra == 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev')" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and python_full_version < '3.15') or (python_full_version >= '3.15' and extra == 'group-19-pyathena-benchmarks-polars1') or (python_full_version >= '3.15' and extra == 'group-19-pyathena-benchmarks-polars2') or (python_full_version >= '3.15' and extra != 'group-8-pyathena-dev') or (python_full_version < '3.12' and extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2') or (python_full_version < '3.12' and extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-8-pyathena-dev') or (python_full_version < '3.12' and extra == 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev')" },
+    { name = "packaging", marker = "python_full_version < '3.15' or extra == 'group-19-pyathena-benchmarks-polars1' or extra == 'group-19-pyathena-benchmarks-polars2' or extra != 'group-8-pyathena-dev'" },
+    { name = "pandas", marker = "python_full_version < '3.15' or extra == 'group-19-pyathena-benchmarks-polars1' or extra == 'group-19-pyathena-benchmarks-polars2' or extra != 'group-8-pyathena-dev'" },
+    { name = "pyarrow", version = "25.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.15' or extra == 'group-19-pyathena-benchmarks-polars1' or extra == 'group-19-pyathena-benchmarks-polars2' or extra != 'group-8-pyathena-dev'" },
+    { name = "setuptools", marker = "(python_full_version >= '3.12' and python_full_version < '3.15') or (python_full_version >= '3.15' and extra == 'group-19-pyathena-benchmarks-polars1') or (python_full_version >= '3.15' and extra == 'group-19-pyathena-benchmarks-polars2') or (python_full_version >= '3.15' and extra != 'group-8-pyathena-dev') or (python_full_version < '3.12' and extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2') or (python_full_version < '3.12' and extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-8-pyathena-dev') or (python_full_version < '3.12' and extra == 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev')" },
+    { name = "typing-extensions", marker = "python_full_version < '3.15' or extra == 'group-19-pyathena-benchmarks-polars1' or extra == 'group-19-pyathena-benchmarks-polars2' or extra != 'group-8-pyathena-dev'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/fc/34/bc4d3ec4f613bf4920fe479879fcdb278b0c7667b24b2cd06e6c841b3f29/awswrangler-3.17.1.tar.gz", hash = "sha256:cc9735a854446c2ccfa25a87295078036361fc170a01c0246e4cf30d4739a2d1", size = 277708, upload-time = "2026-08-03T11:57:35.66Z" }
 wheels = [
@@ -829,18 +858,33 @@ name = "numpy"
 version = "2.5.3"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.15' and sys_platform == 'win32'",
-    "python_full_version == '3.14.*' and sys_platform == 'win32'",
-    "python_full_version >= '3.15' and sys_platform == 'emscripten'",
-    "python_full_version == '3.14.*' and sys_platform == 'emscripten'",
-    "python_full_version >= '3.15' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-    "python_full_version == '3.14.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-    "python_full_version == '3.13.*' and sys_platform == 'win32'",
-    "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
-    "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-    "python_full_version == '3.12.*' and sys_platform == 'win32'",
-    "python_full_version == '3.12.*' and sys_platform == 'emscripten'",
-    "python_full_version == '3.12.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version >= '3.14' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform == 'win32' and extra == 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform == 'emscripten' and extra == 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'win32' and extra == 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten' and extra == 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.15' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version >= '3.15' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version >= '3.15' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version == '3.14.*' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version == '3.14.*' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version == '3.14.*' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/13/01/11703282db468b85f6f7b8c7f22d058de5970d5c7e60a3a8aaa313c3de36/numpy-2.5.3.tar.gz", hash = "sha256:df2d5874ff183595a4ba404edd04f6bd9b5505c1d7708573f6a6c17489a67563", size = 20791231, upload-time = "2026-09-06T16:27:47.073Z" }
 wheels = [
@@ -925,10 +969,10 @@ name = "pandas"
 version = "3.0.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2') or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-8-pyathena-dev') or (extra == 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev')" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2') or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-8-pyathena-dev') or (extra == 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev')" },
     { name = "python-dateutil" },
-    { name = "tzdata", marker = "sys_platform == 'emscripten' or sys_platform == 'win32'" },
+    { name = "tzdata", marker = "sys_platform == 'emscripten' or sys_platform == 'win32' or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2') or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-8-pyathena-dev') or (extra == 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/e2/17/d7b106e05bfa642e8694451e7d3d759c6a241c5386a5d962e4f66c047e06/pandas-3.0.6.tar.gz", hash = "sha256:66b07ef7315a31bfe1089cd3d71a7de781c9dca986762d0b4fe7c0ef17465d10", size = 4667686, upload-time = "2026-09-17T23:23:18.345Z" }
 wheels = [
@@ -1005,18 +1049,18 @@ name = "polars"
 version = "1.44.2"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version == '3.13.*' and sys_platform == 'win32'",
-    "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
-    "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-    "python_full_version == '3.12.*' and sys_platform == 'win32'",
-    "python_full_version == '3.12.*' and sys_platform == 'emscripten'",
-    "python_full_version == '3.12.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version >= '3.14' and sys_platform == 'win32'",
+    "python_full_version >= '3.14' and sys_platform == 'emscripten'",
+    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'win32'",
     "python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten'",
     "python_full_version < '3.12' and sys_platform == 'emscripten'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
     "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "polars-runtime-32", version = "1.44.2", source = { registry = "https://pypi.org/simple" } },
+    { name = "polars-runtime-32", version = "1.44.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.14' and extra == 'group-8-pyathena-dev') or extra == 'group-19-pyathena-benchmarks-polars1' or (extra == 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a4/15/e8541eefc22fbc7ca89bcb5112298a153729f73cfbc0cf6a668e509f975c/polars-1.44.2.tar.gz", hash = "sha256:86c8e26b6c2de8c8d344bb910b74dfc47b118ac3fe0f19b44909467990a0b281", size = 766272, upload-time = "2026-09-09T07:42:08.859Z" }
 wheels = [
@@ -1028,15 +1072,33 @@ name = "polars"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.15' and sys_platform == 'win32'",
-    "python_full_version == '3.14.*' and sys_platform == 'win32'",
-    "python_full_version >= '3.15' and sys_platform == 'emscripten'",
-    "python_full_version == '3.14.*' and sys_platform == 'emscripten'",
-    "python_full_version >= '3.15' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-    "python_full_version == '3.14.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version >= '3.14' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.15' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version >= '3.15' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version >= '3.15' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version == '3.14.*' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version == '3.14.*' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version == '3.14.*' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
 ]
 dependencies = [
-    { name = "polars-runtime-32", version = "2.0.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "polars-runtime-32", version = "2.0.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.14' and extra != 'group-19-pyathena-benchmarks-polars1') or extra == 'group-19-pyathena-benchmarks-polars2' or (extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-8-pyathena-dev') or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-8-pyathena-dev')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/8e/e9/001f371ec6a1bb54893f599ceebd56e6144fed4091f09f09fec0021a9276/polars-2.0.0.tar.gz", hash = "sha256:62da109e27a19a9d36657ee25dc035c9d3f87e7bd610526fe467dc37ea7dc115", size = 778215, upload-time = "2026-10-06T11:51:29.679Z" }
 wheels = [
@@ -1048,14 +1110,14 @@ name = "polars-runtime-32"
 version = "1.44.2"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version == '3.13.*' and sys_platform == 'win32'",
-    "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
-    "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-    "python_full_version == '3.12.*' and sys_platform == 'win32'",
-    "python_full_version == '3.12.*' and sys_platform == 'emscripten'",
-    "python_full_version == '3.12.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version >= '3.14' and sys_platform == 'win32'",
+    "python_full_version >= '3.14' and sys_platform == 'emscripten'",
+    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'win32'",
     "python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten'",
     "python_full_version < '3.12' and sys_platform == 'emscripten'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
     "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d4/a1/a7eace6587b56f22cf2a21ab4d5e695db372dc23fd96accb68b1ec12660b/polars_runtime_32-1.44.2.tar.gz", hash = "sha256:b84842f7d621aaca7a52e165e19a24f89db45f8aa13744941430218419a14a67", size = 3172205, upload-time = "2026-09-09T07:42:10.851Z" }
@@ -1075,12 +1137,30 @@ name = "polars-runtime-32"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.15' and sys_platform == 'win32'",
-    "python_full_version == '3.14.*' and sys_platform == 'win32'",
-    "python_full_version >= '3.15' and sys_platform == 'emscripten'",
-    "python_full_version == '3.14.*' and sys_platform == 'emscripten'",
-    "python_full_version >= '3.15' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-    "python_full_version == '3.14.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version >= '3.14' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.15' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version >= '3.15' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version >= '3.15' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version == '3.14.*' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version == '3.14.*' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version == '3.14.*' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/34/ad/dbb6f6d7070867951532bcfe5e6a648d8777b416b18cddabc07030404e8c/polars_runtime_32-2.0.0.tar.gz", hash = "sha256:b5f9afcc742b4a67eabd2c680ff0f12eb02ede9b4bf807bffabd6dbb9a58d5c7", size = 3591339, upload-time = "2026-10-06T11:51:31.076Z" }
 wheels = [
@@ -1127,18 +1207,42 @@ name = "pyarrow"
 version = "25.0.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version == '3.14.*' and sys_platform == 'win32'",
-    "python_full_version == '3.14.*' and sys_platform == 'emscripten'",
-    "python_full_version == '3.14.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-    "python_full_version == '3.13.*' and sys_platform == 'win32'",
-    "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
-    "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-    "python_full_version == '3.12.*' and sys_platform == 'win32'",
-    "python_full_version == '3.12.*' and sys_platform == 'emscripten'",
-    "python_full_version == '3.12.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-    "python_full_version < '3.12' and sys_platform == 'win32'",
-    "python_full_version < '3.12' and sys_platform == 'emscripten'",
-    "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version >= '3.14' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform == 'win32' and extra == 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform == 'emscripten' and extra == 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'win32' and extra == 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra == 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten' and extra == 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra == 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version == '3.14.*' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version == '3.14.*' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version == '3.14.*' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
+    "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-19-pyathena-benchmarks-polars2' and extra != 'group-8-pyathena-dev'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3d/e3/27f57f80141379d60defe6703eb50a707325706f07fedfd1312c7a751995/pyarrow-25.0.1.tar.gz", hash = "sha256:9150a83248bfed9813ea3c3af74c3856c1984d444aa28e58bf7733b9750ddf6a", size = 1201653, upload-time = "2026-08-10T12:40:53.904Z" }
 wheels = [
@@ -1257,15 +1361,15 @@ aiosqlalchemy = [
     { name = "sqlalchemy", extra = ["asyncio"] },
 ]
 arrow = [
-    { name = "pyarrow", version = "25.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.15'" },
-    { name = "pyarrow", version = "26.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.15'" },
+    { name = "pyarrow", version = "25.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.15' or extra == 'group-19-pyathena-benchmarks-polars1' or extra == 'group-19-pyathena-benchmarks-polars2' or extra != 'group-8-pyathena-dev'" },
+    { name = "pyarrow", version = "26.0.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.15' and extra == 'group-8-pyathena-dev') or (extra == 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev') or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2') or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-8-pyathena-dev')" },
 ]
 pandas = [
     { name = "pandas" },
 ]
 polars = [
-    { name = "polars", version = "1.44.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
-    { name = "polars", version = "2.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
+    { name = "polars", version = "1.44.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.14' and extra == 'group-8-pyathena-dev') or extra == 'group-19-pyathena-benchmarks-polars1' or (extra == 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev')" },
+    { name = "polars", version = "2.0.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.14' and extra != 'group-19-pyathena-benchmarks-polars1') or extra == 'group-19-pyathena-benchmarks-polars2' or (extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-8-pyathena-dev') or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-8-pyathena-dev')" },
 ]
 sqlalchemy = [
     { name = "sqlalchemy" },
@@ -1279,10 +1383,10 @@ dev = [
     { name = "mypy" },
     { name = "myst-parser" },
     { name = "pandas" },
-    { name = "polars", version = "1.44.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
-    { name = "polars", version = "2.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
-    { name = "pyarrow", version = "25.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.15'" },
-    { name = "pyarrow", version = "26.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.15'" },
+    { name = "polars", version = "1.44.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.14' and extra == 'group-8-pyathena-dev') or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2') or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-8-pyathena-dev') or (extra == 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev')" },
+    { name = "polars", version = "2.0.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.14' and extra == 'group-8-pyathena-dev') or (extra == 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev') or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2') or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-8-pyathena-dev')" },
+    { name = "pyarrow", version = "25.0.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.15' and extra == 'group-8-pyathena-dev') or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2') or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-8-pyathena-dev') or (extra == 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev')" },
+    { name = "pyarrow", version = "26.0.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.15' and extra == 'group-8-pyathena-dev') or (extra == 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev') or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2') or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-8-pyathena-dev')" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -1293,7 +1397,7 @@ dev = [
     { name = "sphinx-design" },
     { name = "sphinx-multiversion" },
     { name = "sphinxext-opengraph" },
-    { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "sqlalchemy", extra = ["asyncio"], marker = "(extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2') or (extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev') or (extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-8-pyathena-dev')" },
 ]
 
 [package.metadata]
@@ -1341,16 +1445,23 @@ dev = [
 name = "pyathena-benchmarks"
 version = "0.1.0"
 source = { virtual = "benchmarks" }
+default-groups = ["polars1", "test"]
 dependencies = [
-    { name = "awswrangler", marker = "python_full_version < '3.15'" },
-    { name = "polars", version = "1.44.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
-    { name = "polars", version = "2.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
+    { name = "awswrangler", marker = "python_full_version < '3.15' or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2') or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-8-pyathena-dev') or (extra == 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev')" },
+    { name = "polars", version = "1.44.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.14' and extra == 'group-8-pyathena-dev') or extra == 'group-19-pyathena-benchmarks-polars1' or (extra == 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev')" },
+    { name = "polars", version = "2.0.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.14' and extra != 'group-19-pyathena-benchmarks-polars1') or extra == 'group-19-pyathena-benchmarks-polars2' or (extra != 'group-19-pyathena-benchmarks-polars1' and extra != 'group-8-pyathena-dev') or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-8-pyathena-dev')" },
     { name = "psutil" },
     { name = "pyathena", extra = ["arrow", "pandas", "polars", "sqlalchemy"] },
 ]
 
 [package.dev-dependencies]
-dev = [
+polars1 = [
+    { name = "polars", version = "1.44.2", source = { registry = "https://pypi.org/simple" } },
+]
+polars2 = [
+    { name = "polars", version = "2.0.0", source = { registry = "https://pypi.org/simple" } },
+]
+test = [
     { name = "cfn-lint" },
     { name = "mypy" },
     { name = "pytest" },
@@ -1367,7 +1478,9 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [
+polars1 = [{ name = "polars", specifier = ">=1.39.0,<2" }]
+polars2 = [{ name = "polars", specifier = ">=2,<3" }]
+test = [
     { name = "cfn-lint", specifier = ">=1" },
     { name = "mypy" },
     { name = "pytest", specifier = ">=8" },
@@ -1389,7 +1502,7 @@ name = "pytest"
 version = "9.0.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2') or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-8-pyathena-dev') or (extra == 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev')" },
     { name = "iniconfig" },
     { name = "packaging" },
     { name = "pluggy" },
@@ -1406,7 +1519,7 @@ version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pytest" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2') or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-8-pyathena-dev') or (extra == 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/90/2c/8af215c0f776415f3590cac4f9086ccefd6fd463befeae41cd4d3f193e5a/pytest_asyncio-1.3.0.tar.gz", hash = "sha256:d7f52f36d231b80ee124cd216ffb19369aa168fc10095013c6b014a34d3ee9e5", size = 50087, upload-time = "2025-11-10T16:07:47.256Z" }
 wheels = [
@@ -1418,7 +1531,7 @@ name = "pytest-cov"
 version = "6.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "coverage", extra = ["toml"] },
+    { name = "coverage", extra = ["toml"], marker = "(extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2') or (extra != 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev') or (extra != 'group-19-pyathena-benchmarks-polars1' and extra == 'group-8-pyathena-dev')" },
     { name = "pytest" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/be/45/9b538de8cef30e17c7b45ef42f538a94889ed6a16f2387a6c89e73220651/pytest-cov-6.0.0.tar.gz", hash = "sha256:fde0b595ca248bb8e2d76f020b465f3b107c9632e6a1d1705f17834c89dcadc0", size = 66945, upload-time = "2024-10-29T20:13:35.363Z" }
@@ -1869,7 +1982,7 @@ name = "sqlalchemy"
 version = "2.0.46"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "greenlet", marker = "platform_machine == 'AMD64' or platform_machine == 'WIN32' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'ppc64le' or platform_machine == 'win32' or platform_machine == 'x86_64'" },
+    { name = "greenlet", marker = "platform_machine == 'AMD64' or platform_machine == 'WIN32' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'ppc64le' or platform_machine == 'win32' or platform_machine == 'x86_64' or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-19-pyathena-benchmarks-polars2') or (extra == 'group-19-pyathena-benchmarks-polars1' and extra == 'group-8-pyathena-dev') or (extra == 'group-19-pyathena-benchmarks-polars2' and extra == 'group-8-pyathena-dev')" },
     { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/06/aa/9ce0f3e7a9829ead5c8ce549392f33a12c4555a6c0609bb27d882e9c7ddf/sqlalchemy-2.0.46.tar.gz", hash = "sha256:cf36851ee7219c170bb0793dbc3da3e80c582e04a5437bc601bfe8c85c9216d7", size = 9865393, upload-time = "2026-01-21T18:03:45.119Z" }
