@@ -110,7 +110,7 @@ print(cursor.fetchall())
 ```
 
 `to_sql` writes the data as Parquet with pyarrow, so it requires `pip install PyAthena[Pandas,Arrow]`.
-With the default `flavor="spark"`, timestamps are written as INT96.
+With the default `flavor="spark"`, timestamps are written as INT96, and spaces, tabs, newlines, and the characters `,;{}()=` in column names other than the partition keys are replaced with `_` in the files and in the table.
 Athena reads them correctly.
 pyarrow, of any version, reads the timestamps before 1970 in files that pyarrow 22 wrote as wrong values.
 pyarrow 23.0.0 and later write them correctly and are recommended.

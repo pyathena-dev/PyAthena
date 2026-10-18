@@ -471,6 +471,17 @@ def test_to_sql_with_index(cursor):
     ]
 
 
+def test_to_sql_spark_column_names(cursor):
+    """The table declares the column names that the Spark flavor writes."""
+    df = pd.DataFrame({"col a": np.int32([1]), "col(b)=c": ["x"]})
+    table_name = f"to_sql_{uuid.uuid4().hex}"
+    location = f"{ENV.s3_staging_dir}{ENV.schema}/{table_name}/"
+    to_sql(df, table_name, cursor._connection, location, schema=ENV.schema)
+    cursor.execute(f"SELECT * FROM {table_name}")
+    assert cursor.fetchall() == [(1, "x")]
+    assert [d[0] for d in cursor.description] == ["col_a", "col_b__c"]
+
+
 @pytest.mark.parametrize(
     "cursor",
     [{"endpoint_url": f"https://athena.{ENV.region_name}.amazonaws.com"}],
