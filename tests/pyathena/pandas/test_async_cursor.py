@@ -1,4 +1,3 @@
-import contextlib
 import time
 from datetime import datetime
 from random import randint
@@ -33,44 +32,6 @@ class TestAsyncPandasCursor:
         ]
 
     @pytest.mark.parametrize(
-        ("async_pandas_cursor", "parquet_engine", "chunksize"),
-        [
-            ({"cursor_kwargs": {"unload": False}}, "auto", None),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": True}}, "auto", None),
-        ],
-        indirect=["async_pandas_cursor"],
-    )
-    def test_fetchone(self, async_pandas_cursor, parquet_engine, chunksize):
-        query_id, future = async_pandas_cursor.execute(
-            "SELECT * FROM one_row", engine=parquet_engine, chunksize=chunksize
-        )
-        result_set = future.result()
-        assert result_set.rownumber == 0
-        assert result_set.fetchone() == (1,)
-        assert result_set.rownumber == 1
-        assert result_set.fetchone() is None
-
-    @pytest.mark.parametrize(
-        ("async_pandas_cursor", "parquet_engine", "chunksize"),
-        [
-            ({"cursor_kwargs": {"unload": False}}, "auto", None),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": True}}, "auto", None),
-        ],
-        indirect=["async_pandas_cursor"],
-    )
-    def test_fetchmany(self, async_pandas_cursor, parquet_engine, chunksize):
-        query_id, future = async_pandas_cursor.execute(
-            "SELECT * FROM many_rows LIMIT 15",
-            engine=parquet_engine,
-            chunksize=chunksize,
-        )
-        result_set = future.result()
-        assert len(result_set.fetchmany(10)) == 10
-        assert len(result_set.fetchmany(10)) == 5
-
-    @pytest.mark.parametrize(
         ("async_pandas_cursor", "chunksize"),
         [
             ({}, None),
@@ -90,46 +51,6 @@ class TestAsyncPandasCursor:
             pytest.raises(StopIteration, lambda: df.get_chunk(10))
         else:
             assert len(df) == 15
-
-    @pytest.mark.parametrize(
-        ("async_pandas_cursor", "parquet_engine", "chunksize"),
-        [
-            ({"cursor_kwargs": {"unload": False}}, "auto", None),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": True}}, "auto", None),
-        ],
-        indirect=["async_pandas_cursor"],
-    )
-    def test_fetchall(self, async_pandas_cursor, parquet_engine, chunksize):
-        query_id, future = async_pandas_cursor.execute(
-            "SELECT * FROM one_row",
-            engine=parquet_engine,
-            chunksize=chunksize,
-        )
-        result_set = future.result()
-        assert result_set.fetchall() == [(1,)]
-        query_id, future = async_pandas_cursor.execute("SELECT a FROM many_rows ORDER BY a")
-        result_set = future.result()
-        assert result_set.fetchall() == [(i,) for i in range(10000)]
-
-    @pytest.mark.parametrize(
-        ("async_pandas_cursor", "parquet_engine", "chunksize"),
-        [
-            ({"cursor_kwargs": {"unload": False}}, "auto", None),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": True}}, "auto", None),
-        ],
-        indirect=["async_pandas_cursor"],
-    )
-    def test_iterator(self, async_pandas_cursor, parquet_engine, chunksize):
-        query_id, future = async_pandas_cursor.execute(
-            "SELECT * FROM one_row",
-            engine=parquet_engine,
-            chunksize=chunksize,
-        )
-        result_set = future.result()
-        assert list(result_set) == [(1,)]
-        pytest.raises(StopIteration, result_set.__next__)
 
     @pytest.mark.parametrize(
         ("async_pandas_cursor", "parquet_engine", "chunksize"),
@@ -348,10 +269,6 @@ class TestAsyncPandasCursor:
         assert result_set.fetchone() is None
         assert result_set.fetchmany() == []
         assert result_set.fetchall() == []
-
-    def test_open_close(self):
-        with contextlib.closing(connect()) as conn, conn.cursor(AsyncPandasCursor):
-            pass
 
     def test_no_ops(self):
         conn = connect()

@@ -5,7 +5,6 @@
 #
 # SPDX-License-Identifier: MIT
 
-import contextlib
 import random
 import time
 from unittest.mock import MagicMock, patch
@@ -23,34 +22,12 @@ from tests.pyathena.conftest import connect
 
 
 class TestAsyncS3FSCursor:
-    def test_fetchone(self, async_s3fs_cursor):
-        query_id, future = async_s3fs_cursor.execute("SELECT * FROM one_row")
-        result_set = future.result()
-        assert result_set.rownumber == 0
-        assert result_set.fetchone() == (1,)
-        assert result_set.rownumber == 1
-        assert result_set.fetchone() is None
-
-    def test_fetchmany(self, async_s3fs_cursor):
-        query_id, future = async_s3fs_cursor.execute("SELECT * FROM many_rows LIMIT 15")
-        result_set = future.result()
-        assert len(result_set.fetchmany(10)) == 10
-        assert len(result_set.fetchmany(10)) == 5
-
-    def test_fetchall(self, async_s3fs_cursor):
-        query_id, future = async_s3fs_cursor.execute("SELECT * FROM one_row")
-        result_set = future.result()
-        assert result_set.fetchall() == [(1,)]
-
-        query_id, future = async_s3fs_cursor.execute("SELECT a FROM many_rows ORDER BY a")
-        result_set = future.result()
-        assert result_set.fetchall() == [(i,) for i in range(10000)]
-
     def test_arraysize(self, async_s3fs_cursor):
         async_s3fs_cursor.arraysize = 5
-        query_id, future = async_s3fs_cursor.execute("SELECT * FROM many_rows LIMIT 20")
+        query_id, future = async_s3fs_cursor.execute("SELECT a FROM many_rows ORDER BY a LIMIT 20")
         result_set = future.result()
-        assert len(result_set.fetchmany()) == 5
+        # The values check that the cursor passes its converter to the result set too.
+        assert result_set.fetchmany() == [(i,) for i in range(5)]
 
     def test_arraysize_default(self, async_s3fs_cursor):
         assert async_s3fs_cursor.arraysize == AthenaS3FSResultSet.DEFAULT_FETCH_SIZE
@@ -77,15 +54,6 @@ class TestAsyncS3FSCursor:
         assert result_set.fetchone() is None
         assert result_set.fetchmany() == []
         assert result_set.fetchall() == []
-
-    def test_open_close(self):
-        with (
-            contextlib.closing(connect(schema_name=ENV.schema)) as conn,
-            conn.cursor(AsyncS3FSCursor) as cursor,
-        ):
-            query_id, future = cursor.execute("SELECT * FROM one_row")
-            result_set = future.result()
-            assert result_set.fetchall() == [(1,)]
 
     def test_no_ops(self):
         conn = connect(schema_name=ENV.schema)

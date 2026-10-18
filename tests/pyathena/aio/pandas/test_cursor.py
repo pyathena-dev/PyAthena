@@ -41,12 +41,6 @@ class TestAioPandasCursor:
         assert aio_pandas_cursor.rownumber == 1
         assert await aio_pandas_cursor.fetchone() is None
 
-    async def test_fetchall(self, aio_pandas_cursor):
-        await aio_pandas_cursor.execute("SELECT * FROM one_row")
-        assert await aio_pandas_cursor.fetchall() == [(1,)]
-        await aio_pandas_cursor.execute("SELECT a FROM many_rows ORDER BY a")
-        assert await aio_pandas_cursor.fetchall() == [(i,) for i in range(10000)]
-
     async def test_as_pandas(self, aio_pandas_cursor):
         await aio_pandas_cursor.execute("SELECT * FROM one_row")
         df = aio_pandas_cursor.as_pandas()

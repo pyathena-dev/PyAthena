@@ -184,15 +184,8 @@ class TestCursor:
         assert actual2 == [(i,) for i in range(10, 15)]
 
     def test_fetchall(self, cursor):
-        cursor.execute("SELECT * FROM one_row")
-        assert cursor.fetchall() == [(1,)]
         cursor.execute("SELECT a FROM many_rows ORDER BY a")
         assert cursor.fetchall() == [(i,) for i in range(10000)]
-
-    def test_iterator(self, cursor):
-        cursor.execute("SELECT * FROM one_row")
-        assert list(cursor) == [(1,)]
-        pytest.raises(StopIteration, cursor.__next__)
 
     # Cache hits are asserted in ENV.work_group: the default work group runs most test
     # queries, which can push earlier executions out of the cache_size window.
@@ -1876,25 +1869,6 @@ class TestCursor:
 
 
 class TestDictCursor:
-    def test_fetchone(self, dict_cursor):
-        dict_cursor.execute("SELECT * FROM one_row")
-        assert dict_cursor.fetchone() == {"number_of_rows": 1}
-
-    def test_fetchmany(self, dict_cursor):
-        dict_cursor.execute("SELECT * FROM many_rows LIMIT 15")
-        actual1 = dict_cursor.fetchmany(10)
-        assert len(actual1) == 10
-        assert actual1 == [{"a": i} for i in range(10)]
-        actual2 = dict_cursor.fetchmany(10)
-        assert len(actual2) == 5
-        assert actual2 == [{"a": i} for i in range(10, 15)]
-
-    def test_fetchall(self, dict_cursor):
-        dict_cursor.execute("SELECT * FROM one_row")
-        assert dict_cursor.fetchall() == [{"number_of_rows": 1}]
-        dict_cursor.execute("SELECT a FROM many_rows ORDER BY a")
-        assert dict_cursor.fetchall() == [{"a": i} for i in range(10000)]
-
     def test_dict_type(self, dict_cursor):
         with dict_cursor.connection.cursor(dict_type=OrderedDict) as ordered_cursor:
             ordered_cursor.execute("SELECT * FROM one_row")

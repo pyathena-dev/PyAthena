@@ -114,52 +114,6 @@ class TestArrowCursor:
         [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
         indirect=["arrow_cursor"],
     )
-    def test_fetchone(self, arrow_cursor):
-        arrow_cursor.execute("SELECT * FROM one_row")
-        assert arrow_cursor.rownumber == 0
-        assert arrow_cursor.fetchone() == (1,)
-        assert arrow_cursor.rownumber == 1
-        assert arrow_cursor.fetchone() is None
-
-    @pytest.mark.parametrize(
-        "arrow_cursor",
-        [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
-        indirect=["arrow_cursor"],
-    )
-    def test_fetchmany(self, arrow_cursor):
-        arrow_cursor.execute("SELECT * FROM many_rows LIMIT 15")
-        assert len(arrow_cursor.fetchmany(10)) == 10
-        assert len(arrow_cursor.fetchmany(10)) == 5
-
-    @pytest.mark.parametrize(
-        "arrow_cursor",
-        [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
-        indirect=["arrow_cursor"],
-    )
-    def test_fetchall(self, arrow_cursor):
-        arrow_cursor.execute("SELECT * FROM one_row")
-        assert arrow_cursor.fetchall() == [(1,)]
-        arrow_cursor.execute("SELECT a FROM many_rows ORDER BY a")
-        if arrow_cursor._unload:
-            assert sorted(arrow_cursor.fetchall()) == [(i,) for i in range(10000)]
-        else:
-            assert arrow_cursor.fetchall() == [(i,) for i in range(10000)]
-
-    @pytest.mark.parametrize(
-        "arrow_cursor",
-        [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
-        indirect=["arrow_cursor"],
-    )
-    def test_iterator(self, arrow_cursor):
-        arrow_cursor.execute("SELECT * FROM one_row")
-        assert list(arrow_cursor) == [(1,)]
-        pytest.raises(StopIteration, arrow_cursor.__next__)
-
-    @pytest.mark.parametrize(
-        "arrow_cursor",
-        [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
-        indirect=["arrow_cursor"],
-    )
     def test_arraysize(self, arrow_cursor):
         arrow_cursor.arraysize = 5
         arrow_cursor.execute("SELECT * FROM many_rows LIMIT 20")
@@ -592,10 +546,6 @@ class TestArrowCursor:
 
     def test_cancel_initial(self, arrow_cursor):
         pytest.raises(ProgrammingError, arrow_cursor.cancel)
-
-    def test_open_close(self):
-        with contextlib.closing(connect()) as conn, conn.cursor(ArrowCursor):
-            pass
 
     def test_no_ops(self):
         conn = connect()

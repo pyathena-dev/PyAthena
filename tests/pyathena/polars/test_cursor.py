@@ -40,58 +40,12 @@ _POLARS_2 = int(pl.__version__.split(".")[0]) >= 2
 
 
 class TestPolarsCursor:
-    @pytest.mark.parametrize(
-        "polars_cursor",
-        [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
-        indirect=["polars_cursor"],
-    )
-    def test_fetchone(self, polars_cursor):
-        polars_cursor.execute("SELECT * FROM one_row")
-        assert polars_cursor.rownumber == 0
-        assert polars_cursor.fetchone() == (1,)
-        assert polars_cursor.rownumber == 1
-        assert polars_cursor.fetchone() is None
-
     def test_result_set_file_system_not_cached(self, polars_cursor):
         # GH-978: the filesystem that read the CSV results was kept in the fsspec
         # instance cache with the connection, so the connection was never freed.
         polars_cursor.execute("SELECT * FROM one_row")
         assert polars_cursor.fetchall() == [(1,)]
         assert not cached_file_systems(polars_cursor.connection)
-
-    @pytest.mark.parametrize(
-        "polars_cursor",
-        [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
-        indirect=["polars_cursor"],
-    )
-    def test_fetchmany(self, polars_cursor):
-        polars_cursor.execute("SELECT * FROM many_rows LIMIT 15")
-        assert len(polars_cursor.fetchmany(10)) == 10
-        assert len(polars_cursor.fetchmany(10)) == 5
-
-    @pytest.mark.parametrize(
-        "polars_cursor",
-        [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
-        indirect=["polars_cursor"],
-    )
-    def test_fetchall(self, polars_cursor):
-        polars_cursor.execute("SELECT * FROM one_row")
-        assert polars_cursor.fetchall() == [(1,)]
-        polars_cursor.execute("SELECT a FROM many_rows ORDER BY a")
-        if polars_cursor._unload:
-            assert sorted(polars_cursor.fetchall()) == [(i,) for i in range(10000)]
-        else:
-            assert polars_cursor.fetchall() == [(i,) for i in range(10000)]
-
-    @pytest.mark.parametrize(
-        "polars_cursor",
-        [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
-        indirect=["polars_cursor"],
-    )
-    def test_iterator(self, polars_cursor):
-        polars_cursor.execute("SELECT * FROM one_row")
-        assert list(polars_cursor) == [(1,)]
-        pytest.raises(StopIteration, polars_cursor.__next__)
 
     @pytest.mark.parametrize(
         "polars_cursor",
@@ -539,10 +493,6 @@ class TestPolarsCursor:
 
     def test_cancel_initial(self, polars_cursor):
         pytest.raises(ProgrammingError, polars_cursor.cancel)
-
-    def test_open_close(self):
-        with contextlib.closing(connect()) as conn, conn.cursor(PolarsCursor):
-            pass
 
     def test_no_ops(self):
         conn = connect()

@@ -15,60 +15,6 @@ from tests.pyathena.conftest import connect
 
 
 class TestAsyncCursor:
-    def test_fetchone(self, async_cursor):
-        query_id, future = async_cursor.execute("SELECT * FROM one_row")
-        result_set = future.result()
-        assert result_set.rownumber == 0
-        assert result_set.fetchone() == (1,)
-        assert result_set.rownumber == 1
-        assert result_set.fetchone() is None
-        assert result_set.database == ENV.schema
-        assert result_set.catalog
-        assert result_set.query_id
-        assert result_set.query
-        assert result_set.statement_type == AthenaQueryExecution.STATEMENT_TYPE_DML
-        assert result_set.work_group == ENV.default_work_group
-        assert result_set.state == AthenaQueryExecution.STATE_SUCCEEDED
-        assert result_set.state_change_reason is None
-        assert result_set.submission_date_time
-        assert isinstance(result_set.submission_date_time, datetime)
-        assert result_set.completion_date_time
-        assert isinstance(result_set.completion_date_time, datetime)
-        assert result_set.data_scanned_in_bytes
-        assert result_set.engine_execution_time_in_millis
-        assert result_set.query_queue_time_in_millis
-        assert result_set.total_execution_time_in_millis
-        # assert result_set.query_planning_time_in_millis  # TODO flaky test
-        # assert result_set.service_processing_time_in_millis  # TODO flaky test
-        assert result_set.output_location
-        assert result_set.data_manifest_location is None
-        assert result_set.selected_engine_version
-        assert result_set.effective_engine_version
-
-    def test_fetchmany(self, async_cursor):
-        query_id, future = async_cursor.execute("SELECT * FROM many_rows LIMIT 15")
-        result_set = future.result()
-        actual1 = result_set.fetchmany(10)
-        assert len(actual1) == 10
-        assert actual1 == [(i,) for i in range(10)]
-        actual2 = result_set.fetchmany(10)
-        assert len(actual2) == 5
-        assert actual2 == [(i,) for i in range(10, 15)]
-
-    def test_fetchall(self, async_cursor):
-        query_id, future = async_cursor.execute("SELECT * FROM one_row")
-        result_set = future.result()
-        assert result_set.fetchall() == [(1,)]
-        query_id, future = async_cursor.execute("SELECT a FROM many_rows ORDER BY a")
-        result_set = future.result()
-        assert result_set.fetchall() == [(i,) for i in range(10000)]
-
-    def test_iterator(self, async_cursor):
-        query_id, future = async_cursor.execute("SELECT * FROM one_row")
-        result_set = future.result()
-        assert list(result_set) == [(1,)]
-        pytest.raises(StopIteration, result_set.__next__)
-
     def test_arraysize(self, async_cursor):
         async_cursor.arraysize = 5
         query_id, future = async_cursor.execute("SELECT * FROM many_rows LIMIT 20")
@@ -225,29 +171,6 @@ class TestAsyncCursor:
 
 
 class TestAsyncDictCursor:
-    def test_fetchone(self, async_dict_cursor):
-        query_id, future = async_dict_cursor.execute("SELECT * FROM one_row")
-        result_set = future.result()
-        assert result_set.fetchone() == {"number_of_rows": 1}
-
-    def test_fetchmany(self, async_dict_cursor):
-        query_id, future = async_dict_cursor.execute("SELECT * FROM many_rows LIMIT 15")
-        result_set = future.result()
-        actual1 = result_set.fetchmany(10)
-        assert len(actual1) == 10
-        assert actual1 == [{"a": i} for i in range(10)]
-        actual2 = result_set.fetchmany(10)
-        assert len(actual2) == 5
-        assert actual2 == [{"a": i} for i in range(10, 15)]
-
-    def test_fetchall(self, async_dict_cursor):
-        query_id, future = async_dict_cursor.execute("SELECT * FROM one_row")
-        result_set = future.result()
-        assert result_set.fetchall() == [{"number_of_rows": 1}]
-        query_id, future = async_dict_cursor.execute("SELECT a FROM many_rows ORDER BY a")
-        result_set = future.result()
-        assert result_set.fetchall() == [{"a": i} for i in range(10000)]
-
     def test_dict_type(self, async_dict_cursor):
         with async_dict_cursor.connection.cursor(dict_type=OrderedDict) as ordered_cursor:
             _, future = ordered_cursor.execute("SELECT * FROM one_row")

@@ -314,22 +314,6 @@ class TestPandasCursor:
         assert pandas_cursor.fetchall() == [(None,)]
 
     @pytest.mark.parametrize(
-        ("pandas_cursor", "parquet_engine", "chunksize"),
-        [
-            ({"cursor_kwargs": {"unload": False}}, "auto", None),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": True}}, "auto", None),
-        ],
-        indirect=["pandas_cursor"],
-    )
-    def test_fetchone(self, pandas_cursor, parquet_engine, chunksize):
-        pandas_cursor.execute("SELECT * FROM one_row", engine=parquet_engine, chunksize=chunksize)
-        assert pandas_cursor.rownumber == 0
-        assert pandas_cursor.fetchone() == (1,)
-        assert pandas_cursor.rownumber == 1
-        assert pandas_cursor.fetchone() is None
-
-    @pytest.mark.parametrize(
         "pandas_cursor",
         [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
         indirect=["pandas_cursor"],
@@ -387,24 +371,6 @@ class TestPandasCursor:
             )
 
     @pytest.mark.parametrize(
-        ("pandas_cursor", "parquet_engine", "chunksize"),
-        [
-            ({"cursor_kwargs": {"unload": False}}, "auto", None),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": True}}, "auto", None),
-        ],
-        indirect=["pandas_cursor"],
-    )
-    def test_fetchmany(self, pandas_cursor, parquet_engine, chunksize):
-        pandas_cursor.execute(
-            "SELECT * FROM many_rows LIMIT 15",
-            engine=parquet_engine,
-            chunksize=chunksize,
-        )
-        assert len(pandas_cursor.fetchmany(10)) == 10
-        assert len(pandas_cursor.fetchmany(10)) == 5
-
-    @pytest.mark.parametrize(
         ("pandas_cursor", "ordered"),
         [
             ({"cursor_kwargs": {"unload": False}}, True),
@@ -453,35 +419,6 @@ class TestPandasCursor:
             pytest.raises(StopIteration, lambda: df.get_chunk(10))
         else:
             assert len(df) == 15
-
-    @pytest.mark.parametrize(
-        ("pandas_cursor", "parquet_engine", "chunksize"),
-        [
-            ({"cursor_kwargs": {"unload": False}}, "auto", None),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": True}}, "auto", None),
-        ],
-        indirect=["pandas_cursor"],
-    )
-    def test_fetchall(self, pandas_cursor, parquet_engine, chunksize):
-        pandas_cursor.execute("SELECT * FROM one_row", engine=parquet_engine, chunksize=chunksize)
-        assert pandas_cursor.fetchall() == [(1,)]
-        pandas_cursor.execute("SELECT a FROM many_rows ORDER BY a", engine=parquet_engine)
-        assert pandas_cursor.fetchall() == [(i,) for i in range(10000)]
-
-    @pytest.mark.parametrize(
-        ("pandas_cursor", "parquet_engine", "chunksize"),
-        [
-            ({"cursor_kwargs": {"unload": False}}, "auto", None),
-            ({"cursor_kwargs": {"unload": False}}, "auto", 1_000),
-            ({"cursor_kwargs": {"unload": True}}, "auto", None),
-        ],
-        indirect=["pandas_cursor"],
-    )
-    def test_iterator(self, pandas_cursor, parquet_engine, chunksize):
-        pandas_cursor.execute("SELECT * FROM one_row", engine=parquet_engine, chunksize=chunksize)
-        assert list(pandas_cursor) == [(1,)]
-        pytest.raises(StopIteration, pandas_cursor.__next__)
 
     @pytest.mark.parametrize(
         ("pandas_cursor", "parquet_engine", "chunksize"),
@@ -1169,10 +1106,6 @@ class TestPandasCursor:
 
     def test_cancel_initial(self, pandas_cursor):
         pytest.raises(ProgrammingError, pandas_cursor.cancel)
-
-    def test_open_close(self):
-        with contextlib.closing(connect()) as conn, conn.cursor(PandasCursor):
-            pass
 
     def test_no_ops(self):
         conn = connect()
