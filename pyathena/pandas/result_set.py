@@ -641,7 +641,7 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
             series = df.iloc[:, i]
             array = series.array
             fetch_type = self._fetch_types.get(df.columns[i])
-            if fetch_type is not None and isinstance(array, pd.arrays.DatetimeArray):
+            if fetch_type is not None and series.dtype.kind == "M":
                 columns.append((array, fetch_type))
             elif isinstance(array.dtype, pd.StringDtype):
                 columns.append((array, "list"))

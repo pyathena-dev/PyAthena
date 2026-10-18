@@ -1100,6 +1100,85 @@ class TestAthenaPandasResultSet:
         assert result_set.fetchone() == (expected,)
         assert type(result_set.as_pandas()["ts"].iloc[0]) is type(expected)
 
+    def test_time_zone_before_first_transition(self, tmp_path):
+        """Local times before a zone's first transition convert by the zone's offset then.
+
+        pandas reports them as nonexistent; the zone's local mean time gives their
+        instant.
+        """
+        data = (
+            '"tstz"\n'
+            '"1500-01-01 00:00:00.000 America/New_York"\n'
+            '"0001-01-01 00:00:00.000 Asia/Tokyo"\n'
+            '"2020-01-02 03:04:05.000 Asia/Tokyo"\n'
+        )
+        result_set = _local_result_set(
+            LocalBucketFileSystem(tmp_path), [("tstz", "timestamp with time zone")], data
+        )
+        values = result_set.as_pandas()["tstz"].dt.tz_localize(None).to_numpy()
+        # America/New_York's local mean time is -04:56:02 and Asia/Tokyo's +09:18:59.
+        expected = ["1500-01-01T04:56:02", "0000-12-31T14:41:01", "2020-01-01T18:04:05"]
+        np.testing.assert_array_equal(values, np.array(expected, dtype="datetime64[us]"))
+
+    @pytest.mark.parametrize("infer_string", [True, False])
+    @pytest.mark.parametrize("type_", ["timestamp", "date", "timestamp with time zone"])
+    def test_temporal_conversion_error(self, tmp_path, type_, infer_string):
+        """A value that fails to convert raises DataError naming the column."""
+        value = {
+            "timestamp": "2020-13-01 00:00:00.000",
+            "date": "2020-13-01",
+            "timestamp with time zone": "2020-13-01 00:00:00.000 UTC",
+        }[type_]
+        with (
+            pd.option_context("future.infer_string", infer_string),
+            pytest.raises(DataError) as error,
+        ):
+            _local_result_set(LocalBucketFileSystem(tmp_path), [("x", type_)], f'"x"\n"{value}"\n')
+        assert str(error.value).startswith("Column 'x': ")
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            pytest.param({"converters": {"s": str.upper}}, id="converters"),
+            pytest.param({"dtype": {"tstz": "str"}}, id="dtype_entry"),
+            pytest.param({"dtype": "str"}, id="dtype"),
+        ],
+    )
+    def test_time_zone_results_do_not_depend_on_engine(self, tmp_path, kwargs):
+        """engine="pyarrow" gives the values of the C engine with options for the columns."""
+        data = '"tstz","s"\n' + '"2020-01-02 03:04:05.000 Asia/Tokyo","a"\n' * 5
+        types = [("tstz", "timestamp with time zone"), ("s", "varchar")]
+        frames, rows = [], []
+        for engine in ("c", "pyarrow"):
+            result_set = _local_result_set(
+                LocalBucketFileSystem(tmp_path / engine), types, data, engine=engine, **kwargs
+            )
+            frames.append(result_set.as_pandas())
+            rows.append(result_set.fetchall())
+        assert_frame_equal(frames[1], frames[0])
+        assert rows[1] == rows[0]
+
+    @pytest.mark.parametrize(
+        ("kwargs", "expected"),
+        [
+            # parse_dates keeps PyAthena from converting any temporal column: the
+            # converter's function gives the value in its zone.
+            pytest.param({"parse_dates": ["ts"]}, "+09:00", id="parse_dates"),
+            # converters that do not name the column keep its conversion, to UTC.
+            pytest.param({"converters": {}}, "+00:00", id="converters"),
+            pytest.param({"converters": {"ts": str}}, "+00:00", id="converters_of_other"),
+        ],
+    )
+    def test_time_zone_options_take_precedence(self, tmp_path, kwargs, expected):
+        """Options apply to timestamp with time zone columns as to the other temporal ones."""
+        result_set = _local_result_set(
+            LocalBucketFileSystem(tmp_path),
+            [("ts", "timestamp"), ("tstz", "timestamp with time zone")],
+            '"ts","tstz"\n"2020-01-02 03:04:05.000","2020-01-02 03:04:05.000 Asia/Tokyo"\n',
+            **kwargs,
+        )
+        assert result_set.fetchone()[1].isoformat().endswith(expected)
+
     def test_custom_time_zone_converter(self, tmp_path):
         """A conversion function that the converter maps to timestamp with time zone wins."""
         converter = DefaultPandasTypeConverter()
