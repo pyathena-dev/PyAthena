@@ -474,10 +474,19 @@ class TestAthenaPandasResultSet:
     def test_iter_parquet_chunks_null_in_later_file(self, tmp_path):
         """Top-level integer and boolean columns with NULL anywhere convert alike in every chunk.
 
-        The result is described by the columns of its files.
+        The result is described by the columns of its files, read from the files of the data
+        manifest without listing the unload location, which credentials may not allow.
         """
+
+        class UnlistableFileSystem(LocalBucketFileSystem):
+            def ls(self, path, detail=True, **kwargs):
+                raise PermissionError(path)
+
+            def find(self, path, maxdepth=None, withdirs=False, detail=False, **kwargs):
+                raise PermissionError(path)
+
         result_set = _local_result_set(
-            LocalBucketFileSystem(tmp_path),
+            UnlistableFileSystem(tmp_path),
             tables=[
                 pa.table({"i": pa.array([1, 2], pa.int64()), "b": [True, False]}),
                 pa.table({"i": pa.array([None, 4], pa.int64()), "b": [None, True]}),
@@ -670,7 +679,18 @@ class TestAthenaPandasResultSet:
         connection.client.get_query_results.return_value = query_results_response(
             [("v", "varchar")]
         )
-        with patch.object(connection.s3_client, "_make_api_call", side_effect=s3_object.answer):
+        with (
+            patch.object(
+                connection.s3_client,
+                "head_object",
+                side_effect=lambda **params: s3_object.answer("HeadObject", params),
+            ),
+            patch.object(
+                connection.s3_client,
+                "get_object",
+                side_effect=lambda **params: s3_object.answer("GetObject", params),
+            ),
+        ):
             result_set = AthenaPandasResultSet(
                 connection=connection,
                 converter=DefaultPandasTypeConverter(),
