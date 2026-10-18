@@ -63,7 +63,7 @@ See {ref}`null_handling` for the other types.
 ## Time Zones
 
 A `timestamp with time zone` value has a UTC offset, such as `+05:30`, or a time zone name, such as `UTC` or `Asia/Tokyo`.
-The fetch methods return a value with an offset in a fixed-offset `datetime.timezone`, and a value with a zone name in `zoneinfo.ZoneInfo`.
+The fetch methods of the cursors other than `PandasCursor` return a value with an offset in a fixed-offset `datetime.timezone`, and a value with a zone name in `zoneinfo.ZoneInfo`.
 `time with time zone` values always have an offset.
 
 Athena writes a value with a zone name as the local time in that zone.
