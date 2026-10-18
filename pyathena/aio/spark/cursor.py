@@ -448,6 +448,7 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
         return self
 
     async def __anext__(self):
+        self._ensure_open()
         raise StopAsyncIteration
 
     async def __aenter__(self):

@@ -463,4 +463,6 @@ class TestAioSparkCursor:
                 await cursor.get_std_out()
             with pytest.raises(ProgrammingError):
                 await cursor.get_std_error()
+            with pytest.raises(ProgrammingError):
+                await anext(cursor)
         assert requests == []
