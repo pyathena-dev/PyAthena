@@ -8,20 +8,24 @@
 import csv
 import inspect
 import io
+import re
 import threading
 from collections import defaultdict
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, PropertyMock, patch
 
+import boto3
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from fsspec.implementations.local import LocalFileSystem
+from botocore.exceptions import ClientError
+from botocore.response import StreamingBody
 from pandas.testing import assert_frame_equal
 
-from pyathena.arrow.util import to_column_info
 from pyathena.error import OperationalError, ProgrammingError
+from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.model import AthenaQueryExecution
 from pyathena.pandas.converter import DefaultPandasTypeConverter
 from pyathena.pandas.result_set import (
@@ -468,19 +472,37 @@ class TestAthenaPandasResultSet:
             assert df["d"].tolist() == [pd.Timestamp(d) for d in dates]
 
     def test_iter_parquet_chunks_null_in_later_file(self, tmp_path):
-        """Top-level integer and boolean columns with NULL anywhere convert alike in every chunk."""
-        chunks, _ = _read_unload_result(
-            tmp_path,
-            [
+        """Top-level integer and boolean columns with NULL anywhere convert alike in every chunk.
+
+        The result is described by the columns of its files, read from the files of the data
+        manifest without listing the unload location, which credentials may not allow.
+        """
+
+        class UnlistableFileSystem(LocalBucketFileSystem):
+            def ls(self, path, detail=True, **kwargs):
+                raise PermissionError(path)
+
+            def find(self, path, maxdepth=None, withdirs=False, detail=False, **kwargs):
+                raise PermissionError(path)
+
+        result_set = _local_result_set(
+            UnlistableFileSystem(tmp_path),
+            tables=[
                 pa.table({"i": pa.array([1, 2], pa.int64()), "b": [True, False]}),
                 pa.table({"i": pa.array([None, 4], pa.int64()), "b": [None, True]}),
             ],
             chunksize=1,
         )
-        whole = pd.read_parquet(tmp_path)
+        chunks = list(result_set.iter_chunks())
+        whole = pd.read_parquet(tmp_path / "bucket" / "unload")
+        assert result_set.description == [
+            ("i", "bigint", None, None, 19, 0, "NULLABLE"),
+            ("b", "boolean", None, None, 0, 0, "NULLABLE"),
+        ]
         assert [len(chunk) for chunk in chunks] == [1, 1, 1, 1]
         for chunk in chunks:
             assert chunk.dtypes.tolist() == whole.dtypes.tolist()
+        # The chunks are indexed from their first row, as the whole result is.
         assert_frame_equal(pd.concat(chunks), whole, check_exact=True)
 
     def test_read_parquet_footers_stopped(self, tmp_path):
@@ -488,42 +510,43 @@ class TestAthenaPandasResultSet:
 
         A cancelled ``create_in_thread()`` of AioPandasCursor stops their retries too.
         """
-        result_set, paths = _unload_result_set(
-            tmp_path, [pa.table({"i": [1]}), pa.table({"i": [2]})], chunksize=1
-        )
+        fs = LocalBucketFileSystem(tmp_path)
         stop = threading.Event()
         stop.set()
         operations = []
+        write = fs.open
 
-        def read_parquet_footer(path):
+        def open_(path, mode="rb", **kwargs):
+            if "w" in mode:
+                return write(path, mode, **kwargs)
+            # A read of the file throttles, as an S3 request does.
             operation = ThrottledOperation()
             operations.append(operation)
-            retry_api_call(operation, RetryConfig(attempt=3, multiplier=0))
+            return retry_api_call(operation, RetryConfig(attempt=3, multiplier=0))
 
         with (
-            patch.object(AthenaPandasResultSet, "_read_data_manifest", return_value=paths),
-            patch.object(
-                AthenaPandasResultSet, "_read_parquet_footer", side_effect=read_parquet_footer
-            ),
+            patch.object(fs, "open", side_effect=open_),
             stop_retries_on(stop),
-            pytest.raises(OperationalError, match="ThrottlingException"),
+            pytest.raises(OperationalError) as error,
         ):
-            result_set._read_parquet_footers()
+            _local_result_set(fs, tables=[pa.table({"i": [1]}), pa.table({"i": [2]})], chunksize=1)
+        # The error of the stopped attempt is raised.
+        assert isinstance(error.value.__cause__, ClientError)
+        assert error.value.__cause__.response["Error"]["Code"] == "ThrottlingException"
         assert operations
         assert [operation.calls for operation in operations] == [1] * len(operations)
 
-    def test_as_pandas_parquet_chunks_engine(self, tmp_path):
+    @pytest.mark.parametrize("engine", ["c", "pyarrow"])
+    def test_as_pandas_parquet_chunks_engine(self, tmp_path, engine):
         """Chunks of an UNLOAD result need the pyarrow engine, as the whole result does."""
-        result_set, paths = _unload_result_set(tmp_path, [pa.table({"i": [1]})], chunksize=1)
-        result_set._engine = "c"
-        with (
-            patch.object(AthenaPandasResultSet, "_read_data_manifest", return_value=paths),
-            patch.object(
-                AthenaPandasResultSet, "is_unload", new_callable=PropertyMock, return_value=True
-            ),
-            pytest.raises(ProgrammingError, match="Engine must be `pyarrow`"),
-        ):
-            result_set._as_pandas()
+        fs = LocalBucketFileSystem(tmp_path)
+        tables = [pa.table({"i": [1]})]
+        if engine == "c":
+            with pytest.raises(ProgrammingError):
+                _local_result_set(fs, tables=tables, chunksize=1, engine=engine)
+            return
+        result_set = _local_result_set(fs, tables=tables, chunksize=1, engine=engine)
+        assert result_set.fetchall() == [(1,)]
 
     @pytest.mark.parametrize(
         ("kwargs", "sizes", "columns"),
@@ -633,6 +656,68 @@ class TestAthenaPandasResultSet:
             assert "cache_type" not in options
             assert "block_size" not in options
 
+    @pytest.mark.parametrize(
+        ("kwargs", "read_in_blocks"),
+        [
+            pytest.param({"block_size": 2**20}, True, id="block_size"),
+            pytest.param({"cache_type": "none"}, False, id="cache_type"),
+        ],
+    )
+    def test_csv_read_options_reach_file_system(self, kwargs, read_in_blocks):
+        """block_size and cache_type set how PyAthena's filesystem reads the CSV result file.
+
+        The file is read from S3 in blocks of block_size, or, with the "none" cache, only
+        in the ranges that pandas reads, never the whole file at once as the filesystem's
+        default block would. No AWS calls; the S3 client serves the file from memory.
+        """
+        data = b'"v"\n' + (b'"' + b"x" * 1000 + b'"\n') * 3000
+        s3_object = _InMemoryS3Object(data)
+        connection = MagicMock(retry_config=RetryConfig())
+        connection.s3_client = boto3.session.Session().client(
+            "s3", region_name="us-east-1", aws_access_key_id="key", aws_secret_access_key="secret"
+        )
+        connection.client.get_query_results.return_value = query_results_response(
+            [("v", "varchar")]
+        )
+        with (
+            patch.object(
+                connection.s3_client,
+                "head_object",
+                side_effect=lambda **params: s3_object.answer("HeadObject", params),
+            ),
+            patch.object(
+                connection.s3_client,
+                "get_object",
+                side_effect=lambda **params: s3_object.answer("GetObject", params),
+            ),
+        ):
+            result_set = AthenaPandasResultSet(
+                connection=connection,
+                converter=DefaultPandasTypeConverter(),
+                query_execution=AthenaQueryExecution(
+                    {
+                        "QueryExecution": {
+                            "QueryExecutionId": "query_id",
+                            "Query": "SELECT 1",
+                            "Status": {"State": AthenaQueryExecution.STATE_SUCCEEDED},
+                            "ResultConfiguration": {"OutputLocation": "s3://bucket/result.csv"},
+                        }
+                    }
+                ),
+                arraysize=1000,
+                retry_config=RetryConfig(),
+                engine="c",
+                **kwargs,
+            )
+        assert len(result_set.as_pandas()) == 3000
+        sizes = [end - start for start, end in s3_object.ranges]
+        if read_in_blocks:
+            # The parts that the filesystem's workers fetch are blocks of block_size.
+            assert max(sizes) == kwargs["block_size"]
+        else:
+            assert len(data) < S3FileSystem.DEFAULT_BLOCK_SIZE
+            assert max(sizes) < len(data)
+
     @pytest.mark.filterwarnings("error::pandas.errors.DtypeWarning")
     @pytest.mark.parametrize(
         ("json_value", "expected"), [("9007199254740993", 9007199254740993), ("true", True)]
@@ -651,11 +736,13 @@ class TestAthenaPandasResultSet:
         ],
     )
     def test_read_csv_json_null_without_dtype_warning(
-        self, json_value, expected, engine, kwargs, access
+        self, tmp_path, json_value, expected, engine, kwargs, access
     ):
         """JSON NULLs in a later parser block keep exact values without a warning."""
         data = "n,j\n" + f"1,{json_value}\n" * 400000 + "2,\n" * 10
-        result = _read_csv_result(data, {"n": "integer", "j": "json"}, engine=engine, **kwargs)
+        result = _read_local_csv(
+            tmp_path, data, {"n": "integer", "j": "json"}, engine=engine, **kwargs
+        )
         if access != "whole":
             with result:
                 first = result.get_chunk(400005) if access == "get_chunk" else next(result)
@@ -672,10 +759,10 @@ class TestAthenaPandasResultSet:
 
     @pytest.mark.filterwarnings("error::pandas.errors.DtypeWarning")
     @pytest.mark.parametrize("kwargs", [{}, {"low_memory": True}])
-    def test_read_csv_json_numbers_in_a_parser_block_without_null(self, kwargs):
+    def test_read_csv_json_numbers_in_a_parser_block_without_null(self, tmp_path, kwargs):
         """JSON integers keep their type when their parser block has a float but no NULL."""
         data = "n,j\n1,1.5\n" + "1,7\n" * 400000 + "2,\n" * 10
-        df = _read_csv_result(data, {"n": "integer", "j": "json"}, **kwargs)
+        df = _read_local_csv(tmp_path, data, {"n": "integer", "j": "json"}, **kwargs)
         values = df["j"]
         assert values.dtype == object
         assert values[0] == 1.5
@@ -695,9 +782,11 @@ class TestAthenaPandasResultSet:
             pytest.param('"{""a"": 1}"\n3,[1]', object, [{"a": 1}, [1]], id="containers"),
         ],
     )
-    def test_read_csv_json_without_null(self, engine, text, dtype, values):
+    def test_read_csv_json_without_null(self, tmp_path, engine, text, dtype, values):
         """JSON without NULL gets the dtype that pandas infers for a converter's values."""
-        df = _read_csv_result(f"n,j\n1,{text}\n", {"n": "integer", "j": "json"}, engine=engine)
+        df = _read_local_csv(
+            tmp_path, f"n,j\n1,{text}\n", {"n": "integer", "j": "json"}, engine=engine
+        )
         assert df["j"].dtype == dtype
         assert df["j"].tolist() == values
 
@@ -714,9 +803,10 @@ class TestAthenaPandasResultSet:
             pytest.param({"n": "int32", "j": "Int64"}, "int32", "int64", id="json-column"),
         ],
     )
-    def test_read_csv_json_with_dtype(self, engine, dtype, n_dtype, m_dtype):
+    def test_read_csv_json_with_dtype(self, tmp_path, engine, dtype, n_dtype, m_dtype):
         """A dtype given to execute() replaces PyAthena's and does not apply to json columns."""
-        df = _read_csv_result(
+        df = _read_local_csv(
+            tmp_path,
             "n,m,j\n1,1,2\n3,4,\n",
             {"n": "integer", "m": "integer", "j": "json"},
             engine=engine,
@@ -742,18 +832,21 @@ class TestAthenaPandasResultSet:
         ],
     )
     def test_read_csv_json_column_with_the_same_name_as_another_column(
-        self, kwargs, expected, dtype
+        self, tmp_path, kwargs, expected, dtype
     ):
         """A column renamed from the name of a json column is read with its own options."""
-        df = _read_csv_result("x,x\n1,002\n3,004\n", [("x", "json"), ("x", "integer")], **kwargs)
+        df = _read_local_csv(
+            tmp_path, "x,x\n1,002\n3,004\n", [("x", "json"), ("x", "integer")], **kwargs
+        )
         assert df.to_dict("list") == expected
         assert df["x.1"].dtype == dtype
 
     @pytest.mark.parametrize("engine", ["c", "python"])
     @pytest.mark.parametrize("kwargs", [{}, {"index_col": "j"}])
-    def test_read_csv_json_parse_dates(self, engine, kwargs):
+    def test_read_csv_json_parse_dates(self, tmp_path, engine, kwargs):
         """Dates that pandas parses from a json column with parse_dates are kept."""
-        df = _read_csv_result(
+        df = _read_local_csv(
+            tmp_path,
             "n,j\n1,20240101\n",
             {"n": "integer", "j": "json"},
             engine=engine,
@@ -764,21 +857,21 @@ class TestAthenaPandasResultSet:
         assert values.tolist() == [pd.Timestamp("2024-01-01")]
 
     @pytest.mark.parametrize("engine", ["c", "python"])
-    def test_read_csv_single_json_column_with_null(self, engine):
+    def test_read_csv_single_json_column_with_null(self, tmp_path, engine):
         """NULL in a result with only a json column, an empty line, is None."""
-        df = _read_csv_result("j\n1\n\n", {"j": "json"}, engine=engine)
+        df = _read_local_csv(tmp_path, "j\n1\n\n", {"j": "json"}, engine=engine)
         assert df["j"].tolist() == [1, None]
 
     @pytest.mark.parametrize("chunksize", [None, 1])
-    def test_read_csv_json_conversion_error(self, chunksize):
+    def test_read_csv_json_conversion_error(self, tmp_path, chunksize):
         """A json value that the converter cannot convert raises OperationalError.
 
         A chunked read raises when it reads the chunk.
         """
 
         def read():
-            result = _read_csv_result(
-                "n,j\n1,{\n", {"n": "integer", "j": "json"}, chunksize=chunksize
+            result = _read_local_csv(
+                tmp_path, "n,j\n1,{\n", {"n": "integer", "j": "json"}, chunksize=chunksize
             )
             if chunksize:
                 with result:
@@ -788,10 +881,10 @@ class TestAthenaPandasResultSet:
             read()
 
     @pytest.mark.parametrize(("converters", "expected"), [({}, ["[1]"]), ({"j": len}, [3])])
-    def test_read_csv_json_custom_converters(self, converters, expected):
+    def test_read_csv_json_custom_converters(self, tmp_path, converters, expected):
         """Converters given to execute() replace the json conversion."""
-        df = _read_csv_result(
-            'n,j\n1,"[1]"\n', {"n": "integer", "j": "json"}, converters=converters
+        df = _read_local_csv(
+            tmp_path, 'n,j\n1,"[1]"\n', {"n": "integer", "j": "json"}, converters=converters
         )
         assert df["j"].tolist() == expected
 
@@ -871,109 +964,26 @@ def _pyarrow_read_csv_kwargs(types, tab_separated=False, dtype_overrides=None, *
         return result_set._get_csv_read_options("pyarrow", None)
 
 
-def _unload_result_set(tmp_path, tables, chunksize, **kwargs):
-    """Write Parquet files and create a result set of an UNLOAD result in them, without AWS.
+def _read_local_csv(tmp_path, data, types, engine="c", chunksize=None, **kwargs):
+    """Read CSV text as the result file of a result set built by its constructor.
+
+    Args:
+        tmp_path: The directory that holds the result file.
+        data: The text of the result file.
+        types: The Athena types of the result columns, keyed by name, or the
+            (name, type) pairs of columns with the same name.
+        engine: The CSV engine of the result set.
+        chunksize: The chunk size of the result set.
+        **kwargs: The read options given to ``execute()``.
 
     Returns:
-        The result set, and the paths of the files in the order of the data manifest.
+        The DataFrame of the result, or its chunk iterator if ``chunksize`` is set.
     """
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    paths = []
-    for index, table in enumerate(tables):
-        path = tmp_path / f"{index}.parquet"
-        pq.write_table(table, path)
-        paths.append(str(path))
-    result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)  # bypass __init__
-    result_set._fs = LocalFileSystem()
-    result_set._engine = "auto"
-    result_set._chunksize = chunksize
-    result_set._cache_type = None
-    result_set._connection = MagicMock()
-    result_set._connection.s3_client.meta.config.max_pool_connections = 2
-    result_set._kwargs = kwargs
-    result_set._unload_location = None
-    result_set._parquet_null_dtypes = {}
-    return result_set, paths
-
-
-def _read_unload_result(tmp_path, tables, chunksize, **kwargs):
-    """Read Parquet files in chunks through the result set, without AWS.
-
-    The column metadata must be what the dataset of the files reports, read without
-    listing the unload location.
-
-    Returns:
-        The chunks, and the whole result read by pandas.read_parquet() with the same
-        options.
-    """
-    result_set, paths = _unload_result_set(tmp_path, tables, chunksize, **kwargs)
-    with (
-        patch.object(AthenaPandasResultSet, "_read_data_manifest", return_value=paths),
-        patch.object(
-            AthenaPandasResultSet, "is_unload", new_callable=PropertyMock, return_value=True
-        ),
-        patch.object(AthenaPandasResultSet, "_read_parquet_schema") as read_parquet_schema,
-    ):
-        reader = result_set._as_pandas()
-    read_parquet_schema.assert_not_called()
-    dataset = pq.ParquetDataset(str(tmp_path), filesystem=LocalFileSystem())
-    assert result_set._metadata == to_column_info(dataset.schema)
-    chunks = list(reader)
-    whole = pd.concat([pd.read_parquet(path, **kwargs) for path in paths], ignore_index=True)
-    return chunks, whole
-
-
-def _read_csv_result(data, types, engine="c", chunksize=None, **kwargs):
-    """Read an in-memory CSV through the result set and the real pandas parser.
-
-    ``types`` maps column names to Athena types, or lists (name, type) pairs for
-    columns with the same name.
-    """
-    result_set = AthenaPandasResultSet.__new__(AthenaPandasResultSet)
-    result_set._converter = DefaultPandasTypeConverter()
-    result_set._keep_default_na = False
-    result_set._na_values = ("",)
-    result_set._quoting = 1
-    result_set._engine = engine
-    result_set._chunksize = chunksize
-    result_set._auto_optimize_chunksize = False
-    result_set._kwargs = kwargs
-    result_set._time_columns = []
-    result_set._csv_stream = None
-    result_set._block_size = None
-    result_set._cache_type = None
-    result_set._fs = MagicMock()
-    # Binary columns are read through a text stream.
-    result_set._fs.open.side_effect = lambda path, mode="rb", **_: (
-        io.StringIO(data, newline="") if "t" in mode else io.BytesIO(data.encode())
+    pairs = list(types.items()) if isinstance(types, dict) else types
+    result_set = _local_result_set(
+        LocalBucketFileSystem(tmp_path), pairs, data, engine=engine, chunksize=chunksize, **kwargs
     )
-    pairs = types.items() if isinstance(types, dict) else types
-    description = [(name, type_, None, None, 0, 0, "UNKNOWN") for name, type_ in pairs]
-    with (
-        patch.object(
-            AthenaPandasResultSet,
-            "description",
-            new_callable=PropertyMock,
-            return_value=description,
-        ),
-        patch.object(
-            AthenaPandasResultSet,
-            "output_location",
-            new_callable=PropertyMock,
-            return_value="s3://bucket/result.csv",
-        ),
-        patch.object(
-            AthenaPandasResultSet,
-            "substatement_type",
-            new_callable=PropertyMock,
-            return_value=None,
-        ),
-        patch.object(AthenaPandasResultSet, "_get_content_length", return_value=len(data)),
-    ):
-        result = result_set._read_csv()
-    if isinstance(result, pd.DataFrame):
-        return result_set._finish_csv_frame(result)
-    return PandasDataFrameIterator(result, result_set._finish_csv_frame, result_set._csv_stream)
+    return result_set.as_pandas()
 
 
 def _write_unload_tables(fs, tables):
@@ -989,6 +999,54 @@ def _write_unload_tables(fs, tables):
             pq.write_table(table, file)
     fs.opened.clear()
     return manifest
+
+
+class _InMemoryS3Object:
+    """One S3 object served from memory to a boto3 client, with the ranges it reads.
+
+    Attributes:
+        ranges: The (start, end) byte ranges of the GetObject requests, end exclusive.
+    """
+
+    def __init__(self, data):
+        """Initialize the object.
+
+        Args:
+            data: The bytes of the object.
+        """
+        self.data = data
+        self.ranges = []
+
+    def answer(self, operation, params):
+        """Answer a request of the client as S3 would for this object.
+
+        Args:
+            operation: The operation name.
+            params: The request parameters.
+
+        Returns:
+            The parsed response.
+        """
+        if operation == "HeadObject":
+            return {
+                "ContentLength": len(self.data),
+                "ETag": '"etag"',
+                "LastModified": datetime.now(UTC),
+            }
+        assert operation == "GetObject", operation
+        assert (params["Bucket"], params["Key"]) == ("bucket", "result.csv"), params
+        # Only the closed ranges that PyAthena's filesystem requests are answered.
+        match = re.fullmatch(r"bytes=(\d+)-(\d+)", params["Range"])
+        assert match, params["Range"]
+        start, end = int(match[1]), int(match[2]) + 1
+        assert start < len(self.data), params["Range"]
+        self.ranges.append((start, end))
+        body = self.data[start:end]
+        return {
+            "Body": StreamingBody(io.BytesIO(body), len(body)),
+            "ContentLength": len(body),
+            "ETag": '"etag"',
+        }
 
 
 def _local_result_set(fs, types=(), data=None, tables=None, name="result.csv", **kwargs):
