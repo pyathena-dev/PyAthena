@@ -277,22 +277,13 @@ Athena cancels the calculation on a best-effort basis:
 - Canceling a calculation that has already finished does not raise an error or change its state.
 
 The `execute()` method raises `OperationalError` when the calculation ends in the `CANCELED` state.
-The following example cancels the calculation from another thread after 60 seconds:
 
-```python
-import threading
-from pyathena import connect
-from pyathena.spark.cursor import SparkCursor
+As `pyathena.threadsafety = 2` declares, calling `cancel()` from another thread while `execute()` runs on the same cursor is not supported.
+A long calculation can be stopped in the following ways:
 
-conn = connect(work_group="YOUR_SPARK_WORKGROUP", cursor_class=SparkCursor)
-with conn.cursor() as cursor:
-    timer = threading.Timer(60, cursor.cancel)
-    timer.start()
-    try:
-        cursor.execute("""print(spark.read.parquet("s3://YOUR_S3_BUCKET/large_dataset/").count())""")
-    finally:
-        timer.cancel()
-```
+- A `KeyboardInterrupt` while `execute()` runs, with `kill_on_interrupt` enabled, as described below.
+- {ref}`async-spark-cursor`, whose `execute()` returns the calculation ID with a future, and whose `cancel()` takes that ID.
+- {ref}`aio-spark-cursor` with `asyncio.wait_for()`, whose timeout cancels the calculation.
 
 With `kill_on_interrupt` enabled, which is the default, a `KeyboardInterrupt` while `execute()` waits for the calculation
 requests cancellation, waits until the calculation reaches a terminal state, and then propagates.
@@ -535,3 +526,23 @@ Cancelling the task while `execute()` is still starting the calculation first wa
 and then cancels the calculation it started in the same way.
 If the task is cancelled before `execute()` begins the request, the request is never sent.
 Cancelling the task again during this wait raises `asyncio.CancelledError` at once without cancelling the calculation.
+
+With `kill_on_interrupt` enabled, a timeout from `asyncio.wait_for()` while `execute()` starts or waits for the calculation therefore cancels it and raises `asyncio.TimeoutError`.
+
+```python
+import asyncio
+from pyathena import aio_connect
+from pyathena.aio.spark.cursor import AioSparkCursor
+
+async with await aio_connect(work_group="YOUR_SPARK_WORKGROUP",
+                          cursor_class=AioSparkCursor) as conn:
+    cursor = await asyncio.to_thread(conn.cursor)
+    async with cursor:
+        try:
+            await asyncio.wait_for(
+                cursor.execute("""print(spark.read.parquet("s3://YOUR_S3_BUCKET/large_dataset/").count())"""),
+                timeout=60,
+            )
+        except asyncio.TimeoutError:
+            print(f"Calculation timed out: {cursor.calculation_id} ({cursor.state})")
+```
