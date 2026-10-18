@@ -424,7 +424,8 @@ class S3AioThreadPool(S3Executor):
         if not self._releasing:
             return None
         # An interrupt can keep submit() from adding the callback of a call,
-        # whose future then ends without leaving the set.
+        # whose future then ends without leaving the set. It is dropped here,
+        # when another call ends or release() is called again.
         self._futures = {future for future in self._futures if not future.done()}
         if self._futures:
             return None

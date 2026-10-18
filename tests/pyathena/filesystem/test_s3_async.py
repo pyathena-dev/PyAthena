@@ -750,12 +750,14 @@ class TestAioS3FileSystem:
                 {"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"}
             )
         )
-        started, release = threading.Event(), threading.Event()
+        started, release, finished = threading.Event(), threading.Event(), threading.Event()
 
         def upload_part_copy(**kw):
             started.set()
-            # Bounded, so that a close() that waits for this part fails the test.
+            # Bounded, so that a close() that waits for this part fails the
+            # test instead of hanging it.
             release.wait(EVENT_TIMEOUT)
+            finished.set()
             return SimpleNamespace(etag='"e"', part_number=kw["part_number"])
 
         sync_fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
@@ -776,6 +778,8 @@ class TestAioS3FileSystem:
         try:
             assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
             fs.close()
+            # close() returned without waiting for the running part.
+            assert not finished.is_set()
             if cancel:
                 task.cancel()
                 # Lets the copy enter its cleanup.
