@@ -305,7 +305,7 @@ def prepare_fixtures(
             if key in manifest["fixtures"]:
                 continue
             sql = select_sql(
-                resources["ScratchDatabase"], manifest["scales"][scale]["table"], shape
+                resources["ScratchDatabase"], manifest["scales"][scale]["table"], shape, transport
             )
             root = (
                 f"s3://{resources['Bucket']}/runs/{manifest['run_id']}/fixtures/{uuid.uuid4().hex}/"
