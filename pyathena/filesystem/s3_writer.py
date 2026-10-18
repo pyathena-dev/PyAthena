@@ -413,7 +413,9 @@ class _S3WriteSession:
         self._requests: set[Future[S3MultipartUploadPart]] = set()
         self._next_part_number = 1
         self._parts: dict[int, S3MultipartUploadPart] = {}
-        self._waiters: list[Future[None]] = []
+        # The waiters of ready() and settled(), each with the number of part
+        # requests in flight below which it resolves.
+        self._waiters: list[tuple[Future[None], int]] = []
         # Set by abort(), so that the creation and the running part requests
         # make no further attempt before the upload is aborted.
         self._stop = threading.Event()
@@ -518,15 +520,20 @@ class _S3WriteSession:
         Returns:
             A future whose result is None.
         """
-        waiter: Future[None] = Future()
-        with self._update():
-            self._consume_finished()
-            self._drop_cancelled_waiters()
-            if not self._is_ready():
-                self._waiters.append(waiter)
-                return waiter
-        waiter.set_result(None)
-        return waiter
+        return self._waiter(self._max_workers)
+
+    def settled(self) -> Future[None]:
+        """Return a future that resolves when no part request is in flight.
+
+        It resolves once the upload is created and its part requests have
+        settled, or, as for :meth:`ready`, when the write can no longer submit
+        parts, such as after a failure, which the next operation raises. Each
+        call returns a new future, which the caller may cancel.
+
+        Returns:
+            A future whose result is None.
+        """
+        return self._waiter(1)
 
     def wait_ready(self) -> None:
         """Block until another part may be submitted; see :meth:`ready`.
@@ -651,7 +658,8 @@ class _S3WriteSession:
 
         Does not block. Afterwards, :meth:`abort` leaves the write to the
         commit, and the next :meth:`put` or :meth:`complete`, whichever the
-        write allows, sends it. Does nothing for a committed write.
+        write allows, sends it, unless :meth:`withdraw_complete` withdraws the
+        reservation first. Does nothing for a committed write.
 
         Raises:
             BaseException: The first failure of a request, if it has not been
@@ -668,6 +676,30 @@ class _S3WriteSession:
             # its reservation for the commit to take.
             self._reservation = state
             self._state = _S3WriteState.COMPLETING
+
+    def withdraw_complete(self) -> None:
+        """Withdraw the commit reserved by :meth:`begin_complete`, unless it has been taken.
+
+        Does not block. For a caller whose call that sends the commit does
+        not run, such as one that an interrupt kept from being queued, or one
+        cancelled before it started. The write then fails: :meth:`put` and
+        :meth:`complete` refuse it, and :meth:`abort` discards it. Does
+        nothing if no commit is reserved, or once :meth:`put` or
+        :meth:`complete` has taken the reservation, whose commit runs on.
+        """
+        with self._update():
+            if self._state is not _S3WriteState.COMPLETING or self._reservation is None:
+                return
+            # Failed first, so that an interrupt in between never leaves a
+            # COMPLETING state without its reservation, which abort() leaves
+            # to a commit that nothing sends.
+            self._fail(
+                S3MultipartStateError(
+                    f"The commit of the write to {self._path.uri} was withdrawn."
+                ),
+                raised=True,
+            )
+            self._reservation = None
 
     def begin_abort(self) -> bool:
         """Begin discarding the write without blocking.
@@ -1075,29 +1107,60 @@ class _S3WriteSession:
             request.cancel()
         self._stop.set()
 
-    def _is_ready(self) -> bool:
-        """Whether another part may be submitted; called with the lock held.
+    def _waiter(self, limit: int) -> Future[None]:
+        """Return a future that resolves when fewer than ``limit`` part requests are in flight.
+
+        See :meth:`ready`.
+
+        Args:
+            limit: The number of part requests in flight below which the
+                future resolves.
 
         Returns:
-            Whether :meth:`ready` resolves.
+            A future whose result is None.
+        """
+        waiter: Future[None] = Future()
+        with self._update():
+            self._consume_finished()
+            self._drop_cancelled_waiters()
+            if not self._is_ready(limit):
+                self._waiters.append((waiter, limit))
+                return waiter
+        waiter.set_result(None)
+        return waiter
+
+    def _is_ready(self, limit: int) -> bool:
+        """Whether a waiter resolves; called with the lock held.
+
+        Args:
+            limit: The number of part requests in flight below which the
+                waiter resolves while the upload is active.
+
+        Returns:
+            Whether the waiter resolves.
         """
         if self._state is _S3WriteState.CREATING:
             return False
         if self._state is _S3WriteState.ACTIVE and self._failure_summary is None:
-            return len(self._requests) < self._max_workers
+            return len(self._requests) < limit
         return True
 
     def _take_waiters(self) -> list[Future[None]]:
         """Remove the waiters to resolve; called with the lock held.
 
         Returns:
-            The waiters, if the session is ready, else an empty list.
+            The waiters that resolve in the current state.
         """
-        if not self._is_ready():
-            return []
         # Taken, so that each waiter is resolved by one thread only.
-        waiters, self._waiters = self._waiters, []
-        return waiters
+        taken: list[Future[None]] = []
+        waiting: list[tuple[Future[None], int]] = []
+        for waiter, limit in self._waiters:
+            if self._is_ready(limit):
+                taken.append(waiter)
+            else:
+                waiting.append((waiter, limit))
+        self._waiters = waiting
+        return taken
 
     def _drop_cancelled_waiters(self) -> None:
         """Remove the waiters that their callers cancelled; called with the lock held.
@@ -1105,13 +1168,13 @@ class _S3WriteSession:
         They are marked as notified, as an executor does with a cancelled
         future, so that ``concurrent.futures.wait()`` counts them as done.
         """
-        waiters = []
-        for waiter in self._waiters:
+        waiting = []
+        for waiter, limit in self._waiters:
             if waiter.cancelled():
                 waiter.set_running_or_notify_cancel()
             else:
-                waiters.append(waiter)
-        self._waiters = waiters
+                waiting.append((waiter, limit))
+        self._waiters = waiting
 
     @staticmethod
     def _notify(waiters: list[Future[None]]) -> None:

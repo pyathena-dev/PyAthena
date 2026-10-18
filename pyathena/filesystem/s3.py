@@ -1802,30 +1802,6 @@ class S3FileSystem(AbstractFileSystem):
         self.core.put_object(s3_path, value, **request_kwargs)
         self.invalidate_cache(path)
 
-    def _abort_multipart_upload(
-        self, upload: S3MultipartUpload, request_kwargs: Mapping[str, Any]
-    ) -> None:
-        """Abort a failed multipart upload, logging an error of the abort.
-
-        The error of the abort is logged instead of raised, so that the
-        caller can re-raise the error that made the upload fail.
-
-        Args:
-            upload: The multipart upload returned by creation.
-            request_kwargs: Parameters of the upload; the abort receives
-                those that it accepts.
-        """
-        try:
-            self.core.abort_multipart_upload(
-                upload,
-                **self.core.operation_params("abort_multipart_upload", request_kwargs),
-            )
-        except Exception:
-            _logger.exception(
-                f"Failed to abort multipart upload {upload.upload_id} "
-                f"to s3://{upload.bucket}/{upload.key}."
-            )
-
     def cat_file(
         self, path: str, start: int | None = None, end: int | None = None, **kwargs
     ) -> bytes:
