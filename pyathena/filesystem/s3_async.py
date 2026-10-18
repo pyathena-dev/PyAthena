@@ -40,7 +40,6 @@ from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
     S3Metadata,
     S3MultipartUpload,
-    S3MultipartUploadPart,
     S3Object,
     S3ObjectType,
     S3ObjectVersion,
@@ -578,17 +577,21 @@ class AioS3FileSystem(AsyncFileSystem):
         """Copy an object with a multipart upload of its byte ranges.
 
         See :meth:`S3FileSystem._copy_object_with_multipart_upload`. The part
-        and annotation copies run in parallel as asyncio tasks, at most
-        ``max_workers`` at once, in the threads of the filesystem, which bound
-        the requests of all its copies together. On a cancellation, the
-        requests that have not started are cancelled, the running ones are
+        copies run in the threads of the filesystem, which bound the requests
+        of all its copies together, with at most ``max_workers`` of them in
+        flight; each one is sent once an earlier one has finished. The
+        completion waits for them in a thread of the filesystem. The
+        annotation copies then run in parallel as asyncio tasks, at most
+        ``max_workers`` at once, in the same threads. On a cancellation, the
+        requests that have not started are cancelled, a completion whose
+        request has not been sent is not sent, the running requests are
         waited for in a thread of the filesystem, the upload is aborted if it
         was created and has not completed, and the cancellation is re-raised.
         On a failure or cancellation, the running part copies make no further
         attempt. This also holds when the shutdown of the event loop, such as
         at the end of ``asyncio.run()``, cancels the copy, also after its
         cleanup has started. A repeated cancellation returns without stopping
-        this cleanup.
+        this cleanup. A failed abort is logged with the upload ID.
 
         Args:
             source: Source S3 path, with the version ID to copy, if any.
@@ -613,119 +616,82 @@ class AioS3FileSystem(AsyncFileSystem):
                 self.core.copy_object, plan.source, plan.destination, **kwargs
             )
             return
-        multipart_upload: S3MultipartUpload
 
-        semaphore = asyncio.Semaphore(max_workers)
-        failed = False
-        # The requests of the parts, which keep running when their tasks are
-        # cancelled, such as by the shutdown of the event loop.
-        part_copies: list[Future[S3MultipartUploadPart]] = []
-        # Set on a failure or cancellation, so that the creation and the
-        # running part and annotation copies make no further attempt.
-        stop = threading.Event()
-
-        async def _upload_part(i: int, range_: tuple[int, int]) -> S3MultipartUploadPart | None:
-            nonlocal failed
-            async with semaphore:
-                if failed:
-                    # The upload is being aborted; do not start more parts.
-                    return None
-                try:
-                    with stop_retries_on(stop):
-                        part_copy = self._thread_pool.submit(
-                            self.core.upload_part_copy,
-                            upload=multipart_upload,
-                            part_number=i + 1,
-                            source=plan.source,
-                            range_=range_,
-                            **plan.part_params,
-                        )
-                    part_copies.append(part_copy)
-                    copied = asyncio.wrap_future(part_copy)
-                    return await copied
-                except Exception:
-                    # Set before the semaphore lets a waiting part start.
-                    failed = True
-                    raise
-
+        # The requests run in the threads of the filesystem, not as tasks,
+        # which the shutdown of the event loop would cancel while the
+        # requests keep running.
+        session = _S3WriteSession(
+            self.core,
+            plan.destination,
+            self._thread_pool,
+            block_size=block_size if block_size else self.core.MULTIPART_UPLOAD_MAX_PART_SIZE,
+            max_workers=max_workers,
+            prepared_params={
+                "create_multipart_upload": plan.create_params,
+                "upload_part_copy": plan.part_params,
+                "complete_multipart_upload": plan.complete_params,
+                "abort_multipart_upload": plan.abort_params,
+            },
+        )
         completion: Future[S3CompleteMultipartUpload] | None = None
 
         def _abort() -> None:
             """Abort the upload, if any, once its requests have ended.
 
             Runs in a thread of the filesystem, so that neither a repeated
-            cancellation nor the shutdown of the event loop stops it.
+            cancellation nor the shutdown of the event loop stops it. See
+            :meth:`_S3WriteSession.abort`. A failure is logged instead of
+            raised, so that the error that made the copy fail is raised.
             """
-            wait([creation])
-            if creation.cancelled() or creation.exception() is not None:
-                # No upload was created.
-                return
-            # A part that is still copying when the upload is aborted may be
-            # stored after the abort.
-            wait(part_copies)
             if completion is not None:
+                # Queued before this cleanup, so it has started. A withdrawn
+                # completion fails without a request; one whose request was
+                # sent runs to its end, and the upload is aborted only if it
+                # failed.
                 wait([completion])
-                if not completion.cancelled() and completion.exception() is None:
-                    # The upload completed despite the cancellation, so
-                    # there is nothing to abort.
-                    return
-            self._sync_fs._abort_multipart_upload(creation.result(), plan.abort_params)
+            try:
+                session.abort()
+            except Exception:
+                upload = cast(S3MultipartUpload, session.upload)
+                _logger.exception(
+                    f"Failed to abort multipart upload {upload.upload_id} "
+                    f"to s3://{upload.bucket}/{upload.key}."
+                )
 
-        # The requests run in the threads of the filesystem, not as tasks,
-        # which the shutdown of the event loop would cancel while the
-        # requests keep running; scheduled right before the try, so that
-        # nothing can fail between the two.
-        with stop_retries_on(stop):
-            creation = self._thread_pool.submit(
-                self.core.create_multipart_upload, plan.destination, **plan.create_params
-            )
         try:
-            # A cancellation of this task leaves the creation to the cleanup,
-            # which waits for an upload that a started creation creates.
-            multipart_upload = await self._thread_pool.wait_shielded(creation)
-            tasks = [asyncio.ensure_future(_upload_part(i, r)) for i, r in enumerate(plan.ranges)]
-            for task in tasks:
-                # Retrieved, so that asyncio does not log the failure of a
-                # part that ends after this copy as never retrieved.
-                task.add_done_callback(lambda t: t.cancelled() or t.exception())
-            # Unlike gather, wait does not cancel the parts when this task is
-            # cancelled; their threads would keep copying, so they are waited
-            # for in _abort().
-            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-            for task in done:
-                if (error := task.exception()) is not None:
-                    raise error
-            # The tasks are in part-number order.
-            parts = [task.result() for task in tasks]
-            completion = self._thread_pool.submit(
-                self.core.complete_multipart_upload,
-                multipart_upload,
-                cast(list[S3MultipartUploadPart], parts),
-                **plan.complete_params,
-            )
+            session.start()
+            for part_number, range_ in enumerate(plan.ranges, 1):
+                # A cancellation of this task cancels only its wait.
+                ready = session.ready()
+                if not ready.done():
+                    await asyncio.wrap_future(ready)
+                session.submit_copy(part_number, plan.source, range_)
+            # Reserved before it is queued, so that the cleanup can withdraw
+            # a completion whose request has not been sent.
+            session.begin_complete()
+            completion = self._thread_pool.submit(session.complete)
             # A cancellation of this task leaves the completion to the
             # cleanup, which waits for a started completion.
             completed = await self._thread_pool.wait_shielded(completion)
         except BaseException:
             # Also on cancellation, as S3FileSystem._copy_object_with_multipart_upload
-            # does on an interrupt.
-            failed = True
-            # The requests that have not started are cancelled here, before
-            # the cleanup waits for a thread after them, and before the stop,
-            # which would let a thread that it frees take one of them.
-            creation.cancel()
-            for part_copy in part_copies:
-                part_copy.cancel()
-            if completion is not None:
-                completion.cancel()
-            stop.set()
+            # does on an interrupt. A completion whose request has not been
+            # sent, also one that an interrupt kept from being queued or that
+            # waits for the parts, is withdrawn; one that has been sent runs on.
+            session.withdraw_complete()
+            # Here, so that the creation and the running parts stop even
+            # while they hold every thread that the cleanup waits for.
+            session.begin_abort()
             # A repeated cancellation of this task returns without stopping
             # the cleanup.
             await self._thread_pool.run_shielded(_abort)
             raise
 
+        semaphore = asyncio.Semaphore(max_workers)
         failed = False
-
+        # Set when an annotation copy fails, so that the running ones make no
+        # further attempt.
+        stop = threading.Event()
         # The index of the copy that failed first, whose error is raised
         # instead of those of the copies that its failure stopped. Recorded
         # with the stop, in the thread of the failed copy.
@@ -1560,20 +1526,32 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
 
         The commit is reserved before it is queued, so that a cancellation
         of the waiting task, also while the commit waits for a thread, does
-        not abort it. See :meth:`_complete_upload`.
+        not abort it. If an interrupt stops the queuing, the reservation is
+        withdrawn unless the commit has taken it, and the file is closed
+        without committing it, so that the multipart upload is aborted
+        instead of left incomplete. See :meth:`_complete_upload`.
 
         Raises:
             BaseException: The error of a request of the write that failed
-                before the commit is reserved, after which the file is closed
-                without committing it.
+                before the commit is reserved, or an error that stopped the
+                queuing of the commit, after which the file is closed without
+                committing it.
         """
+        session = cast(_S3WriteSession, self._session)
+        commit: Future[None] | None = None
         try:
-            cast(_S3WriteSession, self._session).begin_complete()
+            session.begin_complete()
+            # Passed, as closing the file without committing it drops the buffer.
+            commit = self._pool.submit(self._complete_upload, cast(BytesIO, self.buffer))
         except BaseException:
+            if commit is None:
+                # Not queued, or queued by a submit() that an interrupt
+                # stopped: such a commit either has taken the reservation
+                # and runs on, or finds the write failed.
+                session.withdraw_complete()
             await self._close_without_commit()
             raise
-        # Passed, as closing the file without committing it drops the buffer.
-        await self._pool.run_shielded(self._complete_upload, cast(BytesIO, self.buffer))
+        await self._pool.wait_shielded(commit)
 
     def _complete_upload(self, buffer: BytesIO) -> None:
         """Upload or complete the written data; blocks, and runs in a thread.

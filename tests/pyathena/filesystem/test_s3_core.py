@@ -9,6 +9,7 @@ import copy
 import gc
 import io
 import re
+import threading
 import time
 import weakref
 from concurrent.futures import Future
@@ -40,11 +41,13 @@ from pyathena.filesystem.s3_core import (
 from pyathena.filesystem.s3_executor import S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import S3Metadata, S3MultipartUpload, S3MultipartUploadPart
 from pyathena.filesystem.s3_path import S3Path
-from pyathena.util import RetryConfig
+from pyathena.util import RetryConfig, stop_retries_on
 from tests.pyathena.util import (
     MULTIPART_COPY_BLOCK_SIZE,
     MULTIPART_COPY_KWARGS,
     MULTIPART_COPY_SIZE,
+    ThrottledOperation,
+    retried,
 )
 
 MODIFIED = datetime(2026, 10, 4, tzinfo=UTC)
@@ -995,6 +998,20 @@ class TestS3Core:
                 core.abort_multipart_upload(
                     S3MultipartUpload({"Bucket": "bucket", "Key": "key", "UploadId": "u"})
                 )
+
+    def test_abort_multipart_upload_in_stopped_scope(self):
+        # GH-1203: an abort cleans up, so a stop scope of the caller, such as
+        # that of a cancelled AioS3FileSystem call, does not stop its retries.
+        core, _ = _make_core()
+        operation = ThrottledOperation(failures=1, operation_name="AbortMultipartUpload")
+        core.call = retried(operation, RetryConfig(attempt=3, multiplier=0))
+        stop = threading.Event()
+        stop.set()
+        with stop_retries_on(stop):
+            core.abort_multipart_upload(
+                S3MultipartUpload({"Bucket": "bucket", "Key": "key", "UploadId": "u"})
+            )
+        assert operation.calls == 2
 
     @pytest.mark.parametrize(
         ("method", "args", "missing", "message"),

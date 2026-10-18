@@ -426,6 +426,9 @@ class _S3WriteSession:
         # PutObject or ACTIVE for the completion, until put() or complete()
         # takes the reservation.
         self._reservation: _S3WriteState | None = None
+        # Set once the request of the commit is being sent, after which
+        # withdraw_complete() leaves the commit to its end.
+        self._commit_sent = False
         # Set by begin_abort() until abort() takes over the abort that it began.
         self._abort_pending = False
 
@@ -651,7 +654,8 @@ class _S3WriteSession:
 
         Does not block. Afterwards, :meth:`abort` leaves the write to the
         commit, and the next :meth:`put` or :meth:`complete`, whichever the
-        write allows, sends it. Does nothing for a committed write.
+        write allows, sends it, unless :meth:`withdraw_complete` withdraws it
+        before its request is sent. Does nothing for a committed write.
 
         Raises:
             BaseException: The first failure of a request, if it has not been
@@ -668,6 +672,31 @@ class _S3WriteSession:
             # its reservation for the commit to take.
             self._reservation = state
             self._state = _S3WriteState.COMPLETING
+
+    def withdraw_complete(self) -> None:
+        """Withdraw the commit reserved by :meth:`begin_complete` until its request is sent.
+
+        Does not block. For a caller that gives up a commit that it reserved:
+        one whose call was not queued, such as after an interrupt while it was
+        being queued, or one whose call has not sent the request yet, also
+        while :meth:`complete` waits for the part requests. The write then
+        fails: the commit is refused without a request, and :meth:`abort`
+        discards the write. Does nothing if no commit is reserved, or once
+        its request is being sent, which then runs to its end.
+        """
+        with self._update():
+            if self._state is not _S3WriteState.COMPLETING or self._commit_sent:
+                return
+            # Failed first, so that an interrupt in between never leaves a
+            # COMPLETING state without its reservation, which abort() leaves
+            # to a commit that nothing sends.
+            self._fail(
+                S3MultipartStateError(
+                    f"The commit of the write to {self._path.uri} was withdrawn."
+                ),
+                raised=True,
+            )
+            self._reservation = None
 
     def begin_abort(self) -> bool:
         """Begin discarding the write without blocking.
@@ -862,6 +891,10 @@ class _S3WriteSession:
                     # abort, rather than being committed.
                     reserved = True
                     self._state = _S3WriteState.COMPLETING
+                if state is _S3WriteState.IDLE:
+                    # PutObject is sent at once; the completion is marked
+                    # once its parts have settled.
+                    self._commit_sent = True
             result = send()
             with self._update():
                 # The result first, as the state publishes it.
@@ -890,7 +923,9 @@ class _S3WriteSession:
             while self._requests and self._failure_summary is None:
                 self._changed.wait(_RECHECK_INTERVAL)
                 self._consume_finished()
+            # Also refused if withdraw_complete() withdrew the commit meanwhile.
             self._refuse_unless(_S3WriteState.COMPLETING, operation="commit")
+            self._commit_sent = True
             parts = [self._parts[number] for number in sorted(self._parts)]
         if len(parts) != self._next_part_number - 1:
             # Every finished request has been consumed, so this guards the

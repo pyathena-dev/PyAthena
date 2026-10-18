@@ -46,7 +46,7 @@ from pyathena.filesystem.s3_executor import S3AioExecutor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import S3MultipartUpload, S3Object, S3ObjectType, S3StorageClass
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_writer import S3MultipartStateError, _S3WriteSession
-from pyathena.util import RetryConfig, stop_retries_on
+from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
@@ -2113,19 +2113,6 @@ class TestS3FileSystem:
         assert time.monotonic() - started < EVENT_TIMEOUT
         assert operation.calls == 1
         fs.core.abort_multipart_upload.assert_called_once()
-
-    def test_abort_multipart_upload_in_stopped_scope(self):
-        # GH-1203: a stop scope of the caller, such as that of a cancelled
-        # AioS3FileSystem call, does not stop the retries of an abort.
-        fs = self._make_fs()
-        operation = ThrottledOperation(failures=1, operation_name="AbortMultipartUpload")
-        fs.core.call = retried(operation, RetryConfig(attempt=3, multiplier=0))
-        stop = threading.Event()
-        stop.set()
-        upload = S3MultipartUpload({"Bucket": "bucket", "Key": "dst", "UploadId": "id"})
-        with stop_retries_on(stop):
-            fs._abort_multipart_upload(upload, {})
-        assert operation.calls == 2
 
     def test_copy_object_with_multipart_upload_failed_annotation(self):
         # GH-973: a failed annotation copy is raised; the completed

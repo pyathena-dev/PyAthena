@@ -269,7 +269,7 @@ its coroutines run the blocking boto3 calls in threads that PyAthena owns, sized
 | **Parallelism** | `ThreadPoolExecutor` | `asyncio.gather` on a thread pool |
 | **File handles** | `S3File` with thread pool | `AioS3File` with `S3AioExecutor`; `AioS3StreamedFile` from `open_async()` |
 | **Bulk delete** | Thread pool per batch | `asyncio.gather` per batch |
-| **Multipart copy** | Thread pool per part | Asyncio task per part |
+| **Multipart copy** | Thread pool per copy | Thread pool of the filesystem |
 | **Best for** | Synchronous applications | Async frameworks (FastAPI, aiohttp, etc.) |
 
 ### Threads
@@ -350,7 +350,9 @@ async with await fs.open_async("s3://my-bucket/data/file.bin", "rb") as f:
   the task that closes or flushes the file is cancelled, and leaving an `async with`
   block with an exception afterward does not abort it. A commit that fails aborts the
   upload; leaving the block with an exception after a cancelled final flush, while that
-  abort runs, waits for it.
+  abort runs, waits for it. An interrupt while the commit is being queued, such as a
+  repeated Ctrl+C under `asyncio.run()`, closes the file without committing it and
+  aborts the multipart upload.
 - A file opened for writing must be closed with `await f.close()` or an `async with`
   block. A file that is garbage collected before it is closed or its commit has begun
   is not committed: it emits a `ResourceWarning`, and its multipart upload is aborted.
