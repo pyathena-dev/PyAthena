@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import logging
 import mimetypes
 import os
@@ -28,6 +29,7 @@ from fsspec.core import get_compression
 from fsspec.implementations.local import LocalFileSystem, make_path_posix
 from fsspec.utils import check_contained
 
+from pyathena.aio.util import create_in_thread
 from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem, S3FileTarget
 from pyathena.filesystem.s3_core import S3Core
 from pyathena.filesystem.s3_executor import (
@@ -876,8 +878,10 @@ class AioS3FileSystem(AsyncFileSystem):
         """Open a file whose reads and writes are coroutines.
 
         The lookups of the mode, as in ``open()``, run in the threads of the
-        filesystem. See :class:`AioS3StreamedFile` for how the file reads,
-        writes, and commits.
+        filesystem. If the caller is cancelled, a file opened after the
+        cancellation is closed without committing anything (see
+        :func:`~pyathena.aio.util.create_in_thread`). See
+        :class:`AioS3StreamedFile` for how the file reads, writes, and commits.
 
         Args:
             path: S3 path (s3://bucket/key) of the file.
@@ -921,16 +925,20 @@ class AioS3FileSystem(AsyncFileSystem):
             **self._sync_fs.s3_additional_kwargs,
             **(s3_additional_kwargs or {}),
         }
-        return await self._thread_pool.run(
-            AioS3StreamedFile,
-            self,
-            path,
-            mode,
-            version_id=version_id,
-            max_workers=max_workers,
-            block_size=block_size,
-            s3_additional_kwargs=s3_additional_kwargs,
-            **kwargs,
+        return await create_in_thread(
+            functools.partial(
+                AioS3StreamedFile,
+                self,
+                path,
+                mode,
+                version_id=version_id,
+                max_workers=max_workers,
+                block_size=block_size,
+                s3_additional_kwargs=s3_additional_kwargs,
+                **kwargs,
+            ),
+            release=AioS3StreamedFile._close_without_commit_blocking,
+            executor=self._thread_pool,
         )
 
     async def _rmdir(self, path: str) -> None:
@@ -1447,6 +1455,23 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         try:
             if aborting:
                 await self._pool.run_shielded(self._discard)
+        finally:
+            self._pool.shutdown(wait=False)
+
+    def _close_without_commit_blocking(self) -> None:
+        """Close the file without committing it; blocks.
+
+        The blocking counterpart of :meth:`_close_without_commit`, for a file
+        that nobody awaits, such as one opened for a cancelled
+        :meth:`AioS3FileSystem.open_async`.
+        """
+        if self.closed:
+            return
+        self.closed = True
+        self.buffer = None
+        try:
+            if self._session is not None and self._session.begin_abort():
+                self._discard()
         finally:
             self._pool.shutdown(wait=False)
 

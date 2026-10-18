@@ -192,6 +192,24 @@ class StoppingOperation:
             self._stopper.join()
 
 
+async def cancel_when_started(task, started, release):
+    """Cancel a task once the blocking call that it waits for has started.
+
+    The call is released after the cancellation has reached the task.
+
+    Args:
+        task: The task.
+        started: The event that the call sets when it starts.
+        release: The event that the call waits for before it returns.
+    """
+    # Polled, since the default executor may have no free thread.
+    await wait_until(started.is_set)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    release.set()
+
+
 async def wait_until(predicate, timeout=EVENT_TIMEOUT):
     """Wait, without blocking the event loop, until a condition holds.
 
@@ -495,6 +513,44 @@ def placeholder_connection(connection_class=Connection):
         aws_access_key_id="access_key",
         aws_secret_access_key="secret_key",
     )
+
+
+def assert_closes_result_sets_after_close(cursor_class):
+    """Check that an AsyncCursor closes only the result sets created after it closes.
+
+    The cursor sends no request to AWS: its queries start without one, and
+    its result sets are created, one at a time, when the test releases them.
+
+    Args:
+        cursor_class: The AsyncCursor class.
+    """
+    cursor = placeholder_connection().cursor(cursor_class, max_workers=1)
+    release = threading.Event()
+    result_sets = []
+
+    def collect(*args, **kwargs):
+        assert release.wait(EVENT_TIMEOUT)
+        result_sets.append(MagicMock())
+        return result_sets[-1]
+
+    with (
+        patch.object(cursor, "_execute", return_value="query_id"),
+        patch.object(cursor, "_collect_result_set", side_effect=collect),
+    ):
+        try:
+            _, before = cursor.execute("SELECT 1")
+            release.set()
+            taken = before.result(EVENT_TIMEOUT)
+            release.clear()
+            _, after = cursor.execute("SELECT 1")
+            cursor.close()
+            release.set()
+            assert after.result(EVENT_TIMEOUT) is result_sets[1]
+        finally:
+            release.set()
+            cursor.close(wait=True)
+    result_sets[1].close.assert_called_once_with()
+    taken.close.assert_not_called()
 
 
 def offline_spark_cursor(cursor_class):

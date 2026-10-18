@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -187,16 +188,18 @@ class AioS3FSCursor(WithAsyncFetch):
         query_execution = await self._poll(self.query_id)
         if query_execution.state == AthenaQueryExecution.STATE_SUCCEEDED:
             self.result_set = await create_in_thread(
-                AthenaS3FSResultSet,
-                connection=self._connection,
-                converter=self._converter,
-                query_execution=query_execution,
-                arraysize=self.arraysize,
-                retry_config=self._retry_config,
-                csv_reader=kwargs.pop("csv_reader", self._csv_reader),
-                filesystem_class=AioS3FileSystem,
-                result_set_type_hints=options.result_set_type_hints,
-                **kwargs,
+                functools.partial(
+                    AthenaS3FSResultSet,
+                    connection=self._connection,
+                    converter=self._converter,
+                    query_execution=query_execution,
+                    arraysize=self.arraysize,
+                    retry_config=self._retry_config,
+                    csv_reader=kwargs.pop("csv_reader", self._csv_reader),
+                    filesystem_class=AioS3FileSystem,
+                    result_set_type_hints=options.result_set_type_hints,
+                    **kwargs,
+                )
             )
         else:
             raise OperationalError(query_execution.state_change_reason)

@@ -105,6 +105,13 @@ class _FailingCSVReader(_TupleCSVReader):
         raise ValueError("unreadable header")
 
 
+class _InterruptedCSVReader(_TupleCSVReader):
+    """A reader interrupted while it reads the header row."""
+
+    def __next__(self) -> tuple[str | None, ...]:
+        raise KeyboardInterrupt
+
+
 class TestAthenaS3FSResultSet:
     @pytest.mark.parametrize(
         ("block_size", "filesystem_class", "prefetch"),
@@ -167,6 +174,22 @@ class TestAthenaS3FSResultSet:
         with pytest.raises(OperationalError):
             _result_set(data, _FailingCSVReader, stream=stream)
         assert stream.closed
+
+    def test_reader_interrupt_closes_file(self):
+        """GH-1208: an interrupt while reading the header row closes the file.
+
+        The check runs while the exception is handled, as its traceback
+        references the file, so that the garbage collector cannot close it
+        instead.
+        """
+        data = "null_col,empty_col,value_col\n"
+        stream = BytesIO(data.encode())
+        try:
+            _result_set(data, _InterruptedCSVReader, stream=stream)
+        except KeyboardInterrupt:
+            assert stream.closed
+        else:
+            pytest.fail("KeyboardInterrupt was not raised")
 
     @pytest.mark.parametrize(
         ("csv_reader", "expected_empty"),

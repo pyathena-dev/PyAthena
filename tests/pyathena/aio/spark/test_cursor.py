@@ -9,20 +9,23 @@ import asyncio
 import textwrap
 import threading
 import uuid
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from botocore.exceptions import ClientError, ReadTimeoutError
 
+from pyathena.aio.connection import AioConnection
 from pyathena.aio.spark.cursor import AioSparkCursor
 from pyathena.error import DatabaseError, NotSupportedError, OperationalError, ProgrammingError
-from pyathena.model import AthenaCalculationExecutionStatus
+from pyathena.model import AthenaCalculationExecutionStatus, AthenaSessionStatus
 from pyathena.util import RetryConfig
 from tests.pyathena.util import (
     CANCELABLE_SPARK_JOB,
     COMPLETED_CALCULATION_RESPONSES,
     answered_requests,
+    cancel_when_started,
     offline_spark_cursor,
+    placeholder_connection,
     wait_for_spark_job,
 )
 
@@ -461,6 +464,65 @@ class TestAioSparkCursor:
         assert (start["SessionId"], start["CodeBlock"]) == ("session", "code")
         assert cursor.calculation_id == "calculation-id"
         assert cursor.state == AthenaCalculationExecutionStatus.STATE_COMPLETED
+
+    async def test_create(self):
+        """GH-1208: create() builds the cursor with the connection's cursor() (no AWS)."""
+        conn = placeholder_connection(AioConnection)
+        conn.cursor_kwargs = {"description": "from connection"}
+        responses = {
+            "StartSession": {"SessionId": "session"},
+            "GetSessionStatus": {"Status": {"State": AthenaSessionStatus.STATE_IDLE}},
+        }
+        with answered_requests(conn.client, responses) as requests:
+            cursor = await AioSparkCursor.create(conn, notebook_version="Athena notebook version 1")
+
+        assert isinstance(cursor, AioSparkCursor)
+        assert cursor.session_id == "session"
+        start = dict(requests)["StartSession"]
+        assert start["Description"] == "from connection"
+        assert start["NotebookVersion"] == "Athena notebook version 1"
+
+    @pytest.mark.parametrize(
+        ("kwargs", "terminated"),
+        [({}, ["session"]), ({"session_id": "supplied"}, [])],
+        ids=["started", "supplied"],
+    )
+    async def test_create_cancelled(self, kwargs, terminated):
+        """GH-1208: a cursor built after create() is cancelled closes as close() would (no AWS)."""
+        conn = placeholder_connection(AioConnection)
+        client = conn.client
+        started = threading.Event()
+        release = threading.Event()
+        requests = []
+
+        def session_request(**request):
+            started.set()
+            assert release.wait(_TIMEOUT)
+            return {"SessionId": "supplied", "Status": {"State": AthenaSessionStatus.STATE_IDLE}}
+
+        released = threading.Event()
+        close_blocking = AioSparkCursor._close_blocking
+
+        def terminate_session(**request):
+            requests.append(request["SessionId"])
+            return {}
+
+        def release_cursor(cursor):
+            close_blocking(cursor)
+            released.set()
+
+        with (
+            patch.object(AioSparkCursor, "_close_blocking", release_cursor),
+            patch.object(client, "start_session", return_value={"SessionId": "session"}),
+            patch.object(client, "get_session_status", side_effect=session_request),
+            patch.object(client, "get_session", side_effect=session_request),
+            patch.object(client, "terminate_session", side_effect=terminate_session),
+        ):
+            task = asyncio.create_task(AioSparkCursor.create(conn, **kwargs))
+            await cancel_when_started(task, started, release)
+            assert await asyncio.to_thread(released.wait, _TIMEOUT)
+
+        assert requests == terminated
 
     async def test_executemany(self):
         cursor = AioSparkCursor.__new__(AioSparkCursor)  # bypass __init__ to avoid AWS calls

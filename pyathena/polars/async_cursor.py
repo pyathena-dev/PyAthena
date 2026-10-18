@@ -275,7 +275,7 @@ class AsyncPolarsCursor(AsyncCursor):
         )
         return (
             query_id,
-            self._executor.submit(
+            self._submit_result_set(
                 self._collect_result_set,
                 query_id,
                 options.result_set_type_hints,

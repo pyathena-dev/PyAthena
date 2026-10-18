@@ -14,6 +14,7 @@ from pyathena.result_set import AthenaResultSet
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
+from tests.pyathena.util import assert_closes_result_sets_after_close
 
 
 class TestAsyncArrowCursor:
@@ -297,6 +298,10 @@ class TestAsyncArrowCursor:
         kwargs = result_set_class.call_args.kwargs
         expected = {**cursor_kwargs, **execute_kwargs}
         assert {key: kwargs[key] for key in expected} == expected
+
+    def test_close_closes_result_sets_after_close(self):
+        """GH-1208: closing the cursor closes the result sets created after it (no AWS)."""
+        assert_closes_result_sets_after_close(AsyncArrowCursor)
 
     def test_closed(self, async_arrow_cursor):
         """GH-1207: a closed cursor rejects execute()."""

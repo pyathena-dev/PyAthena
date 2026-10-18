@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 from collections.abc import Callable
 from multiprocessing import cpu_count
@@ -196,20 +197,22 @@ class AioPolarsCursor(WithAsyncFetch):
         query_execution = await self._poll(self.query_id)
         if query_execution.state == AthenaQueryExecution.STATE_SUCCEEDED:
             self.result_set = await create_in_thread(
-                AthenaPolarsResultSet,
-                connection=self._connection,
-                converter=self._converter,
-                query_execution=query_execution,
-                arraysize=self.arraysize,
-                retry_config=self._retry_config,
-                unload=self._unload,
-                unload_location=unload_location,
-                block_size=kwargs.pop("block_size", self._block_size),
-                cache_type=kwargs.pop("cache_type", self._cache_type),
-                max_workers=kwargs.pop("s3_max_workers", self._s3_max_workers),
-                chunksize=kwargs.pop("chunksize", self._chunksize),
-                result_set_type_hints=options.result_set_type_hints,
-                **kwargs,
+                functools.partial(
+                    AthenaPolarsResultSet,
+                    connection=self._connection,
+                    converter=self._converter,
+                    query_execution=query_execution,
+                    arraysize=self.arraysize,
+                    retry_config=self._retry_config,
+                    unload=self._unload,
+                    unload_location=unload_location,
+                    block_size=kwargs.pop("block_size", self._block_size),
+                    cache_type=kwargs.pop("cache_type", self._cache_type),
+                    max_workers=kwargs.pop("s3_max_workers", self._s3_max_workers),
+                    chunksize=kwargs.pop("chunksize", self._chunksize),
+                    result_set_type_hints=options.result_set_type_hints,
+                    **kwargs,
+                )
             )
         else:
             raise OperationalError(query_execution.state_change_reason)

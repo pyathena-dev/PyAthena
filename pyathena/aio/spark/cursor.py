@@ -10,11 +10,12 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import uuid
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
-from pyathena.aio.util import async_retry_api_call, run_in_thread
+from pyathena.aio.util import async_retry_api_call, create_in_thread, run_in_thread
 from pyathena.error import DatabaseError, NotSupportedError, OperationalError, ProgrammingError
 from pyathena.model import (
     AthenaCalculationExecution,
@@ -23,6 +24,9 @@ from pyathena.model import (
 )
 from pyathena.spark.common import SparkBaseCursor, WithCalculationExecution
 from pyathena.util import override
+
+if TYPE_CHECKING:
+    from pyathena.connection import Connection
 
 _logger = logging.getLogger(__name__)
 
@@ -33,23 +37,63 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
     Overrides post-init I/O methods of ``SparkBaseCursor`` with async
     equivalents.  Session management (``_exists_session``,
     ``_start_session``, etc.) stays synchronous because ``__init__``
-    runs inside ``asyncio.to_thread``.
+    runs in a thread.
 
     Since ``SparkBaseCursor.__init__`` performs I/O (session management),
-    cursor creation must be wrapped in ``asyncio.to_thread``::
+    create the cursor with :meth:`create`, which runs it in a thread::
 
-        cursor = await asyncio.to_thread(conn.cursor)
+        cursor = await AioSparkCursor.create(conn)
 
     Example:
-        >>> import asyncio
         >>> async with await pyathena.aio_connect(
         ...     work_group="spark-workgroup",
         ...     cursor_class=AioSparkCursor,
         ... ) as conn:
-        ...     cursor = await asyncio.to_thread(conn.cursor)
+        ...     cursor = await AioSparkCursor.create(conn)
         ...     await cursor.execute("spark.sql('SELECT 1').show()")
         ...     print(await cursor.get_std_out())
     """
+
+    @classmethod
+    async def create(cls, connection: Connection[Any], **kwargs: Any) -> AioSparkCursor:
+        """Create a cursor with ``connection.cursor()`` in a thread.
+
+        The cursor starts or attaches to its Spark session as ``__init__``
+        describes, without blocking the event loop. If the caller is
+        cancelled, a cursor built after the cancellation terminates the
+        session as :meth:`close` would, also if the caller is cancelled
+        again (see :func:`~pyathena.aio.util.create_in_thread`).
+
+        Args:
+            connection: The connection of the cursor.
+            **kwargs: Arguments for ``connection.cursor()``, which override
+                the connection's ``cursor_kwargs``.
+
+        Returns:
+            The cursor.
+
+        Raises:
+            OperationalError: If the supplied session does not exist, or the
+                session cannot be started or does not become idle.
+        """
+        return await create_in_thread(
+            functools.partial(connection.cursor, cls, **kwargs),
+            release=cls._close_blocking,
+        )
+
+    def _close_blocking(self) -> None:
+        """Close the cursor in a thread, terminating its session if configured to.
+
+        This is the blocking counterpart of :meth:`close` for a cursor that
+        nobody awaits, such as one built for a cancelled :meth:`create`.
+
+        Raises:
+            OperationalError: If terminating the session fails.
+        """
+        self._closed = True
+        if self._terminate_session_on_close:
+            self._terminate_session_by_id(self._session_id)
+            self._terminate_session_on_close = False
 
     @property
     @override

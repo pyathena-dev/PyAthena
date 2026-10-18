@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from concurrent.futures import Future
 from concurrent.futures.thread import ThreadPoolExecutor
 from multiprocessing import cpu_count
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 from pyathena.common import BaseCursor, CursorIterator
 from pyathena.error import NotSupportedError, ProgrammingError
@@ -16,6 +17,8 @@ from pyathena.result_set import AthenaDictResultSet, AthenaResultSet
 from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
+
+_ResultSetT = TypeVar("_ResultSetT", bound=AthenaResultSet)
 
 
 class AsyncCursor(BaseCursor):
@@ -51,7 +54,10 @@ class AsyncCursor(BaseCursor):
         Each execute() call returns a ``(query_id, future)`` tuple. The future
         resolves to the result set, which provides the column descriptions and
         the fetch methods. ``description(query_id)`` also returns the column
-        descriptions as a Future.
+        descriptions as a Future. A result set whose future resolved before
+        the cursor closed belongs to the caller; a future that is still
+        running when the cursor closes resolves with a closed result set,
+        unless it was just finishing (see :meth:`close`).
     """
 
     def __init__(
@@ -134,7 +140,10 @@ class AsyncCursor(BaseCursor):
         """Close the cursor and shut down its executor.
 
         Later operations on the cursor raise ``ProgrammingError``. Futures
-        already returned still run to completion.
+        already returned still run to completion. A future of ``execute()``
+        that is still running resolves with a closed result set, unless it
+        was just finishing; one that resolved before the close is left to the
+        caller.
 
         Args:
             wait: Whether to wait for submitted futures to finish before returning.
@@ -142,11 +151,46 @@ class AsyncCursor(BaseCursor):
         self._closed = True
         self._executor.shutdown(wait=wait)
 
+    def _submit_result_set(
+        self, fn: Callable[..., _ResultSetT], /, *args: Any
+    ) -> Future[_ResultSetT]:
+        """Create a result set in the executor, closing it if the cursor has closed.
+
+        After creating the result set, the worker closes it if the cursor has
+        closed by then, before the future resolves.
+
+        Args:
+            fn: The function that creates the result set.
+            *args: Positional arguments for ``fn``.
+
+        Returns:
+            The future of the result set.
+        """
+
+        def create() -> _ResultSetT:
+            """Create the result set, and close it if the cursor has closed.
+
+            Returns:
+                The result set.
+            """
+            result_set = fn(*args)
+            if self._closed:
+                try:
+                    result_set.close()
+                except Exception:
+                    _logger.exception(f"Failed to close {result_set!r} of a closed cursor.")
+            return result_set
+
+        return self._executor.submit(create)
+
     def _description(
         self, query_id: str
     ) -> list[tuple[str, str, None, None, int, int, str]] | None:
         result_set = self._collect_result_set(query_id)
-        return result_set.description
+        try:
+            return result_set.description
+        finally:
+            result_set.close()
 
     def description(
         self, query_id: str
@@ -296,7 +340,7 @@ class AsyncCursor(BaseCursor):
             parameters=parameters,
             options=options,
         )
-        return query_id, self._executor.submit(
+        return query_id, self._submit_result_set(
             self._collect_result_set, query_id, options.result_set_type_hints
         )
 

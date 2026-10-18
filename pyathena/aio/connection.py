@@ -9,10 +9,11 @@
 
 from __future__ import annotations
 
-import asyncio
+import functools
 from typing import Any
 
 from pyathena.aio.cursor import AioCursor
+from pyathena.aio.util import create_in_thread
 from pyathena.connection import Connection
 
 
@@ -52,6 +53,8 @@ class AioConnection(Connection[AioCursor]):
 
         Runs the (potentially blocking) ``__init__`` in a thread so that
         STS calls (``role_arn`` / ``serial_number``) do not block the loop.
+        If the caller is cancelled, a connection built after the cancellation
+        is closed (see :func:`~pyathena.aio.util.create_in_thread`).
 
         Args:
             **kwargs: Arguments forwarded to ``AioConnection.__init__``.
@@ -59,7 +62,7 @@ class AioConnection(Connection[AioCursor]):
         Returns:
             A fully initialized ``AioConnection``.
         """
-        return await asyncio.to_thread(cls, **kwargs)
+        return await create_in_thread(functools.partial(cls, **kwargs))
 
     async def __aenter__(self) -> AioConnection:
         return self

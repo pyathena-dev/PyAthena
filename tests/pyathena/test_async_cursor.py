@@ -3,6 +3,7 @@ import time
 from collections import OrderedDict
 from datetime import datetime
 from random import randint
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -12,6 +13,11 @@ from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaDictResultSet, AthenaResultSet
 from tests import ENV
 from tests.pyathena.conftest import connect
+from tests.pyathena.util import (
+    EVENT_TIMEOUT,
+    assert_closes_result_sets_after_close,
+    placeholder_connection,
+)
 
 
 class TestAsyncCursor:
@@ -185,6 +191,19 @@ class TestAsyncCursor:
             async_cursor.poll("query_id")
         with pytest.raises(ProgrammingError):
             async_cursor.cancel("query_id")
+
+    def test_close_closes_result_sets_after_close(self):
+        """GH-1208: closing the cursor closes the result sets created after it (no AWS)."""
+        assert_closes_result_sets_after_close(AsyncCursor)
+
+    def test_description_closes_result_set(self):
+        """GH-1208: description() closes the result set that it reads (no AWS)."""
+        cursor = placeholder_connection().cursor(AsyncCursor)
+        result_set = MagicMock(description=None)
+        with patch.object(cursor, "_collect_result_set", return_value=result_set):
+            assert cursor.description("query_id").result(EVENT_TIMEOUT) is None
+        cursor.close()
+        result_set.close.assert_called_once_with()
 
 
 class TestAsyncDictCursor:

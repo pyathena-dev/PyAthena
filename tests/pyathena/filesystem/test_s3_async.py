@@ -10,6 +10,7 @@ import threading
 import time
 import traceback
 import uuid
+import warnings
 import weakref
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from types import SimpleNamespace
@@ -44,6 +45,7 @@ from tests.pyathena.util import (
     MULTIPART_COPY_KWARGS,
     ThrottledOperation,
     await_bounded,
+    cancel_when_started,
     overlapping_calls,
     retried,
     run_bounded,
@@ -2669,6 +2671,44 @@ class TestAioS3StreamedFile:
         with pytest.raises(TypeError, match="async with"), f:
             pass
         await f.close()
+
+    @pytest.mark.parametrize("mode", ["rb", "wb"])
+    @pytest.mark.asyncio
+    async def test_open_async_cancelled(self, fs, mode):
+        # GH-1208: a file opened after open_async() is cancelled is closed
+        # without committing anything, instead of being left to the garbage
+        # collector with a ResourceWarning.
+        info = S3Object(
+            init={"Key": "key", "ContentLength": 1},
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket="bucket",
+            key="key",
+        )
+        fs._sync_fs.info = mock.MagicMock(return_value=info)
+        started = threading.Event()
+        release = threading.Event()
+        files = []
+        init = AioS3StreamedFile.__init__
+
+        def blocking_init(self, *args, **kwargs):
+            init(self, *args, **kwargs)
+            files.append(self)
+            started.set()
+            assert release.wait(EVENT_TIMEOUT)
+
+        with mock.patch.object(AioS3StreamedFile, "__init__", blocking_init):
+            task = asyncio.create_task(fs.open_async("s3://bucket/key", mode))
+            await cancel_when_started(task, started, release)
+            # The pool is shut down last.
+            await wait_until(lambda: files[0]._pool._shutdown)
+
+        assert files[0].closed
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            files.clear()
+            gc.collect()
+        assert [w for w in caught if issubclass(w.category, ResourceWarning)] == []
+        fs.core.put_object.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_garbage_collected_unclosed(self, fs):
