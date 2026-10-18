@@ -47,12 +47,6 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-# The consequence of a Polars 1.x read of UNLOAD timestamps at nanoseconds.
-_NANOSECOND_READ_CONSEQUENCE = (
-    "so those outside 1677-09-21 to 2262-04-11 are wrong. Upgrade to Polars 2.0 or "
-    "later, or install pyarrow and give no read options to execute(), to read them "
-    "correctly."
-)
 _READ_FAILED_MESSAGE = "PolarsDataFrameIterator cannot be read after a failed read."
 
 
@@ -774,9 +768,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """Read query results from Parquet files in S3.
 
         Timestamps are read at microseconds; see ``_int96_read_options()``. Polars 1.x
-        cannot read them so; when ``_reads_with_pyarrow()``, a result with timestamps
-        is read with pyarrow instead, and otherwise Polars 1.x reads them at
-        nanoseconds, and they are cast to microseconds.
+        cannot read them so: it reads them at nanoseconds, and they are cast to
+        microseconds.
 
         ``_prepare_parquet_location()`` must have found the unload location first.
 
@@ -795,12 +788,6 @@ class AthenaPolarsResultSet(AthenaResultSet):
             raise ProgrammingError("unload_location is not available.")
 
         options = self._int96_read_options(schema)
-        if options is None and self._reads_with_pyarrow():
-            self._warn_nanosecond_read(
-                "so they are read with pyarrow instead. Upgrade to Polars 2.0 or later "
-                "to read them with Polars."
-            )
-            return self._read_parquet_with_pyarrow()
         dtypes = self._output_dtypes(schema, options)
         try:
             kwargs = self._read_kwargs(
@@ -811,32 +798,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
             _logger.exception(f"Failed to read {self._unload_location}.")
             raise OperationalError(*e.args) from e
         if options is None and dtypes.keys() & set(df.columns):
-            self._warn_nanosecond_read(_NANOSECOND_READ_CONSEQUENCE)
+            self._warn_nanosecond_read()
         return df
-
-    def _read_parquet_with_pyarrow(self) -> pl.DataFrame:
-        """Read the files of the data manifest with pyarrow, with INT96 at microseconds.
-
-        Returns:
-            Polars DataFrame containing the Parquet data.
-
-        Raises:
-            OperationalError: If reading the Parquet files fails.
-        """
-        import polars as pl
-        from pyarrow import parquet
-
-        try:
-            table = parquet.ParquetDataset(
-                [path.removeprefix("s3://") for path in self._data_manifest],
-                filesystem=S3FileSystem(**self._csv_storage_options),
-                coerce_int96_timestamp_unit="us",
-            ).read(use_threads=True)
-            # Not rechunked, as Polars does not rechunk its own reads.
-            return cast("pl.DataFrame", pl.from_arrow(table, rechunk=False))
-        except Exception as e:
-            _logger.exception(f"Failed to read {self._unload_location}.")
-            raise OperationalError(*e.args) from e
 
     def _read_parquet_schema(self) -> pl.Schema:
         """Read the schema of the Parquet files.
@@ -937,30 +900,16 @@ class AthenaPolarsResultSet(AthenaResultSet):
         casts = [df.get_column(name).cast(dtype) for name, dtype in dtypes.items() if name in df]
         return df.with_columns(casts) if casts else df
 
-    def _reads_with_pyarrow(self) -> bool:
-        """Whether the Parquet files are read with pyarrow through PyAthena's filesystem.
-
-        They are without read options given to ``execute()``, and with pyarrow
-        installed: always in chunks, and with Polars 1.x when the files hold
-        timestamps.
-
-        Returns:
-            True if they are read with pyarrow when pyarrow is chosen for them.
-        """
-        return not self._kwargs and importlib.util.find_spec("pyarrow") is not None
-
     @staticmethod
-    def _warn_nanosecond_read(consequence: str) -> None:
-        """Warn that Polars 1.x reads the timestamps of UNLOAD at nanoseconds.
-
-        Args:
-            consequence: The rest of the message, after "nanoseconds, ".
-        """
+    def _warn_nanosecond_read() -> None:
+        """Warn that Polars 1.x reads the timestamps of UNLOAD at nanoseconds."""
         import polars as pl
 
         _logger.warning(
             f"Polars {pl.__version__} reads the Parquet timestamps of UNLOAD at "
-            f"nanoseconds, {consequence}"
+            "nanoseconds, so those outside 1677-09-21 to 2262-04-11 are wrong. Upgrade to "
+            "Polars 2.0 or later, or read the result in chunks with pyarrow installed and "
+            "no read options given to execute(), to read them correctly."
         )
 
     def _as_polars(self) -> pl.DataFrame:
@@ -1173,7 +1122,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         if self._unload_location is None:
             raise ProgrammingError("unload_location is not available.")
 
-        if self._reads_with_pyarrow():
+        if not self._kwargs and importlib.util.find_spec("pyarrow") is not None:
             return self._read_parquet_chunks(
                 S3FileSystem(**self._csv_storage_options), self._data_manifest
             )
@@ -1233,7 +1182,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             options = self._int96_read_options(schema)
             dtypes = self._output_dtypes(schema, options)
             if options is None and dtypes:
-                self._warn_nanosecond_read(_NANOSECOND_READ_CONSEQUENCE)
+                self._warn_nanosecond_read()
             lazy_df = pl.scan_parquet(
                 location,
                 **self._read_kwargs(
