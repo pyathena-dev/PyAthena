@@ -32,8 +32,6 @@ Parts that remain recognizable in PyAthena:
 - tests/pyathena/sqlalchemy/test_base.py: test cases including
   `test_unicode`, `test_char_length`, and `test_reflect_no_such_table` follow
   PyHive's pyhive/tests/sqlalchemy_test_case.py.
-  tests/pyathena/aio/sqlalchemy/test_base.py ports `test_unicode` to the
-  asynchronous dialect.
 
 Parts that have since been replaced:
 
