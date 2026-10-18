@@ -96,6 +96,8 @@ This is a breaking change for `work_group=""`, which previously read `AWS_ATHENA
 Omit `work_group` or pass `None` to retain that fallback.
 The behavior of `s3_staging_dir=""` is unchanged, including its use with managed query result storage.
 
+(managed-query-result-storage)=
+
 ## Managed query result storage
 
 When using a workgroup with [managed query result storage](https://docs.aws.amazon.com/athena/latest/ug/managed-results.html) enabled,
