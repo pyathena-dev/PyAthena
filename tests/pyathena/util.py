@@ -616,6 +616,26 @@ def assert_close_stops_waiting_futures(cursor_class):
                 future.result(EVENT_TIMEOUT)
 
 
+def csv_result_responses():
+    """Build the responses of a query that succeeds with a CSV result file, without AWS.
+
+    The result has one integer column, ``a``; ``GetQueryResults`` returns no rows.
+
+    Returns:
+        The response to each operation name, for :func:`answered_requests`.
+    """
+    return {
+        **FAILED_EXECUTION_RESPONSES,
+        "GetQueryExecution": {
+            "QueryExecution": {
+                **succeeded_query_execution_data("query-id", "SELECT 1", datetime.now(UTC)),
+                "ResultConfiguration": {"OutputLocation": "s3://bucket/path/query-id.csv"},
+            }
+        },
+        "GetQueryResults": query_results_response([("a", "integer")]),
+    }
+
+
 def assert_description_reads_only_metadata(cursor_class):
     """Check that ``description()`` of an AsyncCursor reads only the result metadata.
 
@@ -627,18 +647,8 @@ def assert_description_reads_only_metadata(cursor_class):
         cursor_class: The AsyncCursor class.
     """
     cursor = placeholder_connection().cursor(cursor_class)
-    responses = {
-        **FAILED_EXECUTION_RESPONSES,
-        "GetQueryExecution": {
-            "QueryExecution": {
-                **succeeded_query_execution_data("query-id", "SELECT 1", datetime.now(UTC)),
-                "ResultConfiguration": {"OutputLocation": "s3://bucket/path/query-id.csv"},
-            }
-        },
-        "GetQueryResults": query_results_response([("a", "integer")]),
-    }
     try:
-        with answered_requests(cursor.connection.client, responses) as requests:
+        with answered_requests(cursor.connection.client, csv_result_responses()) as requests:
             description = cursor.description("query-id").result(EVENT_TIMEOUT)
     finally:
         cursor.close(wait=True)

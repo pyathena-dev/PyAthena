@@ -15,9 +15,11 @@ from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
     EVENT_TIMEOUT,
+    answered_requests,
     assert_close_stops_waiting_futures,
     assert_closes_result_sets_after_close,
     assert_description_reads_only_metadata,
+    csv_result_responses,
     placeholder_connection,
 )
 
@@ -201,6 +203,39 @@ class TestAsyncCursor:
     def test_close_stops_waiting_futures(self):
         """GH-1281: closing the cursor stops the futures that wait for a query (no AWS)."""
         assert_close_stops_waiting_futures(AsyncCursor)
+
+    def test_execute_result_set_class_without_metadata_keyword(self):
+        """GH-1281: execute() still builds a result set class that takes no new keyword (no AWS)."""
+
+        class CustomResultSet(AthenaResultSet):
+            def __init__(
+                self,
+                connection,
+                converter,
+                query_execution,
+                arraysize,
+                retry_config,
+                result_set_type_hints=None,
+            ):
+                super().__init__(
+                    connection,
+                    converter,
+                    query_execution,
+                    arraysize,
+                    retry_config,
+                    result_set_type_hints=result_set_type_hints,
+                )
+
+        cursor = placeholder_connection().cursor(AsyncCursor)
+        cursor._result_set_class = CustomResultSet
+        try:
+            with answered_requests(cursor.connection.client, csv_result_responses()):
+                _, future = cursor.execute("SELECT 1")
+                result_set = future.result(EVENT_TIMEOUT)
+        finally:
+            cursor.close(wait=True)
+        assert isinstance(result_set, CustomResultSet)
+        assert result_set.description == [("a", "integer", None, None, 3, 0, "UNKNOWN")]
 
     def test_description_reads_only_metadata(self):
         """GH-1281: description() reads only the metadata of a CSV result (no AWS)."""

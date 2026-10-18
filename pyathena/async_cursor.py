@@ -340,6 +340,9 @@ class AsyncCursor(BaseCursor):
             OperationalError: If a status request or reading the result fails.
         """
         query_execution = cast(AthenaQueryExecution, self._poll(query_id))
+        # Passed only when set, so that a result set class without the keyword
+        # still serves execute().
+        metadata_kwargs = {"_metadata_only": True} if metadata_only else {}
         return self._result_set_class(
             connection=self._connection,
             converter=self._converter,
@@ -347,7 +350,7 @@ class AsyncCursor(BaseCursor):
             arraysize=self._arraysize,
             retry_config=self._retry_config,
             result_set_type_hints=result_set_type_hints,
-            _metadata_only=metadata_only,
+            **metadata_kwargs,
             **self._result_set_kwargs,
         )
 
