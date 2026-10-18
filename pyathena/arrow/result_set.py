@@ -145,15 +145,12 @@ class AthenaArrowResultSet(AthenaResultSet):
         self._request_timeout = request_timeout
         self._kwargs = kwargs
         self._fs = self._create_s3_file_system()
-        if self.state == AthenaQueryExecution.STATE_SUCCEEDED and _metadata_only:
-            import pyarrow as pa
-
-            if self.output_location and self.is_unload:
-                self._metadata = self._read_parquet_metadata()
-            self._table = pa.Table.from_pydict({})
-        elif self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
+        succeeded = self.state == AthenaQueryExecution.STATE_SUCCEEDED
+        if succeeded and _metadata_only and self.output_location and self.is_unload:
+            self._metadata = self._read_parquet_metadata()
+        if succeeded and not _metadata_only and self.output_location:
             self._table = self._as_arrow()
-        elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
+        elif succeeded and not _metadata_only:
             # Without a result file, as with managed query result storage, the rows from
             # GetQueryResults are read as a CSV result file.
             self._table = self._read_csv()

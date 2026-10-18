@@ -405,17 +405,16 @@ class AthenaPolarsResultSet(AthenaResultSet):
         self._df: pl.DataFrame | None = None
         # Converters for the rows of self._df.
         self._df_converters: dict[str, Callable[[str | None], Any | None]] = {}
-        if self.state == AthenaQueryExecution.STATE_SUCCEEDED and _metadata_only:
-            if self.output_location and self.is_unload:
-                self._metadata = self._read_parquet_metadata()
-            self._df = pl.DataFrame()
-        elif self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
+        succeeded = self.state == AthenaQueryExecution.STATE_SUCCEEDED
+        if succeeded and _metadata_only and self.output_location and self.is_unload:
+            self._metadata = self._read_parquet_metadata()
+        if succeeded and not _metadata_only and self.output_location:
             if self._chunksize is None:
                 self._df = self._as_polars()
                 self._df_converters = self._get_converters(self._get_frame_column_names())
             else:
                 self._df_iter = self._create_dataframe_iterator()
-        elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
+        elif succeeded and not _metadata_only:
             # Without a result file, as with managed query result storage, the rows from
             # GetQueryResults are read as a CSV result file, but not in chunks.
             self._df = self._read_csv()
@@ -879,7 +878,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
         This is the metadata that ``_as_polars()`` or, for a result read in
         chunks, ``_create_dataframe_iterator()`` sets, from the schema of
         ``_read_parquet_schema()``: empty without data files, and for a result
-        read whole, also when the files hold no rows, which the footers count.
+        read whole, also when the files hold no rows. It applies no read
+        options of ``execute()``; ``description()`` passes none.
 
         Returns:
             The column metadata.

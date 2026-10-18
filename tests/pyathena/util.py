@@ -567,6 +567,11 @@ def assert_close_stops_waiting_futures(cursor_class):
     Args:
         cursor_class: The AsyncCursor class.
     """
+    submitters = (
+        lambda cursor: cursor.execute("SELECT 1")[1],
+        lambda cursor: cursor.description("query_id"),
+        lambda cursor: cursor.poll("query_id"),
+    )
     cursor = placeholder_connection().cursor(cursor_class, poll_interval=60, max_workers=3)
     # The three futures and the test; a second status request would time out here.
     polled = threading.Barrier(4)
@@ -581,11 +586,7 @@ def assert_close_stops_waiting_futures(cursor_class):
         patch.object(cursor, "_cancel") as cancel,
     ):
         try:
-            futures = [
-                cursor.execute("SELECT 1")[1],
-                cursor.description("query_id"),
-                cursor.poll("query_id"),
-            ]
+            futures = [submit(cursor) for submit in submitters]
             polled.wait(EVENT_TIMEOUT)
             cancelled = cursor.cancel("query_id")
             cursor.close()
@@ -599,11 +600,7 @@ def assert_close_stops_waiting_futures(cursor_class):
     assert status.call_count == 3
     cancel.assert_called_once_with("query_id")
 
-    for submit in (
-        lambda cursor: cursor.execute("SELECT 1")[1],
-        lambda cursor: cursor.description("query_id"),
-        lambda cursor: cursor.poll("query_id"),
-    ):
+    for submit in submitters:
         cursor = placeholder_connection().cursor(cursor_class)
 
         def finished(query_id, cursor=cursor):
@@ -634,36 +631,18 @@ def assert_description_reads_only_metadata(cursor_class):
         **FAILED_EXECUTION_RESPONSES,
         "GetQueryExecution": {
             "QueryExecution": {
-                "QueryExecutionId": "query-id",
-                "Query": "SELECT 1",
-                "StatementType": "DML",
-                "Status": {"State": "SUCCEEDED"},
+                **succeeded_query_execution_data("query-id", "SELECT 1", datetime.now(UTC)),
                 "ResultConfiguration": {"OutputLocation": "s3://bucket/path/query-id.csv"},
             }
         },
-        "GetQueryResults": {
-            "ResultSet": {
-                "Rows": [{"Data": [{"VarCharValue": "a"}]}, {"Data": [{"VarCharValue": "1"}]}],
-                "ResultSetMetadata": {
-                    "ColumnInfo": [
-                        {
-                            "Name": "a",
-                            "Type": "integer",
-                            "Precision": 10,
-                            "Scale": 0,
-                            "Nullable": "UNKNOWN",
-                        }
-                    ]
-                },
-            }
-        },
+        "GetQueryResults": query_results_response([("a", "integer")]),
     }
     try:
         with answered_requests(cursor.connection.client, responses) as requests:
             description = cursor.description("query-id").result(EVENT_TIMEOUT)
     finally:
         cursor.close(wait=True)
-    assert description == [("a", "integer", None, None, 10, 0, "UNKNOWN")]
+    assert description == [("a", "integer", None, None, 3, 0, "UNKNOWN")]
     assert [operation for operation, _ in requests] == ["GetQueryExecution", "GetQueryResults"]
     assert requests[1][1]["MaxResults"] == 1
 

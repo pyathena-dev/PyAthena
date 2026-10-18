@@ -1007,12 +1007,10 @@ class AthenaPandasResultSet(AthenaResultSet):
 
         # The whole result when it was not read in chunks.
         self._df: DataFrame | None = None
-        if self.state == AthenaQueryExecution.STATE_SUCCEEDED and _metadata_only:
-            if self.output_location and self.is_unload:
-                self._metadata = self._read_parquet_metadata()
-            self._fetch_types = {}
-            self._df = pd.DataFrame()
-        elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
+        succeeded = self.state == AthenaQueryExecution.STATE_SUCCEEDED
+        if succeeded and _metadata_only and self.output_location and self.is_unload:
+            self._metadata = self._read_parquet_metadata()
+        if succeeded and not _metadata_only:
             if self.output_location:
                 result = self._as_pandas()
                 trunc_date = (
@@ -2108,7 +2106,8 @@ class AthenaPandasResultSet(AthenaResultSet):
         This is the metadata that ``_as_pandas()`` sets: empty if the footers of
         the Parquet files count no rows, and otherwise the columns of the schema
         that the read uses, from the footers for a result read in chunks, and
-        from ``_read_parquet_schema()`` for one read whole.
+        from ``_read_parquet_schema()`` for one read whole. It applies no read
+        options of ``execute()``; ``description()`` passes none.
 
         Returns:
             The column metadata.
@@ -2127,6 +2126,8 @@ class AthenaPandasResultSet(AthenaResultSet):
         if self._reads_parquet_in_chunks():
             # The files of one UNLOAD query have the same schema.
             return to_column_info(footers[0].schema.to_arrow_schema())
+        # Not the footers: the dataset schema also has the partition columns of a
+        # partitioned UNLOAD, as the DataFrame read whole does.
         return self._read_parquet_schema(engine)
 
     def _read_parquet_footer(self, path: str) -> FileMetaData:
