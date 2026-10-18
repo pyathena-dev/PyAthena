@@ -68,7 +68,8 @@ The fetch methods return a value with an offset in a fixed-offset `datetime.time
 
 Athena writes a value with a zone name as the local time in that zone.
 A local time that a change of the zone's UTC offset, such as daylight saving time, repeats or skips does not identify one instant.
-For such a value, and for a zone name that Python's time zone database does not know, the fetch methods and `PandasCursor` raise `DataError` naming the column:
+For such a value, and for a zone name that Python's time zone database does not know, the cursors raise `DataError` naming the column where they convert the value:
+in the fetch methods, in `execute()` for the first page of `Cursor` and `DictCursor` results, and in the reads of `PandasCursor`.
 
 ```text
 DataError: Column 'col': '2020-11-01 01:30:00.000 America/New_York' is ambiguous: the local time occurs twice in America/New_York. Convert the value to UTC in SQL, for example with AT TIME ZONE 'UTC'.
