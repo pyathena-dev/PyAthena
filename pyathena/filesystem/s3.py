@@ -38,7 +38,6 @@ from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch, S3DeleteResult
 from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPoolExecutor
 from pyathena.filesystem.s3_object import (
-    S3CompleteMultipartUpload,
     S3Metadata,
     S3MultipartUpload,
     S3MultipartUploadPart,
@@ -1637,7 +1636,8 @@ class S3FileSystem(AbstractFileSystem):
 
         Runs the plan of :meth:`S3Core.plan_multipart_copy`, which reads the
         source and lists its annotations before anything is written. The
-        parts are copied in parallel with UploadPartCopy, and the
+        parts are copied in parallel with UploadPartCopy, ``max_workers`` at
+        a time, each one sent once an earlier one has finished, and the
         annotations are copied onto the destination after the upload
         completes. A failed part or completion aborts the upload, and so does
         an interrupt, after the creation of the upload and the running part
@@ -1672,70 +1672,44 @@ class S3FileSystem(AbstractFileSystem):
             return
         with self._create_executor(max_workers=max_workers) as executor:
             # The requests run on the executor, so that an interrupt lets the
-            # running ones finish and the upload be aborted. Each future is
-            # created and tracked first, so that an interrupt while its
-            # request is being scheduled still lets it be cancelled or waited
-            # for.
-            creation: Future[S3MultipartUpload] = Future()
-            futures: list[Future[S3MultipartUploadPart]] = []
-            # Set on failure, so that the creation and the running part copies
-            # make no further attempt before the abort.
-            stop = threading.Event()
+            # running ones finish and the upload be aborted.
+            session = _S3WriteSession(
+                self.core,
+                plan.destination,
+                executor,
+                block_size=block_size if block_size else self.core.MULTIPART_UPLOAD_MAX_PART_SIZE,
+                max_workers=max_workers,
+                prepared_params={
+                    "create_multipart_upload": plan.create_params,
+                    "upload_part_copy": plan.part_params,
+                    "complete_multipart_upload": plan.complete_params,
+                    "abort_multipart_upload": plan.abort_params,
+                },
+            )
             try:
-                with stop_retries_on(stop):
-                    executor.submit_to(
-                        creation,
-                        self.core.create_multipart_upload,
-                        plan.destination,
-                        **plan.create_params,
-                    )
-                multipart_upload = creation.result()
-                for i, range_ in enumerate(plan.ranges):
-                    future: Future[S3MultipartUploadPart] = Future()
-                    futures.append(future)
-                    with stop_retries_on(stop):
-                        executor.submit_to(
-                            future,
-                            self.core.upload_part_copy,
-                            upload=multipart_upload,
-                            part_number=i + 1,
-                            source=plan.source,
-                            range_=range_,
-                            **plan.part_params,
-                        )
-                completed = self._finish_multipart_upload(
-                    upload=multipart_upload,
-                    futures=futures,
-                    complete_params=plan.complete_params,
-                )
+                session.start()
+                for part_number, range_ in enumerate(plan.ranges, 1):
+                    session.wait_ready()
+                    session.submit_copy(part_number, plan.source, range_)
+                completed = session.complete()
             except BaseException:
-                # The requests that have not started are cancelled before the
-                # stop, which would let a thread that it frees take one of them.
-                creation.cancel()
-                for future in futures:
-                    future.cancel()
-                stop.set()
-                if not creation.cancel():
-                    while not creation.done():
-                        try:
-                            wait([creation])
-                        except KeyboardInterrupt:
-                            # Recover the upload before re-raising the
-                            # interrupt that started cleanup, as S3File does.
-                            continue
-                    if creation.exception() is None:
-                        upload = creation.result()
-                        try:
-                            # A part that is still copying when the upload is
-                            # aborted may be stored after the abort.
-                            wait([future for future in futures if not future.cancel()])
-                            self._abort_multipart_upload(upload, plan.abort_params)
-                        except KeyboardInterrupt:
-                            _logger.warning(
-                                f"Interrupted the abort of multipart upload {upload.upload_id} "
-                                f"to s3://{upload.bucket}/{upload.key}."
-                            )
-                            raise
+                try:
+                    session.abort()
+                except KeyboardInterrupt:
+                    if (upload := session.upload) is not None:
+                        _logger.warning(
+                            f"Interrupted the abort of multipart upload {upload.upload_id} "
+                            f"to s3://{upload.bucket}/{upload.key}."
+                        )
+                    raise
+                except Exception:
+                    # Logged instead of raised, so that the error that made
+                    # the copy fail is raised.
+                    upload = cast(S3MultipartUpload, session.upload)
+                    _logger.exception(
+                        f"Failed to abort multipart upload {upload.upload_id} "
+                        f"to s3://{upload.bucket}/{upload.key}."
+                    )
                 raise
         for name in plan.annotations:
             self.core.copy_object_annotation(
@@ -1827,39 +1801,6 @@ class S3FileSystem(AbstractFileSystem):
 
         self.core.put_object(s3_path, value, **request_kwargs)
         self.invalidate_cache(path)
-
-    def _finish_multipart_upload(
-        self,
-        upload: S3MultipartUpload,
-        futures: list[Future[S3MultipartUploadPart]],
-        complete_params: Mapping[str, Any],
-    ) -> S3CompleteMultipartUpload:
-        """Collect the uploaded parts and complete the multipart upload.
-
-        When a part fails, its error, or that of another part that has failed
-        by then, is raised without waiting for the parts that are still
-        running, so that the caller can cancel the parts queued after them.
-        The caller aborts the upload when this method raises.
-
-        Args:
-            upload: The multipart upload returned by creation.
-            futures: Futures of the part uploads, in part-number order.
-            complete_params: The CompleteMultipartUpload parameters, as
-                ``S3MultipartCopyPlan.complete_params`` selects them.
-
-        Returns:
-            S3CompleteMultipartUpload of the completed upload.
-
-        Raises:
-            Exception: The error of a failed part or of the completion.
-        """
-        done, _ = wait(futures, return_when=FIRST_EXCEPTION)
-        for future in done:
-            if not future.cancelled() and future.exception() is not None:
-                future.result()
-        # The futures are in part-number order.
-        parts = [future.result() for future in futures]
-        return self.core.complete_multipart_upload(upload, parts, **complete_params)
 
     def _abort_multipart_upload(
         self, upload: S3MultipartUpload, request_kwargs: Mapping[str, Any]
