@@ -197,16 +197,20 @@ class TestAioS3FileSystem:
             )
         )
         events = []
+        started = threading.Event()
         failed = threading.Event()
 
         def upload_part_copy(**kw):
             part_number = kw["part_number"]
             events.append(f"start {part_number}")
             if part_number == 1:
-                failed.wait(5)
+                started.set()
+                failed.wait(EVENT_TIMEOUT)
                 time.sleep(0.05)
                 events.append("end 1")
                 return SimpleNamespace(etag='"e"', part_number=part_number)
+            # Fails once part 1 is running, which the copy cannot cancel.
+            assert started.wait(EVENT_TIMEOUT)
             failed.set()
             raise OSError("part failed")
 
