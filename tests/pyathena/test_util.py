@@ -1,5 +1,6 @@
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import tenacity.nap
@@ -16,6 +17,7 @@ from pyathena.util import (
     stop_retries_on,
     strtobool,
     unstoppable_retries,
+    wait_with_retry_stop,
 )
 from tests.pyathena.util import (
     EVENT_TIMEOUT,
@@ -409,3 +411,43 @@ def test_retry_api_call_scope_ends_with_block():
     operation = ThrottledOperation(failures=2)
     assert retry_api_call(operation, RetryConfig(multiplier=0)) == "success"
     assert operation.calls == 3
+
+
+@pytest.mark.parametrize("scope", ["innermost", "enclosing"])
+def test_wait_with_retry_stop_relays_stop(scope):
+    """A stop of a scope of the waiting caller is relayed to the work, whose outcome is returned."""
+    stopped, other, stop = threading.Event(), threading.Event(), threading.Event()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(stop.wait, EVENT_TIMEOUT)
+        outer, inner = (other, stopped) if scope == "innermost" else (stopped, other)
+        with stop_retries_on(outer), stop_retries_on(inner):
+            stopped.set()
+            started = time.monotonic()
+            assert wait_with_retry_stop(future, stop=stop) is True
+    assert time.monotonic() - started < EVENT_TIMEOUT
+
+
+class _CheckedEvent(threading.Event):
+    """An event that records each check of whether it is set."""
+
+    def __init__(self):
+        super().__init__()
+        self.checked = threading.Event()
+
+    def is_set(self):
+        self.checked.set()
+        return super().is_set()
+
+
+def test_wait_with_retry_stop_unstoppable():
+    """A wait in an unstoppable block does not relay the stops of the enclosing scopes."""
+    event, stop = threading.Event(), threading.Event()
+    event.set()
+    # The work ends once the wait checks the scope opened in the block, which is never stopped.
+    probe = _CheckedEvent()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(probe.checked.wait, EVENT_TIMEOUT)
+        with stop_retries_on(event), unstoppable_retries(), stop_retries_on(probe):
+            assert wait_with_retry_stop(future, stop=stop) is True
+    assert not stop.is_set()
