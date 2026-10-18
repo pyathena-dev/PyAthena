@@ -1204,6 +1204,19 @@ class TestAthenaPandasResultSet:
         )
         assert result_set.fetchone() == expected
 
+    def test_temporal_dtype_position_with_pyarrow(self, tmp_path):
+        """The PyArrow engine takes no dtype positions, so the columns are converted."""
+        data = '"a","b"\n' + f'"{_TIMESTAMP_TEXT}","{_TIMESTAMP_TEXT}"\n' * 3
+        assert len(data) >= AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES
+        result_set = _local_result_set(
+            LocalBucketFileSystem(tmp_path),
+            [("a", "timestamp"), ("b", "timestamp")],
+            data,
+            engine="pyarrow",
+            dtype={1: "str"},
+        )
+        assert result_set.fetchone() == (_CONVERTED, _CONVERTED)
+
     @pytest.mark.parametrize(
         ("engine", "position", "expected"),
         [
