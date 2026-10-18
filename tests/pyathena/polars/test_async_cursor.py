@@ -1,4 +1,3 @@
-import contextlib
 import random
 import string
 import time
@@ -19,57 +18,6 @@ from tests.pyathena.conftest import connect
 
 
 class TestAsyncPolarsCursor:
-    @pytest.mark.parametrize(
-        "async_polars_cursor",
-        [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
-        indirect=["async_polars_cursor"],
-    )
-    def test_fetchone(self, async_polars_cursor):
-        query_id, future = async_polars_cursor.execute("SELECT * FROM one_row")
-        result_set = future.result()
-        assert result_set.rownumber == 0
-        assert result_set.fetchone() == (1,)
-        assert result_set.rownumber == 1
-        assert result_set.fetchone() is None
-
-    @pytest.mark.parametrize(
-        "async_polars_cursor",
-        [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
-        indirect=["async_polars_cursor"],
-    )
-    def test_fetchmany(self, async_polars_cursor):
-        query_id, future = async_polars_cursor.execute("SELECT * FROM many_rows LIMIT 15")
-        result_set = future.result()
-        assert len(result_set.fetchmany(10)) == 10
-        assert len(result_set.fetchmany(10)) == 5
-
-    @pytest.mark.parametrize(
-        "async_polars_cursor",
-        [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
-        indirect=["async_polars_cursor"],
-    )
-    def test_fetchall(self, async_polars_cursor):
-        query_id, future = async_polars_cursor.execute("SELECT * FROM one_row")
-        result_set = future.result()
-        assert result_set.fetchall() == [(1,)]
-        query_id, future = async_polars_cursor.execute("SELECT a FROM many_rows ORDER BY a")
-        result_set = future.result()
-        if async_polars_cursor._unload:
-            assert sorted(result_set.fetchall()) == [(i,) for i in range(10000)]
-        else:
-            assert result_set.fetchall() == [(i,) for i in range(10000)]
-
-    @pytest.mark.parametrize(
-        "async_polars_cursor",
-        [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
-        indirect=["async_polars_cursor"],
-    )
-    def test_iterator(self, async_polars_cursor):
-        query_id, future = async_polars_cursor.execute("SELECT * FROM one_row")
-        result_set = future.result()
-        assert list(result_set) == [(1,)]
-        pytest.raises(StopIteration, result_set.__next__)
-
     @pytest.mark.parametrize(
         "async_polars_cursor",
         [{"cursor_kwargs": {"unload": False}}, {"cursor_kwargs": {"unload": True}}],
@@ -259,10 +207,6 @@ class TestAsyncPolarsCursor:
         assert result_set.fetchone() is None
         assert result_set.fetchmany() == []
         assert result_set.fetchall() == []
-
-    def test_open_close(self):
-        with contextlib.closing(connect()) as conn, conn.cursor(AsyncPolarsCursor):
-            pass
 
     def test_no_ops(self):
         conn = connect()

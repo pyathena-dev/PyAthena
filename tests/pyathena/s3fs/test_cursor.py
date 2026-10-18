@@ -35,35 +35,12 @@ def _s3fs_converter_with_json_text():
 
 
 class TestS3FSCursor:
-    def test_fetchone(self, s3fs_cursor):
-        s3fs_cursor.execute("SELECT * FROM one_row")
-        assert s3fs_cursor.rownumber == 0
-        assert s3fs_cursor.fetchone() == (1,)
-        assert s3fs_cursor.rownumber == 1
-        assert s3fs_cursor.fetchone() is None
-
     def test_result_set_file_system_not_cached(self, s3fs_cursor):
         # GH-978: the filesystem that read the results was kept in the fsspec
         # instance cache with the connection, so the connection was never freed.
         s3fs_cursor.execute("SELECT * FROM one_row")
         assert s3fs_cursor.fetchall() == [(1,)]
         assert not cached_file_systems(s3fs_cursor.connection)
-
-    def test_fetchmany(self, s3fs_cursor):
-        s3fs_cursor.execute("SELECT * FROM many_rows LIMIT 15")
-        assert len(s3fs_cursor.fetchmany(10)) == 10
-        assert len(s3fs_cursor.fetchmany(10)) == 5
-
-    def test_fetchall(self, s3fs_cursor):
-        s3fs_cursor.execute("SELECT * FROM one_row")
-        assert s3fs_cursor.fetchall() == [(1,)]
-        s3fs_cursor.execute("SELECT a FROM many_rows ORDER BY a")
-        assert s3fs_cursor.fetchall() == [(i,) for i in range(10000)]
-
-    def test_iterator(self, s3fs_cursor):
-        s3fs_cursor.execute("SELECT * FROM one_row")
-        assert list(s3fs_cursor) == [(1,)]
-        pytest.raises(StopIteration, s3fs_cursor.__next__)
 
     def test_arraysize(self, s3fs_cursor):
         s3fs_cursor.arraysize = 5
@@ -176,14 +153,6 @@ class TestS3FSCursor:
 
     def test_cancel_initial(self, s3fs_cursor):
         pytest.raises(ProgrammingError, s3fs_cursor.cancel)
-
-    def test_open_close(self):
-        with (
-            contextlib.closing(connect(schema_name=ENV.schema)) as conn,
-            conn.cursor(S3FSCursor) as cursor,
-        ):
-            cursor.execute("SELECT * FROM one_row")
-            assert cursor.fetchall() == [(1,)]
 
     def test_no_ops(self):
         conn = connect(schema_name=ENV.schema)

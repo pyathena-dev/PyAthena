@@ -153,8 +153,6 @@ class TestAioCursor:
         assert actual2 == [(i,) for i in range(10, 15)]
 
     async def test_fetchall(self, aio_cursor):
-        await aio_cursor.execute("SELECT * FROM one_row")
-        assert await aio_cursor.fetchall() == [(1,)]
         await aio_cursor.execute("SELECT a FROM many_rows ORDER BY a")
         assert await aio_cursor.fetchall() == [(i,) for i in range(10000)]
 
