@@ -21,7 +21,6 @@ from pyathena.util import RetryConfig
 from tests.pyathena.util import (
     CANCELABLE_SPARK_JOB,
     COMPLETED_CALCULATION_RESPONSES,
-    COMPLETED_CALCULATION_WITH_OUTPUT_RESPONSES,
     answered_requests,
     offline_spark_cursor,
     wait_for_spark_job,
@@ -449,7 +448,7 @@ class TestAioSparkCursor:
         """GH-1207: a closed cursor rejects operations without requests (no AWS)."""
         cursor = offline_spark_cursor(AioSparkCursor)
         client = cursor.connection.client
-        with answered_requests(client, COMPLETED_CALCULATION_WITH_OUTPUT_RESPONSES):
+        with answered_requests(client, COMPLETED_CALCULATION_RESPONSES):
             await cursor.execute("code")
         await cursor.close()
 

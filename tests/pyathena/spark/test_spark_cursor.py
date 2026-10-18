@@ -21,7 +21,6 @@ from tests import ENV
 from tests.pyathena.util import (
     CANCELABLE_SPARK_JOB,
     COMPLETED_CALCULATION_RESPONSES,
-    COMPLETED_CALCULATION_WITH_OUTPUT_RESPONSES,
     ThrottledOperation,
     answered_requests,
     offline_spark_cursor,
@@ -349,7 +348,7 @@ class TestSparkCursor:
         """GH-1207: a closed cursor rejects operations without requests (no AWS)."""
         cursor = offline_spark_cursor(SparkCursor)
         client = cursor.connection.client
-        with answered_requests(client, COMPLETED_CALCULATION_WITH_OUTPUT_RESPONSES):
+        with answered_requests(client, COMPLETED_CALCULATION_RESPONSES):
             cursor.execute("code")
         cursor.close()
 

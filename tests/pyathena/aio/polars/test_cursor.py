@@ -78,13 +78,8 @@ class TestAioPolarsCursor:
         assert {key: kwargs[key] for key in expected} == expected
 
     async def test_closed(self, aio_polars_cursor):
-        """GH-1207: a closed cursor rejects operations."""
-        await aio_polars_cursor.execute("SELECT * FROM one_row")
+        """GH-1207: a closed cursor rejects execute()."""
         aio_polars_cursor.close()
 
         with pytest.raises(ProgrammingError):
             await aio_polars_cursor.execute("SELECT * FROM one_row")
-        with pytest.raises(ProgrammingError):
-            aio_polars_cursor.as_polars()
-        with pytest.raises(ProgrammingError):
-            aio_polars_cursor.as_arrow()

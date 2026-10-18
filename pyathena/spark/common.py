@@ -273,18 +273,16 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
                 raise OperationalError(*e.args) from e
             return session_id
 
-        started: str | None = None
+        session_id = self._start_in_thread(start, self._terminate_session_by_id)
         try:
-            started = self._start_in_thread(start, self._terminate_session_by_id)
-            self._wait_for_idle_session(started)
+            self._wait_for_idle_session(session_id)
         except BaseException:
             # The caller receives no cursor to close, so the session is released here.
-            if started is not None:
-                with contextlib.suppress(OperationalError):
-                    # Already logged with the session ID; the original error takes precedence.
-                    self._terminate_session_by_id(started)
+            with contextlib.suppress(OperationalError):
+                # Already logged with the session ID; the original error takes precedence.
+                self._terminate_session_by_id(session_id)
             raise
-        return started
+        return session_id
 
     def _terminate_session(self) -> None:
         """Terminate the cursor's Spark session with ``TerminateSession``.
