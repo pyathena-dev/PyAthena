@@ -142,7 +142,7 @@ def merge_jobs(job_lists: Iterable[list[dict[str, Any]]]) -> list[dict[str, Any]
     jobs = [job for jobs in job_lists for job in jobs]
     if len({j["id"] for j in jobs}) != len(jobs):
         raise ValueError("Job IDs must be unique")
-    unknown = [j["id"] for j in jobs if "environment" in j and j["environment"] not in ENVIRONMENTS]
+    unknown = [j["id"] for j in jobs if j.get("environment") not in (None, *ENVIRONMENTS)]
     if unknown:
         raise ValueError(f"Jobs name an unknown environment: {', '.join(unknown)}")
     return sorted(jobs, key=job_order)

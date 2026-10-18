@@ -85,10 +85,11 @@ _docs-lint:
 _docs-format:
     mise exec -- markdownlint-cli2 --fix
 
-# Benchmark workspace member with its own Python 3.12 environment, with Polars 1.x
-BENCHMARK_UV := "UV_PROJECT_ENVIRONMENT='" + justfile_directory() + "/benchmarks/.venv' UV_PYTHON=3.12 uv run --directory benchmarks --locked"
-# The benchmark's second environment, with Polars 2.x
-BENCHMARK_UV_POLARS2 := "UV_PROJECT_ENVIRONMENT='" + justfile_directory() + "/benchmarks/.venv-polars2' UV_PYTHON=3.12 uv run --directory benchmarks --locked --no-group polars1 --group polars2"
+# Benchmark workspace member with its own Python 3.12 environments: benchmarks/.venv
+# with Polars 1.x, and benchmarks/.venv-polars2 with Polars 2.x
+BENCHMARK_RUN := "UV_PYTHON=3.12 uv run --directory benchmarks --locked"
+BENCHMARK_UV := "UV_PROJECT_ENVIRONMENT='" + justfile_directory() + "/benchmarks/.venv' " + BENCHMARK_RUN
+BENCHMARK_UV_POLARS2 := "UV_PROJECT_ENVIRONMENT='" + justfile_directory() + "/benchmarks/.venv-polars2' " + BENCHMARK_RUN + " --no-group polars1 --group polars2"
 
 # Standalone benchmark checks; these do not execute Athena queries
 benchmark target="lint":
@@ -102,7 +103,6 @@ _benchmark-lint:
     uvx ruff@{{RUFF_VERSION}} check --config benchmarks/pyproject.toml benchmarks
     uvx ruff@{{RUFF_VERSION}} format --check --config benchmarks/pyproject.toml benchmarks
     {{BENCHMARK_UV}} mypy
-    {{BENCHMARK_UV_POLARS2}} mypy
     {{BENCHMARK_UV}} cfn-lint cloudformation/benchmark.yaml
 
 _benchmark-test: _benchmark-lint

@@ -161,12 +161,8 @@ class TestExpandJobs:
         assert [(j["id"], j["environment"]) for j in jobs] == [
             ("single-small-flat-polars-sync-unload-native-polars2", "polars2")
         ]
-        assert (
-            "environment"
-            not in expand_jobs(
-                SETTINGS, ["single"], ["small"], ["flat"], Filters(family=["polars"])
-            )[0]
-        )
+        default = expand_jobs(SETTINGS, ["single"], ["small"], ["flat"], Filters(family=["polars"]))
+        assert not any("environment" in j for j in default)
 
     def test_dataframe_chunk_variants_share_one_job(self):
         jobs = expand_jobs(
@@ -1198,15 +1194,22 @@ class FakeProcess:
 
 
 class TestRunJob:
-    def test_resumes_writes_checkpoints_and_interrupts_with_sigint(self, tmp_path, monkeypatch):
-        processes = []
+    @pytest.fixture
+    def processes(self, monkeypatch):
+        """Return the fake orchestrator processes that ``run_job()`` starts."""
+        started = []
 
         def popen(command, stdout, stderr, start_new_session):
-            processes.append(FakeProcess(command, stdout, stderr, start_new_session))
-            return processes[-1]
+            started.append(FakeProcess(command, stdout, stderr, start_new_session))
+            return started[-1]
 
-        killed = []
         monkeypatch.setattr("pyathena_bench.fleet.subprocess.Popen", popen)
+        return started
+
+    def test_resumes_writes_checkpoints_and_interrupts_with_sigint(
+        self, tmp_path, monkeypatch, processes
+    ):
+        killed = []
         monkeypatch.setattr(
             "pyathena_bench.fleet.os.killpg", lambda pid, signum: killed.append((pid, signum))
         )
@@ -1233,14 +1236,9 @@ class TestRunJob:
         assert killed == [(4321, signal.SIGKILL)]
         assert (tmp_path / "logs" / "a-attempt-2.log").exists()
 
-    def test_a_job_of_another_environment_runs_its_interpreter(self, tmp_path, monkeypatch):
-        processes = []
-
-        def popen(command, stdout, stderr, start_new_session):
-            processes.append(FakeProcess(command, stdout, stderr, start_new_session))
-            return processes[-1]
-
-        monkeypatch.setattr("pyathena_bench.fleet.subprocess.Popen", popen)
+    def test_a_job_of_another_environment_runs_its_interpreter(
+        self, tmp_path, monkeypatch, processes
+    ):
         monkeypatch.setattr("pyathena_bench.fleet.os.killpg", lambda pid, signum: None)
         monkeypatch.setattr("pyathena_bench.fleet.sys.prefix", str(tmp_path / ".venv"))
         # A set event stops the fake process at once.
