@@ -1706,12 +1706,7 @@ class S3FileSystem(AbstractFileSystem):
                 completed = self._finish_multipart_upload(
                     upload=multipart_upload,
                     futures=futures,
-                    # Filtered again for the completion, which leaves the
-                    # plan's parameters unchanged.
-                    request_kwargs=plan.complete_params,
-                    # Aborted below, as is an upload whose part scheduling
-                    # is interrupted.
-                    abort=False,
+                    complete_params=plan.complete_params,
                 )
             except BaseException:
                 # The requests that have not started are cancelled before the
@@ -1837,54 +1832,34 @@ class S3FileSystem(AbstractFileSystem):
         self,
         upload: S3MultipartUpload,
         futures: list[Future[S3MultipartUploadPart]],
-        request_kwargs: Mapping[str, Any] | None = None,
-        abort: bool = True,
+        complete_params: Mapping[str, Any],
     ) -> S3CompleteMultipartUpload:
         """Collect the uploaded parts and complete the multipart upload.
 
-        When any part or the completion fails, or the wait for them is
-        interrupted, the parts that have not started are cancelled, the
-        running ones are waited for, and the multipart upload is aborted so
-        that no incomplete upload or part is left behind, unless ``abort`` is
-        false. The original error is then re-raised. A failed part is
-        handled as soon as it fails, without waiting for the parts before it.
+        When a part fails, its error, or that of another part that has failed
+        by then, is raised without waiting for the parts that are still
+        running, so that the caller can cancel the parts queued after them.
+        The caller aborts the upload when this method raises.
 
         Args:
             upload: The multipart upload returned by creation.
             futures: Futures of the part uploads, in part-number order.
-            request_kwargs: Parameters of the upload, such as
-                ``RequestPayer`` or the SSE-C parameters; the completion and
-                the abort receive those that they accept.
-            abort: Whether to abort the multipart upload on failure. A caller
-                that keeps the upload to abort it itself passes false.
+            complete_params: The CompleteMultipartUpload parameters, as
+                ``S3MultipartCopyPlan.complete_params`` selects them.
 
         Returns:
             S3CompleteMultipartUpload of the completed upload.
+
+        Raises:
+            Exception: The error of a failed part or of the completion.
         """
-        request_kwargs = request_kwargs or {}
-        try:
-            done, _ = wait(futures, return_when=FIRST_EXCEPTION)
-            for future in done:
-                if not future.cancelled() and future.exception() is not None:
-                    # Raised without waiting for the parts before it, so that
-                    # the parts queued after it are cancelled.
-                    future.result()
-            # The futures are in part-number order.
-            parts = [future.result() for future in futures]
-            return self.core.complete_multipart_upload(
-                upload,
-                parts,
-                **self.core.operation_params("complete_multipart_upload", request_kwargs),
-            )
-        except BaseException:
-            if not abort:
-                raise
-            # A part that is still uploading when the upload is aborted may
-            # be stored after the abort, so wait for the parts that could not
-            # be cancelled first.
-            wait([future for future in futures if not future.cancel()])
-            self._abort_multipart_upload(upload, request_kwargs)
-            raise
+        done, _ = wait(futures, return_when=FIRST_EXCEPTION)
+        for future in done:
+            if not future.cancelled() and future.exception() is not None:
+                future.result()
+        # The futures are in part-number order.
+        parts = [future.result() for future in futures]
+        return self.core.complete_multipart_upload(upload, parts, **complete_params)
 
     def _abort_multipart_upload(
         self, upload: S3MultipartUpload, request_kwargs: Mapping[str, Any]
