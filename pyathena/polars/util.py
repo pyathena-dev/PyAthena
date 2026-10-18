@@ -132,7 +132,8 @@ def to_microseconds(dtype: Any, maps: bool = True) -> Any:
         dtype: The dtype.
         maps: Whether to keep Map dtypes. If False, a Map that holds nanosecond
             Datetimes is a List of Structs of its key and value, which Polars 2.0 needs
-            to read INT96 timestamps in a Parquet map at microseconds.
+            to read INT96 timestamps in a Parquet map at microseconds
+            (pola-rs/polars#30031).
 
     Returns:
         The dtype with microsecond Datetimes.
