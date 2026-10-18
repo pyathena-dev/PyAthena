@@ -142,9 +142,20 @@ class TestAthenaS3FSResultSet:
             assert "block_size" not in options
 
     def test_reader_closes_at_end_of_results(self):
-        """The file is closed once every row has been read, before close()."""
-        result_set, stream = _result_set("null_col,empty_col,value_col\n,,a\n", None)
+        """The reader is closed once every row has been read, before close().
+
+        The test keeps the reader, so that only an explicit close closes the file.
+        """
+        readers = []
+
+        class RecordingReader(AthenaCSVReader):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                readers.append(self)
+
+        result_set, stream = _result_set("null_col,empty_col,value_col\n,,a\n", RecordingReader)
         assert result_set.fetchall() == [(None, None, "a")]
+        assert readers
         assert stream.closed
         assert result_set.fetchone() is None
         result_set.close()
@@ -206,28 +217,51 @@ class TestAthenaS3FSResultSet:
 
     @pytest.mark.parametrize("csv_reader", [AthenaCSVReader, EmptyStringAsNullCSVReader])
     def test_managed_results_preserve_api_values(self, csv_reader):
-        response = {
-            "ResultSet": {
-                "ResultSetMetadata": {"ColumnInfo": [{"Name": "value", "Type": "varchar"}]},
-                "Rows": [
-                    {"Data": [{"VarCharValue": "value"}]},
-                    {"Data": [{"VarCharValue": ""}]},
-                    {"Data": [{}]},
-                ],
+        """Managed results are read from GetQueryResults, whose first page has the header.
+
+        The result set reads one row for the metadata, as Athena returns it, then the rows
+        from the start.
+        """
+        rows = [
+            {"Data": [{"VarCharValue": "value"}]},
+            {"Data": [{"VarCharValue": ""}]},
+            {"Data": [{}]},
+        ]
+
+        def get_query_results(**request: Any) -> dict[str, Any]:
+            start = int(request.get("NextToken", 0))
+            end = start + request["MaxResults"]
+            response: dict[str, Any] = {
+                "ResultSet": {
+                    "ResultSetMetadata": {
+                        "ColumnInfo": [
+                            {
+                                "Name": "value",
+                                "Type": "varchar",
+                                "Precision": 0,
+                                "Scale": 0,
+                                "Nullable": "UNKNOWN",
+                            }
+                        ]
+                    },
+                    "Rows": rows[start:end],
+                }
             }
-        }
-        with (
-            patch.object(AthenaS3FSResultSet, "_get_query_results", return_value=response),
-            AthenaS3FSResultSet(
-                connection=MagicMock(),
-                converter=DefaultS3FSTypeConverter(),
-                query_execution=MagicMock(
-                    state=AthenaQueryExecution.STATE_SUCCEEDED, output_location=None
-                ),
-                arraysize=1,
-                retry_config=RetryConfig(),
-                csv_reader=csv_reader,
-                filesystem_class=MagicMock(),
-            ) as result_set,
-        ):
+            if end < len(rows):
+                response["NextToken"] = str(end)
+            return response
+
+        connection = MagicMock()
+        connection.client.get_query_results.side_effect = get_query_results
+        with AthenaS3FSResultSet(
+            connection=connection,
+            converter=DefaultS3FSTypeConverter(),
+            query_execution=MagicMock(
+                state=AthenaQueryExecution.STATE_SUCCEEDED, output_location=None
+            ),
+            arraysize=1,
+            retry_config=RetryConfig(),
+            csv_reader=csv_reader,
+            filesystem_class=MagicMock(),
+        ) as result_set:
             assert result_set.fetchall() == [("",), (None,)]
