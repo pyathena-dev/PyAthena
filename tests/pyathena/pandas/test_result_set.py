@@ -1267,7 +1267,9 @@ def test_read_csv_with_pyarrow_matches_pandas(
         assert_frame_equal(actual, expected, check_exact=True)
         # Explicit positions retain duplicate names and headerless-column parity.
         # Mapped string columns use PyAthena's preservation contract instead.
-        if pandas_columns:
+        # pandas 3.0.0's PyArrow engine reads strings as the str dtype even with
+        # future.infer_string off, which pandas 3.0.1 fixed.
+        if pandas_columns and (infer_string or pd.__version__ != "3.0.0"):
             reference = pd.read_csv(
                 io.BytesIO(data.encode()),
                 **{**read_csv_kwargs, "dtype": dict(read_csv_kwargs["dtype"])},
