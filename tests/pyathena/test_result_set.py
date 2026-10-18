@@ -8,6 +8,7 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
+from botocore.exceptions import ReadTimeoutError
 
 from pyathena.converter import DefaultTypeConverter
 from pyathena.error import OperationalError, ProgrammingError
@@ -110,6 +111,29 @@ class TestAthenaResultSet:
             next(result_set)
         assert result_set.rownumber is None
         assert client.get_query_results.call_count == 1
+
+    def test_read_data_manifest_body_read_failure(self):
+        """GH-1235: a failure while reading the data manifest body raises OperationalError.
+
+        No AWS calls; the S3 client is mocked.
+        """
+        connection = MagicMock()
+        connection.s3_client.get_object.return_value = {
+            "Body": MagicMock(read=MagicMock(side_effect=ReadTimeoutError(endpoint_url="s3")))
+        }
+        result_set = AthenaResultSet(
+            connection=connection,
+            converter=DefaultTypeConverter(),
+            query_execution=MagicMock(
+                state=AthenaQueryExecution.STATE_SUCCEEDED,
+                data_manifest_location="s3://bucket/path/query-id-manifest.csv",
+            ),
+            arraysize=1,
+            retry_config=RetryConfig(),
+            _pre_fetch=False,
+        )
+        with pytest.raises(OperationalError):
+            result_set._read_data_manifest()
 
     def test_fetchone_across_pages(self):
         result_set = _fetching_result_set(("1", "2"), ("3",))

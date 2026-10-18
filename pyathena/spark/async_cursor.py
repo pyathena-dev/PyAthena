@@ -166,6 +166,7 @@ class AsyncSparkCursor(SparkBaseCursor):
         Returns:
             Future object containing the output text with leading and trailing
             whitespace removed, or None if the calculation has no ``std_out_s3_uri``.
+            The future raises ``OperationalError`` if reading the file fails.
 
         Raises:
             ProgrammingError: If the cursor is closed.
@@ -189,6 +190,7 @@ class AsyncSparkCursor(SparkBaseCursor):
         Returns:
             Future object containing the error output text with leading and trailing
             whitespace removed, or None if the calculation has no ``std_error_s3_uri``.
+            The future raises ``OperationalError`` if reading the file fails.
 
         Raises:
             ProgrammingError: If the cursor is closed.

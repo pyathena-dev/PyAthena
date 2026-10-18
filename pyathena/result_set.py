@@ -873,6 +873,15 @@ class AthenaResultSet(CursorIterator):
             return cast(int, response["ContentLength"])
 
     def _read_data_manifest(self) -> list[str]:
+        """Read the paths of the result files of an UNLOAD query from its data manifest.
+
+        Returns:
+            The S3 paths of the result files, or an empty list without any.
+
+        Raises:
+            ProgrammingError: If the query execution has no data manifest location.
+            OperationalError: If getting or reading the data manifest fails.
+        """
         if not self.data_manifest_location:
             raise ProgrammingError("DataManifestLocation is none or empty.")
         bucket, key = parse_output_location(self.data_manifest_location)
@@ -884,12 +893,11 @@ class AthenaResultSet(CursorIterator):
                 Bucket=bucket,
                 Key=key,
             )
+            manifest: str = response["Body"].read().decode("utf-8").strip()
         except Exception as e:
             _logger.exception(f"Failed to read {bucket}/{key}.")
             raise OperationalError(*e.args) from e
-        else:
-            manifest: str = response["Body"].read().decode("utf-8").strip()
-            return manifest.split("\n") if manifest else []
+        return manifest.split("\n") if manifest else []
 
     @property
     def is_closed(self) -> bool:
