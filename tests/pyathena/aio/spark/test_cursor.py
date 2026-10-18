@@ -441,6 +441,7 @@ class TestAioSparkCursor:
 
     async def test_executemany(self):
         cursor = AioSparkCursor.__new__(AioSparkCursor)  # bypass __init__ to avoid AWS calls
+        cursor._closed = False
         with pytest.raises(NotSupportedError):
             await cursor.executemany("SELECT 1", [])
 
@@ -455,6 +456,8 @@ class TestAioSparkCursor:
         with answered_requests(client) as requests:
             with pytest.raises(ProgrammingError):
                 await cursor.execute("code")
+            with pytest.raises(ProgrammingError):
+                await cursor.executemany("code", [])
             with pytest.raises(ProgrammingError):
                 await cursor.cancel()
             with pytest.raises(ProgrammingError):

@@ -235,7 +235,8 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         The request is sent with ``_start_in_thread()`` regardless of
         ``kill_on_interrupt``, because the caller receives no cursor to close: a
         ``KeyboardInterrupt`` after the request has begun terminates the session
-        it starts. If waiting for the new session raises, including
+        it starts, unless a second interrupt arrives while the cursor waits for the
+        request. If waiting for the new session raises, including
         ``KeyboardInterrupt``, the session is terminated on a best-effort basis
         before the exception is re-raised.
 
@@ -492,6 +493,18 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         seq_of_parameters: list[dict[str, Any] | list[str] | None],
         **kwargs,
     ) -> None:
+        """Reject ``executemany()``, which Spark cursors do not support.
+
+        Args:
+            operation: The code to run.
+            seq_of_parameters: Sequence of parameter sets.
+            **kwargs: Additional arguments.
+
+        Raises:
+            NotSupportedError: If the cursor is open.
+            ProgrammingError: If the cursor is closed.
+        """
+        self._ensure_open()
         raise NotSupportedError
 
 

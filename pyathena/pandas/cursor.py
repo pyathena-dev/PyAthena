@@ -299,6 +299,10 @@ class PandasCursor(WithFetch):
             DataFrame: Individual chunks of the result set when chunking is enabled,
                       or the entire DataFrame as a single chunk when chunking is disabled.
 
+        Raises:
+            ProgrammingError: If the cursor is closed or has no result set when
+                the iteration starts.
+
         Examples:
             # Explicit chunksize
             cursor = connection.cursor(PandasCursor, chunksize=50000)

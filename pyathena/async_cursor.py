@@ -319,11 +319,13 @@ class AsyncCursor(BaseCursor):
 
         Raises:
             NotSupportedError: Always raised as this operation is not supported.
+            ProgrammingError: If the cursor is closed.
 
         Note:
             For bulk operations, consider using execute() with parameterized
             queries or batch processing patterns instead.
         """
+        self._ensure_open()
         raise NotSupportedError
 
     def cancel(self, query_id: str) -> Future[None]:

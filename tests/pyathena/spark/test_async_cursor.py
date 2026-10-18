@@ -294,6 +294,8 @@ class TestAsyncSparkCursor:
             with pytest.raises(ProgrammingError):
                 cursor.execute("code")
             with pytest.raises(ProgrammingError):
+                cursor.executemany("code", [])
+            with pytest.raises(ProgrammingError):
                 cursor.cancel(calculation_id)
             with pytest.raises(ProgrammingError):
                 cursor.calculation_execution(calculation_id)

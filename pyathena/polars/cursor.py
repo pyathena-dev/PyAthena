@@ -316,7 +316,8 @@ class PolarsCursor(WithFetch):
             if chunksize was not specified.
 
         Raises:
-            ProgrammingError: If the cursor is closed or has no result set.
+            ProgrammingError: If the cursor is closed or has no result set when
+                the iteration starts.
 
         Example:
             >>> # With chunking for large datasets

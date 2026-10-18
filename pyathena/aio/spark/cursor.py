@@ -430,6 +430,18 @@ class AioSparkCursor(SparkBaseCursor, WithCalculationExecution):
         seq_of_parameters: list[dict[str, Any] | list[str] | None],
         **kwargs,
     ) -> None:
+        """Reject ``executemany()``, which Spark cursors do not support.
+
+        Args:
+            operation: The code to run.
+            seq_of_parameters: Sequence of parameter sets.
+            **kwargs: Additional arguments.
+
+        Raises:
+            NotSupportedError: If the cursor is open.
+            ProgrammingError: If the cursor is closed.
+        """
+        self._ensure_open()
         raise NotSupportedError
 
     def __aiter__(self):

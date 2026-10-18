@@ -357,6 +357,8 @@ class TestSparkCursor:
             with pytest.raises(ProgrammingError):
                 cursor.execute("code")
             with pytest.raises(ProgrammingError):
+                cursor.executemany("code", [])
+            with pytest.raises(ProgrammingError):
                 cursor.cancel()
             with pytest.raises(ProgrammingError):
                 cursor.get_std_out()

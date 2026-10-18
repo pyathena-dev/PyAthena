@@ -1490,21 +1490,29 @@ class BaseCursor(metaclass=ABCMeta):
             _logger.exception("Failed to cancel query.")
             raise OperationalError(*e.args) from e
 
-    def setinputsizes(self, sizes):  # noqa: B027
+    def setinputsizes(self, sizes):
         """Accept input sizes as DB API 2.0 requires, and ignore them.
 
         Args:
             sizes: Sequence of parameter types or sizes.
-        """
 
-    def setoutputsize(self, size, column=None):  # noqa: B027
+        Raises:
+            ProgrammingError: If the cursor is closed.
+        """
+        self._ensure_open()
+
+    def setoutputsize(self, size, column=None):
         """Accept a column buffer size as DB API 2.0 requires, and ignore it.
 
         Args:
             size: Buffer size for large columns.
             column: Index of the column the size applies to, or None for all
                 large columns.
+
+        Raises:
+            ProgrammingError: If the cursor is closed.
         """
+        self._ensure_open()
 
     def __enter__(self):
         return self

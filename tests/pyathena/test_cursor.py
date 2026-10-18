@@ -744,6 +744,10 @@ class TestCursor:
             cursor.get_table_metadata("one_row")
         with pytest.raises(ProgrammingError):
             cursor.list_table_metadata()
+        with pytest.raises(ProgrammingError):
+            cursor.setinputsizes([])
+        with pytest.raises(ProgrammingError):
+            cursor.setoutputsize(1)
         assert cursor.query_id == query_id
 
     def test_unicode(self, cursor):

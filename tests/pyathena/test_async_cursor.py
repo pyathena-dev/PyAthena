@@ -176,6 +176,8 @@ class TestAsyncCursor:
         with pytest.raises(ProgrammingError):
             async_cursor.execute("SELECT * FROM one_row")
         with pytest.raises(ProgrammingError):
+            async_cursor.executemany("SELECT * FROM one_row", [])
+        with pytest.raises(ProgrammingError):
             async_cursor.description("query_id")
         with pytest.raises(ProgrammingError):
             async_cursor.query_execution("query_id")
