@@ -148,10 +148,9 @@ class AsyncCursor(BaseCursor):
         of ``execute()``, ``description()``, and ``poll()`` that still wait
         for their query raise ``ProgrammingError`` at their next status check,
         also when that check finds the query finished; the query itself keeps
-        running. A future of
-        ``execute()`` that is building its result set resolves with a closed
-        result set, and one that is just finishing can resolve with either an
-        open or a closed one. A result set whose future resolved before the
+        running. A future of ``execute()`` that is building its result set
+        resolves with a closed result set, and one that is just finishing can
+        resolve with either an open or a closed one. A result set whose future resolved before the
         close is left to the caller. The futures of ``cancel()`` and
         ``query_execution()`` still run.
 

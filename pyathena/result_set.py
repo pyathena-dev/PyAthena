@@ -162,6 +162,8 @@ class AthenaResultSet(CursorIterator):
 
         Raises:
             OperationalError: If reading the metadata fails.
+            ProgrammingError: If ``query_execution`` is not given, or the query
+                execution of an UNLOAD result has no data manifest location.
         """
         result_set = cls(
             connection=connection,
@@ -535,7 +537,8 @@ class AthenaResultSet(CursorIterator):
         """Read the result metadata, which sets ``description``, without reading rows.
 
         Requests a ``GetQueryResults`` page of one row and processes its metadata
-        and update count, but not its rows. A result set that reads its result
+        and update count (see :meth:`_process_result_metadata`), but not its rows.
+        A result set that reads its result
         from files overrides this to describe the result as it reads it.
 
         Raises:
@@ -543,7 +546,20 @@ class AthenaResultSet(CursorIterator):
                 succeeded, or the result set is closed.
             OperationalError: If the request fails.
         """
-        response = self._get_query_results(1)
+        self._process_result_metadata(self._get_query_results(1))
+
+    def _process_result_metadata(self, response: dict[str, Any]) -> None:
+        """Process the result metadata and the update count of a ``GetQueryResults`` page.
+
+        The metadata phase and the fetch of the first page share this, so that
+        both describe the result alike.
+
+        Args:
+            response: The ``GetQueryResults`` response of the first page.
+
+        Raises:
+            DataError: If the response has no result metadata.
+        """
         self._process_metadata(response)
         self._process_update_count(response)
 
@@ -556,8 +572,7 @@ class AthenaResultSet(CursorIterator):
             OperationalError: If the request fails.
         """
         response = self._get_query_results(self._arraysize)
-        self._process_metadata(response)
-        self._process_update_count(response)
+        self._process_result_metadata(response)
         rows, self._next_token = self._parse_result_rows(response)
         offset = 1 if rows and self._is_first_row_column_labels(rows) else 0
         self._process_rows(rows, offset)

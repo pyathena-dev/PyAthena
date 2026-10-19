@@ -732,15 +732,30 @@ class AthenaPolarsResultSet(AthenaResultSet):
 
         Raises:
             OperationalError: If reading the metadata fails.
+            ProgrammingError: If the query execution of an UNLOAD result has no data
+                manifest location.
         """
-        if not (self.output_location and self.is_unload):
-            super()._read_metadata()
-            return
-        if self._prepare_parquet_location():
-            self._parquet_schema = self._read_parquet_schema()
-            self._metadata = to_column_info(self._parquet_schema)
+        if self.output_location and self.is_unload:
+            self._metadata = self._read_parquet_metadata()
         else:
-            self._metadata = ()
+            super()._read_metadata()
+
+    def _read_parquet_metadata(self) -> tuple[dict[str, Any], ...]:
+        """Read the schema of the Parquet files of the UNLOAD result, and describe it.
+
+        The schema is kept for ``_as_polars()`` and ``_create_dataframe_iterator()``.
+
+        Returns:
+            The column metadata of the schema, or none without data files.
+
+        Raises:
+            OperationalError: If reading the data manifest or the schema fails.
+            ProgrammingError: If the query execution has no data manifest location.
+        """
+        if not self._prepare_parquet_location():
+            return ()
+        self._parquet_schema = self._read_parquet_schema()
+        return to_column_info(self._parquet_schema)
 
     def _prepare_parquet_location(self) -> bool:
         """Prepare unload location for Parquet reading.
@@ -1303,3 +1318,5 @@ class AthenaPolarsResultSet(AthenaResultSet):
         self._df = pl.DataFrame()
         self._df_iter = PolarsDataFrameIterator(self._df, {}, [])
         self._row_iter = iter(())
+        self._data_manifest = []
+        self._parquet_schema = None

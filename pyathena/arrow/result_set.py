@@ -147,7 +147,7 @@ class AthenaArrowResultSet(AthenaResultSet):
         self._kwargs = kwargs
         self._fs = self._create_s3_file_system()
         # The dataset of the Parquet files of an UNLOAD result, which _read_metadata()
-        # opens; None without data files.
+        # opens and _read_parquet() reads and releases; None without data files.
         self._parquet_dataset: ParquetDataset | None = None
         reads = _pre_fetch and self.state == AthenaQueryExecution.STATE_SUCCEEDED
         if reads:
@@ -417,16 +417,32 @@ class AthenaArrowResultSet(AthenaResultSet):
 
         Raises:
             OperationalError: If reading the metadata fails.
+            ProgrammingError: If the query execution of an UNLOAD result has no data
+                manifest location.
         """
-        if not (self.output_location and self.is_unload):
+        if self.output_location and self.is_unload:
+            self._metadata = self._read_parquet_metadata()
+        else:
             super()._read_metadata()
-            return
+
+    def _read_parquet_metadata(self) -> tuple[dict[str, Any], ...]:
+        """Open the dataset of the Parquet files of the UNLOAD result, and describe it.
+
+        The dataset is kept for ``_read_parquet()``.
+
+        Returns:
+            The column metadata of the schema of the dataset, or none without data
+            files.
+
+        Raises:
+            OperationalError: If reading the data manifest or the schema fails.
+            ProgrammingError: If the query execution has no data manifest location.
+        """
         self._parquet_dataset = self._open_parquet_dataset()
         if self._parquet_dataset is None:
-            self._metadata = ()
-            return
+            return ()
         try:
-            self._metadata = to_column_info(self._parquet_dataset.schema)
+            return to_column_info(self._parquet_dataset.schema)
         except Exception as e:
             _logger.exception(f"Failed to read schema {self._unload_location}.")
             raise OperationalError(*e.args) from e
@@ -472,10 +488,11 @@ class AthenaArrowResultSet(AthenaResultSet):
         """
         import pyarrow as pa
 
-        if self._parquet_dataset is None:
+        dataset, self._parquet_dataset = self._parquet_dataset, None
+        if dataset is None:
             return pa.Table.from_pydict({})
         try:
-            return self._parquet_dataset.read(use_threads=True)
+            return dataset.read(use_threads=True)
         except Exception as e:
             _logger.exception(f"Failed to read {self._unload_location}.")
             raise OperationalError(*e.args) from e

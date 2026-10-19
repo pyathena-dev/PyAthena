@@ -507,6 +507,14 @@ class TestAthenaPandasResultSet:
         with patch.object(AthenaPandasResultSet, "_as_pandas", side_effect=AssertionError):
             assert _local_result_set(fs, tables=tables, describe=True, **kwargs) == expected
 
+    def test_describe_unload_chunks_reads_first_footer(self, tmp_path):
+        """GH-1281: describe() of an UNLOAD result read in chunks opens only its first file."""
+        fs = LocalBucketFileSystem(tmp_path)
+        tables = [pa.table({"i": [1]}), pa.table({"i": [2]}), pa.table({"i": [3]})]
+        description = _local_result_set(fs, tables=tables, describe=True, chunksize=1)
+        assert description == [("i", "bigint", None, None, 19, 0, "NULLABLE")]
+        assert len(fs.opened) == 1
+
     def test_iter_parquet_chunks_null_in_later_file(self, tmp_path):
         """Top-level integer and boolean columns with NULL anywhere convert alike in every chunk.
 

@@ -172,8 +172,7 @@ class AthenaAioResultSet(AthenaResultSet):
             OperationalError: If the request fails.
         """
         response = await self._async_get_query_results(self._arraysize)
-        self._process_metadata(response)
-        self._process_update_count(response)
+        self._process_result_metadata(response)
         rows, self._next_token = self._parse_result_rows(response)
         offset = 1 if rows and self._is_first_row_column_labels(rows) else 0
         self._process_rows(rows, offset)
