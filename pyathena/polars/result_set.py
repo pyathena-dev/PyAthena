@@ -339,19 +339,23 @@ class AthenaPolarsResultSetMetadataReader(AthenaUnloadResultSetMetadataReader):
         """
         return self._parquet_schema
 
-    def storage_options(self, default: Callable[[], dict[str, Any]]) -> Any:
+    @staticmethod
+    def resolve_storage_options(
+        read_kwargs: dict[str, Any], default: Callable[[], dict[str, Any]]
+    ) -> Any:
         """Get the storage options for a Polars read function.
 
         Args:
-            default: Returns the storage options that the reader chooses. It is called
-                only when ``execute()`` was not given ``storage_options``, so replaced
-                options do not fetch credentials.
+            read_kwargs: The read options of the result set (:attr:`read_kwargs`).
+            default: Returns the storage options that the reader or the result set
+                chooses. It is called only when ``execute()`` was not given
+                ``storage_options``, so replaced options do not fetch credentials.
 
         Returns:
             The ``storage_options`` given to ``execute()``, or else the default.
         """
-        if "storage_options" in self._read_kwargs:
-            return self._read_kwargs["storage_options"]
+        if "storage_options" in read_kwargs:
+            return read_kwargs["storage_options"]
         return default()
 
     @staticmethod
@@ -399,8 +403,8 @@ class AthenaPolarsResultSetMetadataReader(AthenaUnloadResultSetMetadataReader):
             # Use scan_parquet to get schema without reading all data
             lazy_df = pl.scan_parquet(
                 location,
-                storage_options=self.storage_options(
-                    lambda: self.parquet_storage_options(self._connection)
+                storage_options=self.resolve_storage_options(
+                    self._read_kwargs, lambda: self.parquet_storage_options(self._connection)
                 ),
             )
             self._parquet_schema = lazy_df.collect_schema()
@@ -529,18 +533,15 @@ class AthenaPolarsResultSet(AthenaResultSet):
         )
         self._metadata_reader = reader
         self._kwargs = reader.read_kwargs
-        self._unload_location = unload_location
-        # The Parquet files of an UNLOAD result, from its data manifest.
-        self._data_manifest: list[str] = []
-        # The schema of the Parquet files of an UNLOAD result, which the reader reads;
-        # None without data files.
-        self._parquet_schema: pl.Schema | None = None
         reads = self.state == AthenaQueryExecution.STATE_SUCCEEDED
         if reads:
             self._load_metadata()
-            self._unload_location = reader.unload_location
-            self._data_manifest = reader.data_manifest
-            self._parquet_schema = reader.parquet_schema
+        # The UNLOAD output that the reader found, for the read of the rows: the location,
+        # the Parquet files from the data manifest, and their schema (None without
+        # data files).
+        self._unload_location = reader.unload_location
+        self._data_manifest = reader.data_manifest
+        self._parquet_schema = reader.parquet_schema
 
         import polars as pl
 
@@ -575,22 +576,18 @@ class AthenaPolarsResultSet(AthenaResultSet):
     def _storage_options(self, default: Callable[[], dict[str, Any]]) -> Any:
         """Get the storage options for a Polars read function.
 
-        The metadata reader resolves the storage options of its schema read alike
-        (``AthenaPolarsResultSetMetadataReader.storage_options()``); this one reads
-        the options that the result set keeps, also in a chunk read that starts
-        later.
+        The metadata reader resolves them for its schema read alike; see
+        ``AthenaPolarsResultSetMetadataReader.resolve_storage_options()``. This
+        reads the options that the result set keeps, so that a chunk read that
+        starts later does not need the reader.
 
         Args:
-            default: Returns the storage options that the result set chooses. It is called
-                only when ``execute()`` was not given ``storage_options``, so replaced
-                options do not fetch credentials.
+            default: Returns the storage options that the result set chooses.
 
         Returns:
             The ``storage_options`` given to ``execute()``, or else the default.
         """
-        if "storage_options" in self._kwargs:
-            return self._kwargs["storage_options"]
-        return default()
+        return AthenaPolarsResultSetMetadataReader.resolve_storage_options(self._kwargs, default)
 
     def _read_kwargs(
         self, storage_options: Callable[[], dict[str, Any]], **defaults: Any
@@ -907,10 +904,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
         cannot read them so: it reads them at nanoseconds, and they are cast to
         microseconds.
 
-        ``_prepare_parquet_location()`` must have found the unload location first.
+        The metadata reader must have found the unload location first.
 
         Args:
-            schema: The schema of the Parquet files, from ``_read_parquet_schema()``.
+            schema: The schema of the Parquet files, which the metadata reader read.
 
         Returns:
             Polars DataFrame containing the Parquet data.
@@ -1220,10 +1217,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
         microseconds, except that Polars 1.x scans them at nanoseconds and casts them,
         as ``_read_parquet()`` does.
 
-        ``_prepare_parquet_location()`` must have found the unload location first.
+        The metadata reader must have found the unload location first.
 
         Args:
-            schema: The schema of the Parquet files, from ``_read_parquet_schema()``.
+            schema: The schema of the Parquet files, which the metadata reader read.
 
         Returns:
             An iterator of a Polars DataFrame for each chunk, read lazily.

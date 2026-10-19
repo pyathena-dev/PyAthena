@@ -71,14 +71,17 @@ class AthenaArrowResultSetMetadataReader(AthenaUnloadResultSetMetadataReader):
         )
         self._connect_timeout = connect_timeout
         self._request_timeout = request_timeout
-        self._filesystem = self._create_s3_file_system()
+        # Created on first use, so that a description of a CSV result creates none.
+        self._filesystem: Any = None
         # The dataset of the Parquet files of an UNLOAD result, which read() opens; None
         # without data files, and once taken.
         self._parquet_dataset: ParquetDataset | None = None
 
     @property
     def filesystem(self) -> Any:
-        """The pyarrow S3 filesystem that reads the result files."""
+        """The pyarrow S3 filesystem that reads the result files, created on first use."""
+        if self._filesystem is None:
+            self._filesystem = self._create_s3_file_system()
         return self._filesystem
 
     def take_parquet_dataset(self) -> ParquetDataset | None:
@@ -110,7 +113,7 @@ class AthenaArrowResultSetMetadataReader(AthenaUnloadResultSetMetadataReader):
             # Athena writes timestamps as INT96, whose default unit, nanoseconds, cannot
             # hold years before 1677 or after 2262.
             self._parquet_dataset = parquet.ParquetDataset(
-                f"{bucket}/{key}", filesystem=self._filesystem, coerce_int96_timestamp_unit="us"
+                f"{bucket}/{key}", filesystem=self.filesystem, coerce_int96_timestamp_unit="us"
             )
             return to_column_info(self._parquet_dataset.schema)
         except Exception as e:
@@ -259,11 +262,11 @@ class AthenaArrowResultSet(AthenaResultSet):
         )
         self._metadata_reader = reader
         self._fs = reader.filesystem
-        self._unload_location = unload_location
         succeeded = self.state == AthenaQueryExecution.STATE_SUCCEEDED
         if succeeded:
             self._load_metadata()
-            self._unload_location = reader.unload_location
+        # The UNLOAD output location that the reader found, given or derived.
+        self._unload_location = reader.unload_location
         if succeeded and self.output_location:
             self._table = self._as_arrow()
         elif succeeded:

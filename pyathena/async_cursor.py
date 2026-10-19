@@ -367,13 +367,14 @@ class AsyncCursor(BaseCursor):
         Returns:
             The keyword arguments.
         """
-        return {
+        # A call, so that an argument given twice raises TypeError.
+        return dict(
             **self._metadata_reader_arguments(query_execution),
-            "converter": self._converter,
-            "arraysize": self._arraysize,
-            "result_set_type_hints": result_set_type_hints,
+            converter=self._converter,
+            arraysize=self._arraysize,
+            result_set_type_hints=result_set_type_hints,
             **self._result_set_kwargs,
-        }
+        )
 
     def _collect_result_set(
         self,

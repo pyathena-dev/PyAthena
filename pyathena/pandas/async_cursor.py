@@ -191,17 +191,18 @@ class AsyncPandasCursor(AsyncCursor):
         """
         if kwargs is None:
             kwargs = {}
-        return {
+        # A call, so that an argument given twice raises TypeError.
+        return dict(
             **super()._metadata_reader_arguments(query_execution),
-            "unload": self._unload,
-            "unload_location": unload_location,
-            "engine": kwargs.pop("engine", self._engine),
-            "chunksize": kwargs.pop("chunksize", self._chunksize),
-            "block_size": kwargs.pop("block_size", self._block_size),
-            "cache_type": kwargs.pop("cache_type", self._cache_type),
-            "max_workers": kwargs.pop("s3_max_workers", self._s3_max_workers),
+            unload=self._unload,
+            unload_location=unload_location,
+            engine=kwargs.pop("engine", self._engine),
+            chunksize=kwargs.pop("chunksize", self._chunksize),
+            block_size=kwargs.pop("block_size", self._block_size),
+            cache_type=kwargs.pop("cache_type", self._cache_type),
+            max_workers=kwargs.pop("s3_max_workers", self._s3_max_workers),
             **kwargs,
-        }
+        )
 
     @override
     def _result_set_arguments(
@@ -237,16 +238,17 @@ class AsyncPandasCursor(AsyncCursor):
         auto_optimize_chunksize = kwargs.pop(
             "auto_optimize_chunksize", self._auto_optimize_chunksize
         )
-        return {
+        # A call, so that an argument given twice raises TypeError.
+        return dict(
             **self._metadata_reader_arguments(query_execution, unload_location, kwargs),
-            "converter": self._converter,
-            "arraysize": self._arraysize,
-            "result_set_type_hints": result_set_type_hints,
-            "keep_default_na": keep_default_na,
-            "na_values": na_values,
-            "quoting": quoting,
-            "auto_optimize_chunksize": auto_optimize_chunksize,
-        }
+            converter=self._converter,
+            arraysize=self._arraysize,
+            result_set_type_hints=result_set_type_hints,
+            keep_default_na=keep_default_na,
+            na_values=na_values,
+            quoting=quoting,
+            auto_optimize_chunksize=auto_optimize_chunksize,
+        )
 
     @override
     def _collect_result_set(

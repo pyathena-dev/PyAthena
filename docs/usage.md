@@ -20,7 +20,7 @@ The `query_id` property keeps the ID of the last query.
 A closed result set, such as one that an `AsyncCursor` future returned, also raises `ProgrammingError` from its fetch methods and from `as_pandas()`, `as_arrow()`, `as_polars()`, and `iter_chunks()`.
 An iterator that `iter_chunks()` returned before the close raises `ProgrammingError` from its next read.
 
-Closing an `AsyncCursor` or one of its variants stops the futures of `execute()`, `description()`, and `poll()` that still wait for their query.
+Closing an `AsyncCursor`, an `AsyncDictCursor`, or the `AsyncPandasCursor`, `AsyncArrowCursor`, `AsyncPolarsCursor`, or `AsyncS3FSCursor` stops the futures of `execute()`, `description()`, and `poll()` that still wait for their query.
 They raise `ProgrammingError` at their next status check, also when that check finds the query finished, without reading the result, and the query itself keeps running.
 The futures of `cancel()` and `query_execution()` still run.
 A future of `execute()` that is already reading its result resolves with a closed result set, and one that is just finishing can resolve with either an open or a closed result set.

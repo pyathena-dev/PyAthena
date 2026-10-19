@@ -14,6 +14,7 @@ from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
+    EVENT_TIMEOUT,
     assert_close_stops_waiting_futures,
     assert_closes_result_sets_after_close,
     assert_description_reads_only_metadata,
@@ -358,6 +359,27 @@ class TestAsyncPandasCursor:
         expected["max_workers"] = expected.pop("s3_max_workers")
         assert {key: kwargs[key] for key in expected} == expected
         assert cursor._executor._max_workers == 1
+
+    def test_execute_option_named_like_a_result_set_argument(self):
+        """GH-1281: an option of execute() that names an argument of the result set raises.
+
+        It raises TypeError, as a duplicate keyword argument does, instead of
+        replacing the argument. No AWS calls; the query is mocked.
+        """
+        query_execution = MagicMock(state=AthenaQueryExecution.STATE_FAILED)
+        with (
+            AsyncPandasCursor(
+                connection=MagicMock(),
+                converter=MagicMock(),
+                formatter=MagicMock(),
+                retry_config=RetryConfig(),
+            ) as cursor,
+            patch.object(AsyncPandasCursor, "_execute", return_value="query_id"),
+            patch.object(AsyncPandasCursor, "_poll", return_value=query_execution),
+        ):
+            _, future = cursor.execute("SELECT 1", converter=MagicMock())
+            with pytest.raises(TypeError, match="converter"):
+                future.result(EVENT_TIMEOUT)
 
     def test_close_closes_result_sets_after_close(self):
         """GH-1208: closing the cursor closes the result sets created after it (no AWS)."""

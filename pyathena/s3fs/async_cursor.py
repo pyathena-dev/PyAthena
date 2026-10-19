@@ -168,11 +168,12 @@ class AsyncS3FSCursor(AsyncCursor):
         """
         if kwargs is None:
             kwargs = {}
-        return {
+        # A call, so that an argument given twice raises TypeError.
+        return dict(
             **super()._result_set_arguments(query_execution, result_set_type_hints),
-            "csv_reader": kwargs.pop("csv_reader", self._csv_reader),
+            csv_reader=kwargs.pop("csv_reader", self._csv_reader),
             **kwargs,
-        }
+        )
 
     @override
     def _collect_result_set(

@@ -199,12 +199,13 @@ class AsyncPolarsCursor(AsyncCursor):
         """
         if kwargs is None:
             kwargs = {}
-        return {
+        # A call, so that an argument given twice raises TypeError.
+        return dict(
             **super()._metadata_reader_arguments(query_execution),
-            "unload": self._unload,
-            "unload_location": unload_location,
+            unload=self._unload,
+            unload_location=unload_location,
             **kwargs,
-        }
+        )
 
     @override
     def _result_set_arguments(
@@ -237,13 +238,14 @@ class AsyncPolarsCursor(AsyncCursor):
             "max_workers": kwargs.pop("s3_max_workers", self._s3_max_workers),
             "chunksize": kwargs.pop("chunksize", self._chunksize),
         }
-        return {
+        # A call, so that an argument given twice raises TypeError.
+        return dict(
             **self._metadata_reader_arguments(query_execution, unload_location, kwargs),
-            "converter": self._converter,
-            "arraysize": self._arraysize,
-            "result_set_type_hints": result_set_type_hints,
+            converter=self._converter,
+            arraysize=self._arraysize,
+            result_set_type_hints=result_set_type_hints,
             **rows,
-        }
+        )
 
     @override
     def _collect_result_set(

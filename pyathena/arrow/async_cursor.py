@@ -180,13 +180,14 @@ class AsyncArrowCursor(AsyncCursor):
         """
         if kwargs is None:
             kwargs = {}
-        return {
+        # A call, so that an argument given twice raises TypeError.
+        return dict(
             **super()._metadata_reader_arguments(query_execution),
-            "unload": self._unload,
-            "unload_location": unload_location,
-            "connect_timeout": kwargs.pop("connect_timeout", self._connect_timeout),
-            "request_timeout": kwargs.pop("request_timeout", self._request_timeout),
-        }
+            unload=self._unload,
+            unload_location=unload_location,
+            connect_timeout=kwargs.pop("connect_timeout", self._connect_timeout),
+            request_timeout=kwargs.pop("request_timeout", self._request_timeout),
+        )
 
     @override
     def _result_set_arguments(
@@ -212,14 +213,15 @@ class AsyncArrowCursor(AsyncCursor):
         """
         if kwargs is None:
             kwargs = {}
-        return {
+        # A call, so that an argument given twice raises TypeError.
+        return dict(
             **self._metadata_reader_arguments(query_execution, unload_location, kwargs),
-            "converter": self._converter,
-            "arraysize": self._arraysize,
-            "result_set_type_hints": result_set_type_hints,
+            converter=self._converter,
+            arraysize=self._arraysize,
+            result_set_type_hints=result_set_type_hints,
             # The options that the reader did not take.
             **kwargs,
-        }
+        )
 
     @override
     def _collect_result_set(

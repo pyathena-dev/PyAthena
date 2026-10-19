@@ -519,6 +519,18 @@ class TestAthenaPandasResultSet:
         assert description == [("i", "bigint", None, None, 19, 0, "NULLABLE")]
         assert len(fs.opened) == 1
 
+    def test_iter_parquet_chunks_without_rows(self, tmp_path):
+        """GH-1281: an UNLOAD result read in chunks whose files hold no rows keeps its columns.
+
+        Its DataFrame has the columns that describe it, as a result read whole does.
+        """
+        fs = LocalBucketFileSystem(tmp_path)
+        tables = [pa.table({"i": pa.array([], pa.int64())})]
+        result_set = _local_result_set(fs, tables=tables, chunksize=1)
+        assert result_set.description == [("i", "bigint", None, None, 19, 0, "NULLABLE")]
+        assert [chunk.columns.tolist() for chunk in result_set.iter_chunks()] == [["i"]]
+        assert result_set.fetchall() == []
+
     def test_iter_parquet_chunks_null_in_later_file(self, tmp_path):
         """Top-level integer and boolean columns with NULL anywhere convert alike in every chunk.
 

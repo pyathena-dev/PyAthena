@@ -71,7 +71,12 @@ class AthenaResultSetMetadataReader:
 
     @property
     def is_unload(self) -> bool:
-        """Whether the result set is read from the output files of an UNLOAD query."""
+        """Whether the query is an UNLOAD statement that the cursor runs for its result."""
+        return False
+
+    @property
+    def reads_unload_files(self) -> bool:
+        """Whether the result set is read from the Parquet files of the UNLOAD output."""
         return False
 
     @property
@@ -270,6 +275,7 @@ class AthenaUnloadResultSetMetadataReader(AthenaResultSetMetadataReader):
         return bool(self._unload and query and query.strip().upper().startswith("UNLOAD"))
 
     @property
+    @override
     def reads_unload_files(self) -> bool:
         """Whether the result set is read from the Parquet files of the UNLOAD output.
 
@@ -634,10 +640,14 @@ class AthenaResultSet(CursorIterator):
 
     @property
     def is_unload(self) -> bool:
-        """Whether the result set is read from the output files of an UNLOAD query.
+        """Whether the query is an UNLOAD statement that the cursor runs for its result.
+
+        Its result is read from the Parquet files of the UNLOAD output when the query
+        has a result location; without one, as with managed query result storage, it
+        is read from ``GetQueryResults``.
 
         Returns:
-            True if the metadata reader of the result set reads an UNLOAD result.
+            True if the metadata reader of the result set finds an UNLOAD result.
         """
         return self._metadata_reader is not None and self._metadata_reader.is_unload
 
@@ -909,7 +919,7 @@ class AthenaResultSet(CursorIterator):
         """
         reader = cast(AthenaResultSetMetadataReader, self._metadata_reader)
         reader.read()
-        if self.output_location and reader.is_unload:
+        if reader.reads_unload_files:
             self._metadata = reader.metadata
         else:
             self._set_metadata(cast(tuple[dict[str, Any], ...], reader.metadata))
