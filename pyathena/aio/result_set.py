@@ -133,7 +133,7 @@ class AthenaAioResultSet(AthenaResultSet):
         """
         if self.is_closed:
             raise ProgrammingError("AthenaAioResultSet is closed.")
-        request = self._build_get_query_results_request(max_results, next_token)
+        request = self._reader.build_get_query_results_request(max_results, next_token)
         try:
             response = await async_retry_api_call(
                 self.connection.client.get_query_results,

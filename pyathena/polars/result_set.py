@@ -37,7 +37,12 @@ from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.model import AthenaQueryExecution
 from pyathena.polars.converter import _to_datetimes
 from pyathena.polars.util import to_column_info, to_microseconds
-from pyathena.result_set import _CLOSED_MESSAGE, _FETCH_FAILED_MESSAGE, AthenaResultSet
+from pyathena.result_set import (
+    _CLOSED_MESSAGE,
+    _FETCH_FAILED_MESSAGE,
+    AthenaResultSet,
+    AthenaUnloadResultSetMetadataReader,
+)
 from pyathena.util import RetryConfig, override
 
 if TYPE_CHECKING:
@@ -277,6 +282,138 @@ class PolarsDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         return pl.concat(dfs)
 
 
+class AthenaPolarsResultSetMetadataReader(AthenaUnloadResultSetMetadataReader):
+    """Reads the metadata of a Polars result set from the schema of its Parquet files.
+
+    It owns the read options normalized for the result, and the storage options
+    with which Polars' native object store reads the files. An UNLOAD result is
+    described by the schema that ``polars.scan_parquet()`` collects from its
+    files. ``AthenaPolarsResultSet`` reads the files with that schema
+    (:attr:`parquet_schema`).
+    """
+
+    def __init__(
+        self,
+        connection: Connection[Any],
+        query_execution: AthenaQueryExecution,
+        retry_config: RetryConfig,
+        unload: bool = False,
+        unload_location: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Initialize the reader; it sends no request.
+
+        Args:
+            connection: The connection that ran the query.
+            query_execution: The query execution whose result set to read.
+            retry_config: The retry configuration for API calls.
+            unload: Whether the cursor runs its queries as UNLOAD to Parquet.
+            unload_location: The S3 location of the UNLOAD output.
+            **kwargs: The arguments of the Polars read functions. ``schema=None`` is
+                the same as no ``schema``.
+        """
+        super().__init__(
+            connection,
+            query_execution,
+            retry_config,
+            unload=unload,
+            unload_location=unload_location,
+        )
+        # schema=None is Polars' default and the same as no schema, so that the result
+        # set still reads, for example, the timestamps of UNLOAD at microseconds.
+        self._read_kwargs = {k: v for k, v in kwargs.items() if k != "schema" or v is not None}
+        # The schema of the Parquet files of an UNLOAD result, which read() reads; None
+        # without data files.
+        self._parquet_schema: pl.Schema | None = None
+
+    @property
+    def read_kwargs(self) -> dict[str, Any]:
+        """The arguments of the Polars read functions, normalized for the result."""
+        return self._read_kwargs
+
+    @property
+    def parquet_schema(self) -> pl.Schema | None:
+        """The schema of the Parquet files that :meth:`read` read; None without data files.
+
+        INT96 timestamps are nanosecond Datetimes in it.
+        """
+        return self._parquet_schema
+
+    @staticmethod
+    def resolve_storage_options(
+        read_kwargs: dict[str, Any], default: Callable[[], dict[str, Any]]
+    ) -> Any:
+        """Get the storage options for a Polars read function.
+
+        Args:
+            read_kwargs: The read options of the result set (:attr:`read_kwargs`).
+            default: Returns the storage options that the reader or the result set
+                chooses. It is called only when ``execute()`` was not given
+                ``storage_options``, so replaced options do not fetch credentials.
+
+        Returns:
+            The ``storage_options`` given to ``execute()``, or else the default.
+        """
+        if "storage_options" in read_kwargs:
+            return read_kwargs["storage_options"]
+        return default()
+
+    @staticmethod
+    def parquet_storage_options(connection: Connection[Any]) -> dict[str, Any]:
+        """Get storage options for Polars reading via native object_store.
+
+        Polars read_parquet, scan_parquet, and scan_csv use Rust's native object_store
+        crate, which requires AWS credentials to be passed directly rather than through
+        fsspec. The credentials are frozen when the options are created.
+
+        Args:
+            connection: The connection whose session and region the reads use.
+
+        Returns:
+            Dictionary with AWS credentials and region for S3 access.
+        """
+        credentials = connection.session.get_credentials()
+        options: dict[str, Any] = {}
+        if credentials:
+            frozen_credentials = credentials.get_frozen_credentials()
+            options["aws_access_key_id"] = frozen_credentials.access_key
+            options["aws_secret_access_key"] = frozen_credentials.secret_key
+            if frozen_credentials.token:
+                options["aws_session_token"] = frozen_credentials.token
+        if connection.region_name:
+            options["aws_region"] = connection.region_name
+        return options
+
+    @override
+    def _read_parquet_metadata(self) -> tuple[dict[str, Any], ...]:
+        """Read the schema of the Parquet files of the UNLOAD result, and describe it.
+
+        The schema is kept for the read of the result.
+
+        Returns:
+            The column metadata of the schema.
+
+        Raises:
+            OperationalError: If reading the schema fails.
+        """
+        import polars as pl
+
+        location = cast(str, self._unload_location)
+        try:
+            # Use scan_parquet to get schema without reading all data
+            lazy_df = pl.scan_parquet(
+                location,
+                storage_options=self.resolve_storage_options(
+                    self._read_kwargs, lambda: self.parquet_storage_options(self._connection)
+                ),
+            )
+            self._parquet_schema = lazy_df.collect_schema()
+        except Exception as e:
+            _logger.exception(f"Failed to read schema from {location}.")
+            raise OperationalError(*e.args) from e
+        return to_column_info(self._parquet_schema)
+
+
 class AthenaPolarsResultSet(AthenaResultSet):
     """Result set that provides Polars DataFrame results with optional Arrow interoperability.
 
@@ -319,6 +456,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
         instantiated directly by users. Requires polars to be installed.
         PyArrow is optional and only needed for as_arrow() functionality.
     """
+
+    _metadata_reader_class: ClassVar[type[AthenaPolarsResultSetMetadataReader]] = (
+        AthenaPolarsResultSetMetadataReader
+    )
 
     def __init__(
         self,
@@ -373,39 +514,51 @@ class AthenaPolarsResultSet(AthenaResultSet):
             connection=connection,
             converter=converter,
             query_execution=query_execution,
-            arraysize=1,  # Fetch one row to retrieve metadata
+            # The fetch size can exceed the size of a GetQueryResults page, which the
+            # base class validates.
+            arraysize=1,
             retry_config=retry_config,
+            # The metadata reader of the result set reads the metadata.
+            _pre_fetch=False,
             result_set_type_hints=result_set_type_hints,
         )
-        self._rows.clear()  # Clear pre_fetch data
         self._arraysize = arraysize
-        self._unload = unload
-        self._unload_location = unload_location
         self._block_size = block_size
         self._cache_type = cache_type
         self._max_workers = max_workers
         self._chunksize = chunksize
-        # schema=None is Polars' default and the same as no schema, so that the result
-        # set still reads, for example, the timestamps of UNLOAD at microseconds.
-        self._kwargs = {k: v for k, v in kwargs.items() if k != "schema" or v is not None}
-        # The Parquet files of an UNLOAD result, from its data manifest.
-        self._data_manifest: list[str] = []
+        reader = self._metadata_reader_class(
+            connection,
+            query_execution,
+            retry_config,
+            unload=unload,
+            unload_location=unload_location,
+            **kwargs,
+        )
+        self._metadata_reader = reader
+        self._kwargs = reader.read_kwargs
+        self._load_metadata()
+        succeeded = self.state == AthenaQueryExecution.STATE_SUCCEEDED
+        # The UNLOAD output that the reader found, for the read of the rows: the location,
+        # the Parquet files from the data manifest, and their schema (None without
+        # data files).
+        self._unload_location = reader.unload_location
+        self._data_manifest = reader.data_manifest
+        self._parquet_schema = reader.parquet_schema
 
         import polars as pl
 
         # The whole result when it was not read in chunks.
-        # Note: _as_polars() and _create_dataframe_iterator() update _metadata for unload
-        # queries, so the converters and column names must be read AFTER them.
         self._df: pl.DataFrame | None = None
         # Converters for the rows of self._df.
         self._df_converters: dict[str, Callable[[str | None], Any | None]] = {}
-        if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
+        if succeeded and self.output_location:
             if self._chunksize is None:
                 self._df = self._as_polars()
                 self._df_converters = self._get_converters(self._get_frame_column_names())
             else:
                 self._df_iter = self._create_dataframe_iterator()
-        elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
+        elif succeeded:
             # Without a result file, as with managed query result storage, the rows from
             # GetQueryResults are read as a CSV result file, but not in chunks.
             self._df = self._read_csv()
@@ -423,21 +576,6 @@ class AthenaPolarsResultSet(AthenaResultSet):
             )
         self._row_iter: Iterator[tuple[Any, ...]] = self._df_iter.itertuples()
 
-    def _storage_options(self, default: Callable[[], dict[str, Any]]) -> Any:
-        """Get the storage options for a Polars read function.
-
-        Args:
-            default: Returns the storage options that the result set chooses. It is called
-                only when ``execute()`` was not given ``storage_options``, so replaced
-                options do not fetch credentials.
-
-        Returns:
-            The ``storage_options`` given to ``execute()``, or else the default.
-        """
-        if "storage_options" in self._kwargs:
-            return self._kwargs["storage_options"]
-        return default()
-
     def _read_kwargs(
         self, storage_options: Callable[[], dict[str, Any]], **defaults: Any
     ) -> dict[str, Any]:
@@ -445,7 +583,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
 
         Args:
             storage_options: Returns the storage options that the result set chooses;
-                see ``_storage_options()``.
+                the options given to ``execute()`` replace them (see
+                ``AthenaPolarsResultSetMetadataReader.resolve_storage_options()``).
             **defaults: The other arguments that the result set chooses, such as
                 ``separator``.
 
@@ -456,7 +595,11 @@ class AthenaPolarsResultSet(AthenaResultSet):
         return {
             **defaults,
             **self._kwargs,
-            "storage_options": self._storage_options(storage_options),
+            # The options that the result set keeps, so that a chunk read that starts
+            # later does not need the metadata reader.
+            "storage_options": AthenaPolarsResultSetMetadataReader.resolve_storage_options(
+                self._kwargs, storage_options
+            ),
         }
 
     @property
@@ -478,32 +621,6 @@ class AthenaPolarsResultSet(AthenaResultSet):
             # released with the result set.
             "skip_instance_cache": True,
         }
-
-    @staticmethod
-    def _get_parquet_storage_options(connection: Connection[Any]) -> dict[str, Any]:
-        """Get storage options for Polars reading via native object_store.
-
-        Polars read_parquet, scan_parquet, and scan_csv use Rust's native object_store
-        crate, which requires AWS credentials to be passed directly rather than through
-        fsspec. The credentials are frozen when the options are created.
-
-        Args:
-            connection: The connection whose session and region the reads use.
-
-        Returns:
-            Dictionary with AWS credentials and region for S3 access.
-        """
-        credentials = connection.session.get_credentials()
-        options: dict[str, Any] = {}
-        if credentials:
-            frozen_credentials = credentials.get_frozen_credentials()
-            options["aws_access_key_id"] = frozen_credentials.access_key
-            options["aws_secret_access_key"] = frozen_credentials.secret_key
-            if frozen_credentials.token:
-                options["aws_session_token"] = frozen_credentials.token
-        if connection.region_name:
-            options["aws_region"] = connection.region_name
-        return options
 
     @property
     def dtypes(self) -> dict[str, Any]:
@@ -635,15 +752,12 @@ class AthenaPolarsResultSet(AthenaResultSet):
     def _create_dataframe_iterator(self) -> PolarsDataFrameIterator:
         """Create a DataFrame iterator that reads the result file in chunks.
 
-        For unload queries, it replaces the metadata with the schema of the Parquet
-        files, as ``_as_polars()`` does, before the chunks are read.
-
         The result set calls this method when it is created, in ``execute()`` or in the
         future that ``AsyncPolarsCursor.execute()`` returns. The requests that prepare
         the reads are made then, before the first fetch, and raise their errors there:
-        the size check of a CSV result file, and the data manifest and the Parquet
-        schema of an UNLOAD result. The schema sets the metadata and is passed to
-        ``_iter_parquet_chunks()``. The chunks themselves are read lazily.
+        the size check of a CSV result file here, and the data manifest and the Parquet
+        schema of an UNLOAD result by the metadata reader before. The schema is passed
+        to ``_iter_parquet_chunks()``. The chunks themselves are read lazily.
 
         Returns:
             PolarsDataFrameIterator that reads each chunk lazily.
@@ -651,12 +765,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
         reader: Iterator[pl.DataFrame]
         if not self.is_unload:
             reader = self._iter_csv_chunks()
-        elif self._prepare_parquet_location():
-            schema = self._read_parquet_schema()
-            self._metadata = to_column_info(schema)
-            reader = self._iter_parquet_chunks(schema)
+        elif self._parquet_schema is not None:
+            reader = self._iter_parquet_chunks(self._parquet_schema)
         else:
-            self._metadata = ()
             reader = iter(())
         column_names = self._get_frame_column_names()
         return PolarsDataFrameIterator(
@@ -715,19 +826,6 @@ class AthenaPolarsResultSet(AthenaResultSet):
         ):
             return False
         return not self.output_location or self._get_content_length() != 0
-
-    def _prepare_parquet_location(self) -> bool:
-        """Prepare unload location for Parquet reading.
-
-        Returns:
-            True if Parquet data is available to read, False otherwise.
-        """
-        self._data_manifest = self._read_data_manifest()
-        if not self._data_manifest:
-            return False
-        if not self._unload_location:
-            self._unload_location = "/".join(self._data_manifest[0].split("/")[:-1]) + "/"
-        return True
 
     def _read_csv(self) -> pl.DataFrame:
         """Read query results from CSV file in S3, or the GetQueryResults rows as one without it.
@@ -798,10 +896,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
         cannot read them so: it reads them at nanoseconds, and they are cast to
         microseconds.
 
-        ``_prepare_parquet_location()`` must have found the unload location first.
+        The metadata reader must have found the unload location first.
 
         Args:
-            schema: The schema of the Parquet files, from ``_read_parquet_schema()``.
+            schema: The schema of the Parquet files, which the metadata reader read.
 
         Returns:
             Polars DataFrame containing the Parquet data.
@@ -818,7 +916,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
         dtypes = self._output_dtypes(schema, options)
         try:
             kwargs = self._read_kwargs(
-                lambda: self._get_parquet_storage_options(self.connection), **(options or {})
+                lambda: AthenaPolarsResultSetMetadataReader.parquet_storage_options(
+                    self.connection
+                ),
+                **(options or {}),
             )
             df = self._cast(pl.read_parquet(self._unload_location, **kwargs), dtypes)
         except Exception as e:
@@ -827,34 +928,6 @@ class AthenaPolarsResultSet(AthenaResultSet):
         if options is None and dtypes.keys() & set(df.columns):
             self._warn_nanosecond_read()
         return df
-
-    def _read_parquet_schema(self) -> pl.Schema:
-        """Read the schema of the Parquet files.
-
-        Returns:
-            The schema, with INT96 timestamps as nanosecond Datetimes.
-
-        Raises:
-            ProgrammingError: If the unload location is not set.
-            OperationalError: If reading the schema fails.
-        """
-        import polars as pl
-
-        if not self._unload_location:
-            raise ProgrammingError("UnloadLocation is none or empty.")
-
-        try:
-            # Use scan_parquet to get schema without reading all data
-            lazy_df = pl.scan_parquet(
-                self._unload_location,
-                storage_options=self._storage_options(
-                    lambda: self._get_parquet_storage_options(self.connection)
-                ),
-            )
-            return lazy_df.collect_schema()
-        except Exception as e:
-            _logger.exception(f"Failed to read schema from {self._unload_location}.")
-            raise OperationalError(*e.args) from e
 
     def _int96_read_options(self, schema: pl.Schema) -> dict[str, Any] | None:
         """Get the Polars read arguments that read the INT96 timestamps of UNLOAD at microseconds.
@@ -955,13 +1028,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
 
         if not self.is_unload:
             return self._read_csv()
-        if not self._prepare_parquet_location():
-            self._metadata = ()
+        if self._parquet_schema is None:
             return pl.DataFrame()
-        schema = self._read_parquet_schema()
-        df = self._read_parquet(schema)
-        self._metadata = () if df.is_empty() else to_column_info(schema)
-        return df
+        return self._read_parquet(self._parquet_schema)
 
     def as_polars(self) -> pl.DataFrame:
         """Return query results as a Polars DataFrame.
@@ -1108,7 +1177,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
             # scan_csv uses Rust's native object_store (like scan_parquet),
             # not fsspec, so we use the same storage options as Parquet
             read_kwargs = self._read_kwargs(
-                lambda: self._get_parquet_storage_options(connection), **defaults
+                lambda: AthenaPolarsResultSetMetadataReader.parquet_storage_options(connection),
+                **defaults,
             )
             if "schema_overrides" not in self._kwargs:
                 # Renamed after reading, so that Polars matches the types to the header.
@@ -1139,10 +1209,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
         microseconds, except that Polars 1.x scans them at nanoseconds and casts them,
         as ``_read_parquet()`` does.
 
-        ``_prepare_parquet_location()`` must have found the unload location first.
+        The metadata reader must have found the unload location first.
 
         Args:
-            schema: The schema of the Parquet files, from ``_read_parquet_schema()``.
+            schema: The schema of the Parquet files, which the metadata reader read.
 
         Returns:
             An iterator of a Polars DataFrame for each chunk, read lazily.
@@ -1217,7 +1287,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             lazy_df = pl.scan_parquet(
                 location,
                 **self._read_kwargs(
-                    lambda: self._get_parquet_storage_options(connection),
+                    lambda: AthenaPolarsResultSetMetadataReader.parquet_storage_options(connection),
                     **(options or {}),
                 ),
             )
@@ -1281,3 +1351,5 @@ class AthenaPolarsResultSet(AthenaResultSet):
         self._df = pl.DataFrame()
         self._df_iter = PolarsDataFrameIterator(self._df, {}, [])
         self._row_iter = iter(())
+        self._data_manifest = []
+        self._parquet_schema = None

@@ -31,6 +31,10 @@ Polars Result Set
    :members:
    :inherited-members:
 
+.. autoclass:: pyathena.polars.result_set.AthenaPolarsResultSetMetadataReader
+   :members:
+   :inherited-members:
+
 .. autoclass:: pyathena.polars.result_set.PolarsDataFrameIterator
    :members:
 

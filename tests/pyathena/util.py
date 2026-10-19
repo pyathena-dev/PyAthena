@@ -553,6 +553,115 @@ def assert_closes_result_sets_after_close(cursor_class):
     taken.close.assert_not_called()
 
 
+def assert_close_stops_waiting_futures(cursor_class):
+    """Check that closing an AsyncCursor stops the futures that wait for a query.
+
+    The cursor sends no request to AWS. First, its query stays running, and it
+    waits a minute between status requests, so that the futures of
+    ``execute()``, ``description()``, and ``poll()`` end within
+    ``EVENT_TIMEOUT`` only because the close ends their wait; a ``cancel()``
+    queued behind them still runs. Then the cursor closes during the status
+    request that reports the query finished, and each future still raises
+    instead of building a result set from the placeholder execution.
+
+    Args:
+        cursor_class: The AsyncCursor class.
+    """
+    submitters = (
+        lambda cursor: cursor.execute("SELECT 1")[1],
+        lambda cursor: cursor.description("query_id"),
+        lambda cursor: cursor.poll("query_id"),
+    )
+    cursor = placeholder_connection().cursor(cursor_class, poll_interval=60, max_workers=3)
+    # The three futures and the test; a second status request would time out here.
+    polled = threading.Barrier(4)
+
+    def running(query_id):
+        polled.wait(EVENT_TIMEOUT)
+        return SimpleNamespace(state=AthenaQueryExecution.STATE_RUNNING)
+
+    with (
+        patch.object(cursor, "_execute", return_value="query_id"),
+        patch.object(cursor, "_get_query_execution", side_effect=running) as status,
+        patch.object(cursor, "_cancel") as cancel,
+    ):
+        try:
+            futures = [submit(cursor) for submit in submitters]
+            polled.wait(EVENT_TIMEOUT)
+            cancelled = cursor.cancel("query_id")
+            cursor.close()
+            for future in futures:
+                with pytest.raises(ProgrammingError, match=r"Cursor is closed\."):
+                    future.result(EVENT_TIMEOUT)
+            cancelled.result(EVENT_TIMEOUT)
+        finally:
+            polled.abort()
+            cursor.close(wait=True)
+    assert status.call_count == 3
+    cancel.assert_called_once_with("query_id")
+
+    for submit in submitters:
+        cursor = placeholder_connection().cursor(cursor_class)
+
+        def finished(query_id, cursor=cursor):
+            cursor.close()
+            return SimpleNamespace(state=AthenaQueryExecution.STATE_SUCCEEDED)
+
+        with (
+            patch.object(cursor, "_execute", return_value="query_id"),
+            patch.object(cursor, "_get_query_execution", side_effect=finished),
+        ):
+            future = submit(cursor)
+            with pytest.raises(ProgrammingError, match=r"Cursor is closed\."):
+                future.result(EVENT_TIMEOUT)
+
+
+def csv_result_responses():
+    """Build the responses of a query that succeeds with a CSV result file, without AWS.
+
+    The result has one integer column, ``a``; ``GetQueryResults`` returns no rows.
+
+    Returns:
+        The response to each operation name, for :func:`answered_requests`.
+    """
+    return {
+        **FAILED_EXECUTION_RESPONSES,
+        "GetQueryExecution": {
+            "QueryExecution": {
+                **succeeded_query_execution_data("query-id", "SELECT 1", datetime.now(UTC)),
+                "ResultConfiguration": {"OutputLocation": "s3://bucket/path/query-id.csv"},
+            }
+        },
+        "GetQueryResults": query_results_response([("a", "integer")]),
+    }
+
+
+def assert_description_reads_only_metadata(cursor_class):
+    """Check that ``description()`` of an AsyncCursor reads only the result metadata.
+
+    For a CSV result, the future requests one row of ``GetQueryResults`` and
+    reads no result file: the connection sends no other request. A request
+    to S3, which a read of the result file starts with (``HeadObject``),
+    fails without leaving the process.
+
+    Args:
+        cursor_class: The AsyncCursor class.
+    """
+    cursor = placeholder_connection().cursor(cursor_class)
+    s3_client = cursor.connection.s3_client
+    try:
+        with (
+            answered_requests(cursor.connection.client, csv_result_responses()) as requests,
+            patch.object(s3_client, "_make_api_call", side_effect=AssertionError("S3 request")),
+        ):
+            description = cursor.description("query-id").result(EVENT_TIMEOUT)
+    finally:
+        cursor.close(wait=True)
+    assert description == [("a", "integer", None, None, 3, 0, "UNKNOWN")]
+    assert [operation for operation, _ in requests] == ["GetQueryExecution", "GetQueryResults"]
+    assert requests[1][1]["MaxResults"] == 1
+
+
 def offline_spark_cursor(cursor_class):
     """Build a Spark cursor on a connection that sends no request to AWS on its own.
 

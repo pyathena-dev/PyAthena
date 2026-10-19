@@ -31,6 +31,10 @@ Arrow Result Set
    :members:
    :inherited-members:
 
+.. autoclass:: pyathena.arrow.result_set.AthenaArrowResultSetMetadataReader
+   :members:
+   :inherited-members:
+
 Arrow Data Converters
 ----------------------
 

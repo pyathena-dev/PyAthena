@@ -300,21 +300,14 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
             raise
         return session_id
 
-    def _terminate_session(self) -> None:
-        """Terminate the cursor's Spark session with ``TerminateSession``.
-
-        Raises:
-            OperationalError: If the request fails.
-        """
-        self._terminate_session_by_id(self._session_id)
-
     def _terminate_session_by_id(self, session_id: str) -> None:
         """Terminate a Spark session with ``TerminateSession``.
 
-        Session startup calls this synchronously in every cursor variant,
-        including those that override ``_terminate_session`` with a coroutine,
-        so subclasses must not override this method with a coroutine. The
-        request cleans up, so a stop scope does not stop its retries (see
+        Session startup and :meth:`close` call this synchronously, also in
+        ``AioSparkCursor``, which releases a cursor that nobody awaits with
+        ``SparkBaseCursor.close``, so subclasses must not override this method
+        with a coroutine. The request cleans up, so a stop scope does not stop
+        its retries (see
         :func:`~pyathena.util.unstoppable_retries`).
 
         Args:
@@ -496,7 +489,7 @@ class SparkBaseCursor(BaseCursor, metaclass=ABCMeta):
         """
         self._closed = True
         if self._terminate_session_on_close:
-            self._terminate_session()
+            self._terminate_session_by_id(self._session_id)
             # Terminated; later calls do nothing.
             self._terminate_session_on_close = False
 

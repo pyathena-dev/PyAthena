@@ -35,7 +35,12 @@ from pyathena.error import DataError, ProgrammingError
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.model import AthenaQueryExecution
 from pyathena.pandas.reader import _BINARY_NULL, BinaryCSVReader
-from pyathena.result_set import _CLOSED_MESSAGE, _FETCH_FAILED_MESSAGE, AthenaResultSet
+from pyathena.result_set import (
+    _CLOSED_MESSAGE,
+    _FETCH_FAILED_MESSAGE,
+    AthenaResultSet,
+    AthenaUnloadResultSetMetadataReader,
+)
 from pyathena.util import RetryConfig, override, parse_output_location
 
 if TYPE_CHECKING:
@@ -803,6 +808,279 @@ class PandasDataFrameIterator(abc.Iterator):  # type: ignore[type-arg]
         return df
 
 
+class AthenaPandasResultSetMetadataReader(AthenaUnloadResultSetMetadataReader):
+    """Reads the metadata of a pandas result set, and the footers of its Parquet files.
+
+    It owns the read configuration that the metadata depends on: PyAthena's S3
+    filesystem for the result files, the read options normalized for the result,
+    the Parquet engine, and whether an UNLOAD result is read in chunks. A result
+    read in chunks is described by the footer of its first file, read without
+    listing the unload location; a result read whole by the schema of its
+    dataset, which also has the partition columns of a partitioned UNLOAD.
+    ``AthenaPandasResultSet`` takes the first footer
+    (:meth:`take_parquet_first_footer`) and reads the footers of the other files
+    (:meth:`read_parquet_footers`) for their row counts and the dtypes of the
+    columns that hold NULL.
+    """
+
+    # The pandas.read_parquet() options given to execute() with which an UNLOAD result is
+    # read in chunks; see reads_parquet_in_chunks().
+    _PARQUET_CHUNK_OPTIONS: ClassVar[frozenset[str]] = frozenset({"columns", "dtype_backend"})
+
+    def __init__(
+        self,
+        connection: Connection[Any],
+        query_execution: AthenaQueryExecution,
+        retry_config: RetryConfig,
+        unload: bool = False,
+        unload_location: str | None = None,
+        engine: str = "auto",
+        chunksize: int | None = None,
+        block_size: int | None = None,
+        cache_type: str | None = None,
+        max_workers: int = (cpu_count() or 1) * 5,
+        **kwargs: Any,
+    ) -> None:
+        """Initialize the reader and the filesystem of the result files; it sends no request.
+
+        Args:
+            connection: The connection that ran the query.
+            query_execution: The query execution whose result set to read.
+            retry_config: The retry configuration for API calls.
+            unload: Whether the cursor runs its queries as UNLOAD to Parquet.
+            unload_location: The S3 location of the UNLOAD output.
+            engine: The parsing engine: ``"auto"``, ``"c"``, ``"python"``, or
+                ``"pyarrow"``.
+            chunksize: The number of rows per chunk, if the result is read in chunks.
+            block_size: The S3 read block size of the filesystem.
+            cache_type: The default fsspec cache type of the filesystem.
+            max_workers: The maximum number of threads of the filesystem.
+            **kwargs: The options of ``pandas.read_csv()`` or ``pandas.read_parquet()``.
+                ``coerce_int96_timestamp_unit=None`` is dropped for an UNLOAD result.
+        """
+        super().__init__(
+            connection,
+            query_execution,
+            retry_config,
+            unload=unload,
+            unload_location=unload_location,
+        )
+        self._engine = engine
+        self._chunksize = chunksize
+        # coerce_int96_timestamp_unit=None is pyarrow's default, nanoseconds, and the
+        # same as no coerce_int96_timestamp_unit for an UNLOAD result, whose timestamps
+        # are still read at microseconds. pandas.read_csv() still rejects it.
+        if self.is_unload and kwargs.get("coerce_int96_timestamp_unit", "us") is None:
+            del kwargs["coerce_int96_timestamp_unit"]
+        self._read_kwargs = kwargs
+        self._block_size = block_size
+        self._cache_type = cache_type
+        self._max_workers = max_workers
+        # Created on first use, so that a description of a CSV result creates none.
+        self._filesystem: S3FileSystem | None = None
+        # The footer of the first file of an UNLOAD result read in chunks; None for one
+        # read whole, and once taken.
+        self._parquet_first_footer: FileMetaData | None = None
+
+    @property
+    def filesystem(self) -> S3FileSystem:
+        """PyAthena's S3 filesystem that reads the result files, created on first use."""
+        if self._filesystem is None:
+            # Not cached by fsspec so that the connection and the dircache are released
+            # with the result set.
+            self._filesystem = S3FileSystem(
+                connection=self._connection,
+                default_block_size=self._block_size,
+                default_cache_type=self._cache_type,
+                max_workers=self._max_workers,
+                skip_instance_cache=True,
+            )
+        return self._filesystem
+
+    @property
+    def read_kwargs(self) -> dict[str, Any]:
+        """The read options of the result set, normalized for the result."""
+        return self._read_kwargs
+
+    @property
+    def parquet_engine(self) -> str:
+        """The Parquet engine, with ``"auto"`` resolved to an available one.
+
+        Raises:
+            ImportError: If pyarrow is not available for ``"auto"``.
+        """
+        if self._engine == "auto":
+            return self.available_engine(["pyarrow"])
+        return self._engine
+
+    @staticmethod
+    def available_engine(engine_candidates: list[str]) -> str:
+        """Get the first available engine from a list of candidates.
+
+        Args:
+            engine_candidates: List of engine names to try in order.
+
+        Returns:
+            First available engine name.
+
+        Raises:
+            ImportError: If no engines are available.
+        """
+        error_msgs = ""
+        for engine in engine_candidates:
+            try:
+                module = importlib.import_module(engine)
+                return module.__name__
+            except ImportError as e:
+                error_msgs += f"\n - {e!s}"
+
+        available_engines = ", ".join(f"'{e}'" for e in engine_candidates)
+        raise ImportError(
+            f"Unable to find a usable engine; tried using: {available_engines}."
+            f"Trying to import the above resulted in these errors:"
+            f"{error_msgs}"
+        )
+
+    def reads_parquet_in_chunks(self) -> bool:
+        """Whether the options allow reading the UNLOAD result in chunks of ``chunksize`` rows.
+
+        Chunks are read with ``ParquetChunkReader`` through PyAthena's filesystem when
+        ``execute()`` was given at most these ``pandas.read_parquet()`` options:
+        ``dtype_backend`` as ``"numpy_nullable"`` or ``"pyarrow"``, and ``columns`` as
+        distinct names without dots, which :meth:`read` also requires to be top-level
+        columns of the result. A name with a dot can select a nested field in
+        ``pandas.read_parquet()``. With other options, the result is read whole, as
+        without ``chunksize``, and pandas validates them.
+
+        Returns:
+            True if the options allow reading the UNLOAD result in chunks.
+        """
+        kwargs = self._read_kwargs
+        if self._chunksize is None or not kwargs.keys() <= self._PARQUET_CHUNK_OPTIONS:
+            return False
+        if kwargs.get("dtype_backend", "numpy_nullable") not in ("numpy_nullable", "pyarrow"):
+            return False
+        columns = kwargs.get("columns")
+        return columns is None or (
+            isinstance(columns, (list, tuple))
+            and len(columns) > 0
+            and all(isinstance(c, str) and "." not in c for c in columns)
+            and len(set(columns)) == len(columns)
+        )
+
+    def take_parquet_first_footer(self) -> FileMetaData | None:
+        """Take the footer of the first file of an UNLOAD result read in chunks.
+
+        Returns:
+            The footer that :meth:`read` read, if the result is read in chunks;
+            None for a result read whole, and on later calls.
+        """
+        footer, self._parquet_first_footer = self._parquet_first_footer, None
+        return footer
+
+    def read_parquet_footers(self, paths: list[str]) -> list[FileMetaData]:
+        """Read the footers of Parquet files of the UNLOAD result.
+
+        The footers are read concurrently, with no more threads than the connection pool
+        of the S3 client.
+
+        Args:
+            paths: The paths of the files, from the data manifest.
+
+        Returns:
+            The footers of the files, in the order of ``paths``.
+
+        Raises:
+            OperationalError: If reading the footers fails.
+        """
+        if not paths:
+            return []
+        # More threads than the S3 client's connection pool would discard connections,
+        # each with a warning from urllib3.
+        workers = min(self._connection.s3_client.meta.config.max_pool_connections, len(paths))
+        # Each read runs with a copy of this context, so that a stop of the retries in
+        # this thread (see stop_retries_on()) stops those of the reads too.
+        contexts = [copy_context() for _ in paths]
+        try:
+            # When the failure of a read reaches map()'s iterator, it cancels the reads
+            # that have not started.
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                footers = list(
+                    executor.map(
+                        lambda context, path: context.run(self._read_parquet_footer, path),
+                        contexts,
+                        paths,
+                    )
+                )
+        except Exception as e:
+            _logger.exception(f"Failed to read {self._unload_location}.")
+            raise OperationalError(*e.args) from e
+        return footers
+
+    @override
+    def _read_parquet_metadata(self) -> tuple[dict[str, Any], ...]:
+        """Read the metadata of the UNLOAD result, and decide whether it is read in chunks.
+
+        A result whose options allow reading it in chunks (see
+        :meth:`reads_parquet_in_chunks`), and whose ``columns`` are top-level
+        columns, is read in chunks: it is described by the schema of the footer of
+        its first file, which is kept for the read. Any other result is read whole
+        with ``pandas.read_parquet()`` and described by the schema of its dataset.
+
+        Returns:
+            The column metadata.
+
+        Raises:
+            OperationalError: If reading the footer or the schema fails.
+            ProgrammingError: If the engine is not ``"pyarrow"``.
+        """
+        if self.parquet_engine != "pyarrow":
+            raise ProgrammingError("Engine must be `pyarrow`.")
+        if self.reads_parquet_in_chunks():
+            footer = self.read_parquet_footers(self._data_manifest[:1])[0]
+            # The files of one UNLOAD query have the same schema.
+            schema = footer.schema.to_arrow_schema()
+            if set(self._read_kwargs.get("columns") or ()) <= set(schema.names):
+                self._parquet_first_footer = footer
+                return to_column_info(schema)
+            # Columns that are not top-level columns of the result are read whole,
+            # where pandas selects nested fields or raises for missing columns.
+        return self._read_parquet_schema()
+
+    def _read_parquet_schema(self) -> tuple[dict[str, Any], ...]:
+        """Read the column metadata of the dataset of the Parquet files.
+
+        Returns:
+            The column metadata, with the partition columns of a partitioned UNLOAD.
+
+        Raises:
+            OperationalError: If reading the schema fails.
+        """
+        from pyarrow import parquet
+
+        bucket, key = parse_output_location(cast(str, self._unload_location))
+        try:
+            dataset = parquet.ParquetDataset(f"{bucket}/{key}", filesystem=self.filesystem)
+            return to_column_info(dataset.schema)
+        except Exception as e:
+            _logger.exception(f"Failed to read schema {bucket}/{key}.")
+            raise OperationalError(*e.args) from e
+
+    def _read_parquet_footer(self, path: str) -> FileMetaData:
+        """Read the footer of a Parquet file.
+
+        Args:
+            path: The path of the file.
+
+        Returns:
+            The metadata of the file.
+        """
+        from pyarrow import parquet
+
+        with self.filesystem.open(path, "rb") as f:
+            return parquet.read_metadata(f)
+
+
 class AthenaPandasResultSet(AthenaResultSet):
     """Result set that provides pandas DataFrame results with memory optimization.
 
@@ -842,6 +1120,10 @@ class AthenaPandasResultSet(AthenaResultSet):
         instantiated directly by users.
     """
 
+    _metadata_reader_class: ClassVar[type[AthenaPandasResultSetMetadataReader]] = (
+        AthenaPandasResultSetMetadataReader
+    )
+
     # File size thresholds and chunking configuration - Public for user customization
     PYARROW_MIN_FILE_SIZE_BYTES: int = 100
     LARGE_FILE_THRESHOLD_BYTES: int = 50 * 1024 * 1024  # 50MB
@@ -856,9 +1138,6 @@ class AthenaPandasResultSet(AthenaResultSet):
         "time",
         "timestamp",
     ]
-    # The pandas.read_parquet() options given to execute() with which an UNLOAD result is
-    # read in chunks; see _reads_parquet_in_chunks().
-    _PARQUET_CHUNK_OPTIONS: ClassVar[frozenset[str]] = frozenset({"columns", "dtype_backend"})
     # The block size of a CSV result file read with the background cache; see
     # _get_csv_open_options().
     CSV_BLOCK_SIZE: ClassVar[int] = 32 * 2**20
@@ -958,33 +1237,43 @@ class AthenaPandasResultSet(AthenaResultSet):
             connection=connection,
             converter=converter,
             query_execution=query_execution,
-            arraysize=1,  # Fetch one row to retrieve metadata
+            # The fetch size can exceed the size of a GetQueryResults page, which the
+            # base class validates.
+            arraysize=1,
             retry_config=retry_config,
+            # The metadata reader of the result set reads the metadata.
+            _pre_fetch=False,
             result_set_type_hints=result_set_type_hints,
         )
-        self._rows.clear()  # Clear pre_fetch data
         self._arraysize = arraysize
         self._keep_default_na = keep_default_na
         self._na_values = na_values
         self._quoting = quoting
-        self._unload = unload
-        self._unload_location = unload_location
         self._engine = engine
         self._chunksize = chunksize
         self._block_size = block_size
         self._cache_type = cache_type
-        self._max_workers = max_workers
         self._auto_optimize_chunksize = auto_optimize_chunksize
-        self._data_manifest: list[str] = []
+        reader = self._metadata_reader_class(
+            connection,
+            query_execution,
+            retry_config,
+            unload=unload,
+            unload_location=unload_location,
+            engine=engine,
+            chunksize=chunksize,
+            block_size=block_size,
+            cache_type=cache_type,
+            max_workers=max_workers,
+            **kwargs,
+        )
+        self._metadata_reader = reader
+        self._kwargs = reader.read_kwargs
+        self._fs = reader.filesystem
+        # The whole-result dtypes of the columns of a chunked UNLOAD result that hold NULL,
+        # which the reader adds from the footers that it reads.
         # The whole-result dtypes of the columns of a chunked UNLOAD result that hold NULL.
         self._parquet_null_dtypes: dict[str, Any] = {}
-        # coerce_int96_timestamp_unit=None is pyarrow's default, nanoseconds, and the
-        # same as no coerce_int96_timestamp_unit for an UNLOAD result, whose timestamps
-        # are still read at microseconds. pandas.read_csv() still rejects it.
-        if self.is_unload and kwargs.get("coerce_int96_timestamp_unit", "us") is None:
-            del kwargs["coerce_int96_timestamp_unit"]
-        self._kwargs = kwargs
-        self._fs = self._create_s3_file_system()
         self._csv_stream: IOBase | None = None
         # The converters of the json columns that _read_csv() reads as text, keyed by label.
         self._csv_json_converters: dict[Any, _JSONConverter] = {}
@@ -992,6 +1281,10 @@ class AthenaPandasResultSet(AthenaResultSet):
         # label; see _get_csv_temporal_converters().
         self._csv_temporal_converters: dict[Any, _TemporalConverter] = {}
 
+        self._load_metadata()
+        # The UNLOAD output that the reader found, for the read of the rows.
+        self._unload_location = reader.unload_location
+        self._data_manifest = reader.data_manifest
         # Cache time column names for efficient _trunc_date processing. _read_csv()
         # replaces them with the labels of the columns that it reads.
         description = self.description if self.description else []
@@ -1034,19 +1327,6 @@ class AthenaPandasResultSet(AthenaResultSet):
                 closed=self._closed_event,
             )
         self._row_iter: Iterator[tuple[Any, ...]] = self._df_iter.itertuples()
-
-    def _get_parquet_engine(self) -> str:
-        """Get the parquet engine to use, handling auto-detection.
-
-        Returns:
-            Name of the parquet engine to use ('pyarrow').
-
-        Raises:
-            ImportError: If pyarrow is not available.
-        """
-        if self._engine == "auto":
-            return self._get_available_engine(["pyarrow"])
-        return self._engine
 
     def _get_csv_engine(
         self, file_size_bytes: int | None = None, chunksize: int | None = None
@@ -1092,38 +1372,11 @@ class AthenaPandasResultSet(AthenaResultSet):
             )
             if is_compatible:
                 try:
-                    return self._get_available_engine(["pyarrow"])
+                    return AthenaPandasResultSetMetadataReader.available_engine(["pyarrow"])
                 except ImportError:
                     pass
 
         return "c"
-
-    def _get_available_engine(self, engine_candidates: list[str]) -> str:
-        """Get the first available engine from a list of candidates.
-
-        Args:
-            engine_candidates: List of engine names to try in order.
-
-        Returns:
-            First available engine name.
-
-        Raises:
-            ImportError: If no engines are available.
-        """
-        error_msgs = ""
-        for engine in engine_candidates:
-            try:
-                module = importlib.import_module(engine)
-                return module.__name__
-            except ImportError as e:
-                error_msgs += f"\n - {e!s}"
-
-        available_engines = ", ".join(f"'{e}'" for e in engine_candidates)
-        raise ImportError(
-            f"Unable to find a usable engine; tried using: {available_engines}."
-            f"Trying to import the above resulted in these errors:"
-            f"{error_msgs}"
-        )
 
     def _auto_determine_chunksize(self, file_size_bytes: int) -> int | None:
         """Determine appropriate chunksize for large files based on file size.
@@ -1149,22 +1402,6 @@ class AthenaPandasResultSet(AthenaResultSet):
         if estimated_rows > self.AUTO_CHUNK_THRESHOLD_MEDIUM:
             return self.AUTO_CHUNK_SIZE_MEDIUM
         return None
-
-    def _create_s3_file_system(self):
-        """Create PyAthena's ``S3FileSystem`` from the connection settings.
-
-        Returns:
-            The S3 filesystem for reading the query results.
-        """
-        # Not cached by fsspec so that the connection and the dircache are
-        # released with the result set.
-        return S3FileSystem(
-            connection=self.connection,
-            default_block_size=self._block_size,
-            default_cache_type=self._cache_type,
-            max_workers=self._max_workers,
-            skip_instance_cache=True,
-        )
 
     @property
     def dtypes(self) -> dict[str, type[Any]]:
@@ -1893,51 +2130,46 @@ class AthenaPandasResultSet(AthenaResultSet):
             stack.pop_all()
             return stream
 
-    def _read_parquet(self, engine) -> DataFrame:
+    def _read_parquet(self) -> DataFrame:
         """Read the UNLOAD result whole with ``pandas.read_parquet()``.
 
         The options given to ``execute()`` are passed to ``pandas.read_parquet()``.
         Timestamps are read at microseconds unless ``coerce_int96_timestamp_unit`` is
         given.
 
-        Args:
-            engine: The Parquet engine, which must be ``"pyarrow"``.
+        The metadata reader must have read the data manifest first, and checked
+        that the engine is pyarrow.
 
         Returns:
             The DataFrame of the result, or an empty DataFrame without data files.
 
         Raises:
             OperationalError: If reading the Parquet files fails.
-            ProgrammingError: If the engine is not ``"pyarrow"``.
         """
         import pandas as pd
 
-        self._data_manifest = self._read_data_manifest()
         if not self._data_manifest:
             return pd.DataFrame()
-        if not self._unload_location:
-            self._unload_location = "/".join(self._data_manifest[0].split("/")[:-1]) + "/"
+        # Derived from the data manifest by the metadata reader if not given.
+        location = cast(str, self._unload_location)
 
-        if engine == "pyarrow":
-            kwargs: dict[str, Any] = {
-                "use_threads": True,
-                # Athena writes timestamps as INT96, whose default unit, nanoseconds,
-                # cannot hold years before 1677 or after 2262.
-                "coerce_int96_timestamp_unit": "us",
-                **self._kwargs,
-            }
-            # Given storage_options, even None, pandas opens the files itself,
-            # as for CSV results.
-            if "filesystem" not in kwargs and "storage_options" not in kwargs:
-                kwargs["filesystem"] = self._fs
-            if kwargs.get("filesystem") is None:
-                unload_location = self._unload_location
-            else:
-                # pyarrow takes the path without the scheme with a filesystem.
-                bucket, key = parse_output_location(self._unload_location)
-                unload_location = f"{bucket}/{key}"
+        kwargs: dict[str, Any] = {
+            "use_threads": True,
+            # Athena writes timestamps as INT96, whose default unit, nanoseconds,
+            # cannot hold years before 1677 or after 2262.
+            "coerce_int96_timestamp_unit": "us",
+            **self._kwargs,
+        }
+        # Given storage_options, even None, pandas opens the files itself,
+        # as for CSV results.
+        if "filesystem" not in kwargs and "storage_options" not in kwargs:
+            kwargs["filesystem"] = self._fs
+        if kwargs.get("filesystem") is None:
+            unload_location = location
         else:
-            raise ProgrammingError("Engine must be `pyarrow`.")
+            # pyarrow takes the path without the scheme with a filesystem.
+            bucket, key = parse_output_location(location)
+            unload_location = f"{bucket}/{key}"
 
         try:
             return pd.read_parquet(unload_location, engine=self._engine, **kwargs)
@@ -1945,53 +2177,11 @@ class AthenaPandasResultSet(AthenaResultSet):
             _logger.exception(f"Failed to read {self.output_location}.")
             raise OperationalError(*e.args) from e
 
-    def _read_parquet_schema(self, engine) -> tuple[dict[str, Any], ...]:
-        if engine == "pyarrow":
-            from pyarrow import parquet
-
-            if not self._unload_location:
-                raise ProgrammingError("UnloadLocation is none or empty.")
-            bucket, key = parse_output_location(self._unload_location)
-            try:
-                dataset = parquet.ParquetDataset(f"{bucket}/{key}", filesystem=self._fs)
-                return to_column_info(dataset.schema)
-            except Exception as e:
-                _logger.exception(f"Failed to read schema {bucket}/{key}.")
-                raise OperationalError(*e.args) from e
-        else:
-            raise ProgrammingError("Engine must be `pyarrow`.")
-
-    def _reads_parquet_in_chunks(self) -> bool:
-        """Whether the options allow reading the UNLOAD result in chunks of ``chunksize`` rows.
-
-        Chunks are read with ``ParquetChunkReader`` through PyAthena's filesystem when
-        ``execute()`` was given at most these ``pandas.read_parquet()`` options:
-        ``dtype_backend`` as ``"numpy_nullable"`` or ``"pyarrow"``, and ``columns`` as
-        distinct names without dots, which ``_as_pandas()`` also requires to be
-        top-level columns of the result. A name with a dot can select a nested field in
-        ``pandas.read_parquet()``. With other options, the result is read whole, as
-        without ``chunksize``, and pandas validates them.
-
-        Returns:
-            True if the options allow reading the UNLOAD result in chunks.
-        """
-        if self._chunksize is None or not self._kwargs.keys() <= self._PARQUET_CHUNK_OPTIONS:
-            return False
-        if self._kwargs.get("dtype_backend", "numpy_nullable") not in ("numpy_nullable", "pyarrow"):
-            return False
-        columns = self._kwargs.get("columns")
-        return columns is None or (
-            isinstance(columns, (list, tuple))
-            and len(columns) > 0
-            and all(isinstance(c, str) and "." not in c for c in columns)
-            and len(set(columns)) == len(columns)
-        )
-
     def _iter_parquet_chunks(self) -> Iterator[DataFrame]:
         """Read the UNLOAD result in DataFrames of ``chunksize`` rows.
 
         See ``_convert_parquet_chunk()`` for the conversion of each chunk.
-        ``_read_parquet_footers()`` must have read the data manifest first.
+        ``_as_pandas()`` must have read the footers of the files first.
 
         Yields:
             The DataFrames of the result rows.
@@ -2046,65 +2236,6 @@ class AthenaPandasResultSet(AthenaResultSet):
         df.index = pd.RangeIndex(start, start + len(df))
         return df
 
-    def _read_parquet_footers(self) -> list[FileMetaData]:
-        """Read the data manifest and the footers of its Parquet files.
-
-        The footers are read concurrently, with no more threads than the connection pool
-        of the S3 client. It sets the unload location, and the whole-result dtypes of the
-        columns that ``_get_parquet_null_dtypes()`` finds in any file.
-
-        Returns:
-            The footers of the files, in the order of the data manifest.
-
-        Raises:
-            OperationalError: If reading the footers fails.
-        """
-        self._data_manifest = self._read_data_manifest()
-        if not self._data_manifest:
-            return []
-        if not self._unload_location:
-            self._unload_location = "/".join(self._data_manifest[0].split("/")[:-1]) + "/"
-        # More threads than the S3 client's connection pool would discard connections,
-        # each with a warning from urllib3.
-        workers = min(
-            self.connection.s3_client.meta.config.max_pool_connections,
-            len(self._data_manifest),
-        )
-        # Each read runs with a copy of this context, so that a stop of the retries in
-        # this thread (see stop_retries_on()) stops those of the reads too.
-        contexts = [copy_context() for _ in self._data_manifest]
-        try:
-            # When the failure of a read reaches map()'s iterator, it cancels the reads
-            # that have not started.
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                footers = list(
-                    executor.map(
-                        lambda context, path: context.run(self._read_parquet_footer, path),
-                        contexts,
-                        self._data_manifest,
-                    )
-                )
-        except Exception as e:
-            _logger.exception(f"Failed to read {self._unload_location}.")
-            raise OperationalError(*e.args) from e
-        for footer in footers:
-            self._parquet_null_dtypes.update(self._get_parquet_null_dtypes(footer))
-        return footers
-
-    def _read_parquet_footer(self, path: str) -> FileMetaData:
-        """Read the footer of a Parquet file.
-
-        Args:
-            path: The path of the file.
-
-        Returns:
-            The metadata of the file.
-        """
-        from pyarrow import parquet
-
-        with self._fs.open(path, "rb") as f:
-            return parquet.read_metadata(f)
-
     @staticmethod
     def _get_parquet_null_dtypes(footer: FileMetaData) -> dict[str, Any]:
         """Get the whole-result dtypes of the columns that hold NULL in a Parquet file.
@@ -2142,33 +2273,39 @@ class AthenaPandasResultSet(AthenaResultSet):
         }
 
     def _as_pandas(self) -> TextFileReader | DataFrame | Iterator[DataFrame]:
-        if self.is_unload and self._reads_parquet_in_chunks():
-            import pandas as pd
+        """Read the result file, or the Parquet files of an UNLOAD result.
 
-            engine = self._get_parquet_engine()
-            footers = self._read_parquet_footers()
+        An UNLOAD result is read as its metadata reader decided: in chunks, after
+        the footers of the other files, or whole.
+
+        Returns:
+            The DataFrame of the result, or a reader or an iterator of its chunks.
+
+        Raises:
+            OperationalError: If reading the result fails.
+        """
+        if not self.is_unload:
+            return self._read_csv()
+        reader = cast(AthenaPandasResultSetMetadataReader, self._reader)
+        first_footer = reader.take_parquet_first_footer()
+        if first_footer is not None:
+            footers = [first_footer, *reader.read_parquet_footers(self._data_manifest[1:])]
+            for footer in footers:
+                self._parquet_null_dtypes.update(self._get_parquet_null_dtypes(footer))
             if not any(footer.num_rows for footer in footers):
-                self._metadata = ()
-                return pd.DataFrame()
-            # The files of one UNLOAD query have the same schema.
-            schema = footers[0].schema.to_arrow_schema()
-            if set(self._kwargs.get("columns") or ()) <= set(schema.names):
-                if engine != "pyarrow":
-                    raise ProgrammingError("Engine must be `pyarrow`.")
-                self._metadata = to_column_info(schema)
-                return self._iter_parquet_chunks()
-            # Columns that are not top-level columns of the result are read whole,
-            # where pandas selects nested fields or raises for missing columns.
-        if self.is_unload:
-            engine = self._get_parquet_engine()
-            df = self._read_parquet(engine)
-            if df.empty:
-                self._metadata = ()
-            else:
-                self._metadata = self._read_parquet_schema(engine)
-        else:
-            df = self._read_csv()
-        return df
+                from pyarrow import parquet
+
+                # Files without rows still have the columns that describe the result,
+                # with INT96 timestamps at microseconds, as the chunks read them.
+                with self._fs.open(self._data_manifest[0], "rb") as f:
+                    schema = parquet.ParquetFile(
+                        f, metadata=first_footer, coerce_int96_timestamp_unit="us"
+                    ).schema_arrow
+                table = schema.empty_table()
+                columns = self._kwargs.get("columns")
+                return self._convert_parquet_chunk(table.select(columns) if columns else table, 0)
+            return self._iter_parquet_chunks()
+        return self._read_parquet()
 
     def as_pandas(self) -> PandasDataFrameIterator | DataFrame:
         """Return the query results as a DataFrame or an iterator of DataFrame chunks.

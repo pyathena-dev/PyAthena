@@ -32,6 +32,7 @@ from pyathena.model import AthenaQueryExecution
 from pyathena.pandas.converter import DefaultPandasTypeConverter
 from pyathena.pandas.result_set import (
     AthenaPandasResultSet,
+    AthenaPandasResultSetMetadataReader,
     PandasDataFrameIterator,
     _no_trunc_date,
     _read_csv_with_pyarrow,
@@ -488,6 +489,59 @@ class TestAthenaPandasResultSet:
             assert df["d"].tolist() == dates
         else:
             assert df["d"].tolist() == [pd.Timestamp(d) for d in dates]
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [{}, {"chunksize": 1}, {"filters": [("i", ">", 10)]}],
+        ids=["whole", "chunks", "whole-without-matching-rows"],
+    )
+    def test_describe_unload(self, tmp_path, kwargs):
+        """GH-1281: the metadata reader describes an UNLOAD result as the result set does.
+
+        A result with data files is described by their columns, also when the read
+        options drop every row.
+        """
+        fs = LocalBucketFileSystem(tmp_path)
+        tables = [pa.table({"i": pa.array([1, 2], pa.int64())}), pa.table({"i": [3]})]
+        expected = [("i", "bigint", None, None, 19, 0, "NULLABLE")]
+        assert _local_result_set(fs, tables=tables, **kwargs).description == expected
+        assert _local_result_set(fs, tables=tables, describe=True, **kwargs) == expected
+
+    def test_describe_unload_chunks_reads_first_footer(self, tmp_path):
+        """GH-1281: describe() of an UNLOAD result read in chunks opens only its first file.
+
+        The metadata reader reads the footer of the first file, without listing the
+        unload location.
+        """
+        fs = LocalBucketFileSystem(tmp_path)
+        tables = [pa.table({"i": [1]}), pa.table({"i": [2]}), pa.table({"i": [3]})]
+        description = _local_result_set(fs, tables=tables, describe=True, chunksize=1)
+        assert description == [("i", "bigint", None, None, 19, 0, "NULLABLE")]
+        assert len(fs.opened) == 1
+
+    def test_iter_parquet_chunks_without_rows(self, tmp_path):
+        """GH-1281: an UNLOAD result read in chunks whose files hold no rows keeps its columns.
+
+        Its DataFrame has the columns that describe it, as a result read whole does.
+        """
+        fs = LocalBucketFileSystem(tmp_path)
+        tables = [pa.table({"i": pa.array([], pa.int64()), "t": pa.array([], pa.timestamp("ns"))})]
+        result_set = _local_result_set(
+            fs,
+            tables=tables,
+            # As Athena writes timestamps.
+            write_options={"use_deprecated_int96_timestamps": True},
+            chunksize=1,
+        )
+        assert result_set.description == [
+            ("i", "bigint", None, None, 19, 0, "NULLABLE"),
+            ("t", "timestamp", None, None, 3, 0, "NULLABLE"),
+        ]
+        chunks = list(result_set.iter_chunks())
+        assert [chunk.columns.tolist() for chunk in chunks] == [["i", "t"]]
+        # INT96 timestamps at microseconds, as the chunks of files with rows have them.
+        assert str(chunks[0].dtypes["t"]) == "datetime64[us]"
+        assert result_set.fetchall() == []
 
     def test_iter_parquet_chunks_null_in_later_file(self, tmp_path):
         """Top-level integer and boolean columns with NULL anywhere convert alike in every chunk.
@@ -1439,8 +1493,13 @@ def _read_local_csv(tmp_path, data, types, engine="c", chunksize=None, **kwargs)
     return result_set.as_pandas()
 
 
-def _write_unload_tables(fs, tables):
+def _write_unload_tables(fs, tables, **write_options):
     """Write the Parquet files of an UNLOAD result under ``s3://bucket/unload/``.
+
+    Args:
+        fs: The filesystem of the files.
+        tables: The tables of the files.
+        **write_options: Options of ``pyarrow.parquet.write_table()``.
 
     Returns:
         The data manifest of the files.
@@ -1449,7 +1508,7 @@ def _write_unload_tables(fs, tables):
     manifest = [f"s3://bucket/unload/{index}.parquet" for index in range(len(tables))]
     for path, table in zip(manifest, tables, strict=True):
         with fs.open(path, "wb") as file:
-            pq.write_table(table, file)
+            pq.write_table(table, file, **write_options)
     fs.opened.clear()
     return manifest
 
@@ -1503,7 +1562,15 @@ class _InMemoryS3Object:
 
 
 def _local_result_set(
-    fs, types=(), data=None, tables=None, name="result.csv", converter=None, **kwargs
+    fs,
+    types=(),
+    data=None,
+    tables=None,
+    name="result.csv",
+    converter=None,
+    describe=False,
+    write_options=None,
+    **kwargs,
 ):
     """Create a result set of a succeeded query over local result files, without AWS.
 
@@ -1511,12 +1578,16 @@ def _local_result_set(
     of an UNLOAD result, which the connection's S3 client lists in the data manifest.
     ``fs`` holds the files and stands in for PyAthena's filesystem, ``types`` lists the
     (name, Athena type) pairs of the GetQueryResults metadata, ``converter`` replaces
-    the default converter, and ``kwargs`` are the result set's options.
+    the default converter, ``write_options`` are the options of
+    ``pyarrow.parquet.write_table()`` for ``tables``, and ``kwargs`` are the result
+    set's options. With
+    ``describe``, ``AthenaPandasResultSetMetadataReader.describe()`` returns the descriptions
+    instead.
     """
     unload = tables is not None
     location = f"s3://bucket/{name}"
     if unload:
-        manifest = _write_unload_tables(fs, tables)
+        manifest = _write_unload_tables(fs, tables, **(write_options or {}))
         length = 1
     else:
         manifest = []
@@ -1542,6 +1613,10 @@ def _local_result_set(
     connection.s3_client.head_object.return_value = {"ContentLength": length}
     connection.client.get_query_results.return_value = query_results_response(types)
     with patch("pyathena.pandas.result_set.S3FileSystem", return_value=fs):
+        if describe:
+            return AthenaPandasResultSetMetadataReader(
+                connection, query_execution, RetryConfig(), unload=unload, **kwargs
+            ).describe()
         return AthenaPandasResultSet(
             connection=connection,
             converter=converter or DefaultPandasTypeConverter(),
@@ -1877,8 +1952,8 @@ def _fetching_result_set(result, arraysize):
         state=AthenaQueryExecution.STATE_SUCCEEDED, output_location="s3://bucket/result.csv"
     )
     with (
-        patch.object(AthenaPandasResultSet, "_pre_fetch"),
-        patch.object(AthenaPandasResultSet, "_create_s3_file_system"),
+        patch.object(AthenaPandasResultSet, "_load_metadata"),
+        patch("pyathena.pandas.result_set.S3FileSystem"),
         patch.object(AthenaPandasResultSet, "_as_pandas", return_value=result),
         patch.object(
             AthenaPandasResultSet, "is_unload", new_callable=PropertyMock, return_value=True

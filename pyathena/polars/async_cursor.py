@@ -16,7 +16,9 @@ from pyathena.polars.converter import (
     DefaultPolarsTypeConverter,
     DefaultPolarsUnloadTypeConverter,
 )
-from pyathena.polars.result_set import AthenaPolarsResultSet
+from pyathena.polars.result_set import (
+    AthenaPolarsResultSet,
+)
 from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
@@ -129,6 +131,7 @@ class AsyncPolarsCursor(AsyncCursor):
             result_reuse_minutes=result_reuse_minutes,
             **kwargs,
         )
+        self._result_set_class: type[AthenaPolarsResultSet] = AthenaPolarsResultSet
         self._s3_max_workers = s3_max_workers
         self._unload = unload
         self._block_size = block_size
@@ -173,6 +176,72 @@ class AsyncPolarsCursor(AsyncCursor):
         self._arraysize = value
 
     @override
+    def _metadata_reader_arguments(
+        self,
+        query_execution: AthenaQueryExecution,
+        unload_location: str | None = None,
+        kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Get the arguments that create the Polars metadata reader of a query's result set.
+
+        Args:
+            query_execution: The query execution in a terminal state.
+            unload_location: The S3 location of the ``UNLOAD`` output.
+            kwargs: Options of ``execute()``, from which the reader options are
+                taken; they are read options.
+
+        Returns:
+            The keyword arguments for ``AthenaPolarsResultSetMetadataReader``.
+        """
+        if kwargs is None:
+            kwargs = {}
+        return dict(
+            **super()._metadata_reader_arguments(query_execution),
+            unload=self._unload,
+            unload_location=unload_location,
+            **kwargs,
+        )
+
+    @override
+    def _result_set_arguments(
+        self,
+        query_execution: AthenaQueryExecution,
+        result_set_type_hints: dict[str | int, str] | None = None,
+        unload_location: str | None = None,
+        kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Get the arguments that create the Polars result set of a query.
+
+        They are the metadata reader arguments and the options of the rows.
+
+        Args:
+            query_execution: The query execution in a terminal state.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
+            unload_location: The S3 location of the ``UNLOAD`` output.
+            kwargs: Options of ``execute()`` for the result set and Polars.
+
+        Returns:
+            The keyword arguments for ``AthenaPolarsResultSet``.
+        """
+        if kwargs is None:
+            kwargs = {}
+        # Taken first, so that the metadata reader does not get them as read options.
+        rows = {
+            "block_size": kwargs.pop("block_size", self._block_size),
+            "cache_type": kwargs.pop("cache_type", self._cache_type),
+            "max_workers": kwargs.pop("s3_max_workers", self._s3_max_workers),
+            "chunksize": kwargs.pop("chunksize", self._chunksize),
+        }
+        return dict(
+            **self._metadata_reader_arguments(query_execution, unload_location, kwargs),
+            converter=self._converter,
+            arraysize=self._arraysize,
+            result_set_type_hints=result_set_type_hints,
+            **rows,
+        )
+
+    @override
     def _collect_result_set(
         self,
         query_id: str,
@@ -180,23 +249,27 @@ class AsyncPolarsCursor(AsyncCursor):
         unload_location: str | None = None,
         kwargs: dict[str, Any] | None = None,
     ) -> AthenaPolarsResultSet:
-        if kwargs is None:
-            kwargs = {}
+        """Wait for the query, then create its Polars result set.
+
+        Args:
+            query_id: The Athena query execution ID.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
+            unload_location: The S3 location of the ``UNLOAD`` output.
+            kwargs: Options of ``execute()`` for the result set and Polars.
+
+        Returns:
+            The result set.
+
+        Raises:
+            ProgrammingError: If the cursor closes before the query finishes.
+            OperationalError: If a status request or reading the result fails.
+        """
         query_execution = cast(AthenaQueryExecution, self._poll(query_id))
-        return AthenaPolarsResultSet(
-            connection=self._connection,
-            converter=self._converter,
-            query_execution=query_execution,
-            arraysize=self._arraysize,
-            retry_config=self._retry_config,
-            unload=self._unload,
-            unload_location=unload_location,
-            block_size=kwargs.pop("block_size", self._block_size),
-            cache_type=kwargs.pop("cache_type", self._cache_type),
-            max_workers=kwargs.pop("s3_max_workers", self._s3_max_workers),
-            chunksize=kwargs.pop("chunksize", self._chunksize),
-            result_set_type_hints=result_set_type_hints,
-            **kwargs,
+        return self._result_set_class(
+            **self._result_set_arguments(
+                query_execution, result_set_type_hints, unload_location, kwargs
+            )
         )
 
     @override

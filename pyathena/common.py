@@ -977,8 +977,8 @@ class BaseCursor(metaclass=ABCMeta):
     ) -> AthenaQueryExecution | AthenaCalculationExecution:
         """Poll a query execution until it reaches a terminal state.
 
-        Calls ``on_poll`` with every status and sleeps ``poll_interval`` seconds
-        between requests.
+        Calls ``on_poll`` with every status and waits between requests (see
+        ``_wait_poll_interval()``).
 
         Args:
             query_id: The query execution ID.
@@ -995,7 +995,11 @@ class BaseCursor(metaclass=ABCMeta):
                 self._on_poll(query_execution)
             if query_execution.state in AthenaQueryExecution.TERMINAL_STATES:
                 return query_execution
-            time.sleep(self._poll_interval)
+            self._wait_poll_interval()
+
+    def _wait_poll_interval(self) -> None:
+        """Wait ``poll_interval`` seconds between two status requests."""
+        time.sleep(self._poll_interval)
 
     def _poll(
         self, query_id: str, options: ExecuteOptions | None = None

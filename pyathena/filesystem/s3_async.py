@@ -1474,13 +1474,8 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         """
         if self.closed:
             return
-        self.closed = True
-        self.buffer = None
-        # Here, so that the creation and the running parts stop even while
-        # they hold every thread of the file, ahead of _discard().
-        aborting = cast(_S3WriteSession, self._session).begin_abort()
         try:
-            if aborting:
+            if self._begin_close_without_commit():
                 await self._pool.run_shielded(self._discard)
         finally:
             self._pool.shutdown(wait=False)
@@ -1494,13 +1489,29 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         """
         if self.closed:
             return
-        self.closed = True
-        self.buffer = None
         try:
-            if self._session is not None and self._session.begin_abort():
+            if self._begin_close_without_commit():
                 self._discard()
         finally:
             self._pool.shutdown(wait=False)
+
+    def _begin_close_without_commit(self) -> bool:
+        """Mark the file closed, drop the buffered data, and begin the abort.
+
+        The part of :meth:`_close_without_commit` and
+        :meth:`_close_without_commit_blocking` that runs before the discard.
+        The abort begins here, so that the creation and the running parts stop
+        even while they hold every thread of the file, ahead of
+        :meth:`_discard`.
+
+        Returns:
+            Whether the caller has to discard the write; see
+            :meth:`_S3WriteSession.begin_abort`. False for a file without a
+            write session.
+        """
+        self.closed = True
+        self.buffer = None
+        return self._session is not None and self._session.begin_abort()
 
     async def _initiate_upload(self) -> None:
         if not self.append_block and self.tell() < self.blocksize:

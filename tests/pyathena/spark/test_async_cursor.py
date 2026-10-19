@@ -36,6 +36,7 @@ def _owned_session_cursor() -> AsyncSparkCursor:
     """
     cursor = AsyncSparkCursor.__new__(AsyncSparkCursor)  # bypass __init__ to avoid AWS calls
     cursor._terminate_session_on_close = True
+    cursor._session_id = "session"
     return cursor
 
 
@@ -183,20 +184,20 @@ class TestAsyncSparkCursor:
     def test_close_wait_shuts_down_executor(self, fails):
         cursor, release, running, queued = self._cursor_with_submitted_work()
 
-        def terminate():
+        def terminate(session_id):
             # Let the running future finish so that shutdown(wait=True) returns.
             release.set()
             if fails:
                 raise OperationalError("termination failed")
 
-        cursor._terminate_session = MagicMock(side_effect=terminate)
+        cursor._terminate_session_by_id = MagicMock(side_effect=terminate)
         if fails:
             with pytest.raises(OperationalError, match="termination failed"):
                 cursor.close(wait=True)
         else:
             cursor.close(wait=True)
 
-        cursor._terminate_session.assert_called_once_with()
+        cursor._terminate_session_by_id.assert_called_once_with("session")
         cursor._executor.shutdown.assert_called_once_with(wait=True)
         assert running.done()
         assert running.result() == "running"
@@ -208,7 +209,7 @@ class TestAsyncSparkCursor:
     @pytest.mark.parametrize("fails", [False, True])
     def test_close_no_wait_shuts_down_executor(self, fails):
         cursor, release, running, queued = self._cursor_with_submitted_work()
-        cursor._terminate_session = MagicMock(
+        cursor._terminate_session_by_id = MagicMock(
             side_effect=OperationalError("termination failed") if fails else None
         )
         try:
@@ -218,7 +219,7 @@ class TestAsyncSparkCursor:
             else:
                 cursor.close(wait=False)
 
-            cursor._terminate_session.assert_called_once_with()
+            cursor._terminate_session_by_id.assert_called_once_with("session")
             cursor._executor.shutdown.assert_called_once_with(wait=False)
             with pytest.raises(RuntimeError):
                 cursor._executor.submit(lambda: None)

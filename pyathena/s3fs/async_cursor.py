@@ -110,6 +110,7 @@ class AsyncS3FSCursor(AsyncCursor):
             result_reuse_minutes=result_reuse_minutes,
             **kwargs,
         )
+        self._result_set_class: type[AthenaS3FSResultSet] = AthenaS3FSResultSet
         self._csv_reader = csv_reader
 
     @staticmethod
@@ -148,35 +149,56 @@ class AsyncS3FSCursor(AsyncCursor):
         self._arraysize = value
 
     @override
+    def _result_set_arguments(
+        self,
+        query_execution: AthenaQueryExecution,
+        result_set_type_hints: dict[str | int, str] | None = None,
+        kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Get the arguments that create the S3FS result set of a query.
+
+        Args:
+            query_execution: The query execution in a terminal state.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
+            kwargs: Options of ``execute()`` for the result set.
+
+        Returns:
+            The keyword arguments for ``AthenaS3FSResultSet``.
+        """
+        if kwargs is None:
+            kwargs = {}
+        return dict(
+            **super()._result_set_arguments(query_execution, result_set_type_hints),
+            csv_reader=kwargs.pop("csv_reader", self._csv_reader),
+            **kwargs,
+        )
+
+    @override
     def _collect_result_set(
         self,
         query_id: str,
         result_set_type_hints: dict[str | int, str] | None = None,
         kwargs: dict[str, Any] | None = None,
     ) -> AthenaS3FSResultSet:
-        """Collect result set after query execution.
+        """Wait for the query, then create its S3FS result set.
 
         Args:
             query_id: The Athena query execution ID.
             result_set_type_hints: Athena type signatures for complex-type columns,
                 keyed by column name (case-insensitive) or zero-based column index.
-            kwargs: Additional keyword arguments for result set.
+            kwargs: Options of ``execute()`` for the result set.
 
         Returns:
-            AthenaS3FSResultSet containing the query results.
+            The result set.
+
+        Raises:
+            ProgrammingError: If the cursor closes before the query finishes.
+            OperationalError: If a status request or reading the result fails.
         """
-        if kwargs is None:
-            kwargs = {}
         query_execution = cast(AthenaQueryExecution, self._poll(query_id))
-        return AthenaS3FSResultSet(
-            connection=self._connection,
-            converter=self._converter,
-            query_execution=query_execution,
-            arraysize=self._arraysize,
-            retry_config=self._retry_config,
-            csv_reader=kwargs.pop("csv_reader", self._csv_reader),
-            result_set_type_hints=result_set_type_hints,
-            **kwargs,
+        return self._result_set_class(
+            **self._result_set_arguments(query_execution, result_set_type_hints, kwargs)
         )
 
     @override

@@ -14,7 +14,11 @@ from pyathena.result_set import AthenaResultSet
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
-from tests.pyathena.util import assert_closes_result_sets_after_close
+from tests.pyathena.util import (
+    assert_close_stops_waiting_futures,
+    assert_closes_result_sets_after_close,
+    assert_description_reads_only_metadata,
+)
 
 
 class TestAsyncArrowCursor:
@@ -73,6 +77,19 @@ class TestAsyncArrowCursor:
         future = async_arrow_cursor.description(query_id)
         description = future.result()
         assert result_set.description == description
+
+    @pytest.mark.parametrize(
+        "async_arrow_cursor", [{"cursor_kwargs": {"unload": True}}], indirect=True
+    )
+    def test_description_unload_empty(self, async_arrow_cursor):
+        """GH-1281: description() reads the metadata of an empty UNLOAD result as execute() does."""
+        query_id, future = async_arrow_cursor.execute(
+            "SELECT CAST(1 AS INT) AS foobar FROM one_row WHERE false"
+        )
+        result_set = future.result()
+        assert result_set.state == AthenaQueryExecution.STATE_SUCCEEDED
+        assert result_set.description == []
+        assert async_arrow_cursor.description(query_id).result() == []
 
     @pytest.mark.parametrize(
         "async_arrow_cursor",
@@ -291,7 +308,7 @@ class TestAsyncArrowCursor:
             ) as cursor,
             patch.object(AsyncArrowCursor, "_execute", return_value="query_id"),
             patch.object(AsyncArrowCursor, "_poll", return_value=query_execution),
-            patch("pyathena.arrow.async_cursor.AthenaArrowResultSet") as result_set_class,
+            patch.object(cursor, "_result_set_class") as result_set_class,
         ):
             _, future = cursor.execute("SELECT 1", **execute_kwargs)
             future.result()
@@ -302,6 +319,14 @@ class TestAsyncArrowCursor:
     def test_close_closes_result_sets_after_close(self):
         """GH-1208: closing the cursor closes the result sets created after it (no AWS)."""
         assert_closes_result_sets_after_close(AsyncArrowCursor)
+
+    def test_close_stops_waiting_futures(self):
+        """GH-1281: closing the cursor stops the futures that wait for a query (no AWS)."""
+        assert_close_stops_waiting_futures(AsyncArrowCursor)
+
+    def test_description_reads_only_metadata(self):
+        """GH-1281: description() reads only the metadata of a CSV result (no AWS)."""
+        assert_description_reads_only_metadata(AsyncArrowCursor)
 
     def test_closed(self, async_arrow_cursor):
         """GH-1207: a closed cursor rejects execute()."""

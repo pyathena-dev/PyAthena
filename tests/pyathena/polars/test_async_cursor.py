@@ -15,7 +15,11 @@ from pyathena.result_set import AthenaResultSet
 from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
-from tests.pyathena.util import assert_closes_result_sets_after_close
+from tests.pyathena.util import (
+    assert_close_stops_waiting_futures,
+    assert_closes_result_sets_after_close,
+    assert_description_reads_only_metadata,
+)
 
 
 class TestAsyncPolarsCursor:
@@ -58,6 +62,35 @@ class TestAsyncPolarsCursor:
         future = async_polars_cursor.description(query_id)
         description = future.result()
         assert result_set.description == description
+
+    @pytest.mark.parametrize(
+        ("async_polars_cursor", "query", "expected"),
+        [
+            (
+                {"cursor_kwargs": {"unload": True, "chunksize": 1_000}},
+                "SELECT CAST(1 AS INT) AS foobar FROM one_row",
+                [("foobar", "integer", None, None, 10, 0, "NULLABLE")],
+            ),
+            (
+                {"cursor_kwargs": {"unload": True}},
+                "SELECT CAST(1 AS INT) AS foobar FROM one_row WHERE false",
+                [],
+            ),
+            (
+                {"cursor_kwargs": {"unload": True, "chunksize": 1_000}},
+                "SELECT CAST(1 AS INT) AS foobar FROM one_row WHERE false",
+                [],
+            ),
+        ],
+        indirect=["async_polars_cursor"],
+    )
+    def test_description_unload(self, async_polars_cursor, query, expected):
+        """GH-1281: description() reads the metadata of an UNLOAD result as execute() does."""
+        query_id, future = async_polars_cursor.execute(query)
+        result_set = future.result()
+        assert result_set.state == AthenaQueryExecution.STATE_SUCCEEDED
+        assert result_set.description == expected
+        assert async_polars_cursor.description(query_id).result() == expected
 
     @pytest.mark.parametrize(
         "async_polars_cursor",
@@ -285,7 +318,7 @@ class TestAsyncPolarsCursor:
             ) as cursor,
             patch.object(AsyncPolarsCursor, "_execute", return_value="query_id"),
             patch.object(AsyncPolarsCursor, "_poll", return_value=query_execution),
-            patch("pyathena.polars.async_cursor.AthenaPolarsResultSet") as result_set_class,
+            patch.object(cursor, "_result_set_class") as result_set_class,
         ):
             _, future = cursor.execute("SELECT 1", **execute_kwargs)
             future.result()
@@ -297,6 +330,14 @@ class TestAsyncPolarsCursor:
     def test_close_closes_result_sets_after_close(self):
         """GH-1208: closing the cursor closes the result sets created after it (no AWS)."""
         assert_closes_result_sets_after_close(AsyncPolarsCursor)
+
+    def test_close_stops_waiting_futures(self):
+        """GH-1281: closing the cursor stops the futures that wait for a query (no AWS)."""
+        assert_close_stops_waiting_futures(AsyncPolarsCursor)
+
+    def test_description_reads_only_metadata(self):
+        """GH-1281: description() reads only the metadata of a CSV result (no AWS)."""
+        assert_description_reads_only_metadata(AsyncPolarsCursor)
 
     def test_closed(self, async_polars_cursor):
         """GH-1207: a closed cursor rejects execute()."""

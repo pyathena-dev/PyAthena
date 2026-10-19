@@ -62,5 +62,11 @@ Result Sets
    :members:
    :inherited-members:
 
+.. autoclass:: pyathena.result_set.AthenaResultSetMetadataReader
+   :members:
+
+.. autoclass:: pyathena.result_set.AthenaUnloadResultSetMetadataReader
+   :members:
+
 .. autoclass:: pyathena.result_set.WithResultSet
    :members:

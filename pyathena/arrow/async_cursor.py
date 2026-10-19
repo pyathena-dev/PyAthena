@@ -12,7 +12,9 @@ from pyathena.arrow.converter import (
     DefaultArrowTypeConverter,
     DefaultArrowUnloadTypeConverter,
 )
-from pyathena.arrow.result_set import AthenaArrowResultSet
+from pyathena.arrow.result_set import (
+    AthenaArrowResultSet,
+)
 from pyathena.async_cursor import AsyncCursor
 from pyathena.common import CursorIterator
 from pyathena.model import AthenaQueryExecution
@@ -129,6 +131,7 @@ class AsyncArrowCursor(AsyncCursor):
             result_reuse_minutes=result_reuse_minutes,
             **kwargs,
         )
+        self._result_set_class: type[AthenaArrowResultSet] = AthenaArrowResultSet
         self._unload = unload
         self._connect_timeout = connect_timeout
         self._request_timeout = request_timeout
@@ -154,6 +157,67 @@ class AsyncArrowCursor(AsyncCursor):
         self._arraysize = value
 
     @override
+    def _metadata_reader_arguments(
+        self,
+        query_execution: AthenaQueryExecution,
+        unload_location: str | None = None,
+        kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Get the arguments that create the Arrow metadata reader of a query's result set.
+
+        Args:
+            query_execution: The query execution in a terminal state.
+            unload_location: The S3 location of the ``UNLOAD`` output.
+            kwargs: Options of ``execute()``, from which the reader options are
+                taken; the reader takes the timeouts.
+
+        Returns:
+            The keyword arguments for ``AthenaArrowResultSetMetadataReader``.
+        """
+        if kwargs is None:
+            kwargs = {}
+        return dict(
+            **super()._metadata_reader_arguments(query_execution),
+            unload=self._unload,
+            unload_location=unload_location,
+            connect_timeout=kwargs.pop("connect_timeout", self._connect_timeout),
+            request_timeout=kwargs.pop("request_timeout", self._request_timeout),
+        )
+
+    @override
+    def _result_set_arguments(
+        self,
+        query_execution: AthenaQueryExecution,
+        result_set_type_hints: dict[str | int, str] | None = None,
+        unload_location: str | None = None,
+        kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Get the arguments that create the Arrow result set of a query.
+
+        They are the metadata reader arguments and the options of the rows.
+
+        Args:
+            query_execution: The query execution in a terminal state.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
+            unload_location: The S3 location of the ``UNLOAD`` output.
+            kwargs: Options of ``execute()`` for the result set.
+
+        Returns:
+            The keyword arguments for ``AthenaArrowResultSet``.
+        """
+        if kwargs is None:
+            kwargs = {}
+        return dict(
+            **self._metadata_reader_arguments(query_execution, unload_location, kwargs),
+            converter=self._converter,
+            arraysize=self._arraysize,
+            result_set_type_hints=result_set_type_hints,
+            # The options that the reader did not take.
+            **kwargs,
+        )
+
+    @override
     def _collect_result_set(
         self,
         query_id: str,
@@ -161,21 +225,27 @@ class AsyncArrowCursor(AsyncCursor):
         unload_location: str | None = None,
         kwargs: dict[str, Any] | None = None,
     ) -> AthenaArrowResultSet:
-        if kwargs is None:
-            kwargs = {}
+        """Wait for the query, then create its Arrow result set.
+
+        Args:
+            query_id: The Athena query execution ID.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
+            unload_location: The S3 location of the ``UNLOAD`` output.
+            kwargs: Options of ``execute()`` for the result set.
+
+        Returns:
+            The result set.
+
+        Raises:
+            ProgrammingError: If the cursor closes before the query finishes.
+            OperationalError: If a status request or reading the result fails.
+        """
         query_execution = cast(AthenaQueryExecution, self._poll(query_id))
-        return AthenaArrowResultSet(
-            connection=self._connection,
-            converter=self._converter,
-            query_execution=query_execution,
-            arraysize=self._arraysize,
-            retry_config=self._retry_config,
-            unload=self._unload,
-            unload_location=unload_location,
-            connect_timeout=kwargs.pop("connect_timeout", self._connect_timeout),
-            request_timeout=kwargs.pop("request_timeout", self._request_timeout),
-            result_set_type_hints=result_set_type_hints,
-            **kwargs,
+        return self._result_set_class(
+            **self._result_set_arguments(
+                query_execution, result_set_type_hints, unload_location, kwargs
+            )
         )
 
     @override
