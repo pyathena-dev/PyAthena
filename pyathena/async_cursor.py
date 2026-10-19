@@ -261,7 +261,9 @@ class AsyncCursor(BaseCursor):
         Polars cursors, the schema of its Parquet files. The descriptions are
         those of the result set of ``execute()`` with the options of the cursor,
         not those given to ``execute()``. If the cursor closes first, the future
-        raises ``ProgrammingError``.
+        raises ``ProgrammingError``. The result set class has to accept the
+        ``_pre_fetch`` keyword, as ``AthenaResultSet`` and the classes that pass
+        their keyword arguments to it do.
 
         Args:
             query_id: The Athena query execution ID.

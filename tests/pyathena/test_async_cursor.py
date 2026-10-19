@@ -245,6 +245,14 @@ class TestAsyncCursor:
 
 
 class TestAsyncDictCursor:
+    def test_description_reads_only_metadata(self):
+        """GH-1281: description() reads only the metadata through a dict result set (no AWS).
+
+        ``AthenaDictResultSet`` passes ``_pre_fetch`` to ``AthenaResultSet`` with
+        its other keyword arguments.
+        """
+        assert_description_reads_only_metadata(AsyncDictCursor)
+
     def test_dict_type(self, async_dict_cursor):
         with async_dict_cursor.connection.cursor(dict_type=OrderedDict) as ordered_cursor:
             _, future = ordered_cursor.execute("SELECT * FROM one_row")
