@@ -180,7 +180,6 @@ class AsyncArrowCursor(AsyncCursor):
         """
         if kwargs is None:
             kwargs = {}
-        # A call, so that an argument given twice raises TypeError.
         return dict(
             **super()._metadata_reader_arguments(query_execution),
             unload=self._unload,
@@ -213,7 +212,6 @@ class AsyncArrowCursor(AsyncCursor):
         """
         if kwargs is None:
             kwargs = {}
-        # A call, so that an argument given twice raises TypeError.
         return dict(
             **self._metadata_reader_arguments(query_execution, unload_location, kwargs),
             converter=self._converter,

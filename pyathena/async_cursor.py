@@ -357,7 +357,9 @@ class AsyncCursor(BaseCursor):
 
         ``_collect_result_set()`` passes them to the result set class. They are
         the metadata reader arguments and the options of the rows. A variant
-        cursor overrides both methods.
+        cursor overrides both methods. Both build the arguments with ``dict()``
+        calls, so that an option of ``execute()`` that names one of them raises
+        ``TypeError``, as a duplicate keyword argument does.
 
         Args:
             query_execution: The query execution in a terminal state.
@@ -367,7 +369,6 @@ class AsyncCursor(BaseCursor):
         Returns:
             The keyword arguments.
         """
-        # A call, so that an argument given twice raises TypeError.
         return dict(
             **self._metadata_reader_arguments(query_execution),
             converter=self._converter,

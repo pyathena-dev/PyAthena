@@ -533,9 +533,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
         )
         self._metadata_reader = reader
         self._kwargs = reader.read_kwargs
-        reads = self.state == AthenaQueryExecution.STATE_SUCCEEDED
-        if reads:
-            self._load_metadata()
+        self._load_metadata()
+        succeeded = self.state == AthenaQueryExecution.STATE_SUCCEEDED
         # The UNLOAD output that the reader found, for the read of the rows: the location,
         # the Parquet files from the data manifest, and their schema (None without
         # data files).
@@ -549,13 +548,13 @@ class AthenaPolarsResultSet(AthenaResultSet):
         self._df: pl.DataFrame | None = None
         # Converters for the rows of self._df.
         self._df_converters: dict[str, Callable[[str | None], Any | None]] = {}
-        if reads and self.output_location:
+        if succeeded and self.output_location:
             if self._chunksize is None:
                 self._df = self._as_polars()
                 self._df_converters = self._get_converters(self._get_frame_column_names())
             else:
                 self._df_iter = self._create_dataframe_iterator()
-        elif reads:
+        elif succeeded:
             # Without a result file, as with managed query result storage, the rows from
             # GetQueryResults are read as a CSV result file, but not in chunks.
             self._df = self._read_csv()
@@ -573,22 +572,6 @@ class AthenaPolarsResultSet(AthenaResultSet):
             )
         self._row_iter: Iterator[tuple[Any, ...]] = self._df_iter.itertuples()
 
-    def _storage_options(self, default: Callable[[], dict[str, Any]]) -> Any:
-        """Get the storage options for a Polars read function.
-
-        The metadata reader resolves them for its schema read alike; see
-        ``AthenaPolarsResultSetMetadataReader.resolve_storage_options()``. This
-        reads the options that the result set keeps, so that a chunk read that
-        starts later does not need the reader.
-
-        Args:
-            default: Returns the storage options that the result set chooses.
-
-        Returns:
-            The ``storage_options`` given to ``execute()``, or else the default.
-        """
-        return AthenaPolarsResultSetMetadataReader.resolve_storage_options(self._kwargs, default)
-
     def _read_kwargs(
         self, storage_options: Callable[[], dict[str, Any]], **defaults: Any
     ) -> dict[str, Any]:
@@ -596,7 +579,8 @@ class AthenaPolarsResultSet(AthenaResultSet):
 
         Args:
             storage_options: Returns the storage options that the result set chooses;
-                see ``_storage_options()``.
+                the options given to ``execute()`` replace them (see
+                ``AthenaPolarsResultSetMetadataReader.resolve_storage_options()``).
             **defaults: The other arguments that the result set chooses, such as
                 ``separator``.
 
@@ -607,7 +591,11 @@ class AthenaPolarsResultSet(AthenaResultSet):
         return {
             **defaults,
             **self._kwargs,
-            "storage_options": self._storage_options(storage_options),
+            # The options that the result set keeps, so that a chunk read that starts
+            # later does not need the metadata reader.
+            "storage_options": AthenaPolarsResultSetMetadataReader.resolve_storage_options(
+                self._kwargs, storage_options
+            ),
         }
 
     @property

@@ -230,7 +230,7 @@ class AthenaArrowResultSet(AthenaResultSet):
             request_timeout: The request timeout in seconds for the pyarrow S3 filesystem.
             result_set_type_hints: Athena type signatures for complex-type columns,
                 keyed by column name (case-insensitive) or zero-based column index.
-            **kwargs: Additional keyword arguments, stored but not used.
+            **kwargs: Additional keyword arguments, which are ignored.
 
         Raises:
             ProgrammingError: If ``query_execution`` is not given.
@@ -250,7 +250,6 @@ class AthenaArrowResultSet(AthenaResultSet):
         )
         self._arraysize = arraysize
         self._block_size = block_size if block_size else self.DEFAULT_BLOCK_SIZE
-        self._kwargs = kwargs
         reader = AthenaArrowResultSetMetadataReader(
             connection,
             query_execution,
@@ -262,9 +261,8 @@ class AthenaArrowResultSet(AthenaResultSet):
         )
         self._metadata_reader = reader
         self._fs = reader.filesystem
+        self._load_metadata()
         succeeded = self.state == AthenaQueryExecution.STATE_SUCCEEDED
-        if succeeded:
-            self._load_metadata()
         # The UNLOAD output location that the reader found, given or derived.
         self._unload_location = reader.unload_location
         if succeeded and self.output_location:

@@ -904,7 +904,7 @@ class AthenaResultSet(CursorIterator):
             self._rownumber += count
 
     def _load_metadata(self) -> None:
-        """Read the metadata with the metadata reader, and set it on the result set.
+        """Read the metadata with the metadata reader, and set it, if the query succeeded.
 
         The result sets that read their result with their own metadata reader call
         this before they read their rows. The column metadata of a result read from
@@ -917,6 +917,8 @@ class AthenaResultSet(CursorIterator):
             ProgrammingError: If the query execution of an UNLOAD result has no
                 data manifest location.
         """
+        if self.state != AthenaQueryExecution.STATE_SUCCEEDED:
+            return
         reader = cast(AthenaResultSetMetadataReader, self._metadata_reader)
         reader.read()
         if reader.reads_unload_files:
