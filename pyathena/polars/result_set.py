@@ -16,7 +16,8 @@ import sys
 import threading
 from collections import abc
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
+from functools import partial
 from io import BytesIO, StringIO
 from itertools import islice, repeat
 from multiprocessing import cpu_count
@@ -853,41 +854,42 @@ class AthenaPolarsResultSet(AthenaResultSet):
             # Renamed after reading, so that Polars matches the types to the header.
             kwargs.pop("new_columns", None)
         # Polars 2.0 reads a path with its native object store, which does not take
-        # fsspec options, so the result file is opened through fsspec here. Polars
-        # reads the open file into one buffer, while Polars 1.x copies bytes given to it.
+        # fsspec options, so the result file is opened through fsspec here and given
+        # to Polars as a file, which Polars 1.x does not copy as it does bytes. Each
+        # read opens the file again, so that a second read starts without the cache
+        # of the first.
         storage_options = kwargs.pop("storage_options")
+        open_source: Callable[[], AbstractContextManager[Any]]
         if self.output_location:
             location = self.output_location
+            open_source = partial(
+                fsspec.open, self.output_location, "rb", **(storage_options or {})
+            )
         else:
-            rows = self._fetch_all_rows_as_csv()
-            if not rows:
+            source = self._fetch_all_rows_as_csv()
+            if not source:
                 return pl.DataFrame()
+            open_source = partial(nullcontext, source)
             location = "the GetQueryResults rows"
 
         try:
             schema_overrides, timestamp_dtypes = self._get_csv_schema_overrides(has_header)
             strict = not kwargs.get("ignore_errors", False)
             df: pl.DataFrame | None = None
-            with (
-                fsspec.open(self.output_location, "rb", **(storage_options or {}))
-                if self.output_location
-                else nullcontext(rows)
-            ) as data:
-                if strict or not timestamp_dtypes:
-                    try:
+            if strict or not timestamp_dtypes:
+                try:
+                    with open_source() as data:
                         df = pl.read_csv(data, **kwargs)
-                    except pl.exceptions.ComputeError:
-                        if not timestamp_dtypes:
-                            raise
-                if df is None:
-                    # The timestamp columns are read as text, again after parsing them
-                    # failed, or at once with ignore_errors, with which Polars reads the
-                    # timestamps that it does not parse as null instead of failing.
-                    kwargs["schema_overrides"] = schema_overrides
-                    if self.output_location:
-                        data.seek(0)
-                    texts = pl.read_csv(data, **kwargs)
+                except pl.exceptions.ComputeError:
+                    if not timestamp_dtypes:
+                        raise
             if df is None:
+                # The timestamp columns are read as text, again after parsing them
+                # failed, or at once with ignore_errors, with which Polars reads the
+                # timestamps that it does not parse as null instead of failing.
+                kwargs["schema_overrides"] = schema_overrides
+                with open_source() as data:
+                    texts = pl.read_csv(data, **kwargs)
                 df = _to_datetimes(texts, timestamp_dtypes, strict=strict)
             if new_columns:
                 df.columns = [*new_columns, *df.columns[len(new_columns) :]]
