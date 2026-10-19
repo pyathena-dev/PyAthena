@@ -79,7 +79,6 @@ class AthenaS3FSResultSet(AthenaResultSet):
         csv_reader: CSVReaderType | None = None,
         filesystem_class: type[AbstractFileSystem] | None = None,
         result_set_type_hints: dict[str | int, str] | None = None,
-        _pre_fetch: bool = True,
         **kwargs,
     ) -> None:
         """Initialize the result set and prepare to read the query results.
@@ -102,9 +101,6 @@ class AthenaS3FSResultSet(AthenaResultSet):
                 PyAthena's ``S3FileSystem`` is used.
             result_set_type_hints: Athena type signatures for complex-type columns,
                 keyed by column name (case-insensitive) or zero-based column index.
-            _pre_fetch: Whether to read the result here when the query succeeded: the
-                first ``GetQueryResults`` page, then the result file. :meth:`describe`
-                passes False and reads only the metadata.
             **kwargs: Additional keyword arguments, which are ignored.
 
         Raises:
@@ -117,7 +113,6 @@ class AthenaS3FSResultSet(AthenaResultSet):
             query_execution=query_execution,
             arraysize=1,  # Fetch one row to retrieve metadata
             retry_config=retry_config,
-            _pre_fetch=_pre_fetch,
             result_set_type_hints=result_set_type_hints,
         )
         # Save pre-fetched rows (from Athena API) in case CSV reading is not available
@@ -130,10 +125,9 @@ class AthenaS3FSResultSet(AthenaResultSet):
         self._fs = self._create_s3_file_system()
         self._csv_reader: CSVReader | None = None
 
-        reads = _pre_fetch and self.state == AthenaQueryExecution.STATE_SUCCEEDED
-        if reads and self.output_location:
+        if self.state == AthenaQueryExecution.STATE_SUCCEEDED and self.output_location:
             self._init_csv_reader()
-        elif reads:
+        elif self.state == AthenaQueryExecution.STATE_SUCCEEDED:
             # Managed query result storage: no output_location, use API.
             # The converter reads text values, as from the CSV result file.
             rows = self._fetch_all_rows(self._converter)

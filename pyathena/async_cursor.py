@@ -14,7 +14,11 @@ from pyathena.common import BaseCursor, CursorIterator
 from pyathena.error import NotSupportedError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.options import ExecuteOptions
-from pyathena.result_set import AthenaDictResultSet, AthenaResultSet
+from pyathena.result_set import (
+    AthenaDictResultSet,
+    AthenaResultSet,
+    AthenaResultSetMetadataReader,
+)
 from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
@@ -124,6 +128,11 @@ class AsyncCursor(BaseCursor):
         # Set by close(), to end the waits between status requests.
         self._closed_event = threading.Event()
         self._result_set_class: type[AthenaResultSet] = AthenaResultSet
+        # Reads the metadata of the result sets for description(), as the result set
+        # class reads it.
+        self._metadata_reader_class: type[AthenaResultSetMetadataReader] = (
+            AthenaResultSetMetadataReader
+        )
         self._result_set_kwargs: dict[str, Any] = {}
 
     @property
@@ -232,10 +241,10 @@ class AsyncCursor(BaseCursor):
     ) -> list[tuple[str, str, None, None, int, int, str]] | None:
         """Wait for the query, then read the column descriptions of its result.
 
-        The result set class describes the result as the result set that
-        ``execute()`` creates would, from the same arguments (see
-        :meth:`_result_set_arguments` and ``AthenaResultSet.describe()``), without
-        reading its rows.
+        The metadata reader of the cursor (``_metadata_reader_class``) reads them
+        from the arguments of :meth:`_metadata_reader_arguments`, which the result
+        set that ``execute()`` creates also reads its metadata with. No result set
+        is created, and no row is read.
 
         Args:
             query_id: The Athena query execution ID.
@@ -248,22 +257,21 @@ class AsyncCursor(BaseCursor):
             OperationalError: If a status request or reading the metadata fails.
         """
         query_execution = cast(AthenaQueryExecution, self._poll(query_id))
-        return self._result_set_class.describe(**self._result_set_arguments(query_execution))
+        reader = self._metadata_reader_class(**self._metadata_reader_arguments(query_execution))
+        return reader.describe()
 
     def description(
         self, query_id: str
     ) -> Future[list[tuple[str, str, None, None, int, int, str]] | None]:
         """Get the column descriptions of a query's result set asynchronously.
 
-        The future waits for the query to finish, then reads only the result
-        metadata, as ``AthenaResultSet.describe()`` does: a ``GetQueryResults``
-        page of one row, or for an UNLOAD result of the pandas, Arrow, and
-        Polars cursors, the schema of its Parquet files. The descriptions are
-        those of the result set of ``execute()`` with the options of the cursor,
-        not those given to ``execute()``. If the cursor closes first, the future
-        raises ``ProgrammingError``. The result set class has to accept the
-        ``_pre_fetch`` keyword, as ``AthenaResultSet`` and the classes that pass
-        their keyword arguments to it do.
+        The future waits for the query to finish, then reads only the result set
+        metadata with the metadata reader of the cursor: a ``GetQueryResults``
+        page of one row, or for an UNLOAD result of the pandas, Arrow, and Polars
+        cursors, the schema of its Parquet files. The descriptions are those of
+        the result set of ``execute()`` with the options of the cursor, not those
+        given to ``execute()``. If the cursor closes first, the future raises
+        ``ProgrammingError``.
 
         Args:
             query_id: The Athena query execution ID.
@@ -319,6 +327,27 @@ class AsyncCursor(BaseCursor):
         self._ensure_open()
         return cast("Future[AthenaQueryExecution]", self._executor.submit(self._poll, query_id))
 
+    def _metadata_reader_arguments(self, query_execution: AthenaQueryExecution) -> dict[str, Any]:
+        """Get the arguments that create the metadata reader of a query's result set.
+
+        ``_description()`` passes them to the metadata reader class. The result
+        set arguments include them (see :meth:`_result_set_arguments`), so that
+        the result set reads its metadata with the same options. A variant
+        cursor adds the options of its reader, taken from the options of
+        ``execute()``.
+
+        Args:
+            query_execution: The query execution in a terminal state.
+
+        Returns:
+            The keyword arguments.
+        """
+        return {
+            "connection": self._connection,
+            "query_execution": query_execution,
+            "retry_config": self._retry_config,
+        }
+
     def _result_set_arguments(
         self,
         query_execution: AthenaQueryExecution,
@@ -326,8 +355,9 @@ class AsyncCursor(BaseCursor):
     ) -> dict[str, Any]:
         """Get the arguments that create the result set of a query.
 
-        ``_collect_result_set()`` passes them to the result set class, and
-        ``_description()`` to its ``describe()``.
+        ``_collect_result_set()`` passes them to the result set class. They are
+        the metadata reader arguments and the options of the rows. A variant
+        cursor overrides both methods.
 
         Args:
             query_execution: The query execution in a terminal state.
@@ -338,11 +368,9 @@ class AsyncCursor(BaseCursor):
             The keyword arguments.
         """
         return {
-            "connection": self._connection,
+            **self._metadata_reader_arguments(query_execution),
             "converter": self._converter,
-            "query_execution": query_execution,
             "arraysize": self._arraysize,
-            "retry_config": self._retry_config,
             "result_set_type_hints": result_set_type_hints,
             **self._result_set_kwargs,
         }

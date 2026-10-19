@@ -12,7 +12,7 @@ import pyarrow as pa
 import pytest
 
 from pyathena.arrow.converter import DefaultArrowTypeConverter
-from pyathena.arrow.result_set import AthenaArrowResultSet
+from pyathena.arrow.result_set import AthenaArrowResultSet, AthenaArrowResultSetMetadataReader
 from pyathena.connection import Connection
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
@@ -26,8 +26,8 @@ class TestAthenaArrowResultSet:
         No AWS calls; the metadata read and the result table are mocked.
         """
         with (
-            patch.object(AthenaArrowResultSet, "_read_metadata"),
-            patch.object(AthenaArrowResultSet, "_create_s3_file_system"),
+            patch.object(AthenaArrowResultSet, "_load_metadata"),
+            patch.object(AthenaArrowResultSetMetadataReader, "_create_s3_file_system"),
             patch.object(
                 AthenaArrowResultSet, "_as_arrow", return_value=pa.table({"a": [1, 2, 3]})
             ),
@@ -115,8 +115,8 @@ class TestAthenaArrowResultSet:
         """
         table = pa.concat_tables([pa.table({"a": pa.array(chunk, pa.int64())}) for chunk in chunks])
         with (
-            patch.object(AthenaArrowResultSet, "_read_metadata"),
-            patch.object(AthenaArrowResultSet, "_create_s3_file_system"),
+            patch.object(AthenaArrowResultSet, "_load_metadata"),
+            patch.object(AthenaArrowResultSetMetadataReader, "_create_s3_file_system"),
             patch.object(AthenaArrowResultSet, "_as_arrow", return_value=table),
         ):
             result_set = AthenaArrowResultSet(
@@ -151,6 +151,8 @@ class TestAthenaArrowResultSet:
         assert result_set.fetchall() == []
         assert result_set.fetchone() is None
 
+
+class TestAthenaArrowResultSetMetadataReader:
     @pytest.mark.parametrize(
         ("connection_kwargs", "expected_access_key"),
         [
@@ -197,11 +199,9 @@ class TestAthenaArrowResultSet:
                 region_name="us-east-1", s3_staging_dir="s3://bucket/path/", **connection_kwargs
             )
         with connection:
-            result_set = AthenaArrowResultSet.__new__(AthenaArrowResultSet)  # bypass __init__
-            result_set._connection = connection
-            result_set._connect_timeout = None
-            result_set._request_timeout = None
-            fs = result_set._create_s3_file_system()
+            fs = AthenaArrowResultSetMetadataReader(
+                connection, MagicMock(), RetryConfig()
+            ).filesystem
 
         # pyarrow exposes the filesystem options only through its pickle support.
         options = fs.__reduce__()[1][0]

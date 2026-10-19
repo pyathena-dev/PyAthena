@@ -31,6 +31,10 @@ Pandas Result Set
    :members:
    :inherited-members:
 
+.. autoclass:: pyathena.pandas.result_set.AthenaPandasResultSetMetadataReader
+   :members:
+   :inherited-members:
+
 .. autoclass:: pyathena.pandas.result_set.PandasDataFrameIterator
    :members:
 

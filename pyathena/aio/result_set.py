@@ -20,6 +20,7 @@ from pyathena.result_set import (
     _FETCH_FAILED_MESSAGE,
     AthenaDictResultSet,
     AthenaResultSet,
+    AthenaResultSetMetadataReader,
 )
 from pyathena.util import RetryConfig, override
 
@@ -133,7 +134,8 @@ class AthenaAioResultSet(AthenaResultSet):
         """
         if self.is_closed:
             raise ProgrammingError("AthenaAioResultSet is closed.")
-        request = self._build_get_query_results_request(max_results, next_token)
+        reader = cast(AthenaResultSetMetadataReader, self._metadata_reader)
+        request = reader.build_get_query_results_request(max_results, next_token)
         try:
             response = await async_retry_api_call(
                 self.connection.client.get_query_results,
@@ -172,7 +174,8 @@ class AthenaAioResultSet(AthenaResultSet):
             OperationalError: If the request fails.
         """
         response = await self._async_get_query_results(self._arraysize)
-        self._process_result_metadata(response)
+        self._process_metadata(response)
+        self._process_update_count(response)
         rows, self._next_token = self._parse_result_rows(response)
         offset = 1 if rows and self._is_first_row_column_labels(rows) else 0
         self._process_rows(rows, offset)

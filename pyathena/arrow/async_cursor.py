@@ -12,7 +12,10 @@ from pyathena.arrow.converter import (
     DefaultArrowTypeConverter,
     DefaultArrowUnloadTypeConverter,
 )
-from pyathena.arrow.result_set import AthenaArrowResultSet
+from pyathena.arrow.result_set import (
+    AthenaArrowResultSet,
+    AthenaArrowResultSetMetadataReader,
+)
 from pyathena.async_cursor import AsyncCursor
 from pyathena.common import CursorIterator
 from pyathena.model import AthenaQueryExecution
@@ -130,6 +133,9 @@ class AsyncArrowCursor(AsyncCursor):
             **kwargs,
         )
         self._result_set_class: type[AthenaArrowResultSet] = AthenaArrowResultSet
+        self._metadata_reader_class: type[AthenaArrowResultSetMetadataReader] = (
+            AthenaArrowResultSetMetadataReader
+        )
         self._unload = unload
         self._connect_timeout = connect_timeout
         self._request_timeout = request_timeout
@@ -155,6 +161,34 @@ class AsyncArrowCursor(AsyncCursor):
         self._arraysize = value
 
     @override
+    def _metadata_reader_arguments(
+        self,
+        query_execution: AthenaQueryExecution,
+        unload_location: str | None = None,
+        kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Get the arguments that create the Arrow metadata reader of a query's result set.
+
+        Args:
+            query_execution: The query execution in a terminal state.
+            unload_location: The S3 location of the ``UNLOAD`` output.
+            kwargs: Options of ``execute()``, from which the reader options are
+                taken; the reader takes the timeouts.
+
+        Returns:
+            The keyword arguments for ``AthenaArrowResultSetMetadataReader``.
+        """
+        if kwargs is None:
+            kwargs = {}
+        return {
+            **super()._metadata_reader_arguments(query_execution),
+            "unload": self._unload,
+            "unload_location": unload_location,
+            "connect_timeout": kwargs.pop("connect_timeout", self._connect_timeout),
+            "request_timeout": kwargs.pop("request_timeout", self._request_timeout),
+        }
+
+    @override
     def _result_set_arguments(
         self,
         query_execution: AthenaQueryExecution,
@@ -164,6 +198,8 @@ class AsyncArrowCursor(AsyncCursor):
     ) -> dict[str, Any]:
         """Get the arguments that create the Arrow result set of a query.
 
+        They are the metadata reader arguments and the options of the rows.
+
         Args:
             query_execution: The query execution in a terminal state.
             result_set_type_hints: Athena type signatures for complex-type columns,
@@ -172,16 +208,16 @@ class AsyncArrowCursor(AsyncCursor):
             kwargs: Options of ``execute()`` for the result set.
 
         Returns:
-            The keyword arguments for ``AthenaArrowResultSet`` and its ``describe()``.
+            The keyword arguments for ``AthenaArrowResultSet``.
         """
         if kwargs is None:
             kwargs = {}
         return {
-            **super()._result_set_arguments(query_execution, result_set_type_hints),
-            "unload": self._unload,
-            "unload_location": unload_location,
-            "connect_timeout": kwargs.pop("connect_timeout", self._connect_timeout),
-            "request_timeout": kwargs.pop("request_timeout", self._request_timeout),
+            **self._metadata_reader_arguments(query_execution, unload_location, kwargs),
+            "converter": self._converter,
+            "arraysize": self._arraysize,
+            "result_set_type_hints": result_set_type_hints,
+            # The options that the reader did not take.
             **kwargs,
         }
 

@@ -164,7 +164,7 @@ class AsyncS3FSCursor(AsyncCursor):
             kwargs: Options of ``execute()`` for the result set.
 
         Returns:
-            The keyword arguments for ``AthenaS3FSResultSet`` and its ``describe()``.
+            The keyword arguments for ``AthenaS3FSResultSet``.
         """
         if kwargs is None:
             kwargs = {}

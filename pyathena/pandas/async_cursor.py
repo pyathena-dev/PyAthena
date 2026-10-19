@@ -17,7 +17,10 @@ from pyathena.pandas.converter import (
     DefaultPandasTypeConverter,
     DefaultPandasUnloadTypeConverter,
 )
-from pyathena.pandas.result_set import AthenaPandasResultSet
+from pyathena.pandas.result_set import (
+    AthenaPandasResultSet,
+    AthenaPandasResultSetMetadataReader,
+)
 from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
@@ -137,6 +140,9 @@ class AsyncPandasCursor(AsyncCursor):
             **kwargs,
         )
         self._result_set_class: type[AthenaPandasResultSet] = AthenaPandasResultSet
+        self._metadata_reader_class: type[AthenaPandasResultSetMetadataReader] = (
+            AthenaPandasResultSetMetadataReader
+        )
         self._s3_max_workers = s3_max_workers
         self._unload = unload
         self._engine = engine
@@ -166,6 +172,38 @@ class AsyncPandasCursor(AsyncCursor):
         self._arraysize = value
 
     @override
+    def _metadata_reader_arguments(
+        self,
+        query_execution: AthenaQueryExecution,
+        unload_location: str | None = None,
+        kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Get the arguments that create the pandas metadata reader of a query's result set.
+
+        Args:
+            query_execution: The query execution in a terminal state.
+            unload_location: The S3 location of the ``UNLOAD`` output.
+            kwargs: Options of ``execute()``, from which the reader options are
+                taken; the rest are read options.
+
+        Returns:
+            The keyword arguments for ``AthenaPandasResultSetMetadataReader``.
+        """
+        if kwargs is None:
+            kwargs = {}
+        return {
+            **super()._metadata_reader_arguments(query_execution),
+            "unload": self._unload,
+            "unload_location": unload_location,
+            "engine": kwargs.pop("engine", self._engine),
+            "chunksize": kwargs.pop("chunksize", self._chunksize),
+            "block_size": kwargs.pop("block_size", self._block_size),
+            "cache_type": kwargs.pop("cache_type", self._cache_type),
+            "max_workers": kwargs.pop("s3_max_workers", self._s3_max_workers),
+            **kwargs,
+        }
+
+    @override
     def _result_set_arguments(
         self,
         query_execution: AthenaQueryExecution,
@@ -178,6 +216,8 @@ class AsyncPandasCursor(AsyncCursor):
     ) -> dict[str, Any]:
         """Get the arguments that create the pandas result set of a query.
 
+        They are the metadata reader arguments and the options of the rows.
+
         Args:
             query_execution: The query execution in a terminal state.
             result_set_type_hints: Athena type signatures for complex-type columns,
@@ -189,26 +229,23 @@ class AsyncPandasCursor(AsyncCursor):
             kwargs: Options of ``execute()`` for the result set and pandas.
 
         Returns:
-            The keyword arguments for ``AthenaPandasResultSet`` and its ``describe()``.
+            The keyword arguments for ``AthenaPandasResultSet``.
         """
         if kwargs is None:
             kwargs = {}
+        # Taken first, so that the metadata reader does not get it as a read option.
+        auto_optimize_chunksize = kwargs.pop(
+            "auto_optimize_chunksize", self._auto_optimize_chunksize
+        )
         return {
-            **super()._result_set_arguments(query_execution, result_set_type_hints),
+            **self._metadata_reader_arguments(query_execution, unload_location, kwargs),
+            "converter": self._converter,
+            "arraysize": self._arraysize,
+            "result_set_type_hints": result_set_type_hints,
             "keep_default_na": keep_default_na,
             "na_values": na_values,
             "quoting": quoting,
-            "unload": self._unload,
-            "unload_location": unload_location,
-            "engine": kwargs.pop("engine", self._engine),
-            "chunksize": kwargs.pop("chunksize", self._chunksize),
-            "block_size": kwargs.pop("block_size", self._block_size),
-            "cache_type": kwargs.pop("cache_type", self._cache_type),
-            "max_workers": kwargs.pop("s3_max_workers", self._s3_max_workers),
-            "auto_optimize_chunksize": kwargs.pop(
-                "auto_optimize_chunksize", self._auto_optimize_chunksize
-            ),
-            **kwargs,
+            "auto_optimize_chunksize": auto_optimize_chunksize,
         }
 
     @override

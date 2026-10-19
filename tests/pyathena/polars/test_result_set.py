@@ -126,7 +126,7 @@ def _fetching_result_set(chunks, names, arraysize, converters=None) -> AthenaPol
         state=AthenaQueryExecution.STATE_SUCCEEDED, output_location="s3://bucket/result.csv"
     )
     with (
-        patch.object(AthenaPolarsResultSet, "_read_metadata"),
+        patch.object(AthenaPolarsResultSet, "_load_metadata"),
         patch.object(
             AthenaPolarsResultSet,
             "_create_dataframe_iterator",

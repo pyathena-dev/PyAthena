@@ -414,10 +414,9 @@ class TestAdapter:
 
         monkeypatch.setattr(BaseClient, "_make_api_call", no_network)
         monkeypatch.setattr(RESULT_SETS["cursor"], "_pre_fetch", prefetch)
-        # The pandas, Arrow, and Polars result sets read the metadata in their own
-        # metadata phase, which reads the Parquet files of an UNLOAD result.
-        for family in ("cursor", "pandas", "arrow", "polars"):
-            monkeypatch.setattr(RESULT_SETS[family], "_read_metadata", read_metadata)
+        # The pandas, Arrow, and Polars result sets read the metadata with their metadata
+        # readers, which read the Parquet files of an UNLOAD result.
+        monkeypatch.setattr(RESULT_SETS["cursor"], "_load_metadata", read_metadata)
         csv_bytes = b'"id"\n"1"\n'
         monkeypatch.setattr(RESULT_SETS["s3fs"], "_get_content_length", lambda self: len(csv_bytes))
         monkeypatch.setattr(

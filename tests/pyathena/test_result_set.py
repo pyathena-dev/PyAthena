@@ -13,7 +13,11 @@ from botocore.exceptions import ReadTimeoutError
 from pyathena.converter import DefaultTypeConverter
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
-from pyathena.result_set import AthenaResultSet
+from pyathena.result_set import (
+    AthenaResultSet,
+    AthenaResultSetMetadataReader,
+    AthenaUnloadResultSetMetadataReader,
+)
 from pyathena.util import RetryConfig
 from tests.pyathena.util import (
     assert_fetches_fail,
@@ -49,7 +53,7 @@ def _fetching_result_set(*pages):
     )
 
 
-class TestAthenaResultSet:
+class TestAthenaResultSetMetadataReader:
     @pytest.mark.parametrize(
         ("state", "expected", "requests"),
         [
@@ -62,30 +66,41 @@ class TestAthenaResultSet:
         ],
     )
     def test_describe(self, state, expected, requests):
-        """GH-1281: describe() reads a page of one row, or nothing for a failed query.
-
-        The result set that it creates is closed.
-        """
+        """GH-1281: describe() reads a page of one row, or nothing for a failed query (no AWS)."""
         connection = MagicMock()
         connection.client.get_query_results.return_value = query_results_response(
             [("a", "integer")]
         )
-        with patch.object(
-            AthenaResultSet, "close", autospec=True, side_effect=AthenaResultSet.close
-        ) as close:
-            description = AthenaResultSet.describe(
-                connection=connection,
-                converter=DefaultTypeConverter(),
-                query_execution=MagicMock(state=state),
-                arraysize=2,
-                retry_config=RetryConfig(),
-            )
-        assert description == expected
+        reader = AthenaResultSetMetadataReader(connection, MagicMock(state=state), RetryConfig())
+        assert reader.describe() == expected
         assert connection.client.get_query_results.call_count == requests
         if requests:
             assert connection.client.get_query_results.call_args.kwargs["MaxResults"] == 1
-        close.assert_called_once()
 
+
+class TestAthenaUnloadResultSetMetadataReader:
+    def test_read_data_manifest_body_read_failure(self):
+        """GH-1235: a failed data manifest read raises OperationalError and closes the body.
+
+        No AWS calls; the S3 client is mocked.
+        """
+        body = MagicMock(read=MagicMock(side_effect=ReadTimeoutError(endpoint_url="s3")))
+        connection = MagicMock()
+        connection.s3_client.get_object.return_value = {"Body": body}
+        reader = AthenaUnloadResultSetMetadataReader(
+            connection,
+            MagicMock(
+                state=AthenaQueryExecution.STATE_SUCCEEDED,
+                data_manifest_location="s3://bucket/path/query-id-manifest.csv",
+            ),
+            RetryConfig(),
+        )
+        with pytest.raises(OperationalError):
+            reader._read_data_manifest()
+        body.close.assert_called_once_with()
+
+
+class TestAthenaResultSet:
     def test_fetchmany_across_pages(self):
         result_set = _fetching_result_set(("1", "2"), ("3", "4"), ("5",))
         assert result_set.fetchmany(1) == [(1,)]
@@ -152,29 +167,6 @@ class TestAthenaResultSet:
         assert result_set.rownumber is None
         assert client.get_query_results.call_count == 1
 
-    def test_read_data_manifest_body_read_failure(self):
-        """GH-1235: a failed data manifest read raises OperationalError and closes the body.
-
-        No AWS calls; the S3 client is mocked.
-        """
-        body = MagicMock(read=MagicMock(side_effect=ReadTimeoutError(endpoint_url="s3")))
-        connection = MagicMock()
-        connection.s3_client.get_object.return_value = {"Body": body}
-        result_set = AthenaResultSet(
-            connection=connection,
-            converter=DefaultTypeConverter(),
-            query_execution=MagicMock(
-                state=AthenaQueryExecution.STATE_SUCCEEDED,
-                data_manifest_location="s3://bucket/path/query-id-manifest.csv",
-            ),
-            arraysize=1,
-            retry_config=RetryConfig(),
-            _pre_fetch=False,
-        )
-        with pytest.raises(OperationalError):
-            result_set._read_data_manifest()
-        body.close.assert_called_once_with()
-
     def test_fetchone_across_pages(self):
         result_set = _fetching_result_set(("1", "2"), ("3",))
         assert [result_set.fetchone() for _ in range(4)] == [(1,), (2,), (3,), None]
@@ -210,6 +202,9 @@ class TestAthenaResultSet:
         result_set = AthenaResultSet.__new__(AthenaResultSet)  # bypass __init__
         result_set._connection = MagicMock()
         result_set._query_execution = None
+        result_set._metadata_reader = AthenaResultSetMetadataReader(
+            result_set._connection, MagicMock(substatement_type=None), RetryConfig()
+        )
         result_set._metadata = tuple(
             {"Name": name, "Type": "varchar", "Precision": 0, "Scale": 0, "Nullable": "UNKNOWN"}
             for name in ("v", 'w"')

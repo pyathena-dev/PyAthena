@@ -203,10 +203,11 @@ class TestAsyncCursor:
         """GH-1281: closing the cursor stops the futures that wait for a query (no AWS)."""
         assert_close_stops_waiting_futures(AsyncCursor)
 
-    def test_execute_result_set_class_with_earlier_parameters(self):
-        """GH-1281: execute() builds a result set class with the earlier parameters (no AWS).
+    def test_result_set_class_with_earlier_parameters(self):
+        """GH-1281: a result set class with the earlier parameters serves both futures (no AWS).
 
-        The class takes none of the keywords that ``describe()`` passes.
+        ``execute()`` creates it with the earlier arguments, and ``description()``
+        reads the metadata with the metadata reader of the cursor, without it.
         """
 
         class CustomResultSet(AthenaResultSet):
@@ -230,14 +231,18 @@ class TestAsyncCursor:
 
         cursor = placeholder_connection().cursor(AsyncCursor)
         cursor._result_set_class = CustomResultSet
+        expected = [("a", "integer", None, None, 3, 0, "UNKNOWN")]
         try:
             with answered_requests(cursor.connection.client, csv_result_responses()):
                 _, future = cursor.execute("SELECT 1")
                 result_set = future.result(EVENT_TIMEOUT)
+            with answered_requests(cursor.connection.client, csv_result_responses()):
+                description = cursor.description("query-id").result(EVENT_TIMEOUT)
         finally:
             cursor.close(wait=True)
         assert isinstance(result_set, CustomResultSet)
-        assert result_set.description == [("a", "integer", None, None, 3, 0, "UNKNOWN")]
+        assert result_set.description == expected
+        assert description == expected
 
     def test_description_reads_only_metadata(self):
         """GH-1281: description() reads only the metadata of a CSV result (no AWS)."""
@@ -245,14 +250,6 @@ class TestAsyncCursor:
 
 
 class TestAsyncDictCursor:
-    def test_description_reads_only_metadata(self):
-        """GH-1281: description() reads only the metadata through a dict result set (no AWS).
-
-        ``AthenaDictResultSet`` passes ``_pre_fetch`` to ``AthenaResultSet`` with
-        its other keyword arguments.
-        """
-        assert_description_reads_only_metadata(AsyncDictCursor)
-
     def test_dict_type(self, async_dict_cursor):
         with async_dict_cursor.connection.cursor(dict_type=OrderedDict) as ordered_cursor:
             _, future = ordered_cursor.execute("SELECT * FROM one_row")

@@ -32,6 +32,7 @@ from pyathena.model import AthenaQueryExecution
 from pyathena.pandas.converter import DefaultPandasTypeConverter
 from pyathena.pandas.result_set import (
     AthenaPandasResultSet,
+    AthenaPandasResultSetMetadataReader,
     PandasDataFrameIterator,
     _no_trunc_date,
     _read_csv_with_pyarrow,
@@ -495,7 +496,7 @@ class TestAthenaPandasResultSet:
         ids=["whole", "chunks", "whole-without-matching-rows"],
     )
     def test_describe_unload(self, tmp_path, kwargs):
-        """GH-1281: describe() describes an UNLOAD result as its read does, without the read.
+        """GH-1281: the metadata reader describes an UNLOAD result as the result set does.
 
         A result with data files is described by their columns, also when the read
         options drop every row.
@@ -504,11 +505,14 @@ class TestAthenaPandasResultSet:
         tables = [pa.table({"i": pa.array([1, 2], pa.int64())}), pa.table({"i": [3]})]
         expected = [("i", "bigint", None, None, 19, 0, "NULLABLE")]
         assert _local_result_set(fs, tables=tables, **kwargs).description == expected
-        with patch.object(AthenaPandasResultSet, "_as_pandas", side_effect=AssertionError):
-            assert _local_result_set(fs, tables=tables, describe=True, **kwargs) == expected
+        assert _local_result_set(fs, tables=tables, describe=True, **kwargs) == expected
 
     def test_describe_unload_chunks_reads_first_footer(self, tmp_path):
-        """GH-1281: describe() of an UNLOAD result read in chunks opens only its first file."""
+        """GH-1281: describe() of an UNLOAD result read in chunks opens only its first file.
+
+        The metadata reader reads the footer of the first file, without listing the
+        unload location.
+        """
         fs = LocalBucketFileSystem(tmp_path)
         tables = [pa.table({"i": [1]}), pa.table({"i": [2]}), pa.table({"i": [3]})]
         description = _local_result_set(fs, tables=tables, describe=True, chunksize=1)
@@ -1545,7 +1549,8 @@ def _local_result_set(
     ``fs`` holds the files and stands in for PyAthena's filesystem, ``types`` lists the
     (name, Athena type) pairs of the GetQueryResults metadata, ``converter`` replaces
     the default converter, and ``kwargs`` are the result set's options. With
-    ``describe``, ``AthenaPandasResultSet.describe()`` returns the descriptions instead.
+    ``describe``, ``AthenaPandasResultSetMetadataReader.describe()`` returns the descriptions
+    instead.
     """
     unload = tables is not None
     location = f"s3://bucket/{name}"
@@ -1576,7 +1581,11 @@ def _local_result_set(
     connection.s3_client.head_object.return_value = {"ContentLength": length}
     connection.client.get_query_results.return_value = query_results_response(types)
     with patch("pyathena.pandas.result_set.S3FileSystem", return_value=fs):
-        return (AthenaPandasResultSet.describe if describe else AthenaPandasResultSet)(
+        if describe:
+            return AthenaPandasResultSetMetadataReader(
+                connection, query_execution, RetryConfig(), unload=unload, **kwargs
+            ).describe()
+        return AthenaPandasResultSet(
             connection=connection,
             converter=converter or DefaultPandasTypeConverter(),
             query_execution=query_execution,
@@ -1911,8 +1920,8 @@ def _fetching_result_set(result, arraysize):
         state=AthenaQueryExecution.STATE_SUCCEEDED, output_location="s3://bucket/result.csv"
     )
     with (
-        patch.object(AthenaPandasResultSet, "_read_metadata"),
-        patch.object(AthenaPandasResultSet, "_create_s3_file_system"),
+        patch.object(AthenaPandasResultSet, "_load_metadata"),
+        patch("pyathena.pandas.result_set.S3FileSystem"),
         patch.object(AthenaPandasResultSet, "_as_pandas", return_value=result),
         patch.object(
             AthenaPandasResultSet, "is_unload", new_callable=PropertyMock, return_value=True
