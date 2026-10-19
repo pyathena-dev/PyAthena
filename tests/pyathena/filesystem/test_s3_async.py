@@ -2799,7 +2799,14 @@ class TestAioS3StreamedFile:
             warnings.simplefilter("always")
             files.clear()
             gc.collect()
-        assert [w for w in caught if issubclass(w.category, ResourceWarning)] == []
+        # GH-1309: gc.collect() also collects the objects that earlier tests
+        # left, such as the event loop that pytest-asyncio creates on Python
+        # 3.13, so only the warning of this file counts.
+        assert [
+            w
+            for w in caught
+            if issubclass(w.category, ResourceWarning) and "s3://bucket/key" in str(w.message)
+        ] == []
         fs.core.put_object.assert_not_called()
 
     @pytest.mark.asyncio
