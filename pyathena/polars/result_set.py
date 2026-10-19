@@ -457,6 +457,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
         PyArrow is optional and only needed for as_arrow() functionality.
     """
 
+    _metadata_reader_class: ClassVar[type[AthenaPolarsResultSetMetadataReader]] = (
+        AthenaPolarsResultSetMetadataReader
+    )
+
     def __init__(
         self,
         connection: Connection[Any],
@@ -523,7 +527,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         self._cache_type = cache_type
         self._max_workers = max_workers
         self._chunksize = chunksize
-        reader = AthenaPolarsResultSetMetadataReader(
+        reader = self._metadata_reader_class(
             connection,
             query_execution,
             retry_config,

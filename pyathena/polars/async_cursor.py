@@ -18,7 +18,6 @@ from pyathena.polars.converter import (
 )
 from pyathena.polars.result_set import (
     AthenaPolarsResultSet,
-    AthenaPolarsResultSetMetadataReader,
 )
 from pyathena.util import override
 
@@ -133,9 +132,6 @@ class AsyncPolarsCursor(AsyncCursor):
             **kwargs,
         )
         self._result_set_class: type[AthenaPolarsResultSet] = AthenaPolarsResultSet
-        self._metadata_reader_class: type[AthenaPolarsResultSetMetadataReader] = (
-            AthenaPolarsResultSetMetadataReader
-        )
         self._s3_max_workers = s3_max_workers
         self._unload = unload
         self._block_size = block_size

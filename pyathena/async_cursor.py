@@ -14,11 +14,7 @@ from pyathena.common import BaseCursor, CursorIterator
 from pyathena.error import NotSupportedError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.options import ExecuteOptions
-from pyathena.result_set import (
-    AthenaDictResultSet,
-    AthenaResultSet,
-    AthenaResultSetMetadataReader,
-)
+from pyathena.result_set import AthenaDictResultSet, AthenaResultSet
 from pyathena.util import override
 
 _logger = logging.getLogger(__name__)
@@ -128,11 +124,6 @@ class AsyncCursor(BaseCursor):
         # Set by close(), to end the waits between status requests.
         self._closed_event = threading.Event()
         self._result_set_class: type[AthenaResultSet] = AthenaResultSet
-        # Reads the metadata of the result sets for description(), as the result set
-        # class reads it.
-        self._metadata_reader_class: type[AthenaResultSetMetadataReader] = (
-            AthenaResultSetMetadataReader
-        )
         self._result_set_kwargs: dict[str, Any] = {}
 
     @property
@@ -241,10 +232,10 @@ class AsyncCursor(BaseCursor):
     ) -> list[tuple[str, str, None, None, int, int, str]] | None:
         """Wait for the query, then read the column descriptions of its result.
 
-        The metadata reader of the cursor (``_metadata_reader_class``) reads them
-        from the arguments of :meth:`_metadata_reader_arguments`, which the result
-        set that ``execute()`` creates also reads its metadata with. No result set
-        is created, and no row is read.
+        The metadata reader class of the result set class reads them, from the
+        arguments of :meth:`_metadata_reader_arguments`, as the result set that
+        ``execute()`` creates reads its metadata. No result set is created, and no
+        row is read.
 
         Args:
             query_id: The Athena query execution ID.
@@ -257,8 +248,8 @@ class AsyncCursor(BaseCursor):
             OperationalError: If a status request or reading the metadata fails.
         """
         query_execution = cast(AthenaQueryExecution, self._poll(query_id))
-        reader = self._metadata_reader_class(**self._metadata_reader_arguments(query_execution))
-        return reader.describe()
+        reader_class = self._result_set_class._metadata_reader_class
+        return reader_class(**self._metadata_reader_arguments(query_execution)).describe()
 
     def description(
         self, query_id: str

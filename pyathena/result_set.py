@@ -11,6 +11,7 @@ from itertools import islice, repeat
 from typing import (
     TYPE_CHECKING,
     Any,
+    ClassVar,
     cast,
 )
 
@@ -395,6 +396,11 @@ class AthenaResultSet(CursorIterator):
     # https://docs.aws.amazon.com/athena/latest/ug/data-types.html
     # Athena complex types that benefit from type hint conversion.
     _COMPLEX_TYPES: frozenset[str] = frozenset({"array", "map", "row", "struct"})
+    # The class that reads the metadata of the result set, which the result set class
+    # determines; AsyncCursor.description() reads with it too.
+    _metadata_reader_class: ClassVar[type[AthenaResultSetMetadataReader]] = (
+        AthenaResultSetMetadataReader
+    )
 
     def __init__(
         self,
@@ -434,8 +440,9 @@ class AthenaResultSet(CursorIterator):
             raise ProgrammingError("Required argument `query_execution` not found.")
         self._retry_config = retry_config
         # Sends the GetQueryResults requests and describes the result set; a result set
-        # that reads its result otherwise replaces it with its own. None once closed.
-        self._metadata_reader: AthenaResultSetMetadataReader | None = AthenaResultSetMetadataReader(
+        # whose reader takes its read options replaces it with one created with them.
+        # None once closed.
+        self._metadata_reader: AthenaResultSetMetadataReader | None = self._metadata_reader_class(
             connection, self._query_execution, retry_config
         )
         self._hints_by_name: dict[str, str] = {}

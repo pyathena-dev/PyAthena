@@ -19,7 +19,6 @@ from pyathena.pandas.converter import (
 )
 from pyathena.pandas.result_set import (
     AthenaPandasResultSet,
-    AthenaPandasResultSetMetadataReader,
 )
 from pyathena.util import override
 
@@ -140,9 +139,6 @@ class AsyncPandasCursor(AsyncCursor):
             **kwargs,
         )
         self._result_set_class: type[AthenaPandasResultSet] = AthenaPandasResultSet
-        self._metadata_reader_class: type[AthenaPandasResultSetMetadataReader] = (
-            AthenaPandasResultSetMetadataReader
-        )
         self._s3_max_workers = s3_max_workers
         self._unload = unload
         self._engine = engine

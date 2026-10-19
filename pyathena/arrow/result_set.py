@@ -178,6 +178,10 @@ class AthenaArrowResultSet(AthenaResultSet):
         instantiated directly by users. Requires pyarrow to be installed.
     """
 
+    _metadata_reader_class: ClassVar[type[AthenaArrowResultSetMetadataReader]] = (
+        AthenaArrowResultSetMetadataReader
+    )
+
     DEFAULT_BLOCK_SIZE = 1024 * 1024 * 128
 
     _timestamp_parsers: ClassVar[list[str]] = [
@@ -250,7 +254,7 @@ class AthenaArrowResultSet(AthenaResultSet):
         )
         self._arraysize = arraysize
         self._block_size = block_size if block_size else self.DEFAULT_BLOCK_SIZE
-        reader = AthenaArrowResultSetMetadataReader(
+        reader = self._metadata_reader_class(
             connection,
             query_execution,
             retry_config,

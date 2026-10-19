@@ -1120,6 +1120,10 @@ class AthenaPandasResultSet(AthenaResultSet):
         instantiated directly by users.
     """
 
+    _metadata_reader_class: ClassVar[type[AthenaPandasResultSetMetadataReader]] = (
+        AthenaPandasResultSetMetadataReader
+    )
+
     # File size thresholds and chunking configuration - Public for user customization
     PYARROW_MIN_FILE_SIZE_BYTES: int = 100
     LARGE_FILE_THRESHOLD_BYTES: int = 50 * 1024 * 1024  # 50MB
@@ -1250,7 +1254,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         self._block_size = block_size
         self._cache_type = cache_type
         self._auto_optimize_chunksize = auto_optimize_chunksize
-        reader = AthenaPandasResultSetMetadataReader(
+        reader = self._metadata_reader_class(
             connection,
             query_execution,
             retry_config,

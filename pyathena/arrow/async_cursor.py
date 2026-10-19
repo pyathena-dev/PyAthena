@@ -14,7 +14,6 @@ from pyathena.arrow.converter import (
 )
 from pyathena.arrow.result_set import (
     AthenaArrowResultSet,
-    AthenaArrowResultSetMetadataReader,
 )
 from pyathena.async_cursor import AsyncCursor
 from pyathena.common import CursorIterator
@@ -133,9 +132,6 @@ class AsyncArrowCursor(AsyncCursor):
             **kwargs,
         )
         self._result_set_class: type[AthenaArrowResultSet] = AthenaArrowResultSet
-        self._metadata_reader_class: type[AthenaArrowResultSetMetadataReader] = (
-            AthenaArrowResultSetMetadataReader
-        )
         self._unload = unload
         self._connect_timeout = connect_timeout
         self._request_timeout = request_timeout
