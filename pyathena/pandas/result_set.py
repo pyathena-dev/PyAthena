@@ -12,7 +12,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from contextvars import copy_context
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from functools import partial
 from io import BufferedReader, BytesIO, IOBase, StringIO, TextIOWrapper
 from itertools import chain, islice
@@ -318,9 +318,9 @@ class _TemporalConverter:
     read as text and converted as whole columns after reading, so that their dtypes
     depend only on the Athena type: ``datetime64[us]``, ``datetime64[us]``,
     ``datetime64[us, UTC]``, and ``object`` with ``time`` objects and None for NULL.
-    Fractional digits beyond microseconds are truncated. A column that pandas already
-    parsed, as with ``parse_dates`` when a ``dtype`` given to ``execute()`` replaces
-    PyAthena's, gets the same unit.
+    Fractional digits beyond microseconds are truncated. A column that pandas or
+    pyarrow already parsed, as when ``dtype=None`` given to ``execute()`` replaces
+    PyAthena's dtype mapping, gets the same dtype.
     """
 
     __slots__ = ("_type",)
@@ -458,8 +458,8 @@ def _to_times(values: Series) -> Series:
     time with ``dateutil``.
 
     Args:
-        values: The text values, with missing values for NULL, or datetime values that
-            pandas parsed.
+        values: The text values, with missing values for NULL, datetime values that
+            pandas parsed, or ``time`` values that pyarrow parsed.
 
     Returns:
         The values as ``time`` objects, with None for NULL.
@@ -469,7 +469,10 @@ def _to_times(values: Series) -> Series:
     if values.dtype.kind == "M":
         return values.dt.time.astype(object).where(values.notna(), None)
     return pd.Series(
-        [_to_time(v) if isinstance(v, str) else None for v in values.to_numpy(dtype=object)],
+        [
+            _to_time(v) if isinstance(v, str) else v if isinstance(v, time) else None
+            for v in values.to_numpy(dtype=object)
+        ],
         index=values.index,
         dtype=object,
     )
@@ -1617,7 +1620,8 @@ class AthenaPandasResultSet(AthenaResultSet):
         pandas parses the time columns with ``parse_dates`` when ``parse_dates``,
         ``dtype``, or ``converters`` given to ``execute()`` keeps PyAthena from
         converting them after reading. A time column can also be an index level. Time
-        columns that pandas did not parse are left as they are.
+        columns that PyAthena converted after reading or that pandas did not parse are
+        left as they are.
 
         Args:
             df: The DataFrame or chunk, updated in place.
@@ -1626,6 +1630,8 @@ class AthenaPandasResultSet(AthenaResultSet):
             The same DataFrame.
         """
         for time_col in self._time_columns:
+            if time_col in self._csv_temporal_converters:
+                continue
             # A NULL is None, as with the GetQueryResults fallback and the other types.
             _replace_by_label(
                 df,

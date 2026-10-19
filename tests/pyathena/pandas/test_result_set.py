@@ -1325,18 +1325,21 @@ class TestAthenaPandasResultSet:
     @pytest.mark.parametrize("engine", ["c", "pyarrow"])
     @pytest.mark.parametrize("key", ["parse_dates", "dtype", "converters"])
     def test_temporal_options_none(self, tmp_path, engine, key):
-        """parse_dates, dtype, or converters of None, their default, is as if not given."""
-        data = '"d","n"\n' + '"2020-01-02","1"\n' * 10
+        """parse_dates, dtype, or converters of None, their default, is as if not given.
+
+        With dtype of None, pyarrow parses the dates and the times without a fraction.
+        """
+        data = '"d","tm","n"\n' + '"2020-01-02","03:04:05","1"\n' * 10
         assert len(data) >= AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES
         result_set = _local_result_set(
             LocalBucketFileSystem(tmp_path),
-            [("d", "date"), ("n", "integer")],
+            [("d", "date"), ("tm", "time"), ("n", "integer")],
             data,
             engine=engine,
             **{key: None},
         )
         assert str(result_set.as_pandas()["d"].dtype) == "datetime64[us]"
-        assert result_set.fetchone() == (date(2020, 1, 2), 1)
+        assert result_set.fetchone() == (date(2020, 1, 2), time(3, 4, 5), 1)
 
     # pandas parses the time column without a format.
     @pytest.mark.filterwarnings("ignore:Could not infer format")
