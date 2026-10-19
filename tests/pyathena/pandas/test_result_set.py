@@ -525,10 +525,22 @@ class TestAthenaPandasResultSet:
         Its DataFrame has the columns that describe it, as a result read whole does.
         """
         fs = LocalBucketFileSystem(tmp_path)
-        tables = [pa.table({"i": pa.array([], pa.int64())})]
-        result_set = _local_result_set(fs, tables=tables, chunksize=1)
-        assert result_set.description == [("i", "bigint", None, None, 19, 0, "NULLABLE")]
-        assert [chunk.columns.tolist() for chunk in result_set.iter_chunks()] == [["i"]]
+        tables = [pa.table({"i": pa.array([], pa.int64()), "t": pa.array([], pa.timestamp("ns"))})]
+        result_set = _local_result_set(
+            fs,
+            tables=tables,
+            # As Athena writes timestamps.
+            write_options={"use_deprecated_int96_timestamps": True},
+            chunksize=1,
+        )
+        assert result_set.description == [
+            ("i", "bigint", None, None, 19, 0, "NULLABLE"),
+            ("t", "timestamp", None, None, 3, 0, "NULLABLE"),
+        ]
+        chunks = list(result_set.iter_chunks())
+        assert [chunk.columns.tolist() for chunk in chunks] == [["i", "t"]]
+        # INT96 timestamps at microseconds, as the chunks of files with rows have them.
+        assert str(chunks[0].dtypes["t"]) == "datetime64[us]"
         assert result_set.fetchall() == []
 
     def test_iter_parquet_chunks_null_in_later_file(self, tmp_path):
@@ -1481,8 +1493,13 @@ def _read_local_csv(tmp_path, data, types, engine="c", chunksize=None, **kwargs)
     return result_set.as_pandas()
 
 
-def _write_unload_tables(fs, tables):
+def _write_unload_tables(fs, tables, **write_options):
     """Write the Parquet files of an UNLOAD result under ``s3://bucket/unload/``.
+
+    Args:
+        fs: The filesystem of the files.
+        tables: The tables of the files.
+        **write_options: Options of ``pyarrow.parquet.write_table()``.
 
     Returns:
         The data manifest of the files.
@@ -1491,7 +1508,7 @@ def _write_unload_tables(fs, tables):
     manifest = [f"s3://bucket/unload/{index}.parquet" for index in range(len(tables))]
     for path, table in zip(manifest, tables, strict=True):
         with fs.open(path, "wb") as file:
-            pq.write_table(table, file)
+            pq.write_table(table, file, **write_options)
     fs.opened.clear()
     return manifest
 
@@ -1552,6 +1569,7 @@ def _local_result_set(
     name="result.csv",
     converter=None,
     describe=False,
+    write_options=None,
     **kwargs,
 ):
     """Create a result set of a succeeded query over local result files, without AWS.
@@ -1560,14 +1578,16 @@ def _local_result_set(
     of an UNLOAD result, which the connection's S3 client lists in the data manifest.
     ``fs`` holds the files and stands in for PyAthena's filesystem, ``types`` lists the
     (name, Athena type) pairs of the GetQueryResults metadata, ``converter`` replaces
-    the default converter, and ``kwargs`` are the result set's options. With
+    the default converter, ``write_options`` are the options of
+    ``pyarrow.parquet.write_table()`` for ``tables``, and ``kwargs`` are the result
+    set's options. With
     ``describe``, ``AthenaPandasResultSetMetadataReader.describe()`` returns the descriptions
     instead.
     """
     unload = tables is not None
     location = f"s3://bucket/{name}"
     if unload:
-        manifest = _write_unload_tables(fs, tables)
+        manifest = _write_unload_tables(fs, tables, **(write_options or {}))
         length = 1
     else:
         manifest = []

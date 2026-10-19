@@ -2293,8 +2293,15 @@ class AthenaPandasResultSet(AthenaResultSet):
             for footer in footers:
                 self._parquet_null_dtypes.update(self._get_parquet_null_dtypes(footer))
             if not any(footer.num_rows for footer in footers):
-                # Files without rows still have the columns that describe the result.
-                table = first_footer.schema.to_arrow_schema().empty_table()
+                from pyarrow import parquet
+
+                # Files without rows still have the columns that describe the result,
+                # with INT96 timestamps at microseconds, as the chunks read them.
+                with self._fs.open(self._data_manifest[0], "rb") as f:
+                    schema = parquet.ParquetFile(
+                        f, metadata=first_footer, coerce_int96_timestamp_unit="us"
+                    ).schema_arrow
+                table = schema.empty_table()
                 columns = self._kwargs.get("columns")
                 return self._convert_parquet_chunk(table.select(columns) if columns else table, 0)
             return self._iter_parquet_chunks()

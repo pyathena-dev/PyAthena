@@ -722,7 +722,9 @@ class AthenaResultSet(CursorIterator):
 
         None without result metadata, or for ``INSERT``, ``UPDATE``, ``DELETE``, and ``MERGE``.
         The metadata reader of the result set formats them (see
-        ``AthenaResultSetMetadataReader.description()``).
+        ``AthenaResultSetMetadataReader.description()``). A subclass that changes the
+        descriptions does so in its reader class (``_metadata_reader_class``), which
+        ``AsyncCursor.description()`` also reads with.
         """
         if self._metadata is None or self._metadata_reader is None:
             return None
