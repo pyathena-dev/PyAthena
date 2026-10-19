@@ -48,9 +48,11 @@ The suite does not query Athena; the stack of the [cursor run](2026-10-19-9e99ca
    For the 6 GiB object, sync wrote 1,050 to 1,074 MiB/s and aio 1,047 to 1,052 MiB/s (0.98 to 1.00 times sync), against 0.75 to 0.77 times in the 4.1.0 run; for the 1 GiB object, 0.97 to 0.99 times, against 0.81 to 0.83.
    Sync copied the 6 GiB object at 1,835 to 1,879 MiB/s and aio at 1,889 to 1,925 MiB/s (1.01 to 1.05 times), against 521 to 540 MiB/s (0.30 to 0.35 times) in the 4.1.0 run.
    With the 1 GiB and 6 GiB objects, the aio processes peaked at 52 to 53 threads, against 24 to 25 in the 4.1.0 run and 51 for sync, so their thread counts follow `max_workers`.
-2. **Reads and the 8-worker cases did not regress.**
+2. **Reads of 256 MiB and larger and the 8-worker cases did not regress.**
    For the 1 GiB object, aio read at 0.96 to 1.06 times sync; with 8 workers, aio wrote at 0.95 to 1.02 times sync from 256 MiB up, and copied at 1.36 to 1.49 times, against 1.33 to 1.46 in the 4.1.0 run.
    The 64 MiB transfers ran at 0.74 to 1.29 times sync, without a consistent order among the settings, as in the 4.1.0 run.
+   The aio reads of the 64 MiB object ran at 230 to 266 MiB/s, against 202 to 312 MiB/s in the 4.1.0 run: slower in three of the four settings, by 17 to 26%, and faster in the fourth; the sync reads ran at 283 to 321 MiB/s, against 215 to 274 MiB/s.
+   These measurements do not establish a cause.
 3. **Writes no longer held the whole object in memory** (#1165).
    Writing the 6 GiB object peaked at 690 to 699 MiB with 40 workers and 302 to 305 MiB with 8 workers, with either API, against 6,005 to 6,313 MiB in the 4.1.0 run; the 1 GiB object peaked at 688 to 691 and 302 to 304 MiB, against 1,245 to 1,376 MiB.
 4. **Sync transfers of large objects ran faster than in the 4.1.0 run.**
