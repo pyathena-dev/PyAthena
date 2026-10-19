@@ -515,7 +515,7 @@ class AthenaArrowResultSet(AthenaResultSet):
         """
         import pyarrow as pa
 
-        reader = cast(AthenaArrowResultSetMetadataReader, self._metadata_reader)
+        reader = cast(AthenaArrowResultSetMetadataReader, self._reader)
         dataset = reader.take_parquet_dataset()
         if dataset is None:
             return pa.Table.from_pydict({})

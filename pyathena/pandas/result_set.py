@@ -2286,7 +2286,7 @@ class AthenaPandasResultSet(AthenaResultSet):
         """
         if not self.is_unload:
             return self._read_csv()
-        reader = cast(AthenaPandasResultSetMetadataReader, self._metadata_reader)
+        reader = cast(AthenaPandasResultSetMetadataReader, self._reader)
         first_footer = reader.take_parquet_first_footer()
         if first_footer is not None:
             footers = [first_footer, *reader.read_parquet_footers(self._data_manifest[1:])]

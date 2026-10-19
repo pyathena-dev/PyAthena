@@ -439,12 +439,10 @@ class AthenaResultSet(CursorIterator):
         if not self._query_execution:
             raise ProgrammingError("Required argument `query_execution` not found.")
         self._retry_config = retry_config
-        # Sends the GetQueryResults requests and describes the result set; a result set
-        # whose reader takes its read options replaces it with one created with them.
+        # Sends the GetQueryResults requests and describes the result set; see _reader.
+        # A result set whose reader takes its read options sets it in its constructor.
         # None once closed.
-        self._metadata_reader: AthenaResultSetMetadataReader | None = self._metadata_reader_class(
-            connection, self._query_execution, retry_config
-        )
+        self._metadata_reader: AthenaResultSetMetadataReader | None = None
         self._hints_by_name: dict[str, str] = {}
         self._hints_by_index: dict[int, str] = {}
         if result_set_type_hints:
@@ -656,7 +654,7 @@ class AthenaResultSet(CursorIterator):
         Returns:
             True if the metadata reader of the result set finds an UNLOAD result.
         """
-        return self._metadata_reader is not None and self._metadata_reader.is_unload
+        return not self.is_closed and self._reader.is_unload
 
     @property
     def encryption_option(self) -> str | None:
@@ -726,9 +724,29 @@ class AthenaResultSet(CursorIterator):
         descriptions does so in its reader class (``_metadata_reader_class``), which
         ``AsyncCursor.description()`` also reads with.
         """
-        if self._metadata is None or self._metadata_reader is None:
+        if self._metadata is None:
             return None
-        return self._metadata_reader.description(self._metadata)
+        return self._reader.description(self._metadata)
+
+    @property
+    def _reader(self) -> AthenaResultSetMetadataReader:
+        """The metadata reader of the result set, while it is open.
+
+        A result set whose reader takes its read options sets its own in its
+        constructor; otherwise the reader of ``_metadata_reader_class`` is created
+        on first use. Either way, the result set has one reader.
+
+        Raises:
+            ProgrammingError: If the result set is closed.
+        """
+        self._ensure_open()
+        if self._metadata_reader is None:
+            self._metadata_reader = self._metadata_reader_class(
+                cast("Connection[Any]", self._connection),
+                cast(AthenaQueryExecution, self._query_execution),
+                self._retry_config,
+            )
+        return self._metadata_reader
 
     @property
     def connection(self) -> Connection[Any]:
@@ -751,10 +769,7 @@ class AthenaResultSet(CursorIterator):
                 succeeded, or the result set is closed.
             OperationalError: If the request fails.
         """
-        self._ensure_open()
-        return cast(AthenaResultSetMetadataReader, self._metadata_reader).get_query_results(
-            max_results, next_token
-        )
+        return self._reader.get_query_results(max_results, next_token)
 
     def _fetch(self) -> None:
         """Fetch the next rows, if any, into the buffer.
@@ -928,7 +943,7 @@ class AthenaResultSet(CursorIterator):
         """
         if self.state != AthenaQueryExecution.STATE_SUCCEEDED:
             return
-        reader = cast(AthenaResultSetMetadataReader, self._metadata_reader)
+        reader = self._reader
         reader.read()
         if reader.reads_unload_files:
             self._metadata = reader.metadata
@@ -945,8 +960,7 @@ class AthenaResultSet(CursorIterator):
         Raises:
             DataError: If the response has no result metadata.
         """
-        reader = cast(AthenaResultSetMetadataReader, self._metadata_reader)
-        self._set_metadata(reader.parse_metadata(response))
+        self._set_metadata(self._reader.parse_metadata(response))
 
     def _set_metadata(self, metadata: tuple[dict[str, Any], ...]) -> None:
         """Set the column metadata, and the column names, types, and type hints from it.
