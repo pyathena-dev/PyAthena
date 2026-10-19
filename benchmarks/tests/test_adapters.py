@@ -397,7 +397,7 @@ class TestAdapter:
         def no_network(*args, **kwargs):
             pytest.fail("Constructor test made an AWS request")
 
-        def prefetch(result):
+        def read_metadata(result):
             result._metadata = (
                 {
                     "Name": "id",
@@ -407,10 +407,17 @@ class TestAdapter:
                     "Nullable": "UNKNOWN",
                 },
             )
+
+        def prefetch(result):
+            read_metadata(result)
             result._rows.append({"id": 1} if case.family == "dict" else (1,))
 
         monkeypatch.setattr(BaseClient, "_make_api_call", no_network)
         monkeypatch.setattr(RESULT_SETS["cursor"], "_pre_fetch", prefetch)
+        # The pandas, Arrow, and Polars result sets read the metadata in their own
+        # metadata phase, which reads the Parquet files of an UNLOAD result.
+        for family in ("cursor", "pandas", "arrow", "polars"):
+            monkeypatch.setattr(RESULT_SETS[family], "_read_metadata", read_metadata)
         csv_bytes = b'"id"\n"1"\n'
         monkeypatch.setattr(RESULT_SETS["s3fs"], "_get_content_length", lambda self: len(csv_bytes))
         monkeypatch.setattr(
@@ -469,7 +476,7 @@ class TestAdapter:
                 captured.append(kwargs["max_workers"])
                 return Rows()
 
-            monkeypatch.setattr("pyathena.pandas.async_cursor.AthenaPandasResultSet", resultset)
+            monkeypatch.setattr(cursor, "_result_set_class", resultset)
             result = await measure_query(adapter, cursor, "SELECT id", 5)
             cursor.close(wait=True)
         assert result["status"] == "ok", result
