@@ -640,15 +640,20 @@ def assert_description_reads_only_metadata(cursor_class):
     """Check that ``description()`` of an AsyncCursor reads only the result metadata.
 
     For a CSV result, the future requests one row of ``GetQueryResults`` and
-    reads no result file: the connection sends no other request, and the
-    placeholder credentials would fail one to S3.
+    reads no result file: the connection sends no other request. A request
+    to S3, which a read of the result file starts with (``HeadObject``),
+    fails without leaving the process.
 
     Args:
         cursor_class: The AsyncCursor class.
     """
     cursor = placeholder_connection().cursor(cursor_class)
+    s3_client = cursor.connection.s3_client
     try:
-        with answered_requests(cursor.connection.client, csv_result_responses()) as requests:
+        with (
+            answered_requests(cursor.connection.client, csv_result_responses()) as requests,
+            patch.object(s3_client, "_make_api_call", side_effect=AssertionError("S3 request")),
+        ):
             description = cursor.description("query-id").result(EVENT_TIMEOUT)
     finally:
         cursor.close(wait=True)
