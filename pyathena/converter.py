@@ -35,38 +35,22 @@ def _to_date(value: str | datetime | date | None) -> date | None:
         return value.date()
     if isinstance(value, date):
         return value
-    return datetime.strptime(value, "%Y-%m-%d").date()
-
-
-def _parse_datetime(value: str) -> datetime:
-    """Parse an Athena TIMESTAMP value of any precision.
-
-    Args:
-        value: The value as ``YYYY-MM-DD HH:MM:SS`` followed by an optional
-            fraction of up to 12 digits.
-
-    Returns:
-        The datetime. Digits beyond microseconds are truncated.
-    """
-    seconds, _, fraction = value.partition(".")
-    parsed = datetime.strptime(seconds, "%Y-%m-%d %H:%M:%S")
-    if fraction:
-        parsed = parsed.replace(microsecond=int(fraction[:6].ljust(6, "0")))
-    return parsed
+    return date.fromisoformat(value)
 
 
 def _to_datetime(varchar_value: str | None) -> datetime | None:
-    """Convert an Athena TIMESTAMP value to a datetime.
+    """Convert an Athena TIMESTAMP value of any precision to a datetime.
 
     Args:
-        varchar_value: The value as text, or None.
+        varchar_value: The value as ``YYYY-MM-DD HH:MM:SS`` followed by an optional
+            fraction of up to 12 digits, or None.
 
     Returns:
-        The datetime, or None.
+        The datetime, or None. Digits beyond microseconds are truncated.
     """
     if varchar_value is None:
         return None
-    return _parse_datetime(varchar_value)
+    return datetime.fromisoformat(varchar_value)
 
 
 # The length of Athena timestamp text, such as "2020-01-02 03:04:05.123456", that holds
@@ -133,7 +117,7 @@ def _to_datetime_with_tz(varchar_value: str | None) -> datetime | None:
             for NULL, is None.
 
     Returns:
-        The aware datetime, or None.
+        The aware datetime, or None. Digits beyond microseconds are truncated.
 
     Raises:
         DataError: If the zone name is unknown, or the local time is ambiguous or
@@ -143,7 +127,7 @@ def _to_datetime_with_tz(varchar_value: str | None) -> datetime | None:
         return None
     datetime_, _, tz = varchar_value.rpartition(" ")
     zone = _parse_time_zone(tz)
-    value = _parse_datetime(datetime_).replace(tzinfo=zone)
+    value = datetime.fromisoformat(datetime_).replace(tzinfo=zone)
     if isinstance(zone, timezone):
         return value
     # PEP 495: fold=0 and fold=1 give different offsets only at a transition. At a
@@ -161,35 +145,19 @@ def _to_datetime_with_tz(varchar_value: str | None) -> datetime | None:
     return value
 
 
-def _parse_time(value: str) -> time:
-    """Parse an Athena TIME value of any precision.
-
-    Args:
-        value: The value as ``HH:MM:SS`` followed by an optional fraction of up to
-            12 digits.
-
-    Returns:
-        The time. Digits beyond microseconds are truncated.
-    """
-    seconds, _, fraction = value.partition(".")
-    parsed = datetime.strptime(seconds, "%H:%M:%S").time()
-    if fraction:
-        parsed = parsed.replace(microsecond=int(fraction[:6].ljust(6, "0")))
-    return parsed
-
-
 def _to_time(varchar_value: str | None) -> time | None:
-    """Convert an Athena TIME value to a time.
+    """Convert an Athena TIME value of any precision to a time.
 
     Args:
-        varchar_value: The value as text, or None. An empty string is None.
+        varchar_value: The value as ``HH:MM:SS`` followed by an optional fraction of
+            up to 12 digits, or None. An empty string is None.
 
     Returns:
-        The time, or None.
+        The time, or None. Digits beyond microseconds are truncated.
     """
     if not varchar_value:
         return None
-    return _parse_time(varchar_value)
+    return time.fromisoformat(varchar_value)
 
 
 def _to_time_with_tz(varchar_value: str | None) -> time | None:
@@ -201,12 +169,13 @@ def _to_time_with_tz(varchar_value: str | None) -> time | None:
             None.
 
     Returns:
-        The time with a fixed-offset ``tzinfo``, or None.
+        The time with a fixed-offset ``tzinfo``, or None. Digits beyond microseconds
+        are truncated.
     """
     if not varchar_value:
         return None
     index = max(varchar_value.rfind("+"), varchar_value.rfind("-"))
-    return _parse_time(varchar_value[:index]).replace(
+    return time.fromisoformat(varchar_value[:index]).replace(
         tzinfo=_parse_utc_offset(varchar_value[index:])
     )
 
