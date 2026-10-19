@@ -1075,19 +1075,29 @@ class TestAthenaPandasResultSet:
         assert pd.isna(df["ts"].iloc[2])
         assert pd.isna(df["tstz"].iloc[2])
 
+    # pandas parses the time column without a format.
+    @pytest.mark.filterwarnings("ignore:Could not infer format")
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            pytest.param({}, id="default"),
+            # pandas parses the time column, which then becomes time objects.
+            pytest.param({"dtype": {}}, id="pandas_parses"),
+        ],
+    )
     @pytest.mark.parametrize("chunksize", [None, 1])
-    def test_temporal_index(self, tmp_path, chunksize):
-        """A temporal column that index_col reads as the index is converted as a column is."""
+    def test_time_index(self, tmp_path, kwargs, chunksize):
+        """A time column that index_col reads as the index holds time objects, as a column does."""
         result_set = _local_result_set(
             LocalBucketFileSystem(tmp_path),
-            [("tm", "time"), ("ts", "timestamp")],
-            f'"tm","ts"\n"{_TIME_TEXT}","{_TIMESTAMP_TEXT}"\n',
+            [("tm", "time"), ("n", "integer")],
+            f'"tm","n"\n"{_TIME_TEXT}","1"\n',
             chunksize=chunksize,
             index_col="tm",
+            **kwargs,
         )
         df = pd.concat(list(result_set.iter_chunks()))
         assert df.index.tolist() == [_TIME]
-        assert df["ts"].tolist() == [pd.Timestamp("2020-01-02 03:04:05.123456")]
 
     @pytest.mark.parametrize("chunksize", [None, 1])
     def test_unload_temporal_types(self, tmp_path, chunksize):

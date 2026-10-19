@@ -458,13 +458,16 @@ def _to_times(values: Series) -> Series:
     time with ``dateutil``.
 
     Args:
-        values: The text values, with missing values for NULL.
+        values: The text values, with missing values for NULL, or datetime values that
+            pandas parsed.
 
     Returns:
         The values as ``time`` objects, with None for NULL.
     """
     import pandas as pd
 
+    if values.dtype.kind == "M":
+        return values.dt.time.astype(object).where(values.notna(), None)
     return pd.Series(
         [_to_time(v) if isinstance(v, str) else None for v in values.to_numpy(dtype=object)],
         index=values.index,
@@ -1613,8 +1616,8 @@ class AthenaPandasResultSet(AthenaResultSet):
 
         pandas parses the time columns with ``parse_dates`` when ``parse_dates``,
         ``dtype``, or ``converters`` given to ``execute()`` keeps PyAthena from
-        converting them after reading. Time columns that pandas did not parse, or that
-        are not columns of the DataFrame, are left as they are.
+        converting them after reading. A time column can also be an index level. Time
+        columns that pandas did not parse are left as they are.
 
         Args:
             df: The DataFrame or chunk, updated in place.
@@ -1623,13 +1626,12 @@ class AthenaPandasResultSet(AthenaResultSet):
             The same DataFrame.
         """
         for time_col in self._time_columns:
-            if time_col not in df.columns:
-                continue
-            i = df.columns.get_loc(time_col)
-            values = df.iloc[:, i]
-            if values.dtype.kind == "M":
-                # A NULL is None, as with the GetQueryResults fallback and the other types.
-                df.isetitem(i, values.dt.time.astype(object).where(values.notna(), None))
+            # A NULL is None, as with the GetQueryResults fallback and the other types.
+            _replace_by_label(
+                df,
+                time_col,
+                lambda values: _to_times(values) if values.dtype.kind == "M" else values,
+            )
         return df
 
     @override
