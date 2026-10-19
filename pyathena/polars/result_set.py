@@ -334,7 +334,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         max_workers: int = (cpu_count() or 1) * 5,
         chunksize: int | None = None,
         result_set_type_hints: dict[str | int, str] | None = None,
-        _metadata_only: bool = False,
+        _pre_fetch: bool = True,
         **kwargs,
     ) -> None:
         """Initialize the Polars result set.
@@ -359,10 +359,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
                       access methods including fetchone(), fetchmany(), and iter_chunks().
             result_set_type_hints: Athena type signatures for complex-type columns,
                 keyed by column name (case-insensitive) or zero-based column index.
-            _metadata_only: Whether to read only the result metadata, which sets
-                ``description``; the result set then reads no rows. For an UNLOAD
-                result, the metadata comes from the schema of its Parquet files
-                (see ``_read_parquet_metadata()``).
+            _pre_fetch: Whether to read the result here when the query succeeded:
+                its metadata (see ``_read_metadata()``), then its rows.
+                :meth:`describe` passes False and reads only the metadata.
             **kwargs: Additional arguments passed to Polars read functions.
                 They replace the arguments the result set chooses, such as ``separator``,
                 ``has_header``, ``schema_overrides``, and ``storage_options``. A given
@@ -378,12 +377,13 @@ class AthenaPolarsResultSet(AthenaResultSet):
             connection=connection,
             converter=converter,
             query_execution=query_execution,
-            arraysize=1,  # Fetch one row to retrieve metadata
+            # The fetch size can exceed the size of a GetQueryResults page, which the
+            # base class validates.
+            arraysize=1,
             retry_config=retry_config,
+            _pre_fetch=False,
             result_set_type_hints=result_set_type_hints,
-            _metadata_only=_metadata_only,
         )
-        self._rows.clear()  # Clear pre_fetch data
         self._arraysize = arraysize
         self._unload = unload
         self._unload_location = unload_location
@@ -396,25 +396,26 @@ class AthenaPolarsResultSet(AthenaResultSet):
         self._kwargs = {k: v for k, v in kwargs.items() if k != "schema" or v is not None}
         # The Parquet files of an UNLOAD result, from its data manifest.
         self._data_manifest: list[str] = []
+        # The schema of the Parquet files of an UNLOAD result, which _read_metadata()
+        # reads; None without data files.
+        self._parquet_schema: pl.Schema | None = None
+        reads = _pre_fetch and self.state == AthenaQueryExecution.STATE_SUCCEEDED
+        if reads:
+            self._read_metadata()
 
         import polars as pl
 
         # The whole result when it was not read in chunks.
-        # Note: _as_polars() and _create_dataframe_iterator() update _metadata for unload
-        # queries, so the converters and column names must be read AFTER them.
         self._df: pl.DataFrame | None = None
         # Converters for the rows of self._df.
         self._df_converters: dict[str, Callable[[str | None], Any | None]] = {}
-        succeeded = self.state == AthenaQueryExecution.STATE_SUCCEEDED
-        if succeeded and _metadata_only and self.output_location and self.is_unload:
-            self._metadata = self._read_parquet_metadata()
-        if succeeded and not _metadata_only and self.output_location:
+        if reads and self.output_location:
             if self._chunksize is None:
                 self._df = self._as_polars()
                 self._df_converters = self._get_converters(self._get_frame_column_names())
             else:
                 self._df_iter = self._create_dataframe_iterator()
-        elif succeeded and not _metadata_only:
+        elif reads:
             # Without a result file, as with managed query result storage, the rows from
             # GetQueryResults are read as a CSV result file, but not in chunks.
             self._df = self._read_csv()
@@ -644,15 +645,12 @@ class AthenaPolarsResultSet(AthenaResultSet):
     def _create_dataframe_iterator(self) -> PolarsDataFrameIterator:
         """Create a DataFrame iterator that reads the result file in chunks.
 
-        For unload queries, it replaces the metadata with the schema of the Parquet
-        files, as ``_as_polars()`` does, before the chunks are read.
-
         The result set calls this method when it is created, in ``execute()`` or in the
         future that ``AsyncPolarsCursor.execute()`` returns. The requests that prepare
         the reads are made then, before the first fetch, and raise their errors there:
-        the size check of a CSV result file, and the data manifest and the Parquet
-        schema of an UNLOAD result. The schema sets the metadata and is passed to
-        ``_iter_parquet_chunks()``. The chunks themselves are read lazily.
+        the size check of a CSV result file here, and the data manifest and the Parquet
+        schema of an UNLOAD result in ``_read_metadata()`` before. The schema is passed
+        to ``_iter_parquet_chunks()``. The chunks themselves are read lazily.
 
         Returns:
             PolarsDataFrameIterator that reads each chunk lazily.
@@ -660,12 +658,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
         reader: Iterator[pl.DataFrame]
         if not self.is_unload:
             reader = self._iter_csv_chunks()
-        elif self._prepare_parquet_location():
-            schema = self._read_parquet_schema()
-            self._metadata = to_column_info(schema)
-            reader = self._iter_parquet_chunks(schema)
+        elif self._parquet_schema is not None:
+            reader = self._iter_parquet_chunks(self._parquet_schema)
         else:
-            self._metadata = ()
             reader = iter(())
         column_names = self._get_frame_column_names()
         return PolarsDataFrameIterator(
@@ -724,6 +719,28 @@ class AthenaPolarsResultSet(AthenaResultSet):
         ):
             return False
         return not self.output_location or self._get_content_length() != 0
+
+    @override
+    def _read_metadata(self) -> None:
+        """Read the result metadata, from the Parquet files of an UNLOAD result.
+
+        An UNLOAD result with a result location is described by the schema of its
+        Parquet files (``_read_parquet_schema()``), which the read of the result
+        also uses, without a ``GetQueryResults`` request; a result without data
+        files has no columns. Other results are described as the base class
+        describes them.
+
+        Raises:
+            OperationalError: If reading the metadata fails.
+        """
+        if not (self.output_location and self.is_unload):
+            super()._read_metadata()
+            return
+        if self._prepare_parquet_location():
+            self._parquet_schema = self._read_parquet_schema()
+            self._metadata = to_column_info(self._parquet_schema)
+        else:
+            self._metadata = ()
 
     def _prepare_parquet_location(self) -> bool:
         """Prepare unload location for Parquet reading.
@@ -847,61 +864,23 @@ class AthenaPolarsResultSet(AthenaResultSet):
             ProgrammingError: If the unload location is not set.
             OperationalError: If reading the schema fails.
         """
+        import polars as pl
+
         if not self._unload_location:
             raise ProgrammingError("UnloadLocation is none or empty.")
 
         try:
             # Use scan_parquet to get schema without reading all data
-            return self._scan_parquet().collect_schema()
+            lazy_df = pl.scan_parquet(
+                self._unload_location,
+                storage_options=self._storage_options(
+                    lambda: self._get_parquet_storage_options(self.connection)
+                ),
+            )
+            return lazy_df.collect_schema()
         except Exception as e:
             _logger.exception(f"Failed to read schema from {self._unload_location}.")
             raise OperationalError(*e.args) from e
-
-    def _scan_parquet(self) -> pl.LazyFrame:
-        """Scan the Parquet files at the unload location, with the result set's storage options.
-
-        Returns:
-            The lazy frame of the files.
-        """
-        import polars as pl
-
-        return pl.scan_parquet(
-            cast(str, self._unload_location),
-            storage_options=self._storage_options(
-                lambda: self._get_parquet_storage_options(self.connection)
-            ),
-        )
-
-    def _read_parquet_metadata(self) -> tuple[dict[str, Any], ...]:
-        """Read the metadata of the UNLOAD result without reading its rows.
-
-        This is the metadata that ``_as_polars()`` or, for a result read in
-        chunks, ``_create_dataframe_iterator()`` sets, from the schema of
-        ``_read_parquet_schema()``: empty without data files, and for a result
-        read whole, also when the files hold no rows. It applies no read
-        options of ``execute()``; ``description()`` passes none.
-
-        Returns:
-            The column metadata.
-
-        Raises:
-            OperationalError: If reading the data manifest, the schema, or the row
-                count fails.
-        """
-        import polars as pl
-
-        if not self._prepare_parquet_location():
-            return ()
-        schema = self._read_parquet_schema()
-        if self._chunksize is None:
-            try:
-                rows = self._scan_parquet().select(pl.len()).collect().item()
-            except Exception as e:
-                _logger.exception(f"Failed to count the rows of {self._unload_location}.")
-                raise OperationalError(*e.args) from e
-            if not rows:
-                return ()
-        return to_column_info(schema)
 
     def _int96_read_options(self, schema: pl.Schema) -> dict[str, Any] | None:
         """Get the Polars read arguments that read the INT96 timestamps of UNLOAD at microseconds.
@@ -1002,13 +981,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
 
         if not self.is_unload:
             return self._read_csv()
-        if not self._prepare_parquet_location():
-            self._metadata = ()
+        if self._parquet_schema is None:
             return pl.DataFrame()
-        schema = self._read_parquet_schema()
-        df = self._read_parquet(schema)
-        self._metadata = () if df.is_empty() else to_column_info(schema)
-        return df
+        return self._read_parquet(self._parquet_schema)
 
     def as_polars(self) -> pl.DataFrame:
         """Return query results as a Polars DataFrame.

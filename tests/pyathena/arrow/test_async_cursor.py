@@ -308,7 +308,7 @@ class TestAsyncArrowCursor:
             ) as cursor,
             patch.object(AsyncArrowCursor, "_execute", return_value="query_id"),
             patch.object(AsyncArrowCursor, "_poll", return_value=query_execution),
-            patch("pyathena.arrow.async_cursor.AthenaArrowResultSet") as result_set_class,
+            patch.object(cursor, "_result_set_class") as result_set_class,
         ):
             _, future = cursor.execute("SELECT 1", **execute_kwargs)
             future.result()

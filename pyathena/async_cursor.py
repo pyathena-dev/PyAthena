@@ -123,7 +123,7 @@ class AsyncCursor(BaseCursor):
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
         # Set by close(), to end the waits between status requests.
         self._closed_event = threading.Event()
-        self._result_set_class = AthenaResultSet
+        self._result_set_class: type[AthenaResultSet] = AthenaResultSet
         self._result_set_kwargs: dict[str, Any] = {}
 
     @property
@@ -233,7 +233,10 @@ class AsyncCursor(BaseCursor):
     ) -> list[tuple[str, str, None, None, int, int, str]] | None:
         """Wait for the query, then read the column descriptions of its result.
 
-        Only the result metadata is read, not the rows.
+        The result set class describes the result as the result set that
+        ``execute()`` creates would, from the same arguments (see
+        :meth:`_result_set_arguments` and ``AthenaResultSet.describe()``), without
+        reading its rows.
 
         Args:
             query_id: The Athena query execution ID.
@@ -245,11 +248,8 @@ class AsyncCursor(BaseCursor):
             ProgrammingError: If the cursor closes before the query finishes.
             OperationalError: If a status request or reading the metadata fails.
         """
-        result_set = self._collect_result_set(query_id, metadata_only=True)
-        try:
-            return result_set.description
-        finally:
-            result_set.close()
+        query_execution = cast(AthenaQueryExecution, self._poll(query_id))
+        return self._result_set_class.describe(**self._result_set_arguments(query_execution))
 
     def description(
         self, query_id: str
@@ -257,10 +257,12 @@ class AsyncCursor(BaseCursor):
         """Get the column descriptions of a query's result set asynchronously.
 
         The future waits for the query to finish, then reads only the result
-        metadata: the first ``GetQueryResults`` page of one row, or for an
-        UNLOAD result of the pandas, Arrow, and Polars cursors, the schema of
-        its Parquet files. If the cursor closes first, the future raises
-        ``ProgrammingError``.
+        metadata, as ``AthenaResultSet.describe()`` does: a ``GetQueryResults``
+        page of one row, or for an UNLOAD result of the pandas, Arrow, and
+        Polars cursors, the schema of its Parquet files. The descriptions are
+        those of the result set of ``execute()`` with the options of the cursor,
+        not those given to ``execute()``. If the cursor closes first, the future
+        raises ``ProgrammingError``.
 
         Args:
             query_id: The Athena query execution ID.
@@ -316,12 +318,38 @@ class AsyncCursor(BaseCursor):
         self._ensure_open()
         return cast("Future[AthenaQueryExecution]", self._executor.submit(self._poll, query_id))
 
+    def _result_set_arguments(
+        self,
+        query_execution: AthenaQueryExecution,
+        result_set_type_hints: dict[str | int, str] | None = None,
+    ) -> dict[str, Any]:
+        """Get the arguments that create the result set of a query.
+
+        ``_collect_result_set()`` passes them to the result set class, and
+        ``_description()`` to its ``describe()``.
+
+        Args:
+            query_execution: The query execution in a terminal state.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
+
+        Returns:
+            The keyword arguments.
+        """
+        return {
+            "connection": self._connection,
+            "converter": self._converter,
+            "query_execution": query_execution,
+            "arraysize": self._arraysize,
+            "retry_config": self._retry_config,
+            "result_set_type_hints": result_set_type_hints,
+            **self._result_set_kwargs,
+        }
+
     def _collect_result_set(
         self,
         query_id: str,
         result_set_type_hints: dict[str | int, str] | None = None,
-        *,
-        metadata_only: bool = False,
     ) -> AthenaResultSet:
         """Wait for the query, then create its result set.
 
@@ -329,8 +357,6 @@ class AsyncCursor(BaseCursor):
             query_id: The Athena query execution ID.
             result_set_type_hints: Athena type signatures for complex-type columns,
                 keyed by column name (case-insensitive) or zero-based column index.
-            metadata_only: Whether the result set reads only the result metadata,
-                as for ``description()``.
 
         Returns:
             The result set.
@@ -340,18 +366,8 @@ class AsyncCursor(BaseCursor):
             OperationalError: If a status request or reading the result fails.
         """
         query_execution = cast(AthenaQueryExecution, self._poll(query_id))
-        # Passed only when set, so that a result set class without the keyword
-        # still serves execute().
-        metadata_kwargs = {"_metadata_only": True} if metadata_only else {}
         return self._result_set_class(
-            connection=self._connection,
-            converter=self._converter,
-            query_execution=query_execution,
-            arraysize=self._arraysize,
-            retry_config=self._retry_config,
-            result_set_type_hints=result_set_type_hints,
-            **metadata_kwargs,
-            **self._result_set_kwargs,
+            **self._result_set_arguments(query_execution, result_set_type_hints)
         )
 
     @override

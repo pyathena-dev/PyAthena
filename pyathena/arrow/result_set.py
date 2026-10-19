@@ -96,7 +96,7 @@ class AthenaArrowResultSet(AthenaResultSet):
         connect_timeout: float | None = None,
         request_timeout: float | None = None,
         result_set_type_hints: dict[str | int, str] | None = None,
-        _metadata_only: bool = False,
+        _pre_fetch: bool = True,
         **kwargs,
     ) -> None:
         """Initialize the result set and load the query results into an Arrow Table.
@@ -118,9 +118,9 @@ class AthenaArrowResultSet(AthenaResultSet):
             request_timeout: The request timeout in seconds for the pyarrow S3 filesystem.
             result_set_type_hints: Athena type signatures for complex-type columns,
                 keyed by column name (case-insensitive) or zero-based column index.
-            _metadata_only: Whether to read only the result metadata, which sets
-                ``description``; the result set then reads no rows. For an UNLOAD
-                result, the metadata comes from the schema of its Parquet files.
+            _pre_fetch: Whether to read the result here when the query succeeded:
+                its metadata (see ``_read_metadata()``), then its rows.
+                :meth:`describe` passes False and reads only the metadata.
             **kwargs: Additional keyword arguments, stored but not used.
 
         Raises:
@@ -131,12 +131,13 @@ class AthenaArrowResultSet(AthenaResultSet):
             connection=connection,
             converter=converter,
             query_execution=query_execution,
-            arraysize=1,  # Fetch one row to retrieve metadata
+            # The fetch size can exceed the size of a GetQueryResults page, which the
+            # base class validates.
+            arraysize=1,
             retry_config=retry_config,
+            _pre_fetch=False,
             result_set_type_hints=result_set_type_hints,
-            _metadata_only=_metadata_only,
         )
-        self._rows.clear()  # Clear pre_fetch data
         self._arraysize = arraysize
         self._block_size = block_size if block_size else self.DEFAULT_BLOCK_SIZE
         self._unload = unload
@@ -145,12 +146,15 @@ class AthenaArrowResultSet(AthenaResultSet):
         self._request_timeout = request_timeout
         self._kwargs = kwargs
         self._fs = self._create_s3_file_system()
-        succeeded = self.state == AthenaQueryExecution.STATE_SUCCEEDED
-        if succeeded and _metadata_only and self.output_location and self.is_unload:
-            self._metadata = self._read_parquet_metadata()
-        if succeeded and not _metadata_only and self.output_location:
+        # The dataset of the Parquet files of an UNLOAD result, which _read_metadata()
+        # opens; None without data files.
+        self._parquet_dataset: ParquetDataset | None = None
+        reads = _pre_fetch and self.state == AthenaQueryExecution.STATE_SUCCEEDED
+        if reads:
+            self._read_metadata()
+        if reads and self.output_location:
             self._table = self._as_arrow()
-        elif succeeded and not _metadata_only:
+        elif reads:
             # Without a result file, as with managed query result storage, the rows from
             # GetQueryResults are read as a CSV result file.
             self._table = self._read_csv()
@@ -402,6 +406,31 @@ class AthenaArrowResultSet(AthenaResultSet):
             _logger.exception(f"Failed to read {location}.")
             raise OperationalError(*e.args) from e
 
+    @override
+    def _read_metadata(self) -> None:
+        """Read the result metadata, from the Parquet files of an UNLOAD result.
+
+        An UNLOAD result with a result location is described by the schema of the
+        dataset of its Parquet files, which ``_read_parquet()`` reads, without a
+        ``GetQueryResults`` request; a result without data files has no columns.
+        Other results are described as the base class describes them.
+
+        Raises:
+            OperationalError: If reading the metadata fails.
+        """
+        if not (self.output_location and self.is_unload):
+            super()._read_metadata()
+            return
+        self._parquet_dataset = self._open_parquet_dataset()
+        if self._parquet_dataset is None:
+            self._metadata = ()
+            return
+        try:
+            self._metadata = to_column_info(self._parquet_dataset.schema)
+        except Exception as e:
+            _logger.exception(f"Failed to read schema {self._unload_location}.")
+            raise OperationalError(*e.args) from e
+
     def _open_parquet_dataset(self) -> ParquetDataset | None:
         """Open the Parquet files of the UNLOAD result, with timestamps at microseconds.
 
@@ -433,6 +462,8 @@ class AthenaArrowResultSet(AthenaResultSet):
     def _read_parquet(self) -> Table:
         """Read the UNLOAD result, with timestamps at microseconds.
 
+        Reads the dataset that ``_read_metadata()`` opened.
+
         Returns:
             The table of the result, or an empty table without data files.
 
@@ -441,43 +472,24 @@ class AthenaArrowResultSet(AthenaResultSet):
         """
         import pyarrow as pa
 
-        dataset = self._open_parquet_dataset()
-        if dataset is None:
+        if self._parquet_dataset is None:
             return pa.Table.from_pydict({})
         try:
-            return dataset.read(use_threads=True)
+            return self._parquet_dataset.read(use_threads=True)
         except Exception as e:
             _logger.exception(f"Failed to read {self._unload_location}.")
             raise OperationalError(*e.args) from e
 
-    def _read_parquet_metadata(self) -> tuple[dict[str, Any], ...]:
-        """Read the metadata of the UNLOAD result without reading its rows.
-
-        This is the metadata that ``_as_arrow()`` sets, from the schema of the
-        dataset that ``_read_parquet()`` reads: empty without data files.
+    def _as_arrow(self) -> Table:
+        """Read the result file, or the Parquet files of an UNLOAD result.
 
         Returns:
-            The column metadata.
+            The table of the result.
 
         Raises:
-            OperationalError: If reading the data manifest or the schema fails.
+            OperationalError: If reading the result fails.
         """
-        dataset = self._open_parquet_dataset()
-        if dataset is None:
-            return ()
-        try:
-            return to_column_info(dataset.schema)
-        except Exception as e:
-            _logger.exception(f"Failed to read schema {self._unload_location}.")
-            raise OperationalError(*e.args) from e
-
-    def _as_arrow(self) -> Table:
-        if self.is_unload:
-            table = self._read_parquet()
-            self._metadata = to_column_info(table.schema)
-        else:
-            table = self._read_csv()
-        return table
+        return self._read_parquet() if self.is_unload else self._read_csv()
 
     def as_arrow(self) -> Table:
         """Return the query results as an Apache Arrow Table.
@@ -527,3 +539,4 @@ class AthenaArrowResultSet(AthenaResultSet):
         super().close()
         self._table = pa.Table.from_pydict({})
         self._batches = iter([])
+        self._parquet_dataset = None

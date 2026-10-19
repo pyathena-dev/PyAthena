@@ -136,6 +136,7 @@ class AsyncPandasCursor(AsyncCursor):
             result_reuse_minutes=result_reuse_minutes,
             **kwargs,
         )
+        self._result_set_class: type[AthenaPandasResultSet] = AthenaPandasResultSet
         self._s3_max_workers = s3_max_workers
         self._unload = unload
         self._engine = engine
@@ -165,6 +166,52 @@ class AsyncPandasCursor(AsyncCursor):
         self._arraysize = value
 
     @override
+    def _result_set_arguments(
+        self,
+        query_execution: AthenaQueryExecution,
+        result_set_type_hints: dict[str | int, str] | None = None,
+        keep_default_na: bool = False,
+        na_values: Iterable[str] | None = ("",),
+        quoting: int = 1,
+        unload_location: str | None = None,
+        kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Get the arguments that create the pandas result set of a query.
+
+        Args:
+            query_execution: The query execution in a terminal state.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
+            keep_default_na: pandas option for handling NA values.
+            na_values: Additional values to recognize as NA.
+            quoting: CSV quoting behavior.
+            unload_location: The S3 location of the ``UNLOAD`` output.
+            kwargs: Options of ``execute()`` for the result set and pandas.
+
+        Returns:
+            The keyword arguments for ``AthenaPandasResultSet`` and its ``describe()``.
+        """
+        if kwargs is None:
+            kwargs = {}
+        return {
+            **super()._result_set_arguments(query_execution, result_set_type_hints),
+            "keep_default_na": keep_default_na,
+            "na_values": na_values,
+            "quoting": quoting,
+            "unload": self._unload,
+            "unload_location": unload_location,
+            "engine": kwargs.pop("engine", self._engine),
+            "chunksize": kwargs.pop("chunksize", self._chunksize),
+            "block_size": kwargs.pop("block_size", self._block_size),
+            "cache_type": kwargs.pop("cache_type", self._cache_type),
+            "max_workers": kwargs.pop("s3_max_workers", self._s3_max_workers),
+            "auto_optimize_chunksize": kwargs.pop(
+                "auto_optimize_chunksize", self._auto_optimize_chunksize
+            ),
+            **kwargs,
+        }
+
+    @override
     def _collect_result_set(
         self,
         query_id: str,
@@ -174,8 +221,6 @@ class AsyncPandasCursor(AsyncCursor):
         quoting: int = 1,
         unload_location: str | None = None,
         kwargs: dict[str, Any] | None = None,
-        *,
-        metadata_only: bool = False,
     ) -> AthenaPandasResultSet:
         """Wait for the query, then create its pandas result set.
 
@@ -188,8 +233,6 @@ class AsyncPandasCursor(AsyncCursor):
             quoting: CSV quoting behavior.
             unload_location: The S3 location of the ``UNLOAD`` output.
             kwargs: Options of ``execute()`` for the result set and pandas.
-            metadata_only: Whether the result set reads only the result metadata,
-                as for ``description()``.
 
         Returns:
             The result set.
@@ -198,31 +241,17 @@ class AsyncPandasCursor(AsyncCursor):
             ProgrammingError: If the cursor closes before the query finishes.
             OperationalError: If a status request or reading the result fails.
         """
-        if kwargs is None:
-            kwargs = {}
         query_execution = cast(AthenaQueryExecution, self._poll(query_id))
-        return AthenaPandasResultSet(
-            connection=self._connection,
-            converter=self._converter,
-            query_execution=query_execution,
-            arraysize=self._arraysize,
-            retry_config=self._retry_config,
-            keep_default_na=keep_default_na,
-            na_values=na_values,
-            quoting=quoting,
-            unload=self._unload,
-            unload_location=unload_location,
-            engine=kwargs.pop("engine", self._engine),
-            chunksize=kwargs.pop("chunksize", self._chunksize),
-            block_size=kwargs.pop("block_size", self._block_size),
-            cache_type=kwargs.pop("cache_type", self._cache_type),
-            max_workers=kwargs.pop("s3_max_workers", self._s3_max_workers),
-            auto_optimize_chunksize=kwargs.pop(
-                "auto_optimize_chunksize", self._auto_optimize_chunksize
-            ),
-            result_set_type_hints=result_set_type_hints,
-            _metadata_only=metadata_only,
-            **kwargs,
+        return self._result_set_class(
+            **self._result_set_arguments(
+                query_execution,
+                result_set_type_hints,
+                keep_default_na,
+                na_values,
+                quoting,
+                unload_location,
+                kwargs,
+            )
         )
 
     @override

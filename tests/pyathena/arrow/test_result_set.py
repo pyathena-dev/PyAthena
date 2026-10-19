@@ -23,10 +23,10 @@ class TestAthenaArrowResultSet:
     def test_fetch_after_close(self):
         """GH-1207: the fetches and table methods of a closed result set raise.
 
-        No AWS calls; the first page request and the result table are mocked.
+        No AWS calls; the metadata read and the result table are mocked.
         """
         with (
-            patch.object(AthenaArrowResultSet, "_pre_fetch"),
+            patch.object(AthenaArrowResultSet, "_read_metadata"),
             patch.object(AthenaArrowResultSet, "_create_s3_file_system"),
             patch.object(
                 AthenaArrowResultSet, "_as_arrow", return_value=pa.table({"a": [1, 2, 3]})
@@ -110,12 +110,12 @@ class TestAthenaArrowResultSet:
         A table read from result files that include an empty one has such
         batches; the fetches used to stop at the first one. to_batches() yields
         no empty batch after the last rows. The fetch methods can be mixed, and
-        return nothing after the last row. No AWS calls; the first page request
+        return nothing after the last row. No AWS calls; the metadata read
         and the result table are mocked.
         """
         table = pa.concat_tables([pa.table({"a": pa.array(chunk, pa.int64())}) for chunk in chunks])
         with (
-            patch.object(AthenaArrowResultSet, "_pre_fetch"),
+            patch.object(AthenaArrowResultSet, "_read_metadata"),
             patch.object(AthenaArrowResultSet, "_create_s3_file_system"),
             patch.object(AthenaArrowResultSet, "_as_arrow", return_value=table),
         ):

@@ -318,7 +318,7 @@ class TestAsyncPolarsCursor:
             ) as cursor,
             patch.object(AsyncPolarsCursor, "_execute", return_value="query_id"),
             patch.object(AsyncPolarsCursor, "_poll", return_value=query_execution),
-            patch("pyathena.polars.async_cursor.AthenaPolarsResultSet") as result_set_class,
+            patch.object(cursor, "_result_set_class") as result_set_class,
         ):
             _, future = cursor.execute("SELECT 1", **execute_kwargs)
             future.result()

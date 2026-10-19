@@ -3,7 +3,6 @@ import time
 from collections import OrderedDict
 from datetime import datetime
 from random import randint
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -204,8 +203,11 @@ class TestAsyncCursor:
         """GH-1281: closing the cursor stops the futures that wait for a query (no AWS)."""
         assert_close_stops_waiting_futures(AsyncCursor)
 
-    def test_execute_result_set_class_without_metadata_keyword(self):
-        """GH-1281: execute() still builds a result set class that takes no new keyword (no AWS)."""
+    def test_execute_result_set_class_with_earlier_parameters(self):
+        """GH-1281: execute() builds a result set class with the earlier parameters (no AWS).
+
+        The class takes none of the keywords that ``describe()`` passes.
+        """
 
         class CustomResultSet(AthenaResultSet):
             def __init__(
@@ -240,15 +242,6 @@ class TestAsyncCursor:
     def test_description_reads_only_metadata(self):
         """GH-1281: description() reads only the metadata of a CSV result (no AWS)."""
         assert_description_reads_only_metadata(AsyncCursor)
-
-    def test_description_closes_result_set(self):
-        """GH-1208: description() closes the result set that it reads (no AWS)."""
-        cursor = placeholder_connection().cursor(AsyncCursor)
-        result_set = MagicMock(description=None)
-        with patch.object(cursor, "_collect_result_set", return_value=result_set):
-            assert cursor.description("query_id").result(EVENT_TIMEOUT) is None
-        cursor.close()
-        result_set.close.assert_called_once_with()
 
 
 class TestAsyncDictCursor:

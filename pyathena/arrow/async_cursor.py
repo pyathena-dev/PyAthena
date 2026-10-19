@@ -129,6 +129,7 @@ class AsyncArrowCursor(AsyncCursor):
             result_reuse_minutes=result_reuse_minutes,
             **kwargs,
         )
+        self._result_set_class: type[AthenaArrowResultSet] = AthenaArrowResultSet
         self._unload = unload
         self._connect_timeout = connect_timeout
         self._request_timeout = request_timeout
@@ -154,14 +155,43 @@ class AsyncArrowCursor(AsyncCursor):
         self._arraysize = value
 
     @override
+    def _result_set_arguments(
+        self,
+        query_execution: AthenaQueryExecution,
+        result_set_type_hints: dict[str | int, str] | None = None,
+        unload_location: str | None = None,
+        kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Get the arguments that create the Arrow result set of a query.
+
+        Args:
+            query_execution: The query execution in a terminal state.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
+            unload_location: The S3 location of the ``UNLOAD`` output.
+            kwargs: Options of ``execute()`` for the result set.
+
+        Returns:
+            The keyword arguments for ``AthenaArrowResultSet`` and its ``describe()``.
+        """
+        if kwargs is None:
+            kwargs = {}
+        return {
+            **super()._result_set_arguments(query_execution, result_set_type_hints),
+            "unload": self._unload,
+            "unload_location": unload_location,
+            "connect_timeout": kwargs.pop("connect_timeout", self._connect_timeout),
+            "request_timeout": kwargs.pop("request_timeout", self._request_timeout),
+            **kwargs,
+        }
+
+    @override
     def _collect_result_set(
         self,
         query_id: str,
         result_set_type_hints: dict[str | int, str] | None = None,
         unload_location: str | None = None,
         kwargs: dict[str, Any] | None = None,
-        *,
-        metadata_only: bool = False,
     ) -> AthenaArrowResultSet:
         """Wait for the query, then create its Arrow result set.
 
@@ -171,8 +201,6 @@ class AsyncArrowCursor(AsyncCursor):
                 keyed by column name (case-insensitive) or zero-based column index.
             unload_location: The S3 location of the ``UNLOAD`` output.
             kwargs: Options of ``execute()`` for the result set.
-            metadata_only: Whether the result set reads only the result metadata,
-                as for ``description()``.
 
         Returns:
             The result set.
@@ -181,22 +209,11 @@ class AsyncArrowCursor(AsyncCursor):
             ProgrammingError: If the cursor closes before the query finishes.
             OperationalError: If a status request or reading the result fails.
         """
-        if kwargs is None:
-            kwargs = {}
         query_execution = cast(AthenaQueryExecution, self._poll(query_id))
-        return AthenaArrowResultSet(
-            connection=self._connection,
-            converter=self._converter,
-            query_execution=query_execution,
-            arraysize=self._arraysize,
-            retry_config=self._retry_config,
-            unload=self._unload,
-            unload_location=unload_location,
-            connect_timeout=kwargs.pop("connect_timeout", self._connect_timeout),
-            request_timeout=kwargs.pop("request_timeout", self._request_timeout),
-            result_set_type_hints=result_set_type_hints,
-            _metadata_only=metadata_only,
-            **kwargs,
+        return self._result_set_class(
+            **self._result_set_arguments(
+                query_execution, result_set_type_hints, unload_location, kwargs
+            )
         )
 
     @override

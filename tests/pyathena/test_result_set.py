@@ -15,7 +15,11 @@ from pyathena.error import OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet
 from pyathena.util import RetryConfig
-from tests.pyathena.util import assert_fetches_fail, get_query_results_responses
+from tests.pyathena.util import (
+    assert_fetches_fail,
+    get_query_results_responses,
+    query_results_response,
+)
 
 
 def _row(*values):
@@ -46,6 +50,42 @@ def _fetching_result_set(*pages):
 
 
 class TestAthenaResultSet:
+    @pytest.mark.parametrize(
+        ("state", "expected", "requests"),
+        [
+            (
+                AthenaQueryExecution.STATE_SUCCEEDED,
+                [("a", "integer", None, None, 3, 0, "UNKNOWN")],
+                1,
+            ),
+            (AthenaQueryExecution.STATE_FAILED, None, 0),
+        ],
+    )
+    def test_describe(self, state, expected, requests):
+        """GH-1281: describe() reads a page of one row, or nothing for a failed query.
+
+        The result set that it creates is closed.
+        """
+        connection = MagicMock()
+        connection.client.get_query_results.return_value = query_results_response(
+            [("a", "integer")]
+        )
+        with patch.object(
+            AthenaResultSet, "close", autospec=True, side_effect=AthenaResultSet.close
+        ) as close:
+            description = AthenaResultSet.describe(
+                connection=connection,
+                converter=DefaultTypeConverter(),
+                query_execution=MagicMock(state=state),
+                arraysize=2,
+                retry_config=RetryConfig(),
+            )
+        assert description == expected
+        assert connection.client.get_query_results.call_count == requests
+        if requests:
+            assert connection.client.get_query_results.call_args.kwargs["MaxResults"] == 1
+        close.assert_called_once()
+
     def test_fetchmany_across_pages(self):
         result_set = _fetching_result_set(("1", "2"), ("3", "4"), ("5",))
         assert result_set.fetchmany(1) == [(1,)]

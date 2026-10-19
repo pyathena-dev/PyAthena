@@ -94,7 +94,7 @@ class TestAsyncS3FSCursor:
             ) as cursor,
             patch.object(AsyncS3FSCursor, "_execute", return_value="query_id"),
             patch.object(AsyncS3FSCursor, "_poll", return_value=query_execution),
-            patch("pyathena.s3fs.async_cursor.AthenaS3FSResultSet") as result_set_class,
+            patch.object(cursor, "_result_set_class") as result_set_class,
         ):
             _, future = cursor.execute("SELECT 1", **execute_kwargs)
             future.result()

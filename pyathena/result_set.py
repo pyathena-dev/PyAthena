@@ -76,7 +76,6 @@ class AthenaResultSet(CursorIterator):
         retry_config: RetryConfig,
         _pre_fetch: bool = True,
         result_set_type_hints: dict[str | int, str] | None = None,
-        _metadata_only: bool = False,
     ) -> None:
         """Initialize the result set and fetch the first page if the query succeeded.
 
@@ -88,13 +87,10 @@ class AthenaResultSet(CursorIterator):
                 ``fetchmany()`` size.
             retry_config: The retry configuration for API calls.
             _pre_fetch: Whether to fetch the first page here when the query succeeded.
-                The async result set passes False and fetches it itself.
+                The async result set passes False and fetches it itself, and
+                :meth:`describe` passes False and reads only the metadata.
             result_set_type_hints: Athena type signatures for complex-type columns,
                 keyed by column name (case-insensitive) or zero-based column index.
-            _metadata_only: Whether to read only the result metadata, which sets
-                ``description``, from a ``GetQueryResults`` page of one row instead
-                of the first page. The result set then has no rows. The thread-based
-                asynchronous cursors pass True for ``description()``.
 
         Raises:
             ProgrammingError: If ``query_execution`` is not given.
@@ -129,11 +125,60 @@ class AthenaResultSet(CursorIterator):
 
         if self.state == AthenaQueryExecution.STATE_SUCCEEDED:
             self._rownumber = 0
-            if _metadata_only:
-                # Only the metadata of a page of one row; its rows are not processed.
-                self._process_metadata(self._get_query_results(1))
-            elif _pre_fetch:
+            if _pre_fetch:
                 self._pre_fetch()
+
+    @classmethod
+    def describe(
+        cls,
+        connection: Connection[Any],
+        converter: Converter,
+        query_execution: AthenaQueryExecution,
+        arraysize: int,
+        retry_config: RetryConfig,
+        result_set_type_hints: dict[str | int, str] | None = None,
+        **kwargs: Any,
+    ) -> list[tuple[str, str, None, None, int, int, str]] | None:
+        """Read the column descriptions of a query result without reading its rows.
+
+        Creates the result set without reading the result (``_pre_fetch=False``),
+        reads only the metadata that sets ``description`` if the query succeeded
+        (see :meth:`_read_metadata`), and closes the result set. The descriptions
+        are those of the result set that the same arguments create.
+
+        Args:
+            connection: The connection that ran the query.
+            converter: The converter for result values.
+            query_execution: The query execution whose results to describe.
+            arraysize: The default ``fetchmany()`` size of the result set.
+            retry_config: The retry configuration for API calls.
+            result_set_type_hints: Athena type signatures for complex-type columns,
+                keyed by column name (case-insensitive) or zero-based column index.
+            **kwargs: Additional arguments for the constructor of ``cls``, which has
+                to accept ``_pre_fetch``.
+
+        Returns:
+            The DB API 2.0 column descriptions, or None.
+
+        Raises:
+            OperationalError: If reading the metadata fails.
+        """
+        result_set = cls(
+            connection=connection,
+            converter=converter,
+            query_execution=query_execution,
+            arraysize=arraysize,
+            retry_config=retry_config,
+            result_set_type_hints=result_set_type_hints,
+            _pre_fetch=False,
+            **kwargs,
+        )
+        try:
+            if result_set.state == AthenaQueryExecution.STATE_SUCCEEDED:
+                result_set._read_metadata()
+            return result_set.description
+        finally:
+            result_set.close()
 
     @property
     def database(self) -> str | None:
@@ -485,6 +530,22 @@ class AthenaResultSet(CursorIterator):
         response = self._get_query_results(self._arraysize, self._next_token)
         rows, self._next_token = self._parse_result_rows(response)
         self._process_rows(rows)
+
+    def _read_metadata(self) -> None:
+        """Read the result metadata, which sets ``description``, without reading rows.
+
+        Requests a ``GetQueryResults`` page of one row and processes its metadata
+        and update count, but not its rows. A result set that reads its result
+        from files overrides this to describe the result as it reads it.
+
+        Raises:
+            ProgrammingError: If the query ID is missing, the query has not
+                succeeded, or the result set is closed.
+            OperationalError: If the request fails.
+        """
+        response = self._get_query_results(1)
+        self._process_metadata(response)
+        self._process_update_count(response)
 
     def _pre_fetch(self) -> None:
         """Fetch the first page of rows along with the result metadata.

@@ -349,7 +349,7 @@ class TestAsyncPandasCursor:
             ) as cursor,
             patch.object(AsyncPandasCursor, "_execute", return_value="query_id"),
             patch.object(AsyncPandasCursor, "_poll", return_value=query_execution),
-            patch("pyathena.pandas.async_cursor.AthenaPandasResultSet") as result_set_class,
+            patch.object(cursor, "_result_set_class") as result_set_class,
         ):
             _, future = cursor.execute("SELECT 1", **execute_kwargs)
             future.result()
