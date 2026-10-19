@@ -865,14 +865,14 @@ class AthenaPolarsResultSet(AthenaResultSet):
             location = "the GetQueryResults rows"
 
         try:
+            schema_overrides, timestamp_dtypes = self._get_csv_schema_overrides(has_header)
+            strict = not kwargs.get("ignore_errors", False)
+            df: pl.DataFrame | None = None
             with (
                 fsspec.open(self.output_location, "rb", **(storage_options or {}))
                 if self.output_location
                 else nullcontext(rows)
             ) as data:
-                schema_overrides, timestamp_dtypes = self._get_csv_schema_overrides(has_header)
-                strict = not kwargs.get("ignore_errors", False)
-                df: pl.DataFrame | None = None
                 if strict or not timestamp_dtypes:
                     try:
                         df = pl.read_csv(data, **kwargs)
@@ -884,9 +884,11 @@ class AthenaPolarsResultSet(AthenaResultSet):
                     # failed, or at once with ignore_errors, with which Polars reads the
                     # timestamps that it does not parse as null instead of failing.
                     kwargs["schema_overrides"] = schema_overrides
-                    if not isinstance(data, bytes):
+                    if self.output_location:
                         data.seek(0)
-                    df = _to_datetimes(pl.read_csv(data, **kwargs), timestamp_dtypes, strict=strict)
+                    texts = pl.read_csv(data, **kwargs)
+            if df is None:
+                df = _to_datetimes(texts, timestamp_dtypes, strict=strict)
             if new_columns:
                 df.columns = [*new_columns, *df.columns[len(new_columns) :]]
             return df

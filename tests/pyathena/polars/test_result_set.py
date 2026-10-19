@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import polars as pl
 import pytest
+from botocore.exceptions import ProfileNotFound
 from fsspec.implementations.local import LocalFileSystem
 
 from pyathena.converter import _to_date, _to_default
@@ -278,10 +279,11 @@ class TestAthenaPolarsResultSet:
 
     def test_csv_read_raises_when_file_system_fails(self):
         """A whole CSV read raises OperationalError when the filesystem cannot be created."""
-        with pytest.raises(OperationalError):
+        with pytest.raises(OperationalError) as e:
             _local_result_set(
                 [("a", "integer")], storage_options={"profile": "pyathena-no-such-profile"}
             )
+        assert isinstance(e.value.__cause__, ProfileNotFound)
 
     @pytest.mark.parametrize(
         "read_options",
