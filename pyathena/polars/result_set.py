@@ -16,7 +16,7 @@ import sys
 import threading
 from collections import abc
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import nullcontext
 from io import BytesIO, StringIO
 from itertools import islice, repeat
 from multiprocessing import cpu_count
@@ -856,19 +856,20 @@ class AthenaPolarsResultSet(AthenaResultSet):
         # fsspec options, so the result file is opened through fsspec here. Polars
         # reads the open file into one buffer, while Polars 1.x copies bytes given to it.
         storage_options = kwargs.pop("storage_options")
-        source: AbstractContextManager[Any]
         if self.output_location:
             location = self.output_location
-            source = fsspec.open(self.output_location, "rb", **(storage_options or {}))
         else:
             rows = self._fetch_all_rows_as_csv()
             if not rows:
                 return pl.DataFrame()
-            source = nullcontext(rows)
             location = "the GetQueryResults rows"
 
         try:
-            with source as data:
+            with (
+                fsspec.open(self.output_location, "rb", **(storage_options or {}))
+                if self.output_location
+                else nullcontext(rows)
+            ) as data:
                 schema_overrides, timestamp_dtypes = self._get_csv_schema_overrides(has_header)
                 strict = not kwargs.get("ignore_errors", False)
                 df: pl.DataFrame | None = None
