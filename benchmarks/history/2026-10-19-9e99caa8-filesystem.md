@@ -7,9 +7,10 @@ See LICENSE or https://opensource.org/licenses/MIT.
 SPDX-License-Identifier: MIT
 -->
 
-# S3 filesystem benchmark of the PyAthena 4.2.0 release commit on 2026-10-19
+# S3 filesystem benchmark of PyAthena 4.2.0 on 2026-10-19
 
-This entry records the [filesystem suite](../README.md#filesystem-suite) at commit [`9e99caa8`](https://github.com/pyathena-dev/PyAthena/tree/9e99caa84857f8d29abe63435461fc412e040c43/benchmarks), which is tagged `v4.2.0`, for #1159.
+This entry records the [filesystem suite](../README.md#filesystem-suite) at commit [`9e99caa8`](https://github.com/pyathena-dev/PyAthena/tree/9e99caa84857f8d29abe63435461fc412e040c43/benchmarks), the commit planned for the PyAthena 4.2.0 release, for #1159.
+PyAthena 4.2.0 was tagged on `baee716c`, which differs from `9e99caa8` only in one test file (#1311).
 It repeats the selection of the [4.1.0 run](2026-10-13-437276e1-filesystem.md), after #1184 gave the asyncio paths of `AioS3FileSystem` thread pools sized by `max_workers` instead of the event loop's default executor, and #1165 bounded the parts in flight of `S3File` writes.
 The cursor run of the same commit is a [separate entry](2026-10-19-9e99caa8.md).
 

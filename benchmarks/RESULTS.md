@@ -18,8 +18,8 @@ Compare entries only when they used the same instance type, architecture, and sc
 | 2026-10-11 | `8a69ce03` | 4.0.0 | `r7g.2xlarge` (arm64), fleet of 12 | Spot | medium, large, xlarge | [2026-10-11-8a69ce03](history/2026-10-11-8a69ce03.md) |
 | 2026-10-13 | `437276e1` | 4.1.0 release commit | `r7g.2xlarge` (arm64), fleet of 8 | Spot | medium, large, xlarge | [2026-10-13-437276e1](history/2026-10-13-437276e1.md) |
 | 2026-10-13 | `437276e1` | 4.1.0 release commit, filesystem suite | `c8gn.2xlarge` (arm64), one host | Spot | small, medium, large, xlarge (objects) | [2026-10-13-437276e1-filesystem](history/2026-10-13-437276e1-filesystem.md) |
-| 2026-10-19 | `9e99caa8` | 4.2.0 release commit | `r7g.2xlarge` (arm64), fleet of 10 | Spot | medium, large, xlarge, xxlarge | [2026-10-19-9e99caa8](history/2026-10-19-9e99caa8.md) |
-| 2026-10-19 | `9e99caa8` | 4.2.0 release commit, filesystem suite | `c8gn.2xlarge` (arm64), one host | Spot | small, medium, large, xlarge (objects) | [2026-10-19-9e99caa8-filesystem](history/2026-10-19-9e99caa8-filesystem.md) |
+| 2026-10-19 | `9e99caa8` | 4.2.0 (tagged on `baee716c`, which differs only in one test file) | `r7g.2xlarge` (arm64), fleet of 10 | Spot | medium, large, xlarge, xxlarge | [2026-10-19-9e99caa8](history/2026-10-19-9e99caa8.md) |
+| 2026-10-19 | `9e99caa8` | 4.2.0 (tagged on `baee716c`, which differs only in one test file), filesystem suite | `c8gn.2xlarge` (arm64), one host | Spot | small, medium, large, xlarge (objects) | [2026-10-19-9e99caa8-filesystem](history/2026-10-19-9e99caa8-filesystem.md) |
 
 ## Recommendations
 
