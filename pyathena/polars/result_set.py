@@ -859,20 +859,20 @@ class AthenaPolarsResultSet(AthenaResultSet):
         # read opens the file again, so that a second read starts without the cache
         # of the first.
         storage_options = kwargs.pop("storage_options")
-        open_source: Callable[[], AbstractContextManager[Any]]
         if self.output_location:
             location = self.output_location
-            open_source = partial(
-                fsspec.open, self.output_location, "rb", **(storage_options or {})
-            )
         else:
             source = self._fetch_all_rows_as_csv()
             if not source:
                 return pl.DataFrame()
-            open_source = partial(nullcontext, source)
             location = "the GetQueryResults rows"
 
         try:
+            open_source: Callable[[], AbstractContextManager[Any]] = (
+                partial(fsspec.open, self.output_location, "rb", **(storage_options or {}))
+                if self.output_location
+                else partial(nullcontext, source)
+            )
             schema_overrides, timestamp_dtypes = self._get_csv_schema_overrides(has_header)
             strict = not kwargs.get("ignore_errors", False)
             df: pl.DataFrame | None = None

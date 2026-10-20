@@ -277,13 +277,16 @@ class TestAthenaPolarsResultSet:
         with pytest.raises(OperationalError):
             list(result_set.iter_chunks())
 
-    def test_csv_read_raises_when_file_system_fails(self):
-        """A whole CSV read raises OperationalError when the filesystem cannot be created."""
+    @pytest.mark.parametrize(
+        ("storage_options", "cause"),
+        [({"profile": "pyathena-no-such-profile"}, ProfileNotFound), ("invalid", TypeError)],
+        ids=["file-system", "not-a-mapping"],
+    )
+    def test_csv_read_raises_with_invalid_storage_options(self, storage_options, cause):
+        """A whole CSV read raises OperationalError when its storage options are invalid."""
         with pytest.raises(OperationalError) as e:
-            _local_result_set(
-                [("a", "integer")], storage_options={"profile": "pyathena-no-such-profile"}
-            )
-        assert isinstance(e.value.__cause__, ProfileNotFound)
+            _local_result_set([("a", "integer")], storage_options=storage_options)
+        assert isinstance(e.value.__cause__, cause)
 
     @pytest.mark.parametrize(
         "read_options",
