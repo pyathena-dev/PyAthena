@@ -16,6 +16,8 @@ import sys
 import threading
 from collections import abc
 from collections.abc import Callable, Iterable, Iterator
+from contextlib import AbstractContextManager, nullcontext
+from functools import partial
 from io import BytesIO, StringIO
 from itertools import islice, repeat
 from multiprocessing import cpu_count
@@ -607,7 +609,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """Get storage options for reading a CSV result file via fsspec.
 
         ``_read_csv()`` opens the file with ``fsspec.open()``, which uses
-        PyAthena's registered S3FileSystem, and passes its contents to Polars.
+        PyAthena's registered S3FileSystem, and passes the open file to Polars.
 
         Returns:
             Dictionary with fsspec-compatible options for S3 access.
@@ -852,9 +854,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
             # Renamed after reading, so that Polars matches the types to the header.
             kwargs.pop("new_columns", None)
         # Polars 2.0 reads a path with its native object store, which does not take
-        # fsspec options, so the result file is read through fsspec here.
+        # fsspec options, so the result file is opened through fsspec here and given
+        # to Polars as a file, which Polars 1.x does not copy as it does bytes.
         storage_options = kwargs.pop("storage_options")
-        source: str | bytes
         if self.output_location:
             location = self.output_location
         else:
@@ -864,15 +866,22 @@ class AthenaPolarsResultSet(AthenaResultSet):
             location = "the GetQueryResults rows"
 
         try:
-            if self.output_location:
-                with fsspec.open(self.output_location, "rb", **(storage_options or {})) as file:
-                    source = file.read()
+            # Each read calls open_csv() to open the file again and closes it after
+            # reading; reading the same file again after seek(0) makes fsspec's cache
+            # hold a second copy. It is created and called inside the try, so that
+            # errors such as invalid storage options raise OperationalError.
+            open_csv: Callable[[], AbstractContextManager[Any]] = (
+                partial(fsspec.open, self.output_location, "rb", **(storage_options or {}))
+                if self.output_location
+                else partial(nullcontext, source)
+            )
             schema_overrides, timestamp_dtypes = self._get_csv_schema_overrides(has_header)
             strict = not kwargs.get("ignore_errors", False)
             df: pl.DataFrame | None = None
             if strict or not timestamp_dtypes:
                 try:
-                    df = pl.read_csv(source, **kwargs)
+                    with open_csv() as data:
+                        df = pl.read_csv(data, **kwargs)
                 except pl.exceptions.ComputeError:
                     if not timestamp_dtypes:
                         raise
@@ -881,7 +890,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 # failed, or at once with ignore_errors, with which Polars reads the
                 # timestamps that it does not parse as null instead of failing.
                 kwargs["schema_overrides"] = schema_overrides
-                df = _to_datetimes(pl.read_csv(source, **kwargs), timestamp_dtypes, strict=strict)
+                with open_csv() as data:
+                    texts = pl.read_csv(data, **kwargs)
+                df = _to_datetimes(texts, timestamp_dtypes, strict=strict)
             if new_columns:
                 df.columns = [*new_columns, *df.columns[len(new_columns) :]]
             return df
