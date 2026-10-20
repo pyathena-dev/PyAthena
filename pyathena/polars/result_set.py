@@ -855,9 +855,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             kwargs.pop("new_columns", None)
         # Polars 2.0 reads a path with its native object store, which does not take
         # fsspec options, so the result file is opened through fsspec here and given
-        # to Polars as a file, which Polars 1.x does not copy as it does bytes. Each
-        # read opens the file again, so that a second read starts without the cache
-        # of the first.
+        # to Polars as a file, which Polars 1.x does not copy as it does bytes.
         storage_options = kwargs.pop("storage_options")
         if self.output_location:
             location = self.output_location
@@ -868,7 +866,11 @@ class AthenaPolarsResultSet(AthenaResultSet):
             location = "the GetQueryResults rows"
 
         try:
-            open_source: Callable[[], AbstractContextManager[Any]] = (
+            # Each read calls open_csv() to open the file again and closes it after
+            # reading; reading the same file again after seek(0) makes fsspec's cache
+            # hold a second copy. It is created and called inside the try, so that
+            # errors such as invalid storage options raise OperationalError.
+            open_csv: Callable[[], AbstractContextManager[Any]] = (
                 partial(fsspec.open, self.output_location, "rb", **(storage_options or {}))
                 if self.output_location
                 else partial(nullcontext, source)
@@ -878,7 +880,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
             df: pl.DataFrame | None = None
             if strict or not timestamp_dtypes:
                 try:
-                    with open_source() as data:
+                    with open_csv() as data:
                         df = pl.read_csv(data, **kwargs)
                 except pl.exceptions.ComputeError:
                     if not timestamp_dtypes:
@@ -888,7 +890,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 # failed, or at once with ignore_errors, with which Polars reads the
                 # timestamps that it does not parse as null instead of failing.
                 kwargs["schema_overrides"] = schema_overrides
-                with open_source() as data:
+                with open_csv() as data:
                     texts = pl.read_csv(data, **kwargs)
                 df = _to_datetimes(texts, timestamp_dtypes, strict=strict)
             if new_columns:
