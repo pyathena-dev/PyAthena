@@ -12,7 +12,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from contextvars import copy_context
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from functools import partial
 from io import BufferedReader, BytesIO, IOBase, StringIO, TextIOWrapper
 from itertools import chain, islice
@@ -30,7 +30,7 @@ from fsspec import open as filesystem_open
 from pyathena import OperationalError
 from pyathena.arrow.reader import ParquetChunkReader
 from pyathena.arrow.util import to_column_info
-from pyathena.converter import Converter, _parse_time_zone, _to_datetime_with_tz
+from pyathena.converter import Converter, _parse_time_zone, _to_datetime_with_tz, _to_time
 from pyathena.error import DataError, ProgrammingError
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.model import AthenaQueryExecution
@@ -57,7 +57,7 @@ _READ_FAILED_MESSAGE = "PandasDataFrameIterator cannot be read after a failed re
 
 # The Athena types whose CSV text AthenaPandasResultSet reads as text and converts after
 # reading; see _TemporalConverter.
-_CSV_TEMPORAL_TYPES = ("timestamp", "date", "timestamp with time zone")
+_CSV_TEMPORAL_TYPES = ("timestamp", "date", "timestamp with time zone", "time")
 # A timestamp's text up to its sixth fractional digit, for years of four digits.
 _TIMESTAMP_TEXT_LENGTH = len("2000-01-01 00:00:00.000000")
 
@@ -314,12 +314,13 @@ class _JSONConverter:
 class _TemporalConverter:
     """A converter for the text of a temporal column that ``pandas.read_csv()`` read.
 
-    ``timestamp``, ``date``, and ``timestamp with time zone`` columns are read as text
-    and converted as whole columns after reading, so that their dtypes depend only on
-    the Athena type: ``datetime64[us]``, ``datetime64[us]``, and ``datetime64[us, UTC]``.
-    Fractional digits beyond microseconds are truncated. A column that pandas already
-    parsed, as with ``parse_dates`` when a ``dtype`` given to ``execute()`` replaces
-    PyAthena's, gets the same unit.
+    ``timestamp``, ``date``, ``timestamp with time zone``, and ``time`` columns are
+    read as text and converted as whole columns after reading, so that their dtypes
+    depend only on the Athena type: ``datetime64[us]``, ``datetime64[us]``,
+    ``datetime64[us, UTC]``, and ``object`` with ``time`` objects and None for NULL.
+    Fractional digits beyond microseconds are truncated. A column that pandas or
+    pyarrow already parsed, as when ``dtype=None`` given to ``execute()`` replaces
+    PyAthena's dtype mapping, gets the same dtype.
     """
 
     __slots__ = ("_type",)
@@ -366,6 +367,8 @@ class _TemporalConverter:
         """
         if self._type == "timestamp with time zone":
             return _to_utc_timestamps(values)
+        if self._type == "time":
+            return _to_times(values)
         return _to_timestamps(values, date=self._type == "date")
 
 
@@ -446,6 +449,33 @@ def _to_timestamps(values: Series, date: bool = False) -> Series:
     if not date:
         text = text.str.slice(0, _TIMESTAMP_TEXT_LENGTH)
     return pd.to_datetime(text, format="ISO8601").dt.as_unit("us")
+
+
+def _to_times(values: Series) -> Series:
+    """Convert time text to ``time`` objects.
+
+    pandas cannot infer the format of time text, which it would parse one value at a
+    time with ``dateutil``.
+
+    Args:
+        values: The text values, with missing values for NULL, datetime values that
+            pandas parsed, or ``time`` values that pyarrow parsed.
+
+    Returns:
+        The values as ``time`` objects, with None for NULL.
+    """
+    import pandas as pd
+
+    if values.dtype.kind == "M":
+        return values.dt.time.astype(object).where(values.notna(), None)
+    return pd.Series(
+        [
+            _to_time(v) if isinstance(v, str) else v if isinstance(v, time) else None
+            for v in values.to_numpy(dtype=object)
+        ],
+        index=values.index,
+        dtype=object,
+    )
 
 
 def _to_utc_timestamps(values: Series) -> Series:
@@ -1515,6 +1545,7 @@ class AthenaPandasResultSet(AthenaResultSet):
             return {
                 label: "date" if converter.type == "date" else "datetime"
                 for label, converter in self._csv_temporal_converters.items()
+                if converter.type != "time"
             }
         if self._kwargs.keys() & {"dtype_backend", "coerce_int96_timestamp_unit"}:
             return {}
@@ -1529,11 +1560,11 @@ class AthenaPandasResultSet(AthenaResultSet):
     ) -> dict[Any, _TemporalConverter]:
         """Get the converters of the temporal columns that are converted after reading.
 
-        PyAthena converts the ``timestamp``, ``date``, and ``timestamp with time zone``
-        columns after reading, unless ``parse_dates``, ``dtype``, or ``converters`` is
-        given to ``execute()``, with which pandas reads them, or the converter maps the
-        type to a conversion function other than the default ``timestamp with time
-        zone`` one.
+        PyAthena converts the ``timestamp``, ``date``, ``timestamp with time zone``, and
+        ``time`` columns after reading, unless ``parse_dates``, ``dtype``, or
+        ``converters`` is given to ``execute()``, with which pandas reads them, or the
+        converter maps the type to a conversion function other than the default
+        ``timestamp with time zone`` one.
 
         Args:
             columns: The label and the description of each column that is read.
@@ -1584,13 +1615,29 @@ class AthenaPandasResultSet(AthenaResultSet):
         return converter
 
     def _trunc_date(self, df: DataFrame) -> DataFrame:
-        if self._time_columns:
+        """Convert the time columns that pandas parsed as datetimes to ``time`` objects.
+
+        pandas parses the time columns with ``parse_dates`` when ``parse_dates``,
+        ``dtype``, or ``converters`` given to ``execute()`` keeps PyAthena from
+        converting them after reading. A time column can also be an index level. Time
+        columns that PyAthena converted after reading or that pandas did not parse are
+        left as they are.
+
+        Args:
+            df: The DataFrame or chunk, updated in place.
+
+        Returns:
+            The same DataFrame.
+        """
+        for time_col in self._time_columns:
+            if time_col in self._csv_temporal_converters:
+                continue
             # A NULL is None, as with the GetQueryResults fallback and the other types.
-            truncated = df.loc[:, self._time_columns].apply(
-                lambda r: r.dt.time.astype(object).where(r.notna(), None)
+            _replace_by_label(
+                df,
+                time_col,
+                lambda values: _to_times(values) if values.dtype.kind == "M" else values,
             )
-            for time_col in self._time_columns:
-                df.isetitem(df.columns.get_loc(time_col), truncated[time_col])
         return df
 
     @override

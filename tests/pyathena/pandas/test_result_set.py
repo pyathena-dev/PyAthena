@@ -11,7 +11,7 @@ import io
 import re
 import threading
 from collections import defaultdict
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from unittest.mock import MagicMock, PropertyMock, patch
 from zoneinfo import ZoneInfo
 
@@ -58,6 +58,8 @@ _PARSED = pd.Timestamp(_TIMESTAMP_TEXT)
 _DATE = pd.Timestamp("2020-01-02")
 _TOKYO_TEXT = "2020-01-02 03:04:05.000 Asia/Tokyo"
 _TOKYO = datetime(2020, 1, 2, 3, 4, 5, tzinfo=ZoneInfo("Asia/Tokyo"))
+_TIME_TEXT = "03:04:05.123"
+_TIME = time(3, 4, 5, 123000)
 
 
 def _typed_values(rows):
@@ -1073,6 +1075,30 @@ class TestAthenaPandasResultSet:
         assert pd.isna(df["ts"].iloc[2])
         assert pd.isna(df["tstz"].iloc[2])
 
+    # pandas parses the time column without a format.
+    @pytest.mark.filterwarnings("ignore:Could not infer format")
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            pytest.param({}, id="default"),
+            # pandas parses the time column, which then becomes time objects.
+            pytest.param({"dtype": {}}, id="pandas_parses"),
+        ],
+    )
+    @pytest.mark.parametrize("chunksize", [None, 1])
+    def test_time_index(self, tmp_path, kwargs, chunksize):
+        """A time column that index_col reads as the index holds time objects, as a column does."""
+        result_set = _local_result_set(
+            LocalBucketFileSystem(tmp_path),
+            [("tm", "time"), ("n", "integer")],
+            f'"tm","n"\n"{_TIME_TEXT}","1"\n',
+            chunksize=chunksize,
+            index_col="tm",
+            **kwargs,
+        )
+        df = pd.concat(list(result_set.iter_chunks()))
+        assert df.index.tolist() == [_TIME]
+
     @pytest.mark.parametrize("chunksize", [None, 1])
     def test_unload_temporal_types(self, tmp_path, chunksize):
         """UNLOAD dates are datetime64[us], as CSV dates are, and fetch returns date objects."""
@@ -1257,13 +1283,14 @@ class TestAthenaPandasResultSet:
         np.testing.assert_array_equal(values, np.array(expected, dtype="datetime64[us]"))
 
     @pytest.mark.parametrize("infer_string", [True, False])
-    @pytest.mark.parametrize("type_", ["timestamp", "date", "timestamp with time zone"])
+    @pytest.mark.parametrize("type_", ["timestamp", "date", "timestamp with time zone", "time"])
     def test_temporal_conversion_error(self, tmp_path, type_, infer_string):
         """A value that fails to convert raises DataError naming the column."""
         value = {
             "timestamp": "2020-13-01 00:00:00.000",
             "date": "2020-13-01",
             "timestamp with time zone": "2020-13-01 00:00:00.000 UTC",
+            "time": "25:00:00.000",
         }[type_]
         with (
             pd.option_context("future.infer_string", infer_string),
@@ -1298,31 +1325,38 @@ class TestAthenaPandasResultSet:
     @pytest.mark.parametrize("engine", ["c", "pyarrow"])
     @pytest.mark.parametrize("key", ["parse_dates", "dtype", "converters"])
     def test_temporal_options_none(self, tmp_path, engine, key):
-        """parse_dates, dtype, or converters of None, their default, is as if not given."""
-        data = '"d","n"\n' + '"2020-01-02","1"\n' * 10
+        """parse_dates, dtype, or converters of None, their default, is as if not given.
+
+        With dtype of None, pyarrow parses the dates and the times without a fraction.
+        """
+        data = '"d","tm","n"\n' + '"2020-01-02","03:04:05","1"\n' * 10
         assert len(data) >= AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES
         result_set = _local_result_set(
             LocalBucketFileSystem(tmp_path),
-            [("d", "date"), ("n", "integer")],
+            [("d", "date"), ("tm", "time"), ("n", "integer")],
             data,
             engine=engine,
             **{key: None},
         )
         assert str(result_set.as_pandas()["d"].dtype) == "datetime64[us]"
-        assert result_set.fetchone() == (date(2020, 1, 2), 1)
+        assert result_set.fetchone() == (date(2020, 1, 2), time(3, 4, 5), 1)
 
+    # pandas parses the time column without a format.
+    @pytest.mark.filterwarnings("ignore:Could not infer format")
     @pytest.mark.parametrize("engine", ["c", "python", "pyarrow"])
     @pytest.mark.parametrize(
         ("kwargs", "expected"),
         [
             # PyAthena's parse_dates and converters read the temporal columns.
-            pytest.param({"dtype": {"n": "Int64"}}, (_PARSED, _DATE, _TOKYO, 1), id="dtype"),
+            pytest.param({"dtype": {"n": "Int64"}}, (_PARSED, _DATE, _TOKYO, _TIME, 1), id="dtype"),
             # The converters replace the timestamp with time zone conversion.
-            pytest.param({"converters": {}}, (_PARSED, _DATE, _TOKYO_TEXT, 1), id="converters"),
-            # parse_dates replaces PyAthena's.
+            pytest.param(
+                {"converters": {}}, (_PARSED, _DATE, _TOKYO_TEXT, _TIME, 1), id="converters"
+            ),
+            # parse_dates replaces PyAthena's, and the columns it does not name stay text.
             pytest.param(
                 {"parse_dates": ["ts"]},
-                (_PARSED, "2020-01-02", _TOKYO, 1),
+                (_PARSED, "2020-01-02", _TOKYO, _TIME_TEXT, 1),
                 id="parse_dates",
             ),
         ],
@@ -1333,8 +1367,8 @@ class TestAthenaPandasResultSet:
         PyAthena's own options read them as before its conversion, and the fetch
         methods return the values as pandas holds them, with any engine.
         """
-        data = '"ts","d","tstz","n"\n' + (
-            f'"{_TIMESTAMP_TEXT}","2020-01-02","{_TOKYO_TEXT}","1"\n' * 2
+        data = '"ts","d","tstz","tm","n"\n' + (
+            f'"{_TIMESTAMP_TEXT}","2020-01-02","{_TOKYO_TEXT}","{_TIME_TEXT}","1"\n' * 2
         )
         assert len(data) >= AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES
         result_set = _local_result_set(
@@ -1343,6 +1377,7 @@ class TestAthenaPandasResultSet:
                 ("ts", "timestamp"),
                 ("d", "date"),
                 ("tstz", "timestamp with time zone"),
+                ("tm", "time"),
                 ("n", "integer"),
             ],
             data,
@@ -1667,8 +1702,8 @@ def _string_series(values, infer_string):
 def _types_frame(infer_string, parse_time=True, temporal_text=False):
     """Build the typed literal expectation for the all-types CSV.
 
-    With ``temporal_text``, the date and timestamp columns are pyarrow strings, as
-    PyAthena reads them for the PyArrow engine with its default options before
+    With ``temporal_text``, the date, timestamp, and time columns are pyarrow strings,
+    as PyAthena reads them for the PyArrow engine with its default options before
     converting them.
     """
     missing = float("nan")
@@ -1707,7 +1742,9 @@ def _types_frame(infer_string, parse_time=True, temporal_text=False):
             ),
             # pandas supplies today's date when it parses a time without a date.
             "tm": (
-                pd.Series(pd.to_datetime(["12:34:56.789", None]))
+                pd.Series(["12:34:56.789", None], dtype="string[pyarrow]")
+                if temporal_text
+                else pd.Series(pd.to_datetime(["12:34:56.789", None]))
                 if parse_time
                 else _string_series(["12:34:56.789", None], infer_string)
             ),
@@ -1729,7 +1766,8 @@ def _types_frame(infer_string, parse_time=True, temporal_text=False):
             _TYPES_CSV,
             _TYPES,
             {},
-            # The date and timestamp columns are read as text and converted afterwards.
+            # The date, timestamp, and time columns are read as text and converted
+            # afterwards.
             lambda infer: _types_frame(infer, temporal_text=True),
             [0, 1, 2, 3, 4, 5, 15, 16, 17, 18],
             id="types",

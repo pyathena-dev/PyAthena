@@ -584,7 +584,7 @@ It also changes the values of a column with a string dtype whose values all look
 
 Apart from PandasCursor's own options such as `engine` and `chunksize`, an option passed here replaces the value PyAthena sets for the same pandas.read_csv() argument.
 For example, `dtype` replaces the whole column type mapping, and `parse_dates` replaces the list of date, time, and timestamp columns.
-With `parse_dates`, `dtype`, or `converters` passed here, PyAthena does not convert the `date`, `timestamp`, and `timestamp with time zone` columns after reading. pandas reads them with these options and the values PyAthena sets for the others: `parse_dates` for date, time, and timestamp columns, and the converter mapping, which converts `timestamp with time zone` values in their zones. The fetch methods return their values as pandas holds them. A conversion function that the converter maps to one of these types also replaces PyAthena's conversion of the columns of that type.
+With `parse_dates`, `dtype`, or `converters` passed here, PyAthena does not convert the `date`, `time`, `timestamp`, and `timestamp with time zone` columns after reading. pandas reads them with these options and the values PyAthena sets for the others: `parse_dates` for date, time, and timestamp columns, and the converter mapping, which converts `timestamp with time zone` values in their zones. `time` columns that pandas parses become `time` objects, and the fetch methods return the values of the other columns as pandas holds them. A conversion function that the converter maps to one of these types also replaces PyAthena's conversion of the columns of that type.
 
 (pandas-s3-read-options)=
 
