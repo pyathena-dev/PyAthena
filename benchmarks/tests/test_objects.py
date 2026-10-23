@@ -17,7 +17,6 @@ from fsspec.asyn import get_loop
 from pyathena_bench.cases import Case
 from pyathena_bench.config import Settings
 from pyathena_bench.objects import (
-    COPY_DIRECTIVES,
     batch,
     check_result,
     listing_keys,
@@ -122,7 +121,11 @@ def test_pipe_writes_one_buffer_of_the_object_size_to_every_target(api):
 def test_copy_excludes_tags_and_annotations(api):
     fs = RecordingFileSystem()
     run_batch(fs, Case("s3", api, "copy", "objects", suite="objects", max_workers=8))
-    expected = {**({} if api == "sync" else {"batch_size": 8}), **COPY_DIRECTIVES}
+    expected = {
+        **({} if api == "sync" else {"batch_size": 8}),
+        "TaggingDirective": "REPLACE",
+        "AnnotationDirective": "EXCLUDE",
+    }
     assert fs.calls == [("_copy" if api == "aio" else "copy", (PATHS, TARGETS), expected)]
 
 
@@ -154,12 +157,16 @@ def test_info_fans_out_over_every_object(api):
 class FakeS3:
     """Holds objects by key with their sizes; lists and deletes them by prefix."""
 
-    def __init__(self, objects=None):
+    def __init__(self, objects=None, failing_keys=(), delete_errors=None):
         self.objects = dict(objects or {})
         self.copies = []
         self.deleted = []
+        self.failing_keys = set(failing_keys)
+        self.delete_errors = delete_errors
 
     def copy_object(self, **params):
+        if params["Key"] in self.failing_keys:
+            raise RuntimeError("Throttled")
         self.copies.append((params["CopySource"]["Key"], params["Key"]))
         self.objects[params["Key"]] = self.objects[params["CopySource"]["Key"]]
 
@@ -179,6 +186,7 @@ class FakeS3:
         for item in params["Delete"]["Objects"]:
             self.deleted.append(item["Key"])
             self.objects.pop(item["Key"], None)
+        return {"Errors": self.delete_errors} if self.delete_errors else {}
 
 
 def test_prepare_trial_creates_sparse_files_for_put_and_copies_for_rm(tmp_path):
@@ -196,7 +204,11 @@ def test_prepare_trial_creates_sparse_files_for_put_and_copies_for_rm(tmp_path):
     prepare_trial(
         s3, Case("s3", "sync", "rm", "objects", suite="objects"), paths, targets, tmp_path / "r", 4
     )
-    assert s3.copies == [("set/files/000000", "trial/000000"), ("set/files/000001", "trial/000001")]
+    # The copies run in threads, in any order.
+    assert sorted(s3.copies) == [
+        ("set/files/000000", "trial/000000"),
+        ("set/files/000001", "trial/000001"),
+    ]
     assert s3.objects["trial/000001"] == 4
 
 
@@ -293,7 +305,7 @@ class TestRunObjects:
     def test_rm_copies_the_set_first_and_expects_nothing_left(self, s3, tmp_path):
         result = self.run("rm", tmp_path=tmp_path)
         # The recording rm deletes nothing, so the copies remain.
-        assert s3.copies == [
+        assert sorted(s3.copies) == [
             ("set/files/000000", "trial/000000"),
             ("set/files/000001", "trial/000001"),
         ]
@@ -301,8 +313,37 @@ class TestRunObjects:
         assert result["queries"][0]["objects"] == 0
         assert sorted(s3.deleted) == ["trial/000000", "trial/000001"]
 
-    def test_loop_lag_is_sampled_for_the_aio_api_only(self, s3, tmp_path):
-        assert self.run("cat", api="aio", tmp_path=tmp_path)["loop_lag_seconds"] is not None
+    def test_a_failed_preparation_is_an_error_whose_copies_are_removed(self, s3, tmp_path):
+        s3.failing_keys = {"trial/000001"}
+        result = self.run("rm", tmp_path=tmp_path)
+        [query] = result["queries"]
+        assert (result["status"], query["status"]) == ("error", "error")
+        assert query["error"] == "RuntimeError: Throttled"
+        assert "cpu_seconds" not in query
+        assert s3.copies == [("set/files/000000", "trial/000000")]
+        assert s3.deleted == ["trial/000000"]
+        assert result["successful_queries_per_second"] == 0.0
+        assert not (tmp_path / "objects").exists()
+
+    def test_a_failed_removal_makes_the_trial_an_error(self, s3, tmp_path):
+        s3.objects.update({"trial/000000": 4, "trial/000001": 4})
+        s3.delete_errors = [{"Key": "trial/000000", "Code": "AccessDenied"}]
+        result = self.run("put", tmp_path=tmp_path)
+        [query] = result["queries"]
+        assert (result["status"], query["status"]) == ("error", "error")
+        assert query["error"].startswith("Removal failed: RuntimeError: [{'Key': 'trial/000000'")
+        # The measurement of the operation is kept.
+        assert (query["objects"], query["bytes"]) == (2, 8)
+        assert query["cpu_seconds"] >= 0
+
+    def test_loop_lag_is_sampled_for_the_aio_api_only(self, s3, tmp_path, monkeypatch):
+        async def slow_cat(paths, **kwargs):
+            await asyncio.sleep(0.05)
+            return dict.fromkeys(paths, b"xyzw")
+
+        monkeypatch.setattr(RecordingFileSystem, "_cat", slow_cat, raising=False)
+        # The default heartbeat interval is 10 ms, so a 50 ms operation is sampled.
+        assert len(self.run("cat", api="aio", tmp_path=tmp_path)["loop_lag_seconds"]) >= 1
         assert self.run("cat", api="s3fs", tmp_path=tmp_path)["loop_lag_seconds"] is None
 
     def test_a_failed_operation_is_recorded_and_still_cleaned_up(self, s3, tmp_path, monkeypatch):
@@ -312,6 +353,10 @@ class TestRunObjects:
         monkeypatch.setattr(RecordingFileSystem, "copy", failing, raising=False)
         s3.objects["trial/000000"] = 4
         result = self.run("copy", tmp_path=tmp_path)
-        assert result["queries"][0]["status"] == "error"
-        assert result["queries"][0]["error"] == "RuntimeError: Forbidden"
+        [query] = result["queries"]
+        assert query["status"] == "error"
+        assert query["error"] == "RuntimeError: Forbidden"
+        # The operation's wall and CPU time are kept.
+        assert query["total_seconds"] >= 0
+        assert query["cpu_seconds"] >= 0
         assert s3.deleted == ["trial/000000"]

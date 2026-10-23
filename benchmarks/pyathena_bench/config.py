@@ -149,6 +149,9 @@ class Settings:
             value = getattr(self, name)
             if type(value) is not int or value < 1:
                 raise ValueError(f"Invalid {name}")
+        # The sets are prepared with CopyObject requests, which copy up to 5 GiB.
+        if self.objects_size > 5 * 2**30:
+            raise ValueError("objects size must be at most 5 GiB")
 
     def suite_scales(self, suite: str | None) -> dict[str, int]:
         """Return the scales of a suite by name.

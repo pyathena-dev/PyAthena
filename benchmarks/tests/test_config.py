@@ -40,6 +40,7 @@ def test_identifier_rejects_sql_and_path_syntax(value):
         {"objects_counts": {"small": 0}},
         {"objects_size": 0},
         {"objects_listing_keys_per_object": 0},
+        {"objects_size": 5 * 2**30 + 1},
         {"objects_concurrency": []},
     ],
 )

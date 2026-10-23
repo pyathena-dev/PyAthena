@@ -198,12 +198,17 @@ def delete_objects(s3: Any, prefix: str) -> None:
     Args:
         s3: boto3 S3 client.
         prefix: ``s3://`` prefix.
+
+    Raises:
+        RuntimeError: If a request reports keys it did not delete.
     """
     bucket, key = parse_output_location(prefix)
     for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=key):
         keys = [{"Key": item["Key"]} for item in page.get("Contents", [])]
         if keys:
-            s3.delete_objects(Bucket=bucket, Delete={"Objects": keys, "Quiet": True})
+            response = s3.delete_objects(Bucket=bucket, Delete={"Objects": keys, "Quiet": True})
+            if response.get("Errors"):
+                raise RuntimeError(str(response["Errors"]))
 
 
 def check_result(
@@ -251,8 +256,12 @@ async def run_objects(
 
     The filesystem comes from :func:`filesystem`. The trial prepares the
     operation's inputs with boto3 and local files, measures the operation, and
-    checks and removes what it created, outside the measurement. The CPU time
-    of the process during the operation is recorded as ``cpu_seconds``.
+    checks and removes what it created, outside the measurement; the objects
+    of a failed preparation are removed too, and a removal that fails makes
+    the trial an error. The CPU time of the process during the operation is
+    recorded as ``cpu_seconds``, also when the operation or its check fails.
+    A write of the ``aio`` API that a failed batch leaves running in a thread
+    may create an object after the removal; the run's ``cleanup`` removes it.
 
     Args:
         settings: Configuration with the region.
@@ -267,7 +276,9 @@ async def run_objects(
 
     Returns:
         A trial result with one operation in ``queries``; its status is
-        ``count_mismatch`` or ``size_mismatch`` if the outcome differs.
+        ``count_mismatch`` or ``size_mismatch`` if the outcome differs, and
+        ``error`` with the error's text if the preparation, the operation,
+        its check, or the removal failed.
     """
     setup_start = time.perf_counter()
     connection = connect(
@@ -289,13 +300,16 @@ async def run_objects(
         count = object_set["keys"]
     elif case.transport == "rm":
         paths = targets
-    prepare_trial(s3, case, files, targets, local, size)
     samples: list[float] = []
     stop = asyncio.Event()
-    monitor = asyncio.create_task(heartbeat(settings.heartbeat_interval, stop, samples))
-    setup_seconds = time.perf_counter() - setup_start
+    monitor: asyncio.Task[None] | None = None
+    # The operation's wall and CPU time, also of one that failed.
+    timing: dict[str, float] = {}
     query: dict[str, Any]
     try:
+        prepare_trial(s3, case, files, targets, local, size)
+        monitor = asyncio.create_task(heartbeat(settings.heartbeat_interval, stop, samples))
+        setup_seconds = time.perf_counter() - setup_start
         await asyncio.sleep(0)
         start = time.perf_counter()
         cpu_start = time.process_time()
@@ -304,19 +318,17 @@ async def run_objects(
                 result = batch(fs, case, paths, targets, local, size)
                 if case.api == "aio":
                     result = await result
-                elapsed = time.perf_counter() - start
-                cpu = time.process_time() - cpu_start
             finally:
+                timing = {
+                    "total_seconds": time.perf_counter() - start,
+                    "cpu_seconds": time.process_time() - cpu_start,
+                }
                 # The event loop's lag is sampled during the operation only.
                 stop.set()
                 await monitor
             outcome = check_result(s3, case, result, count, size, destination, local)
         except Exception as exc:
-            query = {
-                "status": "error",
-                "error": f"{type(exc).__name__}: {exc}",
-                "total_seconds": time.perf_counter() - start,
-            }
+            query = {"status": "error", "error": f"{type(exc).__name__}: {exc}", **timing}
         else:
             expected_bytes = count * size
             status = "ok"
@@ -329,17 +341,24 @@ async def run_objects(
                 **outcome,
                 "expected_objects": count,
                 "expected_bytes": expected_bytes if "bytes" in outcome else None,
-                "total_seconds": elapsed,
-                "cpu_seconds": cpu,
+                **timing,
             }
+    except Exception as exc:
+        # The preparation failed; the removal below takes what it created.
+        setup_seconds = time.perf_counter() - setup_start
+        query = {"status": "error", "error": f"{type(exc).__name__}: {exc}", "total_seconds": 0.0}
     finally:
         stop.set()
-        await monitor
+        if monitor is not None:
+            await monitor
         try:
             # Removed, so that the trials do not accumulate objects and local files.
             if case.transport in {"put", "pipe", "copy", "rm"}:
                 delete_objects(s3, destination)
             shutil.rmtree(local, ignore_errors=True)
+        except Exception as exc:
+            query["status"] = "error"
+            query["error"] = f"Removal failed: {type(exc).__name__}: {exc}"
         finally:
             connection.close()
     return {
@@ -347,6 +366,8 @@ async def run_objects(
         "setup_seconds": setup_seconds,
         "batch_seconds": query["total_seconds"],
         "queries": [query],
-        "successful_queries_per_second": (query["status"] == "ok") / query["total_seconds"],
+        "successful_queries_per_second": (
+            1 / query["total_seconds"] if query["status"] == "ok" else 0.0
+        ),
         "loop_lag_seconds": samples if case.api == "aio" else None,
     }

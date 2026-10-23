@@ -299,7 +299,8 @@ Each case sets one concurrency from `[objects] concurrency`, 8 and 40 by default
 The synchronous `S3FileSystem` inherits fsspec's sequential loops for `cat`, `get`, `put`, `pipe`, and `copy`, so its concurrency only sizes its executor and pool; its `rm` and the other two APIs' delete in DeleteObjects requests of 1,000 keys, which no batch size affects; and `find` pages through ListObjectsV2 with every API.
 The `aio` API awaits each operation's coroutine on the trial's event loop, whose lag is sampled; the `sync` and `s3fs` APIs call the operation on the trial's thread.
 Besides the metrics of the filesystem suite, each trial records the objects per second and the process CPU time of the operation, user and system, as `cpu_seconds`.
-The objects that `put`, `pipe`, and `copy` create, and the local files of `get` and `put`, are removed after the check; `cleanup` removes the sets and any remaining trial objects.
+The objects that `put`, `pipe`, and `copy` create, the copies that an `rm` trial prepares, and the local files of `get` and `put`, are removed after the check, also when the preparation or the operation failed, and a removal that fails makes the trial an error; a write of the `aio` API that a failed batch leaves running in a thread may create an object after the removal.
+`cleanup` removes the sets and any remaining trial objects.
 
 ```bash
 uv run --no-sync python -m pyathena_bench prepare \

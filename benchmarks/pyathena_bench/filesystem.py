@@ -259,7 +259,8 @@ async def run_filesystem(
     or copied object with every API. A ``get`` or ``put`` goes through the
     local file ``object`` in ``temp_dir``, removed after the measurement, once
     the event loop's lag is no longer sampled. The CPU time of the process
-    during the transfer is recorded as ``cpu_seconds``.
+    during the transfer is recorded as ``cpu_seconds``, also when the
+    transfer or its check fails.
 
     Args:
         settings: Configuration with the block size and region.
@@ -294,6 +295,8 @@ async def run_filesystem(
     monitor = asyncio.create_task(heartbeat(settings.heartbeat_interval, stop, samples))
     setup_seconds = time.perf_counter() - setup_start
     query: dict[str, Any]
+    # The transfer's wall and CPU time, also of one that failed.
+    timing: dict[str, float] = {}
     try:
         await asyncio.sleep(0)
         start = time.perf_counter()
@@ -303,9 +306,11 @@ async def run_filesystem(
                 transferred = await transfer(
                     fs, case, source, destination, size, settings.filesystem_block_size, local
                 )
-                elapsed = time.perf_counter() - start
-                cpu = time.process_time() - cpu_start
             finally:
+                timing = {
+                    "total_seconds": time.perf_counter() - start,
+                    "cpu_seconds": time.process_time() - cpu_start,
+                }
                 # The event loop's lag is sampled during the transfer only.
                 stop.set()
                 await monitor
@@ -320,18 +325,13 @@ async def run_filesystem(
                 # Removed, so that the trials do not accumulate copies of the object.
                 connection.s3_client.delete_object(Bucket=bucket, Key=key)
         except Exception as exc:
-            query = {
-                "status": "error",
-                "error": f"{type(exc).__name__}: {exc}",
-                "total_seconds": time.perf_counter() - start,
-            }
+            query = {"status": "error", "error": f"{type(exc).__name__}: {exc}", **timing}
         else:
             query = {
                 "status": "ok" if transferred == size else "size_mismatch",
                 "bytes": transferred,
                 "expected_bytes": size,
-                "total_seconds": elapsed,
-                "cpu_seconds": cpu,
+                **timing,
             }
     finally:
         stop.set()
