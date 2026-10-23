@@ -228,7 +228,7 @@ The filesystem suite transfers one S3 object through PyAthena's `S3FileSystem` (
 Its operations, selected with `--transport`, are:
 
 - `read`: one `read()` of the whole object from a file opened with `block_size`; PyAthena's files read it as parallel range requests of that size and hold the parts and the joined object, about twice the object's size, in memory, while s3fs's file reads it as one stream through fsspec's read-ahead cache;
-- `get`: `get_file()` to a local file in a temporary directory of the trial; PyAthena's downloads through a file opened with `block_size`, and s3fs's reads parallel ranges of `chunksize` with `max_concurrency` requests at a time;
+- `get`: `get_file()` to a local file in a temporary directory of the trial; PyAthena's reads one block at a time through a file opened with `block_size`, whose `bytes` cache requests the next block with the first read and one block at a time afterwards, and s3fs's reads parallel ranges of `chunksize` with `max_concurrency` requests at a time;
 - `write`: writes through a file opened with `block_size`, which uploads the object as a multipart upload with parts of that size; PyAthena's files upload up to `max_workers` parts at a time, and s3fs's file one part at a time;
 - `put`: `put_file()` from a sparse local file of the object's size, so that no disk read bounds the upload; PyAthena's uploads up to `max_workers` parts of `block_size` at a time, and s3fs's `max_concurrency` parts of `chunksize`;
 - `copy`: `cp_file()`, or `_cp_file()` of `AioS3FileSystem`, with parts of `block_size`; PyAthena copies an object over 5 GiB as a multipart copy with up to `max_workers` part copies at a time, and s3fs copies one over 150 MiB (`s3fs.core.MANAGED_COPY_THRESHOLD`) as a multipart copy of one part at a time; the copies of smaller objects, single CopyObject requests, are recorded as unsupported; PyAthena's copies exclude tags and annotations, which the generated objects do not have.
@@ -244,7 +244,7 @@ Its copy is a coroutine awaited on the trial's event loop, whose part copies run
 Both event loops keep Python's default executor, which runs only the trial's `asyncio.to_thread()` call.
 Before #1159, the parallel requests of the `aio` API ran in the default executors, whose `min(32, os.cpu_count() + 4)` threads bound them.
 The `s3fs` API calls s3fs on the trial's thread; each call waits for a coroutine on fsspec's IO loop, where aiobotocore sends the requests, so the trial's event loop lag is not sampled.
-Its cases run in the `s3fs` environment: `jobs` marks them for it, without a suffix to their IDs, and rejects `--environment` with another environment for them; `run` and `plan` need that environment's interpreter.
+Its cases run in the `s3fs` environment: `jobs` marks them for it, without a suffix to their IDs, and rejects `--environment` with another environment for them; a `run` of them in another environment records each trial as failed.
 
 The source objects, of zero bytes, are uploaded with boto3 below the run's scratch prefix and recorded under `objects` in the manifest.
 `prepare --filesystem-scale` uploads them with the manifest, so that every fleet host reads the same objects.
