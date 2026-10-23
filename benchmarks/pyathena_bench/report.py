@@ -294,8 +294,8 @@ def report(directory: Path) -> None:
         "Peak temp dir is the per-trial temporary directory, outside the RSS: Polars' file cache,",
         "and the local file of the filesystem suite's get and put.",
         "Output files: the most Parquet files an UNLOAD or CTAS trial wrote, and the largest.",
-        "Throughput: the bytes of a filesystem or objects transfer per total time, in MiB per",
-        "second; objects per second: the objects of an objects operation per total time.",
+        "Throughput: the bytes of a filesystem or objects transfer per total time, in MiB/s.",
+        "Objects/s: the objects of an objects operation per total time.",
         "CPU: the process CPU time, user and system, of a filesystem or objects operation.",
         "",
         "| Scale | Case | OK | Fail | Warmup fail | Unsupported | Total (s) | "

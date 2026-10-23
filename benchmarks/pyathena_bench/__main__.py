@@ -117,7 +117,8 @@ def parser() -> argparse.ArgumentParser:
         )
         command.add_argument(
             "--transport",
-            choices=("csv", "unload", "ctas", *FILESYSTEM_OPERATIONS, *OBJECTS_OPERATIONS),
+            # The two suites share the get, put, and copy operation names.
+            choices=("csv", "unload", "ctas", *{*FILESYSTEM_OPERATIONS, *OBJECTS_OPERATIONS}),
             nargs="+",
             help="Result transports, or the operations of the filesystem and objects suites",
         )
