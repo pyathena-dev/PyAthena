@@ -111,12 +111,16 @@ def test_concurrency_and_init_matrices_are_bounded():
 def test_filesystem_matrix_sweeps_workers_and_pools_for_each_api_and_operation():
     settings = replace(Settings(), filesystem_max_workers=[8, 40], filesystem_pool_connections=[10])
     cases = matrix(settings, "filesystem", "flat")
-    assert len(cases) == 3 * 2 * 2
+    assert len(cases) == 5 * 3 * 2
     assert {(c.transport, c.api) for c in cases} == {
-        (operation, api) for operation in ("read", "write", "copy") for api in ("sync", "aio")
+        (operation, api)
+        for operation in ("read", "get", "write", "put", "copy")
+        for api in ("sync", "aio", "s3fs")
     }
     assert {(c.max_workers, c.pool_connections) for c in cases} == {(8, 10), (40, 10)}
-    assert "filesystem-s3-aio-copy-w40-p10" in {c.id for c in cases}
+    assert {"filesystem-s3-aio-copy-w40-p10", "filesystem-s3-s3fs-get-w8-p10"} <= {
+        c.id for c in cases
+    }
     # The suite does not query Athena, so the other shapes add no cases.
     assert matrix(settings, "filesystem", "nested") == []
 

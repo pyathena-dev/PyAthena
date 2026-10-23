@@ -28,9 +28,19 @@ SQLALCHEMY_FAMILIES = {
     "sqla_s3fs": "s3fs",
 }
 # The filesystem suite transfers one S3 object with PyAthena's S3FileSystem (API "sync")
-# or AioS3FileSystem (API "aio"); its transport is the operation.
+# or AioS3FileSystem (API "aio"), or with s3fs (API "s3fs"); its transport is the
+# operation: whole reads and writes through an opened file, get_file() and put_file()
+# through a local file, and a copy.
 FILESYSTEM_FAMILY = "s3"
-FILESYSTEM_OPERATIONS = ("read", "write", "copy")
+FILESYSTEM_APIS = ("sync", "aio", "s3fs")
+FILESYSTEM_OPERATIONS = ("read", "get", "write", "put", "copy")
+# s3fs copies objects above its ``s3fs.core.MANAGED_COPY_THRESHOLD`` as multipart
+# copies, and PyAthena those above its largest part.
+SINGLE_COPY_THRESHOLDS = {
+    "sync": S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE,
+    "aio": S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE,
+    "s3fs": 150 * 2**20,
+}
 ALL_FAMILIES = (*FAMILIES, "wrangler", *SQLALCHEMY_FAMILIES, FILESYSTEM_FAMILY)
 SUITES = ("single", "concurrent", "init", "filesystem")
 SHAPES = ("flat", "nested", "json", "temporal")
@@ -71,9 +81,9 @@ class Case:
     def unsupported_reason(self, settings: Settings, scale: str) -> str | None:
         """Return why the case does not run at a scale.
 
-        A copy of an object up to ``S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE`` is
-        a single CopyObject request, which neither ``max_workers`` nor the
-        connection pool affects.
+        A copy of an object up to the API's threshold in
+        ``SINGLE_COPY_THRESHOLDS`` is a single CopyObject request, which
+        neither ``max_workers`` nor the connection pool affects.
 
         Args:
             settings: Configuration with the filesystem suite's object sizes.
@@ -85,9 +95,11 @@ class Case:
         if (
             self.suite == "filesystem"
             and self.transport == "copy"
-            and settings.filesystem_sizes[scale] <= S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE
+            and settings.filesystem_sizes[scale] <= SINGLE_COPY_THRESHOLDS[self.api]
         ):
-            return "Objects up to 5 GiB are copied with a single CopyObject request"
+            threshold = SINGLE_COPY_THRESHOLDS[self.api] // 2**20
+            unit = f"{threshold // 1024} GiB" if threshold % 1024 == 0 else f"{threshold} MiB"
+            return f"Objects up to {unit} are copied with a single CopyObject request"
         return self.unsupported
 
 
@@ -136,7 +148,7 @@ def matrix(settings: Settings, suite: str, shape: str) -> list[Case]:
                 pool_connections=pool,
             )
             for operation in FILESYSTEM_OPERATIONS
-            for api in ("sync", "aio")
+            for api in FILESYSTEM_APIS
             for workers in settings.filesystem_max_workers
             for pool in settings.filesystem_pool_connections
         ]

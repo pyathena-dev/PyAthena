@@ -363,6 +363,7 @@ Resources:
               uv python install ${PythonVersion}
               uv sync --directory /opt/pyathena/benchmarks --locked --no-default-groups --group polars1 --python ${PythonVersion}
               UV_PROJECT_ENVIRONMENT=/opt/pyathena/.venv-polars2 uv sync --directory /opt/pyathena/benchmarks --locked --no-default-groups --group polars2 --python ${PythonVersion}
+              UV_PROJECT_ENVIRONMENT=/opt/pyathena/.venv-s3fs uv sync --directory /opt/pyathena/benchmarks --locked --no-default-groups --group s3fs --python ${PythonVersion}
               chmod -R a+rX /opt/uv-python
               chown -R ec2-user:ec2-user /opt/pyathena
               printf '%s\n' '${AWS::StackId}' > /opt/pyathena/benchmarks/stack-id.txt

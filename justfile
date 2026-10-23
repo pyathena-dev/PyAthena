@@ -86,10 +86,12 @@ _docs-format:
     mise exec -- markdownlint-cli2 --fix
 
 # Benchmark workspace member with its own Python 3.12 environments: benchmarks/.venv
-# with Polars 1.x, and benchmarks/.venv-polars2 with Polars 2.x
+# with Polars 1.x, benchmarks/.venv-polars2 with Polars 2.x, and benchmarks/.venv-s3fs
+# with s3fs for the filesystem suite's s3fs API
 BENCHMARK_RUN := "UV_PYTHON=3.12 uv run --directory benchmarks --locked"
 BENCHMARK_UV := "UV_PROJECT_ENVIRONMENT='" + justfile_directory() + "/benchmarks/.venv' " + BENCHMARK_RUN
 BENCHMARK_UV_POLARS2 := "UV_PROJECT_ENVIRONMENT='" + justfile_directory() + "/benchmarks/.venv-polars2' " + BENCHMARK_RUN + " --no-group polars1 --group polars2"
+BENCHMARK_UV_S3FS := "UV_PROJECT_ENVIRONMENT='" + justfile_directory() + "/benchmarks/.venv-s3fs' " + BENCHMARK_RUN + " --no-group polars1 --group s3fs"
 
 # Standalone benchmark checks; these do not execute Athena queries
 benchmark target="lint":
@@ -108,6 +110,7 @@ _benchmark-lint:
 _benchmark-test: _benchmark-lint
     {{BENCHMARK_UV}} pytest
     {{BENCHMARK_UV_POLARS2}} pytest
+    {{BENCHMARK_UV_S3FS}} pytest
 
 # Install development tools
 tool:

@@ -221,7 +221,7 @@ class TestExpandJobsFilesystem:
     def test_one_job_per_api_and_operation_runs_the_worker_and_pool_sweep(self):
         settings = replace(SETTINGS, filesystem_sizes={"large": 2**30})
         jobs = expand_jobs(settings, ["filesystem"], ["large"], ["flat", "nested"], Filters())
-        assert len(jobs) == 6
+        assert len(jobs) == 15
         assert not any(j["api_heavy"] for j in jobs)
         job = next(j for j in jobs if j["id"] == "filesystem-large-flat-s3-aio-read-bytes")
         assert job["args"][:4] == ["--suite", "filesystem", "--scale", "large"]
@@ -232,6 +232,30 @@ class TestExpandJobsFilesystem:
         # A 1 GiB copy is a single CopyObject, so the copy job only records unsupported cases.
         copy = next(j for j in jobs if j["id"] == "filesystem-large-flat-s3-aio-copy-bytes")
         assert copy["weight"] == 2**30 // 10_000 * trials
+
+    def test_s3fs_jobs_run_in_the_s3fs_environment_without_a_suffix(self):
+        settings = replace(SETTINGS, filesystem_sizes={"large": 2**30})
+        jobs = expand_jobs(settings, ["filesystem"], ["large"], ["flat"], Filters())
+        environments = {j["id"]: j.get("environment") for j in jobs}
+        assert environments["filesystem-large-flat-s3-s3fs-read-bytes"] == "s3fs"
+        assert environments["filesystem-large-flat-s3-sync-read-bytes"] is None
+        assert not any(j["id"].endswith("-s3fs-s3fs") for j in jobs)
+        # s3fs copies a 1 GiB object as a multipart copy, which the job runs.
+        copy = next(j for j in jobs if j["id"] == "filesystem-large-flat-s3-s3fs-copy-bytes")
+        cases = len(settings.filesystem_max_workers) * len(settings.filesystem_pool_connections)
+        assert copy["weight"] == 2**30 // 10_000 * cases * (settings.warmups + settings.repetitions)
+
+    def test_s3fs_jobs_reject_another_environment(self):
+        settings = replace(SETTINGS, filesystem_sizes={"large": 2**30})
+        with pytest.raises(ValueError, match="s3fs API runs in the s3fs environment, not polars2"):
+            expand_jobs(
+                settings, ["filesystem"], ["large"], ["flat"], Filters(), environment="polars2"
+            )
+        jobs = expand_jobs(
+            settings, ["filesystem"], ["large"], ["flat"], Filters(), environment="s3fs"
+        )
+        assert {j.get("environment") for j in jobs} == {"s3fs"}
+        assert any(j["id"] == "filesystem-large-flat-s3-sync-read-bytes-s3fs" for j in jobs)
 
 
 class TestExpandJobsArraysize:
