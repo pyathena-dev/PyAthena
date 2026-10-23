@@ -43,11 +43,13 @@ from pyathena_bench.aws import (
     split_location,
     validate_inputs,
     validate_manifest,
+    validate_object_sets,
     validate_objects,
 )
 from pyathena_bench.cases import Case
 from pyathena_bench.config import Settings, select_sql, write_json
 from pyathena_bench.filesystem import missing_api_reason, run_filesystem
+from pyathena_bench.objects import run_objects
 from pyathena_bench.report import CHECKPOINT, read_trials, trial_key
 
 _logger = logging.getLogger(__name__)
@@ -126,6 +128,15 @@ def worker(pipe: Connection, payload: dict[str, Any]) -> None:
                 payload["source"],
                 payload["destination"],
                 payload["size"],
+                Path(payload["temp_dir"]),
+            )
+        elif case.suite == "objects":
+            measurement = run_objects(
+                settings,
+                case,
+                session_,
+                payload["object_set"],
+                payload["destination"],
                 Path(payload["temp_dir"]),
             )
         else:
@@ -479,7 +490,9 @@ def run(
     resources = validate_manifest(settings, manifest)
     if any(case.suite == "filesystem" for case in cases):
         validate_objects(settings, manifest, scales)
-    if any(case.suite != "filesystem" for case in cases):
+    if any(case.suite == "objects" for case in cases):
+        validate_object_sets(settings, manifest, scales)
+    if any(case.suite not in {"filesystem", "objects"} for case in cases):
         validate_inputs(settings, manifest, scales)
     output.mkdir(parents=True, exist_ok=False)
     write_json(output / "environment.json", environment(settings))
@@ -529,6 +542,11 @@ def run(
                         source=manifest["objects"][scale]["location"],
                         destination=f"{locations['scratch']}trials/{trial}/object",
                         size=manifest["objects"][scale]["size"],
+                    )
+                elif case.suite == "objects":
+                    payload.update(
+                        object_set=manifest["object_sets"][scale],
+                        destination=f"{locations['scratch']}trials/{trial}/",
                     )
                 else:
                     payload.update(

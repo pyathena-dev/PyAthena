@@ -36,6 +36,12 @@ def test_identifier_rejects_sql_and_path_syntax(value):
         {"filesystem_sizes": {"small": 8 * 2**20}},
         {"filesystem_max_workers": []},
         {"filesystem_pool_connections": [0]},
+        {"objects_counts": {}},
+        {"objects_counts": {"small": 0}},
+        {"objects_size": 0},
+        {"objects_listing_keys_per_object": 0},
+        {"objects_size": 5 * 2**30 + 1},
+        {"objects_concurrency": []},
     ],
 )
 def test_invalid_measurement_settings(changes):
@@ -137,6 +143,38 @@ def test_filesystem_section_is_loaded_with_its_own_scales(tmp_path):
     assert settings.suite_scales("single") == {"small": 10000}
     assert settings.filesystem_block_size == 16 * 2**20
     assert settings.filesystem_pool_connections == [4, 16]
+
+
+def test_objects_section_is_loaded_with_its_own_scales(tmp_path):
+    config = tmp_path / "config.toml"
+    config.write_text(
+        "[scales]\nsmall = 10000\n"
+        "[objects]\ncounts = { medium = 1000 }\nsize = 4096\nlisting_keys_per_object = 10\n"
+        "concurrency = [4]\n"
+    )
+    settings = Settings.load(config)
+    assert settings.suite_scales("objects") == {"medium": 1000}
+    assert settings.suite_scales("single") == {"small": 10000}
+    assert (settings.objects_size, settings.objects_listing_keys_per_object) == (4096, 10)
+    assert settings.objects_concurrency == [4]
+
+
+def test_objects_matrix_sweeps_the_concurrency_for_each_api_and_operation():
+    settings = replace(Settings(), objects_concurrency=[8, 40])
+    cases = matrix(settings, "objects", "flat")
+    assert len(cases) == 8 * 3 * 2
+    assert {(c.transport, c.api) for c in cases} == {
+        (operation, api)
+        for operation in ("cat", "get", "put", "pipe", "copy", "rm", "find", "info")
+        for api in ("sync", "aio", "s3fs")
+    }
+    # The concurrency is the filesystem's workers and pool, and the batch size.
+    assert {(c.max_workers, c.pool_connections) for c in cases} == {(8, 8), (40, 40)}
+    assert all(
+        c.output == "objects" and c.unsupported_reason(settings, "small") is None for c in cases
+    )
+    assert "objects-s3-s3fs-cat-n40" in {c.id for c in cases}
+    assert matrix(settings, "objects", "nested") == []
 
 
 def test_flat_projection_and_nested_projection_share_the_snapshot():

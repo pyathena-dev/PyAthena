@@ -15,12 +15,14 @@ from pyathena_bench.aws import (
     cleanup,
     client,
     prepare,
+    prepare_object_sets,
     prepare_objects,
     run_locations,
     split_location,
     stack_resources,
     validate_inputs,
     validate_manifest,
+    validate_object_sets,
     validate_objects,
 )
 from pyathena_bench.config import Settings, read_json
@@ -126,6 +128,113 @@ class TestObjects:
             data["objects"]["small"]["size"] = 1
         with pytest.raises(ValueError, match=message):
             validate_objects(Settings(filesystem_sizes={"small": 64 * 2**20}), data, scales)
+
+
+class ObjectSetStore(ObjectStore):
+    """Adds copies, empty puts, and listing by prefix to the object store."""
+
+    def __init__(self):
+        super().__init__()
+        self.requests = []
+
+    def copy_object(self, **params):
+        self.requests.append("copy")
+        source = params["CopySource"]
+        assert params["TaggingDirective"] == "REPLACE"
+        assert params["AnnotationDirective"] == "EXCLUDE"
+        self.sizes[(params["Bucket"], params["Key"])] = self.sizes[
+            (source["Bucket"], source["Key"])
+        ]
+
+    def put_object(self, **params):
+        self.requests.append("put")
+        assert params["Body"] == b""
+        self.sizes[(params["Bucket"], params["Key"])] = 0
+
+    def get_paginator(self, name):
+        assert name == "list_objects_v2"
+        return self
+
+    def paginate(self, **params):
+        contents = [
+            {"Key": key, "Size": size}
+            for (bucket, key), size in sorted(self.sizes.items())
+            if bucket == params["Bucket"] and key.startswith(params["Prefix"])
+        ]
+        return [{"Contents": contents[:2]}, {"Contents": contents[2:]}]
+
+
+class TestObjectSets:
+    def test_missing_sets_are_uploaded_once_as_copies_and_empty_keys(
+        self, aws_metadata, monkeypatch, tmp_path
+    ):
+        store = ObjectSetStore()
+        monkeypatch.setattr("pyathena_bench.aws.client", lambda session_, service: store)
+        settings = Settings(
+            objects_counts={"small": 3, "large": 2},
+            objects_size=16,
+            objects_listing_keys_per_object=2,
+        )
+        data = manifest()
+        path = tmp_path / "manifest.json"
+        prepare_object_sets(settings, data, path, ["small"])
+        prepare_object_sets(settings, data, path, ["small", "large"])
+        # One upload per set; the other files are copies; the listing keys are empty puts.
+        assert store.requests.count("copy") == 2 + 1
+        assert store.requests.count("put") == 3 * 2 + 2 * 2
+        small = data["object_sets"]["small"]
+        assert small["files"].startswith(f"s3://temporary/runs/{RUN}/object-sets/small-")
+        assert small["listing"] == small["files"].replace("files/", "listing/")
+        assert (small["count"], small["size"], small["keys"]) == (3, 16, 6)
+        assert store.sizes[("temporary", small["files"].split("temporary/")[1] + "000002")] == 16
+        assert (
+            store.sizes[("temporary", small["listing"].split("temporary/")[1] + "000002/001")] == 0
+        )
+        assert read_json(path)["object_sets"] == data["object_sets"]
+        validate_object_sets(settings, data, ["small", "large"])
+        validate_manifest(settings, data)
+
+    @pytest.mark.parametrize(
+        ("change", "message"),
+        [("missing", "Prepare"), ("cleaned", "Prepare"), ("count", "Prepared object set")],
+    )
+    def test_unusable_sets_fail_before_any_measurement(self, change, message):
+        data = manifest()
+        data["object_sets"] = {
+            "small": {
+                "files": "s3://t/f/",
+                "listing": "s3://t/l/",
+                "count": 2,
+                "size": 16,
+                "keys": 4,
+            }
+        }
+        scales = ["small"]
+        if change == "missing":
+            scales = ["small", "large"]
+        elif change == "cleaned":
+            data["cleaned"] = True
+        else:
+            data["object_sets"]["small"]["count"] = 1
+        settings = Settings(
+            objects_counts={"small": 2}, objects_size=16, objects_listing_keys_per_object=2
+        )
+        with pytest.raises(ValueError, match=message):
+            validate_object_sets(settings, data, scales)
+
+    def test_manifest_rejects_a_set_outside_the_run(self, aws_metadata):
+        data = manifest()
+        data["object_sets"] = {
+            "small": {
+                "files": f"s3://temporary/runs/{RUN}/object-sets/small-x/files/",
+                "listing": "s3://temporary/elsewhere/listing/",
+                "count": 2,
+                "size": 16,
+                "keys": 4,
+            }
+        }
+        with pytest.raises(ValueError, match="Object set is outside"):
+            validate_manifest(Settings(), data)
 
 
 class TestAwsLifecycle:

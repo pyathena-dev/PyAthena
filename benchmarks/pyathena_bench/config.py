@@ -82,6 +82,13 @@ class Settings:
     filesystem_block_size: int = 8 * 2**20
     filesystem_max_workers: list[int] = field(default_factory=lambda: [8, 40])
     filesystem_pool_connections: list[int] = field(default_factory=lambda: [10, 40])
+    # The objects suite: object counts by scale name, the size of each object, the
+    # keys of the listing set per object, and the swept concurrency, which is the
+    # filesystem's max_workers and connection pool and the batch size of its operations.
+    objects_counts: dict[str, int] = field(default_factory=lambda: {"small": 100})
+    objects_size: int = 2**20
+    objects_listing_keys_per_object: int = 100
+    objects_concurrency: list[int] = field(default_factory=lambda: [8, 40])
 
     def __post_init__(self) -> None:
         identifier(self.database)
@@ -124,10 +131,27 @@ class Settings:
             for size in self.filesystem_sizes.values()
         ):
             raise ValueError("Filesystem sizes must take 2 to 10,000 parts of block_size")
-        for name in ("filesystem_max_workers", "filesystem_pool_connections"):
+        for name in (
+            "filesystem_max_workers",
+            "filesystem_pool_connections",
+            "objects_concurrency",
+        ):
             values = getattr(self, name)
             if not values or any(type(v) is not int or v < 1 for v in values):
                 raise ValueError(f"Invalid {name}")
+        if not self.objects_counts:
+            raise ValueError("Objects counts must name at least one scale")
+        for name, count in self.objects_counts.items():
+            identifier(name)
+            if type(count) is not int or count < 1:
+                raise ValueError("Objects counts must be positive integers")
+        for name in ("objects_size", "objects_listing_keys_per_object"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 1:
+                raise ValueError(f"Invalid {name}")
+        # The sets are prepared with CopyObject requests, which copy up to 5 GiB.
+        if self.objects_size > 5 * 2**30:
+            raise ValueError("objects size must be at most 5 GiB")
 
     def suite_scales(self, suite: str | None) -> dict[str, int]:
         """Return the scales of a suite by name.
@@ -136,16 +160,21 @@ class Settings:
             suite: Suite name, or None for the snapshots that ``prepare`` creates.
 
         Returns:
-            The object sizes in bytes of the ``filesystem`` suite, and the row
-            counts of the snapshots of the other suites.
+            The object sizes in bytes of the ``filesystem`` suite, the object
+            counts of the ``objects`` suite, and the row counts of the
+            snapshots of the other suites.
         """
-        return self.filesystem_sizes if suite == "filesystem" else self.scales
+        if suite == "filesystem":
+            return self.filesystem_sizes
+        if suite == "objects":
+            return self.objects_counts
+        return self.scales
 
     @classmethod
     def load(cls, path: Path) -> Settings:
         with path.open("rb") as stream:
             data = tomllib.load(stream)
-        if set(data) - {"aws", "source", "scales", "measurement", "filesystem"}:
+        if set(data) - {"aws", "source", "scales", "measurement", "filesystem", "objects"}:
             raise ValueError("Unknown configuration section")
         return cls(
             **data.get("aws", {}),
@@ -153,6 +182,7 @@ class Settings:
             scales=data.get("scales", {"small": 10000}),
             **data.get("measurement", {}),
             **{f"filesystem_{k}": v for k, v in data.get("filesystem", {}).items()},
+            **{f"objects_{k}": v for k, v in data.get("objects", {}).items()},
         )
 
 

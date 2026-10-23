@@ -15,6 +15,7 @@ import re
 import time
 import uuid
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -291,6 +292,11 @@ def validate_manifest(settings: Settings, manifest: dict[str, Any]) -> dict[str,
     for scale, item in manifest.get("objects", {}).items():
         if not item["location"].startswith(f"{objects}{identifier(scale)}-"):
             raise ValueError("Object is outside the manifest namespace")
+    sets = run_locations(actual, manifest["run_id"])["scratch"] + "object-sets/"
+    for scale, item in manifest.get("object_sets", {}).items():
+        root = f"{sets}{identifier(scale)}-"
+        if not (item["files"].startswith(root) and item["listing"].startswith(root)):
+            raise ValueError("Object set is outside the manifest namespace")
     return actual
 
 
@@ -387,6 +393,132 @@ def prepare_objects(
             raise ValueError(f"Uploaded object for {scale} has an unexpected size")
         objects[scale] = {"location": location, "size": size}
         write_json(path, manifest)
+
+
+def prepare_object_sets(
+    settings: Settings, manifest: dict[str, Any], path: Path, scales: list[str]
+) -> None:
+    """Upload the objects suite's object sets that the manifest lacks.
+
+    A set has ``count`` objects of ``size`` zero bytes under its ``files``
+    prefix, the first uploaded and the rest copied from it, and ``count``
+    directories of ``listing_keys_per_object`` empty objects under its
+    ``listing`` prefix. The uploads run with boto3 in parallel threads, below
+    the run's scratch prefix, which ``cleanup`` removes, and the set is
+    recorded under ``object_sets`` in the manifest once its objects are
+    counted.
+
+    Args:
+        settings: Configuration with the objects suite's counts and sizes.
+        manifest: Prepared manifest, updated in place.
+        path: Manifest file, rewritten after each set.
+        scales: Objects scale names.
+
+    Raises:
+        ValueError: If the manifest was cleaned, or an uploaded set does not
+            hold the expected objects.
+    """
+    resources = validate_manifest(settings, manifest)
+    if manifest.get("cleaned"):
+        raise ValueError("The manifest's resources were cleaned")
+    sets = manifest.setdefault("object_sets", {})
+    root = run_locations(resources, manifest["run_id"])["scratch"]
+    s3 = client(session(settings), "s3")
+    for scale in scales:
+        if scale in sets:
+            continue
+        count = settings.objects_counts[scale]
+        size = settings.objects_size
+        keys = count * settings.objects_listing_keys_per_object
+        location = f"{root}object-sets/{identifier(scale)}-{uuid.uuid4().hex}/"
+        files, listing = f"{location}files/", f"{location}listing/"
+        bucket, first = parse_output_location(f"{files}{0:06d}")
+        s3.upload_fileobj(ZeroReader(size), bucket, first)
+
+        def copy(key: str, bucket: str = bucket, first: str = first) -> None:
+            s3.copy_object(
+                Bucket=bucket,
+                Key=key,
+                CopySource={"Bucket": bucket, "Key": first},
+                TaggingDirective="REPLACE",
+                AnnotationDirective="EXCLUDE",
+            )
+
+        def put(key: str, bucket: str = bucket) -> None:
+            s3.put_object(Bucket=bucket, Key=key, Body=b"")
+
+        with ThreadPoolExecutor(32) as pool:
+            list(
+                pool.map(
+                    copy, (parse_output_location(f"{files}{i:06d}")[1] for i in range(1, count))
+                )
+            )
+            list(
+                pool.map(
+                    put,
+                    (
+                        parse_output_location(f"{listing}{i:06d}/{j:03d}")[1]
+                        for i in range(count)
+                        for j in range(settings.objects_listing_keys_per_object)
+                    ),
+                )
+            )
+        if count_objects(s3, files) != (count, count * size):
+            raise ValueError(f"Uploaded files of {scale} have an unexpected count or size")
+        if count_objects(s3, listing) != (keys, 0):
+            raise ValueError(f"Uploaded listing keys of {scale} have an unexpected count")
+        sets[scale] = {
+            "files": files,
+            "listing": listing,
+            "count": count,
+            "size": size,
+            "keys": keys,
+        }
+        write_json(path, manifest)
+
+
+def count_objects(s3: Any, prefix: str) -> tuple[int, int]:
+    """Count the objects below a prefix and sum their sizes.
+
+    Args:
+        s3: boto3 S3 client.
+        prefix: ``s3://`` prefix.
+
+    Returns:
+        The object count and the total size in bytes.
+    """
+    bucket, key = parse_output_location(prefix)
+    count = total = 0
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=key):
+        for item in page.get("Contents", []):
+            count += 1
+            total += item["Size"]
+    return count, total
+
+
+def validate_object_sets(settings: Settings, manifest: dict[str, Any], scales: list[str]) -> None:
+    """Check that the objects suite's sets are prepared as configured.
+
+    Args:
+        settings: Configuration with the objects suite's counts and sizes.
+        manifest: Manifest with the prepared ``object_sets``.
+        scales: Objects scale names.
+
+    Raises:
+        ValueError: If the manifest was cleaned, a set is missing, or its
+            count, size, or keys differ from the configuration.
+    """
+    sets = manifest.get("object_sets", {})
+    if manifest.get("cleaned") or any(scale not in sets for scale in scales):
+        raise ValueError("Prepare all requested object sets before running")
+    for scale in scales:
+        expected = {
+            "count": settings.objects_counts[scale],
+            "size": settings.objects_size,
+            "keys": settings.objects_counts[scale] * settings.objects_listing_keys_per_object,
+        }
+        if {k: sets[scale][k] for k in expected} != expected:
+            raise ValueError("Prepared object set differs from current configuration")
 
 
 def validate_objects(settings: Settings, manifest: dict[str, Any], scales: list[str]) -> None:

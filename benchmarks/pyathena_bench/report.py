@@ -50,8 +50,15 @@ def summarize(trials: list[dict[str, Any]]) -> list[dict[str, Any]]:
             q["bytes"] / 2**20 / q["total_seconds"]
             for t in good
             for q in t.get("queries", [])
-            if "bytes" in q
+            if q.get("bytes") is not None
         ]
+        objects = [
+            q["objects"] / q["total_seconds"]
+            for t in good
+            for q in t.get("queries", [])
+            if "objects" in q
+        ]
+        cpu = [q["cpu_seconds"] for t in good for q in t.get("queries", []) if "cpu_seconds" in q]
         lag = [v for t in good for v in (t.get("loop_lag_seconds") or [])]
         phases = {}
         for key in ("execute_seconds", "consume_seconds", "post_completion_setup_seconds"):
@@ -91,6 +98,8 @@ def summarize(trials: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         reason += f": expected {query['expected_rows']}, got {query['rows']}"
                     elif query["status"] == "size_mismatch":
                         reason += f": expected {query['expected_bytes']} B, got {query['bytes']} B"
+                    elif query["status"] == "count_mismatch":
+                        reason += f": expected {query['expected_objects']}, got {query['objects']}"
                     reasons.add(prefix + reason)
             else:
                 reasons.add(prefix + trial.get("reason", trial.get("error", trial["status"])))
@@ -113,6 +122,8 @@ def summarize(trials: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "median_init_seconds": percentile(init, 0.5),
                 "median_client_result_seconds": percentile(retrieval, 0.5),
                 "median_mib_per_second": percentile(throughput, 0.5),
+                "median_objects_per_second": percentile(objects, 0.5),
+                "median_cpu_seconds": percentile(cpu, 0.5),
                 **phases,
                 "median_queries_per_second": statistics.median(
                     [t["successful_queries_per_second"] for t in good]
@@ -283,13 +294,16 @@ def report(directory: Path) -> None:
         "Peak temp dir is the per-trial temporary directory, outside the RSS: Polars' file cache,",
         "and the local file of the filesystem suite's get and put.",
         "Output files: the most Parquet files an UNLOAD or CTAS trial wrote, and the largest.",
-        "Throughput: the filesystem suite's object size per total time, in MiB per second.",
+        "Throughput: the bytes of a filesystem or objects transfer per total time, in MiB/s.",
+        "Objects/s: the objects of an objects operation per total time.",
+        "CPU: the process CPU time, user and system, of a filesystem or objects operation.",
         "",
         "| Scale | Case | OK | Fail | Warmup fail | Unsupported | Total (s) | "
-        "Client result (s) | Init (s) | Throughput (MiB/s) | Peak RSS (B) | RSS increase (B) | "
-        "Peak temp dir (B) | Output files | Largest file (B) | Peak threads | Notes |",
+        "Client result (s) | Init (s) | Throughput (MiB/s) | Objects/s | CPU (s) | Peak RSS (B) | "
+        "RSS increase (B) | Peak temp dir (B) | Output files | Largest file (B) | Peak threads | "
+        "Notes |",
         "| --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: "
-        "| ---: | ---: | ---: | --- |",
+        "| ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for row in rows:
         values = [
@@ -305,6 +319,8 @@ def report(directory: Path) -> None:
                 "median_client_result_seconds",
                 "median_init_seconds",
                 "median_mib_per_second",
+                "median_objects_per_second",
+                "median_cpu_seconds",
                 "peak_rss_bytes",
                 "median_rss_increase_bytes",
                 "peak_temp_dir_bytes",

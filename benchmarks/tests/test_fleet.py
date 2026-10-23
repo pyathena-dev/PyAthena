@@ -245,6 +245,20 @@ class TestExpandJobsFilesystem:
         cases = len(settings.filesystem_max_workers) * len(settings.filesystem_pool_connections)
         assert copy["weight"] == 2**30 // 10_000 * cases * (settings.warmups + settings.repetitions)
 
+    def test_objects_jobs_are_weighed_by_their_object_count(self):
+        settings = replace(SETTINGS, objects_counts={"medium": 1000})
+        jobs = expand_jobs(settings, ["objects"], ["medium"], ["flat"], Filters())
+        assert len(jobs) == 8 * 3
+        assert not any(j["api_heavy"] for j in jobs)
+        job = next(j for j in jobs if j["id"] == "objects-medium-flat-s3-s3fs-find-objects")
+        assert job["environment"] == "s3fs"
+        assert job["args"] == [
+            "--suite", "objects", "--scale", "medium", "--shape", "flat",
+            "--family", "s3", "--api", "s3fs", "--transport", "find", "--output-kind", "objects",
+        ]  # fmt: skip
+        cases = len(settings.objects_concurrency)
+        assert job["weight"] == 1000 * cases * (settings.warmups + settings.repetitions)
+
     def test_s3fs_jobs_reject_another_environment(self):
         settings = replace(SETTINGS, filesystem_sizes={"large": 2**30})
         with pytest.raises(ValueError, match="s3fs API runs in the s3fs environment, not polars2"):
@@ -565,6 +579,19 @@ class TestCommandLine:
             f"filesystem-s3-aio-read-w{w}-p{p}" for w in (8, 40) for p in (10, 40)
         }
         assert plan["warnings"] == []
+        with pytest.raises(ValueError, match="Select distinct scales"):
+            main([*argv, "--scale", "small"])
+
+    def test_objects_scales_are_the_object_counts(self, tmp_path, capsys):
+        config = tmp_path / "config.toml"
+        config.write_text("[scales]\nsmall = 10000\n[objects]\ncounts = { medium = 1000 }\n")
+        argv = ["--config", str(config), "plan", "--suite", "objects"]
+        assert main([*argv, "--scale", "medium", "--api", "sync", "--transport", "cat", "rm"]) == 0
+        plan = json.loads(capsys.readouterr().out)
+        assert plan["scales"] == {"medium": 1000}
+        assert {c["id"] for c in plan["cases"]} == {
+            f"objects-s3-sync-{op}-n{n}" for op in ("cat", "rm") for n in (8, 40)
+        }
         with pytest.raises(ValueError, match="Select distinct scales"):
             main([*argv, "--scale", "small"])
 

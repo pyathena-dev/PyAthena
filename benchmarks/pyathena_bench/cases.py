@@ -41,8 +41,11 @@ SINGLE_COPY_THRESHOLDS = {
     "aio": S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE,
     "s3fs": 150 * 2**20,
 }
+# The objects suite runs one batch operation of the same APIs over many objects; its
+# transport is the operation and its scale the object count.
+OBJECTS_OPERATIONS = ("cat", "get", "put", "pipe", "copy", "rm", "find", "info")
 ALL_FAMILIES = (*FAMILIES, "wrangler", *SQLALCHEMY_FAMILIES, FILESYSTEM_FAMILY)
-SUITES = ("single", "concurrent", "init", "filesystem")
+SUITES = ("single", "concurrent", "init", "filesystem", "objects")
 SHAPES = ("flat", "nested", "json", "temporal")
 
 
@@ -72,6 +75,8 @@ class Case:
                 f"{self.suite}-{self.family}-{self.api}-{self.transport}-"
                 f"w{self.max_workers}-p{self.pool_connections}"
             )
+        if self.suite == "objects":
+            return f"{self.suite}-{self.family}-{self.api}-{self.transport}-n{self.max_workers}"
         backend = f"-{self.dtype_backend}" if self.dtype_backend else ""
         return (
             f"{self.suite}-{self.family}-{self.api}-{self.transport}-{self.output}-"
@@ -117,13 +122,16 @@ def matrix(settings: Settings, suite: str, shape: str) -> list[Case]:
     included (see ``select_sql()``). Like json, it has no cases in the other
     suites.
 
-    The ``filesystem`` suite does not query Athena and has no shape; its cases
-    belong to the ``flat`` shape.
+    The ``filesystem`` and ``objects`` suites do not query Athena and have no
+    shape; their cases belong to the ``flat`` shape. A case of the ``objects``
+    suite sets its concurrency as the filesystem's ``max_workers`` and
+    connection pool, and as the batch size of its operation.
 
     Args:
         settings: Configuration with the arraysizes, chunk sizes, and concurrency,
-            and the filesystem suite's max_workers and connection pools.
-        suite: ``single``, ``concurrent``, ``init``, or ``filesystem``.
+            the filesystem suite's max_workers and connection pools, and the
+            objects suite's concurrency.
+        suite: ``single``, ``concurrent``, ``init``, ``filesystem``, or ``objects``.
         shape: ``flat``, ``nested``, ``json``, or ``temporal``.
 
     Returns:
@@ -151,6 +159,23 @@ def matrix(settings: Settings, suite: str, shape: str) -> list[Case]:
             for api in FILESYSTEM_APIS
             for workers in settings.filesystem_max_workers
             for pool in settings.filesystem_pool_connections
+        ]
+    if suite == "objects":
+        if shape != "flat":
+            return []
+        return [
+            Case(
+                FILESYSTEM_FAMILY,
+                api,
+                operation,
+                "objects",
+                suite=suite,
+                max_workers=concurrency,
+                pool_connections=concurrency,
+            )
+            for operation in OBJECTS_OPERATIONS
+            for api in FILESYSTEM_APIS
+            for concurrency in settings.objects_concurrency
         ]
     if shape in {"json", "temporal"} and suite != "single":
         return []

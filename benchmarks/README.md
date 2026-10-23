@@ -276,6 +276,39 @@ uv run --no-sync python -m pyathena_bench jobs \
 
 `jobs` reads the scales of the filesystem suite from `[filesystem] sizes`; a `jobs` command that also selects another suite accepts only scale names defined in both tables, so expand the filesystem suite in its own command when its scales differ and combine the job files with `queue --jobs`.
 
+### Objects suite
+
+The objects suite runs one batch operation over many objects through the same three APIs as the filesystem suite, `S3FileSystem` (`sync`), `AioS3FileSystem` (`aio`), and s3fs (`s3fs`), and does not query Athena.
+Its scales are the object counts in `[objects] counts`, 100 (small), 1,000 (medium), and 10,000 (large) by default; each object holds `size` zero bytes, 1 MiB by default.
+A prepared set of a scale has its `count` objects under a `files` prefix and, under a `listing` prefix, `count` directories of `listing_keys_per_object` empty objects, 100 by default, which `find` lists.
+`prepare --objects-scale` uploads a set with boto3, the first object as an upload and the rest as copies, and records it under `object_sets` in the manifest; otherwise `run` uploads the missing sets before its first trial.
+A set of 1,000 objects takes about 1,000 copies and 100,000 PutObject requests; the large set takes ten times as many, so prepare it only for a run that measures it.
+
+Its operations, selected with `--transport`, and the result each trial checks are:
+
+- `cat`: `cat(paths)` of the set's files; the bytes returned;
+- `get`: `get(paths, local_paths)` to the trial's temporary directory; the files and bytes on disk;
+- `put`: `put(local_paths, paths)` of sparse local files of the object size, created before the measurement; the objects created, counted and summed with ListObjectsV2;
+- `pipe`: `pipe({path: bytes})` of one buffer of the object size; the objects created;
+- `copy`: `copy(paths, target_paths)` within the bucket, excluding tags and annotations; the objects created;
+- `rm`: `rm(paths)` of objects that the trial copies from the set with boto3 before the measurement; none left;
+- `find`: `find(prefix)` of the set's listing; the keys returned;
+- `info`: `info(path)` of each file, through a thread pool of the case's concurrency for the synchronous filesystem and through batches of `fsspec.asyn._run_coros_in_chunks` for the other two; the entries returned.
+
+Each case sets one concurrency from `[objects] concurrency`, 8 and 40 by default: the filesystem's `max_workers` and connection pool, as in the filesystem suite, and the `batch_size` of the `aio` and s3fs operations, which is the number of files they transfer at the same time.
+The synchronous `S3FileSystem` inherits fsspec's sequential loops for `cat`, `get`, `put`, `pipe`, and `copy`, so its concurrency only sizes its executor and pool; its `rm` and the other two APIs' delete in DeleteObjects requests of 1,000 keys, which no batch size affects; and `find` pages through ListObjectsV2 with every API.
+The `aio` API awaits each operation's coroutine on the trial's event loop, whose lag is sampled; the `sync` and `s3fs` APIs call the operation on the trial's thread.
+Besides the metrics of the filesystem suite, each trial records the objects per second and the process CPU time of the operation, user and system, as `cpu_seconds`.
+The objects that `put`, `pipe`, and `copy` create, the copies that an `rm` trial prepares, and the local files of `get` and `put`, are removed after the check, also when the preparation or the operation failed, and a removal that fails makes the trial an error; a write of the `aio` API that a failed batch leaves running in a thread may create an object after the removal.
+`cleanup` removes the sets and any remaining trial objects.
+
+```bash
+uv run --no-sync python -m pyathena_bench prepare \
+  --stack "$BENCHMARK_STACK_ID" --manifest results/input-objects.json --objects-scale medium
+uv run --no-sync python -m pyathena_bench jobs \
+  --suite objects --scale medium > results/jobs-objects.json
+```
+
 ## Measurement semantics
 
 Each warmup and measured trial runs in a fresh child process, with imports outside the measurement baseline.
@@ -292,7 +325,8 @@ Athena result reuse and library query caches are disabled.
 | `setup_seconds` | Connection and cursor preparation |
 | `execute_seconds` | Public execute call through completion, including waiting for a Future or coroutine |
 | `consume_seconds` | Consumption after execute completes |
-| `total_seconds` | Execute plus full result consumption; excludes connection preparation and cleanup; the transfer in the filesystem suite |
+| `total_seconds` | Execute plus full result consumption; excludes connection preparation and cleanup; the transfer in the filesystem suite and the operation in the objects suite |
+| `cpu_seconds` | Process CPU time, user and system, of a filesystem transfer or an objects operation |
 | `post_completion_setup_seconds` | First observed successful Athena status through result readiness, when available |
 | `init_seconds` | ResultSet construction in the initialization suite |
 | Athena statistics | Server execution, queue time, scanned bytes, and engine version from SDK responses |
@@ -300,7 +334,7 @@ Athena result reuse and library query caches are disabled.
 | Process high-water RSS | OS high-water value, including imports and process startup |
 | Event-loop lag | Delay beyond the heartbeat interval; 10 ms interval by default |
 | Thread metrics | Observed process threads and CPU time since the baseline, including native library threads |
-| Peak temp dir | Largest sampled size of the trial's temporary directory: Polars' file cache, and the local file of the filesystem suite's `get` and `put` |
+| Peak temp dir | Largest sampled size of the trial's temporary directory: Polars' file cache, and the local files of the `get` and `put` operations of the filesystem and objects suites |
 
 Some cursors eagerly read data during `execute()`, while others fetch lazily.
 Consequently, `consume_seconds` alone is not a fair retrieval comparison.
@@ -325,7 +359,7 @@ When the temporary directory is a tmpfs, as `/tmp` is on Amazon Linux 2023, file
 | SQLAlchemy (`sqla_*`) | `pandas.read_sql_query()` through an engine of each PyAthena driver, whole or with `chunksize` |
 | Wrangler CSV | Scalar projections, including the json and temporal workloads; nested cases are marked unsupported |
 | Wrangler CTAS and UNLOAD | Full DataFrame or chunks, including nested workloads |
-| S3 filesystem (`s3`) | Read, get, write, put, and multipart copy of one object with `S3FileSystem`, `AioS3FileSystem`, and s3fs |
+| S3 filesystem (`s3`) | Read, get, write, put, and multipart copy of one object, and batch operations over many objects, with `S3FileSystem`, `AioS3FileSystem`, and s3fs |
 
 The SQLAlchemy families `sqla_rest`, `sqla_pandas`, `sqla_arrow`, `sqla_polars`, and `sqla_s3fs` read with the synchronous API in the single-query suite only, and the result-file drivers also read UNLOAD results.
 Their engines connect with the same workgroup, output location, polling interval, and disabled result reuse as the cursor cases, their statements run without the client cache (`cache_size` defaults to 0), and their cursors take the same cursor options; with `chunksize`, the pandas and Polars drivers' cursors also read the result file in chunks.
