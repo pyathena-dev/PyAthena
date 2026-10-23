@@ -32,6 +32,8 @@ pyathena = { workspace = true }
 test = ["pytest>=8", "pytest-asyncio>=1", "mypy", "types-psutil", "cfn-lint>=1"]
 polars1 = ["polars>=1.39.0,<2"]
 polars2 = ["polars>=2,<3"]
+# The filesystem suite's s3fs API; aiobotocore pins botocore, so the group resolves apart.
+s3fs = ["s3fs>=2026.9.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -99,7 +99,7 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--scale", nargs="+", required=True)
         command.add_argument("--family", choices=ALL_FAMILIES, nargs="+")
         command.add_argument(
-            "--api", choices=("sync", "thread", "aio", "direct", "to_thread"), nargs="+"
+            "--api", choices=("sync", "thread", "aio", "direct", "to_thread", "s3fs"), nargs="+"
         )
         command.add_argument(
             "--transport",

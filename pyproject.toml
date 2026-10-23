@@ -142,12 +142,15 @@ version-file = "pyathena/_version.py"
 # resolution of the lock keeps the version that the benchmarks' awswrangler allows.
 constraint-dependencies = ["pyarrow>=26.0.0; python_version >= '3.15'"]
 # The benchmark measures PolarsCursor in one environment per Polars major version;
-# the root development group pins Polars by Python version instead.
+# the root development group pins Polars by Python version instead. The benchmark's
+# s3fs group brings aiobotocore, which pins botocore to a few patch releases;
+# resolving it apart keeps the botocore of the other environments.
 conflicts = [
     [
         { package = "pyathena", group = "dev" },
         { package = "pyathena-benchmarks", group = "polars1" },
         { package = "pyathena-benchmarks", group = "polars2" },
+        { package = "pyathena-benchmarks", group = "s3fs" },
     ],
 ]
 
