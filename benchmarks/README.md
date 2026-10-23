@@ -236,7 +236,7 @@ Its operations, selected with `--transport`, are:
 Each case sets the filesystem's `max_workers` and the S3 client's `max_pool_connections`, through the connection's `s3_config` for PyAthena, and as `max_concurrency` and `config_kwargs` for s3fs, which creates its own client from the session's credentials.
 The `[filesystem]` section of `config.toml` sets the swept values, 8 and 40 workers and pools of 10 and 40 by default, and a `block_size` of 8 MiB.
 The suite's scales are the object sizes in bytes in `[filesystem] sizes`, not the row counts in `[scales]`: 64 MiB (small), 256 MiB (medium), 1 GiB (large), and 6 GiB (xlarge) by default.
-A `get` writes the object to the host's volume, whose throughput bounds it; a `put` reads a sparse file, which no disk bounds.
+A `get` also writes the object to a file on the host's volume, through the page cache; a `put` reads a sparse file, which no disk bounds.
 
 The `sync` API calls the filesystem on the trial's thread, and a file's parallel requests run in an `S3ThreadPoolExecutor`.
 The `aio` API runs a read, get, write, or put in `asyncio.to_thread()`, as `AioS3FSCursor` reads result files, and a file's parallel requests run through `S3AioExecutor`, dispatched on the filesystem's event loop, fsspec's IO thread, to a pool of `max_workers` threads of the file; its `get_file()` and `put_file()` run the synchronous filesystem's in the filesystem's thread pool.
