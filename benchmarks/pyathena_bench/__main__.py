@@ -22,6 +22,7 @@ from pyathena_bench.aws import (
     preflight,
     prepare,
     prepare_fixtures,
+    prepare_object_sets,
     prepare_objects,
     run_locations,
     session,
@@ -29,7 +30,14 @@ from pyathena_bench.aws import (
     stack_resources,
     validate_manifest,
 )
-from pyathena_bench.cases import ALL_FAMILIES, FILESYSTEM_OPERATIONS, SHAPES, SUITES, matrix
+from pyathena_bench.cases import (
+    ALL_FAMILIES,
+    FILESYSTEM_OPERATIONS,
+    OBJECTS_OPERATIONS,
+    SHAPES,
+    SUITES,
+    matrix,
+)
 from pyathena_bench.config import Settings, read_json
 from pyathena_bench.fleet import (
     API_FAMILIES,
@@ -75,6 +83,12 @@ def parser() -> argparse.ArgumentParser:
         default=[],
         help="Source objects of the filesystem suite to upload, which fleet hosts then share",
     )
+    prep.add_argument(
+        "--objects-scale",
+        nargs="+",
+        default=[],
+        help="Object sets of the objects suite to upload, which fleet hosts then share",
+    )
     for name in ("plan", "run", "jobs"):
         command = commands.add_parser(name)
         if name == "jobs":
@@ -103,11 +117,11 @@ def parser() -> argparse.ArgumentParser:
         )
         command.add_argument(
             "--transport",
-            choices=("csv", "unload", "ctas", *FILESYSTEM_OPERATIONS),
+            choices=("csv", "unload", "ctas", *FILESYSTEM_OPERATIONS, *OBJECTS_OPERATIONS),
             nargs="+",
-            help="Result transports, or the operations of the filesystem suite",
+            help="Result transports, or the operations of the filesystem and objects suites",
         )
-        command.add_argument("--output-kind", choices=("rows", "native", "bytes"))
+        command.add_argument("--output-kind", choices=("rows", "native", "bytes", "objects"))
         command.add_argument("--arraysize", type=int, nargs="+")
         command.add_argument(
             "--chunksize",
@@ -200,12 +214,14 @@ def main(argv: list[str] | None = None) -> int:
         settings = replace(settings, profile=args.profile)
     scales = getattr(args, "scale", [])
     suite = getattr(args, "suite", None)
-    # prepare has no suite: --scale names snapshots, --filesystem-scale objects.
+    # prepare has no suite: --scale names snapshots, --filesystem-scale objects, and
+    # --objects-scale object sets.
     selections = [
         (scales, settings.suite_scales(name))
         for name in (suite if isinstance(suite, list) else [suite])
     ]
     selections.append((getattr(args, "filesystem_scale", []), settings.filesystem_sizes))
+    selections.append((getattr(args, "objects_scale", []), settings.objects_counts))
     if any(
         len(set(names)) != len(names) or any(n not in defined for n in names)
         for names, defined in selections
@@ -217,6 +233,8 @@ def main(argv: list[str] | None = None) -> int:
         manifest = prepare(settings, args.stack, args.manifest, scales)
         if args.filesystem_scale:
             prepare_objects(settings, manifest, args.manifest, args.filesystem_scale)
+        if args.objects_scale:
+            prepare_object_sets(settings, manifest, args.manifest, args.objects_scale)
     elif args.command == "cleanup":
         manifest = read_json(args.manifest)
         resources = validate_manifest(settings, manifest)
@@ -340,6 +358,8 @@ def main(argv: list[str] | None = None) -> int:
                 prepare_fixtures(settings, manifest, args.manifest, scales, args.shape)
             elif args.suite == "filesystem":
                 prepare_objects(settings, manifest, args.manifest, scales)
+            elif args.suite == "objects":
+                prepare_object_sets(settings, manifest, args.manifest, scales)
             checkpoint = (
                 s3_checkpoint(client(session(settings), "s3"), args.checkpoint)
                 if args.checkpoint

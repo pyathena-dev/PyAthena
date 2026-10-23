@@ -258,7 +258,8 @@ async def run_filesystem(
     :func:`filesystem`; the connection's S3 client checks the written, uploaded,
     or copied object with every API. A ``get`` or ``put`` goes through the
     local file ``object`` in ``temp_dir``, removed after the measurement, once
-    the event loop's lag is no longer sampled.
+    the event loop's lag is no longer sampled. The CPU time of the process
+    during the transfer is recorded as ``cpu_seconds``.
 
     Args:
         settings: Configuration with the block size and region.
@@ -296,12 +297,14 @@ async def run_filesystem(
     try:
         await asyncio.sleep(0)
         start = time.perf_counter()
+        cpu_start = time.process_time()
         try:
             try:
                 transferred = await transfer(
                     fs, case, source, destination, size, settings.filesystem_block_size, local
                 )
                 elapsed = time.perf_counter() - start
+                cpu = time.process_time() - cpu_start
             finally:
                 # The event loop's lag is sampled during the transfer only.
                 stop.set()
@@ -328,6 +331,7 @@ async def run_filesystem(
                 "bytes": transferred,
                 "expected_bytes": size,
                 "total_seconds": elapsed,
+                "cpu_seconds": cpu,
             }
     finally:
         stop.set()

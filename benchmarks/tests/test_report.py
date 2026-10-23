@@ -138,6 +138,38 @@ class TestReport:
         assert "Throughput (MiB/s)" in markdown
         assert "| 256.0 |" in markdown
 
+    def test_report_shows_objects_per_second_and_cpu_time(self, tmp_path):
+        base = {
+            "case_id": "objects-s3-aio-cat-n8",
+            "scale": "small",
+            "status": "ok",
+            "successful_queries_per_second": 0.5,
+            "rss_peak_bytes": 100,
+            "max_threads": 12,
+        }
+        query = {"objects": 100, "bytes": 2**20, "total_seconds": 2, "cpu_seconds": 0.5}
+        trials = [{**base, "repetition": r, "queries": [query]} for r in range(2)]
+        mismatch = {
+            **base,
+            "repetition": 2,
+            "status": "error",
+            "queries": [
+                {**query, "status": "count_mismatch", "objects": 99, "expected_objects": 100}
+            ],
+        }
+        (tmp_path / "trials.jsonl").write_text(
+            "".join(json.dumps(t) + "\n" for t in [*trials, mismatch])
+        )
+        report(tmp_path)
+        row = summarize([*trials, mismatch])[0]
+        assert row["median_objects_per_second"] == 50
+        assert row["median_cpu_seconds"] == 0.5
+        assert row["median_mib_per_second"] == 0.5
+        assert row["notes"] == "count_mismatch: expected 100, got 99"
+        markdown = (tmp_path / "summary.md").read_text()
+        assert "| Objects/s | CPU (s) |" in markdown
+        assert "| 50.0 | 0.5 |" in markdown
+
     def test_report_shows_the_most_output_files_and_the_largest_file(self, tmp_path):
         base = {
             "case_id": "case",

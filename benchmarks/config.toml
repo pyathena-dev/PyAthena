@@ -40,3 +40,11 @@ sizes = { small = 67108864, medium = 268435456, large = 1073741824, xlarge = 644
 block_size = 8388608
 max_workers = [8, 40]
 pool_connections = [10, 40]
+
+[objects]
+# Object counts of the objects suite, by scale name; each object has `size` bytes, and
+# the listing set of a scale has `listing_keys_per_object` keys per object.
+counts = { small = 100, medium = 1000, large = 10000 }
+size = 1048576
+listing_keys_per_object = 100
+concurrency = [8, 40]

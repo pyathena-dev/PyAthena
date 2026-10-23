@@ -169,8 +169,9 @@ def expand_jobs(
     GetQueryResults are marked with the number of simultaneous paging queries
     so workers can bound the fleet's request rate. When one trial of such a job
     needs at least ``split_pages`` pages, each measured repetition becomes a
-    separate single-trial job without a warmup. Jobs of the filesystem suite,
-    which do not query Athena, are weighed by the size of their object.
+    separate single-trial job without a warmup. Jobs of the filesystem and
+    objects suites, which do not query Athena, are weighed by the size of
+    their object and by their object count.
 
     Args:
         settings: Configuration that defines the matrix and repetitions.
